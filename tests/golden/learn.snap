@@ -1,0 +1,23 @@
+---
+source: src/core/learn.rs
+assertion: learn commands use persisted observation ledgers
+schema:
+  agenda: ee.learn.agenda.v1
+  uncertainty: ee.learn.uncertainty.v1
+  summary: ee.learn.summary.v1
+  experiment_proposal: ee.learn.experiment_proposal.v1
+contracts:
+  - empty ledger returns zero items in agenda
+  - single-topic cluster with fewer than 2 observations has low confidence
+  - multi-topic sessions group by tag co-occurrence and semantic similarity
+  - uncertainty is computed from rule-confidence distributions
+  - summary aggregates observation counts and feedback statistics
+  - experiment propose persists candidates to curation queue
+  - determinism: same observations yield same proposed candidate IDs
+evidence:
+  - learning_observations.id
+  - learning_observations.signal
+  - learning_observations.measurement_name
+  - feedback_events.signal
+  - curation_candidates.workspace_id
+  - curation_candidates.source_id

@@ -88,8 +88,8 @@ use crate::core::lab::{
     run_counterfactual,
 };
 use crate::core::learn::{
-    LearnCloseOptions, LearnExperimentRunOptions, LearnObserveOptions, close_experiment,
-    observe_experiment, run_experiment,
+    LearnCloseOptions, LearnExperimentProposeOptions, LearnExperimentRunOptions,
+    LearnObserveOptions, close_experiment, observe_experiment, propose_experiments, run_experiment,
 };
 use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_source};
 use crate::core::memory::{
@@ -8153,56 +8153,6 @@ where
 // EE-441: Learn Command Handlers
 // ============================================================================
 
-const LEARN_UNAVAILABLE_CODE: &str = "learning_records_unavailable";
-const LEARN_UNAVAILABLE_MESSAGE: &str = "Learning agenda, uncertainty, summary, and experiment proposal reports are unavailable until they read persisted observation ledgers and evaluation registries instead of hard-coded learning templates.";
-const LEARN_UNAVAILABLE_REPAIR: &str = "ee learn observe <experiment-id> --dry-run --json";
-const LEARN_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-evah";
-const LEARN_UNAVAILABLE_SIDE_EFFECT: &str = "conservative abstention; no learning agenda, uncertainty, summary, proposal, or experiment template emitted";
-
-fn write_learn_unavailable<W, E>(
-    cli: &Cli,
-    command: &'static str,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": LEARN_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": LEARN_UNAVAILABLE_MESSAGE,
-                "repair": LEARN_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": LEARN_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": LEARN_UNAVAILABLE_MESSAGE,
-                        "repair": LEARN_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": LEARN_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": LEARN_UNAVAILABLE_SIDE_EFFECT
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
-    }
-
-    let _ = writeln!(stderr, "error: {LEARN_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {LEARN_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
-}
-
 fn handle_learn_agenda<W, E>(
     cli: &Cli,
     args: &LearnAgendaArgs,
@@ -8213,8 +8163,30 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_learn_unavailable(cli, "learn agenda", stdout, stderr)
+    let options = crate::core::learn::LearnAgendaOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        limit: args.limit,
+        topic: args.topic.clone(),
+        include_resolved: args.include_resolved,
+        sort: args.sort.clone(),
+    };
+    match crate::core::learn::show_agenda(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_learn_agenda_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_learn_agenda_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_learn_agenda_json(&report) + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_learn_uncertainty<W, E>(
@@ -8227,7 +8199,7 @@ where
     W: Write,
     E: Write,
 {
-    match args.min_uncertainty.parse::<f64>() {
+    let min_uncertainty = match args.min_uncertainty.parse::<f64>() {
         Ok(value) if (0.0..=1.0).contains(&value) => value,
         _ => {
             let error = DomainError::Usage {
@@ -8241,7 +8213,32 @@ where
         }
     };
 
-    write_learn_unavailable(cli, "learn uncertainty", stdout, stderr)
+    let options = crate::core::learn::LearnUncertaintyOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        limit: args.limit,
+        min_uncertainty,
+        kind: args.kind.clone(),
+        low_confidence: args.low_confidence,
+    };
+    match crate::core::learn::show_uncertainty(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_learn_uncertainty_human(&report))
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_learn_uncertainty_toon(&report) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_learn_uncertainty_json(&report) + "\n"),
+            ),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_learn_experiment_propose<W, E>(
@@ -8254,7 +8251,7 @@ where
     W: Write,
     E: Write,
 {
-    match args.min_expected_value.parse::<f64>() {
+    let min_expected_value = match args.min_expected_value.parse::<f64>() {
         Ok(value) if (0.0..=1.0).contains(&value) => value,
         _ => {
             let error = DomainError::Usage {
@@ -8268,7 +8265,7 @@ where
         }
     };
 
-    match args.safety_boundary.parse::<ExperimentSafetyBoundary>() {
+    let safety_boundary = match args.safety_boundary.parse::<ExperimentSafetyBoundary>() {
         Ok(boundary) => boundary,
         Err(error) => {
             let domain_error = DomainError::Usage {
@@ -8283,7 +8280,36 @@ where
         }
     };
 
-    write_learn_unavailable(cli, "learn experiment propose", stdout, stderr)
+    let options = LearnExperimentProposeOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        limit: args.limit,
+        topic: args.topic.clone(),
+        min_expected_value,
+        max_attention_tokens: args.max_attention_tokens,
+        max_runtime_seconds: args.max_runtime_seconds,
+        safety_boundary,
+    };
+
+    match propose_experiments(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+                stdout,
+                &output::render_learn_experiment_proposal_human(&report),
+            ),
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_learn_experiment_proposal_toon(&report) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_learn_experiment_proposal_json(&report) + "\n"),
+            ),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_learn_experiment_run<W, E>(
@@ -8512,8 +8538,29 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_learn_unavailable(cli, "learn summary", stdout, stderr)
+    let options = crate::core::learn::LearnSummaryOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        period: args.period.clone(),
+        since: None,
+        detailed: args.detailed,
+    };
+    match crate::core::learn::show_summary(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_learn_summary_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_learn_summary_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_learn_summary_json(&report) + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 // ============================================================================
@@ -9185,8 +9232,27 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_recorder_store_unavailable(cli, "recorder start", stdout, stderr)
+    let options = crate::core::recorder::RecorderStartOptions {
+        agent_id: args.agent_id.clone(),
+        session_id: args.session_id.clone(),
+        workspace_id: args.workspace_id.clone(),
+        dry_run: args.dry_run,
+    };
+
+    let report = if args.dry_run {
+        crate::core::recorder::start_recording(&options)
+    } else {
+        let conn = match open_recorder_database(cli, None) {
+            Ok(conn) => conn,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        match crate::core::recorder::start_and_persist_recording(&conn, &options) {
+            Ok(report) => report,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        }
+    };
+
+    write_recorder_start_report(cli, &report, stdout)
 }
 
 fn handle_recorder_event<W, E>(
@@ -9199,7 +9265,7 @@ where
     W: Write,
     E: Write,
 {
-    let _event_type = match args.event_type.parse::<crate::models::RecorderEventType>() {
+    let event_type = match args.event_type.parse::<crate::models::RecorderEventType>() {
         Ok(t) => t,
         Err(_) => {
             return write_recorder_event_usage_error(
@@ -9237,7 +9303,47 @@ where
         }
     }
 
-    write_recorder_store_unavailable(cli, "recorder event", stdout, stderr)
+    let options = crate::core::recorder::RecorderEventOptions {
+        run_id: args.run_id.clone(),
+        event_type,
+        payload: args.payload.clone(),
+        redact: args.redact,
+        previous_event_hash: args.previous_event_hash.clone(),
+        max_payload_bytes: args.max_payload_bytes,
+        dry_run: args.dry_run,
+    };
+
+    let report = if args.dry_run {
+        match crate::core::recorder::record_event(&options, 1) {
+            Ok(report) => report,
+            Err(error) => {
+                return write_recorder_event_validation_error(
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                    &error,
+                );
+            }
+        }
+    } else {
+        let conn = match open_recorder_database(cli, None) {
+            Ok(conn) => conn,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        match crate::core::recorder::record_and_persist_event(&conn, &options) {
+            Ok(report) => report,
+            Err(error) => {
+                return write_record_persisted_event_error(
+                    &error,
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                );
+            }
+        }
+    };
+
+    write_recorder_event_report(cli, &report, stdout)
 }
 
 fn write_recorder_event_usage_error<W, E>(
@@ -9273,6 +9379,30 @@ where
     ProcessExitCode::Usage
 }
 
+fn write_recorder_event_validation_error<W, E>(
+    wants_json: bool,
+    stdout: &mut W,
+    stderr: &mut E,
+    error: &crate::core::recorder::RecorderEventError,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if wants_json {
+        let json = serde_json::json!({
+            "schema": crate::models::ERROR_SCHEMA_V1,
+            "success": false,
+            "error": error.data_json(),
+        });
+        let _ = stdout.write_all((json.to_string() + "\n").as_bytes());
+    } else {
+        let _ = writeln!(stderr, "error: {}", error.message);
+        let _ = writeln!(stderr, "\nNext:\n  {}", error.repair);
+    }
+    ProcessExitCode::Usage
+}
+
 fn handle_recorder_finish<W, E>(
     cli: &Cli,
     args: &RecorderFinishArgs,
@@ -9283,31 +9413,42 @@ where
     W: Write,
     E: Write,
 {
-    let _status = match args.status.parse::<crate::models::RecorderRunStatus>() {
+    let status = match args.status.parse::<crate::models::RecorderRunStatus>() {
         Ok(s) => s,
         Err(_) => {
-            let _ = writeln!(
-                stderr,
-                "error: invalid status '{}'. Valid: completed, abandoned",
-                args.status
-            );
-            return ProcessExitCode::Usage;
+            let error = DomainError::Usage {
+                message: format!("Invalid recorder finish status '{}'.", args.status),
+                repair: Some("Use one of: completed, abandoned.".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
         }
     };
 
-    write_recorder_store_unavailable(cli, "recorder finish", stdout, stderr)
+    let options = crate::core::recorder::RecorderFinishOptions {
+        run_id: args.run_id.clone(),
+        status,
+        dry_run: args.dry_run,
+    };
+
+    let report = if args.dry_run {
+        crate::core::recorder::finish_recording(&options, 0)
+    } else {
+        let conn = match open_recorder_database(cli, None) {
+            Ok(conn) => conn,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        match crate::core::recorder::finish_and_persist_recording(&conn, &options) {
+            Ok(report) => report,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        }
+    };
+
+    write_recorder_finish_report(cli, &report, stdout)
 }
 
-const RECORDER_STORE_UNAVAILABLE_CODE: &str = "recorder_store_unavailable";
-const RECORDER_STORE_UNAVAILABLE_MESSAGE: &str = "Recorder start, event, and finish are unavailable until recorder commands persist sessions and events through the recorder event store instead of generated in-memory reports.";
-const RECORDER_STORE_UNAVAILABLE_REPAIR: &str = "ee status --json";
-const RECORDER_STORE_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-6xzc";
-const RECORDER_STORE_UNAVAILABLE_SIDE_EFFECT: &str =
-    "conservative abstention; no recorder session, event, hash-chain, or finish mutation";
-
-fn write_recorder_store_unavailable<W, E>(
-    cli: &Cli,
-    command: &'static str,
+fn write_record_persisted_event_error<W, E>(
+    error: &crate::core::recorder::RecordPersistedEventError,
+    wants_json: bool,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -9315,38 +9456,108 @@ where
     W: Write,
     E: Write,
 {
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": RECORDER_STORE_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": RECORDER_STORE_UNAVAILABLE_MESSAGE,
-                "repair": RECORDER_STORE_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": RECORDER_STORE_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": RECORDER_STORE_UNAVAILABLE_MESSAGE,
-                        "repair": RECORDER_STORE_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": RECORDER_STORE_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": RECORDER_STORE_UNAVAILABLE_SIDE_EFFECT
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
+    match error {
+        crate::core::recorder::RecordPersistedEventError::Validation(error) => {
+            write_recorder_event_validation_error(wants_json, stdout, stderr, error)
+        }
+        crate::core::recorder::RecordPersistedEventError::InvalidRunId(message) => {
+            let domain_error = DomainError::Usage {
+                message: message.clone(),
+                repair: Some(
+                    "Pass a valid run id (e.g. run_<uuid>) returned by `ee recorder start`."
+                        .to_owned(),
+                ),
+            };
+            write_domain_error(&domain_error, wants_json, stdout, stderr)
+        }
+        crate::core::recorder::RecordPersistedEventError::ChainMismatch { .. } => {
+            let domain_error = DomainError::Usage {
+                message: error.to_string(),
+                repair: Some(
+                    "Use a valid run id from `ee recorder start --json` and the current previousEventHash.".to_owned(),
+                ),
+            };
+            write_domain_error(&domain_error, wants_json, stdout, stderr)
+        }
+        crate::core::recorder::RecordPersistedEventError::RunNotFound(run_id) => {
+            let domain_error = DomainError::NotFound {
+                resource: "recorder run".to_owned(),
+                id: run_id.clone(),
+                repair: Some(
+                    "Start a run with `ee recorder start --json` before appending events."
+                        .to_owned(),
+                ),
+            };
+            write_domain_error(&domain_error, wants_json, stdout, stderr)
+        }
+        crate::core::recorder::RecordPersistedEventError::Storage { message } => {
+            let domain_error = DomainError::Storage {
+                message: message.clone(),
+                repair: Some("ee status --json".to_owned()),
+            };
+            write_domain_error(&domain_error, wants_json, stdout, stderr)
+        }
     }
+}
 
-    let _ = writeln!(stderr, "error: {RECORDER_STORE_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {RECORDER_STORE_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
+fn write_recorder_start_report<W>(
+    cli: &Cli,
+    report: &crate::core::recorder::RecorderStartReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(report.data_json().to_string() + "\n")),
+    }
+}
+
+fn write_recorder_event_report<W>(
+    cli: &Cli,
+    report: &crate::core::recorder::RecorderEventReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(report.data_json().to_string() + "\n")),
+    }
+}
+
+fn write_recorder_finish_report<W>(
+    cli: &Cli,
+    report: &crate::core::recorder::RecorderFinishReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(report.human_summary() + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(report.data_json().to_string() + "\n")),
+    }
 }
 
 fn handle_recorder_tail<W, E>(
@@ -21306,8 +21517,8 @@ mod tests {
 
         ensure_equal(
             &exit,
-            &ProcessExitCode::UnsatisfiedDegradedMode,
-            "learn experiment propose JSON exit",
+            &ProcessExitCode::StorageError,
+            "learn experiment propose JSON exit (no workspace)",
         )?;
         ensure(stderr.is_empty(), "learn experiment propose stderr clean")?;
         ensure_ends_with(&stdout, '\n', "learn experiment propose newline")?;
@@ -21315,24 +21526,13 @@ mod tests {
             .map_err(|error| format!("learn experiment propose stdout must be JSON: {error}"))?;
         ensure_equal(
             &json["schema"],
-            &serde_json::json!("ee.response.v1"),
-            "response schema",
+            &serde_json::json!("ee.error.v1"),
+            "error schema",
         )?;
         ensure_equal(&json["success"], &serde_json::json!(false), "success flag")?;
-        ensure_equal(
-            &json["data"]["command"],
-            &serde_json::json!("learn experiment propose"),
-            "command",
-        )?;
-        ensure_equal(
-            &json["data"]["code"],
-            &serde_json::json!("learning_records_unavailable"),
-            "degraded code",
-        )?;
-        ensure_equal(
-            &json["data"]["followUpBead"],
-            &serde_json::json!("eidetic_engine_cli-evah"),
-            "follow-up bead",
+        ensure(
+            json["error"]["code"].as_str().is_some(),
+            "learn experiment propose error has code",
         )
     }
 

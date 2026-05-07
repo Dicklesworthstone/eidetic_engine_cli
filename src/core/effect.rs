@@ -871,6 +871,9 @@ impl EffectManifest {
             CommandEffect::read_only("introspect", "Introspect ee metadata"),
             CommandEffect::read_only("job list", "List available steward job types"),
             CommandEffect::read_only("job show", "Show steward job row details"),
+            CommandEffect::read_only("learn agenda", "Show learning agenda with prioritized gaps"),
+            CommandEffect::read_only("learn summary", "Show learning summary statistics"),
+            CommandEffect::read_only("learn uncertainty", "Show uncertainty estimates"),
             CommandEffect::read_only("maintenance status", "Report maintenance job availability"),
             CommandEffect::read_only("mcp manifest", "Inspect optional MCP adapter manifest"),
             CommandEffect::read_only("memory history", "Show memory revision history"),
@@ -1006,26 +1009,6 @@ impl EffectManifest {
                 "lab counterfactual",
                 "lab_replay_unavailable",
                 "Lab counterfactual analysis abstains until stored episodes exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "learn agenda",
-                "learning_records_unavailable",
-                "Learning agenda abstains until persisted observation ledgers exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "learn uncertainty",
-                "learning_records_unavailable",
-                "Learning uncertainty abstains until persisted observation ledgers exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "learn experiment propose",
-                "learning_records_unavailable",
-                "Experiment proposal abstains until persisted evaluation registries exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "learn summary",
-                "learning_records_unavailable",
-                "Learning summary abstains until persisted observation ledgers exist",
             ),
             CommandEffect::degraded_unavailable(
                 "memory revise",
@@ -1305,6 +1288,11 @@ impl EffectManifest {
                 "learn observe",
                 vec!["learning_observations", "audit_log"],
                 "Record a learning observation",
+            ),
+            CommandEffect::durable_write(
+                "learn experiment propose",
+                vec!["curation_candidates", "audit_log"],
+                "Persist experiment proposals to curation queue",
             ),
             CommandEffect::durable_write(
                 "outcome",
