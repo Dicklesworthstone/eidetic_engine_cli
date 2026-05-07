@@ -1,0 +1,21 @@
+---
+source: tests/handoff_capsule_roundtrip.rs
+assertion: handoff capsule commands use persisted evidence
+schema:
+  preview: ee.handoff.preview.v1
+  create: ee.handoff.create.v1
+  resume: ee.handoff.resume.v1
+  list: ee.handoff.list.v1
+contracts:
+  - preview shows capsule contents without resuming
+  - create materializes deterministic capsules with redaction
+  - resume produces context packs identical to regeneration
+  - same inputs produce same capsule data_hash
+evidence:
+  - handoff_capsule.id
+  - handoff_capsule.task
+  - handoff_capsule.redacted_memory_ids
+  - handoff_capsule.last_state_pointer
+  - handoff_capsule.resume_hint
+  - handoff_capsule.evidence_uris
+  - handoff_capsule.data_hash
