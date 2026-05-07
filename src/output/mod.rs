@@ -4358,22 +4358,9 @@ pub fn render_capabilities_toon(report: &CapabilitiesReport) -> String {
 }
 
 /// Render evaluation run result as JSON (ee.response.v1 envelope).
-///
-/// This stub version is used when no report is available.
 #[must_use]
-pub fn render_eval_run_json(scenario_id: Option<&str>, include_science_metrics: bool) -> String {
-    render_eval_report_json(
-        &build_eval_run_stub_report(include_science_metrics),
-        scenario_id,
-    )
-}
-
-fn build_eval_run_stub_report(include_science_metrics: bool) -> EvaluationReport {
-    let mut report = EvaluationReport::new();
-    if include_science_metrics {
-        report.attach_science_metrics();
-    }
-    report
+pub fn render_eval_run_json(report: &EvaluationReport, scenario_id: Option<&str>) -> String {
+    render_eval_report_json(report, scenario_id)
 }
 
 fn render_eval_science_metrics_json(
@@ -4451,14 +4438,9 @@ fn render_scenario_result_json(obj: &mut JsonBuilder, result: &ScenarioValidatio
 }
 
 /// Render evaluation run result as human-readable text.
-///
-/// This stub version is used when no report is available.
 #[must_use]
-pub fn render_eval_run_human(scenario_id: Option<&str>, include_science_metrics: bool) -> String {
-    render_eval_report_human(
-        &build_eval_run_stub_report(include_science_metrics),
-        scenario_id,
-    )
+pub fn render_eval_run_human(report: &EvaluationReport, scenario_id: Option<&str>) -> String {
+    render_eval_report_human(report, scenario_id)
 }
 
 /// Render evaluation report as human-readable text.
@@ -4539,14 +4521,9 @@ pub fn render_eval_report_human(report: &EvaluationReport, scenario_id: Option<&
 }
 
 /// Render evaluation run result as TOON.
-///
-/// This stub version is used when no report is available.
 #[must_use]
-pub fn render_eval_run_toon(scenario_id: Option<&str>, include_science_metrics: bool) -> String {
-    render_eval_report_toon(
-        &build_eval_run_stub_report(include_science_metrics),
-        scenario_id,
-    )
+pub fn render_eval_run_toon(report: &EvaluationReport, scenario_id: Option<&str>) -> String {
+    render_eval_report_toon(report, scenario_id)
 }
 
 /// Render evaluation report as TOON.
@@ -11662,6 +11639,64 @@ mod tests {
         let json = render_eval_report_json(&report, Some("test_scenario"));
 
         ensure_contains(&json, "\"scenarioId\":\"test_scenario\"", "scenarioId")
+    }
+
+    #[test]
+    fn render_eval_run_json_uses_supplied_report() -> TestResult {
+        use super::render_eval_run_json;
+        use crate::eval::{EvaluationReport, ScenarioValidationResult};
+
+        let mut report = EvaluationReport::new().with_fixture_dir("tests/fixtures/eval");
+        report.add_result(ScenarioValidationResult {
+            scenario_id: "fx.release_failure.v1".to_owned(),
+            passed: true,
+            steps_passed: 4,
+            steps_total: 4,
+            failures: Vec::new(),
+        });
+        report.finalize();
+
+        let json = render_eval_run_json(&report, Some("fx.release_failure.v1"));
+        ensure_contains(&json, "\"status\":\"all_passed\"", "status")?;
+        ensure_contains(&json, "\"scenariosRun\":1", "scenario count")?;
+        ensure_contains(
+            &json,
+            "\"scenarioId\":\"fx.release_failure.v1\"",
+            "scenario id",
+        )?;
+        ensure(
+            !json.contains("\"status\":\"no_scenarios\""),
+            "wrapper must not fabricate an empty report",
+        )
+    }
+
+    #[test]
+    fn render_eval_run_human_uses_supplied_report() -> TestResult {
+        use super::render_eval_run_human;
+        use crate::eval::{EvaluationReport, ScenarioValidationResult};
+
+        let mut report = EvaluationReport::new();
+        report.add_result(ScenarioValidationResult {
+            scenario_id: "fx.async_migration.v1".to_owned(),
+            passed: true,
+            steps_passed: 2,
+            steps_total: 2,
+            failures: Vec::new(),
+        });
+        report.finalize();
+
+        let human = render_eval_run_human(&report, None);
+        ensure_contains(&human, "Status: all passed", "status")?;
+        ensure_contains(&human, "Results: 1 run, 1 passed, 0 failed", "results")?;
+        ensure_contains(
+            &human,
+            "[PASS] fx.async_migration.v1: 2/2 steps",
+            "scenario result",
+        )?;
+        ensure(
+            !human.contains("No evaluation scenarios configured"),
+            "wrapper must not render an empty-report message",
+        )
     }
 
     #[test]
