@@ -43,7 +43,9 @@ use crate::core::causal::{
     stable_workspace_id as stable_causal_workspace_id, trace_causal_chains_from_store,
 };
 use crate::core::check::CheckReport;
-use crate::core::context::{ContextPackError, ContextPackOptions, run_context_pack};
+use crate::core::context::{
+    ContextPackError, ContextPackOptions, run_context_pack, run_context_pack_with_performance,
+};
 use crate::core::curate::{
     CurateApplyOptions, CurateApplyReport, CurateCandidatesOptions, CurateCandidatesReport,
     CurateDispositionOptions, CurateDispositionReport, CurateReviewAction, CurateReviewOptions,
@@ -1119,6 +1121,10 @@ pub struct ContextArgs {
     /// Index directory. Defaults to <workspace>/.ee/index/.
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
+
+    /// Emit a redaction-safe query and pack performance report instead of the context pack.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub explain_performance: bool,
 }
 
 /// Arguments for `ee pack`.
@@ -1151,6 +1157,10 @@ pub struct PackArgs {
     /// Index directory. Defaults to <workspace>/.ee/index/.
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
+
+    /// Emit a redaction-safe query and pack performance report instead of the context pack.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub explain_performance: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -2208,6 +2218,10 @@ pub enum CertificateCommand {
     Show(CertificateShowArgs),
     /// Verify a certificate's validity.
     Verify(CertificateVerifyArgs),
+    /// Sign a certificate with the workspace ed25519 key.
+    Sign(CertificateSignArgs),
+    /// Generate or show the workspace signing key.
+    Keygen(CertificateKeygenArgs),
 }
 
 /// Arguments for `ee certificate list`.
@@ -2256,6 +2270,42 @@ pub struct CertificateVerifyArgs {
     /// Path to certificate manifest JSON. Defaults to <workspace>/certificates.json.
     #[arg(long, value_name = "PATH")]
     pub manifest: Option<PathBuf>,
+}
+
+/// Arguments for `ee certificate sign`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct CertificateSignArgs {
+    /// Certificate ID to sign.
+    #[arg(value_name = "CERTIFICATE_ID")]
+    pub certificate_id: String,
+
+    /// Path to certificate manifest JSON. Defaults to <workspace>/certificates.json.
+    #[arg(long, value_name = "PATH")]
+    pub manifest: Option<PathBuf>,
+
+    /// Path to ed25519 private key file. Defaults to ~/.config/ee/keys/<workspace>.ed25519.
+    #[arg(long, value_name = "KEY_PATH")]
+    pub key: Option<PathBuf>,
+
+    /// Workspace path for resolving default key location.
+    #[arg(long, value_name = "WORKSPACE")]
+    pub workspace: Option<PathBuf>,
+}
+
+/// Arguments for `ee certificate keygen`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct CertificateKeygenArgs {
+    /// Workspace path for key naming. Defaults to current directory.
+    #[arg(long, value_name = "WORKSPACE")]
+    pub workspace: Option<PathBuf>,
+
+    /// Force overwrite existing key.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub force: bool,
+
+    /// Show public key fingerprint only, do not generate new key.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub show: bool,
 }
 
 /// Subcommands for `ee causal`.
@@ -2817,6 +2867,10 @@ pub struct ProcedurePromoteArgs {
     #[arg(value_name = "PROCEDURE_ID")]
     pub procedure_id: String,
 
+    /// Target maturity: validated, mature, or retired.
+    #[arg(long = "to", value_name = "MATURITY")]
+    pub to_maturity: Option<String>,
+
     /// Build the promotion, curation, and audit plan without writing anything.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
@@ -3314,6 +3368,10 @@ pub struct SearchArgs {
     /// Include score explanations in output.
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain: bool,
+
+    /// Emit a redaction-safe query performance report instead of search hits.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub explain_performance: bool,
 }
 
 /// Arguments for `ee doctor`.
@@ -5134,6 +5192,10 @@ where
             CertificateCommand::Show(args) => handle_certificate_show(&cli, args, stdout, stderr),
             CertificateCommand::Verify(args) => {
                 handle_certificate_verify(&cli, args, stdout, stderr)
+            }
+            CertificateCommand::Sign(args) => handle_certificate_sign(&cli, args, stdout, stderr),
+            CertificateCommand::Keygen(args) => {
+                handle_certificate_keygen(&cli, args, stdout, stderr)
             }
         },
         Some(Command::Causal(ref causal_cmd)) => match causal_cmd {
@@ -9231,15 +9293,17 @@ where
         output::Renderer::Human | output::Renderer::Markdown => {
             write_stdout(stdout, &output::render_procedure_propose_human(report))
         }
-        output::Renderer::Toon => {
-            write_stdout(stdout, &(output::render_procedure_propose_toon(report) + "\n"))
-        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_procedure_propose_toon(report) + "\n"),
+        ),
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            write_stdout(stdout, &(output::render_procedure_propose_json(report) + "\n"))
-        }
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_procedure_propose_json(report) + "\n"),
+        ),
     }
 }
 
@@ -9375,15 +9439,17 @@ where
         output::Renderer::Human | output::Renderer::Markdown => {
             write_stdout(stdout, &output::render_procedure_export_human(report))
         }
-        output::Renderer::Toon => {
-            write_stdout(stdout, &(output::render_procedure_export_toon(report) + "\n"))
-        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_procedure_export_toon(report) + "\n"),
+        ),
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            write_stdout(stdout, &(output::render_procedure_export_json(report) + "\n"))
-        }
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_procedure_export_json(report) + "\n"),
+        ),
     }
 }
 
@@ -9402,6 +9468,7 @@ where
     let options = crate::core::procedure::ProcedurePromoteOptions {
         workspace: workspace_path,
         procedure_id: args.procedure_id.clone(),
+        to_maturity: args.to_maturity.clone(),
         actor: args.actor.clone(),
         reason: args.reason.clone(),
         dry_run: args.dry_run,
@@ -9424,15 +9491,17 @@ where
         output::Renderer::Human | output::Renderer::Markdown => {
             write_stdout(stdout, &output::render_procedure_promote_human(report))
         }
-        output::Renderer::Toon => {
-            write_stdout(stdout, &(output::render_procedure_promote_toon(report) + "\n"))
-        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_procedure_promote_toon(report) + "\n"),
+        ),
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            write_stdout(stdout, &(output::render_procedure_promote_json(report) + "\n"))
-        }
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_procedure_promote_json(report) + "\n"),
+        ),
     }
 }
 
@@ -9472,15 +9541,17 @@ where
         output::Renderer::Human | output::Renderer::Markdown => {
             write_stdout(stdout, &output::render_procedure_retire_human(report))
         }
-        output::Renderer::Toon => {
-            write_stdout(stdout, &(output::render_procedure_retire_toon(report) + "\n"))
-        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_procedure_retire_toon(report) + "\n"),
+        ),
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            write_stdout(stdout, &(output::render_procedure_retire_json(report) + "\n"))
-        }
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_procedure_retire_json(report) + "\n"),
+        ),
     }
 }
 
@@ -9503,7 +9574,7 @@ where
     let options = crate::core::procedure::ProcedureVerifyOptions {
         workspace: workspace_path,
         procedure_id: args.procedure_id.clone(),
-        source_kind: args.source_kind.clone(),
+        source_kind: Some(args.source_kind.clone()),
         source_ids: args.source_ids.clone(),
         dry_run: args.dry_run,
         allow_failure: args.allow_failure,
@@ -9523,7 +9594,7 @@ fn write_procedure_verify_report<W>(
 where
     W: Write,
 {
-    let exit = if report.passed || allow_failure {
+    let exit = if report.overall_result == "passed" || allow_failure {
         ProcessExitCode::Success
     } else {
         ProcessExitCode::UnsatisfiedDegradedMode
@@ -9534,14 +9605,20 @@ where
             exit
         }
         output::Renderer::Toon => {
-            write_stdout(stdout, &(output::render_procedure_verify_toon(report) + "\n"));
+            write_stdout(
+                stdout,
+                &(output::render_procedure_verify_toon(report) + "\n"),
+            );
             exit
         }
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
-            write_stdout(stdout, &(output::render_procedure_verify_json(report) + "\n"));
+            write_stdout(
+                stdout,
+                &(output::render_procedure_verify_json(report) + "\n"),
+            );
             exit
         }
     }
@@ -9559,20 +9636,127 @@ where
 {
     let workspace_path =
         resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let evidence = match parse_procedure_drift_evidence_inputs(&args.evidence) {
+        Ok(evidence) => evidence,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let dependency_contracts =
+        match parse_procedure_dependency_contract_inputs(&args.dependency_contracts) {
+            Ok(dependency_contracts) => dependency_contracts,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
     let options = crate::core::procedure::ProcedureDriftOptions {
         workspace: workspace_path,
         procedure_id: args.procedure_id.clone(),
         checked_at: args.checked_at.clone(),
         staleness_threshold_days: args.staleness_threshold_days,
-        failed_verification_id: args.failed_verification.clone(),
-        failed_source_ids: args.failed_sources.clone(),
-        evidence_observations: args.evidence_observations.clone(),
-        contract_observations: args.contract_observations.clone(),
+        verification: procedure_drift_failed_verification(args),
+        evidence,
+        dependency_contracts,
+        dry_run: true,
     };
     match crate::core::procedure::detect_procedure_drift(&options) {
         Ok(report) => write_procedure_drift_report(cli, &report, stdout),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
+}
+
+fn procedure_drift_failed_verification(
+    args: &ProcedureDriftArgs,
+) -> Option<crate::core::procedure::ProcedureVerifyReport> {
+    let verification_id = args.failed_verification.clone()?;
+    let source_ids = if args.failed_sources.is_empty() {
+        vec![verification_id.clone()]
+    } else {
+        args.failed_sources.clone()
+    };
+    let sources_checked = source_ids
+        .into_iter()
+        .map(
+            |source_id| crate::core::procedure::VerificationSourceResult {
+                source_id,
+                source_kind: "eval_fixture".to_owned(),
+                result: "failed".to_owned(),
+                step_results: Vec::new(),
+                message: Some("reported by procedure drift command arguments".to_owned()),
+            },
+        )
+        .collect::<Vec<_>>();
+    let fail_count = u32::try_from(sources_checked.len()).unwrap_or(u32::MAX);
+    Some(crate::core::procedure::ProcedureVerifyReport {
+        schema: crate::core::procedure::PROCEDURE_VERIFY_REPORT_SCHEMA_V1.to_owned(),
+        procedure_id: args.procedure_id.clone(),
+        verification_id,
+        status: "failed".to_owned(),
+        source_kind: "eval_fixture".to_owned(),
+        sources_checked,
+        pass_count: 0,
+        fail_count,
+        skip_count: 0,
+        overall_result: "failed".to_owned(),
+        verified_at: args
+            .checked_at
+            .clone()
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+        dry_run: true,
+        confidence: 0.0,
+        next_actions: Vec::new(),
+    })
+}
+
+fn parse_procedure_drift_evidence_inputs(
+    raw_values: &[String],
+) -> Result<Vec<crate::core::procedure::ProcedureDriftEvidenceInput>, DomainError> {
+    raw_values
+        .iter()
+        .map(|raw| {
+            let parts = raw.split('|').map(str::trim).collect::<Vec<_>>();
+            if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
+                return Err(DomainError::Usage {
+                    message: format!(
+                        "invalid procedure drift evidence observation `{raw}`; expected ID|LAST_SEEN_AT|SOURCE_KIND"
+                    ),
+                    repair: Some(
+                        "use --evidence ev_123|2026-05-01T00:00:00Z|recorder_run".to_owned(),
+                    ),
+                });
+            }
+            Ok(crate::core::procedure::ProcedureDriftEvidenceInput {
+                evidence_id: parts[0].to_owned(),
+                last_seen_at: parts[1].to_owned(),
+                source_kind: parts[2].to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn parse_procedure_dependency_contract_inputs(
+    raw_values: &[String],
+) -> Result<Vec<crate::core::procedure::ProcedureDependencyContractInput>, DomainError> {
+    raw_values
+        .iter()
+        .map(|raw| {
+            let parts = raw.split('|').map(str::trim).collect::<Vec<_>>();
+            if parts.len() != 5 || parts.iter().any(|part| part.is_empty()) {
+                return Err(DomainError::Usage {
+                    message: format!(
+                        "invalid procedure dependency contract `{raw}`; expected NAME|SURFACE|EXPECTED|ACTUAL|COMPATIBILITY"
+                    ),
+                    repair: Some(
+                        "use --dependency-contract cass|procedure verification|v1|v2|breaking"
+                            .to_owned(),
+                    ),
+                });
+            }
+            Ok(crate::core::procedure::ProcedureDependencyContractInput {
+                dependency_name: parts[0].to_owned(),
+                owning_surface: parts[1].to_owned(),
+                expected_contract: parts[2].to_owned(),
+                actual_contract: parts[3].to_owned(),
+                compatibility: parts[4].to_owned(),
+            })
+        })
+        .collect()
 }
 
 fn write_procedure_drift_report<W>(
@@ -9587,15 +9771,17 @@ where
         output::Renderer::Human | output::Renderer::Markdown => {
             write_stdout(stdout, &output::render_procedure_drift_human(report))
         }
-        output::Renderer::Toon => {
-            write_stdout(stdout, &(output::render_procedure_drift_toon(report) + "\n"))
-        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_procedure_drift_toon(report) + "\n"),
+        ),
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            write_stdout(stdout, &(output::render_procedure_drift_json(report) + "\n"))
-        }
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_procedure_drift_json(report) + "\n"),
+        ),
     }
 }
 
@@ -13135,6 +13321,16 @@ where
         filters: crate::models::QueryFilters::default(),
     };
 
+    if args.explain_performance {
+        return match run_context_pack_with_performance(&options, "context") {
+            Ok(run) => write_stdout(stdout, &(run.performance.to_string() + "\n")),
+            Err(error) => {
+                let domain_error = context_error_to_domain(&error);
+                write_domain_error(&domain_error, true, stdout, stderr)
+            }
+        };
+    }
+
     match run_context_pack(&options) {
         Ok(response) => write_context_response(cli.context_renderer(), &response, stdout),
         Err(error) => {
@@ -13288,6 +13484,16 @@ where
         candidate_pool: args.candidate_pool.or(request.candidate_pool),
     };
     let renderer = effective_pack_renderer(cli, request.renderer);
+
+    if args.explain_performance {
+        return match run_context_pack_with_performance(&options, "pack") {
+            Ok(run) => write_stdout(stdout, &(run.performance.to_string() + "\n")),
+            Err(error) => {
+                let domain_error = context_error_to_domain(&error);
+                write_domain_error(&domain_error, true, stdout, stderr)
+            }
+        };
+    }
 
     match run_context_pack(&options) {
         Ok(mut response) => {
@@ -13996,6 +14202,13 @@ where
     };
 
     match run_search(&options) {
+        Ok(report) if args.explain_performance => write_stdout(
+            stdout,
+            &(report
+                .performance_explain_json(args.speed, args.explain)
+                .to_string()
+                + "\n"),
+        ),
         Ok(report) => match cli.renderer() {
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &report.human_summary())
@@ -14011,7 +14224,12 @@ where
                 message: error.to_string(),
                 repair: error.repair_hint().map(str::to_string),
             };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(
+                &domain_error,
+                cli.wants_json() || args.explain_performance,
+                stdout,
+                stderr,
+            )
         }
     }
 }
@@ -16282,6 +16500,76 @@ where
     };
     let report = crate::core::certificate::verify_certificate_with_options(&options);
     write_certificate_verify_report(cli, &report, stdout)
+}
+
+fn handle_certificate_sign<W, E>(
+    cli: &Cli,
+    args: &CertificateSignArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = args
+        .workspace
+        .clone()
+        .or_else(|| cli.workspace.clone())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let options = crate::core::certificate::SignOptions {
+        certificate_id: args.certificate_id.clone(),
+        manifest_path: args.manifest.clone(),
+        key_path: args.key.clone(),
+        workspace_path: Some(workspace_path),
+    };
+    let report = crate::core::certificate::sign_certificate(&options);
+    match cli.renderer() {
+        output::Renderer::Json => write_stdout(
+            stdout,
+            &(serde_json::to_string_pretty(&report.data_json()).unwrap_or_default() + "\n"),
+        ),
+        _ => write_stdout(stdout, &(report.human_summary() + "\n")),
+    };
+    if report.success {
+        ProcessExitCode::Success
+    } else {
+        ProcessExitCode::Storage
+    }
+}
+
+fn handle_certificate_keygen<W, E>(
+    cli: &Cli,
+    args: &CertificateKeygenArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = args.workspace.clone().or_else(|| cli.workspace.clone());
+    let options = crate::core::certificate::KeygenOptions {
+        workspace_path,
+        force: args.force,
+        show_only: args.show,
+    };
+    match crate::core::certificate::keygen(&options) {
+        Ok(report) => {
+            match cli.renderer() {
+                output::Renderer::Json => write_stdout(
+                    stdout,
+                    &(serde_json::to_string_pretty(&report.data_json()).unwrap_or_default() + "\n"),
+                ),
+                _ => write_stdout(stdout, &(report.human_summary() + "\n")),
+            };
+            ProcessExitCode::Success
+        }
+        Err(err) => {
+            let _ = writeln!(stderr, "error: {err}");
+            ProcessExitCode::Storage
+        }
+    }
 }
 
 fn resolve_certificate_store_source(
@@ -19781,6 +20069,8 @@ impl NormalizedInvocation {
                     CertificateCommand::List(_) => "certificate list".to_string(),
                     CertificateCommand::Show(_) => "certificate show".to_string(),
                     CertificateCommand::Verify(_) => "certificate verify".to_string(),
+                    CertificateCommand::Sign(_) => "certificate sign".to_string(),
+                    CertificateCommand::Keygen(_) => "certificate keygen".to_string(),
                 },
                 Command::Causal(causal) => match causal {
                     CausalCommand::Trace(_) => "causal trace".to_string(),
@@ -19953,6 +20243,7 @@ impl NormalizedInvocation {
                     ProcedureCommand::List(_) => "procedure list".to_string(),
                     ProcedureCommand::Export(_) => "procedure export".to_string(),
                     ProcedureCommand::Promote(_) => "procedure promote".to_string(),
+                    ProcedureCommand::Retire(_) => "procedure retire".to_string(),
                     ProcedureCommand::Verify(_) => "procedure verify".to_string(),
                     ProcedureCommand::Drift(_) => "procedure drift".to_string(),
                 },
@@ -20840,6 +21131,48 @@ mod tests {
                 ensure_equal(&args.skip_boilerplate, &true, "skip boilerplate")
             }
             other => Err(format!("expected init command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_explain_performance_on_context_pack_and_search() -> TestResult {
+        let context = Cli::try_parse_from(["ee", "context", "release", "--explain-performance"])
+            .map_err(|error| format!("context flag parse failed: {:?}", error.kind()))?;
+        match context.command {
+            Some(Command::Context(args)) => {
+                ensure_equal(
+                    &args.explain_performance,
+                    &true,
+                    "context explain performance",
+                )?;
+            }
+            other => return Err(format!("expected context command, got {other:?}")),
+        }
+
+        let pack = Cli::try_parse_from([
+            "ee",
+            "pack",
+            "--query-file",
+            "query.json",
+            "--explain-performance",
+        ])
+        .map_err(|error| format!("pack flag parse failed: {:?}", error.kind()))?;
+        match pack.command {
+            Some(Command::Pack(args)) => {
+                ensure_equal(&args.explain_performance, &true, "pack explain performance")?;
+            }
+            other => return Err(format!("expected pack command, got {other:?}")),
+        }
+
+        let search = Cli::try_parse_from(["ee", "search", "release", "--explain-performance"])
+            .map_err(|error| format!("search flag parse failed: {:?}", error.kind()))?;
+        match search.command {
+            Some(Command::Search(args)) => ensure_equal(
+                &args.explain_performance,
+                &true,
+                "search explain performance",
+            ),
+            other => Err(format!("expected search command, got {other:?}")),
         }
     }
 

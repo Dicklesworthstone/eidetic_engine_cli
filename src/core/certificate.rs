@@ -27,15 +27,22 @@
 //! it implied real sigstore bundle verification (rekor inclusion proof,
 //! fulcio cert chain, OIDC binding) that this slice never performed.
 //!
-//! Real signing (ed25519 via `ring`/`ed25519-dalek` or genuine sigstore
-//! bundle verification) is tracked under `implements-surface:certificate-signing`.
-//! Until that lands, do not rely on certificate attestations for
-//! authorization decisions or compliance evidence.
+//! Real signing is implemented via ed25519 using the `ring` crate. The algorithm
+//! string `ee.ed25519.v1` represents a genuine cryptographic signature where:
+//!
+//! - The workspace holds a secret key at `~/.config/ee/keys/<workspace>.ed25519`
+//! - The signer field contains the public key fingerprint: `ed25519:fp:<hex>`
+//! - The signature field contains the ed25519 signature over the payload hash
+//! - Verification loads the public key by fingerprint and verifies the signature
+//!
+//! A forged signature produced from public inputs alone MUST fail verification.
 
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+use ring::rand::SystemRandom;
+use ring::signature::{self, Ed25519KeyPair, KeyPair};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -56,6 +63,18 @@ pub const CERTIFICATE_MANIFEST_SCHEMA_V1: &str = "ee.certificate.manifest.v1";
 
 /// Supported payload schema version for certificate hash verification.
 pub const CERTIFICATE_PAYLOAD_SCHEMA_V1: &str = "ee.certificate.payload.v1";
+
+/// Schema version for certificate sign responses.
+pub const CERTIFICATE_SIGN_SCHEMA_V1: &str = "ee.certificate.sign.v1";
+
+/// Schema version for certificate keygen responses.
+pub const CERTIFICATE_KEYGEN_SCHEMA_V1: &str = "ee.certificate.keygen.v1";
+
+/// Algorithm string for real ed25519 signatures.
+pub const ED25519_ALGORITHM_V1: &str = "ee.ed25519.v1";
+
+/// Default key directory relative to user config.
+const KEY_DIR_NAME: &str = "ee/keys";
 
 /// Options for listing certificates.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -113,6 +132,14 @@ impl CertificateListOptions {
     }
 
     #[must_use]
+    pub fn with_optional_manifest_path(mut self, manifest_path: Option<&Path>) -> Self {
+        if let Some(manifest_path) = manifest_path {
+            self.manifest_path = Some(manifest_path.to_path_buf());
+        }
+        self
+    }
+
+    #[must_use]
     pub fn with_database_path(mut self, database_path: impl Into<PathBuf>) -> Self {
         self.database_path = Some(database_path.into());
         self
@@ -152,6 +179,14 @@ impl CertificateLookupOptions {
     #[must_use]
     pub fn with_manifest_path(mut self, manifest_path: impl Into<PathBuf>) -> Self {
         self.manifest_path = Some(manifest_path.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_optional_manifest_path(mut self, manifest_path: Option<&Path>) -> Self {
+        if let Some(manifest_path) = manifest_path {
+            self.manifest_path = Some(manifest_path.to_path_buf());
+        }
         self
     }
 
@@ -1250,9 +1285,11 @@ fn verify_manifest_certificate_attestation(
 /// hash matches its publicly-derivable form; it does **not** prove an
 /// authorized key holder produced the certificate. See module docs.
 ///
-/// The single supported algorithm is `ee.local-content-hash.v1`. Any other
-/// algorithm name (including the historically-misleading
-/// `sigstore.bundle-sha256.v1`) returns `Mismatch` with an honest message.
+/// Supported algorithms:
+/// - `ee.local-content-hash.v1`: Content-hash attestation (NOT cryptographic)
+/// - `ee.ed25519.v1`: Real ed25519 signature verification
+///
+/// The historically-misleading `sigstore.bundle-sha256.v1` is rejected.
 fn verify_local_content_attestation(
     attestation: Option<&str>,
     attestation_algorithm: Option<&str>,
@@ -1276,34 +1313,38 @@ fn verify_local_content_attestation(
         };
     };
 
-    let expected = match algorithm {
-        "ee.local-content-hash.v1" => local_content_hash_attestation(signer_value, payload_hash),
+    match algorithm {
+        "ee.local-content-hash.v1" => {
+            let expected = local_content_hash_attestation(signer_value, payload_hash);
+            if constant_time_str_eq(attestation, &expected) {
+                AttestationVerification::Ok { signer }
+            } else {
+                AttestationVerification::Mismatch {
+                    signer,
+                    message: "Certificate content-hash attestation does not match payload evidence"
+                        .to_owned(),
+                }
+            }
+        }
+        "ee.ed25519.v1" => {
+            // Real cryptographic signature verification
+            verify_ed25519_signature(attestation, signer_value, payload_hash, None)
+        }
         "sigstore.bundle-sha256.v1" => {
-            return AttestationVerification::Mismatch {
+            AttestationVerification::Mismatch {
                 signer,
                 message:
                     "Certificate attestation algorithm `sigstore.bundle-sha256.v1` is no longer accepted: \
                      this slice does not perform sigstore bundle verification (rekor inclusion proof, \
-                     fulcio cert chain, OIDC binding). Track real signing under \
-                     implements-surface:certificate-signing."
+                     fulcio cert chain, OIDC binding). Use `ee.ed25519.v1` for real signing."
                         .to_owned(),
-            };
+            }
         }
         other => {
-            return AttestationVerification::Mismatch {
+            AttestationVerification::Mismatch {
                 signer,
                 message: format!("Unsupported certificate attestation algorithm `{other}`"),
-            };
-        }
-    };
-
-    if constant_time_str_eq(attestation, &expected) {
-        AttestationVerification::Ok { signer }
-    } else {
-        AttestationVerification::Mismatch {
-            signer,
-            message: "Certificate content-hash attestation does not match payload evidence"
-                .to_owned(),
+            }
         }
     }
 }
@@ -1490,6 +1531,459 @@ fn reject_payload_symlink_component(path: &Path) -> io::Result<()> {
 
 fn usize_to_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+// =============================================================================
+// Ed25519 Signing Implementation
+// =============================================================================
+
+/// Options for key generation.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct KeygenOptions {
+    /// Workspace path for key naming.
+    pub workspace_path: Option<PathBuf>,
+    /// Force overwrite existing key.
+    pub force: bool,
+    /// Show public key fingerprint only, do not generate.
+    pub show_only: bool,
+}
+
+/// Report from key generation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeygenReport {
+    pub key_path: PathBuf,
+    pub fingerprint: String,
+    pub signer: String,
+    pub created: bool,
+    pub message: String,
+}
+
+impl KeygenReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": CERTIFICATE_KEYGEN_SCHEMA_V1,
+            "keyPath": self.key_path.display().to_string(),
+            "fingerprint": self.fingerprint,
+            "signer": self.signer,
+            "created": self.created,
+            "message": self.message,
+        })
+    }
+
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        if self.created {
+            format!(
+                "Generated ed25519 keypair:\n  Key: {}\n  Signer: {}",
+                self.key_path.display(),
+                self.signer
+            )
+        } else {
+            format!(
+                "Existing ed25519 keypair:\n  Key: {}\n  Signer: {}",
+                self.key_path.display(),
+                self.signer
+            )
+        }
+    }
+}
+
+/// Options for signing a certificate.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SignOptions {
+    /// Certificate ID to sign.
+    pub certificate_id: String,
+    /// Path to certificate manifest JSON.
+    pub manifest_path: Option<PathBuf>,
+    /// Path to ed25519 private key file.
+    pub key_path: Option<PathBuf>,
+    /// Workspace path for resolving default key location.
+    pub workspace_path: Option<PathBuf>,
+}
+
+/// Report from signing a certificate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SignReport {
+    pub certificate_id: String,
+    pub signature: String,
+    pub algorithm: String,
+    pub signer: String,
+    pub payload_hash: String,
+    pub signed_at: String,
+    pub success: bool,
+    pub message: String,
+}
+
+impl SignReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": CERTIFICATE_SIGN_SCHEMA_V1,
+            "certificateId": self.certificate_id,
+            "signature": self.signature,
+            "algorithm": self.algorithm,
+            "signer": self.signer,
+            "payloadHash": self.payload_hash,
+            "signedAt": self.signed_at,
+            "success": self.success,
+            "message": self.message,
+        })
+    }
+
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        if self.success {
+            format!(
+                "Signed certificate {}:\n  Algorithm: {}\n  Signer: {}\n  Signature: {}...",
+                self.certificate_id,
+                self.algorithm,
+                self.signer,
+                &self.signature[..self.signature.len().min(32)]
+            )
+        } else {
+            format!(
+                "Failed to sign certificate {}: {}",
+                self.certificate_id, self.message
+            )
+        }
+    }
+
+    fn error(certificate_id: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            certificate_id: certificate_id.into(),
+            signature: String::new(),
+            algorithm: String::new(),
+            signer: String::new(),
+            payload_hash: String::new(),
+            signed_at: chrono::Utc::now().to_rfc3339(),
+            success: false,
+            message: message.into(),
+        }
+    }
+}
+
+/// Get the default key directory path.
+fn default_key_dir() -> io::Result<PathBuf> {
+    let config_dir = dirs_config_dir()?;
+    Ok(config_dir.join(KEY_DIR_NAME))
+}
+
+/// Get the platform-specific config directory (~/.config on Linux).
+fn dirs_config_dir() -> io::Result<PathBuf> {
+    std::env::var("HOME")
+        .map(|home| PathBuf::from(home).join(".config"))
+        .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "HOME environment variable not set"))
+}
+
+/// Resolve the key path for a workspace.
+fn resolve_key_path(
+    workspace_path: Option<&Path>,
+    explicit_key_path: Option<&Path>,
+) -> io::Result<PathBuf> {
+    if let Some(key_path) = explicit_key_path {
+        return Ok(key_path.to_owned());
+    }
+    let key_dir = default_key_dir()?;
+    let workspace_name = workspace_path
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("default");
+    Ok(key_dir.join(format!("{workspace_name}.ed25519")))
+}
+
+/// Derive the signer string from a public key.
+fn signer_from_public_key(public_key: &[u8]) -> String {
+    let fingerprint = blake3::hash(public_key).to_hex();
+    format!("ed25519:fp:{fingerprint}")
+}
+
+/// Generate or load a keypair.
+pub fn keygen(options: &KeygenOptions) -> io::Result<KeygenReport> {
+    let key_path = resolve_key_path(options.workspace_path.as_deref(), None)?;
+
+    if key_path.exists() {
+        if options.show_only {
+            // Load existing key and show fingerprint
+            let key_data = fs::read(&key_path)?;
+            let keypair = Ed25519KeyPair::from_pkcs8(&key_data).map_err(|err| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("invalid key: {err}"))
+            })?;
+            let public_key = keypair.public_key().as_ref();
+            let fingerprint = blake3::hash(public_key).to_hex().to_string();
+            let signer = signer_from_public_key(public_key);
+            return Ok(KeygenReport {
+                key_path,
+                fingerprint,
+                signer,
+                created: false,
+                message: "Existing keypair loaded".to_owned(),
+            });
+        }
+        if !options.force {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "key already exists at {}, use --force to overwrite",
+                    key_path.display()
+                ),
+            ));
+        }
+    }
+
+    if options.show_only {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no key found at {}", key_path.display()),
+        ));
+    }
+
+    // Generate new keypair
+    let rng = SystemRandom::new();
+    let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("key generation failed: {err}"),
+        )
+    })?;
+
+    // Ensure key directory exists
+    if let Some(parent) = key_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    // Write key with restricted permissions
+    fs::write(&key_path, pkcs8_bytes.as_ref())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))?;
+    }
+
+    let keypair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes.as_ref()).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid generated key: {err}"),
+        )
+    })?;
+    let public_key = keypair.public_key().as_ref();
+    let fingerprint = blake3::hash(public_key).to_hex().to_string();
+    let signer = signer_from_public_key(public_key);
+
+    Ok(KeygenReport {
+        key_path,
+        fingerprint,
+        signer,
+        created: true,
+        message: "New keypair generated".to_owned(),
+    })
+}
+
+/// Sign a certificate with ed25519.
+pub fn sign_certificate(options: &SignOptions) -> SignReport {
+    let key_path = match resolve_key_path(
+        options.workspace_path.as_deref(),
+        options.key_path.as_deref(),
+    ) {
+        Ok(path) => path,
+        Err(err) => {
+            return SignReport::error(
+                &options.certificate_id,
+                format!("failed to resolve key path: {err}"),
+            );
+        }
+    };
+
+    // Load the keypair
+    let key_data = match fs::read(&key_path) {
+        Ok(data) => data,
+        Err(err) => {
+            return SignReport::error(
+                &options.certificate_id,
+                format!("failed to read key at {}: {err}", key_path.display()),
+            );
+        }
+    };
+
+    let keypair = match Ed25519KeyPair::from_pkcs8(&key_data) {
+        Ok(kp) => kp,
+        Err(err) => {
+            return SignReport::error(
+                &options.certificate_id,
+                format!("invalid key format: {err}"),
+            );
+        }
+    };
+
+    // Load the certificate to get its payload_hash
+    let mut lookup_options = CertificateLookupOptions::new(&options.certificate_id);
+    if let Some(manifest_path) = options.manifest_path.as_deref() {
+        lookup_options = lookup_options.with_manifest_path(manifest_path);
+    }
+    let show_report = show_certificate_with_options(&lookup_options);
+
+    if show_report.verification_status == VerificationResult::NotFound {
+        return SignReport::error(&options.certificate_id, "certificate not found");
+    }
+    let certificate = &show_report.certificate;
+
+    let payload_hash = &certificate.payload_hash;
+
+    // Sign the payload hash
+    let signature_bytes = keypair.sign(payload_hash.as_bytes());
+    let signature = format!("ed25519:{}", hex_lower(signature_bytes.as_ref()));
+    let signer = signer_from_public_key(keypair.public_key().as_ref());
+
+    SignReport {
+        certificate_id: options.certificate_id.clone(),
+        signature,
+        algorithm: ED25519_ALGORITHM_V1.to_owned(),
+        signer,
+        payload_hash: payload_hash.to_owned(),
+        signed_at: chrono::Utc::now().to_rfc3339(),
+        success: true,
+        message: "Certificate signed successfully".to_owned(),
+    }
+}
+
+/// Verify an ed25519 signature.
+fn verify_ed25519_signature(
+    signature: &str,
+    signer: &str,
+    payload_hash: &str,
+    key_dir: Option<&Path>,
+) -> AttestationVerification {
+    // Parse signer to extract fingerprint
+    let Some(fingerprint) = signer.strip_prefix("ed25519:fp:") else {
+        return AttestationVerification::Mismatch {
+            signer: Some(signer.to_owned()),
+            message: format!(
+                "Invalid ed25519 signer format: expected 'ed25519:fp:<fingerprint>', got '{signer}'"
+            ),
+        };
+    };
+
+    // Parse signature
+    let Some(sig_hex) = signature.strip_prefix("ed25519:") else {
+        return AttestationVerification::Mismatch {
+            signer: Some(signer.to_owned()),
+            message: format!(
+                "Invalid ed25519 signature format: expected 'ed25519:<hex>', got '{signature}'"
+            ),
+        };
+    };
+
+    let sig_bytes = match hex_decode(sig_hex) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return AttestationVerification::Mismatch {
+                signer: Some(signer.to_owned()),
+                message: format!("Invalid signature hex: {err}"),
+            };
+        }
+    };
+
+    // Find the public key by fingerprint
+    let default_key_dir_buf;
+    let key_dir = if let Some(dir) = key_dir {
+        dir
+    } else {
+        default_key_dir_buf = match default_key_dir() {
+            Ok(dir) => dir,
+            Err(err) => {
+                return AttestationVerification::Mismatch {
+                    signer: Some(signer.to_owned()),
+                    message: format!("Failed to resolve key directory: {err}"),
+                };
+            }
+        };
+        default_key_dir_buf.as_path()
+    };
+
+    // Search for key file matching the fingerprint
+    let public_key = match find_public_key_by_fingerprint(key_dir, fingerprint) {
+        Ok(Some(pk)) => pk,
+        Ok(None) => {
+            return AttestationVerification::Mismatch {
+                signer: Some(signer.to_owned()),
+                message: format!("No public key found for fingerprint {fingerprint}"),
+            };
+        }
+        Err(err) => {
+            return AttestationVerification::Mismatch {
+                signer: Some(signer.to_owned()),
+                message: format!("Failed to search for public key: {err}"),
+            };
+        }
+    };
+
+    // Verify the signature
+    match signature::UnparsedPublicKey::new(&signature::ED25519, &public_key)
+        .verify(payload_hash.as_bytes(), &sig_bytes)
+    {
+        Ok(()) => {
+            return AttestationVerification::Ok {
+                signer: Some(signer.to_owned()),
+            };
+        }
+        Err(_) => {
+            return AttestationVerification::Mismatch {
+                signer: Some(signer.to_owned()),
+                message: "Ed25519 signature verification failed".to_owned(),
+            };
+        }
+    };
+}
+
+/// Find a public key by its fingerprint in the key directory.
+fn find_public_key_by_fingerprint(
+    key_dir: &Path,
+    fingerprint: &str,
+) -> io::Result<Option<Vec<u8>>> {
+    if !key_dir.exists() {
+        return Ok(None);
+    }
+
+    for entry in fs::read_dir(key_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().map(|e| e == "ed25519").unwrap_or(false) {
+            if let Ok(key_data) = fs::read(&path) {
+                if let Ok(keypair) = Ed25519KeyPair::from_pkcs8(&key_data) {
+                    let public_key = keypair.public_key().as_ref();
+                    let fp = blake3::hash(public_key).to_hex().to_string();
+                    if fp == fingerprint {
+                        return Ok(Some(public_key.to_vec()));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Decode hex string to bytes.
+fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
+    if hex.len() % 2 != 0 {
+        return Err("odd-length hex string".to_owned());
+    }
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for chunk in hex.as_bytes().chunks(2) {
+        let high = hex_digit(chunk[0])?;
+        let low = hex_digit(chunk[1])?;
+        bytes.push((high << 4) | low);
+    }
+    Ok(bytes)
+}
+
+fn hex_digit(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(format!("invalid hex digit: {}", char::from(byte))),
+    }
 }
 
 #[cfg(test)]
