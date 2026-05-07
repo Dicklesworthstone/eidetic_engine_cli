@@ -19153,58 +19153,8 @@ where
 
 // ============================================================================
 // EE-DIAG-001: Redacted Diagnostic Support Bundle
+// Real implementation in crate::core::support_bundle (eidetic_engine_cli-wtpl)
 // ============================================================================
-
-const SUPPORT_BUNDLE_UNAVAILABLE_CODE: &str = "support_bundle_unavailable";
-const SUPPORT_BUNDLE_UNAVAILABLE_MESSAGE: &str = "Support bundle creation, planning, and inspection are unavailable until bundle commands materialize redacted archives and verify manifests instead of reporting placeholder paths or unconditional hash success.";
-const SUPPORT_BUNDLE_UNAVAILABLE_REPAIR: &str = "ee diag integrity --json";
-const SUPPORT_BUNDLE_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-5g6d";
-const SUPPORT_BUNDLE_UNAVAILABLE_SIDE_EFFECT: &str =
-    "conservative abstention; no support bundle archive, manifest, or verification emitted";
-
-fn write_support_bundle_unavailable<W, E>(
-    cli: &Cli,
-    command: &'static str,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": SUPPORT_BUNDLE_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": SUPPORT_BUNDLE_UNAVAILABLE_MESSAGE,
-                "repair": SUPPORT_BUNDLE_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": SUPPORT_BUNDLE_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": SUPPORT_BUNDLE_UNAVAILABLE_MESSAGE,
-                        "repair": SUPPORT_BUNDLE_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": SUPPORT_BUNDLE_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": SUPPORT_BUNDLE_UNAVAILABLE_SIDE_EFFECT
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
-    }
-
-    let _ = writeln!(stderr, "error: {SUPPORT_BUNDLE_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {SUPPORT_BUNDLE_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
-}
 
 fn handle_support_bundle<W, E>(
     cli: &Cli,
@@ -19216,16 +19166,66 @@ where
     W: Write,
     E: Write,
 {
-    if !args.dry_run && args.out.is_none() {
-        let error = DomainError::Usage {
-            message: "--out is required unless --dry-run is specified".to_string(),
-            repair: Some("ee support bundle --out <dir> --json".to_string()),
-        };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-    }
+    use crate::core::support_bundle::{BundleOptions, create_bundle, plan_bundle};
 
-    let _ = args;
-    write_support_bundle_unavailable(cli, "support bundle", stdout, stderr)
+    let workspace_path = args
+        .workspace
+        .clone()
+        .unwrap_or_else(|| cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")));
+
+    let options = BundleOptions {
+        workspace: workspace_path,
+        output_dir: args.out.clone(),
+        dry_run: args.dry_run,
+        redacted: args.redacted && !args.include_raw,
+        include_raw: args.include_raw,
+        audit_limit: 100,
+    };
+
+    let result = if args.dry_run {
+        plan_bundle(&options)
+    } else {
+        create_bundle(&options)
+    };
+
+    match result {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                let human = format!(
+                    "Support bundle {}\n  Files: {}\n  Size: {} bytes\n  Redacted: {}\n  Output: {}\n",
+                    if report.dry_run {
+                        "(dry run)"
+                    } else {
+                        "created"
+                    },
+                    report.files_collected.join(", "),
+                    report.total_size_bytes,
+                    report.redaction_applied,
+                    report
+                        .output_path
+                        .as_ref()
+                        .map_or("(none)".to_string(), |p| p.display().to_string())
+                );
+                write_stdout(stdout, &human)
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&report.data_json().to_string()) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let response = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": true,
+                    "data": report.data_json()
+                });
+                write_stdout(stdout, &(response.to_string() + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_support_inspect<W, E>(
@@ -19238,8 +19238,44 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_support_bundle_unavailable(cli, "support inspect", stdout, stderr)
+    use crate::core::support_bundle::{InspectOptions, inspect_bundle};
+
+    let options = InspectOptions {
+        bundle_path: args.bundle_path.clone(),
+        verify_hashes: true,
+    };
+
+    match inspect_bundle(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                let human = format!(
+                    "Support bundle inspection\n  Path: {}\n  Files: {}\n  Size: {} bytes\n  Valid: {}\n  Hash verified: {}\n",
+                    report.bundle_path.display(),
+                    report.files_found.join(", "),
+                    report.total_size_bytes,
+                    report.valid,
+                    report.hash_verified
+                );
+                write_stdout(stdout, &human)
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&report.data_json().to_string()) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let response = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": true,
+                    "data": report.data_json()
+                });
+                write_stdout(stdout, &(response.to_string() + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 // ============================================================================

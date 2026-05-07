@@ -1042,193 +1042,127 @@ fn audit_commands_read_persisted_rows_without_unavailable_sentinel() -> TestResu
 }
 
 #[test]
-fn support_bundle_commands_degrade_instead_of_reporting_placeholder_archive_success() -> TestResult
-{
-    let artifact_dir = unique_artifact_dir("support-bundle-unavailable-inputs")?;
+fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> TestResult {
+    let artifact_dir = unique_artifact_dir("support-bundle-real-implementation")?;
     let out_dir = artifact_dir.join("bundle-output");
     fs::create_dir_all(&out_dir)
         .map_err(|error| format!("failed to create {}: {error}", out_dir.display()))?;
-    let bundle_path = artifact_dir.join("support_bundle.tar.gz");
-    fs::write(&bundle_path, b"not a real support bundle")
-        .map_err(|error| format!("failed to create {}: {error}", bundle_path.display()))?;
 
-    let cases = [
-        (
-            "support-bundle-plan-unavailable",
-            "support bundle",
-            vec![
-                "--json".to_owned(),
-                "support".to_owned(),
-                "bundle".to_owned(),
-                "--dry-run".to_owned(),
-            ],
-            None,
-        ),
-        (
-            "support-bundle-create-unavailable",
-            "support bundle",
-            vec![
-                "--json".to_owned(),
-                "support".to_owned(),
-                "bundle".to_owned(),
-                "--out".to_owned(),
-                out_dir.display().to_string(),
-            ],
-            Some(out_dir.join("support_bundle.tar.gz")),
-        ),
-        (
-            "support-inspect-unavailable",
-            "support inspect",
-            vec![
-                "--json".to_owned(),
-                "support".to_owned(),
-                "inspect".to_owned(),
-                bundle_path.display().to_string(),
-                "--verify-hashes".to_owned(),
-                "--check-versions".to_owned(),
-            ],
-            None,
-        ),
-    ];
+    let result = run_ee_logged(
+        "support-bundle-dry-run",
+        None,
+        vec![
+            "--json".to_owned(),
+            "support".to_owned(),
+            "bundle".to_owned(),
+            "--dry-run".to_owned(),
+        ],
+    )?;
 
-    for (artifact_name, command, args, forbidden_output_path) in cases {
-        let result = run_ee_logged(artifact_name, None, args)?;
+    ensure_equal(&result.exit_code, &0, "support bundle dry-run exit code")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/schema",
+        json!("ee.response.v1"),
+        "support bundle dry-run schema",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/success",
+        json!(true),
+        "support bundle dry-run success",
+    )?;
+    ensure(
+        result.parsed.pointer("/data/filesCollected").is_some(),
+        "support bundle dry-run must report files to collect".to_owned(),
+    )?;
+    ensure(
+        result.parsed.pointer("/data/dryRun") == Some(&json!(true)),
+        "support bundle dry-run must report dryRun=true".to_owned(),
+    )?;
 
-        ensure_equal(
-            &result.exit_code,
-            &UNSATISFIED_DEGRADED_MODE_EXIT,
-            &format!("{command} unavailable exit code"),
-        )?;
-        ensure(
-            result.stderr.is_empty(),
-            format!("{command} JSON degraded response must keep stderr empty"),
-        )?;
-        ensure_no_ansi(&result.stdout, &format!("{command} degraded stdout"))?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/schema",
-            json!("ee.response.v1"),
-            &format!("{command} degraded response schema"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/success",
-            json!(false),
-            &format!("{command} success flag"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/command",
-            json!(command),
-            &format!("{command} command label"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/code",
-            json!("support_bundle_unavailable"),
-            &format!("{command} degraded code"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/degraded/0/code",
-            json!("support_bundle_unavailable"),
-            &format!("{command} degraded array code"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/repair",
-            json!("ee diag integrity --json"),
-            &format!("{command} repair command"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/followUpBead",
-            json!("eidetic_engine_cli-5g6d"),
-            &format!("{command} follow-up bead"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sideEffectClass",
-            json!(
-                "conservative abstention; no support bundle archive, manifest, or verification emitted"
-            ),
-            &format!("{command} side-effect class"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/evidenceIds",
-            json!([]),
-            &format!("{command} evidence ids"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sourceIds",
-            json!([]),
-            &format!("{command} source ids"),
-        )?;
-        ensure(
-            result.parsed.pointer("/filesCollected").is_none()
-                && result.parsed.pointer("/outputPath").is_none()
-                && result.parsed.pointer("/hashVerified").is_none()
-                && result.parsed.pointer("/versionInfo").is_none(),
-            format!("{command} must not emit placeholder archive or verification fields"),
-        )?;
-        if let Some(path) = forbidden_output_path {
-            ensure(
-                !path.exists(),
-                format!(
-                    "{command} must not create placeholder bundle {}",
-                    path.display()
-                ),
-            )?;
-        }
+    let result = run_ee_logged(
+        "support-bundle-create",
+        None,
+        vec![
+            "--json".to_owned(),
+            "support".to_owned(),
+            "bundle".to_owned(),
+            "--out".to_owned(),
+            out_dir.display().to_string(),
+        ],
+    )?;
 
-        let fake_success = validate_no_fake_success_output(command, false, false, &result.stdout);
-        ensure(
-            fake_success.passed,
-            format!("degraded {command} output should not be fake success: {fake_success:?}"),
-        )?;
+    ensure_equal(&result.exit_code, &0, "support bundle create exit code")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/schema",
+        json!("ee.response.v1"),
+        "support bundle create schema",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/success",
+        json!(true),
+        "support bundle create success",
+    )?;
+    ensure(
+        result.parsed.pointer("/data/outputPath").is_some(),
+        "support bundle create must report output path".to_owned(),
+    )?;
+    ensure(
+        result.parsed.pointer("/data/manifestHash").is_some(),
+        "support bundle create must report manifest hash".to_owned(),
+    )?;
+    ensure(
+        result.parsed.pointer("/data/dryRun") == Some(&json!(false)),
+        "support bundle create must report dryRun=false".to_owned(),
+    )?;
 
-        let unsupported_claims =
-            validate_no_unsupported_evidence_claims(command, false, false, &result.stdout);
-        ensure(
-            unsupported_claims.passed,
-            format!(
-                "degraded {command} output should not count as unsupported success: {unsupported_claims:?}"
-            ),
-        )?;
+    let output_path = result.parsed.pointer("/data/outputPath")
+        .and_then(|v| v.as_str())
+        .ok_or("outputPath must be a string")?;
+    let bundle_dir = Path::new(output_path);
 
-        let log_text = fs::read_to_string(&result.log_path)
-            .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
-        let log_json: Value = serde_json::from_str(&log_text)
-            .map_err(|error| format!("e2e log must be JSON: {error}"))?;
-        ensure_json_pointer(
-            &log_json,
-            "/degradationCodes",
-            json!(["support_bundle_unavailable"]),
-            &format!("logged {command} degradation code"),
-        )?;
-        ensure_json_pointer(
-            &log_json,
-            "/repairCommand",
-            json!("ee diag integrity --json"),
-            &format!("logged {command} repair command"),
-        )?;
-        ensure_json_pointer(
-            &log_json,
-            "/commandBoundaryMatrixRow",
-            json!("support bundle"),
-            &format!("logged {command} boundary matrix row"),
-        )?;
-        ensure_json_pointer(
-            &log_json,
-            "/sideEffectClass",
-            json!(
-                "conservative abstention; no support bundle archive, manifest, or verification emitted"
-            ),
-            &format!("logged {command} side-effect class"),
-        )?;
-    }
+    ensure(
+        bundle_dir.is_dir(),
+        format!("bundle directory {} must exist", bundle_dir.display()),
+    )?;
+    ensure(
+        bundle_dir.join("manifest.json").is_file(),
+        "bundle must contain manifest.json".to_owned(),
+    )?;
+    ensure(
+        bundle_dir.join("status.json").is_file(),
+        "bundle must contain status.json".to_owned(),
+    )?;
+    ensure(
+        bundle_dir.join("doctor.json").is_file(),
+        "bundle must contain doctor.json".to_owned(),
+    )?;
+
+    let inspect_result = run_ee_logged(
+        "support-bundle-inspect",
+        None,
+        vec![
+            "--json".to_owned(),
+            "support".to_owned(),
+            "inspect".to_owned(),
+            bundle_dir.display().to_string(),
+        ],
+    )?;
+
+    ensure_equal(&inspect_result.exit_code, &0, "support inspect exit code")?;
+    ensure_json_pointer(
+        &inspect_result.parsed,
+        "/success",
+        json!(true),
+        "support inspect success",
+    )?;
+    ensure(
+        inspect_result.parsed.pointer("/data/valid") == Some(&json!(true)),
+        "support inspect must report valid=true for intact bundle".to_owned(),
+    )?;
 
     Ok(())
 }
