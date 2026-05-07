@@ -1,0 +1,25 @@
+---
+source: tests/contracts.rs
+assertion: maintenance job commands run shared steward handlers and persist history
+schema:
+  run: ee.maintenance.job_run.v1
+  list: ee.maintenance.job_list.v1
+  show: ee.maintenance.job_show.v1
+  row: ee.maintenance.job_row.v1
+contracts:
+  - job run accepts persisted steward job kinds and rejects unknown kinds
+  - job run uses the same handler path as the steward runner
+  - job run persists success, failure, cancellation, and lock-busy outcomes
+  - job list reads durable history with kind and since filters
+  - job show reads a full durable row by history ID or steward job ID
+  - concurrent triggers for the same workspace return lock-busy without running the handler
+evidence:
+  - requestedJob
+  - outcome
+  - rowsAffected
+  - jobHistoryId
+  - jobId
+  - historyPath
+  - startedAt
+  - completedAt
+  - repair
