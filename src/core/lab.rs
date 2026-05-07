@@ -870,26 +870,65 @@ pub fn run_counterfactual(
 ) -> Result<CounterfactualReport, DomainError> {
     let run_id = format!("{}{}", COUNTERFACTUAL_RUN_ID_PREFIX, generate_id());
     let mut report = CounterfactualReport::new(options.episode_id.clone(), run_id.clone());
+    let replay_artifact = read_frozen_episode(&options.workspace, &options.episode_id)?;
     report.dry_run = options.dry_run;
     report.interventions_applied = options.interventions.len();
-    report.observed_pack_hash = None;
     report.counterfactual_pack_hash = Some(format!(
         "blake3:{}",
-        hash_content(counterfactual_pack_hash_input(options).as_bytes())
+        hash_content(counterfactual_pack_hash_input(options, replay_artifact.as_ref()).as_bytes())
     ));
-    report.assumptions = vec![
-        "frozen episode inputs are required before replay claims can be made".to_string(),
-        "changedItems are explicit hypothesis pack-diff entries, not behavior claims".to_string(),
-    ];
-    report.next_action =
-        "provide frozen episode inputs, then validate candidates before apply".to_string();
-    report.status = CounterfactualStatus::MissingReplayEvidence;
-    report.replay_evidence_available = false;
-    report.behavior_claims = Vec::new();
-    report.confidence_state = "hypothesis_only_missing_replay_evidence".to_string();
-    report
-        .degradation_codes
-        .push(LAB_REPLAY_UNAVAILABLE_CODE.to_string());
+
+    match replay_artifact.as_ref() {
+        Some(artifact) if artifact.episode_hash == frozen_episode_artifact_hash(artifact) => {
+            report.observed_pack_hash.clone_from(&artifact.pack_hash);
+            report.status = CounterfactualStatus::HypothesisReady;
+            report.replay_evidence_available = true;
+            report.behavior_claims = counterfactual_behavior_claims(artifact, options);
+            report.confidence_state = "hypothesis_ready_with_replay_evidence".to_string();
+            report.assumptions = vec![
+                "frozen episode inputs were loaded from the lab artifact".to_string(),
+                "behaviorClaims describe baseline replay evidence only".to_string(),
+                "changedItems are explicit hypothesis pack-diff entries, not proven outcomes"
+                    .to_string(),
+            ];
+            report.next_action =
+                "validate curation candidates against frozen replay evidence before apply"
+                    .to_string();
+        }
+        Some(_) => {
+            report.assumptions = vec![
+                "frozen episode inputs were present but failed hash verification".to_string(),
+                "changedItems are explicit hypothesis pack-diff entries, not behavior claims"
+                    .to_string(),
+            ];
+            report.next_action =
+                "repair the frozen episode artifact, then validate candidates before apply"
+                    .to_string();
+            report.status = CounterfactualStatus::MissingReplayEvidence;
+            report.replay_evidence_available = false;
+            report.behavior_claims = Vec::new();
+            report.confidence_state = "hypothesis_only_unverified_replay_evidence".to_string();
+            report
+                .degradation_codes
+                .push(LAB_REPLAY_UNAVAILABLE_CODE.to_string());
+        }
+        None => {
+            report.assumptions = vec![
+                "frozen episode inputs are required before replay claims can be made".to_string(),
+                "changedItems are explicit hypothesis pack-diff entries, not behavior claims"
+                    .to_string(),
+            ];
+            report.next_action =
+                "provide frozen episode inputs, then validate candidates before apply".to_string();
+            report.status = CounterfactualStatus::MissingReplayEvidence;
+            report.replay_evidence_available = false;
+            report.behavior_claims = Vec::new();
+            report.confidence_state = "hypothesis_only_missing_replay_evidence".to_string();
+            report
+                .degradation_codes
+                .push(LAB_REPLAY_UNAVAILABLE_CODE.to_string());
+        }
+    }
     if options.dry_run {
         report
             .degradation_codes
@@ -937,8 +976,19 @@ pub fn run_counterfactual(
     Ok(report)
 }
 
-fn counterfactual_pack_hash_input(options: &CounterfactualOptions) -> String {
-    let mut input = format!("counterfactual-hypothesis:{}", options.episode_id);
+fn counterfactual_pack_hash_input(
+    options: &CounterfactualOptions,
+    artifact: Option<&FrozenEpisodeArtifact>,
+) -> String {
+    let mut input = match artifact {
+        Some(artifact) => format!(
+            "counterfactual-replay:{}:{}:{}",
+            options.episode_id,
+            artifact.episode_hash,
+            artifact.pack_hash.as_deref().unwrap_or_default()
+        ),
+        None => format!("counterfactual-hypothesis:{}", options.episode_id),
+    };
     for (index, intervention) in options.interventions.iter().enumerate() {
         input.push('|');
         input.push_str(&hypothesis_item_id(index, intervention));
@@ -959,6 +1009,30 @@ fn counterfactual_pack_hash_input(options: &CounterfactualOptions) -> String {
         input.push_str(intervention.hypothesis.as_deref().unwrap_or_default());
     }
     input
+}
+
+fn counterfactual_behavior_claims(
+    artifact: &FrozenEpisodeArtifact,
+    options: &CounterfactualOptions,
+) -> Vec<String> {
+    let mut claims = vec![
+        format!(
+            "baseline replay evidence available for {}",
+            artifact.episode_id
+        ),
+        format!(
+            "baseline captured {} memories and {} actions",
+            artifact.memories_captured, artifact.actions_captured
+        ),
+        format!(
+            "{} intervention hypotheses require validation before apply",
+            options.interventions.len()
+        ),
+    ];
+    if let Some(pack_hash) = &artifact.pack_hash {
+        claims.push(format!("observed context pack hash {pack_hash}"));
+    }
+    claims
 }
 
 fn hypothesis_item_id(index: usize, intervention: &InterventionSpec) -> String {
@@ -1370,6 +1444,53 @@ mod tests {
             record.requires_replay_evidence,
             true,
             "record requires replay evidence",
+        )
+    }
+
+    #[test]
+    fn counterfactual_reads_frozen_episode_artifact() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let capture = capture_episode(&CaptureOptions {
+            workspace: tempdir.path().to_path_buf(),
+            task_input: Some("stabilize release workflow".to_string()),
+            dry_run: false,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        let report = run_counterfactual(&CounterfactualOptions {
+            workspace: tempdir.path().to_path_buf(),
+            episode_id: capture.episode_id,
+            interventions: vec![InterventionSpec::add_memory("run format before release")],
+            generate_hypotheses: true,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            report.status,
+            CounterfactualStatus::HypothesisReady,
+            "status",
+        )?;
+        ensure(
+            report.replay_evidence_available,
+            true,
+            "replay evidence available",
+        )?;
+        ensure(
+            report.observed_pack_hash.is_some(),
+            true,
+            "observed pack hash",
+        )?;
+        ensure(
+            report.behavior_claims.is_empty(),
+            false,
+            "behavior claims populated",
+        )?;
+        ensure(
+            report.degradation_codes.is_empty(),
+            true,
+            "no replay degradation",
         )
     }
 

@@ -659,6 +659,64 @@ fn counterfactual_with_intervention_reports_missing_replay_evidence() -> TestRes
 }
 
 #[test]
+fn counterfactual_reads_frozen_episode_artifact_for_replay_evidence() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let capture = capture_episode(&CaptureOptions {
+        workspace: tempdir.path().to_path_buf(),
+        task_input: Some("prepare release with frozen context".to_string()),
+        dry_run: false,
+        ..Default::default()
+    })
+    .map_err(|error| error.message())?;
+
+    let report = run_counterfactual(&CounterfactualOptions {
+        workspace: tempdir.path().to_path_buf(),
+        episode_id: capture.episode_id,
+        interventions: vec![
+            InterventionSpec::add_memory("run cargo fmt --check before release")
+                .with_hypothesis("The formatting rule would be visible in context"),
+        ],
+        generate_hypotheses: true,
+        dry_run: false,
+    })
+    .map_err(|error| error.message())?;
+
+    ensure(
+        report.status == CounterfactualStatus::HypothesisReady,
+        "counterfactual is hypothesis-ready when replay evidence exists",
+    )?;
+    ensure(
+        report.replay_evidence_available,
+        "replay evidence is available",
+    )?;
+    ensure(
+        report.observed_pack_hash.is_some(),
+        "observed pack hash comes from frozen evidence",
+    )?;
+    ensure(
+        !report.behavior_claims.is_empty(),
+        "baseline behavior claims are populated",
+    )?;
+    ensure(
+        report.degradation_codes.is_empty(),
+        "replay unavailable degradation is absent",
+    )?;
+
+    let json = render_lab_counterfactual_json(&report);
+    ensure_contains(&json, "\"status\":\"hypothesis_ready\"", "status rendered")?;
+    ensure_contains(
+        &json,
+        "\"replayEvidenceAvailable\":true",
+        "replay evidence rendered",
+    )?;
+    ensure_not_contains(
+        &json,
+        "lab_replay_unavailable",
+        "no missing replay degradation",
+    )
+}
+
+#[test]
 fn counterfactual_generates_hypothesis_records() -> TestResult {
     let options = CounterfactualOptions {
         episode_id: "ep_failure".to_string(),
