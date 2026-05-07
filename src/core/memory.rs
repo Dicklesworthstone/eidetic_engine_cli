@@ -2191,6 +2191,8 @@ impl DedupeMatchType {
 pub struct DedupeCheckOptions<'a> {
     /// Database path.
     pub database_path: &'a Path,
+    /// Workspace path used to derive the workspace id.
+    pub workspace_path: &'a Path,
     /// Content to check for duplicates.
     pub content: &'a str,
     /// Memory level (optional filter).
@@ -2206,9 +2208,10 @@ pub struct DedupeCheckOptions<'a> {
 impl<'a> DedupeCheckOptions<'a> {
     /// Create with defaults.
     #[must_use]
-    pub fn new(database_path: &'a Path, content: &'a str) -> Self {
+    pub fn new(database_path: &'a Path, workspace_path: &'a Path, content: &'a str) -> Self {
         Self {
             database_path,
+            workspace_path,
             content,
             level: None,
             kind: None,
@@ -2308,11 +2311,14 @@ pub fn check_for_duplicates(options: &DedupeCheckOptions<'_>) -> DedupeCheckRepo
         Err(message) => return DedupeCheckReport::error(message),
     };
 
-    // Get workspace ID - for now use default
-    let workspace_id = "default";
+    let workspace_path = options
+        .workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| options.workspace_path.to_path_buf());
+    let workspace_id = stable_workspace_id(&workspace_path);
 
     // List memories with optional level filter
-    let memories = match conn.list_memories(workspace_id, options.level, false) {
+    let memories = match conn.list_memories(&workspace_id, options.level, false) {
         Ok(m) => m,
         Err(e) => return DedupeCheckReport::error(format!("Failed to list memories: {e}")),
     };
@@ -3773,8 +3779,17 @@ mod tests {
 
     #[test]
     fn dedupe_check_options_defaults() -> TestResult {
-        let opts = DedupeCheckOptions::new(std::path::Path::new("/tmp/db"), "test content");
+        let opts = DedupeCheckOptions::new(
+            std::path::Path::new("/tmp/db"),
+            std::path::Path::new("/tmp/workspace"),
+            "test content",
+        );
 
+        ensure(
+            opts.workspace_path,
+            std::path::Path::new("/tmp/workspace"),
+            "workspace path",
+        )?;
         ensure(opts.content, "test content", "content")?;
         ensure(opts.level.is_none(), true, "level none")?;
         ensure(opts.kind.is_none(), true, "kind none")?;
@@ -3784,6 +3799,35 @@ mod tests {
             "min_similarity",
         )?;
         ensure(opts.max_warnings, 5, "max_warnings")
+    }
+
+    #[test]
+    fn dedupe_check_scans_requested_workspace() -> TestResult {
+        let (_temp, created) = remember_revisable_memory("Run cargo fmt before release checks.")?;
+        let report = check_for_duplicates(&DedupeCheckOptions {
+            database_path: &created.database_path,
+            workspace_path: &created.workspace_path,
+            content: "Run cargo fmt before release checks.",
+            level: Some("procedural"),
+            kind: Some("rule"),
+            min_similarity: 0.9,
+            max_warnings: 5,
+        });
+
+        ensure(report.error.is_none(), true, "no dedupe error")?;
+        ensure(report.memories_scanned, 1, "scanned workspace memories")?;
+        ensure(report.has_warnings, true, "has duplicate warning")?;
+        ensure(report.warnings.len(), 1, "warning count")?;
+        ensure(
+            report.warnings[0].existing_memory_id.clone(),
+            created.memory_id.to_string(),
+            "matched non-default workspace memory",
+        )?;
+        ensure(
+            report.warnings[0].match_type,
+            DedupeMatchType::ExactContent,
+            "exact match",
+        )
     }
 
     #[test]
