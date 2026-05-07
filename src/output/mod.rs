@@ -3151,6 +3151,54 @@ pub fn render_quarantine_toon(report: &QuarantineReport) -> String {
     render_toon_from_json(&render_quarantine_json(report))
 }
 
+/// Render a single quarantine entry as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_quarantine_entry_json(entry: &crate::db::StoredTrustQuarantine) -> String {
+    let mut b = JsonBuilder::with_capacity(512);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "diag quarantine show");
+        d.field_str("sourceUri", &entry.source_uri);
+        d.field_str("status", &entry.status);
+        d.field_str("firstEventAt", &entry.first_event_at);
+        d.field_str("lastEventAt", &entry.last_event_at);
+        d.field_raw("harmfulEventCount", &entry.harmful_event_count.to_string());
+        if let Some(quarantined_until) = &entry.quarantined_until {
+            d.field_str("quarantinedUntil", quarantined_until);
+        }
+        d.field_str("reason", &entry.reason);
+        d.field_str("createdAt", &entry.created_at);
+        d.field_str("updatedAt", &entry.updated_at);
+    });
+    b.finish()
+}
+
+/// Render a single quarantine entry as human-readable text.
+#[must_use]
+pub fn render_quarantine_entry_human(entry: &crate::db::StoredTrustQuarantine) -> String {
+    let mut output = "ee diag quarantine show\n\n".to_string();
+    output.push_str(&format!("Source: {}\n", entry.source_uri));
+    output.push_str(&format!("Status: {}\n", entry.status));
+    output.push_str(&format!("Harmful events: {}\n", entry.harmful_event_count));
+    output.push_str(&format!("First event: {}\n", entry.first_event_at));
+    output.push_str(&format!("Last event: {}\n", entry.last_event_at));
+    if let Some(quarantined_until) = &entry.quarantined_until {
+        output.push_str(&format!("Quarantined until: {quarantined_until}\n"));
+    }
+    output.push_str(&format!("Reason: {}\n", entry.reason));
+    output.push_str(&format!("\nRecord created: {}\n", entry.created_at));
+    output.push_str(&format!("Record updated: {}\n", entry.updated_at));
+    output.push_str("\nNext:\n  ee diag quarantine list --json\n");
+    output
+}
+
+/// Render a single quarantine entry as TOON.
+#[must_use]
+pub fn render_quarantine_entry_toon(entry: &crate::db::StoredTrustQuarantine) -> String {
+    render_toon_from_json(&render_quarantine_entry_json(entry))
+}
+
 // ============================================================================
 // EE-243: Graph Diagnostic Output
 // ============================================================================
@@ -6722,6 +6770,152 @@ pub fn render_certificate_verify_toon(report: &CertificateVerifyReport) -> Strin
 }
 
 // ============================================================================
+// EE-jfd9: Plan recommend and explain output renderers
+// ============================================================================
+
+use crate::core::plan::{PlanExplainReport, PlanRecommendReport};
+
+#[must_use]
+pub fn render_plan_recommend_json(report: &PlanRecommendReport) -> String {
+    let mut b = JsonBuilder::with_capacity(1024);
+    b.field_str("schema", &report.schema);
+    b.field_bool("success", true);
+    b.field_object("data", |d| {
+        d.field_str("command", "plan recommend");
+        d.field_str("task", &report.task);
+        d.field_u32(
+            "totalRecipesConsidered",
+            u32::try_from(report.total_recipes_considered).unwrap_or(u32::MAX),
+        );
+        d.field_u32(
+            "matchesFound",
+            u32::try_from(report.matches_found).unwrap_or(u32::MAX),
+        );
+        d.field_array_of_objects("recommendations", &report.recommendations, |d, rec| {
+            d.field_str("recipeId", &rec.recipe_id);
+            d.field_str("recipeName", &rec.recipe_name);
+            d.field_str("category", rec.category.as_str());
+            d.field_raw("confidence", &format!("{:.2}", rec.confidence));
+            d.field_u32(
+                "stepsCount",
+                u32::try_from(rec.steps_count).unwrap_or(u32::MAX),
+            );
+            d.field_str("effectPosture", rec.effect_posture.as_str());
+            d.field_array_of_strings("matchReasons", &rec.match_reasons);
+        });
+    });
+    b.finish()
+}
+
+#[must_use]
+pub fn render_plan_recommend_human(report: &PlanRecommendReport) -> String {
+    let mut out = String::with_capacity(1024);
+    out.push_str(&format!("Plan Recommendations for: {}\n", report.task));
+    out.push_str(&format!("==========================\n\n"));
+    out.push_str(&format!(
+        "Considered {} recipes, found {} matches\n\n",
+        report.total_recipes_considered, report.matches_found
+    ));
+    for (i, rec) in report.recommendations.iter().enumerate() {
+        out.push_str(&format!(
+            "{}. {} ({})\n",
+            i + 1,
+            rec.recipe_name,
+            rec.recipe_id
+        ));
+        out.push_str(&format!("   Category: {}\n", rec.category.as_str()));
+        out.push_str(&format!("   Confidence: {:.2}\n", rec.confidence));
+        out.push_str(&format!("   Steps: {}\n", rec.steps_count));
+        out.push_str(&format!("   Effect: {}\n", rec.effect_posture.as_str()));
+        if !rec.match_reasons.is_empty() {
+            out.push_str("   Reasons:\n");
+            for reason in &rec.match_reasons {
+                out.push_str(&format!("     - {}\n", reason));
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+#[must_use]
+pub fn render_plan_recommend_toon(report: &PlanRecommendReport) -> String {
+    render_toon_from_json(&render_plan_recommend_json(report))
+}
+
+#[must_use]
+pub fn render_plan_explain_json(report: &PlanExplainReport) -> String {
+    let mut b = JsonBuilder::with_capacity(512);
+    b.field_str("schema", &report.schema);
+    b.field_bool("success", report.found);
+    b.field_object("data", |d| {
+        d.field_str("command", "plan explain");
+        d.field_str("recipeId", &report.recipe_id);
+        d.field_bool("found", report.found);
+        if let Some(ref name) = report.recipe_name {
+            d.field_str("recipeName", name);
+        }
+        if let Some(ref category) = report.category {
+            d.field_str("category", category);
+        }
+        if let Some(ref description) = report.description {
+            d.field_str("description", description);
+        }
+        if let Some(ref when_to_use) = report.when_to_use {
+            d.field_str("whenToUse", when_to_use);
+        }
+        d.field_array_of_strings("steps", &report.steps);
+        if let Some(ref posture) = report.effect_posture {
+            d.field_str("effectPosture", posture);
+        }
+        if let Some(ref maturity) = report.maturity {
+            d.field_str("maturity", maturity);
+        }
+        d.field_array_of_strings("evidenceUris", &report.evidence_uris);
+    });
+    b.finish()
+}
+
+#[must_use]
+pub fn render_plan_explain_human(report: &PlanExplainReport) -> String {
+    let mut out = String::with_capacity(512);
+    if !report.found {
+        out.push_str(&format!("Recipe not found: {}\n", report.recipe_id));
+        return out;
+    }
+    out.push_str(&format!(
+        "Recipe: {} ({})\n",
+        report.recipe_name.as_deref().unwrap_or("unknown"),
+        report.recipe_id
+    ));
+    out.push_str(&format!("========================\n\n"));
+    if let Some(ref category) = report.category {
+        out.push_str(&format!("Category: {}\n", category));
+    }
+    if let Some(ref description) = report.description {
+        out.push_str(&format!("Description: {}\n", description));
+    }
+    if let Some(ref when_to_use) = report.when_to_use {
+        out.push_str(&format!("When to use: {}\n", when_to_use));
+    }
+    if let Some(ref posture) = report.effect_posture {
+        out.push_str(&format!("Effect posture: {}\n", posture));
+    }
+    if !report.steps.is_empty() {
+        out.push_str("\nSteps:\n");
+        for (i, step) in report.steps.iter().enumerate() {
+            out.push_str(&format!("  {}. {}\n", i + 1, step));
+        }
+    }
+    out
+}
+
+#[must_use]
+pub fn render_plan_explain_toon(report: &PlanExplainReport) -> String {
+    render_toon_from_json(&render_plan_explain_json(report))
+}
+
+// ============================================================================
 // EE-362: Claim verification output renderers
 // ============================================================================
 
@@ -7876,7 +8070,7 @@ pub fn render_preflight_close_toon(report: &CloseReport) -> String {
 
 use crate::core::procedure::{
     ProcedureDriftReport, ProcedureExportReport, ProcedureListReport, ProcedurePromoteReport,
-    ProcedureProposeReport, ProcedureShowReport,
+    ProcedureProposeReport, ProcedureRetireReport, ProcedureShowReport,
 };
 
 /// Render a procedure propose report as JSON.
@@ -8218,6 +8412,56 @@ pub fn render_procedure_promote_toon(report: &ProcedurePromoteReport) -> String 
         report.dry_run,
         report.planned_effects.len(),
         report.warnings.len()
+    )
+}
+
+/// Render a procedure retire report as JSON.
+#[must_use]
+pub fn render_procedure_retire_json(report: &ProcedureRetireReport) -> String {
+    serde_json::json!({
+        "schema": RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "schema": report.schema,
+            "command": "procedure retire",
+            "procedureId": report.procedure_id,
+            "status": report.status,
+            "fromMaturity": report.from_maturity,
+            "toMaturity": report.to_maturity,
+            "eventId": report.event_id,
+            "auditId": report.audit_id,
+            "reason": report.reason,
+            "retiredAt": report.retired_at,
+        }
+    })
+    .to_string()
+}
+
+/// Render a procedure retire report as human-readable text.
+#[must_use]
+pub fn render_procedure_retire_human(report: &ProcedureRetireReport) -> String {
+    let mut out = String::with_capacity(384);
+    out.push_str(&format!("Procedure Retired: {}\n\n", report.procedure_id));
+    out.push_str(&format!(
+        "Maturity: {} -> {}\n",
+        report.from_maturity, report.to_maturity
+    ));
+    out.push_str(&format!("Reason: {}\n", report.reason));
+    out.push_str(&format!("Event: {}\n", report.event_id));
+    out.push_str(&format!("Audit: {}\n", report.audit_id));
+    out.push_str(&format!("Retired at: {}\n", report.retired_at));
+    out.push_str("\nNext:\n  ee procedure show ");
+    out.push_str(&report.procedure_id);
+    out.push_str(" --json\n");
+    out
+}
+
+/// Render a procedure retire report as TOON.
+#[must_use]
+pub fn render_procedure_retire_toon(report: &ProcedureRetireReport) -> String {
+    format!(
+        "PROCEDURE_RETIRE|id={}|from={}|to={}|audit={}",
+        report.procedure_id, report.from_maturity, report.to_maturity, report.audit_id
     )
 }
 
@@ -9311,6 +9555,44 @@ mod tests {
         ensure(
             haystack.starts_with(prefix),
             format!("{context}: expected output to start with {prefix:?}, got {haystack:?}"),
+        )
+    }
+
+    #[test]
+    fn procedure_retire_renderers_are_response_enveloped() -> TestResult {
+        let report = crate::core::procedure::ProcedureRetireReport {
+            schema: crate::core::procedure::PROCEDURE_RETIRE_REPORT_SCHEMA_V1.to_owned(),
+            procedure_id: "proc_01234567890123456789012345678901".to_owned(),
+            status: "retired".to_owned(),
+            from_maturity: "validated".to_owned(),
+            to_maturity: "retired".to_owned(),
+            event_id: "pevt_01234567890123456789012345678901".to_owned(),
+            audit_id: "audit_01234567890123456789012345678901".to_owned(),
+            reason: "harmful evidence contradicted the procedure".to_owned(),
+            retired_at: "2026-05-07T00:00:00Z".to_owned(),
+        };
+
+        let json = super::render_procedure_retire_json(&report);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        assert_eq!(parsed["schema"], RESPONSE_SCHEMA_V1);
+        assert_eq!(parsed["success"], true);
+        assert_eq!(parsed["data"]["command"], "procedure retire");
+        assert_eq!(
+            parsed["data"]["schema"],
+            crate::core::procedure::PROCEDURE_RETIRE_REPORT_SCHEMA_V1
+        );
+
+        let human = super::render_procedure_retire_human(&report);
+        ensure_contains(&human, "Procedure Retired", "human heading")?;
+        ensure_contains(&human, "validated -> retired", "human maturity")?;
+
+        let toon = super::render_procedure_retire_toon(&report);
+        ensure_contains(&toon, "PROCEDURE_RETIRE", "toon command")?;
+        ensure_contains(
+            &toon,
+            "audit_01234567890123456789012345678901",
+            "toon audit",
         )
     }
 

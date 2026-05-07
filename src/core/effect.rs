@@ -833,7 +833,8 @@ impl EffectManifest {
             CommandEffect::read_only("diag dependencies", "Inspect dependency diagnostics"),
             CommandEffect::read_only("diag graph", "Inspect graph diagnostics"),
             CommandEffect::read_only("diag integrity", "Inspect storage integrity diagnostics"),
-            CommandEffect::read_only("diag quarantine", "Show quarantine status"),
+            CommandEffect::read_only("diag quarantine list", "List quarantine entries"),
+            CommandEffect::read_only("diag quarantine show", "Show single quarantine entry"),
             CommandEffect::read_only("diag streams", "Show streams status"),
             CommandEffect::read_only("doctor", "Run health checks"),
             CommandEffect::read_only("eval list", "List evaluation scenarios"),
@@ -884,6 +885,17 @@ impl EffectManifest {
             CommandEffect::read_only("outcome quarantine list", "List feedback quarantine rows"),
             CommandEffect::read_only("plan recipe list", "List static plan recipes"),
             CommandEffect::read_only("plan recipe show", "Show static plan recipe"),
+            CommandEffect::read_only(
+                "procedure drift",
+                "Inspect procedure maturity and feedback drift signals",
+            ),
+            CommandEffect::read_only("procedure export", "Render a persisted procedure artifact"),
+            CommandEffect::read_only("procedure list", "List persisted procedures"),
+            CommandEffect::read_only("procedure show", "Show persisted procedure details"),
+            CommandEffect::read_only(
+                "procedure verify",
+                "Verify a persisted procedure against evidence sources",
+            ),
             CommandEffect::read_only("rationale list", "List safe rationale traces"),
             CommandEffect::read_only("rationale show", "Show a safe rationale trace"),
             CommandEffect::read_only(
@@ -895,7 +907,10 @@ impl EffectManifest {
             CommandEffect::read_only("schema export", "Export public response schemas"),
             CommandEffect::read_only("schema list", "List response schemas"),
             CommandEffect::read_only("search", "Search memories"),
-            CommandEffect::read_only("situation classify", "Classify task into situation category"),
+            CommandEffect::read_only(
+                "situation classify",
+                "Classify task into situation category",
+            ),
             CommandEffect::read_only("situation compare", "Compare two situations (dry-run)"),
             CommandEffect::read_only("situation explain", "Explain a stored situation"),
             CommandEffect::read_only("situation link", "Plan situation link (dry-run)"),
@@ -1035,51 +1050,9 @@ impl EffectManifest {
                 "preflight_evidence_unavailable",
                 "Preflight close abstains until stored preflight runs exist",
             ),
-            CommandEffect::degraded_unavailable(
-                "plan goal",
-                "plan_decisioning_unavailable",
-                "Goal planning abstains until command recipes are mechanical or skill-facing",
-            ),
-            CommandEffect::degraded_unavailable(
-                "plan explain",
-                "plan_decisioning_unavailable",
-                "Plan explanation abstains until command recipes are mechanical or skill-facing",
-            ),
-            CommandEffect::degraded_unavailable(
-                "procedure propose",
-                "procedure_store_unavailable",
-                "Procedure proposal abstains until procedure storage exists",
-            ),
-            CommandEffect::degraded_unavailable(
-                "procedure show",
-                "procedure_store_unavailable",
-                "Procedure inspection abstains until procedure storage exists",
-            ),
-            CommandEffect::degraded_unavailable(
-                "procedure list",
-                "procedure_store_unavailable",
-                "Procedure listing abstains until procedure storage exists",
-            ),
-            CommandEffect::degraded_unavailable(
-                "procedure export",
-                "procedure_store_unavailable",
-                "Procedure export abstains until procedure storage exists",
-            ),
-            CommandEffect::degraded_unavailable(
-                "procedure promote",
-                "procedure_store_unavailable",
-                "Procedure promotion abstains until procedure storage exists",
-            ),
-            CommandEffect::degraded_unavailable(
-                "procedure verify",
-                "procedure_store_unavailable",
-                "Procedure verification abstains until procedure storage exists",
-            ),
-            CommandEffect::degraded_unavailable(
-                "procedure drift",
-                "procedure_store_unavailable",
-                "Procedure drift checking abstains until procedure storage exists",
-            ),
+            CommandEffect::read_only("plan goal", "Recommends recipes for goals"),
+            CommandEffect::read_only("plan explain", "Explains recipe selection"),
+            CommandEffect::read_only("plan recommend", "Recommends recipes for tasks"),
             CommandEffect::degraded_unavailable(
                 "recorder start",
                 "recorder_store_unavailable",
@@ -1278,6 +1251,16 @@ impl EffectManifest {
                 "outcome",
                 vec!["feedback_events", "audit_log"],
                 "Record observed outcome feedback",
+            ),
+            CommandEffect::durable_write(
+                "procedure promote",
+                vec!["procedures", "procedure_events", "audit_log"],
+                "Promote a persisted procedure maturity level",
+            ),
+            CommandEffect::durable_write(
+                "procedure propose",
+                vec!["procedures", "procedure_events", "audit_log"],
+                "Persist a procedure candidate from explicit evidence",
             ),
             CommandEffect::durable_write(
                 "outcome quarantine release",
@@ -1985,7 +1968,6 @@ mod tests {
 
         for (command, code) in [
             ("demo run", "demo_command_execution_unavailable"),
-            ("procedure export", "procedure_store_unavailable"),
             ("support bundle", "support_bundle_unavailable"),
         ] {
             let effect = manifest

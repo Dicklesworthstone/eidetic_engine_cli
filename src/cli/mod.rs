@@ -1150,9 +1150,33 @@ pub enum DiagCommand {
     /// Verify database, provenance-chain, and canary-memory integrity.
     Integrity(DiagIntegrityArgs),
     /// Report quarantine status for import sources.
-    Quarantine,
+    #[command(subcommand)]
+    Quarantine(DiagQuarantineCommand),
     /// Verify stdout/stderr stream separation is correct.
     Streams,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum DiagQuarantineCommand {
+    /// List quarantine entries for import sources.
+    List(DiagQuarantineListArgs),
+    /// Show details for a specific quarantined source.
+    Show(DiagQuarantineShowArgs),
+}
+
+/// Arguments for `ee diag quarantine list`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagQuarantineListArgs {
+    /// Only show sources with active quarantine status.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub active: bool,
+}
+
+/// Arguments for `ee diag quarantine show`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagQuarantineShowArgs {
+    /// Source URI to inspect (e.g., cass://path/to/session.jsonl).
+    pub source_uri: String,
 }
 
 /// Arguments for `ee diag claims`.
@@ -2566,7 +2590,7 @@ pub struct TripwireCheckArgs {
 }
 
 /// Subcommands for `ee plan`.
-#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+#[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum PlanCommand {
     /// Map a goal to a recipe and return a command plan.
     Goal(PlanGoalArgs),
@@ -2575,6 +2599,8 @@ pub enum PlanCommand {
     Recipe(PlanRecipeCommand),
     /// Explain why a recipe was selected.
     Explain(PlanExplainArgs),
+    /// Recommend recipes for a task based on memory and procedural rules.
+    Recommend(PlanRecommendArgs),
 }
 
 /// Subcommands for `ee plan recipe`.
@@ -2624,6 +2650,26 @@ pub struct PlanExplainArgs {
     /// Plan ID or recipe ID to explain.
     #[arg(value_name = "ID")]
     pub id: String,
+}
+
+/// Arguments for `ee plan recommend`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct PlanRecommendArgs {
+    /// Task description to match against recipes and procedural rules.
+    #[arg(value_name = "TASK")]
+    pub task: String,
+
+    /// Maximum recipes to return.
+    #[arg(long, short = 'n', default_value_t = 5)]
+    pub limit: u32,
+
+    /// Minimum confidence threshold for matches.
+    #[arg(long, default_value_t = 0.3)]
+    pub min_confidence: f64,
+
+    /// Workspace to query for procedural rules.
+    #[arg(long, value_name = "PATH")]
+    pub workspace: Option<PathBuf>,
 }
 
 /// Subcommands for `ee playbook`.
@@ -5107,7 +5153,14 @@ where
             }
             DiagCommand::Graph => handle_diag_graph(&cli, stdout),
             DiagCommand::Integrity(args) => handle_diag_integrity(&cli, args, stdout),
-            DiagCommand::Quarantine => handle_diag_quarantine(&cli, stdout, stderr),
+            DiagCommand::Quarantine(subcmd) => match subcmd {
+                DiagQuarantineCommand::List(args) => {
+                    handle_diag_quarantine_list(&cli, args, stdout, stderr)
+                }
+                DiagQuarantineCommand::Show(args) => {
+                    handle_diag_quarantine_show(&cli, args, stdout, stderr)
+                }
+            },
             DiagCommand::Streams => {
                 let report = crate::core::streams::StreamsReport::gather(stderr);
                 match cli.renderer() {
@@ -5559,6 +5612,9 @@ where
         }
         Some(Command::Plan(PlanCommand::Explain(ref args))) => {
             handle_plan_explain(&cli, args, stdout, stderr)
+        }
+        Some(Command::Plan(PlanCommand::Recommend(ref args))) => {
+            handle_plan_recommend(&cli, args, stdout, stderr)
         }
         Some(Command::Playbook(PlaybookCommand::Extract(ref args))) => {
             handle_playbook_extract(&cli, args, stdout, stderr)
@@ -8816,14 +8872,28 @@ fn handle_plan_goal<W, E>(
     cli: &Cli,
     args: &PlanGoalArgs,
     stdout: &mut W,
-    stderr: &mut E,
+    _stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_plan_decisioning_unavailable(cli, "plan goal", stdout, stderr)
+    use crate::core::plan::{PlanRecommendOptions, recommend_recipes};
+
+    let workspace_path = args
+        .workspace
+        .clone()
+        .map(PathBuf::from)
+        .or_else(|| cli.workspace.clone())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let options = PlanRecommendOptions {
+        task: args.goal.clone(),
+        limit: 5,
+        min_confidence: 0.3,
+        workspace_path,
+    };
+    let report = recommend_recipes(&options);
+    write_plan_recommend_report(cli, &report, stdout)
 }
 
 fn handle_plan_recipe_list<W, E>(
@@ -8996,65 +9066,91 @@ fn handle_plan_explain<W, E>(
     cli: &Cli,
     args: &PlanExplainArgs,
     stdout: &mut W,
-    stderr: &mut E,
+    _stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_plan_decisioning_unavailable(cli, "plan explain", stdout, stderr)
+    use crate::core::plan::explain_recipe;
+
+    let report = explain_recipe(&args.id);
+    write_plan_explain_report(cli, &report, stdout)
 }
 
-const PLAN_DECISIONING_UNAVAILABLE_CODE: &str = "plan_decisioning_unavailable";
-const PLAN_DECISIONING_UNAVAILABLE_MESSAGE: &str = "Goal planning and recipe explanation are unavailable until plan commands are re-scoped to mechanical command catalogs or skill-facing docs instead of built-in goal classification and recipe reasoning.";
-const PLAN_DECISIONING_UNAVAILABLE_REPAIR: &str = "ee plan recipe list --json";
-const PLAN_DECISIONING_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-6cks";
-const PLAN_DECISIONING_UNAVAILABLE_SIDE_EFFECT: &str =
-    "conservative abstention; no goal classification or recipe explanation";
-
-fn write_plan_decisioning_unavailable<W, E>(
+fn handle_plan_recommend<W, E>(
     cli: &Cli,
-    command: &'static str,
+    args: &PlanRecommendArgs,
     stdout: &mut W,
-    stderr: &mut E,
+    _stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": PLAN_DECISIONING_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": PLAN_DECISIONING_UNAVAILABLE_MESSAGE,
-                "repair": PLAN_DECISIONING_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": PLAN_DECISIONING_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": PLAN_DECISIONING_UNAVAILABLE_MESSAGE,
-                        "repair": PLAN_DECISIONING_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": PLAN_DECISIONING_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": PLAN_DECISIONING_UNAVAILABLE_SIDE_EFFECT
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
-    }
+    use crate::core::plan::{PlanRecommendOptions, recommend_recipes};
 
-    let _ = writeln!(stderr, "error: {PLAN_DECISIONING_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {PLAN_DECISIONING_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
+    let workspace_path = args
+        .workspace
+        .clone()
+        .or_else(|| cli.workspace.clone())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let options = PlanRecommendOptions {
+        task: args.task.clone(),
+        limit: args.limit,
+        min_confidence: args.min_confidence,
+        workspace_path,
+    };
+    let report = recommend_recipes(&options);
+    write_plan_recommend_report(cli, &report, stdout)
+}
+
+fn write_plan_explain_report<W>(
+    cli: &Cli,
+    report: &crate::core::plan::PlanExplainReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_plan_explain_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_plan_explain_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_plan_explain_json(report) + "\n"))
+        }
+    }
+}
+
+fn write_plan_recommend_report<W>(
+    cli: &Cli,
+    report: &crate::core::plan::PlanRecommendReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_plan_recommend_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_plan_recommend_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_plan_recommend_json(report) + "\n"))
+        }
+    }
 }
 
 // ============================================================================
@@ -9484,7 +9580,7 @@ where
                 resource: "recorder run".to_owned(),
                 id: run_id.clone(),
                 repair: Some(
-                    "Start a run with `ee recorder start --json` before appending events."
+                    "Start a run with `ee recorder start --json` before recording events."
                         .to_owned(),
                 ),
             };
@@ -9952,7 +10048,10 @@ where
     };
     use crate::db::DbConnection;
 
-    let workspace_path = args.workspace.clone();
+    let workspace_path = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| args.workspace.clone());
     let database_path = args
         .database
         .clone()
@@ -10609,14 +10708,24 @@ where
     }
 }
 
-fn handle_diag_quarantine<W, E>(cli: &Cli, stdout: &mut W, _stderr: &mut E) -> ProcessExitCode
+fn handle_diag_quarantine_list<W, E>(
+    cli: &Cli,
+    args: &DiagQuarantineListArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
     let workspace_path =
         resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
-    let report = crate::core::quarantine::QuarantineReport::gather_for_workspace(&workspace_path);
+    let mut report =
+        crate::core::quarantine::QuarantineReport::gather_for_workspace(&workspace_path);
+
+    if args.active {
+        report.filter_active_only();
+    }
 
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
@@ -10631,6 +10740,119 @@ where
         | output::Renderer::Hook => {
             write_stdout(stdout, &(output::render_quarantine_json(&report) + "\n"))
         }
+    }
+}
+
+fn handle_diag_quarantine_show<W, E>(
+    cli: &Cli,
+    args: &DiagQuarantineShowArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let canonical_path = match workspace_path.canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::new(
+                    "quarantine_workspace_unavailable",
+                    DomainErrorSeverity::Medium,
+                    DomainErrorSituation::Configuration,
+                    format!("Failed to resolve workspace: {error}"),
+                    "ee init --workspace .",
+                ),
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+    let database_path = canonical_path.join(".ee").join("ee.db");
+    if !database_path.is_file() {
+        return write_domain_error(
+            &DomainError::new(
+                "quarantine_database_missing",
+                DomainErrorSeverity::Medium,
+                DomainErrorSituation::Configuration,
+                format!("No ee database was found at {}.", database_path.display()),
+                "ee init --workspace .",
+            ),
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    }
+    let workspace_id = crate::core::curate::stable_workspace_id(&canonical_path);
+    let connection = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::new(
+                    "quarantine_database_unreadable",
+                    DomainErrorSeverity::Medium,
+                    DomainErrorSituation::Storage,
+                    format!("Failed to open database: {error}"),
+                    "ee doctor --json",
+                ),
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+
+    let entry = match connection.get_trust_quarantine(&workspace_id, &args.source_uri) {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return write_domain_error(
+                &DomainError::new(
+                    "quarantine_source_not_found",
+                    DomainErrorSeverity::Low,
+                    DomainErrorSituation::NotFound,
+                    format!("No quarantine record found for source: {}", args.source_uri),
+                    "ee diag quarantine list --json",
+                ),
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::new(
+                    "quarantine_query_failed",
+                    DomainErrorSeverity::Medium,
+                    DomainErrorSituation::Storage,
+                    format!("Failed to query quarantine state: {error}"),
+                    "ee db migrate --workspace .",
+                ),
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_quarantine_entry_human(&entry))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_quarantine_entry_toon(&entry) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_quarantine_entry_json(&entry) + "\n"),
+        ),
     }
 }
 
@@ -18551,7 +18773,10 @@ impl NormalizedInvocation {
                     DiagCommand::Dependencies => "diag dependencies".to_string(),
                     DiagCommand::Graph => "diag graph".to_string(),
                     DiagCommand::Integrity(_) => "diag integrity".to_string(),
-                    DiagCommand::Quarantine => "diag quarantine".to_string(),
+                    DiagCommand::Quarantine(subcmd) => match subcmd {
+                        DiagQuarantineCommand::List(_) => "diag quarantine list".to_string(),
+                        DiagQuarantineCommand::Show(_) => "diag quarantine show".to_string(),
+                    },
                     DiagCommand::Streams => "diag streams".to_string(),
                 },
                 Command::Doctor(_) => "doctor".to_string(),
@@ -18665,6 +18890,7 @@ impl NormalizedInvocation {
                         "plan recipe show".to_string()
                     }
                     PlanCommand::Explain(_) => "plan explain".to_string(),
+                    PlanCommand::Recommend(_) => "plan recommend".to_string(),
                 },
                 Command::Playbook(playbook) => match playbook {
                     PlaybookCommand::Extract(_) => "playbook extract".to_string(),
@@ -22361,15 +22587,55 @@ mod tests {
     }
 
     #[test]
-    fn diag_quarantine_command_parses() -> TestResult {
-        let parsed = Cli::try_parse_from(["ee", "diag", "quarantine"])
-            .map_err(|e| format!("failed to parse diag quarantine: {:?}", e.kind()))?;
+    fn diag_quarantine_list_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "diag", "quarantine", "list"])
+            .map_err(|e| format!("failed to parse diag quarantine list: {:?}", e.kind()))?;
 
-        ensure_equal(
-            &parsed.command,
-            &Some(Command::Diag(DiagCommand::Quarantine)),
-            "diag quarantine command",
-        )
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::Quarantine(DiagQuarantineCommand::List(ref args)))) => {
+                ensure_equal(
+                    &args.active,
+                    &false,
+                    "diag quarantine list --active default",
+                )
+            }
+            _ => Err("expected DiagQuarantineCommand::List".to_string()),
+        }
+    }
+
+    #[test]
+    fn diag_quarantine_list_active_flag_parses() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "diag", "quarantine", "list", "--active"])
+            .map_err(|e| {
+                format!(
+                    "failed to parse diag quarantine list --active: {:?}",
+                    e.kind()
+                )
+            })?;
+
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::Quarantine(DiagQuarantineCommand::List(ref args)))) => {
+                ensure_equal(&args.active, &true, "diag quarantine list --active set")
+            }
+            _ => Err("expected DiagQuarantineCommand::List with active=true".to_string()),
+        }
+    }
+
+    #[test]
+    fn diag_quarantine_show_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "diag", "quarantine", "show", "cass://test"])
+            .map_err(|e| format!("failed to parse diag quarantine show: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::Quarantine(DiagQuarantineCommand::Show(ref args)))) => {
+                ensure_equal(
+                    &args.source_uri,
+                    &"cass://test".to_string(),
+                    "diag quarantine show source_uri",
+                )
+            }
+            _ => Err("expected DiagQuarantineCommand::Show".to_string()),
+        }
     }
 
     #[test]
@@ -22961,10 +23227,14 @@ mod tests {
     }
 
     #[test]
-    fn diag_quarantine_json_reports_persisted_state_without_placeholder() -> TestResult {
-        let (exit, stdout, stderr) = invoke(&["ee", "diag", "quarantine", "--json"]);
+    fn diag_quarantine_list_json_reports_persisted_state_without_placeholder() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "diag", "quarantine", "list", "--json"]);
 
-        ensure_equal(&exit, &ProcessExitCode::Success, "diag quarantine exit")?;
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "diag quarantine list exit",
+        )?;
         ensure_contains(&stdout, "\"schema\":\"ee.response.v1\"", "response schema")?;
         ensure_contains(&stdout, "\"success\":true", "success flag")?;
         ensure_contains(
@@ -22978,7 +23248,7 @@ mod tests {
             !stdout.contains(&removed_code) && !stdout.contains("placeholder"),
             "diag quarantine output must not emit the removed unavailable sentinel",
         )?;
-        ensure(stderr.is_empty(), "diag quarantine json stderr empty")
+        ensure(stderr.is_empty(), "diag quarantine list json stderr empty")
     }
 
     // ========================================================================

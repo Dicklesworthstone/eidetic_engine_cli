@@ -379,6 +379,17 @@ impl QuarantineReport {
             .saturating_add(self.summary.at_risk_count)
             .saturating_add(self.summary.blocked_count)
     }
+
+    /// Filter report to only include actively quarantined or blocked sources.
+    pub fn filter_active_only(&mut self) {
+        self.at_risk_sources.clear();
+        self.summary.at_risk_count = 0;
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            self.summary.total_sources =
+                (self.quarantined_sources.len() + self.blocked_sources.len()) as u32;
+        }
+    }
 }
 
 fn canonical_workspace_path(path: &Path) -> Result<PathBuf, String> {

@@ -1216,7 +1216,7 @@ impl PlanExplanation {
 
 /// Explain a recipe selection.
 #[must_use]
-pub fn explain_recipe(recipe_id: &str) -> Option<PlanExplanation> {
+pub fn explain_recipe_selection(recipe_id: &str) -> Option<PlanExplanation> {
     let recipe = get_recipe(recipe_id)?;
 
     Some(PlanExplanation {
@@ -1240,6 +1240,213 @@ pub fn explain_recipe(recipe_id: &str) -> Option<PlanExplanation> {
             format!("ee plan recipe show {} --json", recipe.id),
         ],
     })
+}
+
+// ============================================================================
+// Plan Recommend (EE-jfd9)
+// ============================================================================
+
+pub const PLAN_RECOMMEND_SCHEMA_V1: &str = "ee.plan.recommend.v1";
+
+/// Options for recommending recipes based on task description.
+#[derive(Clone, Debug)]
+pub struct PlanRecommendOptions {
+    pub task: String,
+    pub limit: u32,
+    pub min_confidence: f64,
+    pub workspace_path: std::path::PathBuf,
+}
+
+/// A ranked recipe recommendation.
+#[derive(Clone, Debug)]
+pub struct RecipeRecommendation {
+    pub recipe_id: String,
+    pub recipe_name: String,
+    pub category: GoalCategory,
+    pub confidence: f64,
+    pub match_reasons: Vec<String>,
+    pub steps_count: usize,
+    pub effect_posture: EffectPosture,
+}
+
+/// Report from plan recommend.
+#[derive(Clone, Debug)]
+pub struct PlanRecommendReport {
+    pub schema: String,
+    pub task: String,
+    pub recommendations: Vec<RecipeRecommendation>,
+    pub total_recipes_considered: usize,
+    pub matches_found: usize,
+}
+
+impl PlanRecommendReport {
+    #[must_use]
+    pub fn empty(task: &str) -> Self {
+        Self {
+            schema: PLAN_RECOMMEND_SCHEMA_V1.to_owned(),
+            task: task.to_owned(),
+            recommendations: Vec::new(),
+            total_recipes_considered: 0,
+            matches_found: 0,
+        }
+    }
+}
+
+/// Recommend recipes for a task based on keyword matching and category alignment.
+#[must_use]
+pub fn recommend_recipes(options: &PlanRecommendOptions) -> PlanRecommendReport {
+    let task_lower = options.task.to_lowercase();
+    let task_words: Vec<&str> = task_lower.split_whitespace().collect();
+    let all_recipes = recipes_by_category(None);
+    let total_recipes_considered = all_recipes.len();
+
+    let mut scored: Vec<(RecipeRecommendation, f64)> = Vec::new();
+
+    for recipe in &all_recipes {
+        let mut score = 0.0;
+        let mut reasons = Vec::new();
+
+        let category_keywords = category_keywords(recipe.category);
+        for keyword in category_keywords {
+            if task_words.iter().any(|word| word.contains(keyword)) {
+                score += 0.3;
+                reasons.push(format!("Task mentions '{}' (category keyword)", keyword));
+            }
+        }
+
+        let recipe_name_lower = recipe.name.to_lowercase();
+        for word in &task_words {
+            if recipe_name_lower.contains(word) && word.len() > 2 {
+                score += 0.2;
+                reasons.push(format!("Recipe name matches task word '{}'", word));
+            }
+        }
+
+        for step in &recipe.steps {
+            let step_lower = step.command.to_lowercase();
+            for word in &task_words {
+                if step_lower.contains(word) && word.len() > 2 {
+                    score += 0.1;
+                    reasons.push(format!("Step command contains '{}'", word));
+                    break;
+                }
+            }
+        }
+
+        if score >= options.min_confidence {
+            scored.push((
+                RecipeRecommendation {
+                    recipe_id: recipe.id.clone(),
+                    recipe_name: recipe.name.clone(),
+                    category: recipe.category,
+                    confidence: score.min(1.0),
+                    match_reasons: reasons,
+                    steps_count: recipe.steps.len(),
+                    effect_posture: recipe.effect_posture,
+                },
+                score,
+            ));
+        }
+    }
+
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(options.limit as usize);
+
+    let matches_found = scored.len();
+    let recommendations: Vec<RecipeRecommendation> =
+        scored.into_iter().map(|(rec, _)| rec).collect();
+
+    PlanRecommendReport {
+        schema: PLAN_RECOMMEND_SCHEMA_V1.to_owned(),
+        task: options.task.clone(),
+        recommendations,
+        total_recipes_considered,
+        matches_found,
+    }
+}
+
+fn category_keywords(category: GoalCategory) -> &'static [&'static str] {
+    match category {
+        GoalCategory::Init => &["init", "initialize", "setup", "start", "new"],
+        GoalCategory::PreTaskBriefing => &["brief", "context", "prepare", "before", "pre"],
+        GoalCategory::InTaskRetrieval => &["search", "find", "retrieve", "look", "query"],
+        GoalCategory::DegradedRepair => &["repair", "fix", "degraded", "broken", "error"],
+        GoalCategory::OutcomeCapture => &["remember", "outcome", "capture", "record", "save"],
+        GoalCategory::SessionReview => &["review", "session", "curation", "curate"],
+        GoalCategory::Handoff => &["handoff", "resume", "continue", "transfer"],
+        GoalCategory::SupportBundle => &["support", "bundle", "debug", "diagnostic"],
+        GoalCategory::BackupExport => &["backup", "export", "archive", "restore"],
+        GoalCategory::Rehearsal => &["rehearse", "rehearsal", "practice", "dry-run"],
+        GoalCategory::AuditInspection => &["audit", "inspect", "timeline", "history"],
+        GoalCategory::Closeout => &["close", "closeout", "finish", "complete", "done"],
+        GoalCategory::Unknown => &[],
+    }
+}
+
+// ============================================================================
+// Plan Explain (EE-jfd9)
+// ============================================================================
+
+/// Report from explaining a recipe.
+#[derive(Clone, Debug)]
+pub struct PlanExplainReport {
+    pub schema: String,
+    pub recipe_id: String,
+    pub found: bool,
+    pub recipe_name: Option<String>,
+    pub category: Option<String>,
+    pub description: Option<String>,
+    pub when_to_use: Option<String>,
+    pub steps: Vec<String>,
+    pub effect_posture: Option<String>,
+    pub maturity: Option<String>,
+    pub evidence_uris: Vec<String>,
+}
+
+impl PlanExplainReport {
+    #[must_use]
+    pub fn not_found(recipe_id: &str) -> Self {
+        Self {
+            schema: PLAN_EXPLAIN_SCHEMA_V1.to_owned(),
+            recipe_id: recipe_id.to_owned(),
+            found: false,
+            recipe_name: None,
+            category: None,
+            description: None,
+            when_to_use: None,
+            steps: Vec::new(),
+            effect_posture: None,
+            maturity: None,
+            evidence_uris: Vec::new(),
+        }
+    }
+}
+
+/// Explain why a recipe exists and when to use it.
+#[must_use]
+pub fn explain_recipe(recipe_id: &str) -> PlanExplainReport {
+    let all_recipes = recipes_by_category(None);
+    let recipe = all_recipes.iter().find(|r| r.id == recipe_id);
+
+    match recipe {
+        Some(r) => PlanExplainReport {
+            schema: PLAN_EXPLAIN_SCHEMA_V1.to_owned(),
+            recipe_id: recipe_id.to_owned(),
+            found: true,
+            recipe_name: Some(r.name.clone()),
+            category: Some(r.category.as_str().to_owned()),
+            description: Some(r.category.description().to_owned()),
+            when_to_use: Some(format!(
+                "Use this recipe when your goal involves {} tasks.",
+                r.category.as_str()
+            )),
+            steps: r.steps.iter().map(|s| s.command.clone()).collect(),
+            effect_posture: Some(r.effect_posture.as_str().to_owned()),
+            maturity: Some("catalog".to_owned()),
+            evidence_uris: vec![format!("ee://plan/recipe/{}", r.id)],
+        },
+        None => PlanExplainReport::not_found(recipe_id),
+    }
 }
 
 #[cfg(test)]
