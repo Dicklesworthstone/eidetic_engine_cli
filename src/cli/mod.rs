@@ -2730,6 +2730,8 @@ pub enum ProcedureCommand {
     Export(ProcedureExportArgs),
     /// Plan promotion through curation and audit paths without mutating state.
     Promote(ProcedurePromoteArgs),
+    /// Retire a procedure with an audited reason.
+    Retire(ProcedureRetireArgs),
     /// Verify a procedure against eval fixtures, repro packs, or claim evidence.
     Verify(ProcedureVerifyArgs),
     /// Detect failed-verification, stale-evidence, and dependency-contract drift.
@@ -2826,6 +2828,22 @@ pub struct ProcedurePromoteArgs {
     /// Review reason to include in the curation candidate.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
+}
+
+/// Arguments for `ee procedure retire`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ProcedureRetireArgs {
+    /// Procedure ID to retire.
+    #[arg(value_name = "PROCEDURE_ID")]
+    pub procedure_id: String,
+
+    /// Reason for retirement.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: String,
+
+    /// Actor to include in the audit record.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
 }
 
 /// Arguments for `ee procedure verify`.
@@ -5648,6 +5666,9 @@ where
         }
         Some(Command::Procedure(ProcedureCommand::Promote(ref args))) => {
             handle_procedure_promote(&cli, args, stdout, stderr)
+        }
+        Some(Command::Procedure(ProcedureCommand::Retire(ref args))) => {
+            handle_procedure_retire(&cli, args, stdout, stderr)
         }
         Some(Command::Procedure(ProcedureCommand::Verify(ref args))) => {
             handle_procedure_verify(&cli, args, stdout, stderr)
@@ -9172,55 +9193,6 @@ where
 // EE-411: Procedure Command Handlers
 // ============================================================================
 
-const PROCEDURE_UNAVAILABLE_CODE: &str = "procedure_store_unavailable";
-const PROCEDURE_UNAVAILABLE_MESSAGE: &str = "Procedure lifecycle data is unavailable until procedure commands are backed by persisted evidence, verification, and curation records instead of generated fixture data.";
-const PROCEDURE_UNAVAILABLE_REPAIR: &str = "ee status --json";
-const PROCEDURE_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-q5vf";
-
-fn write_procedure_unavailable<W, E>(
-    cli: &Cli,
-    command: &'static str,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": PROCEDURE_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": PROCEDURE_UNAVAILABLE_MESSAGE,
-                "repair": PROCEDURE_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": PROCEDURE_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": PROCEDURE_UNAVAILABLE_MESSAGE,
-                        "repair": PROCEDURE_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": PROCEDURE_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": "conservative abstention; no procedure mutation or artifact write"
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
-    }
-
-    let _ = writeln!(stderr, "error: {PROCEDURE_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {PROCEDURE_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
-}
-
 fn handle_procedure_propose<W, E>(
     cli: &Cli,
     args: &ProcedureProposeArgs,
@@ -9231,8 +9203,44 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_procedure_unavailable(cli, "procedure propose", stdout, stderr)
+    let workspace_path =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let options = crate::core::procedure::ProcedureProposeOptions {
+        workspace: workspace_path,
+        title: args.title.clone(),
+        summary: args.summary.clone(),
+        source_run_ids: args.source_runs.clone(),
+        evidence_ids: args.evidence_ids.clone(),
+        dry_run: args.dry_run,
+    };
+    match crate::core::procedure::propose_procedure(&options) {
+        Ok(report) => write_procedure_propose_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_procedure_propose_report<W>(
+    cli: &Cli,
+    report: &crate::core::procedure::ProcedureProposeReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_procedure_propose_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_procedure_propose_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_procedure_propose_json(report) + "\n"))
+        }
+    }
 }
 
 fn handle_procedure_show<W, E>(
@@ -9245,8 +9253,42 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_procedure_unavailable(cli, "procedure show", stdout, stderr)
+    let workspace_path =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let options = crate::core::procedure::ProcedureShowOptions {
+        workspace: workspace_path,
+        procedure_id: args.procedure_id.clone(),
+        include_steps: args.include_steps,
+        include_verification: args.include_verification,
+    };
+    match crate::core::procedure::show_procedure(&options) {
+        Ok(report) => write_procedure_show_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_procedure_show_report<W>(
+    cli: &Cli,
+    report: &crate::core::procedure::ProcedureShowReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_procedure_show_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_procedure_show_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_procedure_show_json(report) + "\n"))
+        }
+    }
 }
 
 fn handle_procedure_list<W, E>(
@@ -9259,8 +9301,42 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_procedure_unavailable(cli, "procedure list", stdout, stderr)
+    let workspace_path =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let options = crate::core::procedure::ProcedureListOptions {
+        workspace: workspace_path,
+        status_filter: args.status.clone(),
+        limit: args.limit,
+        include_steps: args.include_steps,
+    };
+    match crate::core::procedure::list_procedures(&options) {
+        Ok(report) => write_procedure_list_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_procedure_list_report<W>(
+    cli: &Cli,
+    report: &crate::core::procedure::ProcedureListReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_procedure_list_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_procedure_list_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_procedure_list_json(report) + "\n"))
+        }
+    }
 }
 
 fn handle_procedure_export<W, E>(
@@ -9273,8 +9349,42 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_procedure_unavailable(cli, "procedure export", stdout, stderr)
+    let workspace_path =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let options = crate::core::procedure::ProcedureExportOptions {
+        workspace: workspace_path,
+        procedure_id: args.procedure_id.clone(),
+        format: args.export_format.clone(),
+        output_path: args.output.clone(),
+    };
+    match crate::core::procedure::export_procedure(&options) {
+        Ok(report) => write_procedure_export_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_procedure_export_report<W>(
+    cli: &Cli,
+    report: &crate::core::procedure::ProcedureExportReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_procedure_export_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_procedure_export_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_procedure_export_json(report) + "\n"))
+        }
+    }
 }
 
 fn handle_procedure_promote<W, E>(
@@ -9287,14 +9397,91 @@ where
     W: Write,
     E: Write,
 {
-    if !args.dry_run {
-        let error = DomainError::PolicyDenied {
-            message: "procedure promote requires --dry-run until audited durable promotion is implemented".to_owned(),
-            repair: Some("ee procedure promote <procedure-id> --dry-run --json".to_owned()),
-        };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    let workspace_path =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let options = crate::core::procedure::ProcedurePromoteOptions {
+        workspace: workspace_path,
+        procedure_id: args.procedure_id.clone(),
+        actor: args.actor.clone(),
+        reason: args.reason.clone(),
+        dry_run: args.dry_run,
+    };
+    match crate::core::procedure::promote_procedure(&options) {
+        Ok(report) => write_procedure_promote_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
-    write_procedure_unavailable(cli, "procedure promote", stdout, stderr)
+}
+
+fn write_procedure_promote_report<W>(
+    cli: &Cli,
+    report: &crate::core::procedure::ProcedurePromoteReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_procedure_promote_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_procedure_promote_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_procedure_promote_json(report) + "\n"))
+        }
+    }
+}
+
+fn handle_procedure_retire<W, E>(
+    cli: &Cli,
+    args: &ProcedureRetireArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let options = crate::core::procedure::ProcedureRetireOptions {
+        workspace: workspace_path,
+        procedure_id: args.procedure_id.clone(),
+        reason: args.reason.clone(),
+        actor: args.actor.clone(),
+    };
+    match crate::core::procedure::retire_procedure(&options) {
+        Ok(report) => write_procedure_retire_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_procedure_retire_report<W>(
+    cli: &Cli,
+    report: &crate::core::procedure::ProcedureRetireReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_procedure_retire_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_procedure_retire_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_procedure_retire_json(report) + "\n"))
+        }
+    }
 }
 
 // ============================================================================
@@ -9311,8 +9498,53 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_procedure_unavailable(cli, "procedure verify", stdout, stderr)
+    let workspace_path =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let options = crate::core::procedure::ProcedureVerifyOptions {
+        workspace: workspace_path,
+        procedure_id: args.procedure_id.clone(),
+        source_kind: args.source_kind.clone(),
+        source_ids: args.source_ids.clone(),
+        dry_run: args.dry_run,
+        allow_failure: args.allow_failure,
+    };
+    match crate::core::procedure::verify_procedure(&options) {
+        Ok(report) => write_procedure_verify_report(cli, &report, args.allow_failure, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_procedure_verify_report<W>(
+    cli: &Cli,
+    report: &crate::core::procedure::ProcedureVerifyReport,
+    allow_failure: bool,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let exit = if report.passed || allow_failure {
+        ProcessExitCode::Success
+    } else {
+        ProcessExitCode::UnsatisfiedDegradedMode
+    };
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_procedure_verify_human(report));
+            exit
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_procedure_verify_toon(report) + "\n"));
+            exit
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_procedure_verify_json(report) + "\n"));
+            exit
+        }
+    }
 }
 
 fn handle_procedure_drift<W, E>(
@@ -9325,8 +9557,46 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_procedure_unavailable(cli, "procedure drift", stdout, stderr)
+    let workspace_path =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let options = crate::core::procedure::ProcedureDriftOptions {
+        workspace: workspace_path,
+        procedure_id: args.procedure_id.clone(),
+        checked_at: args.checked_at.clone(),
+        staleness_threshold_days: args.staleness_threshold_days,
+        failed_verification_id: args.failed_verification.clone(),
+        failed_source_ids: args.failed_sources.clone(),
+        evidence_observations: args.evidence_observations.clone(),
+        contract_observations: args.contract_observations.clone(),
+    };
+    match crate::core::procedure::detect_procedure_drift(&options) {
+        Ok(report) => write_procedure_drift_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_procedure_drift_report<W>(
+    cli: &Cli,
+    report: &crate::core::procedure::ProcedureDriftReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_procedure_drift_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_procedure_drift_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_procedure_drift_json(report) + "\n"))
+        }
+    }
 }
 
 // ============================================================================
