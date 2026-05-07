@@ -1,4 +1,5 @@
 use std::env;
+use std::fmt::Write as _;
 use std::io::IsTerminal;
 
 use serde::Serialize;
@@ -29,7 +30,7 @@ use crate::core::rule::{
 use crate::core::status::StatusReport;
 use crate::core::why::WhyReport;
 use crate::core::{VERSION_PROVENANCE_SCHEMA_V1, VersionReport};
-use crate::eval::{EvaluationReport, EvaluationStatus, ScenarioValidationResult};
+use crate::eval::{EvaluationReport, EvaluationStatus, FixtureListEntry, ScenarioValidationResult};
 use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
 use crate::models::{
     DomainError, ERROR_SCHEMA_V1, InstallCheckReport, InstallPlanReport, RESPONSE_SCHEMA_V0,
@@ -4554,36 +4555,70 @@ pub fn render_eval_report_toon(report: &EvaluationReport, scenario_id: Option<&s
     render_toon_from_json(&render_eval_report_json(report, scenario_id))
 }
 
-/// Render evaluation scenario list as JSON (ee.response.v1 envelope).
+/// Render evaluation fixture list as JSON (ee.response.v1 envelope).
 #[must_use]
-pub fn render_eval_list_json() -> String {
-    let mut b = JsonBuilder::with_capacity(256);
+pub fn render_eval_list_json(entries: &[FixtureListEntry], fixture_dir: Option<&str>) -> String {
+    let mut b = JsonBuilder::with_capacity(512);
     b.field_str("schema", RESPONSE_SCHEMA_V1);
     b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "eval list");
-        d.field_raw("scenarios", "[]");
-        d.field_str(
-            "message",
-            "No evaluation scenarios configured. Add fixtures to tests/fixtures/eval/.",
-        );
+        d.field_array_of_objects("fixtures", entries, render_eval_fixture_list_entry_json);
+        d.field_raw("fixtureCount", &entries.len().to_string());
+        if let Some(dir) = fixture_dir {
+            d.field_str("fixtureDir", dir);
+        }
+        if entries.is_empty() {
+            d.field_str(
+                "message",
+                "No evaluation scenarios configured. Add fixtures to tests/fixtures/eval/.",
+            );
+        }
     });
     b.finish()
 }
 
-/// Render evaluation scenario list as human-readable text.
+fn render_eval_fixture_list_entry_json(obj: &mut JsonBuilder, entry: &FixtureListEntry) {
+    obj.field_str("fixtureId", &entry.fixture_id);
+    obj.field_str("fixtureFamily", &entry.fixture_family);
+    obj.field_str("journey", &entry.journey);
+    obj.field_raw("memoryCount", &entry.memory_count.to_string());
+    obj.field_raw("queryCount", &entry.query_count.to_string());
+    obj.field_str("path", &entry.path);
+}
+
+/// Render evaluation fixture list as human-readable text.
 #[must_use]
-pub fn render_eval_list_human() -> String {
+pub fn render_eval_list_human(entries: &[FixtureListEntry], fixture_dir: Option<&str>) -> String {
     let mut output = String::from("ee eval list\n\n");
-    output.push_str("No evaluation scenarios configured.\n");
-    output.push_str("Add fixtures to tests/fixtures/eval/ to define scenarios.\n");
+    if let Some(dir) = fixture_dir {
+        let _ = writeln!(output, "Fixtures: {dir}");
+        output.push('\n');
+    }
+    if entries.is_empty() {
+        output.push_str("No evaluation scenarios configured.\n");
+        output.push_str("Add fixtures to tests/fixtures/eval/ to define scenarios.\n");
+    } else {
+        let _ = writeln!(output, "Available evaluation fixtures ({}):", entries.len());
+        for entry in entries {
+            output.push('\n');
+            let _ = writeln!(output, "  {} ({})", entry.fixture_id, entry.fixture_family);
+            let _ = writeln!(output, "    Journey: {}", entry.journey);
+            let _ = writeln!(
+                output,
+                "    Memories: {}, Queries: {}",
+                entry.memory_count, entry.query_count
+            );
+            let _ = writeln!(output, "    Path: {}", entry.path);
+        }
+    }
     output
 }
 
-/// Render evaluation scenario list as TOON.
+/// Render evaluation fixture list as TOON.
 #[must_use]
-pub fn render_eval_list_toon() -> String {
-    render_toon_from_json(&render_eval_list_json())
+pub fn render_eval_list_toon(entries: &[FixtureListEntry], fixture_dir: Option<&str>) -> String {
+    render_toon_from_json(&render_eval_list_json(entries, fixture_dir))
 }
 
 /// Public schema entry for the schema registry.
@@ -11872,6 +11907,81 @@ mod tests {
             &json,
             "\"fixtureDir\":\"tests/fixtures/eval/\"",
             "fixtureDir",
+        )
+    }
+
+    #[test]
+    fn render_eval_list_json_includes_fixture_entries() -> TestResult {
+        use super::render_eval_list_json;
+        use crate::eval::FixtureListEntry;
+
+        let entries = vec![FixtureListEntry {
+            fixture_id: "fx.release_failure.v1".to_owned(),
+            fixture_family: "release".to_owned(),
+            journey: "Release failure triage".to_owned(),
+            memory_count: 3,
+            query_count: 5,
+            path: "tests/fixtures/eval/release_failure".to_owned(),
+        }];
+        let json = render_eval_list_json(&entries, Some("tests/fixtures/eval"));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &parsed["data"]["fixtureCount"],
+            &serde_json::json!(1),
+            "fixture count",
+        )?;
+        ensure_equal(
+            &parsed["data"]["fixtures"][0]["fixtureId"],
+            &serde_json::json!("fx.release_failure.v1"),
+            "fixture id",
+        )?;
+        ensure_equal(
+            &parsed["data"]["fixtures"][0]["memoryCount"],
+            &serde_json::json!(3),
+            "memory count",
+        )?;
+        ensure_equal(
+            &parsed["data"]["fixtureDir"],
+            &serde_json::json!("tests/fixtures/eval"),
+            "fixture dir",
+        )?;
+        ensure(
+            parsed["data"]["message"].is_null(),
+            "non-empty list must not claim no scenarios are configured",
+        )
+    }
+
+    #[test]
+    fn render_eval_list_human_lists_fixture_entries() -> TestResult {
+        use super::render_eval_list_human;
+        use crate::eval::FixtureListEntry;
+
+        let entries = vec![FixtureListEntry {
+            fixture_id: "fx.async_migration.v1".to_owned(),
+            fixture_family: "migration".to_owned(),
+            journey: "Async migration investigation".to_owned(),
+            memory_count: 2,
+            query_count: 4,
+            path: "tests/fixtures/eval/async_migration".to_owned(),
+        }];
+        let human = render_eval_list_human(&entries, Some("tests/fixtures/eval"));
+
+        ensure_contains(
+            &human,
+            "Available evaluation fixtures (1):",
+            "fixture count",
+        )?;
+        ensure_contains(
+            &human,
+            "fx.async_migration.v1 (migration)",
+            "fixture identity",
+        )?;
+        ensure_contains(&human, "Memories: 2, Queries: 4", "fixture counts")?;
+        ensure(
+            !human.contains("No evaluation scenarios configured"),
+            "non-empty human list must not claim no scenarios are configured",
         )
     }
 
