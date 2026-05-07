@@ -1,0 +1,23 @@
+---
+source: tests/contracts.rs
+assertion: certificate commands verify backup integrity
+schema:
+  verify: ee.certificate.verify.v1
+  list: ee.certificate.list.v1
+  show: ee.certificate.show.v1
+contracts:
+  - verify returns valid=true for intact backup
+  - verify returns valid=false with mismatch paths for tampered backup
+  - signature verification works for sigstore and local-key configurations
+  - list enumerates persisted certificates by target-kind
+  - show displays certificate details including hash and signer
+evidence:
+  - certificate.id
+  - certificate.target_kind
+  - certificate.target_id
+  - certificate.hash_algo
+  - certificate.content_hash
+  - certificate.signature
+  - certificate.signer
+  - certificate.signed_at
+  - certificate.verified_at
