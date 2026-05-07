@@ -6,6 +6,7 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::error::ErrorKind;
@@ -152,6 +153,10 @@ use crate::models::{
 use crate::output;
 use crate::pack::{
     ContextPackProfile, ContextResponse, ContextResponseDegradation, ContextResponseSeverity,
+};
+use crate::search::{
+    CanonicalSearchDocument, DocumentSource, Embedder, EmbedderStack, HashEmbedder, IndexBuilder,
+    SpeedMode,
 };
 use crate::steward::JobType;
 
@@ -6140,14 +6145,10 @@ where
             Err(e) => return write_domain_error(&e, cli.wants_json(), stdout, stderr),
         };
 
-        let query_expectations = build_query_expectations(&source.memories);
-
-        let mut per_query = Vec::new();
-        for (query, expected_ids) in &query_expectations {
-            let retrieved_ids = simulate_retrieval(&source.memories, query);
-            let metrics = crate::eval::compute_query_metrics(query, expected_ids, &retrieved_ids);
-            per_query.push(metrics);
-        }
+        let per_query = match run_eval_retrieval_queries(&source) {
+            Ok(metrics) => metrics,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
 
         let fixture_metrics = crate::eval::compute_fixture_metrics(&fixture.fixture_id, per_query);
 
@@ -6229,10 +6230,8 @@ where
 
 fn build_query_expectations(
     memories: &[crate::eval::SourceMemory],
-) -> std::collections::HashMap<String, Vec<String>> {
-    let mut expectations: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
-
+) -> BTreeMap<String, Vec<String>> {
+    let mut expectations: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for memory in memories {
         for query in &memory.expected_query_match {
             expectations
@@ -6245,38 +6244,137 @@ fn build_query_expectations(
     expectations
 }
 
-fn simulate_retrieval(memories: &[crate::eval::SourceMemory], query: &str) -> Vec<String> {
-    let query_lower = query.to_lowercase();
-    let query_terms: std::collections::HashSet<_> = query_lower.split_whitespace().collect();
+fn run_eval_retrieval_queries(
+    source: &crate::eval::SourceMemoryFile,
+) -> Result<Vec<crate::eval::QueryMetrics>, DomainError> {
+    let query_expectations = build_query_expectations(&source.memories);
+    if query_expectations.is_empty() {
+        return Ok(Vec::new());
+    }
 
-    let mut scored: Vec<_> = memories
-        .iter()
-        .map(|m| {
-            let content_lower = m.content.to_lowercase();
-            let content_terms: std::collections::HashSet<_> =
-                content_lower.split_whitespace().collect();
+    let tempdir = tempfile::Builder::new()
+        .prefix("ee-eval-index-")
+        .tempdir()
+        .map_err(|error| DomainError::Storage {
+            message: format!("failed to create eval index tempdir: {error}"),
+            repair: Some("Check TMPDIR and filesystem permissions.".to_owned()),
+        })?;
+    let index_dir = tempdir.path().join("index");
+    build_eval_search_index(&index_dir, source)?;
 
-            let term_overlap = query_terms
-                .iter()
-                .filter(|t| content_terms.iter().any(|ct| ct.contains(*t)))
-                .count();
-
-            let tag_boost: usize = m
-                .tags
-                .iter()
-                .filter(|tag| query_terms.iter().any(|qt| tag.to_lowercase().contains(qt)))
-                .count();
-
-            let base_score =
-                (term_overlap as f64 * 0.3) + (tag_boost as f64 * 0.5) + m.utility * 0.2;
-
-            (m.id.clone(), base_score)
+    let workspace_path = tempdir.path().to_path_buf();
+    let limit = u32::try_from(source.memories.len().max(5)).unwrap_or(u32::MAX);
+    let mut per_query = Vec::with_capacity(query_expectations.len());
+    for (query, expected_ids) in query_expectations {
+        let report = run_search(&SearchOptions {
+            workspace_path: workspace_path.clone(),
+            database_path: None,
+            index_dir: Some(index_dir.clone()),
+            query: query.clone(),
+            limit,
+            speed: SpeedMode::Default,
+            explain: false,
         })
-        .collect();
+        .map_err(|error| DomainError::SearchIndex {
+            message: format!("eval fixture search failed for `{query}`: {error}"),
+            repair: error.repair_hint().map(str::to_owned),
+        })?;
+        let retrieved_ids = report
+            .results
+            .into_iter()
+            .map(|hit| hit.doc_id)
+            .collect::<Vec<_>>();
+        per_query.push(crate::eval::compute_query_metrics(
+            &query,
+            &expected_ids,
+            &retrieved_ids,
+        ));
+    }
 
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(per_query)
+}
 
-    scored.into_iter().map(|(id, _)| id).collect()
+fn build_eval_search_index(
+    index_dir: &Path,
+    source: &crate::eval::SourceMemoryFile,
+) -> Result<(), DomainError> {
+    let documents = source
+        .memories
+        .iter()
+        .map(eval_source_memory_document)
+        .map(CanonicalSearchDocument::into_indexable)
+        .collect::<Vec<_>>();
+    if documents.is_empty() {
+        return Err(DomainError::Configuration {
+            message: format!("eval fixture {} contains no memories", source.fixture_id),
+            repair: Some(
+                "Add memories to source_memory.json before running retrieval eval.".into(),
+            ),
+        });
+    }
+
+    let index_dir = index_dir.to_path_buf();
+    crate::core::run_cli_future(async move {
+        let cx = asupersync::Cx::for_testing();
+        IndexBuilder::new(&index_dir)
+            .with_embedder_stack(eval_embedder_stack())
+            .add_documents(documents)
+            .build(&cx)
+            .await
+    })
+    .map_err(|error| DomainError::SearchIndex {
+        message: format!("eval fixture index runtime failed: {error}"),
+        repair: Some("Re-run eval after checking Asupersync runtime health.".to_owned()),
+    })?
+    .map_err(|error| DomainError::SearchIndex {
+        message: format!("eval fixture index build failed: {error}"),
+        repair: Some("Inspect source_memory.json for invalid indexable content.".to_owned()),
+    })
+    .and_then(|stats| {
+        if stats.errors.is_empty() {
+            Ok(())
+        } else {
+            let details = stats
+                .errors
+                .iter()
+                .map(|(id, error)| format!("{id}: {error}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            Err(DomainError::SearchIndex {
+                message: format!("eval fixture index skipped documents: {details}"),
+                repair: Some("Fix invalid fixture memory records before running eval.".to_owned()),
+            })
+        }
+    })
+}
+
+fn eval_embedder_stack() -> EmbedderStack {
+    let fast_embedder = Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>;
+    let quality_embedder = Arc::new(HashEmbedder::default_384()) as Arc<dyn Embedder>;
+    EmbedderStack::from_parts(fast_embedder, Some(quality_embedder))
+}
+
+fn eval_source_memory_document(memory: &crate::eval::SourceMemory) -> CanonicalSearchDocument {
+    let title = memory.tags.join(" ");
+    let mut document = CanonicalSearchDocument::new(
+        memory.id.as_str(),
+        memory.content.as_str(),
+        DocumentSource::Memory,
+    )
+    .with_level(memory.level.as_str())
+    .with_kind(memory.kind.as_str())
+    .with_tags(memory.tags.iter().map(String::as_str))
+    .with_metadata_entry("trustClass", memory.trust_class.as_str())
+    .with_metadata_entry("confidence", memory.confidence.to_string())
+    .with_metadata_entry("utility", memory.utility.to_string())
+    .with_metadata_entry("importance", memory.importance.to_string());
+    if !title.trim().is_empty() {
+        document = document.with_title(title);
+    }
+    if let Some(uri) = memory.provenance_uri.as_deref() {
+        document = document.with_metadata_entry("provenanceUri", uri);
+    }
+    document
 }
 
 fn handle_focus<W, E>(
