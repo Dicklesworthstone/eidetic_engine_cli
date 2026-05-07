@@ -581,6 +581,7 @@ mod tests {
         "artifacts",
         "audit_log",
         "audit_log_v038",
+        "causal_evidence",
         "certificates",
         "curation_candidates",
         "curation_candidates_v029",
@@ -603,6 +604,9 @@ mod tests {
         "pack_items",
         "pack_omissions",
         "pack_records",
+        "plan_recipes",
+        "procedure_events",
+        "procedures",
         "procedural_rules",
         "rationale_trace_links",
         "rationale_traces",
@@ -862,6 +866,22 @@ mod tests {
         AppendixDivergence {
             table: "audit_log_v038",
             reason: "the retained v038 table is migration evidence for UUID-v7 audit id rebuilds",
+        },
+        AppendixDivergence {
+            table: "procedures",
+            reason: "procedure distillation uses durable procedure records separate from raw curation candidates",
+        },
+        AppendixDivergence {
+            table: "procedure_events",
+            reason: "procedure maturity transitions are auditable durable events",
+        },
+        AppendixDivergence {
+            table: "plan_recipes",
+            reason: "plan decisioning persists reusable recipes as first-class records",
+        },
+        AppendixDivergence {
+            table: "causal_evidence",
+            reason: "causal credit assignment persists evidence ledger rows for explainable estimates",
         },
     ];
 
