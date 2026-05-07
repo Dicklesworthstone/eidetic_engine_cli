@@ -121,7 +121,12 @@ harness = false
 name = "curate_candidates"
 harness = false
 
+[[test]]
+name = "cass_contracts"
+path = "tests/conformance/cass_contracts.rs"
+
 [patch.crates-io]
+asupersync = { path = "/data/projects/asupersync" }
 fsqlite = { path = "/data/projects/frankensqlite/crates/fsqlite" }
 fsqlite-core = { path = "/data/projects/frankensqlite/crates/fsqlite-core" }
 fsqlite-error = { path = "/data/projects/frankensqlite/crates/fsqlite-error" }
