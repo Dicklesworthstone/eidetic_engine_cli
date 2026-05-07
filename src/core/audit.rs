@@ -831,9 +831,8 @@ mod tests {
         let database = workspace.join(".ee").join("ee.db");
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
 
-        let outcome = connection.execute_raw(
-            "DELETE FROM audit_log WHERE id = 'audit_00000000000000000000000001'",
-        );
+        let outcome = connection
+            .execute_raw("DELETE FROM audit_log WHERE id = 'audit_00000000000000000000000001'");
 
         connection.close().map_err(|error| error.to_string())?;
 

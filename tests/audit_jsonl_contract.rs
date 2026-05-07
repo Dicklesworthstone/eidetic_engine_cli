@@ -2,6 +2,7 @@ use std::fs;
 use std::process::{Command, Output};
 
 use chrono::DateTime;
+use ee::db::{CreateAuditInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection};
 use ee::obs::{AUDIT_EVENT_SCHEMA_V1, AuditEvent};
 use serde_json::Value;
 
@@ -109,6 +110,116 @@ fn remember_command_appends_real_workspace_audit_jsonl_row() -> TestResult {
     assert_eq!(
         event.fields.get("command"),
         Some(&Value::String("ee remember".to_owned()))
+    );
+    Ok(())
+}
+
+#[test]
+fn audit_verify_cli_reports_tampered_persisted_row() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let workspace = tempdir.path().to_string_lossy().into_owned();
+    let database_path = tempdir.path().join(".ee").join("ee.db");
+    fs::create_dir_all(tempdir.path().join(".ee"))
+        .map_err(|error| format!("create workspace .ee dir: {error}"))?;
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| format!("open audit database: {error}"))?;
+    connection
+        .migrate()
+        .map_err(|error| format!("migrate audit database: {error}"))?;
+    connection
+        .insert_workspace(
+            "wsp_auditverify000000000000000",
+            &CreateWorkspaceInput {
+                path: workspace.clone(),
+                name: Some("audit-verify-cli".to_owned()),
+            },
+        )
+        .map_err(|error| format!("insert audit workspace: {error}"))?;
+    connection
+        .insert_memory(
+            "mem_auditverify000000000000000",
+            &CreateMemoryInput {
+                workspace_id: "wsp_auditverify000000000000000".to_owned(),
+                level: "procedural".to_owned(),
+                kind: "rule".to_owned(),
+                content:
+                    "Never close an implements-surface bead while its unavailable sentinel remains."
+                        .to_owned(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.8,
+                importance: 0.7,
+                provenance_uri: Some("test://audit-verify-cli".to_owned()),
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: Some("test".to_owned()),
+                tags: vec![],
+                valid_from: None,
+                valid_to: None,
+            },
+        )
+        .map_err(|error| format!("insert audit memory: {error}"))?;
+    let audit_id = "audit_00000000000000000000000001";
+    connection
+        .insert_audit(
+            audit_id,
+            &CreateAuditInput {
+                workspace_id: Some("wsp_auditverify000000000000000".to_owned()),
+                actor: Some("audit-test-agent".to_owned()),
+                action: "memory.create".to_owned(),
+                target_type: Some("memory".to_owned()),
+                target_id: Some("mem_auditverify000000000000000".to_owned()),
+                details: Some(r#"{"source":"audit_verify_cli_test"}"#.to_owned()),
+            },
+        )
+        .map_err(|error| format!("insert audit row: {error}"))?;
+    connection
+        .execute_raw("DROP TRIGGER IF EXISTS audit_log_no_update")
+        .map_err(|error| format!("drop audit update trigger for tamper fixture: {error}"))?;
+    let escaped_audit_id = audit_id.replace('\'', "''");
+    connection
+        .execute_raw(&format!(
+            "UPDATE audit_log SET actor = 'tampered-audit-contract' WHERE id = '{escaped_audit_id}'"
+        ))
+        .map_err(|error| format!("tamper audit row: {error}"))?;
+    connection
+        .close()
+        .map_err(|error| format!("close audit database: {error}"))?;
+
+    let database = database_path.to_string_lossy().into_owned();
+    let verify = run_ee(&[
+        "--workspace",
+        &workspace,
+        "--json",
+        "audit",
+        "verify",
+        "--database",
+        &database,
+    ])?;
+    assert_success(&verify, "audit verify")?;
+    if !verify.stderr.is_empty() {
+        return Err(format!(
+            "audit verify JSON success must keep stderr empty: {}",
+            String::from_utf8_lossy(&verify.stderr)
+        ));
+    }
+
+    let verified: Value = serde_json::from_slice(&verify.stdout)
+        .map_err(|error| format!("audit verify stdout must be JSON: {error}"))?;
+    assert_eq!(
+        verified.pointer("/schema").and_then(Value::as_str),
+        Some("ee.audit.verify.v1")
+    );
+    assert_eq!(
+        verified.pointer("/integrity_ok").and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        verified.pointer("/first_break").and_then(Value::as_str),
+        Some(audit_id)
+    );
+    assert_eq!(
+        verified.pointer("/issues/0/code").and_then(Value::as_str),
+        Some("row_hash_mismatch")
     );
     Ok(())
 }
