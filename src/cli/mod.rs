@@ -21081,6 +21081,54 @@ mod tests {
             .into_owned())
     }
 
+    fn init_cli_workspace(prefix: &str) -> Result<String, String> {
+        let workspace = unique_temp_workspace(prefix)?;
+        let (exit, stdout, stderr) =
+            invoke(&["ee", "--json", "--workspace", workspace.as_str(), "init"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "init workspace exit")?;
+        ensure(stderr.is_empty(), "init workspace JSON stderr clean")?;
+        ensure(
+            !stdout.trim().is_empty(),
+            "init workspace JSON stdout present",
+        )?;
+        Ok(workspace)
+    }
+
+    fn propose_cli_procedure(prefix: &str) -> Result<(String, String), String> {
+        let workspace = init_cli_workspace(prefix)?;
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "--workspace",
+            workspace.as_str(),
+            "procedure",
+            "propose",
+            "--title",
+            "Run release verification",
+            "--summary",
+            "1. Check formatting\n2. Run clippy through RCH",
+            "--source-run",
+            "run_release_001",
+            "--evidence",
+            "ev_release_log",
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "procedure propose exit")?;
+        ensure(stderr.is_empty(), "procedure propose JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.procedure.propose_report.v1"),
+            "procedure propose schema",
+        )?;
+        let procedure_id = value["procedureId"]
+            .as_str()
+            .filter(|id| id.starts_with("proc_"))
+            .ok_or_else(|| "procedure propose should return a procedureId".to_owned())?
+            .to_owned();
+        Ok((workspace, procedure_id))
+    }
+
     fn ensure_repair_command_parses(repair: &str, context: &str) -> TestResult {
         if !repair.starts_with("ee ") || repair.contains('<') || repair.contains('>') {
             return Ok(());
@@ -22543,21 +22591,20 @@ mod tests {
 
     #[test]
     fn procedure_export_skill_capsule_json_is_response_enveloped() -> TestResult {
+        let (workspace, procedure_id) = propose_cli_procedure("ee-procedure-export-capsule")?;
         let (exit, stdout, stderr) = invoke(&[
             "ee",
             "--json",
+            "--workspace",
+            workspace.as_str(),
             "procedure",
             "export",
-            "proc_export",
+            procedure_id.as_str(),
             "--export-format",
             "skill-capsule",
         ]);
 
-        ensure_equal(
-            &exit,
-            &ProcessExitCode::UnsatisfiedDegradedMode,
-            "procedure export exit",
-        )?;
+        ensure_equal(&exit, &ProcessExitCode::Success, "procedure export exit")?;
         ensure(stderr.is_empty(), "procedure export JSON stderr clean")?;
 
         let value: serde_json::Value =
@@ -22567,67 +22614,84 @@ mod tests {
             &serde_json::json!("ee.response.v1"),
             "response schema",
         )?;
-        ensure_equal(&value["success"], &serde_json::json!(false), "success flag")?;
+        ensure_equal(&value["success"], &serde_json::json!(true), "success flag")?;
         ensure_equal(
             &value["data"]["command"],
             &serde_json::json!("procedure export"),
             "command",
         )?;
         ensure_equal(
-            &value["data"]["code"],
-            &serde_json::json!("procedure_store_unavailable"),
-            "degraded code",
+            &value["data"]["procedureId"],
+            &serde_json::json!(procedure_id),
+            "procedure id",
+        )?;
+        ensure_equal(
+            &value["data"]["format"],
+            &serde_json::json!("skill_capsule"),
+            "export format",
+        )?;
+        ensure_equal(
+            &value["data"]["artifactKind"],
+            &serde_json::json!("skill_capsule"),
+            "artifact kind",
+        )?;
+        ensure_equal(
+            &value["data"]["installMode"],
+            &serde_json::json!("render_only"),
+            "install mode",
         )?;
         ensure_contains(
-            value["data"]["message"].as_str().unwrap_or_default(),
-            "persisted evidence",
-            "degraded message",
+            value["data"]["content"].as_str().unwrap_or_default(),
+            "This capsule is render-only",
+            "skill capsule content",
         )
     }
 
     #[test]
     fn procedure_export_markdown_defaults_to_artifact_stdout() -> TestResult {
+        let (workspace, procedure_id) = propose_cli_procedure("ee-procedure-export-markdown")?;
         let (exit, stdout, stderr) = invoke(&[
             "ee",
+            "--workspace",
+            workspace.as_str(),
             "procedure",
             "export",
-            "proc_export",
+            procedure_id.as_str(),
             "--export-format",
             "markdown",
         ]);
 
         ensure_equal(
             &exit,
-            &ProcessExitCode::UnsatisfiedDegradedMode,
+            &ProcessExitCode::Success,
             "procedure export markdown exit",
         )?;
-        ensure(stdout.is_empty(), "procedure export markdown stdout empty")?;
+        ensure(stderr.is_empty(), "procedure export markdown stderr clean")?;
         ensure_contains(
-            &stderr,
-            "Procedure lifecycle data is unavailable",
-            "procedure export markdown stderr",
+            &stdout,
+            "# Run release verification",
+            "procedure export markdown stdout",
         )?;
-        ensure_contains(&stderr, "ee status --json", "procedure repair command")
+        ensure_contains(&stdout, "## Provenance", "procedure markdown provenance")
     }
 
     #[test]
     fn procedure_promote_dry_run_json_is_response_enveloped() -> TestResult {
+        let (workspace, procedure_id) = propose_cli_procedure("ee-procedure-promote-dry-run")?;
         let (exit, stdout, stderr) = invoke(&[
             "ee",
             "--json",
+            "--workspace",
+            workspace.as_str(),
             "procedure",
             "promote",
-            "proc_promote",
+            procedure_id.as_str(),
             "--dry-run",
             "--actor",
             "MistySalmon",
         ]);
 
-        ensure_equal(
-            &exit,
-            &ProcessExitCode::UnsatisfiedDegradedMode,
-            "procedure promote exit",
-        )?;
+        ensure_equal(&exit, &ProcessExitCode::Success, "procedure promote exit")?;
         ensure(stderr.is_empty(), "procedure promote JSON stderr clean")?;
         let value: serde_json::Value =
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
@@ -22636,51 +22700,81 @@ mod tests {
             &serde_json::json!("ee.response.v1"),
             "response schema",
         )?;
-        ensure_equal(&value["success"], &serde_json::json!(false), "success flag")?;
+        ensure_equal(&value["success"], &serde_json::json!(true), "success flag")?;
         ensure_equal(
             &value["data"]["command"],
             &serde_json::json!("procedure promote"),
             "command",
         )?;
         ensure_equal(
-            &value["data"]["code"],
-            &serde_json::json!("procedure_store_unavailable"),
-            "degraded code",
+            &value["data"]["procedureId"],
+            &serde_json::json!(procedure_id),
+            "procedure id",
         )?;
         ensure_equal(
-            &value["data"]["followUpBead"],
-            &serde_json::json!("eidetic_engine_cli-q5vf"),
-            "follow-up bead",
+            &value["data"]["dryRun"],
+            &serde_json::json!(true),
+            "dry-run flag",
         )?;
         ensure_equal(
-            &value["data"]["sideEffectClass"],
-            &serde_json::json!("conservative abstention; no procedure mutation or artifact write"),
-            "side effect class",
+            &value["data"]["audit"]["actor"],
+            &serde_json::json!("MistySalmon"),
+            "audit actor",
+        )?;
+        ensure_equal(
+            &value["data"]["audit"]["recorded"],
+            &serde_json::json!(false),
+            "dry-run audit not recorded",
         )
     }
 
     #[test]
-    fn procedure_promote_without_dry_run_is_policy_error() -> TestResult {
-        let (exit, stdout, stderr) =
-            invoke(&["ee", "--json", "procedure", "promote", "proc_promote"]);
+    fn procedure_promote_without_dry_run_persists_when_evidence_threshold_met() -> TestResult {
+        let (workspace, procedure_id) = propose_cli_procedure("ee-procedure-promote-persisted")?;
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "--workspace",
+            workspace.as_str(),
+            "procedure",
+            "promote",
+            procedure_id.as_str(),
+        ]);
 
-        ensure_equal(
-            &exit,
-            &ProcessExitCode::PolicyDenied,
-            "procedure promote policy exit",
-        )?;
-        ensure(stderr.is_empty(), "procedure promote policy stderr clean")?;
+        ensure_equal(&exit, &ProcessExitCode::Success, "procedure promote exit")?;
+        ensure(stderr.is_empty(), "procedure promote stderr clean")?;
         let value: serde_json::Value =
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.error.v1"),
-            "error schema",
+            &serde_json::json!("ee.response.v1"),
+            "response schema",
+        )?;
+        ensure_equal(&value["success"], &serde_json::json!(true), "success flag")?;
+        ensure_equal(
+            &value["data"]["procedureId"],
+            &serde_json::json!(procedure_id),
+            "procedure id",
         )?;
         ensure_equal(
-            &value["error"]["code"],
-            &serde_json::json!("policy_denied"),
-            "policy code",
+            &value["data"]["dryRun"],
+            &serde_json::json!(false),
+            "dry-run flag",
+        )?;
+        ensure_equal(
+            &value["data"]["status"],
+            &serde_json::json!("promoted"),
+            "promotion status",
+        )?;
+        ensure_equal(
+            &value["data"]["toStatus"],
+            &serde_json::json!("validated"),
+            "target status",
+        )?;
+        ensure_equal(
+            &value["data"]["audit"]["recorded"],
+            &serde_json::json!(true),
+            "audit recorded",
         )
     }
 
