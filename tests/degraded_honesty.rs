@@ -35,7 +35,7 @@ fn ensure_equal<T>(actual: &T, expected: &T, context: &str) -> TestResult
 where
     T: std::fmt::Debug + PartialEq,
 {
-    if actual == expected {
+    if actual.eq(expected) {
         Ok(())
     } else {
         Err(format!("{context}: expected {expected:?}, got {actual:?}"))
@@ -249,17 +249,17 @@ fn side_effect_class(args: &[String]) -> &'static str {
     } else if args.iter().any(|arg| arg == "causal") {
         "persisted causal-evidence query; promote-plan writes audited curation candidates when storage is available"
     } else if args.iter().any(|arg| arg == "procedure") {
-        "conservative abstention; no procedure mutation or artifact write"
+        "read-only persisted procedure query; no procedure mutation or artifact write"
     } else if args.iter().any(|arg| arg == "situation") {
-        "conservative abstention; no situation routing, link, or recommendation mutation"
+        "read-only heuristic situation classification; no situation link, routing-state, or recommendation mutation"
     } else if args.iter().any(|arg| arg == "plan") {
-        "conservative abstention; no goal classification or recipe explanation"
+        "read-only recipe recommendation/explanation; no plan mutation"
     } else if args.iter().any(|arg| arg == "preflight") {
         "conservative abstention; no preflight run, risk brief, or feedback ledger mutation"
     } else if args.iter().any(|arg| arg == "tripwire") {
-        "read-only, conservative abstention; no tripwire store read or event evaluation"
+        "read-only tripwire store query/evaluation; no tripwire mutation"
     } else if args.iter().any(|arg| arg == "eval") {
-        "read-only, conservative abstention; no fixture discovery, evaluation report, or science metrics emitted"
+        "read-only fixture discovery/evaluation report generation; no durable mutation"
     } else if args.iter().any(|arg| arg == "review") {
         "audited curation candidate mutation only when storage is available; missing storage prevents review"
     } else if args.iter().any(|arg| arg == "handoff") {
@@ -484,6 +484,22 @@ fn run_ee_logged_with_env(
         parsed,
         log_path,
     })
+}
+
+fn init_workspace(workspace: &Path, context: &str) -> TestResult {
+    let workspace_arg = workspace.display().to_string();
+    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(["--workspace", &workspace_arg, "--json", "init"])
+        .output()
+        .map_err(|error| format!("failed to initialize {context} workspace: {error}"))?;
+    ensure(
+        output.status.success(),
+        format!(
+            "{context} workspace init failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
 }
 
 #[test]
@@ -1009,7 +1025,7 @@ fn audit_commands_read_persisted_rows_without_unavailable_sentinel() -> TestResu
                 )?;
                 ensure_json_pointer(&result.parsed, "/rows", json!(2), "verify row count")?;
             }
-            _ => unreachable!("unknown audit command case"),
+            other => return Err(format!("unknown audit command case: {other}")),
         }
 
         let log_text = fs::read_to_string(&result.log_path)
@@ -1076,9 +1092,11 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
         result.parsed.pointer("/data/filesCollected").is_some(),
         "support bundle dry-run must report files to collect".to_owned(),
     )?;
-    ensure(
-        result.parsed.pointer("/data/dryRun") == Some(&json!(true)),
-        "support bundle dry-run must report dryRun=true".to_owned(),
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/dryRun",
+        json!(true),
+        "support bundle dry-run must report dryRun=true",
     )?;
 
     let result = run_ee_logged(
@@ -1114,9 +1132,11 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
         result.parsed.pointer("/data/manifestHash").is_some(),
         "support bundle create must report manifest hash".to_owned(),
     )?;
-    ensure(
-        result.parsed.pointer("/data/dryRun") == Some(&json!(false)),
-        "support bundle create must report dryRun=false".to_owned(),
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/dryRun",
+        json!(false),
+        "support bundle create must report dryRun=false",
     )?;
 
     let output_path = result
@@ -1161,9 +1181,11 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
         json!(true),
         "support inspect success",
     )?;
-    ensure(
-        inspect_result.parsed.pointer("/data/valid") == Some(&json!(true)),
-        "support inspect must report valid=true for intact bundle".to_owned(),
+    ensure_json_pointer(
+        &inspect_result.parsed,
+        "/data/valid",
+        json!(true),
+        "support inspect must report valid=true for intact bundle",
     )?;
 
     Ok(())
@@ -1418,6 +1440,7 @@ fn diag_quarantine_reports_persisted_state_instead_of_placeholder_health() -> Te
             "--json".to_owned(),
             "diag".to_owned(),
             "quarantine".to_owned(),
+            "list".to_owned(),
         ],
     )?;
 
@@ -1483,6 +1506,12 @@ fn diag_quarantine_reports_persisted_state_instead_of_placeholder_health() -> Te
         "/degradationCodes",
         json!(["quarantine_database_missing"]),
         "logged diag quarantine degradation code",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/repairCommand",
+        json!("ee init --workspace ."),
+        "logged diag quarantine repair command",
     )?;
     ensure_json_pointer(
         &log_json,
@@ -1567,18 +1596,23 @@ fn rehearse_commands_emit_real_sandbox_artifacts_instead_of_degraded_stub() -> T
         json!([]),
         "plan degradation codes",
     )?;
+    let estimated_artifacts = plan
+        .parsed
+        .pointer("/data/estimated_artifacts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "plan estimated_artifacts must be an array".to_string())?;
     ensure(
-        plan.parsed["data"]["estimated_artifacts"]
-            .as_array()
-            .is_some_and(|artifacts| {
-                artifacts.iter().any(|artifact| artifact == "manifest.json")
-                    && artifacts
-                        .iter()
-                        .any(|artifact| artifact == "source_snapshot.json")
-                    && artifacts
-                        .iter()
-                        .any(|artifact| artifact == "sandbox_snapshot.json")
-            }),
+        [
+            "manifest.json",
+            "source_snapshot.json",
+            "sandbox_snapshot.json",
+        ]
+        .iter()
+        .all(|expected| {
+            estimated_artifacts
+                .iter()
+                .any(|artifact| artifact.as_str().is_some_and(|name| name.eq(*expected)))
+        }),
         "rehearse plan must advertise manifest and filesystem snapshot artifacts",
     )?;
 
@@ -1626,20 +1660,29 @@ fn rehearse_commands_emit_real_sandbox_artifacts_instead_of_degraded_stub() -> T
         json!(0),
         "run command exit code",
     )?;
+    let sandbox_path = run
+        .parsed
+        .pointer("/data/sandbox_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "run sandbox_path missing".to_string())?;
     ensure(
-        run.parsed["data"]["sandbox_path"]
-            .as_str()
-            .is_some_and(|path| Path::new(path).join("state.txt").is_file()),
+        Path::new(sandbox_path).join("state.txt").is_file(),
         "rehearse run must copy the source workspace into a readable sandbox",
     )?;
-    let manifest = run.parsed["data"]["artifact_paths"]["manifest"]
-        .as_str()
+    let artifact_paths = run
+        .parsed
+        .pointer("/data/artifact_paths")
+        .ok_or_else(|| "run artifact_paths missing".to_string())?;
+    let manifest = artifact_paths
+        .get("manifest")
+        .and_then(Value::as_str)
         .ok_or_else(|| "run manifest path missing".to_string())?
         .to_owned();
     for artifact_key in ["manifest", "source_snapshot", "sandbox_snapshot"] {
         ensure(
-            run.parsed["data"]["artifact_paths"][artifact_key]
-                .as_str()
+            artifact_paths
+                .get(artifact_key)
+                .and_then(Value::as_str)
                 .is_some_and(|path| Path::new(path).is_file()),
             format!("rehearse run must write {artifact_key} artifact"),
         )?;
@@ -1905,10 +1948,13 @@ fn learn_read_and_proposal_commands_use_persisted_ledgers() -> TestResult {
         ensure_logged_contract_shape(&result, command)?;
     }
 
+    let workspace_arg = workspace.display().to_string();
     let run_result = run_ee_logged(
         "learn-experiment-run-dry-run",
-        None,
+        Some(&workspace),
         vec![
+            "--workspace".to_owned(),
+            workspace_arg,
             "--json".to_owned(),
             "learn".to_owned(),
             "experiment".to_owned(),
@@ -1920,25 +1966,40 @@ fn learn_read_and_proposal_commands_use_persisted_ledgers() -> TestResult {
     )?;
     ensure_equal(
         &run_result.exit_code,
-        &UNSATISFIED_DEGRADED_MODE_EXIT,
-        "learn experiment run degraded exit code",
+        &1,
+        "learn experiment run missing proposal exit code",
     )?;
     ensure(
         run_result.stderr.is_empty(),
-        "learn experiment run degraded JSON stderr empty",
+        "learn experiment run missing proposal JSON stderr empty",
     )?;
-    ensure_no_ansi(&run_result.stdout, "learn experiment run degraded stdout")?;
+    ensure_no_ansi(
+        &run_result.stdout,
+        "learn experiment run missing proposal stdout",
+    )?;
     ensure_json_pointer(
         &run_result.parsed,
         "/schema",
         json!("ee.error.v1"),
-        "learn experiment run degraded schema",
+        "learn experiment run missing proposal schema",
     )?;
     ensure_json_pointer(
         &run_result.parsed,
         "/error/code",
-        json!("unsatisfied_degraded_mode"),
-        "learn experiment run degraded code",
+        json!("not_found"),
+        "learn experiment run missing proposal code",
+    )?;
+    ensure_json_pointer(
+        &run_result.parsed,
+        "/error/repair",
+        json!("Run ee learn experiment propose --json to register experiment definitions."),
+        "learn experiment run missing proposal repair",
+    )?;
+    ensure(
+        !run_result
+            .stdout
+            .contains("experiment_registry_unavailable"),
+        "learn experiment run must not report the removed experiment registry sentinel",
     )?;
     let fake_success =
         validate_no_fake_success_output("learn experiment run", false, false, &run_result.stdout);
@@ -2342,86 +2403,66 @@ fn causal_trace_without_failure_id_reports_empty_evidence_query() -> TestResult 
 }
 
 #[test]
-fn procedure_list_degrades_instead_of_reporting_generated_records() -> TestResult {
+fn procedure_list_reports_persisted_records_without_unavailable_sentinel() -> TestResult {
+    let workspace_root = unique_artifact_dir("procedure-list-workspace")?;
+    let workspace = workspace_root.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+    init_workspace(&workspace, "procedure list")?;
+    let workspace_arg = workspace.display().to_string();
+
     let result = run_ee_logged(
-        "procedure-list-unavailable",
-        None,
+        "procedure-list-persisted",
+        Some(&workspace),
         vec![
+            "--workspace".to_owned(),
+            workspace_arg,
             "--json".to_owned(),
             "procedure".to_owned(),
             "list".to_owned(),
         ],
     )?;
 
-    ensure_equal(
-        &result.exit_code,
-        &UNSATISFIED_DEGRADED_MODE_EXIT,
-        "procedure unavailable exit code",
-    )?;
+    ensure_equal(&result.exit_code, &0, "procedure list exit code")?;
     ensure(
         result.stderr.is_empty(),
-        "procedure JSON degraded response must keep stderr empty",
+        "procedure JSON response must keep stderr empty",
     )?;
-    ensure_no_ansi(&result.stdout, "procedure degraded stdout")?;
+    ensure_no_ansi(&result.stdout, "procedure list stdout")?;
     ensure_json_pointer(
         &result.parsed,
         "/schema",
-        json!("ee.response.v1"),
-        "procedure degraded response schema",
-    )?;
-    ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/code",
-        json!("procedure_store_unavailable"),
-        "procedure degraded code",
+        json!("ee.procedure.list_report.v1"),
+        "procedure list response schema",
     )?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/degraded/0/code",
-        json!("procedure_store_unavailable"),
-        "procedure degraded array code",
+        "/total_count",
+        json!(0),
+        "procedure total count",
     )?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/followUpBead",
-        json!("eidetic_engine_cli-q5vf"),
-        "procedure follow-up bead",
+        "/filtered_count",
+        json!(0),
+        "procedure filtered count",
     )?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/sideEffectClass",
-        json!("conservative abstention; no procedure mutation or artifact write"),
-        "procedure side-effect class",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/evidenceIds",
+        "/procedures",
         json!([]),
-        "procedure evidence ids",
+        "procedure empty persisted list",
     )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/sourceIds",
-        json!([]),
-        "procedure source ids",
+    ensure(
+        !result.stdout.contains("procedure_store_unavailable"),
+        "procedure list must not emit the removed unavailable sentinel",
     )?;
 
-    let fake_success =
-        validate_no_fake_success_output("procedure list", false, false, &result.stdout);
-    ensure(
-        fake_success.passed,
-        format!("degraded procedure output should not be fake success: {fake_success:?}"),
-    )?;
-
-    let unsupported_claims =
-        validate_no_unsupported_evidence_claims("procedure list", false, false, &result.stdout);
-    ensure(
-        unsupported_claims.passed,
-        format!(
-            "degraded procedure output should not count as unsupported success: {unsupported_claims:?}"
-        ),
-    )?;
+    ensure_no_fake_or_unsupported_claims("procedure list", true, false, &result.stdout)?;
 
     let log_text = fs::read_to_string(&result.log_path)
         .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
@@ -2430,13 +2471,13 @@ fn procedure_list_degrades_instead_of_reporting_generated_records() -> TestResul
     ensure_json_pointer(
         &log_json,
         "/degradationCodes",
-        json!(["procedure_store_unavailable"]),
+        json!([]),
         "logged procedure degradation code",
     )?;
     ensure_json_pointer(
         &log_json,
         "/repairCommand",
-        json!("ee status --json"),
+        Value::Null,
         "logged procedure repair command",
     )?;
     ensure_json_pointer(
@@ -2448,15 +2489,16 @@ fn procedure_list_degrades_instead_of_reporting_generated_records() -> TestResul
     ensure_json_pointer(
         &log_json,
         "/sideEffectClass",
-        json!("conservative abstention; no procedure mutation or artifact write"),
+        json!("read-only persisted procedure query; no procedure mutation or artifact write"),
         "logged procedure side-effect class",
-    )
+    )?;
+    ensure_logged_contract_shape(&result, "procedure list")
 }
 
 #[test]
-fn situation_classify_degrades_instead_of_reporting_builtin_routing() -> TestResult {
+fn situation_classify_reports_heuristic_routing_without_unavailable_sentinel() -> TestResult {
     let result = run_ee_logged(
-        "situation-classify-unavailable",
+        "situation-classify-heuristic",
         None,
         vec![
             "--json".to_owned(),
@@ -2466,75 +2508,45 @@ fn situation_classify_degrades_instead_of_reporting_builtin_routing() -> TestRes
         ],
     )?;
 
-    ensure_equal(
-        &result.exit_code,
-        &UNSATISFIED_DEGRADED_MODE_EXIT,
-        "situation unavailable exit code",
-    )?;
+    ensure_equal(&result.exit_code, &0, "situation classify exit code")?;
     ensure(
         result.stderr.is_empty(),
-        "situation JSON degraded response must keep stderr empty",
+        "situation JSON response must keep stderr empty",
     )?;
-    ensure_no_ansi(&result.stdout, "situation degraded stdout")?;
+    ensure_no_ansi(&result.stdout, "situation classify stdout")?;
     ensure_json_pointer(
         &result.parsed,
         "/schema",
-        json!("ee.response.v1"),
-        "situation degraded response schema",
+        json!("ee.situation.classify.v1"),
+        "situation classify response schema",
     )?;
-    ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
+    ensure_json_pointer(&result.parsed, "/success", json!(true), "success flag")?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/code",
-        json!("situation_decisioning_unavailable"),
-        "situation degraded code",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/degraded/0/code",
-        json!("situation_decisioning_unavailable"),
-        "situation degraded array code",
+        "/data/command",
+        json!("situation classify"),
+        "situation classify command label",
     )?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/followUpBead",
-        json!("eidetic_engine_cli-6cks"),
-        "situation follow-up bead",
+        "/data/category",
+        json!("bug_fix"),
+        "situation classify category",
     )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/sideEffectClass",
-        json!("conservative abstention; no situation routing, link, or recommendation mutation"),
-        "situation side-effect class",
+    ensure(
+        result
+            .parsed
+            .pointer("/data/signals")
+            .and_then(Value::as_array)
+            .is_some_and(|signals| !signals.is_empty()),
+        "situation classify must report heuristic signals",
     )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/evidenceIds",
-        json!([]),
-        "situation evidence ids",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/sourceIds",
-        json!([]),
-        "situation source ids",
+    ensure(
+        !result.stdout.contains("situation_decisioning_unavailable"),
+        "situation classify must not emit the removed unavailable sentinel",
     )?;
 
-    let fake_success =
-        validate_no_fake_success_output("situation classify", false, false, &result.stdout);
-    ensure(
-        fake_success.passed,
-        format!("degraded situation output should not be fake success: {fake_success:?}"),
-    )?;
-
-    let unsupported_claims =
-        validate_no_unsupported_evidence_claims("situation classify", false, false, &result.stdout);
-    ensure(
-        unsupported_claims.passed,
-        format!(
-            "degraded situation output should not count as unsupported success: {unsupported_claims:?}"
-        ),
-    )?;
+    ensure_no_fake_or_unsupported_claims("situation classify", true, false, &result.stdout)?;
 
     let log_text = fs::read_to_string(&result.log_path)
         .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
@@ -2543,13 +2555,13 @@ fn situation_classify_degrades_instead_of_reporting_builtin_routing() -> TestRes
     ensure_json_pointer(
         &log_json,
         "/degradationCodes",
-        json!(["situation_decisioning_unavailable"]),
+        json!([]),
         "logged situation degradation code",
     )?;
     ensure_json_pointer(
         &log_json,
         "/repairCommand",
-        json!("ee status --json"),
+        Value::Null,
         "logged situation repair command",
     )?;
     ensure_json_pointer(
@@ -2561,17 +2573,21 @@ fn situation_classify_degrades_instead_of_reporting_builtin_routing() -> TestRes
     ensure_json_pointer(
         &log_json,
         "/sideEffectClass",
-        json!("conservative abstention; no situation routing, link, or recommendation mutation"),
+        json!(
+            "read-only heuristic situation classification; no situation link, routing-state, or recommendation mutation"
+        ),
         "logged situation side-effect class",
-    )
+    )?;
+    ensure_logged_contract_shape(&result, "situation classify")
 }
 
 #[test]
-fn plan_goal_and_explain_degrade_instead_of_reporting_builtin_reasoning() -> TestResult {
+fn plan_goal_and_explain_report_catalog_reasoning_without_unavailable_sentinel() -> TestResult {
     let commands = [
         (
-            "plan-goal-unavailable",
+            "plan-goal-catalog",
             "plan goal",
+            "ee.plan.recommend.v1",
             vec![
                 "--json".to_owned(),
                 "plan".to_owned(),
@@ -2581,8 +2597,9 @@ fn plan_goal_and_explain_degrade_instead_of_reporting_builtin_reasoning() -> Tes
             ],
         ),
         (
-            "plan-explain-unavailable",
+            "plan-explain-catalog",
             "plan explain",
+            "ee.plan.explain.v1",
             vec![
                 "--json".to_owned(),
                 "plan".to_owned(),
@@ -2592,88 +2609,84 @@ fn plan_goal_and_explain_degrade_instead_of_reporting_builtin_reasoning() -> Tes
         ),
     ];
 
-    for (artifact_name, command, args) in commands {
+    for (artifact_name, command, schema, args) in commands {
         let result = run_ee_logged(artifact_name, None, args)?;
 
-        ensure_equal(
-            &result.exit_code,
-            &UNSATISFIED_DEGRADED_MODE_EXIT,
-            &format!("{command} unavailable exit code"),
-        )?;
+        ensure_equal(&result.exit_code, &0, &format!("{command} exit code"))?;
         ensure(
             result.stderr.is_empty(),
-            format!("{command} JSON degraded response must keep stderr empty"),
+            format!("{command} JSON response must keep stderr empty"),
         )?;
-        ensure_no_ansi(&result.stdout, &format!("{command} degraded stdout"))?;
+        ensure_no_ansi(&result.stdout, &format!("{command} stdout"))?;
         ensure_json_pointer(
             &result.parsed,
             "/schema",
-            json!("ee.response.v1"),
-            &format!("{command} degraded response schema"),
+            json!(schema),
+            &format!("{command} response schema"),
         )?;
         ensure_json_pointer(
             &result.parsed,
             "/success",
-            json!(false),
+            json!(true),
             &format!("{command} success flag"),
         )?;
+        let expected_command = if command == "plan goal" {
+            "plan recommend"
+        } else {
+            "plan explain"
+        };
         ensure_json_pointer(
             &result.parsed,
-            "/data/code",
-            json!("plan_decisioning_unavailable"),
-            &format!("{command} degraded code"),
+            "/data/command",
+            json!(expected_command),
+            &format!("{command} command label"),
         )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/degraded/0/code",
-            json!("plan_decisioning_unavailable"),
-            &format!("{command} degraded array code"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/repair",
-            json!("ee plan recipe list --json"),
-            &format!("{command} repair command"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/followUpBead",
-            json!("eidetic_engine_cli-6cks"),
-            &format!("{command} follow-up bead"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sideEffectClass",
-            json!("conservative abstention; no goal classification or recipe explanation"),
-            &format!("{command} side-effect class"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/evidenceIds",
-            json!([]),
-            &format!("{command} evidence ids"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sourceIds",
-            json!([]),
-            &format!("{command} source ids"),
-        )?;
-
-        let fake_success = validate_no_fake_success_output(command, false, false, &result.stdout);
         ensure(
-            fake_success.passed,
-            format!("degraded {command} output should not be fake success: {fake_success:?}"),
+            !result.stdout.contains("plan_decisioning_unavailable"),
+            format!("{command} must not emit the removed unavailable sentinel"),
         )?;
+        if command == "plan goal" {
+            ensure(
+                result
+                    .parsed
+                    .pointer("/data/recommendations")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| !items.is_empty()),
+                "plan goal must return at least one catalog recommendation",
+            )?;
+        } else {
+            ensure_json_pointer(
+                &result.parsed,
+                "/data/found",
+                json!(true),
+                "plan explain found flag",
+            )?;
+            ensure_json_pointer(
+                &result.parsed,
+                "/data/recipeId",
+                json!("init-workspace"),
+                "plan explain recipe id",
+            )?;
+            ensure(
+                result
+                    .parsed
+                    .pointer("/data/evidenceUris")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| !items.is_empty()),
+                "plan explain must name catalog evidence URIs for maturity claims",
+            )?;
+        }
 
-        let unsupported_claims =
-            validate_no_unsupported_evidence_claims(command, false, false, &result.stdout);
-        ensure(
-            unsupported_claims.passed,
-            format!(
-                "degraded {command} output should not count as unsupported success: {unsupported_claims:?}"
-            ),
-        )?;
+        if command == "plan goal" {
+            ensure_no_fake_or_unsupported_claims(command, true, false, &result.stdout)?;
+        } else {
+            let fake_success =
+                validate_no_fake_success_output(command, true, false, &result.stdout);
+            ensure(
+                fake_success.passed,
+                format!("{command} output should not be fake success: {fake_success:?}"),
+            )?;
+        }
 
         let log_text = fs::read_to_string(&result.log_path)
             .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
@@ -2682,13 +2695,13 @@ fn plan_goal_and_explain_degrade_instead_of_reporting_builtin_reasoning() -> Tes
         ensure_json_pointer(
             &log_json,
             "/degradationCodes",
-            json!(["plan_decisioning_unavailable"]),
+            json!([]),
             &format!("logged {command} degradation code"),
         )?;
         ensure_json_pointer(
             &log_json,
             "/repairCommand",
-            json!("ee plan recipe list --json"),
+            Value::Null,
             &format!("logged {command} repair command"),
         )?;
         ensure_json_pointer(
@@ -2700,19 +2713,20 @@ fn plan_goal_and_explain_degrade_instead_of_reporting_builtin_reasoning() -> Tes
         ensure_json_pointer(
             &log_json,
             "/sideEffectClass",
-            json!("conservative abstention; no goal classification or recipe explanation"),
+            json!("read-only recipe recommendation/explanation; no plan mutation"),
             &format!("logged {command} side-effect class"),
         )?;
+        ensure_logged_contract_shape(&result, command)?;
     }
 
     Ok(())
 }
 
 #[test]
-fn eval_run_and_list_degrade_instead_of_reporting_no_scenario_stub_success() -> TestResult {
+fn eval_run_and_list_report_fixture_results_without_unavailable_sentinel() -> TestResult {
     let cases = [
         (
-            "eval-run-unavailable",
+            "eval-run-fixture",
             "eval run",
             vec![
                 "--json".to_owned(),
@@ -2722,17 +2736,18 @@ fn eval_run_and_list_degrade_instead_of_reporting_no_scenario_stub_success() -> 
             ],
         ),
         (
-            "eval-run-science-unavailable",
+            "eval-run-science-fixture",
             "eval run",
             vec![
                 "--json".to_owned(),
                 "eval".to_owned(),
                 "run".to_owned(),
+                "release_failure".to_owned(),
                 "--science".to_owned(),
             ],
         ),
         (
-            "eval-list-unavailable",
+            "eval-list-fixtures",
             "eval list",
             vec!["--json".to_owned(), "eval".to_owned(), "list".to_owned()],
         ),
@@ -2741,26 +2756,22 @@ fn eval_run_and_list_degrade_instead_of_reporting_no_scenario_stub_success() -> 
     for (artifact_name, command, args) in cases {
         let result = run_ee_logged(artifact_name, None, args)?;
 
-        ensure_equal(
-            &result.exit_code,
-            &UNSATISFIED_DEGRADED_MODE_EXIT,
-            &format!("{command} unavailable exit code"),
-        )?;
+        ensure_equal(&result.exit_code, &0, &format!("{command} exit code"))?;
         ensure(
             result.stderr.is_empty(),
-            format!("{command} JSON degraded response must keep stderr empty"),
+            format!("{command} JSON response must keep stderr empty"),
         )?;
-        ensure_no_ansi(&result.stdout, &format!("{command} degraded stdout"))?;
+        ensure_no_ansi(&result.stdout, &format!("{command} stdout"))?;
         ensure_json_pointer(
             &result.parsed,
             "/schema",
             json!("ee.response.v1"),
-            &format!("{command} degraded response schema"),
+            &format!("{command} response schema"),
         )?;
         ensure_json_pointer(
             &result.parsed,
             "/success",
-            json!(false),
+            json!(true),
             &format!("{command} success flag"),
         )?;
         ensure_json_pointer(
@@ -2769,69 +2780,48 @@ fn eval_run_and_list_degrade_instead_of_reporting_no_scenario_stub_success() -> 
             json!(command),
             &format!("{command} command label"),
         )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/code",
-            json!("eval_fixtures_unavailable"),
-            &format!("{command} degraded code"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/degraded/0/code",
-            json!("eval_fixtures_unavailable"),
-            &format!("{command} degraded array code"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/repair",
-            json!("ee status --json"),
-            &format!("{command} repair command"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/followUpBead",
-            json!("eidetic_engine_cli-uiy3"),
-            &format!("{command} follow-up bead"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sideEffectClass",
-            json!(
-                "read-only, conservative abstention; no fixture discovery, evaluation report, or science metrics emitted"
-            ),
-            &format!("{command} side-effect class"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/evidenceIds",
-            json!([]),
-            &format!("{command} evidence ids"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sourceIds",
-            json!([]),
-            &format!("{command} source ids"),
-        )?;
         ensure(
-            result.parsed.pointer("/data/scienceMetrics").is_none(),
-            format!("{command} must not emit science metrics without real eval results"),
+            !result.stdout.contains("eval_fixtures_unavailable"),
+            format!("{command} must not emit the removed unavailable sentinel"),
         )?;
 
-        let fake_success = validate_no_fake_success_output(command, false, false, &result.stdout);
-        ensure(
-            fake_success.passed,
-            format!("degraded {command} output should not be fake success: {fake_success:?}"),
-        )?;
+        if command == "eval run" {
+            ensure_json_pointer(
+                &result.parsed,
+                "/data/report/schema",
+                json!("ee.eval.report.v1"),
+                &format!("{command} report schema"),
+            )?;
+            ensure_json_pointer(
+                &result.parsed,
+                "/data/report/fixture_id",
+                json!("fx.release_failure.v1"),
+                &format!("{command} fixture id"),
+            )?;
+            ensure(
+                result.parsed.pointer("/data/report/metrics").is_some(),
+                format!("{command} must emit real evaluation metrics"),
+            )?;
+        } else {
+            ensure(
+                result
+                    .parsed
+                    .pointer("/data/fixtures")
+                    .and_then(Value::as_array)
+                    .is_some_and(|fixtures| !fixtures.is_empty()),
+                "eval list must discover fixture metadata",
+            )?;
+            ensure(
+                result
+                    .parsed
+                    .pointer("/data/fixtureCount")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|count| count > 0),
+                "eval list must report a positive fixture count",
+            )?;
+        }
 
-        let unsupported_claims =
-            validate_no_unsupported_evidence_claims(command, false, false, &result.stdout);
-        ensure(
-            unsupported_claims.passed,
-            format!(
-                "degraded {command} output should not count as unsupported success: {unsupported_claims:?}"
-            ),
-        )?;
+        ensure_no_fake_or_unsupported_claims(command, true, true, &result.stdout)?;
 
         let log_text = fs::read_to_string(&result.log_path)
             .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
@@ -2840,13 +2830,13 @@ fn eval_run_and_list_degrade_instead_of_reporting_no_scenario_stub_success() -> 
         ensure_json_pointer(
             &log_json,
             "/degradationCodes",
-            json!(["eval_fixtures_unavailable"]),
+            json!([]),
             &format!("logged {command} degradation code"),
         )?;
         ensure_json_pointer(
             &log_json,
             "/repairCommand",
-            json!("ee status --json"),
+            Value::Null,
             &format!("logged {command} repair command"),
         )?;
         ensure_json_pointer(
@@ -2858,11 +2848,10 @@ fn eval_run_and_list_degrade_instead_of_reporting_no_scenario_stub_success() -> 
         ensure_json_pointer(
             &log_json,
             "/sideEffectClass",
-            json!(
-                "read-only, conservative abstention; no fixture discovery, evaluation report, or science metrics emitted"
-            ),
+            json!("read-only fixture discovery/evaluation report generation; no durable mutation"),
             &format!("logged {command} side-effect class"),
         )?;
+        ensure_logged_contract_shape(&result, command)?;
     }
 
     Ok(())
@@ -2976,8 +2965,8 @@ fn review_session_reports_storage_error_without_unavailable_sentinel() -> TestRe
 }
 
 #[test]
-fn tripwire_commands_degrade_instead_of_reporting_fixture_risk_state() -> TestResult {
-    let workspace_root = unique_artifact_dir("preflight-tripwire-unavailable-workspace")?;
+fn tripwire_commands_report_store_queries_without_unavailable_sentinel() -> TestResult {
+    let workspace_root = unique_artifact_dir("tripwire-readonly-workspace")?;
     let workspace = workspace_root.join("workspace");
     fs::create_dir_all(&workspace).map_err(|error| {
         format!(
@@ -2993,11 +2982,9 @@ fn tripwire_commands_degrade_instead_of_reporting_fixture_risk_state() -> TestRe
 
     let cases = [
         (
-            "tripwire-list-unavailable",
+            "tripwire-list-readonly",
             "tripwire list",
-            "tripwire_store_unavailable",
-            "eidetic_engine_cli-qmu0",
-            "read-only, conservative abstention; no tripwire store read or event evaluation",
+            "ee.tripwire.list.v1",
             vec![
                 "--workspace".to_owned(),
                 workspace_arg.clone(),
@@ -3010,11 +2997,9 @@ fn tripwire_commands_degrade_instead_of_reporting_fixture_risk_state() -> TestRe
             ],
         ),
         (
-            "tripwire-check-unavailable",
+            "tripwire-check-readonly",
             "tripwire check",
-            "tripwire_store_unavailable",
-            "eidetic_engine_cli-qmu0",
-            "read-only, conservative abstention; no tripwire store read or event evaluation",
+            "ee.tripwire.check.v1",
             vec![
                 "--workspace".to_owned(),
                 workspace_arg,
@@ -3031,94 +3016,67 @@ fn tripwire_commands_degrade_instead_of_reporting_fixture_risk_state() -> TestRe
         ),
     ];
 
-    for (artifact_name, command, code, follow_up, side_effect, args) in cases {
+    for (artifact_name, command, schema, args) in cases {
         let result = run_ee_logged(artifact_name, Some(&workspace), args)?;
 
-        ensure_equal(
-            &result.exit_code,
-            &UNSATISFIED_DEGRADED_MODE_EXIT,
-            &format!("{command} unavailable exit code"),
-        )?;
+        ensure_equal(&result.exit_code, &0, &format!("{command} exit code"))?;
         ensure(
             result.stderr.is_empty(),
-            format!("{command} JSON degraded response must keep stderr empty"),
+            format!("{command} JSON response must keep stderr empty"),
         )?;
-        ensure_no_ansi(&result.stdout, &format!("{command} degraded stdout"))?;
+        ensure_no_ansi(&result.stdout, &format!("{command} stdout"))?;
         ensure_json_pointer(
             &result.parsed,
             "/schema",
-            json!("ee.response.v1"),
-            &format!("{command} degraded response schema"),
+            json!(schema),
+            &format!("{command} response schema"),
         )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/success",
-            json!(false),
-            &format!("{command} success flag"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/command",
-            json!(command),
-            &format!("{command} command label"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/code",
-            json!(code),
-            &format!("{command} degraded code"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/degraded/0/code",
-            json!(code),
-            &format!("{command} degraded array code"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/repair",
-            json!("ee status --json"),
-            &format!("{command} repair command"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/followUpBead",
-            json!(follow_up),
-            &format!("{command} follow-up bead"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sideEffectClass",
-            json!(side_effect),
-            &format!("{command} side-effect class"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/evidenceIds",
-            json!([]),
-            &format!("{command} evidence ids"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sourceIds",
-            json!([]),
-            &format!("{command} source ids"),
+        ensure(
+            !result.stdout.contains("tripwire_store_unavailable"),
+            format!("{command} must not emit the removed unavailable sentinel"),
         )?;
 
-        let fake_success = validate_no_fake_success_output(command, false, false, &result.stdout);
-        ensure(
-            fake_success.passed,
-            format!("degraded {command} output should not be fake success: {fake_success:?}"),
-        )?;
+        if command == "tripwire list" {
+            ensure_json_pointer(
+                &result.parsed,
+                "/tripwires",
+                json!([]),
+                "tripwire list empty persisted list",
+            )?;
+            ensure_json_pointer(
+                &result.parsed,
+                "/total_count",
+                json!(0),
+                "tripwire list total count",
+            )?;
+        } else {
+            ensure_json_pointer(
+                &result.parsed,
+                "/tripwire_id",
+                json!("tw_004"),
+                "tripwire check id",
+            )?;
+            ensure_json_pointer(
+                &result.parsed,
+                "/result",
+                json!("not_found"),
+                "tripwire check result",
+            )?;
+            ensure_json_pointer(
+                &result.parsed,
+                "/durable_mutation",
+                json!(false),
+                "tripwire check durable mutation",
+            )?;
+            ensure_json_pointer(
+                &result.parsed,
+                "/degraded",
+                json!([]),
+                "tripwire check degradation array",
+            )?;
+        }
 
-        let unsupported_claims =
-            validate_no_unsupported_evidence_claims(command, false, false, &result.stdout);
-        ensure(
-            unsupported_claims.passed,
-            format!(
-                "degraded {command} output should not count as unsupported success: {unsupported_claims:?}"
-            ),
-        )?;
+        ensure_no_fake_or_unsupported_claims(command, true, false, &result.stdout)?;
 
         let log_text = fs::read_to_string(&result.log_path)
             .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
@@ -3127,13 +3085,13 @@ fn tripwire_commands_degrade_instead_of_reporting_fixture_risk_state() -> TestRe
         ensure_json_pointer(
             &log_json,
             "/degradationCodes",
-            json!([code]),
+            json!([]),
             &format!("logged {command} degradation code"),
         )?;
         ensure_json_pointer(
             &log_json,
             "/repairCommand",
-            json!("ee status --json"),
+            Value::Null,
             &format!("logged {command} repair command"),
         )?;
         ensure_json_pointer(
@@ -3145,9 +3103,10 @@ fn tripwire_commands_degrade_instead_of_reporting_fixture_risk_state() -> TestRe
         ensure_json_pointer(
             &log_json,
             "/sideEffectClass",
-            json!(side_effect),
+            json!("read-only tripwire store query/evaluation; no tripwire mutation"),
             &format!("logged {command} side-effect class"),
         )?;
+        ensure_logged_contract_shape(&result, command)?;
     }
 
     Ok(())
@@ -3285,18 +3244,6 @@ fn daemon_foreground_runs_real_health_job_without_unavailable_sentinel() -> Test
         )
     })?;
     let workspace_arg = workspace.display().to_string();
-    let init_output = Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(["--workspace", &workspace_arg, "--json", "init"])
-        .output()
-        .map_err(|error| format!("failed to initialize daemon workspace: {error}"))?;
-    ensure(
-        init_output.status.success(),
-        format!(
-            "daemon workspace init failed: stdout={} stderr={}",
-            String::from_utf8_lossy(&init_output.stdout),
-            String::from_utf8_lossy(&init_output.stderr)
-        ),
-    )?;
 
     let result = run_ee_logged(
         "daemon-foreground-real",
@@ -3384,6 +3331,12 @@ fn daemon_foreground_runs_real_health_job_without_unavailable_sentinel() -> Test
         "/data/ticks/0/runner/results/0/outcome",
         json!("success"),
         "daemon runner outcome",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/ticks/0/runner/results/0/details/storageStatus",
+        json!("missing"),
+        "daemon health job storage status",
     )?;
     ensure(
         !result.stdout.contains("daemon_jobs_unavailable"),
