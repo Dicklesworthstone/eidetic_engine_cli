@@ -104,7 +104,7 @@ Run `cargo tree -e features` and grep for these crates. CI must fail if any appe
 | `serde` + `serde_json` + `serde_yaml` | Stable JSON/YAML output contracts |
 | `toml` + `toml_edit` | Config parsing with formatting preservation |
 | `chrono` | RFC 3339 timestamps |
-| `uuid` (v7) | Time-ordered IDs |
+| `uuid` (v7) | Time-ordered IDs within one process; use explicit timestamps or sequence columns for cross-process ordering |
 | `blake3`, `sha2` | Content hashing, pack hashes, source hashes |
 | `tiktoken-rs` | Token budgeting for context packs |
 | `tracing` + `tracing-subscriber` | Structured logging and diagnostics |
