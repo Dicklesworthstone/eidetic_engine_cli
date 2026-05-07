@@ -364,7 +364,65 @@ pub enum DomainError {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DomainErrorSeverity {
+    Low,
+    Medium,
+    High,
+}
+
+impl DomainErrorSeverity {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DomainErrorSituation {
+    Usage,
+    Configuration,
+    Storage,
+    SearchIndex,
+    Graph,
+    Import,
+    NotFound,
+    UnsatisfiedDegradedMode,
+    PolicyDenied,
+    MigrationRequired,
+}
+
 impl DomainError {
+    #[must_use]
+    pub fn new(
+        _code: impl Into<String>,
+        _severity: DomainErrorSeverity,
+        situation: DomainErrorSituation,
+        message: impl Into<String>,
+        repair: impl Into<String>,
+    ) -> Self {
+        let message = message.into();
+        let repair = Some(repair.into());
+        match situation {
+            DomainErrorSituation::Usage => Self::Usage { message, repair },
+            DomainErrorSituation::Configuration => Self::Configuration { message, repair },
+            DomainErrorSituation::Storage => Self::Storage { message, repair },
+            DomainErrorSituation::SearchIndex => Self::SearchIndex { message, repair },
+            DomainErrorSituation::Graph => Self::Graph { message, repair },
+            DomainErrorSituation::Import => Self::Import { message, repair },
+            DomainErrorSituation::NotFound => Self::Usage { message, repair },
+            DomainErrorSituation::UnsatisfiedDegradedMode => {
+                Self::UnsatisfiedDegradedMode { message, repair }
+            }
+            DomainErrorSituation::PolicyDenied => Self::PolicyDenied { message, repair },
+            DomainErrorSituation::MigrationRequired => Self::MigrationRequired { message, repair },
+        }
+    }
+
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
