@@ -15588,7 +15588,6 @@ where
                     "data": {
                         "situationId": &args.situation_id,
                         "category": details.category.as_str(),
-                        "confidence": details.confidence.as_str(),
                     }
                 });
                 let _ = stdout.write_all(json.to_string().as_bytes());
@@ -15601,7 +15600,8 @@ where
         }
         None => {
             let error = DomainError::NotFound {
-                message: format!("Situation '{}' not found in store", args.situation_id),
+                resource: "situation".to_owned(),
+                id: args.situation_id.clone(),
                 repair: Some("ee situation classify --task <text> --json".to_owned()),
             };
             write_domain_error(&error, cli.wants_json(), stdout, stderr)
@@ -15643,7 +15643,8 @@ where
         }
         None => {
             let error = DomainError::NotFound {
-                message: format!("Situation '{}' not found in store", args.situation_id),
+                resource: "situation".to_owned(),
+                id: args.situation_id.clone(),
                 repair: Some("ee situation classify --task <text> --json".to_owned()),
             };
             write_domain_error(&error, cli.wants_json(), stdout, stderr)
