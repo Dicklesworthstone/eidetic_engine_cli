@@ -895,6 +895,11 @@ impl EffectManifest {
             CommandEffect::read_only("schema export", "Export public response schemas"),
             CommandEffect::read_only("schema list", "List response schemas"),
             CommandEffect::read_only("search", "Search memories"),
+            CommandEffect::read_only("situation classify", "Classify task into situation category"),
+            CommandEffect::read_only("situation compare", "Compare two situations (dry-run)"),
+            CommandEffect::read_only("situation explain", "Explain a stored situation"),
+            CommandEffect::read_only("situation link", "Plan situation link (dry-run)"),
+            CommandEffect::read_only("situation show", "Show stored situation details"),
             CommandEffect::read_only("status", "Report workspace status"),
             CommandEffect::read_only("task-frame show", "Show passive task-frame state"),
             CommandEffect::read_only("update", "Plan update without mutation"),
@@ -1125,31 +1130,6 @@ impl EffectManifest {
             CommandEffect::read_only(
                 "rehearse promote-plan",
                 "Rehearsal promotion planning reads a manifest and emits a conservative checklist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "situation classify",
-                "situation_decisioning_unavailable",
-                "Situation classification abstains until stored evidence features exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "situation compare",
-                "situation_decisioning_unavailable",
-                "Situation comparison abstains until stored evidence features exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "situation link",
-                "situation_decisioning_unavailable",
-                "Situation linking abstains until stored evidence features exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "situation show",
-                "situation_decisioning_unavailable",
-                "Situation inspection abstains until stored evidence features exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "situation explain",
-                "situation_decisioning_unavailable",
-                "Situation explanation abstains until stored evidence features exist",
             ),
             CommandEffect::degraded_unavailable(
                 "support bundle",

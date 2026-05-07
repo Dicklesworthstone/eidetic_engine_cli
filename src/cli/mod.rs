@@ -9242,7 +9242,7 @@ where
     let report = if args.dry_run {
         crate::core::recorder::start_recording(&options)
     } else {
-        let conn = match open_recorder_database(cli, None) {
+        let conn = match open_recorder_database_for_write(cli) {
             Ok(conn) => conn,
             Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         };
@@ -9326,7 +9326,7 @@ where
             }
         }
     } else {
-        let conn = match open_recorder_database(cli, None) {
+        let conn = match open_recorder_database_for_write(cli) {
             Ok(conn) => conn,
             Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         };
@@ -9433,7 +9433,7 @@ where
     let report = if args.dry_run {
         crate::core::recorder::finish_recording(&options, 0)
     } else {
-        let conn = match open_recorder_database(cli, None) {
+        let conn = match open_recorder_database_for_write(cli) {
             Ok(conn) => conn,
             Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         };
@@ -9698,6 +9698,15 @@ fn open_recorder_database(
         message: format!("Failed to open database: {error}"),
         repair: Some("ee status --json".to_owned()),
     })
+}
+
+fn open_recorder_database_for_write(cli: &Cli) -> Result<crate::db::DbConnection, DomainError> {
+    let conn = open_recorder_database(cli, None)?;
+    conn.migrate().map_err(|error| DomainError::Storage {
+        message: format!("Failed to migrate recorder database: {error}"),
+        repair: Some("ee init --workspace . --json".to_owned()),
+    })?;
+    Ok(conn)
 }
 
 fn write_recorder_tail_report<W>(
@@ -15409,55 +15418,6 @@ where
     }
 }
 
-const SITUATION_UNAVAILABLE_CODE: &str = "situation_decisioning_unavailable";
-const SITUATION_UNAVAILABLE_MESSAGE: &str = "Situation classification, comparison, link planning, show, and explain are unavailable until situation commands are re-scoped to stored evidence and mechanical boundary records instead of built-in routing fixtures.";
-const SITUATION_UNAVAILABLE_REPAIR: &str = "ee status --json";
-const SITUATION_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-6cks";
-
-fn write_situation_unavailable<W, E>(
-    cli: &Cli,
-    command: &'static str,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": SITUATION_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": SITUATION_UNAVAILABLE_MESSAGE,
-                "repair": SITUATION_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": SITUATION_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": SITUATION_UNAVAILABLE_MESSAGE,
-                        "repair": SITUATION_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": SITUATION_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": "conservative abstention; no situation routing, link, or recommendation mutation"
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
-    }
-
-    let _ = writeln!(stderr, "error: {SITUATION_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {SITUATION_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
-}
-
 fn handle_situation_classify<W, E>(
     cli: &Cli,
     args: &SituationClassifyArgs,
@@ -15468,8 +15428,34 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_situation_unavailable(cli, "situation classify", stdout, stderr)
+    let _ = stderr;
+    let result = crate::core::situation::classify_task(&args.text);
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::SITUATION_CLASSIFY_SCHEMA_V1,
+            "success": true,
+            "data": {
+                "command": "situation classify",
+                "category": result.category.as_str(),
+                "confidence": result.confidence.as_str(),
+                "confidenceScore": result.confidence_score,
+                "signals": result.signals.iter().map(|s| serde_json::json!({
+                    "signalType": s.signal_type,
+                    "pattern": &s.pattern,
+                    "weight": s.weight
+                })).collect::<Vec<_>>(),
+                "alternativeCategories": result.alternative_categories.iter().map(|(cat, score)| serde_json::json!({
+                    "category": cat.as_str(),
+                    "score": score
+                })).collect::<Vec<_>>(),
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+    } else {
+        let _ = stdout.write_all(result.human_summary().as_bytes());
+    }
+    ProcessExitCode::Success
 }
 
 fn situation_dry_run_required_error() -> DomainError {
@@ -15498,7 +15484,39 @@ where
         );
     }
 
-    write_situation_unavailable(cli, "situation compare", stdout, stderr)
+    let _ = stderr;
+    let options = crate::core::situation::SituationCompareOptions {
+        source_situation_id: args.source_situation_id.clone(),
+        target_situation_id: args.target_situation_id.clone(),
+        source_text: args.source_text.clone(),
+        target_text: args.target_text.clone(),
+        evidence_ids: args.evidence_ids.clone(),
+        created_at: None,
+    };
+    let report = crate::core::situation::compare_situations(&options);
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": true,
+            "data": report.data_json()
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+    } else {
+        let _ = writeln!(
+            stdout,
+            "Source: {} ({})\nTarget: {} ({})\nRelation: {}\nConfidence: {} ({:.0}%)\nRecommended: {}",
+            report.source.category.as_str(),
+            report.source.confidence.as_str(),
+            report.target.category.as_str(),
+            report.target.confidence.as_str(),
+            report.relation.as_str(),
+            report.confidence.as_str(),
+            report.confidence_score * 100.0,
+            report.recommended
+        );
+    }
+    ProcessExitCode::Success
 }
 
 fn handle_situation_link<W, E>(
@@ -15520,7 +15538,35 @@ where
         );
     }
 
-    write_situation_unavailable(cli, "situation link", stdout, stderr)
+    let _ = stderr;
+    let options = crate::core::situation::SituationCompareOptions {
+        source_situation_id: args.source_situation_id.clone(),
+        target_situation_id: args.target_situation_id.clone(),
+        source_text: args.source_text.clone(),
+        target_text: args.target_text.clone(),
+        evidence_ids: args.evidence_ids.clone(),
+        created_at: args.created_at.clone(),
+    };
+    let report = crate::core::situation::plan_situation_link_dry_run(&options);
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": true,
+            "data": report.data_json()
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+    } else {
+        let _ = writeln!(
+            stdout,
+            "Link plan (dry-run):\n  Would write: {}\n  Relation: {}\n  Candidate: {} ({})",
+            report.would_write,
+            report.compare.relation.as_str(),
+            report.curation_candidate.candidate_id,
+            report.curation_candidate.status
+        );
+    }
+    ProcessExitCode::Success
 }
 
 fn handle_situation_show<W, E>(
@@ -15533,8 +15579,34 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_situation_unavailable(cli, "situation show", stdout, stderr)
+    match crate::core::situation::show_situation(&args.situation_id) {
+        Some(details) => {
+            if cli.wants_json() {
+                let json = serde_json::json!({
+                    "schema": crate::models::SITUATION_SHOW_SCHEMA_V1,
+                    "success": true,
+                    "data": {
+                        "situationId": &args.situation_id,
+                        "category": details.category.as_str(),
+                        "confidence": details.confidence.as_str(),
+                    }
+                });
+                let _ = stdout.write_all(json.to_string().as_bytes());
+                let _ = stdout.write_all(b"\n");
+            } else {
+                let _ = writeln!(stdout, "Situation: {}", args.situation_id);
+                let _ = writeln!(stdout, "Category: {}", details.category.as_str());
+            }
+            ProcessExitCode::Success
+        }
+        None => {
+            let error = DomainError::NotFound {
+                message: format!("Situation '{}' not found in store", args.situation_id),
+                repair: Some("ee situation classify --task <text> --json".to_owned()),
+            };
+            write_domain_error(&error, cli.wants_json(), stdout, stderr)
+        }
+    }
 }
 
 fn handle_situation_explain<W, E>(
@@ -15547,8 +15619,36 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_situation_unavailable(cli, "situation explain", stdout, stderr)
+    match crate::core::situation::explain_situation(&args.situation_id) {
+        Some(explanation) => {
+            if cli.wants_json() {
+                let json = serde_json::json!({
+                    "schema": crate::models::SITUATION_EXPLAIN_SCHEMA_V1,
+                    "success": true,
+                    "data": {
+                        "situationId": &args.situation_id,
+                        "category": explanation.category.as_str(),
+                        "recommendations": explanation.recommendations,
+                    }
+                });
+                let _ = stdout.write_all(json.to_string().as_bytes());
+                let _ = stdout.write_all(b"\n");
+            } else {
+                let _ = writeln!(stdout, "Explanation for: {}", args.situation_id);
+                for rec in &explanation.recommendations {
+                    let _ = writeln!(stdout, "  - {}", rec);
+                }
+            }
+            ProcessExitCode::Success
+        }
+        None => {
+            let error = DomainError::NotFound {
+                message: format!("Situation '{}' not found in store", args.situation_id),
+                repair: Some("ee situation classify --task <text> --json".to_owned()),
+            };
+            write_domain_error(&error, cli.wants_json(), stdout, stderr)
+        }
+    }
 }
 
 // ============================================================================
@@ -21517,7 +21617,7 @@ mod tests {
 
         ensure_equal(
             &exit,
-            &ProcessExitCode::StorageError,
+            &ProcessExitCode::Storage,
             "learn experiment propose JSON exit (no workspace)",
         )?;
         ensure(stderr.is_empty(), "learn experiment propose stderr clean")?;

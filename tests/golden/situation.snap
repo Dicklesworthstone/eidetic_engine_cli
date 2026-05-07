@@ -1,0 +1,23 @@
+---
+source: src/core/situation.rs
+assertion: situation commands classify tasks and plan links with heuristic signals
+schema:
+  classify: ee.situation.classify.v1
+  compare: ee.situation.compare.v1
+  link_dry_run: ee.situation.link_dry_run.v1
+  show: ee.situation.show.v1
+  explain: ee.situation.explain.v1
+contracts:
+  - classify returns category with confidence based on keyword signals
+  - density-aware lift caps confidence at 0.49 for single signal
+  - multi-signal tasks can reach confidence >= 0.7
+  - compare dry-run returns relation and overlap score
+  - link dry-run plans curation candidate without persisting
+  - show returns not-found for unknown situation IDs (no persistence yet)
+  - explain returns not-found for unknown situation IDs (no persistence yet)
+evidence:
+  - ClassifyResult.category
+  - ClassifyResult.confidence
+  - ClassifyResult.signals
+  - SituationCompareReport.relation
+  - SituationLinkDryRunReport.curation_candidate
