@@ -33,6 +33,60 @@ expression: why
       "level": "procedural",
       "kind": "rule"
     },
+    "graphRetrievalFeatures": {
+      "status": "scores_unavailable",
+      "source": {
+        "kind": "graph_snapshot",
+        "workspaceId": "[WORKSPACE_ID]",
+        "graphType": "memory_links",
+        "snapshot": null
+      },
+      "centralityScore": 0.0,
+      "authorityScore": 0.0,
+      "hubScore": 0.0,
+      "communityId": null,
+      "distanceToQuerySeed": null,
+      "sameClusterAsTopResult": null,
+      "evidenceSupportCount": 0,
+      "contradictionCount": 0,
+      "orphanPenalty": 1.0,
+      "staleBridgePenalty": 0.0,
+      "pagerank": {
+        "raw": 0.0,
+        "normalized": 0.0,
+        "rank": null,
+        "weight": 0.0,
+        "contribution": 0.0,
+        "formula": "metric unavailable"
+      },
+      "betweenness": {
+        "raw": 0.0,
+        "normalized": 0.0,
+        "rank": null,
+        "weight": 0.0,
+        "contribution": 0.0,
+        "formula": "metric unavailable"
+      },
+      "labels": [],
+      "reasons": [],
+      "centralityFormula": "centrality_score = 0.6 * pagerank.normalized + 0.4 * betweenness.normalized",
+      "orphanPenaltyFormula": "orphan_penalty = 1.0 when no incident memory_links exist, else 0.0",
+      "staleBridgePenaltyFormula": "stale_bridge_penalty = betweenness.normalized when validity_status is expired, else 0.0",
+      "degraded": [
+        {
+          "code": "graph_snapshot_missing",
+          "severity": "medium",
+          "message": "No persisted graph snapshot exists for feature enrichment.",
+          "repair": "ee graph centrality-refresh"
+        },
+        {
+          "code": "graph_query_relative_features_unavailable",
+          "severity": "low",
+          "message": "Community and query-seed graph features are present as stable fields but unavailable without community detection and query-seed expansion.",
+          "repair": "ee graph communities && ee search --explain"
+        }
+      ]
+    },
     "selection": {
       "selectionScore": 0.84,
       "aboveConfidenceThreshold": true,

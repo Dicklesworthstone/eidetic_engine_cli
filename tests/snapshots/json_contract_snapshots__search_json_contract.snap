@@ -14,6 +14,13 @@ expression: search
         "docId": "mem_00000000000000000000000001",
         "score": 0.40820467472076416,
         "source": "semantic_fast",
+        "why": "Selected by semantic_fast retrieval with score 0.4082.",
+        "provenance": [
+          {
+            "kind": "search_document",
+            "docId": "mem_00000000000000000000000001"
+          }
+        ],
         "fastScore": 0.40820467472076416
       }
     ],
@@ -46,6 +53,7 @@ expression: search
         "explanationCount": 0
       }
     },
-    "errors": []
+    "errors": [],
+    "degraded": []
   }
 }

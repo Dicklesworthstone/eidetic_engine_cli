@@ -258,6 +258,12 @@ fn scrub_value_for_key(key: &str, value: &mut Value) {
         }
         return;
     }
+    if normalized == "workspaceid" || normalized == "workspace_id" {
+        if value.is_string() {
+            *value = Value::String("[WORKSPACE_ID]".to_string());
+        }
+        return;
+    }
     if is_timestamp_key(&normalized) {
         if value.is_string() {
             *value = Value::String("[TIMESTAMP]".to_string());

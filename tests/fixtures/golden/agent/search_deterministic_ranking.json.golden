@@ -111,6 +111,7 @@
         "explanationCount": 3
       }
     },
-    "errors": []
+    "errors": [],
+    "degraded": []
   }
 }
