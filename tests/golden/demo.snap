@@ -1,0 +1,30 @@
+---
+source: tests/degraded_honesty.rs
+assertion: demo run executes safe manifests with audit-ledger rows and evidence artifacts
+schema:
+  list: ee.demo.list.v1
+  run: ee.demo.run.v1
+  run_plan: ee.demo.run_plan.v1
+  show: ee.demo.show.v1
+  verify: ee.demo.verify.v1
+contracts:
+  - demo list reads manifest entries without durable mutation
+  - demo run --dry-run returns an execution plan without running commands
+  - demo run executes safe manifest commands and records stdout, stderr, metadata, and audit evidence
+  - demo run aborts remaining steps after the first failure unless continue-on-error is requested
+  - demo run rejects unsafe shell commands before execution
+  - demo show reads persisted audit-ledger rows for the selected demo
+  - demo verify checks declared evidence artifacts and rejects symlink evidence
+  - demo verify reports missing or optional artifacts without fabricating success
+evidence:
+  - data.demos[].id
+  - data.demos[].status
+  - data.demos[].commands[].executed
+  - data.demos[].commands[].exitCode
+  - data.demos[].commands[].auditId
+  - data.demos[].commands[].evidenceDir
+  - data.demos[].commands[].artifacts
+  - data.firstFailure
+  - data.auditEntries
+  - data.artifactResults
+  - tests.fixtures.golden.demo.release_context_demo
