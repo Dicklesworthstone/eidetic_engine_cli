@@ -108,10 +108,13 @@ use crate::core::outcome::{
 };
 use crate::core::preflight::{
     CloseOptions as PreflightCloseOptions, RunOptions as PreflightRunOptions,
-    ShowOptions as PreflightShowOptions, close_preflight, run_preflight, show_preflight,
+    ShowOptions as PreflightShowOptions, TripwireSource as PreflightTripwireSource,
+    TripwireSourceKind as PreflightTripwireSourceKind, close_preflight, run_preflight,
+    show_preflight,
 };
 use crate::core::preflight_guard::{
-    BypassTokenInput, PreflightGuardOptions, PreflightGuardRegistry, run_preflight_guard,
+    BypassTokenInput, PreflightGuardOptions, PreflightGuardRegistry, PreflightGuardRule,
+    RuleSource, run_preflight_guard,
 };
 use crate::core::rehearse::{
     CommandSpec, RehearsalProfile, RehearseInspectOptions, RehearsePlanOptions,
@@ -137,7 +140,9 @@ use crate::core::tripwire::{
 };
 use crate::core::why::{WhyOptions, explain_memory};
 use crate::core::workspace as workspace_core;
-use crate::models::preflight::{TripwireState, TripwireType};
+use crate::models::preflight::{
+    RiskCategory, RiskLevel, TripwireAction, TripwireState, TripwireType,
+};
 use crate::models::{
     CertificateKind, CertificateStatus, DEMO_FILE_SCHEMA_V1, DEMO_RUN_RESULT_SCHEMA_V1, DemoEntry,
     DemoFile, DemoId, DemoStatus, DomainError, ExperimentOutcomeStatus, ExperimentSafetyBoundary,
@@ -8857,18 +8862,80 @@ where
     W: Write,
     E: Write,
 {
+    let workspace = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let tripwire_sources = if args.check_tripwires {
+        let registry = match PreflightGuardRegistry::load(&workspace) {
+            Ok(registry) => registry,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        guard_tripwire_sources_for_command(&registry, &args.task_input)
+    } else {
+        Vec::new()
+    };
+
     let options = PreflightRunOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        workspace,
         task_input: args.task_input.clone(),
         check_history: args.check_history,
         check_tripwires: args.check_tripwires,
         dry_run: args.dry_run,
+        persist_run: true,
+        tripwire_sources,
         ..PreflightRunOptions::default()
     };
 
     match run_preflight(&options) {
         Ok(report) => write_preflight_run_report(cli, &report, stdout),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn guard_tripwire_sources_for_command(
+    registry: &PreflightGuardRegistry,
+    command: &str,
+) -> Vec<PreflightTripwireSource> {
+    registry
+        .match_command(command)
+        .into_iter()
+        .map(|rule| guard_rule_tripwire_source(rule, command))
+        .collect()
+}
+
+fn guard_rule_tripwire_source(rule: &PreflightGuardRule, command: &str) -> PreflightTripwireSource {
+    let halts = rule.action.stops_execution();
+    PreflightTripwireSource {
+        kind: PreflightTripwireSourceKind::DependencyContract,
+        source_id: format!("preflight_guard:{}", rule.id),
+        summary: format!(
+            "Preflight guard rule `{}` matched command `{}` from {}: {}",
+            rule.id,
+            command,
+            guard_rule_source_label(&rule.source),
+            rule.message
+        ),
+        score: if halts { 1.0 } else { 0.75 },
+        risk_category: RiskCategory::Compliance,
+        risk_level: if halts {
+            RiskLevel::Critical
+        } else {
+            RiskLevel::High
+        },
+        trigger_terms: vec![command.trim().to_lowercase()],
+        action: if halts {
+            TripwireAction::Halt
+        } else {
+            TripwireAction::Warn
+        },
+        tripwire_type: TripwireType::FileChange,
+    }
+}
+
+fn guard_rule_source_label(source: &RuleSource) -> String {
+    match source {
+        RuleSource::Builtin { name } => format!("builtin:{name}"),
+        RuleSource::WorkspaceFile { path } => format!("workspace_file:{path}"),
+        RuleSource::ProceduralRule { rule_id } => format!("procedural_rule:{rule_id}"),
+        RuleSource::Tripwire { tripwire_id } => format!("tripwire:{tripwire_id}"),
     }
 }
 
@@ -22760,6 +22827,92 @@ mod tests {
                 .as_str()
                 .is_some_and(|repair| repair.contains("pf_<uuid>")),
             "repair should describe preflight ID format",
+        )
+    }
+
+    #[test]
+    fn preflight_run_guard_match_generates_evidence_tripwire() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().to_string_lossy().into_owned();
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "--workspace",
+            workspace.as_str(),
+            "preflight",
+            "run",
+            "rm -rf /",
+        ]);
+
+        ensure_equal(&exit, &ProcessExitCode::Success, "preflight run exit")?;
+        ensure(stderr.is_empty(), "preflight JSON stderr clean")?;
+
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "response schema",
+        )?;
+        ensure_equal(
+            &value["data"]["risk_level"],
+            &serde_json::json!("critical"),
+            "guard-backed risk level",
+        )?;
+        ensure_equal(
+            &value["data"]["tripwires_set"],
+            &serde_json::json!(1),
+            "guard-backed tripwire count",
+        )?;
+        ensure_equal(
+            &value["data"]["evidence_ids"][0],
+            &serde_json::json!("preflight_guard:builtin:rm_rf_root"),
+            "guard evidence id",
+        )?;
+        ensure_equal(
+            &value["data"]["tripwires"][0]["source_kind"],
+            &serde_json::json!("dependency_contract"),
+            "guard source kind",
+        )?;
+        ensure_equal(
+            &value["data"]["tripwires"][0]["source_id"],
+            &serde_json::json!("preflight_guard:builtin:rm_rf_root"),
+            "guard source id",
+        )?;
+        ensure(
+            value["data"]["degraded"]
+                .as_array()
+                .is_some_and(Vec::is_empty),
+            "guard-backed run must not emit preflight_evidence_unavailable",
+        )?;
+
+        let run_id = value["data"]["run_id"]
+            .as_str()
+            .ok_or_else(|| "preflight run_id should be a string".to_owned())?;
+        let (show_exit, show_stdout, show_stderr) = invoke(&[
+            "ee",
+            "--json",
+            "--workspace",
+            workspace.as_str(),
+            "preflight",
+            "show",
+            run_id,
+        ]);
+        ensure_equal(
+            &show_exit,
+            &ProcessExitCode::Success,
+            "persisted preflight show exit",
+        )?;
+        ensure(
+            show_stderr.is_empty(),
+            "persisted preflight show JSON stderr clean",
+        )?;
+        let shown: serde_json::Value =
+            serde_json::from_str(&show_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &shown["data"]["tripwires"][0]["source_id"],
+            &serde_json::json!("preflight_guard:builtin:rm_rf_root"),
+            "persisted guard tripwire source id",
         )
     }
 

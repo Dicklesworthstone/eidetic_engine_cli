@@ -1,11 +1,24 @@
-# Project-specific RCH sync exclusions
+# Project-specific RCH sync exclusions.
 #
-# NOTE: RCH reads exclude patterns from ~/.config/rch/config.toml, not from
-# this file. This .rchignore documents the project's sync hygiene intent —
-# these patterns have been added to the global config's [transfer.exclude_patterns].
+# RCH reads this file for normal project upload and artifact retrieval. Keep
+# patterns narrow: this file must not hide source, fixtures, migrations, or
+# other inputs required for remote Cargo verification.
 #
-# These are generated artifacts that slow down remote compilation sync
-# without contributing to the build.
+# RCH's custom CARGO_TARGET_DIR pullback is rooted at the target directory, not
+# this repo root, so these rules do not suppress that separate artifact sync.
+# For verification-only runs, prefer:
+#
+#   env -u CARGO_TARGET_DIR rch exec -- cargo check --all-targets
+#
+# If artifacts must be pulled back, point CARGO_TARGET_DIR at disk-backed
+# storage such as ${TMPDIR:-/data/tmp}/rch_target_<task>, not /tmp.
+
+# Cargo/RCH build outputs. Remote verification does not need local build
+# artifacts copied back into this checkout.
+/target/
+/target/**
+/.rch-target/
+/.rch-target/**
 
 # Diagnostic output files created by verification scripts
 .clippy_out.txt

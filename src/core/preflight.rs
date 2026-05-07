@@ -9,7 +9,8 @@
 //! - **show**: Display details of a preflight run
 //! - **close**: Mark a preflight run as completed
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,12 @@ use crate::models::preflight::{
 
 /// Schema for preflight reports.
 pub const PREFLIGHT_REPORT_SCHEMA_V1: &str = "ee.preflight.report.v1";
+
+/// Schema for the lightweight project-local preflight run store.
+pub const PREFLIGHT_RUN_STORE_SCHEMA_V1: &str = "ee.preflight_run_store.v1";
+
+/// Location of persisted preflight runs, relative to the workspace root.
+pub const PREFLIGHT_RUN_STORE_RELATIVE_PATH: &str = ".ee/preflight_runs.json";
 
 /// Default minimum score for turning evidence into a tripwire.
 pub const DEFAULT_TRIPWIRE_SOURCE_SCORE: f64 = 0.5;
@@ -285,6 +292,8 @@ pub struct RunOptions {
     pub auto_clear_threshold: Option<RiskLevel>,
     /// Whether to run in dry-run mode.
     pub dry_run: bool,
+    /// Persist the completed run into the workspace-local preflight run store.
+    pub persist_run: bool,
     /// Evidence sources available for deterministic tripwire generation.
     pub tripwire_sources: Vec<TripwireSource>,
     /// Tripwire generation thresholds.
@@ -300,6 +309,7 @@ impl Default for RunOptions {
             check_tripwires: true,
             auto_clear_threshold: Some(RiskLevel::Medium),
             dry_run: false,
+            persist_run: false,
             tripwire_sources: Vec::new(),
             tripwire_generation: TripwireGenerationConfig::default(),
         }
@@ -615,6 +625,27 @@ impl CloseReport {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PreflightRunStoreDocument {
+    schema: String,
+    runs: Vec<StoredPreflightRun>,
+}
+
+impl Default for PreflightRunStoreDocument {
+    fn default() -> Self {
+        Self {
+            schema: PREFLIGHT_RUN_STORE_SCHEMA_V1.to_owned(),
+            runs: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredPreflightRun {
+    report: RunReport,
+    close_report: Option<CloseReport>,
+}
+
 /// Honest degraded-mode marker for preflight readiness contracts.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PreflightDegradation {
@@ -648,6 +679,116 @@ impl PreflightDegradation {
 
 fn generate_id() -> String {
     uuid::Uuid::now_v7().to_string()
+}
+
+/// Path for the workspace-local persisted preflight run store.
+#[must_use]
+pub fn preflight_run_store_path(workspace: &Path) -> PathBuf {
+    workspace.join(PREFLIGHT_RUN_STORE_RELATIVE_PATH)
+}
+
+fn read_preflight_run_store(store_path: &Path) -> Result<PreflightRunStoreDocument, DomainError> {
+    if !store_path.exists() {
+        return Ok(PreflightRunStoreDocument::default());
+    }
+
+    let text = fs::read_to_string(store_path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to read preflight run store `{}`: {error}",
+            store_path.display()
+        ),
+        repair: Some("Check workspace .ee permissions.".to_owned()),
+    })?;
+
+    let document: PreflightRunStoreDocument =
+        serde_json::from_str(&text).map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to parse preflight run store `{}`: {error}",
+                store_path.display()
+            ),
+            repair: Some("Repair or remove the malformed preflight run store.".to_owned()),
+        })?;
+
+    if document.schema == PREFLIGHT_RUN_STORE_SCHEMA_V1 {
+        Ok(document)
+    } else {
+        Err(DomainError::Storage {
+            message: format!(
+                "Unsupported preflight run store schema `{}` in `{}`.",
+                document.schema,
+                store_path.display()
+            ),
+            repair: Some(format!(
+                "Expected schema `{PREFLIGHT_RUN_STORE_SCHEMA_V1}`; migrate or rebuild the store."
+            )),
+        })
+    }
+}
+
+fn write_preflight_run_store(
+    store_path: &Path,
+    store: &mut PreflightRunStoreDocument,
+) -> Result<(), DomainError> {
+    if let Some(parent) = store_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to create preflight run store directory `{}`: {error}",
+                parent.display()
+            ),
+            repair: Some("Check workspace .ee permissions.".to_owned()),
+        })?;
+    }
+
+    store.runs.sort_by(|left, right| {
+        left.report
+            .started_at
+            .cmp(&right.report.started_at)
+            .then_with(|| left.report.run_id.cmp(&right.report.run_id))
+    });
+
+    let text = serde_json::to_string_pretty(store).map_err(|error| DomainError::Storage {
+        message: format!("Failed to serialize preflight run store: {error}"),
+        repair: Some("Report the invalid preflight run payload.".to_owned()),
+    })?;
+
+    fs::write(store_path, format!("{text}\n")).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to write preflight run store `{}`: {error}",
+            store_path.display()
+        ),
+        repair: Some("Check workspace .ee permissions.".to_owned()),
+    })
+}
+
+fn persist_preflight_run(workspace: &Path, report: &RunReport) -> Result<(), DomainError> {
+    let store_path = preflight_run_store_path(workspace);
+    let mut store = read_preflight_run_store(&store_path)?;
+    match store
+        .runs
+        .iter_mut()
+        .find(|stored| stored.report.run_id == report.run_id)
+    {
+        Some(stored) => stored.report = report.clone(),
+        None => store.runs.push(StoredPreflightRun {
+            report: report.clone(),
+            close_report: None,
+        }),
+    }
+    write_preflight_run_store(&store_path, &mut store)
+}
+
+fn preflight_run_view_from_report(report: &RunReport) -> PreflightRunView {
+    PreflightRunView {
+        id: report.run_id.clone(),
+        task_input: report.task_input.clone(),
+        status: report.status.clone(),
+        risk_level: report.risk_level.clone(),
+        cleared: report.cleared,
+        block_reason: report.block_reason.clone(),
+        started_at: report.started_at.clone(),
+        completed_at: report.completed_at.clone(),
+        duration_ms: None,
+    }
 }
 
 /// Generate deterministic tripwires from already-selected evidence sources.
@@ -904,19 +1045,69 @@ pub fn run_preflight(options: &RunOptions) -> Result<RunReport, DomainError> {
     report.status = PreflightStatus::Completed.as_str().to_owned();
     report.completed_at = Some(Utc::now().to_rfc3339());
 
+    if options.persist_run && !options.dry_run {
+        persist_preflight_run(&options.workspace, &report)?;
+    }
+
     Ok(report)
 }
 
 /// Show details of a preflight run.
 pub fn show_preflight(options: &ShowOptions) -> Result<ShowReport, DomainError> {
     validate_preflight_run_id(&options.run_id)?;
-    Err(preflight_run_not_found(&options.run_id))
+    let store_path = preflight_run_store_path(&options.workspace);
+    let store = read_preflight_run_store(&store_path)?;
+    let stored = store
+        .runs
+        .iter()
+        .find(|stored| stored.report.run_id == options.run_id)
+        .ok_or_else(|| preflight_run_not_found(&options.run_id))?;
+
+    let mut report = ShowReport::new(preflight_run_view_from_report(&stored.report));
+    if options.include_tripwires {
+        report.tripwires = stored.report.tripwires.clone();
+    }
+    report.degraded = stored.report.degraded.clone();
+    Ok(report)
 }
 
 /// Close a preflight run.
 pub fn close_preflight(options: &CloseOptions) -> Result<CloseReport, DomainError> {
     validate_preflight_run_id(&options.run_id)?;
-    Err(preflight_run_not_found(&options.run_id))
+    let store_path = preflight_run_store_path(&options.workspace);
+    let mut store = read_preflight_run_store(&store_path)?;
+    let stored = store
+        .runs
+        .iter_mut()
+        .find(|stored| stored.report.run_id == options.run_id)
+        .ok_or_else(|| preflight_run_not_found(&options.run_id))?;
+
+    let previous_status = stored
+        .report
+        .status
+        .parse::<PreflightStatus>()
+        .unwrap_or(PreflightStatus::Completed);
+    let mut report = CloseReport::new(options.run_id.clone(), previous_status);
+    report.cleared = options.cleared;
+    report.reason = options.reason.clone();
+    report.task_outcome = options
+        .task_outcome
+        .map(|outcome| outcome.as_str().to_owned());
+    report.dry_run = options.dry_run;
+
+    if !options.dry_run {
+        stored.report.cleared = options.cleared;
+        stored.report.block_reason = if options.cleared {
+            None
+        } else {
+            options.reason.clone()
+        };
+        stored.report.status = PreflightStatus::Completed.as_str().to_owned();
+        stored.close_report = Some(report.clone());
+        write_preflight_run_store(&store_path, &mut store)?;
+    }
+
+    Ok(report)
 }
 
 fn validate_preflight_run_id(run_id: &str) -> Result<(), DomainError> {
@@ -939,8 +1130,7 @@ fn preflight_run_not_found(run_id: &str) -> DomainError {
         resource: "preflight run".to_owned(),
         id: run_id.to_owned(),
         repair: Some(
-            "Persisted preflight run storage is not wired; run preflight with explicit evidence before show/close."
-                .to_owned(),
+            "Run `ee preflight run <task>` in the same workspace before show/close.".to_owned(),
         ),
     }
 }
@@ -1064,6 +1254,10 @@ mod tests {
         }
     }
 
+    fn temp_workspace() -> Result<tempfile::TempDir, String> {
+        tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))
+    }
+
     #[test]
     fn run_dry_run_completes_immediately() -> TestResult {
         let options = RunOptions {
@@ -1158,6 +1352,100 @@ mod tests {
             return Err("close should not invent a persisted preflight run".to_owned());
         };
         ensure(error.code(), "not_found", "error code")
+    }
+
+    #[test]
+    fn persisted_run_can_be_shown_with_tripwire_provenance() -> TestResult {
+        let workspace = temp_workspace()?;
+        let source = TripwireSource::dependency_contract(
+            "dep_forbidden_runtime",
+            "Forbidden runtime dependency must not be introduced",
+            true,
+            ["release"],
+        );
+        let run = run_preflight(&RunOptions {
+            workspace: workspace.path().to_path_buf(),
+            task_input: "prepare release".to_owned(),
+            persist_run: true,
+            tripwire_sources: vec![source],
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            preflight_run_store_path(workspace.path()).exists(),
+            true,
+            "run store exists",
+        )?;
+
+        let shown = show_preflight(&ShowOptions {
+            workspace: workspace.path().to_path_buf(),
+            run_id: run.run_id.clone(),
+            include_tripwires: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(shown.run.id, run.run_id, "shown run id")?;
+        ensure(shown.tripwires.len(), 1, "shown tripwire count")?;
+        ensure(
+            shown.tripwires[0].source_id.clone(),
+            Some("dep_forbidden_runtime".to_owned()),
+            "shown source id",
+        )?;
+        ensure(shown.degraded.is_empty(), true, "no degraded evidence")
+    }
+
+    #[test]
+    fn close_updates_persisted_run_state() -> TestResult {
+        let workspace = temp_workspace()?;
+        let source = TripwireSource::dependency_contract(
+            "dep_forbidden_runtime",
+            "Forbidden runtime dependency must not be introduced",
+            true,
+            ["release"],
+        );
+        let run = run_preflight(&RunOptions {
+            workspace: workspace.path().to_path_buf(),
+            task_input: "prepare release".to_owned(),
+            persist_run: true,
+            tripwire_sources: vec![source],
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        let close = close_preflight(&CloseOptions {
+            workspace: workspace.path().to_path_buf(),
+            run_id: run.run_id.clone(),
+            cleared: false,
+            reason: Some("manual review still required".to_owned()),
+            task_outcome: Some(TaskOutcome::Failure),
+            feedback_kind: Some(PreflightFeedbackKind::Missed),
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(close.run_id, run.run_id.clone(), "close run id")?;
+        ensure(close.cleared, false, "close cleared")?;
+        ensure(
+            close.task_outcome,
+            Some("failure".to_owned()),
+            "close task outcome",
+        )?;
+
+        let shown = show_preflight(&ShowOptions {
+            workspace: workspace.path().to_path_buf(),
+            run_id: run.run_id,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(shown.run.cleared, false, "stored cleared")?;
+        ensure(
+            shown.run.block_reason,
+            Some("manual review still required".to_owned()),
+            "stored close reason",
+        )
     }
 
     #[test]
