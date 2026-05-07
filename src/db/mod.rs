@@ -428,7 +428,11 @@ impl DbConnection {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let fkid = row.get(3).and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+            let fkid = row
+                .get(3)
+                .and_then(|v| v.as_i64())
+                .and_then(|v| u32::try_from(v).ok())
+                .unwrap_or(0);
 
             violations.push(ForeignKeyViolation {
                 table,
