@@ -541,8 +541,6 @@ fn appendix_c_agent_flow_parity_scenario() -> TestResult {
     let cass_sessions = run_cass_json(
         &[
             OsString::from("sessions"),
-            OsString::from("--workspace"),
-            OsString::from(workspace_arg.clone()),
             OsString::from("--json"),
             OsString::from("--data-dir"),
             OsString::from(cass_data_arg.clone()),
@@ -553,8 +551,14 @@ fn appendix_c_agent_flow_parity_scenario() -> TestResult {
         &envs,
         "discover Appendix C fixture session",
     )?;
+    let cass_session = json_array(&cass_sessions, "/sessions", "cass sessions")?
+        .iter()
+        .find(|session| {
+            session.get("path").and_then(JsonValue::as_str) == Some(session_arg.as_str())
+        })
+        .ok_or_else(|| format!("cass Appendix C session list did not include {session_arg}"))?;
     ensure_equal(
-        &cass_sessions.pointer("/sessions/0/path"),
+        &cass_session.get("path"),
         &Some(&json!(session_arg)),
         "cass Appendix C session path",
     )?;
