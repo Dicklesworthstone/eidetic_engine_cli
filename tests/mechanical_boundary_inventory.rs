@@ -202,7 +202,8 @@ const README_WORKFLOW_ROWS: &[(&str, &str, &str, &[&str])] = &[
             "diag dependencies",
             "diag graph",
             "diag integrity",
-            "diag quarantine",
+            "diag quarantine list",
+            "diag quarantine show",
             "diag streams",
             "eval run",
             "eval list",
@@ -349,7 +350,8 @@ const BASELINE_ACTUAL_COMMANDS: &[(&str, &[&str])] = &[
             "diag dependencies",
             "diag graph",
             "diag integrity",
-            "diag quarantine",
+            "diag quarantine list",
+            "diag quarantine show",
             "diag streams",
         ],
     ),
@@ -416,7 +418,7 @@ fn mechanical_boundary_inventory_covers_all_cli_command_paths() -> Result<(), St
     let commands = command_paths_from_extract_function(CLI_SOURCE)?;
     assert_eq!(
         commands.len(),
-        165,
+        186,
         "unexpected CLI command count; update the mechanical boundary inventory"
     );
 
