@@ -2,7 +2,8 @@
 
 **Status:** Accepted  
 **Date:** 2026-05-06  
-**Bead:** eidetic_engine_cli-jfd9
+**Bead:** eidetic_engine_cli-jfd9  
+**Migration:** V035_PLAN_RECIPES (src/db/mod.rs:3110)
 
 ## Context
 
@@ -80,7 +81,7 @@ Each recommendation includes:
 - Deterministic tie-breaking for stable golden tests
 
 ### Negative
-- Requires plan_recipes table migration (V033)
+- Requires plan_recipes table migration (V035)
 - Additional complexity in CLI output formatting
 
 ### Verification
