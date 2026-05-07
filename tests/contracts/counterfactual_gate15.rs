@@ -191,20 +191,18 @@ fn capture_report_includes_workspace() -> TestResult {
 }
 
 #[test]
-fn capture_non_dry_run_reports_unavailable_store_without_episode_hash() -> TestResult {
+fn capture_non_dry_run_stores_frozen_episode_for_existing_workspace() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
     let options = CaptureOptions {
-        workspace: PathBuf::from("."),
+        workspace: tempdir.path().to_path_buf(),
         dry_run: false,
         ..Default::default()
     };
 
     let report = capture_episode(&options).map_err(|e| e.message())?;
 
-    ensure(!report.stored, "capture does not claim persisted storage")?;
-    ensure(
-        report.episode_hash.is_none(),
-        "episode hash is absent until a frozen episode is stored",
-    )?;
+    ensure(report.stored, "capture stores frozen episode inputs")?;
+    ensure(report.episode_hash.is_some(), "episode hash is present")?;
     ensure(report.pack_hash.is_some(), "pack hash preview is present")
 }
 
@@ -467,6 +465,58 @@ fn replay_non_dry_run_reports_missing_frozen_inputs() -> TestResult {
             .contains(&"frozen episode manifest".to_string()),
         "missing inputs identify the episode manifest",
     )
+}
+
+#[test]
+fn replay_reads_frozen_episode_artifact_created_by_capture() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let capture = capture_episode(&CaptureOptions {
+        workspace: tempdir.path().to_path_buf(),
+        session_id: Some("session_replay_contract".to_string()),
+        task_input: Some("prepare release with frozen context".to_string()),
+        dry_run: false,
+        ..Default::default()
+    })
+    .map_err(|error| error.message())?;
+
+    ensure(capture.stored, "capture stores frozen episode artifact")?;
+    ensure(
+        capture.episode_hash.is_some(),
+        "capture records a frozen episode hash",
+    )?;
+
+    let replay = replay_episode(&ReplayOptions {
+        workspace: tempdir.path().to_path_buf(),
+        episode_id: capture.episode_id,
+        verify_hash: true,
+        record_trace: true,
+        dry_run: false,
+    })
+    .map_err(|error| error.message())?;
+
+    ensure(
+        replay.status == ReplayStatus::Replayed,
+        "replay status is replayed when frozen inputs exist",
+    )?;
+    ensure(replay.frozen_inputs, "frozen inputs are available")?;
+    ensure(
+        replay.replay_evidence_available,
+        "replay evidence is available",
+    )?;
+    ensure(
+        replay.missing_frozen_inputs.is_empty(),
+        "no frozen input gaps remain",
+    )?;
+    ensure(replay.episode_hash_verified, "episode hash verifies")?;
+
+    let json = render_lab_replay_json(&replay);
+    ensure_contains(&json, "\"frozenInputs\":true", "frozen inputs rendered")?;
+    ensure_contains(
+        &json,
+        "\"replayEvidenceAvailable\":true",
+        "replay evidence rendered",
+    )?;
+    ensure_contains(&json, "\"status\":\"replayed\"", "status rendered")
 }
 
 #[test]

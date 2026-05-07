@@ -9,7 +9,11 @@
 //! - **replay**: Read frozen episode inputs, or report exactly what is missing
 //! - **counterfactual**: Emit pack-diff hypotheses that require external validation
 
-use std::path::PathBuf;
+use std::{
+    fs::{self, OpenOptions},
+    io::{ErrorKind, Write},
+    path::{Path, PathBuf},
+};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -28,6 +32,7 @@ pub const LAB_COUNTERFACTUAL_SCHEMA_V1: &str = "ee.lab.counterfactual.v1";
 /// Schema for lab reconstruct report.
 pub const LAB_RECONSTRUCT_SCHEMA_V1: &str = "ee.lab.reconstruct.v1";
 
+const FROZEN_EPISODE_SCHEMA_V1: &str = "ee.lab.frozen_episode.v1";
 const LAB_REPLAY_UNAVAILABLE_CODE: &str = "lab_replay_unavailable";
 const HYPOTHESIS_RECORD_ID_PREFIX: &str = "hyprec_";
 
@@ -488,6 +493,44 @@ impl HypothesisRecord {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct FrozenEpisodeArtifact {
+    schema: String,
+    episode_id: String,
+    session_id: Option<String>,
+    task_input: String,
+    pack_hash: Option<String>,
+    policy_ids: Vec<String>,
+    outcome_ref: Option<String>,
+    repository_fingerprint: Option<String>,
+    evidence_ids: Vec<String>,
+    memories_captured: usize,
+    actions_captured: usize,
+    episode_hash: String,
+    captured_at: String,
+}
+
+impl FrozenEpisodeArtifact {
+    fn from_capture(report: &CaptureReport) -> Self {
+        let episode_hash = frozen_episode_hash(report);
+        Self {
+            schema: FROZEN_EPISODE_SCHEMA_V1.to_owned(),
+            episode_id: report.episode_id.clone(),
+            session_id: report.session_id.clone(),
+            task_input: report.task_input.clone(),
+            pack_hash: report.pack_hash.clone(),
+            policy_ids: report.policy_ids.clone(),
+            outcome_ref: report.outcome_ref.clone(),
+            repository_fingerprint: report.repository_fingerprint.clone(),
+            evidence_ids: report.evidence_ids.clone(),
+            memories_captured: report.memories_captured,
+            actions_captured: report.actions_captured,
+            episode_hash,
+            captured_at: report.captured_at.clone(),
+        }
+    }
+}
+
 /// Capture a task episode.
 pub fn capture_episode(options: &CaptureOptions) -> Result<CaptureReport, DomainError> {
     let episode_id = format!("{}{}", EPISODE_ID_PREFIX, generate_id());
@@ -522,6 +565,10 @@ pub fn capture_episode(options: &CaptureOptions) -> Result<CaptureReport, Domain
     }
     if options.include_actions {
         report.actions_captured = 0;
+    }
+
+    if !options.dry_run {
+        maybe_store_frozen_episode(&mut report, &options.workspace)?;
     }
 
     Ok(report)
@@ -614,6 +661,33 @@ pub fn replay_episode(options: &ReplayOptions) -> Result<ReplayReport, DomainErr
     let replay_id = format!("rpl_{}", generate_id());
     let mut report = ReplayReport::new(options.episode_id.clone(), replay_id);
     report.dry_run = options.dry_run;
+
+    if let Some(artifact) = read_frozen_episode(&options.workspace, &options.episode_id)? {
+        report.status = ReplayStatus::Replayed;
+        report.frozen_inputs = true;
+        report.replay_evidence_available = true;
+        report.missing_frozen_inputs = Vec::new();
+        report.mutable_current_state_access = Vec::new();
+        let episode_hash_matches = artifact.episode_hash == frozen_episode_artifact_hash(&artifact);
+        report.episode_hash_verified = options.verify_hash && episode_hash_matches;
+        report.memories_retrieved = artifact.memories_captured;
+        report.actions_replayed = if options.record_trace {
+            artifact.actions_captured
+        } else {
+            0
+        };
+        if options.dry_run {
+            report.add_warning(
+                "dry_run: frozen episode inputs were found but no replay trace was written",
+            );
+        }
+        if options.verify_hash && !episode_hash_matches {
+            report.status = ReplayStatus::Diverged;
+            report.add_warning("frozen episode hash did not match captured inputs");
+        }
+        return Ok(report);
+    }
+
     report.frozen_inputs = false;
     report.replay_evidence_available = false;
     report.missing_frozen_inputs = vec![
@@ -637,6 +711,157 @@ pub fn replay_episode(options: &ReplayOptions) -> Result<ReplayReport, DomainErr
     }
 
     Ok(report)
+}
+
+fn maybe_store_frozen_episode(
+    report: &mut CaptureReport,
+    workspace: &Path,
+) -> Result<(), DomainError> {
+    if !workspace.exists() {
+        return Ok(());
+    }
+    let artifact = FrozenEpisodeArtifact::from_capture(report);
+    let artifact_path = frozen_episode_path(workspace, &report.episode_id);
+    let Some(parent) = artifact_path.parent() else {
+        return Err(lab_storage_error_message(
+            "resolve frozen episode artifact directory",
+            "artifact path has no parent",
+        ));
+    };
+    ensure_no_lab_symlink_components(workspace, parent)?;
+    fs::create_dir_all(parent)
+        .map_err(|error| lab_storage_error("create frozen episode directory", error))?;
+    let bytes = serde_json::to_vec_pretty(&artifact).map_err(|error| {
+        lab_storage_error_message("serialize frozen episode artifact", error.to_string())
+    })?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&artifact_path)
+        .map_err(|error| lab_storage_error("create frozen episode artifact", error))?;
+    file.write_all(&bytes)
+        .map_err(|error| lab_storage_error("write frozen episode artifact", error))?;
+    file.write_all(b"\n")
+        .map_err(|error| lab_storage_error("finish frozen episode artifact", error))?;
+    file.flush()
+        .map_err(|error| lab_storage_error("flush frozen episode artifact", error))?;
+    report.episode_hash = Some(artifact.episode_hash);
+    report.stored = true;
+    Ok(())
+}
+
+fn read_frozen_episode(
+    workspace: &Path,
+    episode_id: &str,
+) -> Result<Option<FrozenEpisodeArtifact>, DomainError> {
+    let path = frozen_episode_path(workspace, episode_id);
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(lab_storage_error("read frozen episode artifact", error)),
+    };
+    let artifact: FrozenEpisodeArtifact = serde_json::from_str(&text).map_err(|error| {
+        lab_storage_error_message("parse frozen episode artifact", error.to_string())
+    })?;
+    if artifact.schema != FROZEN_EPISODE_SCHEMA_V1 || artifact.episode_id != episode_id {
+        return Err(lab_storage_error_message(
+            "validate frozen episode artifact",
+            "artifact schema or episode ID did not match requested replay",
+        ));
+    }
+    Ok(Some(artifact))
+}
+
+fn frozen_episode_path(workspace: &Path, episode_id: &str) -> PathBuf {
+    workspace
+        .join(".ee")
+        .join("lab")
+        .join("episodes")
+        .join(safe_episode_file_name(episode_id))
+}
+
+fn ensure_no_lab_symlink_components(
+    workspace: &Path,
+    artifact_dir: &Path,
+) -> Result<(), DomainError> {
+    for path in [
+        workspace.join(".ee"),
+        workspace.join(".ee").join("lab"),
+        artifact_dir.to_path_buf(),
+    ] {
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(lab_storage_error_message(
+                    "validate frozen episode artifact path",
+                    format!("refusing to write through symlink {}", path.display()),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(lab_storage_error(
+                    "inspect frozen episode artifact path",
+                    error,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn safe_episode_file_name(episode_id: &str) -> String {
+    if !episode_id.is_empty()
+        && episode_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        format!("{episode_id}.json")
+    } else {
+        format!("episode_{}.json", hash_content(episode_id.as_bytes()))
+    }
+}
+
+fn frozen_episode_hash(report: &CaptureReport) -> String {
+    hash_content(
+        format!(
+            "{}\n{}\n{:?}\n{:?}\n{:?}\n{}\n{}",
+            report.episode_id,
+            report.task_input,
+            report.pack_hash,
+            report.policy_ids,
+            report.evidence_ids,
+            report.memories_captured,
+            report.actions_captured,
+        )
+        .as_bytes(),
+    )
+}
+
+fn frozen_episode_artifact_hash(artifact: &FrozenEpisodeArtifact) -> String {
+    hash_content(
+        format!(
+            "{}\n{}\n{:?}\n{:?}\n{:?}\n{}\n{}",
+            artifact.episode_id,
+            artifact.task_input,
+            artifact.pack_hash,
+            artifact.policy_ids,
+            artifact.evidence_ids,
+            artifact.memories_captured,
+            artifact.actions_captured,
+        )
+        .as_bytes(),
+    )
+}
+
+fn lab_storage_error(context: &str, error: std::io::Error) -> DomainError {
+    lab_storage_error_message(context, error.to_string())
+}
+
+fn lab_storage_error_message(context: &str, message: impl Into<String>) -> DomainError {
+    DomainError::Storage {
+        message: format!("{context}: {}", message.into()),
+        repair: Some("Check workspace .ee/lab permissions and retry.".to_owned()),
+    }
 }
 
 /// Run counterfactual analysis on an episode.
@@ -1027,6 +1252,51 @@ mod tests {
             true,
             "episode_id prefix",
         )
+    }
+
+    #[test]
+    fn capture_persists_frozen_episode_and_replay_reads_it() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let options = CaptureOptions {
+            workspace: tempdir.path().to_path_buf(),
+            session_id: Some("session_lab".to_string()),
+            task_input: Some("fix release regression".to_string()),
+            dry_run: false,
+            ..Default::default()
+        };
+
+        let capture = capture_episode(&options).map_err(|error| error.message())?;
+
+        ensure(capture.stored, true, "capture stored")?;
+        ensure(capture.episode_hash.is_some(), true, "capture episode hash")?;
+        ensure(
+            frozen_episode_path(tempdir.path(), &capture.episode_id).exists(),
+            true,
+            "frozen episode artifact exists",
+        )?;
+
+        let replay = replay_episode(&ReplayOptions {
+            workspace: tempdir.path().to_path_buf(),
+            episode_id: capture.episode_id,
+            verify_hash: true,
+            record_trace: true,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(replay.status, ReplayStatus::Replayed, "replay status")?;
+        ensure(replay.frozen_inputs, true, "frozen inputs")?;
+        ensure(
+            replay.replay_evidence_available,
+            true,
+            "replay evidence available",
+        )?;
+        ensure(
+            replay.missing_frozen_inputs.is_empty(),
+            true,
+            "missing frozen inputs",
+        )?;
+        ensure(replay.episode_hash_verified, true, "episode hash verified")
     }
 
     #[test]
