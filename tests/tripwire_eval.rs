@@ -1,6 +1,8 @@
 //! Integration tests for the tripwire event-payload evaluator and
 //! harm-feedback → tripwire candidate promotion path (eidetic_engine_cli-2mad).
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::path::PathBuf;
 
 use ee::core::tripwire::{

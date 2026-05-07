@@ -6811,7 +6811,7 @@ pub fn render_plan_recommend_json(report: &PlanRecommendReport) -> String {
 pub fn render_plan_recommend_human(report: &PlanRecommendReport) -> String {
     let mut out = String::with_capacity(1024);
     out.push_str(&format!("Plan Recommendations for: {}\n", report.task));
-    out.push_str(&format!("==========================\n\n"));
+    out.push_str("==========================\n\n");
     out.push_str(&format!(
         "Considered {} recipes, found {} matches\n\n",
         report.total_recipes_considered, report.matches_found
@@ -6888,7 +6888,7 @@ pub fn render_plan_explain_human(report: &PlanExplainReport) -> String {
         report.recipe_name.as_deref().unwrap_or("unknown"),
         report.recipe_id
     ));
-    out.push_str(&format!("========================\n\n"));
+    out.push_str("========================\n\n");
     if let Some(ref category) = report.category {
         out.push_str(&format!("Category: {}\n", category));
     }

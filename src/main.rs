@@ -126,6 +126,7 @@ fn main() -> ExitCode {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};

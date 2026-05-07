@@ -31,9 +31,10 @@ use chrono::{Duration, Utc};
 use serde::Serialize;
 
 use crate::db::{
-    AuditedFeedbackEventInput, CreateAuditInput, CreateFeedbackEventInput,
-    CreateFeedbackQuarantineInput, DbConnection, FeedbackCounts, StoredFeedbackEvent,
-    StoredFeedbackQuarantine, audit_actions, feedback_scoring, generate_audit_id,
+    ApplyProcedureFeedbackInput, AuditedFeedbackEventInput, CreateAuditInput,
+    CreateFeedbackEventInput, CreateFeedbackQuarantineInput, DbConnection, FeedbackCounts,
+    StoredFeedbackEvent, StoredFeedbackQuarantine, audit_actions, feedback_scoring,
+    generate_audit_id,
 };
 use crate::models::{DomainError, ProcessExitCode};
 
@@ -843,16 +844,16 @@ pub fn record_outcome(
 
     if target_type == "procedure" {
         connection
-            .apply_procedure_feedback(
-                &target.workspace_id,
-                &target_id,
-                &signal,
+            .apply_procedure_feedback(ApplyProcedureFeedbackInput {
+                workspace_id: &target.workspace_id,
+                procedure_id: &target_id,
+                signal: &signal,
                 weight,
-                3,
-                &procedure_event_id_for_feedback(&event_id),
-                feedback_input.reason.as_deref(),
-                options.actor.as_deref(),
-            )
+                auto_retire_harmful_threshold: 3,
+                event_id: &procedure_event_id_for_feedback(&event_id),
+                reason: feedback_input.reason.as_deref(),
+                actor: options.actor.as_deref(),
+            })
             .map_err(|error| DomainError::Storage {
                 message: format!("Failed to update procedure feedback score: {error}"),
                 repair: Some("ee procedure show <id> --json".to_string()),

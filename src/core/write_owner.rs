@@ -786,6 +786,8 @@ impl fmt::Display for WriteSpoolBackpressureError {
 
 impl std::error::Error for WriteSpoolBackpressureError {}
 
+type WriteSpoolBackpressureResult<T> = Result<T, Box<WriteSpoolBackpressureError>>;
+
 /// Last failed write metadata for status/support bundles.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -951,17 +953,17 @@ impl WriteSpool {
         &mut self,
         intent: WriteSpoolIntent,
         now_ms: u64,
-    ) -> Result<WriteSpoolTicket, WriteSpoolBackpressureError> {
+    ) -> WriteSpoolBackpressureResult<WriteSpoolTicket> {
         if let Some(request_id) = self.idempotency.get(&intent.idempotency_key).copied() {
-            let record = self
-                .record(request_id)
-                .expect("idempotency index must point at a record");
-            return Ok(WriteSpoolTicket {
-                request_id,
-                idempotency_key: record.idempotency_key.clone(),
-                duplicate: true,
-                status: record.status,
-            });
+            if let Some(record) = self.record(request_id) {
+                return Ok(WriteSpoolTicket {
+                    request_id,
+                    idempotency_key: record.idempotency_key.clone(),
+                    duplicate: true,
+                    status: record.status,
+                });
+            }
+            self.idempotency.remove(&intent.idempotency_key);
         }
 
         self.ensure_accepting(intent.payload_bytes, now_ms)?;
@@ -989,11 +991,12 @@ impl WriteSpool {
     /// Drain the next FIFO-compatible batch.
     #[must_use]
     pub fn next_batch(&mut self) -> Option<WriteSpoolBatch> {
-        let first_id = self.pending_order.pop_front()?;
-        let first = self
-            .record(first_id)
-            .expect("pending queue must reference an existing record")
-            .clone();
+        let (first_id, first) = loop {
+            let first_id = self.pending_order.pop_front()?;
+            if let Some(record) = self.record(first_id) {
+                break (first_id, record.clone());
+            }
+        };
         let key = first.batch_key();
         let mut selected = vec![first_id];
 
@@ -1017,28 +1020,34 @@ impl WriteSpool {
         self.next_batch_id = self.next_batch_id.saturating_add(1);
 
         let mut audit_subjects = Vec::with_capacity(selected.len());
+        let mut request_ids = Vec::with_capacity(selected.len());
         for request_id in &selected {
             let (payload_bytes, audit_subject) = {
-                let record = self
-                    .record_mut(*request_id)
-                    .expect("selected request must reference an existing record");
+                let Some(record) = self.record_mut(*request_id) else {
+                    continue;
+                };
                 record.batch_id = Some(batch_id);
                 (record.payload_bytes, record.audit_subject.clone())
             };
             self.pending_bytes = self.pending_bytes.saturating_sub(payload_bytes);
+            request_ids.push(*request_id);
             audit_subjects.push(audit_subject);
+        }
+        if request_ids.is_empty() {
+            return None;
         }
 
         self.stats.total_batches = self.stats.total_batches.saturating_add(1);
-        self.stats.last_batch_size = selected.len();
-        self.stats.max_batch_size_observed = self.stats.max_batch_size_observed.max(selected.len());
+        self.stats.last_batch_size = request_ids.len();
+        self.stats.max_batch_size_observed =
+            self.stats.max_batch_size_observed.max(request_ids.len());
 
         Some(WriteSpoolBatch {
             batch_id,
             workspace_id: key.workspace_id,
             kind: key.kind,
             durability: key.durability,
-            request_ids: selected,
+            request_ids,
             audit_subjects,
             audit_row_id: format!("audit_batch_{batch_id:016}"),
             job_row_id: format!("job_batch_{batch_id:016}"),
@@ -1170,31 +1179,31 @@ impl WriteSpool {
         &self,
         additional_bytes: usize,
         now_ms: u64,
-    ) -> Result<(), WriteSpoolBackpressureError> {
+    ) -> WriteSpoolBackpressureResult<()> {
         let status = self.status(now_ms);
         if status.queue_depth >= self.config.max_pending {
-            return Err(WriteSpoolBackpressureError::new(
+            return Err(Box::new(WriteSpoolBackpressureError::new(
                 WriteSpoolBackpressureReason::QueueDepth,
                 &status,
                 &self.config,
-            ));
+            )));
         }
         if self.pending_bytes.saturating_add(additional_bytes) > self.config.max_pending_bytes {
-            return Err(WriteSpoolBackpressureError::new(
+            return Err(Box::new(WriteSpoolBackpressureError::new(
                 WriteSpoolBackpressureReason::PendingBytes,
                 &status,
                 &self.config,
-            ));
+            )));
         }
         if status
             .oldest_queued_age_ms
             .is_some_and(|age_ms| age_ms > self.config.max_queue_age_ms)
         {
-            return Err(WriteSpoolBackpressureError::new(
+            return Err(Box::new(WriteSpoolBackpressureError::new(
                 WriteSpoolBackpressureReason::QueueTimeout,
                 &status,
                 &self.config,
-            ));
+            )));
         }
         Ok(())
     }
@@ -1208,6 +1217,7 @@ impl WriteSpool {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -1521,7 +1531,7 @@ mod tests {
     #[test]
     fn write_spool_lab_runtime_cancellation_is_recoverable() -> Result<(), String> {
         let runtime = asupersync::LabRuntime::new(asupersync::LabConfig::new(42));
-        let now_ms = (runtime.now().as_nanos() / 1_000_000) as u64;
+        let now_ms = runtime.now().as_nanos() / 1_000_000;
         let mut spool = WriteSpool::new(WriteSpoolConfig::new(4, 2, 1024, 10_000), now_ms);
         let ticket = spool
             .enqueue(
@@ -1556,7 +1566,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
 
         runtime.advance_time(6_000_000);
-        let now_ms = (runtime.now().as_nanos() / 1_000_000) as u64;
+        let now_ms = runtime.now().as_nanos() / 1_000_000;
         let err = spool
             .enqueue(
                 WriteSpoolIntent::new(WriteSpoolIntentKind::Recorder, "workspace", "blocked", 32),
@@ -1571,7 +1581,7 @@ mod tests {
     #[test]
     fn write_spool_lab_runtime_pending_bytes_backpressure() -> Result<(), String> {
         let runtime = asupersync::LabRuntime::new(asupersync::LabConfig::new(44));
-        let now_ms = (runtime.now().as_nanos() / 1_000_000) as u64;
+        let now_ms = runtime.now().as_nanos() / 1_000_000;
         let mut spool = WriteSpool::new(WriteSpoolConfig::new(4, 2, 64, 10_000), now_ms);
         spool
             .enqueue(

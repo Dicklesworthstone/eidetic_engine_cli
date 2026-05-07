@@ -5,6 +5,8 @@
 //! and `finish_and_persist_recording` against an in-memory FrankenSQLite
 //! database with the full migration set applied.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use ee::core::recorder::{
     RecorderEventOptions, RecorderEventsListOptions, RecorderFinishOptions, RecorderStartOptions,
     finish_and_persist_recording, list_recorder_events, record_and_persist_event,

@@ -20974,6 +20974,7 @@ fn render_tripwire_check_human(report: &crate::core::tripwire::CheckReport) -> S
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use std::ffi::OsString;
     use std::fmt::Debug;
@@ -22682,6 +22683,7 @@ mod tests {
         )
     }
 
+    #[allow(dead_code)]
     fn assert_situation_unavailable(
         exit: ProcessExitCode,
         stdout: &str,
@@ -22727,7 +22729,7 @@ mod tests {
     }
 
     #[test]
-    fn situation_classify_json_reports_unavailable_instead_of_routing_golden() -> TestResult {
+    fn situation_classify_json_returns_classification_result() -> TestResult {
         let (exit, stdout, stderr) = invoke(&[
             "ee",
             "--json",
@@ -22736,7 +22738,19 @@ mod tests {
             "fix failing release workflow",
         ]);
 
-        assert_situation_unavailable(exit, &stdout, &stderr, "situation classify")
+        ensure_equal(&exit, &ProcessExitCode::Success, "situation classify exit")?;
+        ensure(stderr.is_empty(), "situation JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(&value["success"], &serde_json::json!(true), "success flag")?;
+        ensure(
+            value["data"]["category"].is_string(),
+            "classification has category",
+        )?;
+        ensure(
+            value["data"]["confidence"].is_string(),
+            "classification has confidence",
+        )
     }
 
     #[test]
@@ -22791,7 +22805,7 @@ mod tests {
     }
 
     #[test]
-    fn situation_compare_json_reports_unavailable_after_dry_run_guard() -> TestResult {
+    fn situation_compare_json_returns_comparison_result() -> TestResult {
         let (exit, stdout, stderr) = invoke(&[
             "ee",
             "--json",
@@ -22808,11 +22822,19 @@ mod tests {
             "--dry-run",
         ]);
 
-        assert_situation_unavailable(exit, &stdout, &stderr, "situation compare")
+        ensure_equal(&exit, &ProcessExitCode::Success, "situation compare exit")?;
+        ensure(stderr.is_empty(), "situation JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(&value["success"], &serde_json::json!(true), "success flag")?;
+        ensure(
+            value["data"]["relation"].is_string(),
+            "comparison has relation",
+        )
     }
 
     #[test]
-    fn situation_link_dry_run_json_reports_unavailable_after_dry_run_guard() -> TestResult {
+    fn situation_link_dry_run_json_returns_link_plan() -> TestResult {
         let (exit, stdout, stderr) = invoke(&[
             "ee",
             "--json",
@@ -22831,7 +22853,15 @@ mod tests {
             "--dry-run",
         ]);
 
-        assert_situation_unavailable(exit, &stdout, &stderr, "situation link")
+        ensure_equal(&exit, &ProcessExitCode::Success, "situation link exit")?;
+        ensure(stderr.is_empty(), "situation JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(&value["success"], &serde_json::json!(true), "success flag")?;
+        ensure(
+            value["data"]["wouldWrite"].is_boolean(),
+            "link plan has wouldWrite",
+        )
     }
 
     #[test]

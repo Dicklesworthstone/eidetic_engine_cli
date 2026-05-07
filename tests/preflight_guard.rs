@@ -5,6 +5,8 @@
 //! compilable even when other agents' in-flight changes break unrelated
 //! `#[cfg(test)]` blocks elsewhere in the crate.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::path::PathBuf;
 
 use ee::core::preflight_guard::{

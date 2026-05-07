@@ -5773,6 +5773,31 @@ pub struct ProcedureFeedbackUpdate {
     pub auto_retired: bool,
 }
 
+/// Input for promoting a persisted procedure and recording the event.
+#[derive(Debug, Clone, Copy)]
+pub struct PromoteProcedureRecordInput<'a> {
+    pub workspace_id: &'a str,
+    pub procedure_id: &'a str,
+    pub to_maturity: &'a str,
+    pub event_id: &'a str,
+    pub reason: Option<&'a str>,
+    pub actor: Option<&'a str>,
+    pub evidence_uris: &'a [String],
+}
+
+/// Input for applying one outcome feedback signal to a persisted procedure.
+#[derive(Debug, Clone, Copy)]
+pub struct ApplyProcedureFeedbackInput<'a> {
+    pub workspace_id: &'a str,
+    pub procedure_id: &'a str,
+    pub signal: &'a str,
+    pub weight: f32,
+    pub auto_retire_harmful_threshold: u32,
+    pub event_id: &'a str,
+    pub reason: Option<&'a str>,
+    pub actor: Option<&'a str>,
+}
+
 /// Input for recording a quarantined harmful feedback event.
 #[derive(Debug, Clone)]
 pub struct CreateFeedbackQuarantineInput {
@@ -6089,20 +6114,14 @@ impl DbConnection {
     /// Promote a persisted procedure and record a history event atomically.
     pub fn promote_procedure_record(
         &self,
-        workspace_id: &str,
-        procedure_id: &str,
-        to_maturity: &str,
-        event_id: &str,
-        reason: Option<&str>,
-        actor: Option<&str>,
-        evidence_uris: &[String],
+        input: PromoteProcedureRecordInput<'_>,
     ) -> Result<Option<StoredProcedureEvent>> {
         self.with_transaction(|| {
-            let Some(before) = self.get_procedure(workspace_id, procedure_id)? else {
+            let Some(before) = self.get_procedure(input.workspace_id, input.procedure_id)? else {
                 return Ok(None);
             };
             let now = Utc::now().to_rfc3339();
-            let last_validated_at = if matches!(to_maturity, "validated" | "mature") {
+            let last_validated_at = if matches!(input.to_maturity, "validated" | "mature") {
                 Value::Text(now.clone())
             } else {
                 Value::Null
@@ -6111,27 +6130,27 @@ impl DbConnection {
                 DbOperation::Execute,
                 "UPDATE procedures SET maturity = ?1, updated_at = ?2, last_promoted_at = ?2, last_validated_at = COALESCE(?3, last_validated_at), retired_at = NULL, retire_reason = NULL WHERE workspace_id = ?4 AND id = ?5",
                 &[
-                    Value::Text(to_maturity.to_string()),
+                    Value::Text(input.to_maturity.to_string()),
                     Value::Text(now.clone()),
                     last_validated_at,
-                    Value::Text(workspace_id.to_string()),
-                    Value::Text(procedure_id.to_string()),
+                    Value::Text(input.workspace_id.to_string()),
+                    Value::Text(input.procedure_id.to_string()),
                 ],
             )?;
             if affected == 0 {
                 return Ok(None);
             }
             self.insert_procedure_event(
-                event_id,
+                input.event_id,
                 &CreateProcedureEventInput {
-                    workspace_id: workspace_id.to_string(),
-                    procedure_id: procedure_id.to_string(),
+                    workspace_id: input.workspace_id.to_string(),
+                    procedure_id: input.procedure_id.to_string(),
                     event_type: "promoted".to_owned(),
                     from_maturity: Some(before.maturity),
-                    to_maturity: Some(to_maturity.to_string()),
-                    reason: reason.map(str::to_owned),
-                    evidence_uris: evidence_uris.to_vec(),
-                    actor: actor.map(str::to_owned),
+                    to_maturity: Some(input.to_maturity.to_string()),
+                    reason: input.reason.map(str::to_owned),
+                    evidence_uris: input.evidence_uris.to_vec(),
+                    actor: input.actor.map(str::to_owned),
                     created_at: Some(now),
                 },
             )
@@ -6187,21 +6206,17 @@ impl DbConnection {
     /// Apply one feedback signal to a procedure and optionally auto-retire it.
     pub fn apply_procedure_feedback(
         &self,
-        workspace_id: &str,
-        procedure_id: &str,
-        signal: &str,
-        weight: f32,
-        auto_retire_harmful_threshold: u32,
-        event_id: &str,
-        reason: Option<&str>,
-        actor: Option<&str>,
+        input: ApplyProcedureFeedbackInput<'_>,
     ) -> Result<Option<ProcedureFeedbackUpdate>> {
         self.with_transaction(|| {
-            let Some(before) = self.get_procedure(workspace_id, procedure_id)? else {
+            let Some(before) = self.get_procedure(input.workspace_id, input.procedure_id)? else {
                 return Ok(None);
             };
-            let helpful = matches!(signal, "helpful" | "positive" | "confirmation");
-            let harmful = matches!(signal, "harmful" | "negative" | "contradiction" | "inaccurate");
+            let helpful = matches!(input.signal, "helpful" | "positive" | "confirmation");
+            let harmful = matches!(
+                input.signal,
+                "harmful" | "negative" | "contradiction" | "inaccurate"
+            );
             if !helpful && !harmful {
                 return Ok(None);
             }
@@ -6213,16 +6228,16 @@ impl DbConnection {
             let mut confidence = before.confidence;
             if helpful {
                 helpful_count = helpful_count.saturating_add(1);
-                utility = (utility + 0.08 * weight).clamp(0.0, 1.0);
-                confidence = (confidence + 0.04 * weight).clamp(0.0, 1.0);
+                utility = (utility + 0.08 * input.weight).clamp(0.0, 1.0);
+                confidence = (confidence + 0.04 * input.weight).clamp(0.0, 1.0);
             }
             if harmful {
                 harmful_count = harmful_count.saturating_add(1);
-                utility = (utility - 0.12 * weight).clamp(0.0, 1.0);
-                confidence = (confidence - 0.10 * weight).clamp(0.0, 1.0);
+                utility = (utility - 0.12 * input.weight).clamp(0.0, 1.0);
+                confidence = (confidence - 0.10 * input.weight).clamp(0.0, 1.0);
             }
             let auto_retired = harmful
-                && harmful_count >= auto_retire_harmful_threshold
+                && harmful_count >= input.auto_retire_harmful_threshold
                 && before.maturity != "retired";
             let next_maturity = if auto_retired {
                 "retired".to_owned()
@@ -6249,18 +6264,18 @@ impl DbConnection {
                     retire_reason
                         .as_ref()
                         .map_or(Value::Null, |value| Value::Text(value.clone())),
-                    Value::Text(workspace_id.to_string()),
-                    Value::Text(procedure_id.to_string()),
+                    Value::Text(input.workspace_id.to_string()),
+                    Value::Text(input.procedure_id.to_string()),
                 ],
             )?;
             if affected == 0 {
                 return Ok(None);
             }
             let event = self.insert_procedure_event(
-                event_id,
+                input.event_id,
                 &CreateProcedureEventInput {
-                    workspace_id: workspace_id.to_string(),
-                    procedure_id: procedure_id.to_string(),
+                    workspace_id: input.workspace_id.to_string(),
+                    procedure_id: input.procedure_id.to_string(),
                     event_type: if helpful {
                         "outcome_helpful".to_owned()
                     } else {
@@ -6268,14 +6283,14 @@ impl DbConnection {
                     },
                     from_maturity: Some(before.maturity),
                     to_maturity: Some(next_maturity),
-                    reason: reason.map(str::to_owned),
+                    reason: input.reason.map(str::to_owned),
                     evidence_uris: Vec::new(),
-                    actor: actor.map(str::to_owned),
+                    actor: input.actor.map(str::to_owned),
                     created_at: Some(now),
                 },
             )?;
             let procedure = self
-                .get_procedure(workspace_id, procedure_id)?
+                .get_procedure(input.workspace_id, input.procedure_id)?
                 .ok_or_else(|| DbError::MalformedRow {
                     operation: DbOperation::Query,
                     message: "updated procedure row could not be reloaded".to_owned(),
@@ -11932,6 +11947,7 @@ fn stored_recorder_event_from_row(row: &Row) -> Result<StoredRecorderEvent> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use std::error::Error as StdError;
     use std::fmt;

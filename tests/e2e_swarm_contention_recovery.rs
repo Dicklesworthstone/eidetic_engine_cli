@@ -8,6 +8,8 @@
 //! profile. Logs include per-process command, pid, timing, exit code, stderr, JSON
 //! stdout hash, and artifact path for post-mortem debugging.
 
+#![allow(clippy::expect_used, clippy::unwrap_used, dead_code, unused_imports)]
+
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsStr;

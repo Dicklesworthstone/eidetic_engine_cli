@@ -584,6 +584,7 @@ impl From<StoredAuditEntry> for AuditTimelineEntry {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};

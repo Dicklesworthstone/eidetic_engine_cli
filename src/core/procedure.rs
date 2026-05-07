@@ -14,7 +14,8 @@ use serde_json::json;
 
 use crate::db::{
     CreateAuditInput, CreateProcedureEventInput, CreateProcedureInput, DbConnection,
-    StoredProcedure, StoredProcedureEvent, audit_actions, generate_audit_id,
+    PromoteProcedureRecordInput, StoredProcedure, StoredProcedureEvent, audit_actions,
+    generate_audit_id,
 };
 use crate::models::{
     DomainError, ProcedureExportFormat, ProcedureMaturity, ProcedureStatus,
@@ -1265,15 +1266,15 @@ fn promote_persisted_procedure(
     let event_id = format!("pevt_{}", generate_id());
     let event = store
         .connection
-        .promote_procedure_record(
-            &store.workspace_id,
+        .promote_procedure_record(PromoteProcedureRecordInput {
+            workspace_id: &store.workspace_id,
             procedure_id,
-            target_maturity.as_str(),
-            &event_id,
-            Some(&reason),
-            Some(&actor),
-            &stored.evidence_uris,
-        )
+            to_maturity: target_maturity.as_str(),
+            event_id: &event_id,
+            reason: Some(&reason),
+            actor: Some(&actor),
+            evidence_uris: &stored.evidence_uris,
+        })
         .map_err(storage_error("failed to promote procedure"))?
         .ok_or_else(|| procedure_not_found(procedure_id))?;
     let audit_details = json!({

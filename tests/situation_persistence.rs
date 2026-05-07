@@ -5,6 +5,8 @@
 //! Lives in `tests/` so it runs even when other agents' in-flight changes
 //! break unrelated `#[cfg(test)]` blocks elsewhere in the lib.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::str::FromStr;
 
 use ee::core::situation::classify_task;
@@ -122,7 +124,7 @@ fn new_categories_round_trip_through_from_str_and_as_str() {
         SituationCategory::IncidentResponse,
     ] {
         let s = category.as_str();
-        let parsed = SituationCategory::from_str(s).expect(&format!("round-trip: {s}"));
+        let parsed = SituationCategory::from_str(s).unwrap_or_else(|_| panic!("round-trip: {s}"));
         assert_eq!(parsed, category, "{s} did not round-trip");
     }
 }
@@ -184,9 +186,6 @@ fn category_all_includes_new_variants() {
         SituationCategory::Exploration,
         SituationCategory::IncidentResponse,
     ] {
-        assert!(
-            SituationCategory::ALL.iter().any(|c| *c == v),
-            "ALL is missing {v:?}",
-        );
+        assert!(SituationCategory::ALL.contains(&v), "ALL is missing {v:?}",);
     }
 }

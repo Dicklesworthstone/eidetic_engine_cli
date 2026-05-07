@@ -1740,12 +1740,8 @@ pub fn keygen(options: &KeygenOptions) -> io::Result<KeygenReport> {
 
     // Generate new keypair
     let rng = SystemRandom::new();
-    let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng).map_err(|err| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!("key generation failed: {err}"),
-        )
-    })?;
+    let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng)
+        .map_err(|err| io::Error::other(format!("key generation failed: {err}")))?;
 
     // Ensure key directory exists
     if let Some(parent) = key_path.parent() {
@@ -1921,18 +1917,14 @@ fn verify_ed25519_signature(
     match signature::UnparsedPublicKey::new(&signature::ED25519, &public_key)
         .verify(payload_hash.as_bytes(), &sig_bytes)
     {
-        Ok(()) => {
-            return AttestationVerification::Ok {
-                signer: Some(signer.to_owned()),
-            };
-        }
-        Err(_) => {
-            return AttestationVerification::Mismatch {
-                signer: Some(signer.to_owned()),
-                message: "Ed25519 signature verification failed".to_owned(),
-            };
-        }
-    };
+        Ok(()) => AttestationVerification::Ok {
+            signer: Some(signer.to_owned()),
+        },
+        Err(_) => AttestationVerification::Mismatch {
+            signer: Some(signer.to_owned()),
+            message: "Ed25519 signature verification failed".to_owned(),
+        },
+    }
 }
 
 /// Find a public key by its fingerprint in the key directory.
