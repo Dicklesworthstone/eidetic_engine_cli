@@ -883,6 +883,10 @@ impl EffectManifest {
             CommandEffect::read_only("plan recipe show", "Show static plan recipe"),
             CommandEffect::read_only("rationale list", "List safe rationale traces"),
             CommandEffect::read_only("rationale show", "Show a safe rationale trace"),
+            CommandEffect::read_only(
+                "review session",
+                "Analyze session evidence spans for curation candidates",
+            ),
             CommandEffect::read_only("rule list", "List procedural rules"),
             CommandEffect::read_only("rule show", "Show procedural rule"),
             CommandEffect::read_only("schema export", "Export public response schemas"),
@@ -1140,11 +1144,6 @@ impl EffectManifest {
                 "Rehearsal promotion planning reads a manifest and emits a conservative checklist",
             ),
             CommandEffect::degraded_unavailable(
-                "review session",
-                "review_evidence_unavailable",
-                "Session review abstains until CASS evidence extraction exists",
-            ),
-            CommandEffect::degraded_unavailable(
                 "situation classify",
                 "situation_decisioning_unavailable",
                 "Situation classification abstains until stored evidence features exist",
@@ -1326,6 +1325,11 @@ impl EffectManifest {
                 "remember",
                 vec!["memories", "memory_tags", "audit_log"],
                 "Store a new memory",
+            ),
+            CommandEffect::durable_write(
+                "review session --propose",
+                vec!["curation_candidates", "audit_log"],
+                "Persist session-derived curation candidates",
             ),
             CommandEffect::durable_write(
                 "workflow close",

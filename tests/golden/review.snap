@@ -1,0 +1,20 @@
+---
+source: src/core/curate.rs
+assertion: review session propose uses persisted evidence spans
+schema:
+  session: ee.review.session.v1
+contracts:
+  - empty session returns no candidates
+  - single-topic session with fewer than 2 spans returns no candidates
+  - multi-topic session groups spans by topic key
+  - each candidate requires at least 2 evidence spans
+  - candidate IDs are deterministic given same inputs
+  - propose mode persists candidates to curation queue
+  - dry-run mode prevents persistence
+evidence:
+  - sessions.id
+  - sessions.cass_session_id
+  - evidence_spans.session_id
+  - evidence_spans.excerpt
+  - curation_candidates.workspace_id
+  - curation_candidates.source_id
