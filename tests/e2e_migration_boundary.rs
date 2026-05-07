@@ -40,6 +40,40 @@ fn stdout_json(output: &Output) -> Result<serde_json::Value, String> {
         .map_err(|error| format!("stdout was not JSON: {error}\nstdout: {stdout}"))
 }
 
+fn init_action_status<'a>(
+    json: &'a serde_json::Value,
+    action_name: &str,
+    path_suffix: &str,
+) -> Option<&'a str> {
+    json.pointer("/data/actions")?
+        .as_array()?
+        .iter()
+        .find(|action| {
+            action.get("action").and_then(|value| value.as_str()) == Some(action_name)
+                && action
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|path| path.ends_with(path_suffix))
+        })
+        .and_then(|action| action.get("status"))
+        .and_then(|value| value.as_str())
+}
+
+fn ensure_no_failed_init_actions(json: &serde_json::Value, context: &str) -> TestResult {
+    let failed_actions: Vec<String> = json
+        .pointer("/data/actions")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|action| action.get("status").and_then(|value| value.as_str()) == Some("failed"))
+        .map(ToString::to_string)
+        .collect();
+    ensure(
+        failed_actions.is_empty(),
+        format!("{context} reported failed init actions: {failed_actions:?}"),
+    )
+}
+
 #[test]
 fn init_is_idempotent() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
@@ -61,6 +95,13 @@ fn init_is_idempotent() -> TestResult {
         status1 == "created",
         format!("first init should create workspace, got: {status1}"),
     )?;
+    ensure_no_failed_init_actions(&init1_json, "first init")?;
+    let init1_database_status =
+        init_action_status(&init1_json, "create_file", ".ee/ee.db").unwrap_or("");
+    ensure(
+        init1_database_status == "created",
+        format!("first init database action should be created, got: {init1_database_status}"),
+    )?;
 
     // Second init is idempotent
     let init2 = run_ee(&["--workspace", &workspace, "init", "--json"])?;
@@ -77,6 +118,13 @@ fn init_is_idempotent() -> TestResult {
     ensure(
         status2 == "exists" || status2 == "already_exists",
         format!("second init should report exists/already_exists, got: {status2}"),
+    )?;
+    ensure_no_failed_init_actions(&init2_json, "second init")?;
+    let init2_database_status =
+        init_action_status(&init2_json, "check_file", ".ee/ee.db").unwrap_or("");
+    ensure(
+        init2_database_status == "exists",
+        format!("second init database action should be exists, got: {init2_database_status}"),
     )?;
 
     // Third init with --force is also idempotent

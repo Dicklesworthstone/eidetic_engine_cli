@@ -746,7 +746,7 @@ fn normalize_lexical(path: &Path) -> PathBuf {
     out
 }
 
-fn stable_workspace_id(path: &Path) -> String {
+pub(crate) fn stable_workspace_id(path: &Path) -> String {
     let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
     let mut bytes = [0_u8; 16];
     for (target, source) in bytes.iter_mut().zip(hash.as_bytes().iter().copied()) {

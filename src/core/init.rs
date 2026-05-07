@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::build_info;
+use super::{build_info, workspace::stable_workspace_id};
 use crate::db::{CreateWorkspaceInput, DbConnection};
 
 /// Status of the init operation.
@@ -461,7 +461,7 @@ fn initialize_database(database_path: &PathBuf, workspace_path: &Path) -> Result
         .get_workspace_by_path(&workspace_key)
         .map_err(|error| format!("failed to check workspace: {error}"))?;
     if existing.is_none() {
-        let workspace_id = format!("wsp_{}", uuid::Uuid::now_v7().simple());
+        let workspace_id = stable_workspace_id(workspace_path);
         connection
             .insert_workspace(
                 &workspace_id,
@@ -598,6 +598,7 @@ mod tests {
     fn init_creates_ee_directory() -> TestResult {
         let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
         let workspace = temp_dir.path().to_path_buf();
+        let database_path = workspace.join(".ee").join("ee.db");
         let options = InitOptions {
             workspace_path: workspace.clone(),
             dry_run: false,
@@ -616,11 +617,31 @@ mod tests {
             true,
             "index dir should exist",
         )?;
+        ensure(database_path.exists(), true, "database file should exist")?;
+        let database_action = report
+            .actions
+            .iter()
+            .find(|action| action.action == "create_file" && action.path == database_path)
+            .ok_or_else(|| "missing database create action".to_string())?;
+        ensure(database_action.status, "created", "database action status")?;
         ensure(
-            workspace.join(".ee").join("ee.db").exists(),
-            true,
-            "database file should exist",
+            report
+                .actions
+                .iter()
+                .any(|action| action.status == "failed"),
+            false,
+            "init should not report failed actions",
         )?;
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let workspace_key = workspace.to_string_lossy().to_string();
+        let stored = connection
+            .get_workspace_by_path(&workspace_key)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing workspace row".to_string())?;
+        ensure(stored.id.starts_with("wsp_"), true, "workspace id prefix")?;
+        ensure(stored.id.len(), 30, "workspace id length")?;
 
         Ok(())
     }
@@ -644,12 +665,28 @@ mod tests {
             InitStatus::Created,
             "first run creates",
         )?;
+        ensure(
+            first_report
+                .actions
+                .iter()
+                .any(|action| action.status == "failed"),
+            false,
+            "first run has no failed actions",
+        )?;
 
         let second_report = init_workspace(&options);
         ensure(
             second_report.status,
             InitStatus::AlreadyExists,
             "second run is already_exists",
+        )?;
+        ensure(
+            second_report
+                .actions
+                .iter()
+                .any(|action| action.status == "failed"),
+            false,
+            "second run has no failed actions",
         )?;
 
         Ok(())
