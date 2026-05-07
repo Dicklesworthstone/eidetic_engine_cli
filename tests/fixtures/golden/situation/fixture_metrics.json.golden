@@ -131,13 +131,15 @@
       "routingHits": 0,
       "routingExpected": 2,
       "expectedAlternativeCategories": [
+        "release",
         "review"
       ],
       "observedAlternativeCategories": [
+        "release",
         "review"
       ],
-      "alternativeHits": 1,
-      "alternativeExpected": 1
+      "alternativeHits": 2,
+      "alternativeExpected": 2
     },
     {
       "id": "routing_review",
@@ -173,10 +175,10 @@
       "routingHits": 0,
       "routingExpected": 2,
       "expectedAlternativeCategories": [
-        "deployment"
+        "release"
       ],
       "observedAlternativeCategories": [
-        "deployment"
+        "release"
       ],
       "alternativeHits": 1,
       "alternativeExpected": 1

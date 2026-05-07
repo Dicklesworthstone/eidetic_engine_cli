@@ -334,7 +334,10 @@ pub fn built_in_situation_fixture_cases() -> Vec<SituationFixtureCase> {
             task_text: "release production deployment",
             expected_category: SituationCategory::Deployment,
             expected_fixture_ids: &["fixture.situation.deployment", "fixture.preflight.full"],
-            expected_alternative_categories: &[SituationCategory::Review],
+            expected_alternative_categories: &[
+                SituationCategory::Release,
+                SituationCategory::Review,
+            ],
         },
         SituationFixtureCase {
             id: "routing_review",
@@ -350,7 +353,7 @@ pub fn built_in_situation_fixture_cases() -> Vec<SituationFixtureCase> {
             task_text: "fix failing release workflow",
             expected_category: SituationCategory::BugFix,
             expected_fixture_ids: &["fixture.situation.bug_fix", "fixture.preflight.standard"],
-            expected_alternative_categories: &[SituationCategory::Deployment],
+            expected_alternative_categories: &[SituationCategory::Release],
         },
         SituationFixtureCase {
             id: "alternative_testing_config",
@@ -1161,28 +1164,24 @@ pub fn classify_task(text: &str) -> ClassifyResult {
     // confidence threshold required by eidetic_engine_cli-oofg.
     let mut release_signals = Vec::new();
     let mut release_score: f32 = 0.0;
-    for pattern in [
-        "release",
-        "changelog",
-        "tag",
-        "version bump",
-        "version_bump",
-        "bump version",
-        "cut release",
-        "cargo publish",
-        "release notes",
-        "release workflow",
-        "semver",
-    ] {
-        if lower.contains(pattern) {
-            release_score += 0.4;
-            release_signals.push(ClassificationSignal {
-                signal_type: "keyword",
-                pattern: pattern.to_string(),
-                weight: 0.4,
-            });
-        }
-    }
+    release_score += push_non_overlapping_keyword_signals(
+        &lower,
+        &[
+            "version bump",
+            "version_bump",
+            "bump version",
+            "cut release",
+            "cargo publish",
+            "release notes",
+            "release workflow",
+            "changelog",
+            "semver",
+            "release",
+            "tag",
+        ],
+        0.4,
+        &mut release_signals,
+    );
     scores.push((
         SituationCategory::Release,
         release_score.min(1.0),
@@ -1318,6 +1317,34 @@ pub fn classify_task(text: &str) -> ClassifyResult {
         alternative_categories,
         routing_decisions,
     }
+}
+
+fn push_non_overlapping_keyword_signals(
+    lower_text: &str,
+    patterns: &[&'static str],
+    weight: f32,
+    signals: &mut Vec<ClassificationSignal>,
+) -> f32 {
+    let mut score = 0.0;
+    let mut matched_patterns: Vec<&str> = Vec::new();
+
+    for &pattern in patterns {
+        if lower_text.contains(pattern)
+            && !matched_patterns
+                .iter()
+                .any(|matched| matched.contains(pattern))
+        {
+            score += weight;
+            matched_patterns.push(pattern);
+            signals.push(ClassificationSignal {
+                signal_type: "keyword",
+                pattern: pattern.to_string(),
+                weight,
+            });
+        }
+    }
+
+    score
 }
 
 /// Map a numeric confidence score to the discrete `ConfidenceLevel` band
@@ -1915,9 +1942,9 @@ mod tests {
             result
                 .alternative_categories
                 .iter()
-                .any(|(category, _)| *category == SituationCategory::Deployment),
+                .any(|(category, _)| *category == SituationCategory::Release),
             true,
-            "deployment retained as alternative",
+            "release retained as alternative",
         )?;
 
         ensure(
