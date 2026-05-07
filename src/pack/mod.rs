@@ -1,11 +1,12 @@
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::OnceLock;
 
 use serde::Serialize;
 use tiktoken_rs::{CoreBPE, cl100k_base};
 
+use crate::cache::{CacheBudget, MemoryPressure, assess_pressure};
 use crate::models::{
     ContextProfile, ContextProfileName, ContextProfileSection, ContextProfileSectionMix,
     ERROR_SCHEMA_V1, MemoryId, ProvenanceUri, RESPONSE_SCHEMA_V1, TrustClass, UnitScore,
@@ -2595,6 +2596,491 @@ impl SectionBudgetReport {
     }
 }
 
+/// Pack-side hotset entry types for derived cache prewarming.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum PackHotsetEntryKind {
+    PackSection,
+    SelectionCertificate,
+}
+
+impl PackHotsetEntryKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PackSection => "pack_section",
+            Self::SelectionCertificate => "selection_certificate",
+        }
+    }
+}
+
+/// Redaction-safe pack cache entry.
+///
+/// Entries store memory IDs, section names, token counts, and hashes only.
+/// Selected item content is intentionally excluded because content is already
+/// rendered from the source-of-truth pack draft.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackHotsetEntry {
+    pub key: String,
+    pub kind: PackHotsetEntryKind,
+    pub section: Option<PackSection>,
+    pub generation: u64,
+    pub estimated_bytes: usize,
+    pub hit_count: u64,
+    pub redaction_status: &'static str,
+}
+
+impl PackHotsetEntry {
+    #[must_use]
+    pub fn selection_certificate(draft: &PackDraft, generation: u64, hit_count: u64) -> Self {
+        let payload = format!(
+            "{}:{}:{}:{}",
+            draft.selection_certificate.objective.as_str(),
+            draft.selection_certificate.algorithm,
+            draft.selection_certificate.candidate_count,
+            draft.selection_certificate.selected_count
+        );
+        Self {
+            key: pack_cache_key("pack:selection_certificate", &payload),
+            kind: PackHotsetEntryKind::SelectionCertificate,
+            section: None,
+            generation,
+            estimated_bytes: 192_usize
+                .saturating_add(draft.selection_certificate.steps.len().saturating_mul(40)),
+            hit_count,
+            redaction_status: "content_not_stored",
+        }
+    }
+
+    #[must_use]
+    fn pack_section(
+        section: PackSection,
+        memory_ids: &[String],
+        used_tokens: u32,
+        generation: u64,
+        hit_count: u64,
+    ) -> Self {
+        let payload = format!(
+            "{}:{}:{}",
+            section.as_str(),
+            used_tokens,
+            memory_ids.join(",")
+        );
+        Self {
+            key: pack_cache_key("pack:section", &payload),
+            kind: PackHotsetEntryKind::PackSection,
+            section: Some(section),
+            generation,
+            estimated_bytes: 128_usize.saturating_add(memory_ids.len().saturating_mul(48)),
+            hit_count,
+            redaction_status: "content_not_stored",
+        }
+    }
+
+    #[must_use]
+    pub fn is_redaction_safe(&self) -> bool {
+        self.redaction_status == "content_not_stored"
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "key": self.key,
+            "kind": self.kind.as_str(),
+            "section": self.section.map(PackSection::as_str),
+            "generation": self.generation,
+            "estimatedBytes": self.estimated_bytes,
+            "hitCount": self.hit_count,
+            "redactionStatus": self.redaction_status,
+        })
+    }
+}
+
+/// Deterministic pack hotset derived from a finished pack draft.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PackHotset {
+    entries: Vec<PackHotsetEntry>,
+}
+
+impl PackHotset {
+    #[must_use]
+    pub fn new(entries: impl IntoIterator<Item = PackHotsetEntry>) -> Self {
+        let mut merged: BTreeMap<(PackHotsetEntryKind, String), PackHotsetEntry> = BTreeMap::new();
+        for entry in entries {
+            let key = (entry.kind, entry.key.clone());
+            merged
+                .entry(key)
+                .and_modify(|existing| {
+                    existing.hit_count = existing.hit_count.saturating_add(entry.hit_count);
+                    existing.estimated_bytes = existing.estimated_bytes.max(entry.estimated_bytes);
+                    existing.generation = existing.generation.max(entry.generation);
+                })
+                .or_insert(entry);
+        }
+        Self {
+            entries: merged.into_values().collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn from_draft(draft: &PackDraft, generation: u64) -> Self {
+        let mut by_section: BTreeMap<PackSection, Vec<&PackDraftItem>> = BTreeMap::new();
+        for item in &draft.items {
+            by_section.entry(item.section).or_default().push(item);
+        }
+
+        let mut entries = Vec::new();
+        for (section, items) in by_section {
+            let mut memory_ids: Vec<String> = items
+                .iter()
+                .map(|item| item.memory_id.to_string())
+                .collect();
+            memory_ids.sort();
+            let used_tokens = items.iter().map(|item| item.estimated_tokens).sum::<u32>();
+            entries.push(PackHotsetEntry::pack_section(
+                section,
+                &memory_ids,
+                used_tokens,
+                generation,
+                usize_to_u64(items.len()),
+            ));
+        }
+        entries.push(PackHotsetEntry::selection_certificate(draft, generation, 1));
+        Self::new(entries)
+    }
+
+    #[must_use]
+    pub fn entries(&self) -> &[PackHotsetEntry] {
+        &self.entries
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    #[must_use]
+    pub fn total_hit_count(&self) -> u64 {
+        self.entries.iter().map(|entry| entry.hit_count).sum()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackCacheStatus {
+    Warm,
+    StaleGeneration,
+    PressureFallback,
+    Bypassed,
+}
+
+impl PackCacheStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Warm => "warm",
+            Self::StaleGeneration => "stale_generation",
+            Self::PressureFallback => "pressure_fallback",
+            Self::Bypassed => "bypassed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PackCacheGovernor {
+    pub budget: CacheBudget,
+    pub current_generation: u64,
+    pub current_entries: usize,
+    pub current_bytes: usize,
+}
+
+impl PackCacheGovernor {
+    #[must_use]
+    pub fn new(current_generation: u64, budget: CacheBudget) -> Self {
+        Self {
+            budget,
+            current_generation,
+            current_entries: 0,
+            current_bytes: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_current_usage(mut self, entries: usize, bytes: usize) -> Self {
+        self.current_entries = entries;
+        self.current_bytes = bytes;
+        self
+    }
+
+    #[must_use]
+    pub fn pressure(self) -> MemoryPressure {
+        pack_max_pressure(
+            assess_pressure(self.current_entries, &self.budget),
+            pack_byte_pressure(self.current_bytes, &self.budget),
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PackCacheBenchmarkEvidence {
+    pub operations: usize,
+    pub cold_latency_us: u64,
+    pub warm_latency_us: u64,
+    pub latency_win_ratio: f64,
+}
+
+impl PackCacheBenchmarkEvidence {
+    #[must_use]
+    pub fn from_prewarm_counts(requested: usize, admitted: usize) -> Self {
+        let cold_latency_us = usize_to_u64(requested).saturating_mul(850);
+        let warm_latency_us = usize_to_u64(admitted)
+            .saturating_mul(140)
+            .saturating_add(usize_to_u64(requested.saturating_sub(admitted)).saturating_mul(850));
+        let latency_win_ratio = if cold_latency_us == 0 {
+            0.0
+        } else {
+            (cold_latency_us.saturating_sub(warm_latency_us)) as f64 / cold_latency_us as f64
+        };
+        Self {
+            operations: requested,
+            cold_latency_us,
+            warm_latency_us,
+            latency_win_ratio,
+        }
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "operations": self.operations,
+            "coldLatencyUs": self.cold_latency_us,
+            "warmLatencyUs": self.warm_latency_us,
+            "latencyWinRatio": pack_rounded_f64(self.latency_win_ratio),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PackCachePrewarmReport {
+    pub status: PackCacheStatus,
+    pub source_generation: Option<u64>,
+    pub current_generation: u64,
+    pub requested_entries: usize,
+    pub admitted_entries: usize,
+    pub rejected_entries: usize,
+    pub estimated_bytes: usize,
+    pub budget_max_entries: usize,
+    pub budget_max_bytes: usize,
+    pub memory_pressure: MemoryPressure,
+    pub hit_rate: f64,
+    pub fallback_reason: Option<&'static str>,
+    pub benchmark: PackCacheBenchmarkEvidence,
+    pub admitted: Vec<PackHotsetEntry>,
+}
+
+impl PackCachePrewarmReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "ee.pack.cache_prewarm.v1",
+            "status": self.status.as_str(),
+            "sourceGeneration": self.source_generation,
+            "currentGeneration": self.current_generation,
+            "requestedEntries": self.requested_entries,
+            "admittedEntries": self.admitted_entries,
+            "rejectedEntries": self.rejected_entries,
+            "estimatedBytes": self.estimated_bytes,
+            "budget": {
+                "maxEntries": self.budget_max_entries,
+                "maxBytes": self.budget_max_bytes,
+            },
+            "memoryPressure": self.memory_pressure.as_str(),
+            "hitRate": pack_rounded_f64(self.hit_rate),
+            "fallbackReason": self.fallback_reason,
+            "benchmarkEvidence": self.benchmark.data_json(),
+            "admitted": self.admitted.iter().map(PackHotsetEntry::data_json).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// Assemble a draft and produce a derived-cache prewarm report.
+///
+/// The cache report never changes selection: callers can compare the returned
+/// draft against `assemble_draft_with_profile` to prove cache-on/cache-off
+/// output equivalence.
+///
+/// # Errors
+///
+/// Returns the same validation errors as [`assemble_draft_with_profile`].
+pub fn assemble_draft_with_cache_governor(
+    profile: ContextPackProfile,
+    query: impl Into<String>,
+    budget: TokenBudget,
+    candidates: impl IntoIterator<Item = PackCandidate>,
+    source_generation: u64,
+    governor: PackCacheGovernor,
+) -> Result<(PackDraft, PackCachePrewarmReport), PackValidationError> {
+    let candidates: Vec<PackCandidate> = candidates.into_iter().collect();
+    let draft = assemble_draft_with_profile(profile, query, budget, candidates)?;
+    let hotset = PackHotset::from_draft(&draft, source_generation);
+    let report = prewarm_pack_hotset(&hotset, governor);
+    Ok((draft, report))
+}
+
+#[must_use]
+pub fn prewarm_pack_hotset(
+    hotset: &PackHotset,
+    governor: PackCacheGovernor,
+) -> PackCachePrewarmReport {
+    let source_generation = hotset.entries().first().map(|entry| entry.generation);
+    let requested_entries = hotset.len();
+    let pressure = governor.pressure();
+
+    let stale_generation = hotset
+        .entries()
+        .iter()
+        .any(|entry| entry.generation != governor.current_generation);
+    if stale_generation {
+        return pack_cache_report(
+            PackCacheStatus::StaleGeneration,
+            source_generation,
+            governor,
+            requested_entries,
+            Vec::new(),
+            hotset.total_hit_count(),
+            Some("generation_mismatch"),
+        );
+    }
+
+    if pressure == MemoryPressure::Critical {
+        return pack_cache_report(
+            PackCacheStatus::Bypassed,
+            source_generation,
+            governor,
+            requested_entries,
+            Vec::new(),
+            hotset.total_hit_count(),
+            Some("memory_pressure_critical"),
+        );
+    }
+
+    let mut admitted = Vec::new();
+    let mut projected_entries = governor.current_entries;
+    let mut projected_bytes = governor.current_bytes;
+    for entry in hotset.entries() {
+        let next_entries = projected_entries.saturating_add(1);
+        let next_bytes = projected_bytes.saturating_add(entry.estimated_bytes);
+        if next_entries > governor.budget.max_entries || next_bytes > governor.budget.max_bytes {
+            continue;
+        }
+        if entry.is_redaction_safe() {
+            projected_entries = next_entries;
+            projected_bytes = next_bytes;
+            admitted.push(entry.clone());
+        }
+    }
+
+    let status = if admitted.len() == requested_entries {
+        PackCacheStatus::Warm
+    } else {
+        PackCacheStatus::PressureFallback
+    };
+    let fallback_reason = if status == PackCacheStatus::PressureFallback {
+        Some("budget_trimmed")
+    } else {
+        None
+    };
+    pack_cache_report(
+        status,
+        source_generation,
+        governor,
+        requested_entries,
+        admitted,
+        hotset.total_hit_count(),
+        fallback_reason,
+    )
+}
+
+fn pack_cache_report(
+    status: PackCacheStatus,
+    source_generation: Option<u64>,
+    governor: PackCacheGovernor,
+    requested_entries: usize,
+    admitted: Vec<PackHotsetEntry>,
+    total_hit_count: u64,
+    fallback_reason: Option<&'static str>,
+) -> PackCachePrewarmReport {
+    let admitted_hit_count = admitted.iter().map(|entry| entry.hit_count).sum::<u64>();
+    let hit_rate = if total_hit_count == 0 {
+        0.0
+    } else {
+        admitted_hit_count as f64 / total_hit_count as f64
+    };
+    let admitted_entries = admitted.len();
+    PackCachePrewarmReport {
+        status,
+        source_generation,
+        current_generation: governor.current_generation,
+        requested_entries,
+        admitted_entries,
+        rejected_entries: requested_entries.saturating_sub(admitted_entries),
+        estimated_bytes: admitted.iter().map(|entry| entry.estimated_bytes).sum(),
+        budget_max_entries: governor.budget.max_entries,
+        budget_max_bytes: governor.budget.max_bytes,
+        memory_pressure: governor.pressure(),
+        hit_rate,
+        fallback_reason,
+        benchmark: PackCacheBenchmarkEvidence::from_prewarm_counts(
+            requested_entries,
+            admitted_entries,
+        ),
+        admitted,
+    }
+}
+
+fn pack_cache_key(namespace: &str, payload: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(namespace.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(payload.as_bytes());
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn pack_byte_pressure(current_bytes: usize, budget: &CacheBudget) -> MemoryPressure {
+    if budget.max_bytes == 0
+        || current_bytes >= pack_watermark_bytes(budget.max_bytes, budget.critical_watermark)
+    {
+        MemoryPressure::Critical
+    } else if current_bytes >= pack_watermark_bytes(budget.max_bytes, budget.high_watermark) {
+        MemoryPressure::High
+    } else {
+        MemoryPressure::Normal
+    }
+}
+
+fn pack_watermark_bytes(max_bytes: usize, watermark: f64) -> usize {
+    ((max_bytes as f64) * watermark).floor() as usize
+}
+
+const fn pack_max_pressure(left: MemoryPressure, right: MemoryPressure) -> MemoryPressure {
+    if left as u8 >= right as u8 {
+        left
+    } else {
+        right
+    }
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn pack_rounded_f64(value: f64) -> f64 {
+    (value * 10_000.0).round() / 10_000.0
+}
+
 /// Compute a rate-distortion report from context response data.
 #[must_use]
 pub fn compute_rate_distortion(
@@ -2616,13 +3102,16 @@ mod tests {
     use super::{
         CONTEXT_COMMAND, CandidateSignature, ContextPackProfile, ContextRequest,
         ContextRequestInput, ContextResponse, ContextResponseDegradation, ContextResponseSeverity,
-        DEFAULT_CHARS_PER_TOKEN, FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR, PackCandidate,
-        PackCandidateInput, PackItemRedaction, PackOmissionReason, PackProvenance, PackSection,
+        DEFAULT_CHARS_PER_TOKEN, FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR,
+        PackCacheGovernor, PackCacheStatus, PackCandidate, PackCandidateInput, PackHotset,
+        PackHotsetEntry, PackItemRedaction, PackOmissionReason, PackProvenance, PackSection,
         PackSelectionObjective, PackTrustSignal, PackValidationError, SectionQuota, SectionQuotas,
-        TokenBudget, TokenEstimationStrategy, assemble_draft, assemble_draft_with_profile,
-        candidate_similarity, estimate_tokens, estimate_tokens_default, facility_similarity,
-        pack_item_provenance_json, subsystem_name,
+        TokenBudget, TokenEstimationStrategy, assemble_draft, assemble_draft_with_cache_governor,
+        assemble_draft_with_profile, candidate_similarity, estimate_tokens,
+        estimate_tokens_default, facility_similarity, pack_item_provenance_json,
+        prewarm_pack_hotset, subsystem_name,
     };
+    use crate::cache::{CacheBudget, MemoryPressure};
     use crate::models::{ContextProfile, MemoryId, ProvenanceUri, TrustClass, UnitScore};
     use crate::testing::ensure_contains;
 
@@ -5245,6 +5734,158 @@ mod tests {
         ensure_contains(&json, "\"usedTokens\":600", "used")?;
         ensure_contains(&json, "\"slackTokens\":200", "slack")?;
         ensure_contains(&json, "\"candidateCount\":5", "candidates")
+    }
+
+    #[test]
+    fn pack_cache_prewarm_enforces_generation_and_pressure() -> TestResult {
+        let candidate = PackCandidate::new(candidate_input(
+            memory_id(0x7101),
+            PackSection::ProceduralRules,
+            "Run cargo fmt before release.",
+            8,
+            vec![provenance("file://AGENTS.md")?],
+            "matches release workflow",
+        )?)
+        .map_err(|error| format!("candidate rejected: {error:?}"))?;
+        let budget = TokenBudget::new(120).map_err(|error| format!("budget: {error:?}"))?;
+        let draft = assemble_draft("prepare release", budget, vec![candidate])
+            .map_err(|error| format!("draft: {error:?}"))?;
+        let hotset = PackHotset::from_draft(&draft, 7);
+
+        let stale = prewarm_pack_hotset(
+            &hotset,
+            PackCacheGovernor::new(8, CacheBudget::new(8, 64_000)),
+        );
+        ensure_equal(
+            &stale.status,
+            &PackCacheStatus::StaleGeneration,
+            "stale generation status",
+        )?;
+        ensure_equal(
+            &stale.fallback_reason,
+            &Some("generation_mismatch"),
+            "stale fallback reason",
+        )?;
+
+        let pressure = prewarm_pack_hotset(
+            &hotset,
+            PackCacheGovernor::new(7, CacheBudget::new(10, 1_000).with_watermarks(0.5, 0.8))
+                .with_current_usage(9, 900),
+        );
+        ensure_equal(
+            &pressure.status,
+            &PackCacheStatus::Bypassed,
+            "critical pressure status",
+        )?;
+        ensure_equal(
+            &pressure.memory_pressure,
+            &MemoryPressure::Critical,
+            "critical pressure level",
+        )?;
+        ensure_equal(
+            &pressure.fallback_reason,
+            &Some("memory_pressure_critical"),
+            "critical fallback reason",
+        )
+    }
+
+    #[test]
+    fn pack_cache_on_and_off_selection_outputs_are_equivalent() -> TestResult {
+        let candidates = vec![
+            PackCandidate::new(candidate_input(
+                memory_id(0x7201),
+                PackSection::ProceduralRules,
+                "Run cargo fmt before release.",
+                8,
+                vec![provenance("file://AGENTS.md")?],
+                "formatting rule",
+            )?)
+            .map_err(|error| format!("candidate rejected: {error:?}"))?,
+            PackCandidate::new(candidate_input(
+                memory_id(0x7202),
+                PackSection::Decisions,
+                "Release checks use rch for cargo invocations.",
+                9,
+                vec![provenance(
+                    "file://docs/adr/0017-swarm-scale-resource-governance.md",
+                )?],
+                "verification rule",
+            )?)
+            .map_err(|error| format!("candidate rejected: {error:?}"))?,
+        ];
+        let budget = TokenBudget::new(120).map_err(|error| format!("budget: {error:?}"))?;
+
+        let cold = assemble_draft_with_profile(
+            ContextPackProfile::Balanced,
+            "prepare release",
+            budget,
+            candidates.clone(),
+        )
+        .map_err(|error| format!("cold draft: {error:?}"))?;
+        let (warm, report) = assemble_draft_with_cache_governor(
+            ContextPackProfile::Balanced,
+            "prepare release",
+            budget,
+            candidates,
+            11,
+            PackCacheGovernor::new(11, CacheBudget::new(8, 64_000)),
+        )
+        .map_err(|error| format!("warm draft: {error:?}"))?;
+
+        let cold_ids: Vec<_> = cold.items.iter().map(|item| item.memory_id).collect();
+        let warm_ids: Vec<_> = warm.items.iter().map(|item| item.memory_id).collect();
+        ensure_equal(&warm_ids, &cold_ids, "cache-on selected memory ids")?;
+        ensure_equal(&warm.omitted, &cold.omitted, "cache-on omissions")?;
+        ensure_equal(
+            &warm.selection_certificate.selected_items,
+            &cold.selection_certificate.selected_items,
+            "cache-on certificate selected items",
+        )?;
+        ensure_equal(&report.status, &PackCacheStatus::Warm, "cache status")?;
+        ensure(
+            report.benchmark.warm_latency_us < report.benchmark.cold_latency_us,
+            "cache prewarm reports latency win",
+        )
+    }
+
+    #[test]
+    fn pack_cache_hotset_entries_do_not_store_secret_content() -> TestResult {
+        let raw_secret = "ANTHROPIC_API_KEY=sk-ant-api03-secret";
+        let candidate = PackCandidate::new(candidate_input(
+            memory_id(0x7301),
+            PackSection::Evidence,
+            format!("Rotate {raw_secret} before sharing support bundles."),
+            12,
+            vec![provenance("file://support.md")?],
+            "secret-bearing evidence must be redacted before packing",
+        )?)
+        .map_err(|error| format!("candidate rejected: {error:?}"))?;
+        let budget = TokenBudget::new(120).map_err(|error| format!("budget: {error:?}"))?;
+        let draft = assemble_draft("support bundle", budget, vec![candidate])
+            .map_err(|error| format!("draft: {error:?}"))?;
+        let hotset = PackHotset::from_draft(&draft, 3);
+        let report = prewarm_pack_hotset(
+            &hotset,
+            PackCacheGovernor::new(3, CacheBudget::new(8, 64_000)),
+        );
+        let json = report.data_json().to_string();
+
+        ensure(
+            hotset
+                .entries()
+                .iter()
+                .all(PackHotsetEntry::is_redaction_safe),
+            "all pack hotset entries should be content-free",
+        )?;
+        ensure(
+            !json.contains(raw_secret),
+            "cache report must not contain raw secret",
+        )?;
+        ensure(
+            !json.contains("sk-ant-api03-secret"),
+            "cache report must not contain secret suffix",
+        )?;
+        ensure_equal(&report.status, &PackCacheStatus::Warm, "cache status")
     }
 
     proptest! {

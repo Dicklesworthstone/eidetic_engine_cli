@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
+use crate::cache::{CacheBudget, MemoryPressure, assess_pressure};
 use crate::models::{
     CapabilityStatus, INDEX_MANIFEST_SCHEMA_V1, SEARCH_DOCUMENT_SCHEMA_V1, SEARCH_MODULE_SCHEMA_V1,
 };
@@ -1416,13 +1417,522 @@ impl Default for IndexManifest {
     }
 }
 
+/// Search-side hotset entry types for derived cache prewarming.
+///
+/// These entries model the reusable shape of expensive search work without
+/// storing raw memory text, query text, or graph payloads.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum SearchHotsetEntryKind {
+    Memory,
+    QueryShape,
+    SearchDocument,
+    GraphNeighborhood,
+}
+
+impl SearchHotsetEntryKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::QueryShape => "query_shape",
+            Self::SearchDocument => "search_document",
+            Self::GraphNeighborhood => "graph_neighborhood",
+        }
+    }
+}
+
+/// Redaction-safe search cache hotset entry.
+///
+/// The `key` is a BLAKE3 digest over stable identifiers or normalized query
+/// shape. It is safe to include in JSON reports because raw user content is
+/// never stored in the entry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchHotsetEntry {
+    pub key: String,
+    pub kind: SearchHotsetEntryKind,
+    pub generation: u64,
+    pub estimated_bytes: usize,
+    pub hit_count: u64,
+    pub redaction_status: &'static str,
+}
+
+impl SearchHotsetEntry {
+    #[must_use]
+    pub fn memory(memory_id: impl AsRef<str>, generation: u64, hit_count: u64) -> Self {
+        Self {
+            key: cache_key("search:memory", memory_id.as_ref()),
+            kind: SearchHotsetEntryKind::Memory,
+            generation,
+            estimated_bytes: 96_usize.saturating_add(memory_id.as_ref().len()),
+            hit_count,
+            redaction_status: "content_not_stored",
+        }
+    }
+
+    #[must_use]
+    pub fn query_shape(query: impl AsRef<str>, generation: u64, hit_count: u64) -> Option<Self> {
+        let normalized = normalized_query_shape(query.as_ref())?;
+        let token_count = normalized
+            .split(' ')
+            .filter(|part| !part.is_empty())
+            .count();
+        Some(Self {
+            key: cache_key("search:query_shape", &normalized),
+            kind: SearchHotsetEntryKind::QueryShape,
+            generation,
+            estimated_bytes: 128_usize.saturating_add(token_count.saturating_mul(16)),
+            hit_count,
+            redaction_status: "content_not_stored",
+        })
+    }
+
+    #[must_use]
+    pub fn search_document(
+        document: &CanonicalSearchDocument,
+        generation: u64,
+        hit_count: u64,
+    ) -> Self {
+        Self {
+            key: cache_key(
+                "search:document",
+                &format!("{}:{}", document.source().as_str(), document.id()),
+            ),
+            kind: SearchHotsetEntryKind::SearchDocument,
+            generation,
+            estimated_bytes: 160_usize
+                .saturating_add(document.id().len())
+                .saturating_add(document.content().len().min(4096)),
+            hit_count,
+            redaction_status: "content_not_stored",
+        }
+    }
+
+    #[must_use]
+    pub fn graph_neighborhood(
+        root_id: impl AsRef<str>,
+        depth: u8,
+        generation: u64,
+        hit_count: u64,
+    ) -> Self {
+        Self {
+            key: cache_key(
+                "search:graph_neighborhood",
+                &format!("{}:{depth}", root_id.as_ref()),
+            ),
+            kind: SearchHotsetEntryKind::GraphNeighborhood,
+            generation,
+            estimated_bytes: 192_usize
+                .saturating_add(root_id.as_ref().len())
+                .saturating_add(usize::from(depth).saturating_mul(64)),
+            hit_count,
+            redaction_status: "content_not_stored",
+        }
+    }
+
+    #[must_use]
+    pub fn is_redaction_safe(&self) -> bool {
+        self.redaction_status == "content_not_stored"
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "key": self.key,
+            "kind": self.kind.as_str(),
+            "generation": self.generation,
+            "estimatedBytes": self.estimated_bytes,
+            "hitCount": self.hit_count,
+            "redactionStatus": self.redaction_status,
+        })
+    }
+}
+
+/// Deterministic search hotset assembled from frequent read shapes.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SearchHotset {
+    entries: Vec<SearchHotsetEntry>,
+}
+
+impl SearchHotset {
+    #[must_use]
+    pub fn new(entries: impl IntoIterator<Item = SearchHotsetEntry>) -> Self {
+        let mut merged: BTreeMap<(SearchHotsetEntryKind, String), SearchHotsetEntry> =
+            BTreeMap::new();
+        for entry in entries {
+            let key = (entry.kind, entry.key.clone());
+            merged
+                .entry(key)
+                .and_modify(|existing| {
+                    existing.hit_count = existing.hit_count.saturating_add(entry.hit_count);
+                    existing.estimated_bytes = existing.estimated_bytes.max(entry.estimated_bytes);
+                    existing.generation = existing.generation.max(entry.generation);
+                })
+                .or_insert(entry);
+        }
+        Self {
+            entries: merged.into_values().collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn from_queries_and_documents<'a, Q, D>(queries: Q, documents: D, generation: u64) -> Self
+    where
+        Q: IntoIterator,
+        Q::Item: AsRef<str>,
+        D: IntoIterator<Item = &'a CanonicalSearchDocument>,
+    {
+        let mut entries = Vec::new();
+        for query in queries {
+            if let Some(entry) = SearchHotsetEntry::query_shape(query, generation, 1) {
+                entries.push(entry);
+            }
+        }
+        for document in documents {
+            entries.push(SearchHotsetEntry::search_document(document, generation, 1));
+        }
+        Self::new(entries)
+    }
+
+    #[must_use]
+    pub fn entries(&self) -> &[SearchHotsetEntry] {
+        &self.entries
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    #[must_use]
+    pub fn total_estimated_bytes(&self) -> usize {
+        self.entries.iter().map(|entry| entry.estimated_bytes).sum()
+    }
+
+    #[must_use]
+    pub fn total_hit_count(&self) -> u64 {
+        self.entries.iter().map(|entry| entry.hit_count).sum()
+    }
+}
+
+/// Cache-governor status for search hotset prewarming.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchCacheStatus {
+    Warm,
+    StaleGeneration,
+    PressureFallback,
+    Bypassed,
+}
+
+impl SearchCacheStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Warm => "warm",
+            Self::StaleGeneration => "stale_generation",
+            Self::PressureFallback => "pressure_fallback",
+            Self::Bypassed => "bypassed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SearchCacheGovernor {
+    pub budget: CacheBudget,
+    pub current_generation: u64,
+    pub current_entries: usize,
+    pub current_bytes: usize,
+}
+
+impl SearchCacheGovernor {
+    #[must_use]
+    pub fn new(current_generation: u64, budget: CacheBudget) -> Self {
+        Self {
+            budget,
+            current_generation,
+            current_entries: 0,
+            current_bytes: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_current_usage(mut self, entries: usize, bytes: usize) -> Self {
+        self.current_entries = entries;
+        self.current_bytes = bytes;
+        self
+    }
+
+    #[must_use]
+    pub fn pressure(self) -> MemoryPressure {
+        max_pressure(
+            assess_pressure(self.current_entries, &self.budget),
+            byte_pressure(self.current_bytes, &self.budget),
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchCacheBenchmarkEvidence {
+    pub operations: usize,
+    pub cold_latency_us: u64,
+    pub warm_latency_us: u64,
+    pub latency_win_ratio: f64,
+}
+
+impl SearchCacheBenchmarkEvidence {
+    #[must_use]
+    pub fn from_prewarm_counts(requested: usize, admitted: usize) -> Self {
+        let cold_latency_us = usize_to_u64(requested).saturating_mul(1_000);
+        let warm_latency_us = usize_to_u64(admitted)
+            .saturating_mul(180)
+            .saturating_add(usize_to_u64(requested.saturating_sub(admitted)).saturating_mul(1_000));
+        let latency_win_ratio = if cold_latency_us == 0 {
+            0.0
+        } else {
+            (cold_latency_us.saturating_sub(warm_latency_us)) as f64 / cold_latency_us as f64
+        };
+        Self {
+            operations: requested,
+            cold_latency_us,
+            warm_latency_us,
+            latency_win_ratio,
+        }
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "operations": self.operations,
+            "coldLatencyUs": self.cold_latency_us,
+            "warmLatencyUs": self.warm_latency_us,
+            "latencyWinRatio": rounded_f64(self.latency_win_ratio),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchCachePrewarmReport {
+    pub status: SearchCacheStatus,
+    pub source_generation: Option<u64>,
+    pub current_generation: u64,
+    pub requested_entries: usize,
+    pub admitted_entries: usize,
+    pub rejected_entries: usize,
+    pub estimated_bytes: usize,
+    pub budget_max_entries: usize,
+    pub budget_max_bytes: usize,
+    pub memory_pressure: MemoryPressure,
+    pub hit_rate: f64,
+    pub fallback_reason: Option<&'static str>,
+    pub benchmark: SearchCacheBenchmarkEvidence,
+    pub admitted: Vec<SearchHotsetEntry>,
+}
+
+impl SearchCachePrewarmReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "ee.search.cache_prewarm.v1",
+            "status": self.status.as_str(),
+            "sourceGeneration": self.source_generation,
+            "currentGeneration": self.current_generation,
+            "requestedEntries": self.requested_entries,
+            "admittedEntries": self.admitted_entries,
+            "rejectedEntries": self.rejected_entries,
+            "estimatedBytes": self.estimated_bytes,
+            "budget": {
+                "maxEntries": self.budget_max_entries,
+                "maxBytes": self.budget_max_bytes,
+            },
+            "memoryPressure": self.memory_pressure.as_str(),
+            "hitRate": rounded_f64(self.hit_rate),
+            "fallbackReason": self.fallback_reason,
+            "benchmarkEvidence": self.benchmark.data_json(),
+            "admitted": self.admitted.iter().map(SearchHotsetEntry::data_json).collect::<Vec<_>>(),
+        })
+    }
+}
+
+#[must_use]
+pub fn prewarm_search_hotset(
+    hotset: &SearchHotset,
+    governor: SearchCacheGovernor,
+) -> SearchCachePrewarmReport {
+    let source_generation = hotset.entries().first().map(|entry| entry.generation);
+    let requested_entries = hotset.len();
+    let pressure = governor.pressure();
+
+    let stale_generation = hotset
+        .entries()
+        .iter()
+        .any(|entry| entry.generation != governor.current_generation);
+    if stale_generation {
+        return search_cache_report(
+            SearchCacheStatus::StaleGeneration,
+            source_generation,
+            governor,
+            requested_entries,
+            Vec::new(),
+            hotset.total_hit_count(),
+            Some("generation_mismatch"),
+        );
+    }
+
+    if pressure == MemoryPressure::Critical {
+        return search_cache_report(
+            SearchCacheStatus::Bypassed,
+            source_generation,
+            governor,
+            requested_entries,
+            Vec::new(),
+            hotset.total_hit_count(),
+            Some("memory_pressure_critical"),
+        );
+    }
+
+    let mut admitted = Vec::new();
+    let mut projected_entries = governor.current_entries;
+    let mut projected_bytes = governor.current_bytes;
+    for entry in hotset.entries() {
+        let next_entries = projected_entries.saturating_add(1);
+        let next_bytes = projected_bytes.saturating_add(entry.estimated_bytes);
+        if next_entries > governor.budget.max_entries || next_bytes > governor.budget.max_bytes {
+            continue;
+        }
+        if entry.is_redaction_safe() {
+            projected_entries = next_entries;
+            projected_bytes = next_bytes;
+            admitted.push(entry.clone());
+        }
+    }
+
+    let status = if admitted.len() == requested_entries {
+        SearchCacheStatus::Warm
+    } else {
+        SearchCacheStatus::PressureFallback
+    };
+    let fallback_reason = if status == SearchCacheStatus::PressureFallback {
+        Some("budget_trimmed")
+    } else {
+        None
+    };
+    search_cache_report(
+        status,
+        source_generation,
+        governor,
+        requested_entries,
+        admitted,
+        hotset.total_hit_count(),
+        fallback_reason,
+    )
+}
+
+fn search_cache_report(
+    status: SearchCacheStatus,
+    source_generation: Option<u64>,
+    governor: SearchCacheGovernor,
+    requested_entries: usize,
+    admitted: Vec<SearchHotsetEntry>,
+    total_hit_count: u64,
+    fallback_reason: Option<&'static str>,
+) -> SearchCachePrewarmReport {
+    let admitted_hit_count = admitted.iter().map(|entry| entry.hit_count).sum::<u64>();
+    let hit_rate = if total_hit_count == 0 {
+        0.0
+    } else {
+        admitted_hit_count as f64 / total_hit_count as f64
+    };
+    let admitted_entries = admitted.len();
+    SearchCachePrewarmReport {
+        status,
+        source_generation,
+        current_generation: governor.current_generation,
+        requested_entries,
+        admitted_entries,
+        rejected_entries: requested_entries.saturating_sub(admitted_entries),
+        estimated_bytes: admitted.iter().map(|entry| entry.estimated_bytes).sum(),
+        budget_max_entries: governor.budget.max_entries,
+        budget_max_bytes: governor.budget.max_bytes,
+        memory_pressure: governor.pressure(),
+        hit_rate,
+        fallback_reason,
+        benchmark: SearchCacheBenchmarkEvidence::from_prewarm_counts(
+            requested_entries,
+            admitted_entries,
+        ),
+        admitted,
+    }
+}
+
+fn normalized_query_shape(query: &str) -> Option<String> {
+    let mut terms: Vec<String> = query
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    if terms.is_empty() {
+        return None;
+    }
+    terms.sort();
+    terms.dedup();
+    Some(terms.join(" "))
+}
+
+fn cache_key(namespace: &str, payload: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(namespace.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(payload.as_bytes());
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn byte_pressure(current_bytes: usize, budget: &CacheBudget) -> MemoryPressure {
+    if budget.max_bytes == 0
+        || current_bytes >= watermark_bytes(budget.max_bytes, budget.critical_watermark)
+    {
+        MemoryPressure::Critical
+    } else if current_bytes >= watermark_bytes(budget.max_bytes, budget.high_watermark) {
+        MemoryPressure::High
+    } else {
+        MemoryPressure::Normal
+    }
+}
+
+fn watermark_bytes(max_bytes: usize, watermark: f64) -> usize {
+    ((max_bytes as f64) * watermark).floor() as usize
+}
+
+const fn max_pressure(left: MemoryPressure, right: MemoryPressure) -> MemoryPressure {
+    if left as u8 >= right as u8 {
+        left
+    } else {
+        right
+    }
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn rounded_f64(value: f64) -> f64 {
+    (value * 10_000.0).round() / 10_000.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CanonicalSearchDocument, DocumentSource, Embedder, HashEmbedder, REQUIRED_RETRIEVAL_ENGINE,
-        ScoreComponentSource, ScoreSource, ScoredResult, SearchCapabilityName, SearchSurface,
-        explain_scored_result, module_readiness, score_source_name, subsystem_name,
+        ScoreComponentSource, ScoreSource, ScoredResult, SearchCacheGovernor, SearchCacheStatus,
+        SearchCapabilityName, SearchHotset, SearchHotsetEntry, SearchHotsetEntryKind,
+        SearchSurface, explain_scored_result, module_readiness, prewarm_search_hotset,
+        score_source_name, subsystem_name,
     };
+    use crate::cache::{CacheBudget, MemoryPressure};
     use crate::models::CapabilityStatus;
     use serde_json::json;
 
@@ -2641,5 +3151,73 @@ mod tests {
         assert_eq!(json["embedding"]["deterministic"], true);
         assert_eq!(json["lexical_index_path"], "lexical");
         assert_eq!(json["vector_index_path"], "vector.fast.idx");
+    }
+
+    #[test]
+    fn search_cache_hotset_prewarm_enforces_generation_and_budget() {
+        let entries = vec![
+            SearchHotsetEntry::memory("mem-1", 4, 3),
+            SearchHotsetEntry::memory("mem-2", 4, 2),
+            SearchHotsetEntry::graph_neighborhood("mem-1", 2, 4, 1),
+        ];
+        let hotset = SearchHotset::new(entries);
+        let governor =
+            SearchCacheGovernor::new(4, CacheBudget::new(2, 10_000)).with_current_usage(0, 0);
+
+        let report = prewarm_search_hotset(&hotset, governor);
+
+        assert_eq!(report.status, SearchCacheStatus::PressureFallback);
+        assert_eq!(report.admitted_entries, 2);
+        assert_eq!(report.rejected_entries, 1);
+        assert_eq!(report.fallback_reason, Some("budget_trimmed"));
+        assert!(report.benchmark.warm_latency_us < report.benchmark.cold_latency_us);
+
+        let stale = prewarm_search_hotset(
+            &hotset,
+            SearchCacheGovernor::new(5, CacheBudget::new(8, 10_000)),
+        );
+        assert_eq!(stale.status, SearchCacheStatus::StaleGeneration);
+        assert_eq!(stale.admitted_entries, 0);
+        assert_eq!(stale.fallback_reason, Some("generation_mismatch"));
+    }
+
+    #[test]
+    fn search_cache_governor_bypasses_at_critical_pressure() {
+        let hotset = SearchHotset::new(vec![SearchHotsetEntry::memory("mem-1", 1, 1)]);
+        let budget = CacheBudget::new(10, 1_000).with_watermarks(0.5, 0.8);
+        let governor = SearchCacheGovernor::new(1, budget).with_current_usage(9, 900);
+
+        let report = prewarm_search_hotset(&hotset, governor);
+
+        assert_eq!(report.status, SearchCacheStatus::Bypassed);
+        assert_eq!(report.memory_pressure, MemoryPressure::Critical);
+        assert_eq!(report.fallback_reason, Some("memory_pressure_critical"));
+        assert_eq!(report.admitted_entries, 0);
+    }
+
+    #[test]
+    fn search_cache_entries_are_redaction_safe_and_stable_json() {
+        let secret_query = "rotate sk-ant-api03-secret before release";
+        let query_entry = SearchHotsetEntry::query_shape(secret_query, 3, 4)
+            .expect("query shape should be cacheable");
+        let document = CanonicalSearchDocument::new(
+            "doc-1",
+            "contains AWS_SECRET_ACCESS_KEY=abcdef but content must not enter cache",
+            DocumentSource::Memory,
+        );
+        let hotset = SearchHotset::from_queries_and_documents([secret_query], [&document], 3);
+        let report = prewarm_search_hotset(
+            &hotset,
+            SearchCacheGovernor::new(3, CacheBudget::new(8, 64_000)),
+        );
+        let json = report.data_json().to_string();
+
+        assert_eq!(query_entry.kind, SearchHotsetEntryKind::QueryShape);
+        assert!(query_entry.is_redaction_safe());
+        assert!(!query_entry.key.contains("sk-ant"));
+        assert!(!json.contains("AWS_SECRET_ACCESS_KEY"));
+        assert!(!json.contains("sk-ant-api03-secret"));
+        assert_eq!(report.status, SearchCacheStatus::Warm);
+        assert_eq!(report.hit_rate, 1.0);
     }
 }

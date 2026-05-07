@@ -1563,9 +1563,8 @@ mod tests {
 
     #[test]
     fn explain_recipe_exists() -> TestResult {
-        let explanation = explain_recipe("init-workspace");
-        assert!(explanation.is_some());
-        let exp = explanation.ok_or_else(|| "init-workspace explanation missing".to_string())?;
+        let exp = explain_recipe("init-workspace");
+        assert!(exp.found);
         assert_eq!(exp.recipe_id, "init-workspace");
         Ok(())
     }
