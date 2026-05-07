@@ -336,14 +336,20 @@ fn exit_6_degraded_on_economy_without_metrics() -> TestResult {
 }
 
 #[test]
-fn exit_6_degraded_on_preflight_without_evidence() -> TestResult {
+fn exit_0_preflight_report_without_evidence() -> TestResult {
     let output = run_ee(&["preflight", "run", "deploy production migration", "--json"])?;
-    persist_artifact("exit_6_preflight_degraded", &output);
+    persist_artifact("exit_0_preflight_report_without_evidence", &output);
 
     ensure_equal(
         &output.status.code(),
-        &Some(EXIT_DEGRADED),
-        "preflight degraded exit code",
+        &Some(0),
+        "preflight report exit code",
+    )?;
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["data"]["degraded"][0]["code"],
+        &serde_json::json!("preflight_evidence_unavailable"),
+        "preflight report degraded code",
     )
 }
 
