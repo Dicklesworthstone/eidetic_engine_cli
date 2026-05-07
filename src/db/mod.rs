@@ -12155,6 +12155,40 @@ mod tests {
     }
 
     #[test]
+    fn migrations_array_is_sorted_strictly_increasing() -> TestResult {
+        let versions = migration_versions();
+        for window in versions.windows(2) {
+            ensure(
+                window[0] < window[1],
+                format!(
+                    "MIGRATIONS array out of order: V{:03} appears before V{:03}",
+                    window[0], window[1]
+                ),
+            )?;
+        }
+        ensure_equal(&versions.first(), &Some(&1), "MIGRATIONS must start at V001")?;
+        let expected_last = u32::try_from(versions.len()).unwrap();
+        ensure_equal(
+            &versions.last(),
+            &Some(&expected_last),
+            &format!("MIGRATIONS must end at V{expected_last:03}"),
+        )
+    }
+
+    #[test]
+    fn migrations_have_no_version_gaps() -> TestResult {
+        for (index, migration) in super::MIGRATIONS.iter().enumerate() {
+            let expected = u32::try_from(index + 1).unwrap();
+            ensure_equal(
+                &migration.version(),
+                &expected,
+                &format!("MIGRATIONS[{index}] version"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn memory_config_uses_read_write_mode() -> TestResult {
         let config = DatabaseConfig::memory();
 
