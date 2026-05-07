@@ -1711,7 +1711,7 @@ fn preflight_run_blocks_high_risk_deploy_task() -> TestResult {
         "deploy production database migration",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(6), "exit code")?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(
@@ -1727,25 +1727,25 @@ fn preflight_run_blocks_high_risk_deploy_task() -> TestResult {
     )?;
     ensure_equal(
         &json["success"],
-        &serde_json::json!(false),
+        &serde_json::json!(true),
         "preflight run success flag",
     )?;
     ensure_equal(
-        &json["data"]["code"],
+        &json["data"]["degraded"][0]["code"],
         &serde_json::json!("preflight_evidence_unavailable"),
         "preflight run degraded code",
     )?;
     ensure_equal(
-        &json["data"]["followUpBead"],
-        &serde_json::json!("eidetic_engine_cli-bijm"),
-        "preflight run follow-up bead",
+        &json["data"]["next_action"],
+        &serde_json::json!("collect_preflight_evidence_or_use_risk_review_skill"),
+        "preflight run next action",
     )
 }
 
 #[test]
 fn preflight_show_returns_stubbed_storage_details() -> TestResult {
     let output = run_ee(&["preflight", "show", "pf_gate16_contract", "--json"])?;
-    ensure_equal(&output.status.code(), &Some(6), "exit code")?;
+    ensure_equal(&output.status.code(), &Some(1), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(
@@ -1756,18 +1756,18 @@ fn preflight_show_returns_stubbed_storage_details() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.response.v1"),
-        "preflight show response schema",
+        &serde_json::json!("ee.error.v1"),
+        "preflight show error schema",
     )?;
     ensure_equal(
-        &json["success"],
-        &serde_json::json!(false),
-        "preflight show success flag",
+        &json["error"]["code"],
+        &serde_json::json!("not_found"),
+        "preflight show error code",
     )?;
     ensure_equal(
-        &json["data"]["code"],
-        &serde_json::json!("preflight_evidence_unavailable"),
-        "preflight show degraded code",
+        &json["error"]["details"]["id"],
+        &serde_json::json!("pf_gate16_contract"),
+        "preflight show error id",
     )
 }
 
@@ -1787,7 +1787,7 @@ fn preflight_close_dry_run_records_feedback_shape() -> TestResult {
         "--dry-run",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(6), "exit code")?;
+    ensure_equal(&output.status.code(), &Some(1), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(
@@ -1798,13 +1798,13 @@ fn preflight_close_dry_run_records_feedback_shape() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.response.v1"),
-        "preflight close response schema",
+        &serde_json::json!("ee.error.v1"),
+        "preflight close error schema",
     )?;
     ensure_equal(
-        &json["data"]["code"],
-        &serde_json::json!("preflight_evidence_unavailable"),
-        "preflight close degraded code",
+        &json["error"]["code"],
+        &serde_json::json!("not_found"),
+        "preflight close error code",
     )
 }
 
@@ -1821,7 +1821,7 @@ fn preflight_close_without_cleared_infers_false_alarm_for_success() -> TestResul
         "--dry-run",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(6), "exit code")?;
+    ensure_equal(&output.status.code(), &Some(1), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(
@@ -1832,13 +1832,13 @@ fn preflight_close_without_cleared_infers_false_alarm_for_success() -> TestResul
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.response.v1"),
-        "preflight close response schema",
+        &serde_json::json!("ee.error.v1"),
+        "preflight close error schema",
     )?;
     ensure_equal(
-        &json["data"]["code"],
-        &serde_json::json!("preflight_evidence_unavailable"),
-        "uncleared preflight close degraded code",
+        &json["error"]["code"],
+        &serde_json::json!("not_found"),
+        "uncleared preflight close error code",
     )
 }
 

@@ -69,7 +69,7 @@ fn assert_exact_golden(relative: &str, actual: &str) -> TestResult {
     )
 }
 
-fn assert_cli_json_stdout_clean(args: &[&str], display: &str, code: &str) -> TestResult {
+fn assert_cli_preflight_run_stdout_clean(args: &[&str], display: &str, code: &str) -> TestResult {
     let output = Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
         .output()
@@ -80,8 +80,8 @@ fn assert_cli_json_stdout_clean(args: &[&str], display: &str, code: &str) -> Tes
         .map_err(|error| format!("stderr was not UTF-8 for ee {display}: {error}"))?;
 
     ensure(
-        output.status.code() == Some(6),
-        format!("ee {display} should degrade, stderr: {stderr}"),
+        output.status.success(),
+        format!("ee {display} should return a preflight report, stderr: {stderr}"),
     )?;
     ensure(
         stderr.is_empty(),
@@ -96,17 +96,17 @@ fn assert_cli_json_stdout_clean(args: &[&str], display: &str, code: &str) -> Tes
     ensure_equal(
         &value["schema"],
         &serde_json::json!("ee.response.v1"),
-        "public CLI degraded schema",
+        "public CLI preflight schema",
     )?;
     ensure_equal(
         &value["success"],
-        &serde_json::json!(false),
-        "public CLI degraded success flag",
+        &serde_json::json!(true),
+        "public CLI preflight success flag",
     )?;
     ensure_equal(
-        &value["data"]["code"],
+        &value["data"]["degraded"][0]["code"],
         &serde_json::json!(code),
-        "public CLI degraded code",
+        "public CLI preflight degraded code",
     )?;
     Ok(())
 }
@@ -540,7 +540,7 @@ fn tripwire_store_check_uses_persisted_rows_and_logs_event() -> TestResult {
 
 #[test]
 fn public_cli_preflight_and_tripwire_json_keep_stdout_clean() -> TestResult {
-    assert_cli_json_stdout_clean(
+    assert_cli_preflight_run_stdout_clean(
         &[
             "--json",
             "preflight",

@@ -1,0 +1,17 @@
+---
+source: src/core/preflight.rs
+assertion: preflight run produces evidence-aware risk reports and honest missing-evidence degradation
+schema:
+  report: ee.preflight.report.v1
+contracts:
+  - preflight run calls core::preflight::run_preflight through the public CLI
+  - preflight run returns a stable ee.response.v1 envelope in JSON mode
+  - preflight run reports matched evidence IDs and generated tripwires when evidence sources match
+  - preflight run keeps degraded evidence explicit when no persisted evidence matches
+  - preflight show validates persisted run IDs and reports not_found for missing stored runs
+  - preflight close validates persisted run IDs and reports not_found for missing stored runs
+evidence:
+  - tests/contracts/preflight_tripwires.rs
+  - tests/golden/preflight/release_task.json
+  - tests/golden/preflight/degraded_evidence.json
+  - tests/golden/preflight/false_alarm_close.json

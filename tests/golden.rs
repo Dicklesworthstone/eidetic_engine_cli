@@ -619,7 +619,7 @@ mod tests {
                 "run",
                 "deploy production database migration",
             ],
-            false,
+            true,
         )?;
         ensure_equal(
             &value["schema"],
@@ -628,18 +628,18 @@ mod tests {
         )?;
         ensure_equal(
             &value["success"],
-            &serde_json::json!(false),
+            &serde_json::json!(true),
             "preflight run success flag",
         )?;
         ensure_equal(
-            &value["data"]["code"],
+            &value["data"]["degraded"][0]["code"],
             &serde_json::json!("preflight_evidence_unavailable"),
             "preflight run degraded code",
         )?;
         ensure_equal(
-            &value["data"]["followUpBead"],
-            &serde_json::json!("eidetic_engine_cli-bijm"),
-            "preflight run follow-up bead",
+            &value["data"]["next_action"],
+            &serde_json::json!("collect_preflight_evidence_or_use_risk_review_skill"),
+            "preflight run next action",
         )
     }
 
@@ -651,23 +651,18 @@ mod tests {
         )?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
-            "preflight show response schema",
+            &serde_json::json!("ee.error.v1"),
+            "preflight show error schema",
         )?;
         ensure_equal(
-            &value["success"],
-            &serde_json::json!(false),
-            "preflight show success flag",
+            &value["error"]["code"],
+            &serde_json::json!("not_found"),
+            "preflight show error code",
         )?;
         ensure_equal(
-            &value["data"]["code"],
-            &serde_json::json!("preflight_evidence_unavailable"),
-            "preflight show degraded code",
-        )?;
-        ensure_equal(
-            &value["data"]["evidenceIds"],
-            &serde_json::json!([]),
-            "preflight show does not claim evidence",
+            &value["error"]["details"]["id"],
+            &serde_json::json!("pf_gate16_contract"),
+            "preflight show error id",
         )
     }
 
@@ -692,18 +687,18 @@ mod tests {
         )?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
-            "preflight close response schema",
+            &serde_json::json!("ee.error.v1"),
+            "preflight close error schema",
         )?;
         ensure_equal(
-            &value["success"],
-            &serde_json::json!(false),
-            "preflight close success flag",
+            &value["error"]["code"],
+            &serde_json::json!("not_found"),
+            "preflight close error code",
         )?;
         ensure_equal(
-            &value["data"]["code"],
-            &serde_json::json!("preflight_evidence_unavailable"),
-            "preflight close degraded code",
+            &value["error"]["details"]["id"],
+            &serde_json::json!("pf_gate16_contract"),
+            "preflight close error id",
         )
     }
 

@@ -106,6 +106,10 @@ use crate::core::outcome::{
     OutcomeQuarantineReviewReport, OutcomeRecordOptions, list_feedback_quarantine, record_outcome,
     review_feedback_quarantine,
 };
+use crate::core::preflight::{
+    CloseOptions as PreflightCloseOptions, RunOptions as PreflightRunOptions,
+    ShowOptions as PreflightShowOptions, close_preflight, run_preflight, show_preflight,
+};
 use crate::core::preflight_guard::{
     BypassTokenInput, PreflightGuardOptions, PreflightGuardRegistry, run_preflight_guard,
 };
@@ -8843,58 +8847,6 @@ where
 // EE-391: Preflight Command Handlers
 // ============================================================================
 
-const PREFLIGHT_UNAVAILABLE_CODE: &str = "preflight_evidence_unavailable";
-const PREFLIGHT_UNAVAILABLE_MESSAGE: &str = "Preflight risk briefs are unavailable until preflight commands are backed by persisted evidence matches and stored run records instead of task-text heuristics.";
-const PREFLIGHT_UNAVAILABLE_REPAIR: &str = "ee status --json";
-const PREFLIGHT_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-bijm";
-const PREFLIGHT_UNAVAILABLE_SIDE_EFFECT: &str =
-    "conservative abstention; no preflight run, risk brief, or feedback ledger mutation";
-const PREFLIGHT_RUN_ID_PREFIX: &str = "pf_";
-
-fn write_preflight_unavailable<W, E>(
-    cli: &Cli,
-    command: &'static str,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": PREFLIGHT_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": PREFLIGHT_UNAVAILABLE_MESSAGE,
-                "repair": PREFLIGHT_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": PREFLIGHT_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": PREFLIGHT_UNAVAILABLE_MESSAGE,
-                        "repair": PREFLIGHT_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": PREFLIGHT_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": PREFLIGHT_UNAVAILABLE_SIDE_EFFECT
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
-    }
-
-    let _ = writeln!(stderr, "error: {PREFLIGHT_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {PREFLIGHT_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
-}
-
 fn handle_preflight_run<W, E>(
     cli: &Cli,
     args: &PreflightRunArgs,
@@ -8905,8 +8857,19 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    write_preflight_unavailable(cli, "preflight run", stdout, stderr)
+    let options = PreflightRunOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        task_input: args.task_input.clone(),
+        check_history: args.check_history,
+        check_tripwires: args.check_tripwires,
+        dry_run: args.dry_run,
+        ..PreflightRunOptions::default()
+    };
+
+    match run_preflight(&options) {
+        Ok(report) => write_preflight_run_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_preflight_show<W, E>(
@@ -8919,10 +8882,17 @@ where
     W: Write,
     E: Write,
 {
-    if let Err(error) = validate_preflight_run_id(&args.run_id) {
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    let options = PreflightShowOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        run_id: args.run_id.clone(),
+        include_brief: args.include_brief,
+        include_tripwires: args.include_tripwires,
+    };
+
+    match show_preflight(&options) {
+        Ok(report) => write_preflight_show_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
-    write_preflight_unavailable(cli, "preflight show", stdout, stderr)
 }
 
 fn handle_preflight_close<W, E>(
@@ -8935,9 +8905,6 @@ where
     W: Write,
     E: Write,
 {
-    if let Err(error) = validate_preflight_run_id(&args.run_id) {
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-    }
     let task_outcome = match parse_task_outcome_arg(args.task_outcome.as_deref()) {
         Ok(outcome) => outcome,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
@@ -8946,22 +8913,94 @@ where
         Ok(kind) => kind,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
-    let _ = (task_outcome, feedback_kind);
-    write_preflight_unavailable(cli, "preflight close", stdout, stderr)
+
+    let options = PreflightCloseOptions {
+        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        run_id: args.run_id.clone(),
+        cleared: args.cleared,
+        reason: args.reason.clone(),
+        task_outcome,
+        feedback_kind,
+        dry_run: args.dry_run,
+    };
+
+    match close_preflight(&options) {
+        Ok(report) => write_preflight_close_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
-fn validate_preflight_run_id(raw: &str) -> Result<(), DomainError> {
-    if raw.starts_with(PREFLIGHT_RUN_ID_PREFIX) {
-        Ok(())
-    } else {
-        let prefix_preview = raw.chars().take(3).collect::<String>();
-        Err(DomainError::Usage {
-            message: format!(
-                "Invalid preflight run ID `{}`: expected prefix `{}`",
-                prefix_preview, PREFLIGHT_RUN_ID_PREFIX
-            ),
-            repair: Some("Provide a valid preflight run ID (format: pf_<uuid>)".to_owned()),
-        })
+fn write_preflight_run_report<W>(
+    cli: &Cli,
+    report: &crate::core::preflight::RunReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_preflight_run_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_preflight_run_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_preflight_run_json(report) + "\n"))
+        }
+    }
+}
+
+fn write_preflight_show_report<W>(
+    cli: &Cli,
+    report: &crate::core::preflight::ShowReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_preflight_show_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_preflight_show_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_preflight_show_json(report) + "\n"))
+        }
+    }
+}
+
+fn write_preflight_close_report<W>(
+    cli: &Cli,
+    report: &crate::core::preflight::CloseReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_preflight_close_human(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_preflight_close_toon(report) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_preflight_close_json(report) + "\n"),
+        ),
     }
 }
 
