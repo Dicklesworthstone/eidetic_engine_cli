@@ -1042,7 +1042,10 @@ pub struct RecorderTailOptions {
     /// exist. This intentionally differs from `RecorderEventsListOptions`,
     /// where zero means "unbounded".
     pub limit: u32,
-    /// Starting sequence number.
+    /// Return events with sequence strictly greater than this value.
+    ///
+    /// This is an exclusive cursor for follow-mode pagination: callers should
+    /// pass the last sequence they have already observed.
     pub from_sequence: Option<u64>,
     /// Follow mode: continuously poll for new events.
     pub follow: bool,
@@ -1320,7 +1323,6 @@ pub fn tail_recording_from_events(
     options: &RecorderTailOptions,
     events: &[RecorderEventSummary],
 ) -> RecorderTailReport {
-    let from_sequence = options.from_sequence.unwrap_or(0);
     let mut matching = events
         .iter()
         .filter(|event| {
@@ -1335,7 +1337,11 @@ pub fn tail_recording_from_events(
                 .as_ref()
                 .is_none_or(|since| timestamp_is_at_or_after(&event.timestamp, since))
         })
-        .filter(|event| event.sequence >= from_sequence)
+        .filter(|event| {
+            options
+                .from_sequence
+                .is_none_or(|from_sequence| event.sequence > from_sequence)
+        })
         .filter(|event| {
             options
                 .filter
@@ -2862,7 +2868,7 @@ mod tests {
             run_id: Some("run_test".to_string()),
             since: None,
             limit: 2,
-            from_sequence: Some(2),
+            from_sequence: Some(1),
             follow: false,
             filter: None,
         };
@@ -2909,6 +2915,52 @@ mod tests {
         assert_eq!(report.events[0].event_id, "evt_002");
         assert_eq!(report.events[1].event_id, "evt_003");
         assert!(report.events[0].redacted);
+    }
+
+    #[test]
+    fn tail_recording_from_events_uses_from_sequence_as_exclusive_cursor() {
+        let options = RecorderTailOptions {
+            run_id: Some("run_test".to_string()),
+            since: None,
+            limit: 10,
+            from_sequence: Some(2),
+            follow: false,
+            filter: None,
+        };
+        let events = vec![
+            event_summary(
+                "run_test",
+                "evt_001",
+                1,
+                RecorderEventType::UserMessage,
+                "2026-01-01T00:00:01Z",
+                false,
+            ),
+            event_summary(
+                "run_test",
+                "evt_002",
+                2,
+                RecorderEventType::ToolCall,
+                "2026-01-01T00:00:02Z",
+                false,
+            ),
+            event_summary(
+                "run_test",
+                "evt_003",
+                3,
+                RecorderEventType::ToolResult,
+                "2026-01-01T00:00:03Z",
+                false,
+            ),
+        ];
+
+        let report = tail_recording_from_events(&options, &events);
+
+        assert_eq!(report.total_events, 1);
+        assert!(!report.has_more);
+        assert_eq!(report.events.len(), 1);
+        assert_eq!(report.events[0].sequence, 3);
+        assert_eq!(report.events[0].event_id, "evt_003");
     }
 
     #[test]
