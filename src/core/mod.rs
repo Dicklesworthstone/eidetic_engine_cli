@@ -65,8 +65,12 @@ pub use outcome::{
     outcome_class, outcome_exit_code, record_outcome,
 };
 pub use write_owner::{
-    WRITE_OWNER_STATUS_SCHEMA_V1, WriteHandle, WriteOperation, WriteOwner, WriteOwnerStatus,
-    WriteResult,
+    WRITE_OWNER_STATUS_SCHEMA_V1, WRITE_SPOOL_BACKPRESSURE_CODE,
+    WRITE_SPOOL_BACKPRESSURE_SCHEMA_V1, WRITE_SPOOL_STATUS_SCHEMA_V1, WriteHandle, WriteOperation,
+    WriteOwner, WriteOwnerStatus, WriteResult, WriteSpool, WriteSpoolBackpressureError,
+    WriteSpoolBackpressureReason, WriteSpoolBatch, WriteSpoolConfig, WriteSpoolDurability,
+    WriteSpoolFailure, WriteSpoolIntent, WriteSpoolIntentKind, WriteSpoolRecord,
+    WriteSpoolRecordStatus, WriteSpoolStatus, WriteSpoolTicket,
 };
 
 pub const VERSION_PROVENANCE_SCHEMA_V1: &str = "ee.version.provenance.v1";
