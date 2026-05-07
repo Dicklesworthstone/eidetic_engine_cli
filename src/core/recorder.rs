@@ -2079,9 +2079,8 @@ pub fn execute_recorder_import(
 // `&DbConnection` that the caller has already acquired and convert any DB error
 // into a `DomainError::Storage`.
 //
-// The CLI handlers in `src/cli/mod.rs` call these helpers directly so the
-// `RECORDER_STORE_UNAVAILABLE_CODE` abstention can be deleted. We expose a
-// stable surface here so the CLI side stays thin.
+// The CLI handlers in `src/cli/mod.rs` call these helpers directly. We expose
+// a stable surface here so the CLI side stays thin.
 // ============================================================================
 
 /// Persist a new recorder run row alongside the in-memory start report.
@@ -2134,6 +2133,15 @@ pub fn record_and_persist_event(
     let mut recorder_error = None;
     let report = conn
         .with_transaction(|| {
+            if conn.get_recorder_run(&options.run_id)?.is_none() {
+                recorder_error = Some(RecordPersistedEventError::RunNotFound(
+                    options.run_id.clone(),
+                ));
+                return Err(crate::db::DbError::MalformedRow {
+                    operation: crate::db::DbOperation::Query,
+                    message: "recorder run not found".to_owned(),
+                });
+            }
             let existing = conn.list_recorder_events(&options.run_id)?;
             let sequence = u64::try_from(existing.len()).unwrap_or(u64::MAX) + 1;
             let previous_event_hash = existing.last().map(|event| event.event_hash.clone());
@@ -2217,6 +2225,23 @@ pub fn finish_and_persist_recording(
         }
     })?;
 
+    if conn
+        .get_recorder_run(&options.run_id)
+        .map_err(|error| crate::models::DomainError::Storage {
+            message: format!("Failed to read recorder run {}: {error}", options.run_id),
+            repair: Some("ee status --json".to_owned()),
+        })?
+        .is_none()
+    {
+        return Err(crate::models::DomainError::NotFound {
+            resource: "recorder run".to_owned(),
+            id: options.run_id.clone(),
+            repair: Some(
+                "Start a run with `ee recorder start --json` before finishing it.".to_owned(),
+            ),
+        });
+    }
+
     let stored_events = conn
         .list_recorder_events(&options.run_id)
         .map_err(|error| crate::models::DomainError::Storage {
@@ -2288,6 +2313,8 @@ fn validate_run_id_token(run_id: &str) -> Result<(), String> {
 pub enum RecordPersistedEventError {
     /// The supplied run id did not match the recorder_runs CHECK constraint.
     InvalidRunId(String),
+    /// The supplied run id was syntactically valid but absent from the store.
+    RunNotFound(String),
     /// `record_event` rejected the inputs (usually payload too large).
     Validation(RecorderEventError),
     /// The caller asserted a previous-event-hash that disagrees with persisted chain.
@@ -2300,6 +2327,7 @@ impl std::fmt::Display for RecordPersistedEventError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidRunId(message) | Self::Storage { message } => f.write_str(message),
+            Self::RunNotFound(run_id) => write!(f, "recorder run not found: {run_id}"),
             Self::Validation(error) => write!(f, "{error}"),
             Self::ChainMismatch { expected, provided } => write!(
                 f,

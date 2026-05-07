@@ -37,6 +37,9 @@ pub const PROCEDURE_EXPORT_REPORT_SCHEMA_V1: &str = "ee.procedure.export_report.
 /// Schema for procedure promotion dry-run reports.
 pub const PROCEDURE_PROMOTE_REPORT_SCHEMA_V1: &str = "ee.procedure.promote_report.v1";
 
+/// Schema for procedure retirement reports.
+pub const PROCEDURE_RETIRE_REPORT_SCHEMA_V1: &str = "ee.procedure.retire_report.v1";
+
 /// Schema for procedure drift detection reports.
 pub const PROCEDURE_DRIFT_REPORT_SCHEMA_V1: &str = "ee.procedure.drift_report.v1";
 
@@ -106,6 +109,7 @@ pub fn propose_procedure(
             });
         };
         let evidence_uris = procedure_evidence_uris(&options.source_run_ids, &options.evidence_ids);
+        let event_id = format!("pevt_{}", generate_id());
         let procedure = store
             .connection
             .insert_procedure(
@@ -127,9 +131,9 @@ pub fn propose_procedure(
         store
             .connection
             .insert_procedure_event(
-                &format!("pevt_{}", generate_id()),
+                &event_id,
                 &CreateProcedureEventInput {
-                    workspace_id: store.workspace_id,
+                    workspace_id: store.workspace_id.clone(),
                     procedure_id: procedure_id.clone(),
                     event_type: "created".to_owned(),
                     from_maturity: None,
@@ -141,6 +145,29 @@ pub fn propose_procedure(
                 },
             )
             .map_err(storage_error("failed to record procedure creation event"))?;
+        let audit_id = generate_audit_id();
+        let audit_details = json!({
+            "eventId": event_id,
+            "title": options.title.as_str(),
+            "sourceRunIds": &options.source_run_ids,
+            "evidenceIds": &options.evidence_ids,
+            "dryRun": false,
+        })
+        .to_string();
+        store
+            .connection
+            .insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(store.workspace_id),
+                    actor: Some("agent".to_owned()),
+                    action: audit_actions::PROCEDURE_CREATE.to_owned(),
+                    target_type: Some("procedure".to_owned()),
+                    target_id: Some(procedure_id.clone()),
+                    details: Some(audit_details),
+                },
+            )
+            .map_err(storage_error("failed to audit procedure creation"))?;
     }
 
     let report = ProcedureProposeReport {
@@ -1484,7 +1511,7 @@ pub fn retire_procedure(
         .map_err(storage_error("failed to audit procedure retirement"))?;
 
     Ok(ProcedureRetireReport {
-        schema: "ee.procedure.retire_report.v1".to_owned(),
+        schema: PROCEDURE_RETIRE_REPORT_SCHEMA_V1.to_owned(),
         procedure_id: procedure_id.to_owned(),
         status: "retired".to_owned(),
         from_maturity: event

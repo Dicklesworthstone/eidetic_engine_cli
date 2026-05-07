@@ -5071,7 +5071,7 @@ Then update src/policy/mod.rs on main."
         let mut input = valid_input();
         input.proposed_trust_class = Some("human_explicit".to_string());
         input.source_type = CandidateSource::HumanRequest;
-        input.source_id = Some("audit_01234567890123456789012345".to_string());
+        input.source_id = Some("audit_01234567890123456789012345678901".to_string());
 
         let result = validate_candidate(input, "2026-04-29T12:00:00Z");
 

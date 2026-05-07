@@ -74,59 +74,16 @@ fn stdout_is_clean(output: &Output) -> bool {
 // Recorder Tests (EE-401)
 // ============================================================================
 
-fn assert_recorder_store_unavailable(output: &Output, command: &str) -> TestResult {
-    ensure_equal(
-        &output.status.code(),
-        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
-        "exit code",
-    )?;
-    ensure(stdout_is_json(output), "stdout must be valid JSON")?;
-    ensure(stdout_is_clean(output), "stdout must be clean")?;
-    ensure(
-        output.stderr.is_empty(),
-        "json degraded response must keep stderr empty",
-    )?;
-    let json = stdout_json(output)?;
-    ensure_equal(
-        &json["schema"],
-        &serde_json::json!("ee.response.v1"),
-        "response schema",
-    )?;
-    ensure_equal(&json["success"], &serde_json::json!(false), "success flag")?;
-    ensure_equal(
-        &json["data"]["command"],
-        &serde_json::json!(command),
-        "recorder command",
-    )?;
-    ensure_equal(
-        &json["data"]["code"],
-        &serde_json::json!("recorder_store_unavailable"),
-        "recorder store degraded code",
-    )?;
-    ensure_equal(
-        &json["data"]["repair"],
-        &serde_json::json!("ee status --json"),
-        "recorder repair command",
-    )?;
-    ensure_equal(
-        &json["data"]["followUpBead"],
-        &serde_json::json!("eidetic_engine_cli-6xzc"),
-        "recorder follow-up bead",
-    )?;
-    ensure_equal(
-        &json["data"]["evidenceIds"],
-        &serde_json::json!([]),
-        "recorder evidence ids",
-    )?;
-    ensure_equal(
-        &json["data"]["sourceIds"],
-        &serde_json::json!([]),
-        "recorder source ids",
-    )
+fn initialized_recorder_workspace() -> Result<(tempfile::TempDir, String), String> {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(&init.status.code(), &Some(0), "recorder init exit")?;
+    Ok((tempdir, workspace))
 }
 
 #[test]
-fn recorder_start_dry_run_degrades_until_store_exists() -> TestResult {
+fn recorder_start_dry_run_reports_without_store_mutation() -> TestResult {
     let output = run_ee(&[
         "recorder",
         "start",
@@ -135,69 +92,174 @@ fn recorder_start_dry_run_degrades_until_store_exists() -> TestResult {
         "--dry-run",
         "--json",
     ])?;
-    assert_recorder_store_unavailable(&output, "recorder start")
-}
-
-#[test]
-fn recorder_start_degrades_without_generated_run_id() -> TestResult {
-    let output = run_ee(&["recorder", "start", "--agent-id", "test-agent", "--json"])?;
-    assert_recorder_store_unavailable(&output, "recorder start")?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(output.stderr.is_empty(), "json dry-run stderr empty")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.recorder.start.v1"),
+        "start schema",
+    )?;
+    ensure_equal(&json["dryRun"], &serde_json::json!(true), "dry run")?;
     ensure(
-        !stdout_contains(&output, "runId"),
-        "degraded recorder start must not claim a generated run id",
+        json["runId"]
+            .as_str()
+            .is_some_and(|run_id| run_id.starts_with("run_")),
+        "dry-run start reports a syntactically valid run id",
     )
 }
 
 #[test]
-fn recorder_event_degrades_until_store_exists() -> TestResult {
-    let output = run_ee(&[
-        "recorder",
-        "event",
-        "run_test_123",
-        "--event-type",
-        "tool_call",
-        "--json",
-    ])?;
-    assert_recorder_store_unavailable(&output, "recorder event")
-}
+fn recorder_start_event_finish_persist_and_list_events() -> TestResult {
+    let (_tempdir, workspace) = initialized_recorder_workspace()?;
 
-#[test]
-fn recorder_event_degraded_response_does_not_echo_payload() -> TestResult {
-    let output = run_ee(&[
+    let start = run_ee(&[
+        "--workspace",
+        &workspace,
+        "--json",
+        "recorder",
+        "start",
+        "--agent-id",
+        "test-agent",
+        "--session-id",
+        "sess-test",
+    ])?;
+    ensure_equal(&start.status.code(), &Some(0), "start exit")?;
+    ensure(start.stderr.is_empty(), "start stderr empty")?;
+    let start_json = stdout_json(&start)?;
+    ensure_equal(
+        &start_json["schema"],
+        &serde_json::json!("ee.recorder.start.v1"),
+        "start schema",
+    )?;
+    let run_id = start_json["runId"]
+        .as_str()
+        .ok_or_else(|| "start output missing runId".to_owned())?
+        .to_owned();
+
+    let event = run_ee(&[
+        "--workspace",
+        &workspace,
+        "--json",
         "recorder",
         "event",
-        "run_test_123",
+        &run_id,
         "--event-type",
         "user_message",
         "--payload",
         "password marker token marker",
-        "--json",
     ])?;
-    assert_recorder_store_unavailable(&output, "recorder event")?;
+    ensure_equal(&event.status.code(), &Some(0), "event exit")?;
+    ensure(event.stderr.is_empty(), "event stderr empty")?;
+    let event_stdout = String::from_utf8_lossy(&event.stdout);
     ensure(
-        !String::from_utf8_lossy(&output.stdout).contains("password marker token marker"),
-        "degraded stdout must not echo raw payload",
+        !event_stdout.contains("password marker token marker"),
+        "recorder event output must not echo raw sensitive payload",
+    )?;
+    let event_json = stdout_json(&event)?;
+    ensure_equal(
+        &event_json["schema"],
+        &serde_json::json!("ee.recorder.event_response.v1"),
+        "event schema",
+    )?;
+    ensure_equal(&event_json["runId"], &serde_json::json!(run_id), "run id")?;
+    ensure_equal(&event_json["sequence"], &serde_json::json!(1), "sequence")?;
+    ensure_equal(
+        &event_json["redactionStatus"],
+        &serde_json::json!("full"),
+        "redaction status",
+    )?;
+    let event_hash = event_json["eventHash"]
+        .as_str()
+        .ok_or_else(|| "event output missing eventHash".to_owned())?
+        .to_owned();
+    ensure(
+        event_hash.starts_with("blake3:"),
+        "event hash must be persisted hash-chain value",
+    )?;
+
+    let finish = run_ee(&[
+        "--workspace",
+        &workspace,
+        "--json",
+        "recorder",
+        "finish",
+        &run_id,
+        "--status",
+        "completed",
+    ])?;
+    ensure_equal(&finish.status.code(), &Some(0), "finish exit")?;
+    ensure(finish.stderr.is_empty(), "finish stderr empty")?;
+    let finish_json = stdout_json(&finish)?;
+    ensure_equal(
+        &finish_json["schema"],
+        &serde_json::json!("ee.recorder.finish.v1"),
+        "finish schema",
+    )?;
+    ensure_equal(
+        &finish_json["eventCount"],
+        &serde_json::json!(1),
+        "finish event count",
+    )?;
+
+    let listed = run_ee(&[
+        "--workspace",
+        &workspace,
+        "--json",
+        "recorder",
+        "events",
+        "list",
+        "--run-id",
+        &run_id,
+        "--source",
+        "live",
+    ])?;
+    ensure_equal(&listed.status.code(), &Some(0), "list exit")?;
+    ensure(listed.stderr.is_empty(), "list stderr empty")?;
+    let listed_json = stdout_json(&listed)?;
+    ensure_equal(
+        &listed_json["schema"],
+        &serde_json::json!("ee.recorder.events_list.v1"),
+        "list schema",
+    )?;
+    ensure_equal(
+        &listed_json["totalCount"],
+        &serde_json::json!(1),
+        "list total count",
+    )?;
+    ensure_equal(
+        &listed_json["events"][0]["eventHash"],
+        &serde_json::json!(event_hash),
+        "listed event hash",
     )
 }
 
 #[test]
-fn recorder_event_degrades_without_hash_chain_claims() -> TestResult {
+fn recorder_event_missing_run_returns_not_found() -> TestResult {
+    let (_tempdir, workspace) = initialized_recorder_workspace()?;
     let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "--json",
         "recorder",
         "event",
-        "run_test_123",
+        "run_missing_123",
         "--event-type",
-        "tool_result",
-        "--payload",
-        "ok",
-        "--previous-event-hash",
-        "blake3:previous",
-        "--json",
+        "tool_call",
     ])?;
-    assert_recorder_store_unavailable(&output, "recorder event")?;
-    ensure(
-        !stdout_contains(&output, "eventHash") && !stdout_contains(&output, "chainStatus"),
-        "degraded recorder event must not claim hash-chain state",
+    ensure_equal(&output.status.code(), &Some(1), "not-found exit")?;
+    ensure(output.stderr.is_empty(), "json not-found stderr empty")?;
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.error.v1"),
+        "error schema",
+    )?;
+    ensure_equal(
+        &json["error"]["code"],
+        &serde_json::json!("not_found"),
+        "error code",
     )
 }
 
@@ -356,20 +418,6 @@ fn recorder_import_requires_dry_run_with_stable_error_code() -> TestResult {
 }
 
 #[test]
-fn recorder_finish_dry_run_degrades_until_store_exists() -> TestResult {
-    let output = run_ee(&[
-        "recorder",
-        "finish",
-        "run_test_123",
-        "--status",
-        "completed",
-        "--dry-run",
-        "--json",
-    ])?;
-    assert_recorder_store_unavailable(&output, "recorder finish")
-}
-
-#[test]
 fn recorder_finish_validates_status() -> TestResult {
     let output = run_ee(&[
         "recorder",
@@ -383,6 +431,13 @@ fn recorder_finish_validates_status() -> TestResult {
         &output.status.code(),
         &Some(1),
         "exit code for invalid status",
+    )?;
+    ensure(output.stderr.is_empty(), "json usage stderr empty")?;
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["error"]["code"],
+        &serde_json::json!("usage"),
+        "usage code",
     )
 }
 
@@ -1865,21 +1920,23 @@ fn all_recorder_commands_produce_stdout_only_data() -> TestResult {
 }
 
 #[test]
-fn recorder_commands_support_human_degraded_output() -> TestResult {
+fn recorder_commands_support_human_dry_run_output() -> TestResult {
     let output = run_ee(&["recorder", "start", "--agent-id", "test", "--dry-run"])?;
-    ensure_equal(
-        &output.status.code(),
-        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
-        "exit code",
-    )?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
     ensure(
-        output.stdout.is_empty(),
-        "human degraded stdout must be empty",
+        !output.stdout.is_empty(),
+        "human dry-run stdout must describe the planned recording",
+    )?;
+    ensure(output.stderr.is_empty(), "human dry-run stderr empty")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    ensure(
+        stdout.contains("Recording Session [DRY RUN]"),
+        "human dry-run output must identify dry-run mode",
     )?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     ensure(
-        stderr.contains("Recorder start, event, and finish are unavailable"),
-        "human degraded output must explain recorder unavailability",
+        !stderr.contains("Recorder start, event, and finish are unavailable"),
+        "human dry-run output must not report recorder store unavailability",
     )
 }
 

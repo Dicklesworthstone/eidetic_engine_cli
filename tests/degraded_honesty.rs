@@ -269,8 +269,10 @@ fn side_effect_class(args: &[String]) -> &'static str {
     } else if args.iter().any(|arg| arg == "recorder") {
         if args.iter().any(|arg| arg == "tail" || arg == "follow") {
             "read-only recorder event stream; no recorder mutation"
+        } else if args.iter().any(|arg| arg == "--dry-run") {
+            "dry-run recorder report; no recorder store mutation"
         } else {
-            "conservative abstention; no recorder session, event, hash-chain, or finish mutation"
+            "persisted recorder session, event, or finalization mutation through recorder store"
         }
     } else if args.iter().any(|arg| arg == "demo") {
         if args.iter().any(|arg| arg == "verify") {
@@ -3519,166 +3521,184 @@ fn daemon_foreground_degrades_instead_of_reporting_simulated_job_success() -> Te
 }
 
 #[test]
-fn recorder_start_event_finish_degrade_instead_of_reporting_generated_state() -> TestResult {
-    let cases = [
-        (
-            "recorder-start-store-unavailable",
-            vec![
-                "--json".to_owned(),
-                "recorder".to_owned(),
-                "start".to_owned(),
-                "--agent-id".to_owned(),
-                "agent_fixture".to_owned(),
-                "--session-id".to_owned(),
-                "session_fixture".to_owned(),
-                "--workspace-id".to_owned(),
-                "workspace_fixture".to_owned(),
-            ],
-            "recorder start",
+fn recorder_start_event_finish_persist_real_state() -> TestResult {
+    let workspace_root = unique_artifact_dir("recorder-real-store-workspace")?;
+    let workspace = workspace_root.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+    let workspace_arg = workspace.display().to_string();
+    let init_output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(["--workspace", &workspace_arg, "init", "--json"])
+        .output()
+        .map_err(|error| format!("failed to initialize recorder workspace: {error}"))?;
+    ensure(
+        init_output.status.success(),
+        format!(
+            "workspace init for recorder store should succeed: stdout={} stderr={}",
+            String::from_utf8_lossy(&init_output.stdout),
+            String::from_utf8_lossy(&init_output.stderr)
         ),
-        (
-            "recorder-event-store-unavailable",
-            vec![
-                "--json".to_owned(),
-                "recorder".to_owned(),
-                "event".to_owned(),
-                "run_fixture_001".to_owned(),
-                "--event-type".to_owned(),
-                "tool_result".to_owned(),
-                "--payload".to_owned(),
-                "ok".to_owned(),
-                "--previous-event-hash".to_owned(),
-                "blake3:previous".to_owned(),
-            ],
-            "recorder event",
-        ),
-        (
-            "recorder-finish-store-unavailable",
-            vec![
-                "--json".to_owned(),
-                "recorder".to_owned(),
-                "finish".to_owned(),
-                "run_fixture_001".to_owned(),
-                "--status".to_owned(),
-                "completed".to_owned(),
-            ],
-            "recorder finish",
-        ),
-    ];
+    )?;
 
-    for (name, args, command) in cases {
-        let result = run_ee_logged(name, None, args)?;
+    let start = run_ee_logged(
+        "recorder-start-real-store",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "recorder".to_owned(),
+            "start".to_owned(),
+            "--agent-id".to_owned(),
+            "agent_fixture".to_owned(),
+            "--session-id".to_owned(),
+            "session_fixture".to_owned(),
+        ],
+    )?;
+    ensure_equal(&start.exit_code, &0, "recorder start exit code")?;
+    ensure(start.stderr.is_empty(), "recorder start JSON stderr empty")?;
+    ensure_no_ansi(&start.stdout, "recorder start stdout")?;
+    ensure_json_pointer(
+        &start.parsed,
+        "/schema",
+        json!("ee.recorder.start.v1"),
+        "recorder start schema",
+    )?;
+    ensure_json_pointer(
+        &start.parsed,
+        "/agentId",
+        json!("agent_fixture"),
+        "recorder start agent",
+    )?;
+    ensure(
+        start
+            .parsed
+            .pointer("/runId")
+            .and_then(Value::as_str)
+            .is_some_and(|run_id| run_id.starts_with("run_")),
+        "recorder start must return a persisted run id",
+    )?;
+    ensure_no_fake_or_unsupported_claims("recorder start", true, false, &start.stdout)?;
+    ensure_logged_contract_shape(&start, "recorder start")?;
+    let start_log_text = fs::read_to_string(&start.log_path)
+        .map_err(|error| format!("failed to read {}: {error}", start.log_path.display()))?;
+    let start_log: Value = serde_json::from_str(&start_log_text)
+        .map_err(|error| format!("recorder start e2e log must be JSON: {error}"))?;
+    ensure_json_pointer(
+        &start_log,
+        "/degradationCodes",
+        json!([]),
+        "recorder start degradation codes",
+    )?;
 
-        ensure_equal(
-            &result.exit_code,
-            &UNSATISFIED_DEGRADED_MODE_EXIT,
-            &format!("{command} unavailable exit code"),
-        )?;
-        ensure(
-            result.stderr.is_empty(),
-            format!("{command} JSON degraded response must keep stderr empty"),
-        )?;
-        ensure_no_ansi(&result.stdout, &format!("{command} degraded stdout"))?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/schema",
-            json!("ee.response.v1"),
-            &format!("{command} degraded response schema"),
-        )?;
-        ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/command",
-            json!(command),
-            &format!("{command} command field"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/code",
-            json!("recorder_store_unavailable"),
-            &format!("{command} degraded code"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/degraded/0/code",
-            json!("recorder_store_unavailable"),
-            &format!("{command} degraded array code"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/followUpBead",
-            json!("eidetic_engine_cli-6xzc"),
-            &format!("{command} follow-up bead"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sideEffectClass",
-            json!(
-                "conservative abstention; no recorder session, event, hash-chain, or finish mutation"
-            ),
-            &format!("{command} side-effect class"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/evidenceIds",
-            json!([]),
-            &format!("{command} evidence ids"),
-        )?;
-        ensure_json_pointer(
-            &result.parsed,
-            "/data/sourceIds",
-            json!([]),
-            &format!("{command} source ids"),
-        )?;
+    let run_id = start
+        .parsed
+        .pointer("/runId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "recorder start missing runId".to_owned())?
+        .to_owned();
+    let event = run_ee_logged(
+        "recorder-event-real-store",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "recorder".to_owned(),
+            "event".to_owned(),
+            run_id.clone(),
+            "--event-type".to_owned(),
+            "tool_result".to_owned(),
+            "--payload".to_owned(),
+            "password marker token marker".to_owned(),
+        ],
+    )?;
+    ensure_equal(&event.exit_code, &0, "recorder event exit code")?;
+    ensure(event.stderr.is_empty(), "recorder event JSON stderr empty")?;
+    ensure_no_ansi(&event.stdout, "recorder event stdout")?;
+    ensure(
+        !event.stdout.contains("password marker token marker"),
+        "recorder event output must not echo raw sensitive payload",
+    )?;
+    ensure_json_pointer(
+        &event.parsed,
+        "/schema",
+        json!("ee.recorder.event_response.v1"),
+        "recorder event schema",
+    )?;
+    ensure_json_pointer(
+        &event.parsed,
+        "/runId",
+        json!(run_id.clone()),
+        "recorder event run id",
+    )?;
+    ensure_json_pointer(
+        &event.parsed,
+        "/sequence",
+        json!(1),
+        "recorder event sequence",
+    )?;
+    ensure_json_pointer(
+        &event.parsed,
+        "/redactionStatus",
+        json!("full"),
+        "recorder event redaction status",
+    )?;
+    ensure(
+        event
+            .parsed
+            .pointer("/eventHash")
+            .and_then(Value::as_str)
+            .is_some_and(|hash| hash.starts_with("blake3:")),
+        "recorder event must expose a persisted hash-chain event hash",
+    )?;
+    ensure_no_fake_or_unsupported_claims("recorder event", true, false, &event.stdout)?;
+    ensure_logged_contract_shape(&event, "recorder event")?;
 
-        let fake_success = validate_no_fake_success_output(command, false, false, &result.stdout);
-        ensure(
-            fake_success.passed,
-            format!("{command} degraded output should not be fake success: {fake_success:?}"),
-        )?;
-
-        let unsupported_claims =
-            validate_no_unsupported_evidence_claims(command, false, false, &result.stdout);
-        ensure(
-            unsupported_claims.passed,
-            format!(
-                "{command} degraded output should not count as unsupported success: {unsupported_claims:?}"
-            ),
-        )?;
-
-        let log_text = fs::read_to_string(&result.log_path)
-            .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
-        let log_json: Value = serde_json::from_str(&log_text)
-            .map_err(|error| format!("e2e log must be JSON: {error}"))?;
-        ensure_json_pointer(
-            &log_json,
-            "/degradationCodes",
-            json!(["recorder_store_unavailable"]),
-            &format!("logged {command} degradation code"),
-        )?;
-        ensure_json_pointer(
-            &log_json,
-            "/repairCommand",
-            json!("ee status --json"),
-            &format!("logged {command} repair command"),
-        )?;
-        ensure_json_pointer(
-            &log_json,
-            "/commandBoundaryMatrixRow",
-            json!("recorder"),
-            &format!("logged {command} boundary matrix row"),
-        )?;
-        ensure_json_pointer(
-            &log_json,
-            "/sideEffectClass",
-            json!(
-                "conservative abstention; no recorder session, event, hash-chain, or finish mutation"
-            ),
-            &format!("logged {command} side-effect class"),
-        )?;
-    }
-
-    Ok(())
+    let finish = run_ee_logged(
+        "recorder-finish-real-store",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg,
+            "--json".to_owned(),
+            "recorder".to_owned(),
+            "finish".to_owned(),
+            run_id,
+            "--status".to_owned(),
+            "completed".to_owned(),
+        ],
+    )?;
+    ensure_equal(&finish.exit_code, &0, "recorder finish exit code")?;
+    ensure(
+        finish.stderr.is_empty(),
+        "recorder finish JSON stderr empty",
+    )?;
+    ensure_no_ansi(&finish.stdout, "recorder finish stdout")?;
+    ensure_json_pointer(
+        &finish.parsed,
+        "/schema",
+        json!("ee.recorder.finish.v1"),
+        "recorder finish schema",
+    )?;
+    ensure_json_pointer(
+        &finish.parsed,
+        "/status",
+        json!("completed"),
+        "recorder finish status",
+    )?;
+    ensure_json_pointer(
+        &finish.parsed,
+        "/eventCount",
+        json!(1),
+        "recorder finish event count",
+    )?;
+    ensure_no_fake_or_unsupported_claims("recorder finish", true, false, &finish.stdout)?;
+    ensure_logged_contract_shape(&finish, "recorder finish")
 }
 
 #[test]

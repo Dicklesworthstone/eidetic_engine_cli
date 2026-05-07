@@ -290,7 +290,7 @@ fn is_audit_log_id(value: &str) -> bool {
     let Some(payload) = value.strip_prefix("audit_") else {
         return false;
     };
-    value.len() == 32 && payload.chars().all(|ch| ch.is_ascii_hexdigit())
+    matches!(value.len(), 32 | 38) && payload.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 const INSTRUCTION_PATTERNS: &[InstructionPattern] = &[
@@ -1092,6 +1092,17 @@ mod tests {
 
     #[test]
     fn trust_promotion_accepts_audit_log_for_human_explicit() {
+        let result = validate_trust_promotion_evidence(
+            "human_explicit",
+            "human_request",
+            "audit_01234567890123456789012345678901",
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn trust_promotion_accepts_legacy_audit_log_for_human_explicit() {
         let result = validate_trust_promotion_evidence(
             "human_explicit",
             "human_request",

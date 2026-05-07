@@ -10,7 +10,7 @@ use ee::core::recorder::{
     finish_and_persist_recording, list_recorder_events, record_and_persist_event,
     start_and_persist_recording,
 };
-use ee::db::DbConnection;
+use ee::db::{CreateRecorderEventInput, CreateRecorderRunInput, DbConnection};
 use ee::models::{RecorderEventType, RecorderRunStatus};
 use std::collections::HashSet;
 use std::sync::{Arc, Barrier};
@@ -243,11 +243,10 @@ fn finish_and_persist_recording_marks_run_completed_with_rolled_up_counts() {
 #[test]
 fn appending_many_events_yields_matching_row_count() {
     // Bead acceptance: "Appending 1000 events through hook API yields 1000 rows."
-    // We exercise the hot path with a smaller-but-still-meaningful budget here.
     let conn = connect();
     let start = start_and_persist_recording(&conn, &start_options()).expect("start");
 
-    const N: usize = 250;
+    const N: usize = 1000;
     for i in 0..N {
         let payload = format!("event-{i}");
         let _ = record_and_persist_event(&conn, &event_options(&start.run_id, Some(&payload)))
@@ -258,6 +257,77 @@ fn appending_many_events_yields_matching_row_count() {
     assert_eq!(stored.len(), N, "all events persisted");
     let last_seq = stored.last().expect("non-empty").sequence;
     assert_eq!(last_seq, N as u64);
+}
+
+#[test]
+fn list_recorder_events_filters_across_multiple_sources() {
+    let conn = connect();
+    let live = start_and_persist_recording(&conn, &start_options()).expect("live start");
+    let _ = record_and_persist_event(&conn, &event_options(&live.run_id, Some("live event")))
+        .expect("live event");
+
+    conn.insert_recorder_run(
+        "run_synthetic_001",
+        &CreateRecorderRunInput {
+            workspace_id: None,
+            agent_id: "agent_synthetic".to_owned(),
+            session_id: None,
+            source_type: "synthetic".to_owned(),
+            source_id: Some("fixture://synthetic".to_owned()),
+            status: "imported".to_owned(),
+            started_at: "2026-01-01T00:00:00Z".to_owned(),
+            ended_at: None,
+            event_count: 1,
+            redacted_count: 0,
+            payload_bytes: 0,
+            chain_complete: true,
+        },
+    )
+    .expect("insert synthetic run");
+    conn.insert_recorder_event(
+        "evt_synthetic_001",
+        &CreateRecorderEventInput {
+            run_id: "run_synthetic_001".to_owned(),
+            sequence: 1,
+            event_type: "state_change".to_owned(),
+            timestamp: "2026-01-01T00:00:00Z".to_owned(),
+            payload_hash: None,
+            payload_bytes: 0,
+            redaction_status: "clean".to_owned(),
+            redacted_bytes: 0,
+            previous_event_hash: None,
+            event_hash: "blake3:syntheticeventhash".to_owned(),
+            chain_status: "root".to_owned(),
+            source_span_id: None,
+            source_line_start: None,
+            source_line_end: None,
+        },
+    )
+    .expect("insert synthetic event");
+
+    let live_entries = list_recorder_events(
+        &conn,
+        &RecorderEventsListOptions {
+            source: Some("live".to_owned()),
+            limit: 100,
+            ..RecorderEventsListOptions::default()
+        },
+    )
+    .expect("list live entries");
+    assert_eq!(live_entries.len(), 1);
+    assert_eq!(live_entries[0].run_id, live.run_id);
+
+    let synthetic_entries = list_recorder_events(
+        &conn,
+        &RecorderEventsListOptions {
+            source: Some("synthetic".to_owned()),
+            limit: 100,
+            ..RecorderEventsListOptions::default()
+        },
+    )
+    .expect("list synthetic entries");
+    assert_eq!(synthetic_entries.len(), 1);
+    assert_eq!(synthetic_entries[0].run_id, "run_synthetic_001");
 }
 
 #[test]

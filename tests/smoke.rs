@@ -2327,6 +2327,213 @@ fn curate_apply_json_updates_approved_candidate_target() -> TestResult {
 
 #[cfg(unix)]
 #[test]
+fn curate_apply_procedure_candidate_then_harmful_outcomes_auto_retire() -> TestResult {
+    let workspace = unique_artifact_dir("curate-apply-procedure")?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let init = run_ee(&["--workspace", workspace_arg.as_str(), "--json", "init"])?;
+    ensure(
+        init.status.success(),
+        format!(
+            "init should succeed before procedure curate apply; stderr: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ),
+    )?;
+    let remember = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "remember",
+        "--level",
+        "procedural",
+        "--kind",
+        "release-check",
+        "Before release, run cargo fmt --check and cargo clippy.",
+    ])?;
+    ensure(
+        remember.status.success(),
+        format!(
+            "remember should create the source memory; stderr: {}",
+            String::from_utf8_lossy(&remember.stderr)
+        ),
+    )?;
+    let remember_json: serde_json::Value = serde_json::from_slice(&remember.stdout)
+        .map_err(|error| format!("remember stdout must be JSON: {error}"))?;
+    let workspace_id = remember_json["data"]["workspace_id"]
+        .as_str()
+        .ok_or_else(|| "remember workspace_id must be a string".to_string())?
+        .to_owned();
+    let memory_id = remember_json["data"]["memory_id"]
+        .as_str()
+        .ok_or_else(|| "remember memory_id must be a string".to_string())?
+        .to_owned();
+
+    let candidate_id = "curate_00000000000000000000000012";
+    let database_path = workspace.join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+    connection
+        .insert_curation_candidate(
+            candidate_id,
+            &CreateCurationCandidateInput {
+                workspace_id: workspace_id.clone(),
+                candidate_type: "procedure".to_string(),
+                target_memory_id: memory_id,
+                proposed_content: Some(
+                    "Run cargo fmt --check and cargo clippy before release.".to_string(),
+                ),
+                proposed_confidence: Some(0.82),
+                proposed_trust_class: None,
+                source_type: "feedback_event".to_string(),
+                source_id: Some("fb_01234567890123456789012345".to_string()),
+                reason: "Procedure candidate created from repeated release evidence.".to_string(),
+                confidence: 0.82,
+                status: Some("approved".to_string()),
+                created_at: Some("2026-05-07T00:00:00Z".to_string()),
+                ttl_expires_at: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+    let apply = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "curate",
+        "apply",
+        candidate_id,
+        "--actor",
+        "smoke-test",
+    ])?;
+    let apply_stdout = String::from_utf8_lossy(&apply.stdout);
+    let apply_stderr = String::from_utf8_lossy(&apply.stderr);
+    ensure(
+        apply.status.success(),
+        format!(
+            "curate apply procedure should succeed; stdout: {apply_stdout}; stderr: {apply_stderr}"
+        ),
+    )?;
+    ensure(
+        apply.stderr.is_empty(),
+        "curate apply procedure JSON stderr clean",
+    )?;
+    let apply_json: serde_json::Value = serde_json::from_slice(&apply.stdout)
+        .map_err(|error| format!("curate apply procedure stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &apply_json["data"]["application"]["decision"],
+        &serde_json::json!("create_procedure"),
+        "procedure apply decision",
+    )?;
+    let procedure_id = apply_json["data"]["application"]["changes"]
+        .as_array()
+        .and_then(|changes| {
+            changes.iter().find_map(|change| {
+                (change["field"] == "procedureId")
+                    .then(|| change["after"].as_str())
+                    .flatten()
+            })
+        })
+        .ok_or_else(|| "procedureId change must be present".to_string())?
+        .to_owned();
+
+    let created = connection
+        .get_procedure(&workspace_id, &procedure_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "procedure must be created by curate apply".to_string())?;
+    ensure_equal(
+        &created.maturity,
+        &"provisional".to_string(),
+        "procedure starts provisional",
+    )?;
+
+    for (index, event_id) in [
+        "fb_10000000000000000000000001",
+        "fb_10000000000000000000000002",
+        "fb_10000000000000000000000003",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let source_id = format!("run-procedure-harm-{index}");
+        let outcome = run_ee(&[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "outcome",
+            procedure_id.as_str(),
+            "--target-type",
+            "procedure",
+            "--signal",
+            "harmful",
+            "--source-type",
+            "outcome_observed",
+            "--source-id",
+            source_id.as_str(),
+            "--event-id",
+            *event_id,
+            "--actor",
+            "smoke-test",
+        ])?;
+        let stdout = String::from_utf8_lossy(&outcome.stdout);
+        let stderr = String::from_utf8_lossy(&outcome.stderr);
+        ensure(
+            outcome.status.success(),
+            format!(
+                "procedure harmful outcome {index} should succeed; stdout: {stdout}; stderr: {stderr}"
+            ),
+        )?;
+        ensure(
+            outcome.stderr.is_empty(),
+            format!("procedure harmful outcome {index} JSON stderr clean"),
+        )?;
+        let outcome_json: serde_json::Value = serde_json::from_slice(&outcome.stdout)
+            .map_err(|error| format!("outcome stdout must be JSON: {error}"))?;
+        ensure_equal(
+            &outcome_json["data"]["target"]["type"],
+            &serde_json::json!("procedure"),
+            "outcome target type",
+        )?;
+        ensure_equal(
+            &outcome_json["data"]["event"]["signal"],
+            &serde_json::json!("harmful"),
+            "outcome signal",
+        )?;
+    }
+
+    let retired = connection
+        .get_procedure(&workspace_id, &procedure_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "procedure must still exist after harmful outcomes".to_string())?;
+    ensure_equal(
+        &retired.maturity,
+        &"retired".to_string(),
+        "procedure auto-retires after harmful threshold",
+    )?;
+    ensure_equal(&retired.harmful_count, &3, "harmful count")?;
+    ensure(
+        retired.retire_reason.as_deref() == Some("harmful feedback threshold reached"),
+        "retire reason should explain harmful threshold",
+    )?;
+    let events = connection
+        .list_procedure_events(&procedure_id)
+        .map_err(|error| error.to_string())?;
+    ensure(
+        events
+            .iter()
+            .any(|event| event.event_type == "curation_apply"),
+        "procedure history includes curation apply event",
+    )?;
+    ensure(
+        events
+            .iter()
+            .filter(|event| event.event_type == "outcome_harmful")
+            .count()
+            == 3,
+        "procedure history includes three harmful outcome events",
+    )
+}
+
+#[cfg(unix)]
+#[test]
 fn curate_review_lifecycle_commands_json_update_review_state() -> TestResult {
     let workspace = unique_artifact_dir("curate-review-lifecycle")?;
     fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;

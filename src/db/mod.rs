@@ -3245,6 +3245,198 @@ CREATE INDEX idx_causal_evidence_method
     "blake3:v037_causal_evidence_ledger_2026_05_06",
 );
 
+/// V038: Allow procedure feedback targets in feedback ledgers.
+pub const V038_PROCEDURE_FEEDBACK_TARGETS: Migration = Migration::new(
+    38,
+    "procedure_feedback_targets",
+    r#"
+ALTER TABLE feedback_events RENAME TO feedback_events_v037;
+DROP INDEX IF EXISTS idx_feedback_events_workspace;
+DROP INDEX IF EXISTS idx_feedback_events_target;
+DROP INDEX IF EXISTS idx_feedback_events_signal;
+DROP INDEX IF EXISTS idx_feedback_events_source;
+DROP INDEX IF EXISTS idx_feedback_events_session;
+DROP INDEX IF EXISTS idx_feedback_events_created;
+DROP INDEX IF EXISTS idx_feedback_events_applied;
+
+CREATE TABLE feedback_events (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'fb_*' AND length(id) = 29),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    target_type TEXT NOT NULL CHECK (target_type IN (
+        'memory', 'rule', 'session', 'source', 'pack', 'candidate', 'procedure'
+    )),
+    target_id TEXT NOT NULL CHECK (length(trim(target_id)) > 0),
+    signal TEXT NOT NULL CHECK (signal IN (
+        'positive', 'negative', 'neutral', 'contradiction', 'confirmation',
+        'harmful', 'helpful', 'stale', 'inaccurate', 'outdated'
+    )),
+    weight REAL NOT NULL DEFAULT 1.0 CHECK (weight >= 0.0 AND weight <= 10.0),
+    source_type TEXT NOT NULL CHECK (source_type IN (
+        'human_explicit', 'agent_inference', 'automated_check', 'outcome_observed',
+        'contradiction_detected', 'usage_pattern', 'decay_trigger'
+    )),
+    source_id TEXT CHECK (source_id IS NULL OR length(trim(source_id)) > 0),
+    reason TEXT CHECK (reason IS NULL OR length(trim(reason)) > 0),
+    evidence_json TEXT CHECK (evidence_json IS NULL OR json_valid(evidence_json)),
+    session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+    applied_at TEXT CHECK (applied_at IS NULL OR length(trim(applied_at)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0)
+);
+
+INSERT INTO feedback_events (
+    id, workspace_id, target_type, target_id, signal, weight, source_type,
+    source_id, reason, evidence_json, session_id, applied_at, created_at
+)
+SELECT
+    id, workspace_id, target_type, target_id, signal, weight, source_type,
+    source_id, reason, evidence_json, session_id, applied_at, created_at
+FROM feedback_events_v037;
+
+CREATE INDEX idx_feedback_events_workspace ON feedback_events(workspace_id);
+CREATE INDEX idx_feedback_events_target ON feedback_events(target_type, target_id);
+CREATE INDEX idx_feedback_events_signal ON feedback_events(signal);
+CREATE INDEX idx_feedback_events_source ON feedback_events(source_type);
+CREATE INDEX idx_feedback_events_session ON feedback_events(session_id) WHERE session_id IS NOT NULL;
+CREATE INDEX idx_feedback_events_created ON feedback_events(created_at);
+CREATE INDEX idx_feedback_events_applied ON feedback_events(applied_at) WHERE applied_at IS NOT NULL;
+
+ALTER TABLE feedback_quarantine RENAME TO feedback_quarantine_v037;
+DROP INDEX IF EXISTS idx_feedback_quarantine_workspace;
+DROP INDEX IF EXISTS idx_feedback_quarantine_source;
+DROP INDEX IF EXISTS idx_feedback_quarantine_target;
+DROP INDEX IF EXISTS idx_feedback_quarantine_status;
+
+CREATE TABLE feedback_quarantine (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'fq_*' AND length(id) = 29),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    source_id TEXT NOT NULL CHECK (length(trim(source_id)) > 0),
+    target_type TEXT NOT NULL CHECK (target_type IN (
+        'memory', 'rule', 'session', 'source', 'pack', 'candidate', 'procedure'
+    )),
+    target_id TEXT NOT NULL CHECK (length(trim(target_id)) > 0),
+    signal TEXT NOT NULL CHECK (signal IN (
+        'negative', 'contradiction', 'harmful', 'inaccurate'
+    )),
+    proposed_event_id TEXT CHECK (proposed_event_id IS NULL OR proposed_event_id GLOB 'fb_*'),
+    recorded_at TEXT NOT NULL CHECK (length(trim(recorded_at)) > 0),
+    reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+    raw_event_hash TEXT NOT NULL CHECK (raw_event_hash GLOB 'blake3:*'),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'released', 'rejected')),
+    reviewed_at TEXT CHECK (reviewed_at IS NULL OR length(trim(reviewed_at)) > 0),
+    reviewed_by TEXT CHECK (reviewed_by IS NULL OR length(trim(reviewed_by)) > 0),
+    released_feedback_event_id TEXT REFERENCES feedback_events(id) ON DELETE SET NULL,
+    source_type TEXT NOT NULL DEFAULT 'outcome_observed' CHECK (source_type IN (
+        'human_explicit', 'agent_inference', 'automated_check', 'outcome_observed',
+        'contradiction_detected', 'usage_pattern', 'decay_trigger'
+    )),
+    weight REAL NOT NULL DEFAULT 1.0 CHECK (weight >= 0.0 AND weight <= 10.0),
+    event_reason TEXT CHECK (event_reason IS NULL OR length(trim(event_reason)) > 0),
+    evidence_json TEXT CHECK (evidence_json IS NULL OR json_valid(evidence_json)),
+    session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL
+);
+
+INSERT INTO feedback_quarantine (
+    id, workspace_id, source_id, target_type, target_id, signal,
+    proposed_event_id, recorded_at, reason, raw_event_hash, status, reviewed_at,
+    reviewed_by, released_feedback_event_id, source_type, weight, event_reason,
+    evidence_json, session_id
+)
+SELECT
+    id, workspace_id, source_id, target_type, target_id, signal,
+    proposed_event_id, recorded_at, reason, raw_event_hash, status, reviewed_at,
+    reviewed_by, released_feedback_event_id, source_type, weight, event_reason,
+    evidence_json, session_id
+FROM feedback_quarantine_v037;
+
+CREATE INDEX idx_feedback_quarantine_workspace ON feedback_quarantine(workspace_id);
+CREATE INDEX idx_feedback_quarantine_source ON feedback_quarantine(workspace_id, source_id, recorded_at);
+CREATE INDEX idx_feedback_quarantine_target ON feedback_quarantine(target_type, target_id);
+CREATE INDEX idx_feedback_quarantine_status ON feedback_quarantine(status, recorded_at);
+"#,
+    "blake3:v038_procedure_feedback_targets_2026_05_07",
+);
+
+/// V039: Allow UUID-v7 audit IDs while preserving legacy audit IDs.
+pub const V039_AUDIT_UUID_V7_IDS: Migration = Migration::new(
+    39,
+    "audit_uuid_v7_ids",
+    r#"
+DROP TRIGGER IF EXISTS audit_log_no_update;
+DROP TRIGGER IF EXISTS audit_log_no_delete;
+
+ALTER TABLE audit_log RENAME TO audit_log_v038;
+DROP INDEX IF EXISTS idx_audit_log_workspace;
+DROP INDEX IF EXISTS idx_audit_log_timestamp;
+DROP INDEX IF EXISTS idx_audit_log_action;
+DROP INDEX IF EXISTS idx_audit_log_target;
+DROP INDEX IF EXISTS idx_audit_log_surface;
+DROP INDEX IF EXISTS idx_audit_log_chain;
+
+CREATE TABLE audit_log (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'audit_*' AND length(id) IN (32, 38)),
+    workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
+    timestamp TEXT NOT NULL CHECK (length(trim(timestamp)) > 0),
+    actor TEXT CHECK (actor IS NULL OR length(trim(actor)) > 0),
+    action TEXT NOT NULL CHECK (length(trim(action)) > 0),
+    target_type TEXT CHECK (target_type IS NULL OR length(trim(target_type)) > 0),
+    target_id TEXT CHECK (target_id IS NULL OR length(trim(target_id)) > 0),
+    details TEXT CHECK (details IS NULL OR length(trim(details)) > 0),
+    surface TEXT,
+    mutation_kind TEXT,
+    before_hash TEXT,
+    after_hash TEXT,
+    prev_row_hash TEXT,
+    this_row_hash TEXT
+);
+
+INSERT INTO audit_log (
+    id, workspace_id, timestamp, actor, action, target_type, target_id, details,
+    surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash
+)
+SELECT
+    id, workspace_id, timestamp, actor, action, target_type, target_id, details,
+    surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash
+FROM audit_log_v038;
+
+CREATE INDEX idx_audit_log_workspace ON audit_log(workspace_id);
+CREATE INDEX idx_audit_log_timestamp ON audit_log(timestamp);
+CREATE INDEX idx_audit_log_action ON audit_log(action);
+CREATE INDEX idx_audit_log_target ON audit_log(target_type, target_id);
+CREATE INDEX idx_audit_log_surface ON audit_log(surface, timestamp, id);
+CREATE INDEX idx_audit_log_chain ON audit_log(prev_row_hash, this_row_hash);
+
+CREATE TRIGGER audit_log_no_update
+BEFORE UPDATE ON audit_log
+WHEN NOT (
+    OLD.workspace_id IS NOT NULL
+    AND NEW.workspace_id IS NULL
+    AND OLD.id IS NEW.id
+    AND OLD.timestamp IS NEW.timestamp
+    AND OLD.actor IS NEW.actor
+    AND OLD.action IS NEW.action
+    AND OLD.target_type IS NEW.target_type
+    AND OLD.target_id IS NEW.target_id
+    AND OLD.details IS NEW.details
+    AND OLD.surface IS NEW.surface
+    AND OLD.mutation_kind IS NEW.mutation_kind
+    AND OLD.before_hash IS NEW.before_hash
+    AND OLD.after_hash IS NEW.after_hash
+    AND OLD.prev_row_hash IS NEW.prev_row_hash
+    AND OLD.this_row_hash IS NEW.this_row_hash
+)
+BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only: UPDATE not allowed (eidetic_engine_cli-is96)');
+END;
+
+CREATE TRIGGER audit_log_no_delete
+BEFORE DELETE ON audit_log
+BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only: DELETE not allowed (eidetic_engine_cli-is96)');
+END;
+"#,
+    "blake3:v039_audit_uuid_v7_ids_2026_05_07",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -3284,6 +3476,8 @@ pub const MIGRATIONS: &[Migration] = &[
     V035_PLAN_RECIPES,
     V036_APPEND_ONLY_TRIGGERS,
     V037_CAUSAL_EVIDENCE_LEDGER,
+    V038_PROCEDURE_FEEDBACK_TARGETS,
+    V039_AUDIT_UUID_V7_IDS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {

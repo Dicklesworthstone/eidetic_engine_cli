@@ -38,6 +38,7 @@
 //! - If cancelled after reserve: permit drop aborts cleanly
 //! - Response arrives via oneshot channel
 
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 
 use asupersync::channel::{mpsc, oneshot};
@@ -52,11 +53,32 @@ pub const WRITE_OWNER_STATUS_SCHEMA_V1: &str = "ee.write_owner.status.v1";
 /// Schema for write owner busy error.
 pub const WRITE_OWNER_BUSY_SCHEMA_V1: &str = "ee.write_owner.busy.v1";
 
+/// Schema for write spool status response.
+pub const WRITE_SPOOL_STATUS_SCHEMA_V1: &str = "ee.write_spool.status.v1";
+
+/// Schema for write spool backpressure errors.
+pub const WRITE_SPOOL_BACKPRESSURE_SCHEMA_V1: &str = "ee.write_spool.backpressure.v1";
+
 /// Default channel capacity for write requests.
 pub const DEFAULT_CHANNEL_CAPACITY: usize = 64;
 
+/// Default maximum pending entries in the durable write spool.
+pub const DEFAULT_SPOOL_MAX_PENDING: usize = 512;
+
+/// Default maximum entries coalesced into one durable batch.
+pub const DEFAULT_SPOOL_MAX_BATCH_SIZE: usize = 32;
+
+/// Default maximum payload bytes waiting in the write spool.
+pub const DEFAULT_SPOOL_MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
+
+/// Default queue age budget before callers receive backpressure.
+pub const DEFAULT_SPOOL_QUEUE_TIMEOUT_MS: u64 = 30_000;
+
 /// Error code for write owner busy condition.
 pub const WRITE_OWNER_BUSY_CODE: &str = "write_owner_busy";
+
+/// Error code for write spool backpressure.
+pub const WRITE_SPOOL_BACKPRESSURE_CODE: &str = "write_spool_backpressure";
 
 /// A request to perform a write operation.
 #[derive(Debug)]
@@ -365,6 +387,826 @@ impl fmt::Display for WriteOwnerBusyError {
 
 impl std::error::Error for WriteOwnerBusyError {}
 
+/// Configuration for the batched write spool.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WriteSpoolConfig {
+    /// Maximum number of writes waiting for the owner.
+    pub max_pending: usize,
+    /// Maximum writes in one coalesced batch.
+    pub max_batch_size: usize,
+    /// Maximum payload bytes waiting for the owner.
+    pub max_pending_bytes: usize,
+    /// Maximum permitted age for the oldest queued write.
+    pub max_queue_age_ms: u64,
+}
+
+impl Default for WriteSpoolConfig {
+    fn default() -> Self {
+        Self {
+            max_pending: DEFAULT_SPOOL_MAX_PENDING,
+            max_batch_size: DEFAULT_SPOOL_MAX_BATCH_SIZE,
+            max_pending_bytes: DEFAULT_SPOOL_MAX_PENDING_BYTES,
+            max_queue_age_ms: DEFAULT_SPOOL_QUEUE_TIMEOUT_MS,
+        }
+    }
+}
+
+impl WriteSpoolConfig {
+    /// Create a test-friendly config with explicit limits.
+    #[must_use]
+    pub const fn new(
+        max_pending: usize,
+        max_batch_size: usize,
+        max_pending_bytes: usize,
+        max_queue_age_ms: u64,
+    ) -> Self {
+        Self {
+            max_pending,
+            max_batch_size,
+            max_pending_bytes,
+            max_queue_age_ms,
+        }
+    }
+
+    fn effective_batch_size(&self) -> usize {
+        self.max_batch_size.max(1)
+    }
+}
+
+/// Durable write categories accepted by the spool.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteSpoolIntentKind {
+    /// `ee remember` memory write.
+    Remember,
+    /// `ee outcome` feedback write.
+    Outcome,
+    /// CASS/import checkpoint or imported row write.
+    Import,
+    /// Recorder event or transcript write.
+    Recorder,
+}
+
+impl WriteSpoolIntentKind {
+    /// Stable machine string for JSON, audit rows, and diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Remember => "remember",
+            Self::Outcome => "outcome",
+            Self::Import => "import",
+            Self::Recorder => "recorder",
+        }
+    }
+
+    /// Default durability class for this write category.
+    #[must_use]
+    pub const fn default_durability(self) -> WriteSpoolDurability {
+        match self {
+            Self::Import => WriteSpoolDurability::Immediate,
+            Self::Remember | Self::Outcome | Self::Recorder => WriteSpoolDurability::Batched,
+        }
+    }
+}
+
+/// Whether a write may be coalesced with matching writes.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteSpoolDurability {
+    /// May share a transaction with matching writes.
+    Batched,
+    /// Must become its own durable batch boundary.
+    Immediate,
+}
+
+impl WriteSpoolDurability {
+    /// Stable machine string for JSON and audit rows.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Batched => "batched",
+            Self::Immediate => "immediate",
+        }
+    }
+}
+
+/// Write request accepted by the batched spool.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WriteSpoolIntent {
+    /// Idempotency key supplied by the caller.
+    pub idempotency_key: String,
+    /// Workspace this write mutates.
+    pub workspace_id: String,
+    /// Write category.
+    pub kind: WriteSpoolIntentKind,
+    /// Durability and batching behavior.
+    pub durability: WriteSpoolDurability,
+    /// Approximate serialized payload size for budget accounting.
+    pub payload_bytes: usize,
+    /// Stable audit subject written alongside the batch boundary.
+    pub audit_subject: String,
+}
+
+impl WriteSpoolIntent {
+    /// Build a write intent with the default durability for its kind.
+    #[must_use]
+    pub fn new(
+        kind: WriteSpoolIntentKind,
+        workspace_id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        payload_bytes: usize,
+    ) -> Self {
+        let idempotency_key = idempotency_key.into();
+        Self {
+            idempotency_key: idempotency_key.clone(),
+            workspace_id: workspace_id.into(),
+            kind,
+            durability: kind.default_durability(),
+            payload_bytes,
+            audit_subject: format!("{}:{idempotency_key}", kind.as_str()),
+        }
+    }
+
+    /// Force immediate durability for a write that normally batches.
+    #[must_use]
+    pub const fn immediate(mut self) -> Self {
+        self.durability = WriteSpoolDurability::Immediate;
+        self
+    }
+
+    /// Force batched durability for a write that normally commits alone.
+    #[must_use]
+    pub const fn batched(mut self) -> Self {
+        self.durability = WriteSpoolDurability::Batched;
+        self
+    }
+
+    /// Override the audit subject used in batch metadata.
+    #[must_use]
+    pub fn with_audit_subject(mut self, audit_subject: impl Into<String>) -> Self {
+        self.audit_subject = audit_subject.into();
+        self
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct WriteSpoolBatchKey {
+    workspace_id: String,
+    kind: WriteSpoolIntentKind,
+    durability: WriteSpoolDurability,
+}
+
+/// Durable state for a spooled write after crash recovery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteSpoolRecordStatus {
+    /// Accepted by the spool but not durably committed.
+    Pending,
+    /// Committed by the write owner.
+    Committed,
+    /// Cancelled before commit.
+    Cancelled,
+    /// Failed during commit.
+    Failed,
+}
+
+impl WriteSpoolRecordStatus {
+    /// Stable machine string for JSON and diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Committed => "committed",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
+        }
+    }
+
+    const fn is_terminal(self) -> bool {
+        matches!(self, Self::Committed | Self::Cancelled | Self::Failed)
+    }
+}
+
+/// Persistent recovery record for one spooled write.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteSpoolRecord {
+    /// Monotonic request ID assigned by the spool.
+    pub request_id: u64,
+    /// Caller-supplied idempotency key.
+    pub idempotency_key: String,
+    /// Workspace this write mutates.
+    pub workspace_id: String,
+    /// Write category.
+    pub kind: WriteSpoolIntentKind,
+    /// Durability and batching behavior.
+    pub durability: WriteSpoolDurability,
+    /// Current durable state.
+    pub status: WriteSpoolRecordStatus,
+    /// Batch ID assigned when the write owner drains the record.
+    pub batch_id: Option<u64>,
+    /// Virtual or wall-clock enqueue time in milliseconds.
+    pub enqueued_at_ms: u64,
+    /// Terminal timestamp when committed, cancelled, or failed.
+    pub terminal_at_ms: Option<u64>,
+    /// Approximate serialized payload size.
+    pub payload_bytes: usize,
+    /// Stable audit subject emitted with the batch.
+    pub audit_subject: String,
+    /// Failure message when status is failed.
+    pub failure: Option<String>,
+}
+
+impl WriteSpoolRecord {
+    fn from_intent(request_id: u64, intent: WriteSpoolIntent, enqueued_at_ms: u64) -> Self {
+        Self {
+            request_id,
+            idempotency_key: intent.idempotency_key,
+            workspace_id: intent.workspace_id,
+            kind: intent.kind,
+            durability: intent.durability,
+            status: WriteSpoolRecordStatus::Pending,
+            batch_id: None,
+            enqueued_at_ms,
+            terminal_at_ms: None,
+            payload_bytes: intent.payload_bytes,
+            audit_subject: intent.audit_subject,
+            failure: None,
+        }
+    }
+
+    fn batch_key(&self) -> WriteSpoolBatchKey {
+        WriteSpoolBatchKey {
+            workspace_id: self.workspace_id.clone(),
+            kind: self.kind,
+            durability: self.durability,
+        }
+    }
+}
+
+/// Ticket returned by enqueue, including idempotent duplicate detection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteSpoolTicket {
+    /// Monotonic request ID assigned to this idempotency key.
+    pub request_id: u64,
+    /// Caller-supplied idempotency key.
+    pub idempotency_key: String,
+    /// True when enqueue reused an existing idempotency key.
+    pub duplicate: bool,
+    /// Current state of the existing or new record.
+    pub status: WriteSpoolRecordStatus,
+}
+
+/// Batch boundary handed to the single write owner.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteSpoolBatch {
+    /// Monotonic batch ID.
+    pub batch_id: u64,
+    /// Workspace shared by every row in this batch.
+    pub workspace_id: String,
+    /// Write category shared by every row in this batch.
+    pub kind: WriteSpoolIntentKind,
+    /// Durability class for this boundary.
+    pub durability: WriteSpoolDurability,
+    /// Request IDs included in FIFO order.
+    pub request_ids: Vec<u64>,
+    /// Audit subjects included in FIFO order.
+    pub audit_subjects: Vec<String>,
+    /// Stable audit row ID for this batch boundary.
+    pub audit_row_id: String,
+    /// Stable job row ID for this batch boundary.
+    pub job_row_id: String,
+}
+
+impl WriteSpoolBatch {
+    /// Number of write rows in this batch.
+    #[must_use]
+    pub fn row_count(&self) -> usize {
+        self.request_ids.len()
+    }
+}
+
+/// Reason a caller hit write-spool backpressure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteSpoolBackpressureReason {
+    /// Queue depth exceeded configured budget.
+    QueueDepth,
+    /// Pending payload bytes exceeded configured budget.
+    PendingBytes,
+    /// Oldest queued write exceeded age budget.
+    QueueTimeout,
+}
+
+impl WriteSpoolBackpressureReason {
+    /// Stable machine string for JSON and diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::QueueDepth => "queue_depth",
+            Self::PendingBytes => "pending_bytes",
+            Self::QueueTimeout => "queue_timeout",
+        }
+    }
+}
+
+/// JSON-serializable error returned when the spool refuses more writes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteSpoolBackpressureError {
+    /// Schema identifier.
+    pub schema: &'static str,
+    /// Error code.
+    pub code: &'static str,
+    /// Machine-readable budget reason.
+    pub reason: WriteSpoolBackpressureReason,
+    /// Human-readable message.
+    pub message: String,
+    /// Current queue depth.
+    pub queue_depth: usize,
+    /// Queue depth limit.
+    pub max_pending: usize,
+    /// Current pending payload bytes.
+    pub pending_bytes: usize,
+    /// Pending payload byte limit.
+    pub max_pending_bytes: usize,
+    /// Age of the oldest pending write, if any.
+    pub oldest_queued_age_ms: Option<u64>,
+    /// Suggested repair command.
+    pub repair: &'static str,
+    /// Suggested next diagnostic command.
+    pub next: &'static str,
+}
+
+impl WriteSpoolBackpressureError {
+    fn new(
+        reason: WriteSpoolBackpressureReason,
+        status: &WriteSpoolStatus,
+        config: &WriteSpoolConfig,
+    ) -> Self {
+        let message = match reason {
+            WriteSpoolBackpressureReason::QueueDepth => format!(
+                "Write spool queue depth {} exceeded the configured limit {}.",
+                status.queue_depth, config.max_pending
+            ),
+            WriteSpoolBackpressureReason::PendingBytes => format!(
+                "Write spool has {} pending bytes, exceeding the configured limit {}.",
+                status.pending_bytes, config.max_pending_bytes
+            ),
+            WriteSpoolBackpressureReason::QueueTimeout => format!(
+                "Write spool oldest queued write is {} ms old, exceeding the configured limit {} ms.",
+                status.oldest_queued_age_ms.unwrap_or(0),
+                config.max_queue_age_ms
+            ),
+        };
+
+        Self {
+            schema: WRITE_SPOOL_BACKPRESSURE_SCHEMA_V1,
+            code: WRITE_SPOOL_BACKPRESSURE_CODE,
+            reason,
+            message,
+            queue_depth: status.queue_depth,
+            max_pending: config.max_pending,
+            pending_bytes: status.pending_bytes,
+            max_pending_bytes: config.max_pending_bytes,
+            oldest_queued_age_ms: status.oldest_queued_age_ms,
+            repair: "ee daemon status --json",
+            next: "ee support-bundle create --include write-queue --json",
+        }
+    }
+}
+
+impl fmt::Display for WriteSpoolBackpressureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for WriteSpoolBackpressureError {}
+
+/// Last failed write metadata for status/support bundles.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteSpoolFailure {
+    /// Failed request ID.
+    pub request_id: u64,
+    /// Failed idempotency key.
+    pub idempotency_key: String,
+    /// Failure message.
+    pub message: String,
+    /// Failure timestamp in milliseconds.
+    pub failed_at_ms: u64,
+}
+
+/// Status exposed by `status` and support-bundle diagnostics.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteSpoolStatus {
+    /// Schema identifier.
+    pub schema: &'static str,
+    /// Number of records waiting to be drained.
+    pub queue_depth: usize,
+    /// Approximate queued payload bytes.
+    pub pending_bytes: usize,
+    /// Age of the oldest queued write.
+    pub oldest_queued_age_ms: Option<u64>,
+    /// Queue depth limit.
+    pub max_pending: usize,
+    /// Pending payload byte limit.
+    pub max_pending_bytes: usize,
+    /// Queue age limit.
+    pub max_queue_age_ms: u64,
+    /// Total unique writes accepted.
+    pub total_enqueued: u64,
+    /// Total rows committed.
+    pub total_committed: u64,
+    /// Total rows cancelled.
+    pub total_cancelled: u64,
+    /// Total rows failed.
+    pub total_failed: u64,
+    /// Total batches emitted to the write owner.
+    pub total_batches: u64,
+    /// Size of the most recent batch.
+    pub last_batch_size: usize,
+    /// Largest batch emitted since start.
+    pub max_batch_size_observed: usize,
+    /// Committed rows per second since the spool started.
+    pub rows_per_sec: f64,
+    /// Most recent failure, if any.
+    pub last_failure: Option<WriteSpoolFailure>,
+}
+
+/// Deterministic batched write spool for daemon/write-owner mode.
+#[derive(Clone, Debug)]
+pub struct WriteSpool {
+    config: WriteSpoolConfig,
+    next_request_id: u64,
+    next_batch_id: u64,
+    started_at_ms: u64,
+    pending_order: VecDeque<u64>,
+    records: Vec<WriteSpoolRecord>,
+    idempotency: HashMap<String, u64>,
+    pending_bytes: usize,
+    stats: WriteSpoolStats,
+}
+
+#[derive(Clone, Debug, Default)]
+struct WriteSpoolStats {
+    total_enqueued: u64,
+    total_committed: u64,
+    total_cancelled: u64,
+    total_failed: u64,
+    total_batches: u64,
+    last_batch_size: usize,
+    max_batch_size_observed: usize,
+    last_failure: Option<WriteSpoolFailure>,
+}
+
+impl WriteSpool {
+    /// Create an empty spool.
+    #[must_use]
+    pub fn new(config: WriteSpoolConfig, started_at_ms: u64) -> Self {
+        Self {
+            config,
+            next_request_id: 1,
+            next_batch_id: 1,
+            started_at_ms,
+            pending_order: VecDeque::new(),
+            records: Vec::new(),
+            idempotency: HashMap::new(),
+            pending_bytes: 0,
+            stats: WriteSpoolStats::default(),
+        }
+    }
+
+    /// Rebuild in-memory queue state from persisted recovery records.
+    #[must_use]
+    pub fn from_recovery_records(
+        config: WriteSpoolConfig,
+        started_at_ms: u64,
+        records: Vec<WriteSpoolRecord>,
+    ) -> Self {
+        let mut pending_order = VecDeque::new();
+        let mut idempotency = HashMap::new();
+        let mut pending_bytes = 0usize;
+        let mut stats = WriteSpoolStats::default();
+        let mut next_request_id = 1u64;
+        let mut next_batch_id = 1u64;
+
+        for record in &records {
+            next_request_id = next_request_id.max(record.request_id.saturating_add(1));
+            if let Some(batch_id) = record.batch_id {
+                next_batch_id = next_batch_id.max(batch_id.saturating_add(1));
+            }
+            idempotency.insert(record.idempotency_key.clone(), record.request_id);
+
+            match record.status {
+                WriteSpoolRecordStatus::Pending => {
+                    pending_order.push_back(record.request_id);
+                    pending_bytes = pending_bytes.saturating_add(record.payload_bytes);
+                    stats.total_enqueued = stats.total_enqueued.saturating_add(1);
+                }
+                WriteSpoolRecordStatus::Committed => {
+                    stats.total_enqueued = stats.total_enqueued.saturating_add(1);
+                    stats.total_committed = stats.total_committed.saturating_add(1);
+                }
+                WriteSpoolRecordStatus::Cancelled => {
+                    stats.total_enqueued = stats.total_enqueued.saturating_add(1);
+                    stats.total_cancelled = stats.total_cancelled.saturating_add(1);
+                }
+                WriteSpoolRecordStatus::Failed => {
+                    stats.total_enqueued = stats.total_enqueued.saturating_add(1);
+                    stats.total_failed = stats.total_failed.saturating_add(1);
+                    if let (Some(message), Some(failed_at_ms)) =
+                        (&record.failure, record.terminal_at_ms)
+                    {
+                        stats.last_failure = Some(WriteSpoolFailure {
+                            request_id: record.request_id,
+                            idempotency_key: record.idempotency_key.clone(),
+                            message: message.clone(),
+                            failed_at_ms,
+                        });
+                    }
+                }
+            }
+        }
+
+        Self {
+            config,
+            next_request_id,
+            next_batch_id,
+            started_at_ms,
+            pending_order,
+            records,
+            idempotency,
+            pending_bytes,
+            stats,
+        }
+    }
+
+    /// Enqueue a write intent or return the existing idempotency ticket.
+    pub fn enqueue(
+        &mut self,
+        intent: WriteSpoolIntent,
+        now_ms: u64,
+    ) -> Result<WriteSpoolTicket, WriteSpoolBackpressureError> {
+        if let Some(request_id) = self.idempotency.get(&intent.idempotency_key).copied() {
+            let record = self
+                .record(request_id)
+                .expect("idempotency index must point at a record");
+            return Ok(WriteSpoolTicket {
+                request_id,
+                idempotency_key: record.idempotency_key.clone(),
+                duplicate: true,
+                status: record.status,
+            });
+        }
+
+        self.ensure_accepting(intent.payload_bytes, now_ms)?;
+
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+
+        let record = WriteSpoolRecord::from_intent(request_id, intent, now_ms);
+        self.pending_bytes = self.pending_bytes.saturating_add(record.payload_bytes);
+        self.pending_order.push_back(request_id);
+        self.idempotency
+            .insert(record.idempotency_key.clone(), request_id);
+        self.stats.total_enqueued = self.stats.total_enqueued.saturating_add(1);
+
+        let ticket = WriteSpoolTicket {
+            request_id,
+            idempotency_key: record.idempotency_key.clone(),
+            duplicate: false,
+            status: record.status,
+        };
+        self.records.push(record);
+        Ok(ticket)
+    }
+
+    /// Drain the next FIFO-compatible batch.
+    #[must_use]
+    pub fn next_batch(&mut self) -> Option<WriteSpoolBatch> {
+        let first_id = self.pending_order.pop_front()?;
+        let first = self
+            .record(first_id)
+            .expect("pending queue must reference an existing record")
+            .clone();
+        let key = first.batch_key();
+        let mut selected = vec![first_id];
+
+        if key.durability == WriteSpoolDurability::Batched {
+            let mut retained = VecDeque::with_capacity(self.pending_order.len());
+            while let Some(request_id) = self.pending_order.pop_front() {
+                let should_batch = selected.len() < self.config.effective_batch_size()
+                    && self
+                        .record(request_id)
+                        .is_some_and(|record| record.batch_key() == key);
+                if should_batch {
+                    selected.push(request_id);
+                } else {
+                    retained.push_back(request_id);
+                }
+            }
+            self.pending_order = retained;
+        }
+
+        let batch_id = self.next_batch_id;
+        self.next_batch_id = self.next_batch_id.saturating_add(1);
+
+        let mut audit_subjects = Vec::with_capacity(selected.len());
+        for request_id in &selected {
+            let (payload_bytes, audit_subject) = {
+                let record = self
+                    .record_mut(*request_id)
+                    .expect("selected request must reference an existing record");
+                record.batch_id = Some(batch_id);
+                (record.payload_bytes, record.audit_subject.clone())
+            };
+            self.pending_bytes = self.pending_bytes.saturating_sub(payload_bytes);
+            audit_subjects.push(audit_subject);
+        }
+
+        self.stats.total_batches = self.stats.total_batches.saturating_add(1);
+        self.stats.last_batch_size = selected.len();
+        self.stats.max_batch_size_observed = self.stats.max_batch_size_observed.max(selected.len());
+
+        Some(WriteSpoolBatch {
+            batch_id,
+            workspace_id: key.workspace_id,
+            kind: key.kind,
+            durability: key.durability,
+            request_ids: selected,
+            audit_subjects,
+            audit_row_id: format!("audit_batch_{batch_id:016}"),
+            job_row_id: format!("job_batch_{batch_id:016}"),
+        })
+    }
+
+    /// Mark every pending record in the batch committed.
+    pub fn mark_batch_committed(&mut self, batch_id: u64, now_ms: u64) -> usize {
+        let mut committed = 0usize;
+        for record in &mut self.records {
+            if record.batch_id == Some(batch_id) && record.status == WriteSpoolRecordStatus::Pending
+            {
+                record.status = WriteSpoolRecordStatus::Committed;
+                record.terminal_at_ms = Some(now_ms);
+                committed += 1;
+            }
+        }
+        self.stats.total_committed = self.stats.total_committed.saturating_add(committed as u64);
+        committed
+    }
+
+    /// Mark every pending record in the batch failed.
+    pub fn mark_batch_failed(
+        &mut self,
+        batch_id: u64,
+        now_ms: u64,
+        message: impl Into<String>,
+    ) -> usize {
+        let message = message.into();
+        let mut failed = 0usize;
+        let mut last_failure = None;
+        for record in &mut self.records {
+            if record.batch_id == Some(batch_id) && record.status == WriteSpoolRecordStatus::Pending
+            {
+                record.status = WriteSpoolRecordStatus::Failed;
+                record.terminal_at_ms = Some(now_ms);
+                record.failure = Some(message.clone());
+                failed += 1;
+                last_failure = Some(WriteSpoolFailure {
+                    request_id: record.request_id,
+                    idempotency_key: record.idempotency_key.clone(),
+                    message: message.clone(),
+                    failed_at_ms: now_ms,
+                });
+            }
+        }
+        self.stats.total_failed = self.stats.total_failed.saturating_add(failed as u64);
+        if last_failure.is_some() {
+            self.stats.last_failure = last_failure;
+        }
+        failed
+    }
+
+    /// Cancel a pending record by request ID.
+    pub fn cancel_pending(&mut self, request_id: u64, now_ms: u64) -> bool {
+        let Some(index) = self.records.iter().position(|r| r.request_id == request_id) else {
+            return false;
+        };
+        if self.records[index].status.is_terminal() {
+            return false;
+        }
+
+        self.pending_order
+            .retain(|queued_id| *queued_id != request_id);
+        if self.records[index].batch_id.is_none() {
+            self.pending_bytes = self
+                .pending_bytes
+                .saturating_sub(self.records[index].payload_bytes);
+        }
+        self.records[index].status = WriteSpoolRecordStatus::Cancelled;
+        self.records[index].terminal_at_ms = Some(now_ms);
+        self.stats.total_cancelled = self.stats.total_cancelled.saturating_add(1);
+        true
+    }
+
+    /// Return stable recovery records for persistence or support bundles.
+    #[must_use]
+    pub fn recovery_records(&self) -> Vec<WriteSpoolRecord> {
+        let mut records = self.records.clone();
+        records.sort_by_key(|record| record.request_id);
+        records
+    }
+
+    /// Current status for `ee status` and support bundles.
+    #[must_use]
+    pub fn status(&self, now_ms: u64) -> WriteSpoolStatus {
+        let elapsed_ms = now_ms.saturating_sub(self.started_at_ms);
+        let rows_per_sec = if elapsed_ms == 0 {
+            0.0
+        } else {
+            self.stats.total_committed as f64 / (elapsed_ms as f64 / 1_000.0)
+        };
+
+        WriteSpoolStatus {
+            schema: WRITE_SPOOL_STATUS_SCHEMA_V1,
+            queue_depth: self.pending_order.len(),
+            pending_bytes: self.pending_bytes,
+            oldest_queued_age_ms: self.oldest_queued_age_ms(now_ms),
+            max_pending: self.config.max_pending,
+            max_pending_bytes: self.config.max_pending_bytes,
+            max_queue_age_ms: self.config.max_queue_age_ms,
+            total_enqueued: self.stats.total_enqueued,
+            total_committed: self.stats.total_committed,
+            total_cancelled: self.stats.total_cancelled,
+            total_failed: self.stats.total_failed,
+            total_batches: self.stats.total_batches,
+            last_batch_size: self.stats.last_batch_size,
+            max_batch_size_observed: self.stats.max_batch_size_observed,
+            rows_per_sec,
+            last_failure: self.stats.last_failure.clone(),
+        }
+    }
+
+    /// Look up a record by request ID.
+    #[must_use]
+    pub fn record(&self, request_id: u64) -> Option<&WriteSpoolRecord> {
+        self.records
+            .iter()
+            .find(|record| record.request_id == request_id)
+    }
+
+    fn record_mut(&mut self, request_id: u64) -> Option<&mut WriteSpoolRecord> {
+        self.records
+            .iter_mut()
+            .find(|record| record.request_id == request_id)
+    }
+
+    fn ensure_accepting(
+        &self,
+        additional_bytes: usize,
+        now_ms: u64,
+    ) -> Result<(), WriteSpoolBackpressureError> {
+        let status = self.status(now_ms);
+        if status.queue_depth >= self.config.max_pending {
+            return Err(WriteSpoolBackpressureError::new(
+                WriteSpoolBackpressureReason::QueueDepth,
+                &status,
+                &self.config,
+            ));
+        }
+        if self.pending_bytes.saturating_add(additional_bytes) > self.config.max_pending_bytes {
+            return Err(WriteSpoolBackpressureError::new(
+                WriteSpoolBackpressureReason::PendingBytes,
+                &status,
+                &self.config,
+            ));
+        }
+        if status
+            .oldest_queued_age_ms
+            .is_some_and(|age_ms| age_ms > self.config.max_queue_age_ms)
+        {
+            return Err(WriteSpoolBackpressureError::new(
+                WriteSpoolBackpressureReason::QueueTimeout,
+                &status,
+                &self.config,
+            ));
+        }
+        Ok(())
+    }
+
+    fn oldest_queued_age_ms(&self, now_ms: u64) -> Option<u64> {
+        self.pending_order
+            .front()
+            .and_then(|request_id| self.record(*request_id))
+            .map(|record| now_ms.saturating_sub(record.enqueued_at_ms))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,6 +1306,289 @@ mod tests {
             .ok_or_else(|| "second write request should enqueue".to_string())?;
         assert_eq!(owner.status().queue_depth, 2);
 
+        Ok(())
+    }
+
+    #[test]
+    fn write_spool_deduplicates_idempotency_keys() -> Result<(), String> {
+        let mut spool = WriteSpool::new(WriteSpoolConfig::default(), 0);
+        let first = spool
+            .enqueue(
+                WriteSpoolIntent::new(WriteSpoolIntentKind::Remember, "workspace", "idem-1", 128),
+                10,
+            )
+            .map_err(|error| error.to_string())?;
+        let duplicate = spool
+            .enqueue(
+                WriteSpoolIntent::new(WriteSpoolIntentKind::Remember, "workspace", "idem-1", 128),
+                11,
+            )
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(first.request_id, duplicate.request_id);
+        assert!(!first.duplicate);
+        assert!(duplicate.duplicate);
+        assert_eq!(spool.status(11).queue_depth, 1);
+        assert_eq!(spool.recovery_records().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn write_spool_batches_eligible_writes_and_isolates_immediate_imports() -> Result<(), String> {
+        let mut spool = WriteSpool::new(WriteSpoolConfig::new(8, 4, 4096, 30_000), 0);
+        for index in 0..3 {
+            spool
+                .enqueue(
+                    WriteSpoolIntent::new(
+                        WriteSpoolIntentKind::Remember,
+                        "workspace",
+                        format!("remember-{index}"),
+                        100,
+                    ),
+                    index,
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let import = spool
+            .enqueue(
+                WriteSpoolIntent::new(WriteSpoolIntentKind::Import, "workspace", "import-0", 100),
+                4,
+            )
+            .map_err(|error| error.to_string())?;
+
+        let remember_batch = spool
+            .next_batch()
+            .ok_or_else(|| "expected remember batch".to_string())?;
+        assert_eq!(remember_batch.kind, WriteSpoolIntentKind::Remember);
+        assert_eq!(remember_batch.durability, WriteSpoolDurability::Batched);
+        assert_eq!(remember_batch.row_count(), 3);
+        assert_eq!(remember_batch.audit_row_id, "audit_batch_0000000000000001");
+        assert_eq!(remember_batch.job_row_id, "job_batch_0000000000000001");
+
+        let import_batch = spool
+            .next_batch()
+            .ok_or_else(|| "expected immediate import batch".to_string())?;
+        assert_eq!(import_batch.request_ids, vec![import.request_id]);
+        assert_eq!(import_batch.kind, WriteSpoolIntentKind::Import);
+        assert_eq!(import_batch.durability, WriteSpoolDurability::Immediate);
+        assert_eq!(import_batch.row_count(), 1);
+        assert_eq!(spool.status(5).queue_depth, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn write_spool_backpressure_reports_json_contract() -> Result<(), String> {
+        let mut spool = WriteSpool::new(WriteSpoolConfig::new(1, 4, 4096, 30_000), 0);
+        spool
+            .enqueue(
+                WriteSpoolIntent::new(WriteSpoolIntentKind::Outcome, "workspace", "outcome-0", 10),
+                0,
+            )
+            .map_err(|error| error.to_string())?;
+
+        let err = spool
+            .enqueue(
+                WriteSpoolIntent::new(WriteSpoolIntentKind::Outcome, "workspace", "outcome-1", 10),
+                1,
+            )
+            .expect_err("second write should hit depth backpressure");
+        assert_eq!(err.schema, WRITE_SPOOL_BACKPRESSURE_SCHEMA_V1);
+        assert_eq!(err.code, WRITE_SPOOL_BACKPRESSURE_CODE);
+        assert_eq!(err.reason, WriteSpoolBackpressureReason::QueueDepth);
+        assert_eq!(err.queue_depth, 1);
+        assert_eq!(err.repair, "ee daemon status --json");
+        assert_eq!(
+            err.next,
+            "ee support-bundle create --include write-queue --json"
+        );
+
+        let json = serde_json::to_value(&err).map_err(|error| error.to_string())?;
+        assert_eq!(json["reason"], "queue_depth");
+        assert_eq!(json["oldestQueuedAgeMs"], 1);
+        Ok(())
+    }
+
+    #[test]
+    fn write_spool_recovery_distinguishes_pending_committed_cancelled_failed() -> Result<(), String>
+    {
+        let mut spool = WriteSpool::new(WriteSpoolConfig::new(8, 2, 4096, 30_000), 0);
+        let pending = spool
+            .enqueue(
+                WriteSpoolIntent::new(WriteSpoolIntentKind::Recorder, "workspace", "pending", 10),
+                0,
+            )
+            .map_err(|error| error.to_string())?;
+        let committed = spool
+            .enqueue(
+                WriteSpoolIntent::new(WriteSpoolIntentKind::Remember, "workspace", "committed", 10),
+                1,
+            )
+            .map_err(|error| error.to_string())?;
+        let cancelled = spool
+            .enqueue(
+                WriteSpoolIntent::new(WriteSpoolIntentKind::Outcome, "workspace", "cancelled", 10),
+                2,
+            )
+            .map_err(|error| error.to_string())?;
+        let failed = spool
+            .enqueue(
+                WriteSpoolIntent::new(WriteSpoolIntentKind::Import, "workspace", "failed", 10),
+                3,
+            )
+            .map_err(|error| error.to_string())?;
+
+        assert!(spool.cancel_pending(cancelled.request_id, 4));
+
+        let first_batch = spool
+            .next_batch()
+            .ok_or_else(|| "expected first batch".to_string())?;
+        assert_eq!(first_batch.request_ids, vec![pending.request_id]);
+
+        let committed_batch = spool
+            .next_batch()
+            .ok_or_else(|| "expected committed batch".to_string())?;
+        assert_eq!(committed_batch.request_ids, vec![committed.request_id]);
+        assert_eq!(spool.mark_batch_committed(committed_batch.batch_id, 5), 1);
+
+        let failed_batch = spool
+            .next_batch()
+            .ok_or_else(|| "expected failed batch".to_string())?;
+        assert_eq!(failed_batch.request_ids, vec![failed.request_id]);
+        assert_eq!(
+            spool.mark_batch_failed(failed_batch.batch_id, 6, "disk full"),
+            1
+        );
+
+        let recovered = WriteSpool::from_recovery_records(
+            WriteSpoolConfig::new(8, 2, 4096, 30_000),
+            0,
+            spool.recovery_records(),
+        );
+        assert_eq!(
+            recovered.record(pending.request_id).map(|r| r.status),
+            Some(WriteSpoolRecordStatus::Pending)
+        );
+        assert_eq!(
+            recovered.record(committed.request_id).map(|r| r.status),
+            Some(WriteSpoolRecordStatus::Committed)
+        );
+        assert_eq!(
+            recovered.record(cancelled.request_id).map(|r| r.status),
+            Some(WriteSpoolRecordStatus::Cancelled)
+        );
+        assert_eq!(
+            recovered.record(failed.request_id).map(|r| r.status),
+            Some(WriteSpoolRecordStatus::Failed)
+        );
+        assert_eq!(recovered.status(7).queue_depth, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn write_spool_status_reports_metrics_for_support_bundle() -> Result<(), String> {
+        let mut spool = WriteSpool::new(WriteSpoolConfig::new(8, 8, 4096, 30_000), 1_000);
+        for index in 0..4 {
+            spool
+                .enqueue(
+                    WriteSpoolIntent::new(
+                        WriteSpoolIntentKind::Remember,
+                        "workspace",
+                        format!("metric-{index}"),
+                        25,
+                    ),
+                    1_000 + index,
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let batch = spool
+            .next_batch()
+            .ok_or_else(|| "expected metrics batch".to_string())?;
+        assert_eq!(spool.mark_batch_committed(batch.batch_id, 2_000), 4);
+
+        let status = spool.status(3_000);
+        assert_eq!(status.schema, WRITE_SPOOL_STATUS_SCHEMA_V1);
+        assert_eq!(status.queue_depth, 0);
+        assert_eq!(status.total_enqueued, 4);
+        assert_eq!(status.total_committed, 4);
+        assert_eq!(status.total_batches, 1);
+        assert_eq!(status.last_batch_size, 4);
+        assert_eq!(status.max_batch_size_observed, 4);
+        assert_eq!(status.rows_per_sec, 2.0);
+        assert_eq!(status.last_failure, None);
+        Ok(())
+    }
+
+    #[test]
+    fn write_spool_lab_runtime_cancellation_is_recoverable() -> Result<(), String> {
+        let runtime = asupersync::LabRuntime::new(asupersync::LabConfig::new(42));
+        let now_ms = (runtime.now().as_nanos() / 1_000_000) as u64;
+        let mut spool = WriteSpool::new(WriteSpoolConfig::new(4, 2, 1024, 10_000), now_ms);
+        let ticket = spool
+            .enqueue(
+                WriteSpoolIntent::new(WriteSpoolIntentKind::Remember, "workspace", "cancel", 32),
+                now_ms,
+            )
+            .map_err(|error| error.to_string())?;
+        assert!(spool.cancel_pending(ticket.request_id, now_ms + 1));
+
+        let recovered = WriteSpool::from_recovery_records(
+            WriteSpoolConfig::new(4, 2, 1024, 10_000),
+            now_ms,
+            spool.recovery_records(),
+        );
+        assert_eq!(
+            recovered.record(ticket.request_id).map(|r| r.status),
+            Some(WriteSpoolRecordStatus::Cancelled)
+        );
+        assert_eq!(recovered.status(now_ms + 2).total_cancelled, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn write_spool_lab_runtime_queue_timeout_backpressure() -> Result<(), String> {
+        let mut runtime = asupersync::LabRuntime::new(asupersync::LabConfig::new(43));
+        let mut spool = WriteSpool::new(WriteSpoolConfig::new(4, 2, 1024, 5), 0);
+        spool
+            .enqueue(
+                WriteSpoolIntent::new(WriteSpoolIntentKind::Recorder, "workspace", "stale", 32),
+                0,
+            )
+            .map_err(|error| error.to_string())?;
+
+        runtime.advance_time(6_000_000);
+        let now_ms = (runtime.now().as_nanos() / 1_000_000) as u64;
+        let err = spool
+            .enqueue(
+                WriteSpoolIntent::new(WriteSpoolIntentKind::Recorder, "workspace", "blocked", 32),
+                now_ms,
+            )
+            .expect_err("stale queue should apply timeout backpressure");
+        assert_eq!(err.reason, WriteSpoolBackpressureReason::QueueTimeout);
+        assert_eq!(err.oldest_queued_age_ms, Some(6));
+        Ok(())
+    }
+
+    #[test]
+    fn write_spool_lab_runtime_pending_bytes_backpressure() -> Result<(), String> {
+        let runtime = asupersync::LabRuntime::new(asupersync::LabConfig::new(44));
+        let now_ms = (runtime.now().as_nanos() / 1_000_000) as u64;
+        let mut spool = WriteSpool::new(WriteSpoolConfig::new(4, 2, 64, 10_000), now_ms);
+        spool
+            .enqueue(
+                WriteSpoolIntent::new(WriteSpoolIntentKind::Remember, "workspace", "fits", 48),
+                now_ms,
+            )
+            .map_err(|error| error.to_string())?;
+
+        let err = spool
+            .enqueue(
+                WriteSpoolIntent::new(WriteSpoolIntentKind::Remember, "workspace", "too-big", 32),
+                now_ms,
+            )
+            .expect_err("payload budget should apply bytes backpressure");
+        assert_eq!(err.reason, WriteSpoolBackpressureReason::PendingBytes);
+        assert_eq!(err.pending_bytes, 48);
+        assert_eq!(err.max_pending_bytes, 64);
         Ok(())
     }
 }

@@ -1,0 +1,19 @@
+---
+source: tests/contracts/preflight_tripwires.rs
+assertion: tripwire deeper checks evaluate persisted rules against explicit event payloads
+schema:
+  list: ee.tripwire.list.v1
+  check: ee.tripwire.check.v1
+  promotion: ee.tripwire.harm_promotion.v1
+contracts:
+  - empty stores return stable empty list output instead of an unavailable sentinel
+  - missing tripwire IDs return not_found with tripwire_inputs_incomplete provenance
+  - persisted event:<key.path>=<glob> rules match caller-supplied --event JSON
+  - check events are logged with event payload hashes and mutation posture
+  - harmful feedback at threshold proposes deterministic rule candidates
+evidence:
+  - tripwires.id
+  - tripwires.condition
+  - tripwire_check_events.event_payload_hash
+  - tripwire_check_events.mutation_posture
+  - curation_candidates.source_type

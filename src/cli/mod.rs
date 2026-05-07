@@ -10759,13 +10759,10 @@ where
         Ok(path) => path,
         Err(error) => {
             return write_domain_error(
-                &DomainError::new(
-                    "quarantine_workspace_unavailable",
-                    DomainErrorSeverity::Medium,
-                    DomainErrorSituation::Configuration,
-                    format!("Failed to resolve workspace: {error}"),
-                    "ee init --workspace .",
-                ),
+                &DomainError::Configuration {
+                    message: format!("Failed to resolve workspace: {error}"),
+                    repair: Some("ee init --workspace .".to_owned()),
+                },
                 cli.wants_json(),
                 stdout,
                 stderr,
@@ -10775,13 +10772,10 @@ where
     let database_path = canonical_path.join(".ee").join("ee.db");
     if !database_path.is_file() {
         return write_domain_error(
-            &DomainError::new(
-                "quarantine_database_missing",
-                DomainErrorSeverity::Medium,
-                DomainErrorSituation::Configuration,
-                format!("No ee database was found at {}.", database_path.display()),
-                "ee init --workspace .",
-            ),
+            &DomainError::Configuration {
+                message: format!("No ee database was found at {}.", database_path.display()),
+                repair: Some("ee init --workspace .".to_owned()),
+            },
             cli.wants_json(),
             stdout,
             stderr,
@@ -10792,13 +10786,10 @@ where
         Ok(connection) => connection,
         Err(error) => {
             return write_domain_error(
-                &DomainError::new(
-                    "quarantine_database_unreadable",
-                    DomainErrorSeverity::Medium,
-                    DomainErrorSituation::Storage,
-                    format!("Failed to open database: {error}"),
-                    "ee doctor --json",
-                ),
+                &DomainError::Storage {
+                    message: format!("Failed to open database: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                },
                 cli.wants_json(),
                 stdout,
                 stderr,
@@ -10810,13 +10801,11 @@ where
         Ok(Some(row)) => row,
         Ok(None) => {
             return write_domain_error(
-                &DomainError::new(
-                    "quarantine_source_not_found",
-                    DomainErrorSeverity::Low,
-                    DomainErrorSituation::NotFound,
-                    format!("No quarantine record found for source: {}", args.source_uri),
-                    "ee diag quarantine list --json",
-                ),
+                &DomainError::NotFound {
+                    resource: "quarantine record".to_owned(),
+                    id: args.source_uri.clone(),
+                    repair: Some("ee diag quarantine list --json".to_owned()),
+                },
                 cli.wants_json(),
                 stdout,
                 stderr,
@@ -10824,13 +10813,10 @@ where
         }
         Err(error) => {
             return write_domain_error(
-                &DomainError::new(
-                    "quarantine_query_failed",
-                    DomainErrorSeverity::Medium,
-                    DomainErrorSituation::Storage,
-                    format!("Failed to query quarantine state: {error}"),
-                    "ee db migrate --workspace .",
-                ),
+                &DomainError::Storage {
+                    message: format!("Failed to query quarantine state: {error}"),
+                    repair: Some("ee db migrate --workspace .".to_owned()),
+                },
                 cli.wants_json(),
                 stdout,
                 stderr,
@@ -19619,8 +19605,8 @@ mod tests {
 
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction, Cli,
-        Command, CurateCommand, DaemonCommand, DiagCommand, EconomyCommand, FieldsLevel,
-        FocusCommand, GraphCommand, ImportCommand, JobCommand, LearnCommand,
+        Command, CurateCommand, DaemonCommand, DiagCommand, DiagQuarantineCommand, EconomyCommand,
+        FieldsLevel, FocusCommand, GraphCommand, ImportCommand, JobCommand, LearnCommand,
         LearnExperimentCommand, MaintenanceCommand, MemoryCommand, OutcomeQuarantineCommand,
         OutputFormat, PlaybookCommand, RuleCommand, ShadowMode, SituationCommand, TaskFrameCommand,
         TaskFrameSubgoalCommand, WorkflowCommand, run,

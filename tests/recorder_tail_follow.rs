@@ -276,8 +276,7 @@ fn tail_caps_sql_fetch_to_caller_limit_when_no_client_filters() -> TestResult {
         filter: None,
     };
 
-    let report =
-        tail_recording_from_store(&conn, &options).map_err(|error| error.message())?;
+    let report = tail_recording_from_store(&conn, &options).map_err(|error| error.message())?;
 
     assert_eq!(report.events.len(), 5);
     assert!(report.has_more);
@@ -333,8 +332,7 @@ fn tail_applies_headroom_when_client_only_filter_terms_present() -> TestResult {
         filter: Some(filter),
     };
 
-    let report =
-        tail_recording_from_store(&conn, &options).map_err(|error| error.message())?;
+    let report = tail_recording_from_store(&conn, &options).map_err(|error| error.message())?;
 
     // SQL was bounded at 4*3 + 1 = 13, of which roughly half match the filter,
     // so total_events stays well under the 20 inserted rows.
@@ -343,7 +341,12 @@ fn tail_applies_headroom_when_client_only_filter_terms_present() -> TestResult {
         "expected SQL bounded by headroom, got total_events={}",
         report.total_events,
     );
-    assert!(report.events.iter().all(|event| event.event_type.as_str() == "tool_call"));
+    assert!(
+        report
+            .events
+            .iter()
+            .all(|event| event.event_type.as_str() == "tool_call")
+    );
     assert_eq!(report.events.len(), 3);
     Ok(())
 }

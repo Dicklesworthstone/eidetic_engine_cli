@@ -485,7 +485,6 @@ fn effect_manifest_tracks_degraded_unavailable_paths_as_non_mutating() -> TestRe
     for (command, code) in [
         ("demo run", "demo_command_execution_unavailable"),
         ("memory revise", "revision_write_unavailable"),
-        ("procedure export", "procedure_store_unavailable"),
         ("support bundle", "support_bundle_unavailable"),
         ("tripwire check", "tripwire_store_unavailable"),
     ] {
@@ -518,6 +517,76 @@ fn effect_manifest_tracks_degraded_unavailable_paths_as_non_mutating() -> TestRe
             &format!("{command} degraded code"),
         )?;
     }
+    Ok(())
+}
+
+#[test]
+fn effect_manifest_tracks_procedure_commands_as_real_surfaces() -> TestResult {
+    use ee::core::effect::{EffectClass, EffectManifest, SideEffectClass};
+
+    let manifest = EffectManifest::build();
+
+    for command in [
+        "procedure drift",
+        "procedure export",
+        "procedure list",
+        "procedure show",
+        "procedure verify",
+    ] {
+        let effect = manifest
+            .get(command)
+            .ok_or_else(|| format!("{command} not in manifest"))?;
+        ensure(
+            effect.default_effect,
+            EffectClass::ReadOnly,
+            &format!("{command} reads stored procedure data"),
+        )?;
+        ensure(
+            effect.mutation_contract.side_effect_class,
+            SideEffectClass::ReadOnly,
+            &format!("{command} is no-mutation"),
+        )?;
+        ensure(
+            effect.mutation_contract.degraded_code,
+            None,
+            &format!("{command} has no unavailable sentinel"),
+        )?;
+    }
+
+    for command in ["procedure promote", "procedure propose"] {
+        let effect = manifest
+            .get(command)
+            .ok_or_else(|| format!("{command} not in manifest"))?;
+        ensure(
+            effect.default_effect,
+            EffectClass::DurableMemoryWrite,
+            &format!("{command} mutates the procedure store"),
+        )?;
+        ensure(
+            effect.mutation_contract.side_effect_class,
+            SideEffectClass::AuditedMutation,
+            &format!("{command} is audited"),
+        )?;
+        ensure(
+            effect.write_surfaces.db_tables.contains(&"procedures"),
+            true,
+            &format!("{command} writes procedures"),
+        )?;
+        ensure(
+            effect
+                .write_surfaces
+                .db_tables
+                .contains(&"procedure_events"),
+            true,
+            &format!("{command} writes procedure_events"),
+        )?;
+        ensure(
+            effect.write_surfaces.db_tables.contains(&"audit_log"),
+            true,
+            &format!("{command} writes audit_log"),
+        )?;
+    }
+
     Ok(())
 }
 

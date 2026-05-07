@@ -580,15 +580,19 @@ mod tests {
         "artifact_links",
         "artifacts",
         "audit_log",
+        "audit_log_v038",
         "certificates",
         "curation_candidates",
         "curation_candidates_v029",
+        "curation_candidates_v033",
         "curation_ttl_policies",
         "ee_advisory_locks",
         "ee_schema_migrations",
         "evidence_spans",
         "feedback_events",
+        "feedback_events_v037",
         "feedback_quarantine",
+        "feedback_quarantine_v037",
         "graph_snapshots",
         "import_ledger",
         "learning_observations",
@@ -842,6 +846,22 @@ mod tests {
         AppendixDivergence {
             table: "curation_candidates_v029",
             reason: "the retained v029 table is migration evidence for FrankenSQLite integrity",
+        },
+        AppendixDivergence {
+            table: "curation_candidates_v033",
+            reason: "the retained v033 table is migration evidence for procedure-candidate rebuilds",
+        },
+        AppendixDivergence {
+            table: "feedback_events_v037",
+            reason: "the retained v037 table is migration evidence for procedure feedback-target rebuilds",
+        },
+        AppendixDivergence {
+            table: "feedback_quarantine_v037",
+            reason: "the retained v037 table is migration evidence for procedure feedback-target rebuilds",
+        },
+        AppendixDivergence {
+            table: "audit_log_v038",
+            reason: "the retained v038 table is migration evidence for UUID-v7 audit id rebuilds",
         },
     ];
 

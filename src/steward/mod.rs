@@ -5,12 +5,12 @@
 //! CLI-first mode without requiring a daemon.
 
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use asupersync::runtime::yield_now::yield_now;
@@ -38,15 +38,38 @@ pub const JOB_RECORD_SCHEMA_V1: &str = "ee.steward.job.v1";
 pub const MAINTENANCE_JOB_LOCK_SCHEMA_V1: &str = "ee.steward.maintenance_job_lock.v1";
 pub const MAINTENANCE_JOB_LOCK_BUSY_CODE: &str = "maintenance_job_lock_busy";
 
-static MAINTENANCE_JOB_PROCESS_GATE: OnceLock<Mutex<()>> = OnceLock::new();
+static MAINTENANCE_JOB_PROCESS_GATES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
 
 #[must_use]
 pub const fn subsystem_name() -> &'static str {
     SUBSYSTEM
 }
 
-fn maintenance_job_process_gate() -> &'static Mutex<()> {
-    MAINTENANCE_JOB_PROCESS_GATE.get_or_init(|| Mutex::new(()))
+fn maintenance_job_process_gates() -> &'static Mutex<BTreeSet<PathBuf>> {
+    MAINTENANCE_JOB_PROCESS_GATES.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+fn try_acquire_maintenance_job_process_gate(
+    lock_path: &Path,
+) -> Result<PathBuf, MaintenanceJobLockError> {
+    let mut active_paths = maintenance_job_process_gates()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let lock_path = lock_path.to_path_buf();
+    if !active_paths.insert(lock_path.clone()) {
+        return Err(MaintenanceJobLockError::Busy {
+            path: lock_path,
+            message: "Another maintenance job is already running in this process.".to_owned(),
+        });
+    }
+    Ok(lock_path)
+}
+
+fn release_maintenance_job_process_gate(lock_path: &Path) {
+    let mut active_paths = maintenance_job_process_gates()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    active_paths.remove(lock_path);
 }
 
 /// Process and file guard for one active maintenance job trigger.
@@ -55,7 +78,7 @@ pub struct MaintenanceJobLock {
     path: PathBuf,
     holder_id: String,
     _file: File,
-    _process_guard: MutexGuard<'static, ()>,
+    process_gate_path: PathBuf,
 }
 
 impl MaintenanceJobLock {
@@ -67,6 +90,12 @@ impl MaintenanceJobLock {
     #[must_use]
     pub fn holder_id(&self) -> &str {
         &self.holder_id
+    }
+}
+
+impl Drop for MaintenanceJobLock {
+    fn drop(&mut self) {
+        release_maintenance_job_process_gate(&self.process_gate_path);
     }
 }
 
@@ -130,46 +159,46 @@ pub fn try_acquire_maintenance_job_lock(
     holder_id: &str,
 ) -> Result<MaintenanceJobLock, MaintenanceJobLockError> {
     let lock_path = workspace_path.join(".ee").join("maintenance-job.lock");
-    let process_guard = match maintenance_job_process_gate().try_lock() {
-        Ok(guard) => guard,
-        Err(TryLockError::WouldBlock) => {
-            return Err(MaintenanceJobLockError::Busy {
-                path: lock_path,
-                message: "Another maintenance job is already running in this process.".to_owned(),
-            });
-        }
-        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-    };
+    let process_gate_path = try_acquire_maintenance_job_process_gate(&lock_path)?;
 
     let Some(parent) = lock_path.parent() else {
+        release_maintenance_job_process_gate(&process_gate_path);
         return Err(MaintenanceJobLockError::OpenFailed {
             path: lock_path,
             message: "Could not resolve maintenance job lock parent directory.".to_owned(),
         });
     };
-    std::fs::create_dir_all(parent).map_err(|error| MaintenanceJobLockError::OpenFailed {
-        path: lock_path.clone(),
-        message: format!("Failed to create maintenance job lock directory: {error}"),
-    })?;
+    if let Err(error) = std::fs::create_dir_all(parent) {
+        release_maintenance_job_process_gate(&process_gate_path);
+        return Err(MaintenanceJobLockError::OpenFailed {
+            path: lock_path.clone(),
+            message: format!("Failed to create maintenance job lock directory: {error}"),
+        });
+    }
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)
-        .map_err(|error| MaintenanceJobLockError::OpenFailed {
-            path: lock_path.clone(),
-            message: format!("Failed to open maintenance job lock: {error}"),
+        .map_err(|error| {
+            release_maintenance_job_process_gate(&process_gate_path);
+            MaintenanceJobLockError::OpenFailed {
+                path: lock_path.clone(),
+                message: format!("Failed to open maintenance job lock: {error}"),
+            }
         })?;
 
     #[cfg(unix)]
     if let Err(error) = flock(&file, FlockOperation::NonBlockingLockExclusive) {
         if error == Errno::WOULDBLOCK || error == Errno::AGAIN {
+            release_maintenance_job_process_gate(&process_gate_path);
             return Err(MaintenanceJobLockError::Busy {
                 path: lock_path,
                 message: "Another maintenance job holds the workspace lock.".to_owned(),
             });
         }
+        release_maintenance_job_process_gate(&process_gate_path);
         return Err(MaintenanceJobLockError::OpenFailed {
             path: lock_path,
             message: format!("Failed to acquire maintenance job lock: {error}"),
@@ -180,7 +209,7 @@ pub fn try_acquire_maintenance_job_lock(
         path: lock_path,
         holder_id: holder_id.to_owned(),
         _file: file,
-        _process_guard: process_guard,
+        process_gate_path,
     })
 }
 
@@ -2449,9 +2478,9 @@ impl ManualRunner {
         };
 
         let started = std::time::Instant::now();
-        if self.options.dry_run && !database_path.exists() {
+        if !database_path.exists() {
             let message = format!(
-                "Dry-run decay sweep database does not exist: {}",
+                "Decay sweep database does not exist: {}",
                 database_path.display()
             );
             return (
@@ -2462,7 +2491,7 @@ impl ManualRunner {
                     "schema": "ee.steward.decay_sweep.error.v1",
                     "code": "decay_sweep_database_missing",
                     "databasePath": database_path.display().to_string(),
-                    "dryRun": true,
+                    "dryRun": self.options.dry_run,
                     "durableMutation": false,
                     "message": message,
                     "repair": "ee init --workspace .",
