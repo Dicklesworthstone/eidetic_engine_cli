@@ -22,6 +22,7 @@
 //! EE-006 / EE-016. Strict scope: this module must not depend on any
 //! of those landing first.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Instant;
@@ -30,13 +31,14 @@ use crate::config::WorkspaceLocation;
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
 use crate::core::search::{
-    PERFORMANCE_EXPLAIN_SCHEMA_V1, SearchError, SearchOptions, SearchReport, SearchStatus,
-    elapsed_timing_json, performance_redaction_json, query_observation_json, run_search,
+    PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
+    SearchOptions, SearchReport, SearchStatus, elapsed_timing_json, performance_redaction_json,
+    query_observation_json, run_search,
 };
 use crate::db::{
     CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, DbConnection, StoredMemory,
 };
-use crate::models::{MemoryId, PackId, ProvenanceUri, TrustClass, UnitScore};
+use crate::models::{MemoryId, PackId, ProvenanceUri, TrustClass, UnitScore, WorkspaceId};
 use crate::pack::{
     ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
     ContextResponseDegradation, ContextResponseSeverity, PackCandidate, PackCandidateInput,
@@ -390,8 +392,10 @@ pub fn run_context_pack_with_performance(
     trace.db_open_count = trace.db_open_count.saturating_add(1);
     trace.record_elapsed("dbOpen", db_open_start);
 
+    let mut degraded = Vec::new();
+
     let search_start = Instant::now();
-    let mut search_report = run_search(&SearchOptions {
+    let mut search_report = match run_search(&SearchOptions {
         workspace_path: options.workspace_path.clone(),
         database_path: Some(database_path),
         index_dir: options.index_dir.clone(),
@@ -399,18 +403,46 @@ pub fn run_context_pack_with_performance(
         limit: request.candidate_pool,
         speed: options.speed,
         explain: false,
-    })
-    .map_err(ContextPackError::Search)?;
+    }) {
+        Ok(report) => report,
+        Err(SearchError::NoIndex) => {
+            missing_index_search_report(&request.query, request.candidate_pool)
+        }
+        Err(error) => return Err(ContextPackError::Search(error)),
+    };
     trace.index_status_checks = trace.index_status_checks.saturating_add(1);
     trace.record_elapsed("search", search_start);
 
-    if search_report.status == SearchStatus::IndexError {
-        return Err(ContextPackError::Search(SearchError::Index(
-            search_report.errors.join("; "),
-        )));
+    push_search_degradations(&mut degraded, &search_report.degraded);
+    if matches!(
+        search_report.status,
+        SearchStatus::IndexError | SearchStatus::IndexNotFound
+    ) {
+        let fallback_hits = lexical_memory_fallback_hits(
+            &connection,
+            &options.workspace_path,
+            &request.query,
+            request.candidate_pool,
+            &mut degraded,
+        );
+        let fallback_count = fallback_hits.len();
+        push_degradation(
+            &mut degraded,
+            "context_lexical_fallback",
+            ContextResponseSeverity::Medium,
+            format!(
+                "Search index could not satisfy the context request; assembled context from {fallback_count} deterministic lexical memory match{}.",
+                plural_suffix(fallback_count)
+            ),
+            Some("ee index rebuild --workspace .".to_string()),
+        );
+        search_report.results = fallback_hits;
+        search_report.status = if search_report.results.is_empty() {
+            SearchStatus::NoResults
+        } else {
+            SearchStatus::Success
+        };
     }
-
-    let mut degraded = Vec::new();
 
     // Apply query filters to search results
     if !options.filters.is_empty() {
@@ -680,6 +712,202 @@ fn search_degradation_summary_json(
         "message": &degraded.message,
         "repair": &degraded.repair,
     })
+}
+
+fn missing_index_search_report(query: &str, limit: u32) -> SearchReport {
+    SearchReport {
+        status: SearchStatus::IndexNotFound,
+        query: query.to_owned(),
+        requested_limit: limit,
+        results: Vec::new(),
+        elapsed_ms: 0.0,
+        errors: vec!["Search index not found".to_owned()],
+        degraded: vec![SearchDegradation {
+            code: "index_missing".to_owned(),
+            severity: "medium".to_owned(),
+            message: "Search index metadata or files are missing; context used stored memories directly where possible."
+                .to_owned(),
+            repair: Some("ee index rebuild --workspace .".to_owned()),
+        }],
+    }
+}
+
+fn push_search_degradations(
+    degraded: &mut Vec<ContextResponseDegradation>,
+    search_degraded: &[SearchDegradation],
+) {
+    for entry in search_degraded {
+        let severity = match entry.severity.as_str() {
+            "high" => ContextResponseSeverity::High,
+            "medium" => ContextResponseSeverity::Medium,
+            _ => ContextResponseSeverity::Low,
+        };
+        push_degradation(
+            degraded,
+            &entry.code,
+            severity,
+            entry.message.clone(),
+            entry.repair.clone(),
+        );
+    }
+}
+
+fn lexical_memory_fallback_hits(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    query: &str,
+    limit: u32,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Vec<SearchHit> {
+    let query_terms = lexical_terms(query);
+    if query_terms.is_empty() {
+        return Vec::new();
+    }
+
+    let memories = fallback_memories_for_workspace(connection, workspace_path, degraded);
+    let mut scored: Vec<(StoredMemory, f32)> = memories
+        .into_values()
+        .filter_map(|memory| {
+            lexical_memory_score(&memory, &query_terms).map(|score| (memory, score))
+        })
+        .collect();
+    scored.sort_by(|(left_memory, left_score), (right_memory, right_score)| {
+        right_score
+            .total_cmp(left_score)
+            .then_with(|| left_memory.id.cmp(&right_memory.id))
+    });
+
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(memory, score)| SearchHit {
+            doc_id: memory.id.clone(),
+            score,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(score),
+            rerank_score: None,
+            metadata: Some(memory_fallback_metadata(&memory)),
+            explanation: None,
+        })
+        .collect()
+}
+
+fn fallback_memories_for_workspace(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> BTreeMap<String, StoredMemory> {
+    let mut memories = BTreeMap::new();
+    for workspace_id in context_workspace_ids(connection, workspace_path, degraded) {
+        match connection.list_memories(&workspace_id, None, false) {
+            Ok(rows) => {
+                for memory in rows {
+                    memories.insert(memory.id.clone(), memory);
+                }
+            }
+            Err(error) => push_degradation(
+                degraded,
+                "context_lexical_fallback_workspace_read_failed",
+                ContextResponseSeverity::Low,
+                format!("Stored memories for workspace {workspace_id} could not be read: {error}"),
+                Some("ee doctor --json".to_owned()),
+            ),
+        }
+    }
+    memories
+}
+
+fn context_workspace_ids(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Vec<String> {
+    let mut ids = BTreeSet::new();
+    let mut path_keys = BTreeSet::new();
+
+    let absolute = if workspace_path.is_absolute() {
+        workspace_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(workspace_path)
+    };
+    path_keys.insert(workspace_path.to_path_buf());
+    path_keys.insert(absolute.clone());
+    if let Ok(canonical) = absolute.canonicalize() {
+        path_keys.insert(canonical);
+    }
+
+    for path in path_keys {
+        ids.insert(stable_context_workspace_id(&path));
+        let path_string = path.to_string_lossy().into_owned();
+        match connection.get_workspace_by_path(&path_string) {
+            Ok(Some(workspace)) => {
+                ids.insert(workspace.id);
+            }
+            Ok(None) => {}
+            Err(error) => push_degradation(
+                degraded,
+                "context_lexical_fallback_workspace_lookup_failed",
+                ContextResponseSeverity::Low,
+                format!("Workspace lookup for {} failed: {error}", path.display()),
+                Some("ee doctor --json".to_owned()),
+            ),
+        }
+    }
+
+    ids.into_iter().collect()
+}
+
+fn stable_context_workspace_id(path: &Path) -> String {
+    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+}
+
+fn lexical_terms(text: &str) -> BTreeSet<String> {
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .map(str::trim)
+        .filter(|term| term.len() >= 2)
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+fn lexical_memory_score(memory: &StoredMemory, query_terms: &BTreeSet<String>) -> Option<f32> {
+    let haystack =
+        format!("{} {} {}", memory.level, memory.kind, memory.content).to_ascii_lowercase();
+    let matched = query_terms
+        .iter()
+        .filter(|term| haystack.contains(term.as_str()))
+        .count();
+    if matched == 0 {
+        return None;
+    }
+    Some(matched as f32 / query_terms.len() as f32)
+}
+
+fn memory_fallback_metadata(memory: &StoredMemory) -> serde_json::Value {
+    serde_json::json!({
+        "source": "memory",
+        "memoryId": &memory.id,
+        "workspaceId": &memory.workspace_id,
+        "level": &memory.level,
+        "kind": &memory.kind,
+        "confidence": memory.confidence,
+        "utility": memory.utility,
+        "importance": memory.importance,
+        "provenanceUri": &memory.provenance_uri,
+        "createdAt": &memory.created_at,
+        "updatedAt": &memory.updated_at,
+    })
+}
+
+const fn plural_suffix(count: usize) -> &'static str {
+    if count == 1 { "" } else { "es" }
 }
 
 fn persist_pack_record(
@@ -1339,6 +1567,7 @@ fn push_degradation(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -1352,7 +1581,10 @@ mod tests {
     use crate::core::search::{
         PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchHit, SearchReport, SearchStatus,
     };
-    use crate::models::{FocusItem, FocusState, MemoryId, ProvenanceUri, UnitScore, WorkspaceId};
+    use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
+    use crate::models::{
+        FocusItem, FocusState, MemoryId, ProvenanceUri, TrustClass, UnitScore, WorkspaceId,
+    };
     use crate::pack::{
         ContextPackProfile, ContextRequest, ContextRequestInput, PackCandidate, PackCandidateInput,
         PackProvenance, PackSection, TokenBudget, assemble_draft_with_profile,
@@ -1504,6 +1736,90 @@ mod tests {
         assert!(!rendered.contains("SECRET_VALUE_ONE"));
         assert!(!rendered.contains("SECRET_VALUE_TWO"));
         assert!(!rendered.contains(&memory_a.to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn context_pack_falls_back_to_stored_memory_when_index_open_fails() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let db_path = ee_dir.join("ee.db");
+        let empty_index_dir = tempdir.path().join("empty-index");
+        std::fs::create_dir_all(&empty_index_dir).map_err(|error| error.to_string())?;
+
+        let connection = DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = super::stable_context_workspace_id(&workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("workspace".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(42)).to_string();
+        connection
+            .insert_memory(
+                &memory_id,
+                &CreateMemoryInput {
+                    workspace_id,
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Run cargo fmt --check before release.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.95,
+                    utility: 0.80,
+                    importance: 0.70,
+                    provenance_uri: None,
+                    trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                    trust_subclass: Some("test".to_owned()),
+                    tags: vec!["release".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let response = super::run_context_pack(&super::ContextPackOptions {
+            workspace_path: workspace,
+            database_path: Some(db_path),
+            index_dir: Some(empty_index_dir),
+            query: "format before release".to_owned(),
+            speed: crate::search::SpeedMode::Default,
+            filters: crate::models::QueryFilters::default(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(400),
+            candidate_pool: Some(10),
+        })
+        .map_err(|error| error.to_string())?;
+
+        let packed_ids: Vec<String> = response
+            .data
+            .pack
+            .items
+            .iter()
+            .map(|item| item.memory_id.to_string())
+            .collect();
+        assert!(
+            packed_ids.contains(&memory_id),
+            "fallback context should include matching stored memory, got {packed_ids:?}"
+        );
+        let degraded_codes: BTreeSet<&str> = response
+            .data
+            .degraded
+            .iter()
+            .map(|entry| entry.code.as_str())
+            .collect();
+        assert!(degraded_codes.contains("index_missing"));
+        assert!(degraded_codes.contains("context_lexical_fallback"));
         Ok(())
     }
 
