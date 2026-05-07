@@ -13,13 +13,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::db::{
-    CreateAuditInput, CreateProcedureEventInput, CreateProcedureInput, DbConnection,
-    PromoteProcedureRecordInput, StoredProcedure, StoredProcedureEvent, audit_actions,
-    generate_audit_id,
+    CreateAuditInput, CreateProcedureEventInput, CreateProcedureInput, CreateWorkspaceInput,
+    DbConnection, PromoteProcedureRecordInput, StoredProcedure, StoredProcedureEvent,
+    audit_actions, generate_audit_id,
 };
 use crate::models::{
     DomainError, ProcedureExportFormat, ProcedureMaturity, ProcedureStatus,
-    ProcedureVerificationStatus, SKILL_CAPSULE_SCHEMA_V1, SkillCapsuleInstallMode,
+    ProcedureVerificationStatus, SKILL_CAPSULE_SCHEMA_V1, SkillCapsuleInstallMode, WorkspaceId,
 };
 use crate::output::markdown;
 
@@ -102,13 +102,10 @@ pub fn propose_procedure(
             .to_owned()
     });
     if !options.dry_run {
-        let Some(store) = open_procedure_store(&options.workspace)? else {
-            return Err(DomainError::Storage {
-                message: "procedure proposal requires an initialized ee workspace database"
-                    .to_owned(),
-                repair: Some("ee init --workspace .".to_owned()),
-            });
-        };
+        let store = open_writable_procedure_store(
+            &options.workspace,
+            "procedure proposal requires an initialized ee workspace database",
+        )?;
         let evidence_uris = procedure_evidence_uris(&options.source_run_ids, &options.evidence_ids);
         let event_id = format!("pevt_{}", generate_id());
         let procedure = store
@@ -1198,12 +1195,10 @@ fn promote_persisted_procedure(
     procedure_id: &str,
     target_maturity: ProcedureMaturity,
 ) -> Result<ProcedurePromoteReport, DomainError> {
-    let Some(store) = open_procedure_store(&options.workspace)? else {
-        return Err(DomainError::Storage {
-            message: "procedure promotion requires an initialized ee workspace database".to_owned(),
-            repair: Some("ee init --workspace .".to_owned()),
-        });
-    };
+    let store = open_writable_procedure_store(
+        &options.workspace,
+        "procedure promotion requires an initialized ee workspace database",
+    )?;
     let stored = store
         .connection
         .get_procedure(&store.workspace_id, procedure_id)
@@ -1457,13 +1452,10 @@ pub fn retire_procedure(
             repair: Some("ee procedure retire <procedure-id> --reason <reason>".to_owned()),
         });
     }
-    let Some(store) = open_procedure_store(&options.workspace)? else {
-        return Err(DomainError::Storage {
-            message: "procedure retirement requires an initialized ee workspace database"
-                .to_owned(),
-            repair: Some("ee init --workspace .".to_owned()),
-        });
-    };
+    let store = open_writable_procedure_store(
+        &options.workspace,
+        "procedure retirement requires an initialized ee workspace database",
+    )?;
     let before = store
         .connection
         .get_procedure(&store.workspace_id, procedure_id)
@@ -2206,6 +2198,26 @@ struct ProcedureStore {
 }
 
 fn open_procedure_store(workspace: &Path) -> Result<Option<ProcedureStore>, DomainError> {
+    open_procedure_store_with_workspace_mode(workspace, false)
+}
+
+fn open_writable_procedure_store(
+    workspace: &Path,
+    missing_database_message: &'static str,
+) -> Result<ProcedureStore, DomainError> {
+    let Some(store) = open_procedure_store_with_workspace_mode(workspace, true)? else {
+        return Err(DomainError::Storage {
+            message: missing_database_message.to_owned(),
+            repair: Some("ee init --workspace .".to_owned()),
+        });
+    };
+    Ok(store)
+}
+
+fn open_procedure_store_with_workspace_mode(
+    workspace: &Path,
+    create_workspace_row: bool,
+) -> Result<Option<ProcedureStore>, DomainError> {
     if workspace.as_os_str().is_empty() {
         return Ok(None);
     }
@@ -2227,13 +2239,47 @@ fn open_procedure_store(workspace: &Path) -> Result<Option<ProcedureStore>, Doma
     let workspace = connection
         .get_workspace_by_path(&workspace_key)
         .map_err(storage_error("failed to load workspace row"))?;
-    let Some(workspace) = workspace else {
+    let workspace_id = if let Some(workspace) = workspace {
+        workspace.id
+    } else if create_workspace_row {
+        ensure_procedure_workspace(&connection, &workspace_path)?
+    } else {
         return Ok(None);
     };
     Ok(Some(ProcedureStore {
         connection,
-        workspace_id: workspace.id,
+        workspace_id,
     }))
+}
+
+fn ensure_procedure_workspace(
+    connection: &DbConnection,
+    workspace_path: &Path,
+) -> Result<String, DomainError> {
+    let workspace_key = workspace_path.display().to_string();
+    let workspace_id = stable_workspace_id(workspace_path);
+    connection
+        .insert_workspace(
+            &workspace_id,
+            &CreateWorkspaceInput {
+                path: workspace_key,
+                name: workspace_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned()),
+            },
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("failed to register procedure workspace: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    Ok(workspace_id)
+}
+
+fn stable_workspace_id(path: &Path) -> String {
+    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
 }
 
 fn resolve_workspace_path(workspace: &Path) -> Result<PathBuf, DomainError> {

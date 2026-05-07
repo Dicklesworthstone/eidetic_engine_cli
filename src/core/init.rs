@@ -10,7 +10,7 @@ use std::{
 };
 
 use super::build_info;
-use crate::db::DbConnection;
+use crate::db::{CreateWorkspaceInput, DbConnection};
 
 /// Status of the init operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -342,7 +342,7 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
     }
 
     if !database_path.exists() {
-        match initialize_database(&database_path) {
+        match initialize_database(&database_path, &workspace) {
             Ok(()) => {
                 actions.push(InitAction {
                     action: "create_file",
@@ -360,7 +360,7 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
             }
         }
     } else {
-        match initialize_database(&database_path) {
+        match initialize_database(&database_path, &workspace) {
             Ok(()) => actions.push(InitAction {
                 action: "check_file",
                 path: database_path.clone(),
@@ -448,12 +448,31 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
     }
 }
 
-fn initialize_database(database_path: &PathBuf) -> Result<(), String> {
+fn initialize_database(database_path: &PathBuf, workspace_path: &Path) -> Result<(), String> {
     let connection = DbConnection::open_file(database_path)
         .map_err(|error| format!("failed to open database: {error}"))?;
     connection
         .migrate()
         .map_err(|error| format!("failed to migrate database: {error}"))?;
+
+    // Create workspace row if it doesn't exist (idempotent).
+    let workspace_key = workspace_path.to_string_lossy().to_string();
+    let existing = connection
+        .get_workspace_by_path(&workspace_key)
+        .map_err(|error| format!("failed to check workspace: {error}"))?;
+    if existing.is_none() {
+        let workspace_id = format!("wsp_{}", uuid::Uuid::now_v7().simple());
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_key,
+                    name: None,
+                },
+            )
+            .map_err(|error| format!("failed to create workspace row: {error}"))?;
+    }
+
     Ok(())
 }
 
