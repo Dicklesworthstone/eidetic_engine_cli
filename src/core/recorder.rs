@@ -3184,7 +3184,7 @@ mod tests {
                 true,
             )],
         };
-        let result = poll_follow_events_from_snapshot(Some(&snapshot), 2, 10);
+        let result = poll_follow_events_from_snapshot(Some(&snapshot), 1, 10);
 
         assert!(matches!(
             result,

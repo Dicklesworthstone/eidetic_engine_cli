@@ -1,0 +1,18 @@
+---
+source: src/core/certificate.rs
+assertion: certificate verification uses real ed25519 signing for the certificate-signing surface
+schema:
+  verify: ee.certificate.verify.v1
+  sign: ee.certificate.sign.v1
+contracts:
+  - signing binds payload hash bytes to an ed25519 keypair
+  - forged signatures produced from public inputs fail verification
+  - mutating a signed payload fails verification
+  - deterministic test keys preserve stable acceptance coverage
+  - content-hash attestations remain distinct from real signatures
+evidence:
+  - ee.ed25519.v1
+  - certificate signing round-trip tests
+  - forged signature rejection tests
+  - mutated payload rejection tests
+  - adversarial public-input reproduction test

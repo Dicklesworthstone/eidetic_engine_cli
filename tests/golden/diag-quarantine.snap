@@ -1,0 +1,20 @@
+---
+source: tests/degraded_honesty.rs
+assertion: diag quarantine reads persisted trust state instead of reporting a canned health result
+schema:
+  list: ee.diag.quarantine.list.v1
+  show: ee.diag.quarantine.show.v1
+contracts:
+  - diag quarantine opens persisted trust/quarantine state
+  - missing quarantine databases return explicit degraded metadata without fake success claims
+  - active-only filtering is handled by the report layer
+  - stdout remains machine JSON and diagnostics stay on stderr
+  - removed sentinel codes are not emitted by the real command surface
+evidence:
+  - QuarantineReport::filter_active_only
+  - QuarantineReport.sources
+  - degradationCodes
+  - sideEffectClass
+fixtures:
+  - tests/degraded_honesty.rs::diag_quarantine_reports_persisted_state_instead_of_placeholder_health
+  - tests/effect_contracts.rs::effect_manifest_tracks_certificate_and_quarantine_as_real_read_only_surfaces

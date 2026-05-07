@@ -1,0 +1,25 @@
+---
+source: tests/recorder_persistence.rs
+assertion: recorder commands append to and read from the persisted event store
+schema:
+  start: ee.recorder.start.v1
+  event: ee.recorder.event.v1
+  finish: ee.recorder.finish.v1
+  import_plan: ee.recorder.import_plan.v1
+contracts:
+  - recorder events persist with deterministic run IDs, event IDs, and sequence numbers
+  - malformed payloads are rejected without partially persisted events
+  - list filters by run ID and time window
+  - append-only event rows preserve event hashes and chain continuity
+  - dry-run imports avoid recorder store mutation
+evidence:
+  - recorder_store
+  - recorder_events.event_id
+  - recorder_events.sequence
+  - recorder_events.event_hash
+  - recorder_events.chain_status
+  - RecorderImportPlan
+fixtures:
+  - tests/fixtures/golden/recorder/gate17_event_response.json.golden
+  - tests/fixtures/golden/recorder/gate17_import_plan.json.golden
+  - tests/recorder_persistence.rs

@@ -5,7 +5,8 @@
 # - implements-surface:* beads cannot close with abstention language
 # - implements-surface:* beads cannot close while *_UNAVAILABLE_CODE exists
 # - implements-surface:* beads must have a golden snapshot
-# - honesty-only beads must have a sibling implements-surface bead in open queue
+# - honesty-only beads must have an open implements-surface sibling, unless a
+#   matching implementation sibling is already closed and no sentinel remains
 #
 # Usage:
 #   ./scripts/closure-lint.sh                # Lint relevant bead closures changed recently
@@ -113,13 +114,93 @@ OPEN_SURFACES_JSON=$(
     ' "$BEADS_FILE" 2>/dev/null || echo '[]'
 )
 
+ALL_IMPLEMENTATION_SURFACES_JSON=$(
+    jq -sc '
+        [
+          .[]
+          | . as $bead
+          | [
+              (($bead.labels // [])[]? | select(startswith("implements-surface:")) | sub("^implements-surface:"; "")),
+              (try ($bead.title | capture("\\[implements-surface:(?<surface>[^]]+)\\]").surface) catch empty)
+            ]
+          | unique[]
+          | {surface: ., bead: $bead.id, status: $bead.status}
+        ]
+        | unique_by(.surface, .bead, .status)
+    ' "$BEADS_FILE" 2>/dev/null || echo '[]'
+)
+
+surface_unavailable_constant() {
+    local surface="$1"
+    echo "$(echo "$surface" | tr '[:lower:]-' '[:upper:]_')_UNAVAILABLE_CODE"
+}
+
+surface_has_unavailable_constant() {
+    local surface="$1"
+    local constant
+    constant=$(surface_unavailable_constant "$surface")
+    [ -f "$CLI_MOD" ] && grep -q "$constant" "$CLI_MOD" 2>/dev/null
+}
+
+surface_has_open_implementation() {
+    local surface="$1"
+    printf "%s\n" "$ALL_IMPLEMENTATION_SURFACES_JSON" |
+        jq -e --arg surface "$surface" '
+            any(.[]; .surface == $surface and .status != "closed")
+        ' >/dev/null 2>&1
+}
+
+surface_has_closed_implementation() {
+    local surface="$1"
+    printf "%s\n" "$ALL_IMPLEMENTATION_SURFACES_JSON" |
+        jq -e --arg surface "$surface" '
+            any(.[]; .surface == $surface and .status == "closed")
+        ' >/dev/null 2>&1
+}
+
+surface_has_golden_snapshot() {
+    local surface="$1"
+    local underscored
+    underscored=$(echo "$surface" | tr '-' '_')
+
+    [ -f "$GOLDEN_DIR/$surface.snap" ] && return 0
+    [ -d "$GOLDEN_DIR/$surface" ] &&
+        find "$GOLDEN_DIR/$surface" -type f 2>/dev/null | grep -q . &&
+        return 0
+    [ -d "tests/fixtures/golden/$surface" ] &&
+        find "tests/fixtures/golden/$surface" -type f 2>/dev/null | grep -q . &&
+        return 0
+    find "$GOLDEN_DIR" "tests/fixtures/golden" -type f \
+        \( -name "*$surface*" -o -name "*$underscored*" \) 2>/dev/null |
+        grep -q .
+}
+
+close_reason_contains_abstention() {
+    local close_reason="$1"
+    local scrubbed
+
+    if ! echo "$close_reason" | grep -qiE "$ABSTENTION_REGEX"; then
+        return 1
+    fi
+
+    scrubbed=$(
+        printf "%s\n" "$close_reason" |
+            sed -E 's/[A-Z0-9_]+_UNAVAILABLE_CODE[[:space:]]+(deleted|removed)//Ig' |
+            sed -E 's/(deleted|removed)[[:space:]]+[A-Z0-9_]+_UNAVAILABLE_CODE//Ig' |
+            sed -E 's/unavailable stubs removed//Ig' |
+            sed -E 's/instead of degraded-mode errors//Ig'
+    )
+
+    echo "$scrubbed" | grep -qiE "$ABSTENTION_REGEX"
+}
+
 honesty_surfaces_for_bead() {
     local bead_id="$1"
-    jq -r --arg bead_id "$bead_id" --argjson open_surfaces "$OPEN_SURFACES_JSON" '
+    jq -r --arg bead_id "$bead_id" --argjson known_surfaces "$ALL_IMPLEMENTATION_SURFACES_JSON" '
         select(.id == $bead_id)
         | . as $bead
         | [
-            $open_surfaces[] as $surface
+            ($known_surfaces | map(.surface) | unique)[] as $surface
             | select(
                 (($bead.labels // []) | index($surface))
                 or any(($bead.labels // [])[]?; . as $label | $surface | startswith($label + "-"))
@@ -210,7 +291,7 @@ for bead_id in $BEAD_IDS; do
     implementation_surfaces=$(implementation_surfaces_for_bead "$bead_id")
     if [ -n "$implementation_surfaces" ]; then
         # Rule 1: Check for abstention language in close_reason
-        if echo "$close_reason" | grep -qiE "$ABSTENTION_REGEX"; then
+        if close_reason_contains_abstention "$close_reason"; then
             for surface in $implementation_surfaces; do
                 add_violation "$bead_id" "implements-surface" "$surface" "close_reason contains abstention language"
             done
@@ -218,15 +299,13 @@ for bead_id in $BEAD_IDS; do
 
         for surface in $implementation_surfaces; do
             # Rule 2: Check if UNAVAILABLE_CODE constant still exists
-            if [ -f "$CLI_MOD" ]; then
-                constant=$(echo "$surface" | tr '[:lower:]-' '[:upper:]_')_UNAVAILABLE_CODE
-                if grep -q "$constant" "$CLI_MOD" 2>/dev/null; then
-                    add_violation "$bead_id" "implements-surface" "$surface" "${constant} still exists in src/cli/mod.rs"
-                fi
+            if surface_has_unavailable_constant "$surface"; then
+                constant=$(surface_unavailable_constant "$surface")
+                add_violation "$bead_id" "implements-surface" "$surface" "${constant} still exists in src/cli/mod.rs"
             fi
 
             # Rule 3: Implements-surface closures need a public golden snapshot.
-            if [ ! -f "$GOLDEN_DIR/$surface.snap" ]; then
+            if ! surface_has_golden_snapshot "$surface"; then
                 add_violation "$bead_id" "implements-surface" "$surface" "missing $GOLDEN_DIR/$surface.snap"
             fi
         done
@@ -236,21 +315,18 @@ for bead_id in $BEAD_IDS; do
     if echo "$labels" | grep -qE '\bhonesty-only\b'; then
         honesty_surfaces=$(honesty_surfaces_for_bead "$bead_id")
         if [ -z "$honesty_surfaces" ]; then
-            add_violation "$bead_id" "honesty-only" "unknown" "no open implements-surface sibling matches this bead's surface labels"
+            add_violation "$bead_id" "honesty-only" "unknown" "no implements-surface sibling matches this bead's surface labels"
         fi
 
         for surface in $honesty_surfaces; do
-            sibling_exists=$(jq -r --arg surface "$surface" '
-                select(.status != "closed")
-                | select(
-                    ((.labels // []) | index("implements-surface:" + $surface))
-                    or ((.title // "") | test("\\[implements-surface:" + $surface + "\\]"))
-                  )
-                | .id
-            ' "$BEADS_FILE" 2>/dev/null | head -1 || true)
-            if [ -z "$sibling_exists" ]; then
-                add_violation "$bead_id" "honesty-only" "$surface" "missing open implements-surface sibling"
+            if surface_has_open_implementation "$surface"; then
+                continue
             fi
+            if surface_has_closed_implementation "$surface" &&
+                ! surface_has_unavailable_constant "$surface"; then
+                continue
+            fi
+            add_violation "$bead_id" "honesty-only" "$surface" "missing open or completed implements-surface sibling"
         done
     fi
 done

@@ -1756,7 +1756,7 @@ mod tests {
         ensure(resume.task_frame.is_some(), "resume includes task frame")?;
         ensure_equal(
             &resume.current_objective,
-            &Some("Continue release with api_key=***REDACTED***".to_owned()),
+            &Some("Continue release with api_key=[REDACTED:api_key]".to_owned()),
             "resume objective comes from redacted task frame",
         )?;
         ensure(

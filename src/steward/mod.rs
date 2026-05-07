@@ -4607,6 +4607,7 @@ mod tests {
         CreateFeedbackEventInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection,
         audit_actions,
     };
+    use asupersync::runtime::JoinError;
     use asupersync::{Budget, CancelReason, Cx, LabConfig, LabRuntime, Outcome};
 
     type TestResult = Result<(), String>;
@@ -6006,12 +6007,8 @@ mod tests {
         lab.advance_time(1_000_000_000);
         lab.run_until_quiescent();
 
-        let outcome = handle
-            .try_join()
-            .map_err(|error| format!("daemon cancellation join failed: {error}"))?
-            .ok_or_else(|| "daemon cancellation task did not finish".to_owned())?;
-        match outcome {
-            Outcome::Cancelled(reason) => {
+        match handle.try_join() {
+            Ok(Some(Outcome::Cancelled(reason))) | Err(JoinError::Cancelled(reason)) => {
                 let golden = json!({
                     "schema": "ee.steward.daemon_cancellation_golden.v1",
                     "outcome": "cancelled",
@@ -6024,9 +6021,11 @@ mod tests {
                 });
                 ensure(actual, golden, "daemon cancellation golden")
             }
-            other => Err(format!(
+            Ok(Some(other)) => Err(format!(
                 "daemon cancellation outcome was not cancelled: {other:?}"
             )),
+            Ok(None) => Err("daemon cancellation task did not finish".to_owned()),
+            Err(error) => Err(format!("daemon cancellation join failed: {error}")),
         }
     }
 

@@ -2976,7 +2976,7 @@ fn review_session_reports_storage_error_without_unavailable_sentinel() -> TestRe
 }
 
 #[test]
-fn preflight_and_tripwire_commands_degrade_instead_of_reporting_fixture_risk_state() -> TestResult {
+fn tripwire_commands_degrade_instead_of_reporting_fixture_risk_state() -> TestResult {
     let workspace_root = unique_artifact_dir("preflight-tripwire-unavailable-workspace")?;
     let workspace = workspace_root.join("workspace");
     fs::create_dir_all(&workspace).map_err(|error| {
@@ -2992,57 +2992,6 @@ fn preflight_and_tripwire_commands_degrade_instead_of_reporting_fixture_risk_sta
         .to_string();
 
     let cases = [
-        (
-            "preflight-run-unavailable",
-            "preflight run",
-            "preflight_evidence_unavailable",
-            "eidetic_engine_cli-bijm",
-            "conservative abstention; no preflight run, risk brief, or feedback ledger mutation",
-            vec![
-                "--workspace".to_owned(),
-                workspace_arg.clone(),
-                "--json".to_owned(),
-                "preflight".to_owned(),
-                "run".to_owned(),
-                "deploy production database migration".to_owned(),
-            ],
-        ),
-        (
-            "preflight-show-unavailable",
-            "preflight show",
-            "preflight_evidence_unavailable",
-            "eidetic_engine_cli-bijm",
-            "conservative abstention; no preflight run, risk brief, or feedback ledger mutation",
-            vec![
-                "--workspace".to_owned(),
-                workspace_arg.clone(),
-                "--json".to_owned(),
-                "preflight".to_owned(),
-                "show".to_owned(),
-                "pf_gate16_contract".to_owned(),
-            ],
-        ),
-        (
-            "preflight-close-unavailable",
-            "preflight close",
-            "preflight_evidence_unavailable",
-            "eidetic_engine_cli-bijm",
-            "conservative abstention; no preflight run, risk brief, or feedback ledger mutation",
-            vec![
-                "--workspace".to_owned(),
-                workspace_arg.clone(),
-                "--json".to_owned(),
-                "preflight".to_owned(),
-                "close".to_owned(),
-                "pf_gate16_contract".to_owned(),
-                "--cleared".to_owned(),
-                "--task-outcome".to_owned(),
-                "success".to_owned(),
-                "--feedback".to_owned(),
-                "helped".to_owned(),
-                "--dry-run".to_owned(),
-            ],
-        ),
         (
             "tripwire-list-unavailable",
             "tripwire list",

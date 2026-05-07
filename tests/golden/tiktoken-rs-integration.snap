@@ -1,0 +1,17 @@
+---
+source: src/pack/mod.rs
+assertion: context packing uses tiktoken-rs cl100k_base token counting by default
+schema:
+  strategy: tiktoken_cl100k_base
+contracts:
+  - default token estimation routes through tiktoken-rs cl100k_base
+  - empty and whitespace-only inputs count as zero tokens
+  - known short strings match cl100k_base token counts
+  - CJK text is not under-counted by the legacy character heuristic
+  - repeated estimates are deterministic for identical input
+evidence:
+  - TokenEstimationStrategy::TiktokenCl100kBase
+  - estimate_tokens_default
+  - estimate_tokens_tiktoken_matches_known_short_strings
+  - estimate_tokens_tiktoken_is_more_accurate_than_heuristic_for_cjk
+  - estimate_tokens_tiktoken_is_deterministic

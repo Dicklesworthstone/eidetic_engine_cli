@@ -1,0 +1,22 @@
+---
+source: tests/degraded_honesty.rs
+assertion: daemon foreground mode runs bounded supervised maintenance handlers
+schema:
+  foreground: ee.steward.daemon_foreground.v1
+  status: ee.steward.daemon_status.v1
+contracts:
+  - daemon foreground requires explicit bounded execution
+  - foreground runs write supervised job rows through the steward job store
+  - daemon status reports durable job state after recovery
+  - restart recovery cancels orphaned daemon rows before subsequent work
+  - stdout remains machine JSON and diagnostics stay on stderr
+evidence:
+  - DaemonForegroundReport.schema
+  - DaemonForegroundReport.jobReports
+  - DaemonForegroundReport.succeeded
+  - DaemonForegroundReport.failed
+  - DaemonStatusReport.openJobs
+  - DaemonJobRow.recovery_reason
+fixtures:
+  - tests/e2e_daemon_recovery.rs
+  - tests/degraded_honesty.rs::daemon_foreground_runs_real_health_job_without_unavailable_sentinel

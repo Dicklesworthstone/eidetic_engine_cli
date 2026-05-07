@@ -171,7 +171,7 @@ fn closure_lint_reports_each_taxonomy_violation() -> TestResult {
             (
                 "closed-honesty-orphan".to_owned(),
                 "unknown".to_owned(),
-                "no open implements-surface sibling matches this bead's surface labels".to_owned(),
+                "no implements-surface sibling matches this bead's surface labels".to_owned(),
             ),
             (
                 "closed-missing-golden".to_owned(),
@@ -195,11 +195,14 @@ fn closure_lint_accepts_clean_implementation_and_honesty_sibling() -> TestResult
         temp.path(),
         &[
             r#"{"id":"closed-clean","title":"[implements-surface:clean-surface] real implementation","status":"closed","close_reason":"implemented with durable evidence","labels":["implements-surface:clean-surface"]}"#,
+            r#"{"id":"closed-sentinel-removed","title":"[implements-surface:sentinel-clean] real implementation with removed sentinel","status":"closed","close_reason":"SENTINEL_CLEAN_UNAVAILABLE_CODE deleted; real implementation shipped","labels":["implements-surface:sentinel-clean"]}"#,
+            r#"{"id":"closed-honesty-implemented","title":"honesty-only procedure closure followed by implementation","status":"closed","close_reason":"honest degraded closure","labels":["honesty-only","procedure"]}"#,
+            r#"{"id":"closed-procedure","title":"[implements-surface:procedure] real implementation sibling","status":"closed","close_reason":"implemented procedure store","labels":["implements-surface:procedure"]}"#,
             r#"{"id":"closed-honesty","title":"honesty-only tripwire closure","status":"closed","close_reason":"honest degraded closure","labels":["honesty-only","tripwire"]}"#,
             r#"{"id":"open-tripwire","title":"[implements-surface:tripwire-deeper] open implementation sibling","status":"open","labels":["implements-surface:tripwire-deeper"]}"#,
         ],
         "",
-        &["clean-surface"],
+        &["clean-surface", "sentinel-clean", "procedure"],
     )?;
 
     let (output, report) = run_linter(temp.path())?;
