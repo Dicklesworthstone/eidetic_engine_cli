@@ -2056,6 +2056,130 @@ pub fn compare_causal_chains_from_store(
     Ok(report)
 }
 
+/// Compare causal chains matching artifact_id or decision_id filters.
+///
+/// When both chain IDs are not provided but artifact_id or decision_id is, find
+/// all matching chains and produce pairwise comparisons.
+pub fn compare_causal_filtered_from_store(
+    conn: &DbConnection,
+    workspace_id: &str,
+    options: &CompareOptions,
+) -> Result<CompareReport, DomainError> {
+    let mut report = compare_causal_evidence(options);
+    report.degradations.retain(|d| {
+        !matches!(
+            d.code.as_str(),
+            "causal_comparison_evidence_unavailable" | "no_sources" | "no_filters"
+        )
+    });
+
+    if options.dry_run {
+        return Ok(report);
+    }
+
+    let (edges, _) = load_causal_ledger_edges(conn, workspace_id)?;
+    if edges.is_empty() {
+        report.degradations.push(trace_degradation(
+            "causal_ledger_empty",
+            "No causal ledger edges found in workspace.",
+            "warning",
+        ));
+        return Ok(report);
+    }
+
+    let candidate_failures = edges
+        .iter()
+        .map(|edge| edge.failure_id.clone())
+        .collect::<BTreeSet<_>>();
+
+    let mut matching_chains = Vec::new();
+    for failure_id in candidate_failures {
+        let trace_opts = TraceOptions::new()
+            .with_memory_id(failure_id)
+            .with_depth(32)
+            .with_limit(usize::MAX);
+        for chain in build_causal_chains(
+            conn,
+            workspace_id,
+            trace_opts.memory_id.as_deref().unwrap_or_default(),
+            &edges,
+            &trace_opts,
+        )? {
+            let chain_artifact_id = chain.root_cause_id.as_deref();
+            let chain_decision_id = chain.failure_id.as_deref();
+
+            let artifact_match = options
+                .artifact_id
+                .as_ref()
+                .map_or(true, |id| chain_artifact_id == Some(id.as_str()));
+            let decision_match = options
+                .decision_id
+                .as_ref()
+                .map_or(true, |id| chain_decision_id == Some(id.as_str()));
+
+            if artifact_match && decision_match {
+                matching_chains.push(chain);
+            }
+        }
+    }
+
+    if matching_chains.len() < 2 {
+        report.degradations.push(trace_degradation(
+            "causal_insufficient_chains",
+            format!(
+                "Found {} matching chain(s); comparison requires at least 2.",
+                matching_chains.len()
+            ),
+            "info",
+        ));
+        return Ok(report);
+    }
+
+    // Produce pairwise comparisons for up to first 10 chains to avoid explosion
+    let limit = matching_chains.len().min(10);
+    let mut comparisons = Vec::new();
+    for i in 0..limit {
+        for j in (i + 1)..limit {
+            let chain_a = &matching_chains[i];
+            let chain_b = &matching_chains[j];
+
+            let baseline_uplift = rounded_causal_metric(chain_a.contribution_estimate);
+            let candidate_uplift = rounded_causal_metric(chain_b.contribution_estimate);
+            let uplift_delta = rounded_causal_metric(candidate_uplift - baseline_uplift);
+            let evidence_strength = strongest_evidence_strength(&[
+                causal_evidence_strength(&chain_a.edges),
+                causal_evidence_strength(&chain_b.edges),
+            ]);
+            let verdict = if uplift_delta > 0.0 {
+                "improves"
+            } else if uplift_delta < 0.0 {
+                "regresses"
+            } else {
+                "flat"
+            };
+
+            comparisons.push(CausalComparison {
+                comparison_id: deterministic_comparison_id(
+                    workspace_id,
+                    &chain_a.chain_id,
+                    &chain_b.chain_id,
+                ),
+                source_kind: "causal_chain_pair".to_owned(),
+                source_id: format!("{}..{}", chain_a.chain_id, chain_b.chain_id),
+                baseline_uplift,
+                candidate_uplift,
+                uplift_delta,
+                confidence_state: ConfidenceState::from_evidence_strength(evidence_strength),
+                evidence_strength: evidence_strength.as_str().to_owned(),
+                verdict: verdict.to_owned(),
+            });
+        }
+    }
+
+    report.comparisons = comparisons;
+    Ok(report)
+}
+
 fn strongest_evidence_strength(strengths: &[CausalEvidenceStrength]) -> CausalEvidenceStrength {
     if strengths.contains(&CausalEvidenceStrength::ExperimentSupported) {
         CausalEvidenceStrength::ExperimentSupported
