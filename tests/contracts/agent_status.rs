@@ -142,7 +142,12 @@ fn agent_status_fixture_json_matches_golden() -> TestResult {
 
 #[test]
 fn status_json_embeds_deferred_agent_inventory() -> TestResult {
-    let report = StatusReport::gather();
+    let workspace = tempfile::Builder::new()
+        .prefix("ee-agent-status-contract-")
+        .tempdir()
+        .map_err(|error| format!("temp workspace: {error}"))?
+        .keep();
+    let report = StatusReport::gather_for_workspace(&workspace);
     let rendered = render_status_json(&report);
     let value: JsonValue =
         serde_json::from_str(&rendered).map_err(|error| format!("status JSON: {error}"))?;

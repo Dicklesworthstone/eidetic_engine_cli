@@ -12,8 +12,9 @@
 
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value as JsonValue;
 
@@ -46,6 +47,39 @@ fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+}
+
+fn isolated_workspace(label: &str) -> Result<PathBuf, String> {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("clock before unix epoch: {error}"))?
+        .as_nanos();
+    let path = env::temp_dir().join(format!(
+        "ee-toon-contract-{label}-{}-{suffix}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&path).map_err(|error| {
+        format!(
+            "failed to create temp workspace {}: {error}",
+            path.display()
+        )
+    })?;
+    Ok(path)
+}
+
+fn run_ee_in_workspace(workspace: &Path, args: &[&str]) -> Result<std::process::Output, String> {
+    Command::new(env!("CARGO_BIN_EXE_ee"))
+        .arg("--workspace")
+        .arg(workspace)
+        .args(args)
+        .output()
+        .map_err(|error| {
+            format!(
+                "failed to run ee --workspace {} {}: {error}",
+                workspace.display(),
+                args.join(" ")
+            )
+        })
 }
 
 fn run_ee_with_env(
@@ -110,6 +144,23 @@ fn assert_golden(name: &str, actual: &str) -> TestResult {
             path.display()
         ))
     }
+}
+
+fn normalize_status_toon(raw: &str, workspace: &Path) -> String {
+    let workspace_path = workspace.to_string_lossy();
+    let path_normalized = raw.replace(workspace_path.as_ref(), "$STATUS_WORKSPACE");
+    let mut normalized = String::new();
+    for line in path_normalized.lines() {
+        if line.trim_start().starts_with("fingerprint: ") {
+            let indent_len = line.len() - line.trim_start().len();
+            normalized.push_str(&line[..indent_len]);
+            normalized.push_str("fingerprint: <workspace-fingerprint>\n");
+        } else {
+            normalized.push_str(line);
+            normalized.push('\n');
+        }
+    }
+    normalized
 }
 
 // ============================================================================
@@ -192,8 +243,9 @@ fn toon_format_uses_bracket_notation_for_arrays() -> TestResult {
 
 #[test]
 fn toon_uses_fewer_bytes_than_json_for_status() -> TestResult {
-    let json_output = run_ee(&["status", "--json"])?;
-    let toon_output = run_ee(&["status", "--format", "toon"])?;
+    let workspace = isolated_workspace("size")?;
+    let json_output = run_ee_in_workspace(&workspace, &["status", "--json"])?;
+    let toon_output = run_ee_in_workspace(&workspace, &["status", "--format", "toon"])?;
 
     ensure(json_output.status.success(), "JSON output should succeed")?;
     ensure(toon_output.status.success(), "TOON output should succeed")?;
@@ -257,13 +309,15 @@ fn toon_removes_json_syntax_overhead_for_capabilities() -> TestResult {
 
 #[test]
 fn status_toon_matches_golden() -> TestResult {
-    let output = run_ee(&["status", "--format", "toon"])?;
+    let workspace = isolated_workspace("golden")?;
+    let output = run_ee_in_workspace(&workspace, &["status", "--format", "toon"])?;
     ensure(
         output.status.success(),
         "ee status --format toon should succeed",
     )?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_golden("status", &stdout)
+    let normalized = normalize_status_toon(&stdout, &workspace);
+    assert_golden("status", &normalized)
 }
 
 #[test]

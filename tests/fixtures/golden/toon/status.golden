@@ -6,20 +6,21 @@ data:
   version: 0.1.0
   workspace:
     source: explicit
-    root: /data/projects/eidetic_engine_cli
-    configDir: /data/projects/eidetic_engine_cli/.ee
-    markerPresent: true
-    canonicalRoot: /data/projects/eidetic_engine_cli
-    fingerprint: 25e38e130474e7f0292de2a3
-    scopeKind: repository
-    repositoryRoot: /data/projects/eidetic_engine_cli
-    repositoryFingerprint: "repo:25e38e130474e7f0292de2a3"
+    root: $STATUS_WORKSPACE
+    configDir: $STATUS_WORKSPACE/.ee
+    markerPresent: false
+    canonicalRoot: $STATUS_WORKSPACE
+    fingerprint: <workspace-fingerprint>
+    scopeKind: standalone
+    repositoryRoot: null
+    repositoryFingerprint: null
     subprojectPath: null
-    diagnostics[0]:
+    diagnostics[1]{code,severity,message,repair,selectedSource,selectedRoot,conflictingSource,conflictingRoot}:
+      workspace_selected_differs_from_discovered,warning,The selected workspace differs from the nearest initialized workspace discovered from the current directory.,Confirm --workspace/EE_WORKSPACE before running mutating commands.,explicit,$STATUS_WORKSPACE,discovered,/data/projects/eidetic_engine_cli
   capabilities:
     runtime: ready
-    storage: degraded
-    search: degraded
+    storage: pending
+    search: pending
     agentDetection: ready
   runtime:
     engine: asupersync
@@ -79,8 +80,8 @@ data:
     inspectionCommand: ee agent status --json
     degraded[0]:
   degraded[5]{code,severity,message}:
-    storage_degraded,medium,Workspace storage exists but could not be opened or needs migration.
-    search_index_degraded,medium,"Search is compiled but the selected workspace index is missing, stale, corrupt, or unreadable."
-    memory_health_unavailable,medium,Memory health is unavailable because memory rows could not be read.
-    curation_health_unavailable,medium,Curation health is unavailable because candidate rows could not be read.
-    feedback_quarantine_unavailable,medium,Feedback quarantine rows could not be read.
+    storage_not_initialized,medium,Workspace storage is unavailable because .ee/ee.db is missing.
+    search_waiting_for_storage,medium,Search readiness is pending until workspace storage is initialized.
+    memory_health_unavailable,low,Memory health is unavailable because the workspace database is missing.
+    curation_health_unavailable,low,Curation health is unavailable because the workspace database is missing.
+    feedback_health_unavailable,low,Feedback health is unavailable because the workspace database is missing.
