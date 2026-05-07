@@ -1384,7 +1384,7 @@ fn timestamp_is_at_or_after(timestamp: &str, since: &str) -> bool {
         chrono::DateTime::parse_from_rfc3339(since),
     ) {
         (Ok(timestamp), Ok(since)) => timestamp >= since,
-        _ => timestamp >= since,
+        _ => false,
     }
 }
 
@@ -2964,6 +2964,67 @@ mod tests {
     }
 
     #[test]
+    fn tail_recording_since_filter_compares_rfc3339_offsets_by_instant() {
+        let options = RecorderTailOptions {
+            run_id: Some("run_test".to_string()),
+            since: Some("2026-05-05T18:00:00Z".to_string()),
+            limit: 10,
+            from_sequence: None,
+            follow: false,
+            filter: None,
+        };
+        let events = vec![
+            event_summary(
+                "run_test",
+                "evt_before",
+                1,
+                RecorderEventType::UserMessage,
+                "2026-05-06T01:00:00+09:00",
+                false,
+            ),
+            event_summary(
+                "run_test",
+                "evt_equal",
+                2,
+                RecorderEventType::ToolCall,
+                "2026-05-06T03:00:00+09:00",
+                false,
+            ),
+            event_summary(
+                "run_test",
+                "evt_after",
+                3,
+                RecorderEventType::ToolResult,
+                "2026-05-05T18:00:01Z",
+                false,
+            ),
+        ];
+
+        let report = tail_recording_from_events(&options, &events);
+
+        assert_eq!(report.total_events, 2);
+        let mut event_ids = report
+            .events
+            .iter()
+            .map(|event| event.event_id.as_str())
+            .collect::<Vec<_>>();
+        event_ids.sort_unstable();
+        assert_eq!(event_ids, vec!["evt_after", "evt_equal"]);
+    }
+
+    #[test]
+    fn tail_recording_since_filter_rejects_malformed_timestamps() {
+        assert!(!timestamp_is_at_or_after(
+            "2026-05-06 12:00:00",
+            "2026-05-06T00:00:00Z"
+        ));
+        assert!(!timestamp_is_at_or_after(
+            "2026-05-06T12:00:00Z",
+            "2026-05-06 00:00:00"
+        ));
+    }
+
+    #[test]
     fn tail_recording_from_events_with_limit_zero_returns_empty_with_has_more() {
         // Contract decision for eidetic_engine_cli-2nkb: an explicit
         // `--limit 0` on the tail surface honors the user's literal request
@@ -3519,7 +3580,9 @@ mod tests {
             .map_err(|e| e.to_string())?;
         ensure(after.len(), 2, "events still present after blocked UPDATE")?;
         ensure(
-            after.iter().all(|event| event.event_type != "error"),
+            after
+                .iter()
+                .all(|event| !matches!(event.event_type.as_str(), "error")),
             true,
             "no event was rewritten to 'error'",
         )
