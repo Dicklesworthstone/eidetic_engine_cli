@@ -152,6 +152,34 @@ impl SearchDegradation {
     }
 
     #[must_use]
+    fn missing_index() -> Self {
+        Self {
+            code: "index_missing".to_string(),
+            severity: "medium".to_string(),
+            message: "Search index metadata or files are missing; results may be unavailable until the index is rebuilt."
+                .to_string(),
+            repair: Some("ee index rebuild --workspace .".to_string()),
+        }
+    }
+
+    #[must_use]
+    fn corrupt_index(last_check_error: Option<&str>) -> Self {
+        let detail = last_check_error
+            .filter(|error| !error.trim().is_empty())
+            .map(|error| format!(" Last check error: {error}"))
+            .unwrap_or_default();
+
+        Self {
+            code: "index_corrupt".to_string(),
+            severity: "high".to_string(),
+            message: format!(
+                "Search index failed integrity checks; results may be incomplete or unavailable until the index is rebuilt.{detail}"
+            ),
+            repair: Some("ee index rebuild --workspace .".to_string()),
+        }
+    }
+
+    #[must_use]
     fn data_json(&self) -> serde_json::Value {
         serde_json::json!({
             "code": self.code,
@@ -847,15 +875,25 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
                 degraded,
             })
         }
-        Err(e) => Ok(SearchReport {
-            status: SearchStatus::IndexError,
-            query: options.query.clone(),
-            requested_limit: options.limit,
-            results: Vec::new(),
-            elapsed_ms,
-            errors: vec![e],
-            degraded,
-        }),
+        Err(e) => {
+            let mut degraded = degraded;
+            let index_error_already_explained = degraded.iter().any(|degradation| {
+                matches!(degradation.code.as_str(), "index_corrupt" | "index_missing")
+            });
+            if !index_error_already_explained {
+                degraded.push(SearchDegradation::corrupt_index(Some(&e)));
+            }
+
+            Ok(SearchReport {
+                status: SearchStatus::IndexError,
+                query: options.query.clone(),
+                requested_limit: options.limit,
+                results: Vec::new(),
+                elapsed_ms,
+                errors: vec![e],
+                degraded,
+            })
+        }
     }
 }
 
@@ -871,11 +909,15 @@ fn search_degradations(options: &SearchOptions, index_dir: &Path) -> Vec<SearchD
     };
 
     match index_status.health {
+        IndexHealth::Ready => Vec::new(),
         IndexHealth::Stale => vec![SearchDegradation::stale_index(
             index_status.db_generation,
             index_status.index_generation,
         )],
-        IndexHealth::Ready | IndexHealth::Missing | IndexHealth::Corrupt => Vec::new(),
+        IndexHealth::Missing => vec![SearchDegradation::missing_index()],
+        IndexHealth::Corrupt => vec![SearchDegradation::corrupt_index(
+            index_status.last_check_error.as_deref(),
+        )],
     }
 }
 
@@ -984,6 +1026,20 @@ fn search_sync(
 mod tests {
     use super::*;
 
+    type TestResult = Result<(), String>;
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join("ee-search-tests").join(format!(
+            "{}-{}-{nanos}",
+            label,
+            std::process::id()
+        ))
+    }
+
     #[test]
     fn search_status_as_str_is_stable() {
         assert_eq!(SearchStatus::Success.as_str(), "success");
@@ -1063,6 +1119,60 @@ mod tests {
         assert!(!rendered.contains("sk_live_do_not_emit"));
         assert!(!rendered.contains("mem-secret-doc"));
         assert!(!rendered.contains("token should not leave"));
+    }
+
+    #[test]
+    fn search_degradations_report_missing_index_files() -> TestResult {
+        let workspace = unique_test_dir("missing-index");
+        let index_dir = workspace.join("index");
+        std::fs::create_dir_all(&index_dir).map_err(|error| error.to_string())?;
+        let options = SearchOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(workspace.join("missing.db")),
+            index_dir: Some(index_dir.clone()),
+            query: "format before release".to_string(),
+            limit: 10,
+            speed: SpeedMode::Default,
+            explain: false,
+        };
+
+        let degraded = search_degradations(&options, &index_dir);
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "index_missing");
+        assert_eq!(degraded[0].severity, "medium");
+        assert_eq!(
+            degraded[0].repair.as_deref(),
+            Some("ee index rebuild --workspace .")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn search_degradations_report_corrupt_index_metadata() -> TestResult {
+        let workspace = unique_test_dir("corrupt-index");
+        let index_dir = workspace.join("index");
+        std::fs::create_dir_all(&index_dir).map_err(|error| error.to_string())?;
+        std::fs::write(index_dir.join("meta.json"), "{ not-json")
+            .map_err(|error| error.to_string())?;
+        let options = SearchOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(workspace.join("missing.db")),
+            index_dir: Some(index_dir.clone()),
+            query: "format before release".to_string(),
+            limit: 10,
+            speed: SpeedMode::Default,
+            explain: false,
+        };
+
+        let degraded = search_degradations(&options, &index_dir);
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "index_corrupt");
+        assert_eq!(degraded[0].severity, "high");
+        assert!(degraded[0].message.contains("Last check error"));
+        assert!(degraded[0].message.contains("meta.json"));
+        Ok(())
     }
 
     #[test]
@@ -1525,5 +1635,55 @@ mod tests {
         let summary = report.human_summary();
         assert!(summary.contains("lexical: 0.70"));
         assert!(summary.contains("BM25"));
+    }
+
+    #[test]
+    fn search_degradation_corrupt_index_has_required_code_and_severity() {
+        let degradation =
+            SearchDegradation::corrupt_index(Some("manifest parse error: invalid JSON"));
+        assert_eq!(degradation.code, "index_corrupt");
+        assert_eq!(degradation.severity, "high");
+        assert!(degradation.message.contains("failed integrity checks"));
+        assert!(degradation.message.contains("manifest parse error"));
+        assert!(degradation.repair.is_some());
+        assert!(
+            degradation
+                .repair
+                .as_ref()
+                .is_some_and(|r| r.contains("rebuild"))
+        );
+    }
+
+    #[test]
+    fn search_degradation_corrupt_index_without_error_detail_still_valid() {
+        let degradation = SearchDegradation::corrupt_index(None);
+        assert_eq!(degradation.code, "index_corrupt");
+        assert_eq!(degradation.severity, "high");
+        assert!(degradation.message.contains("failed integrity checks"));
+        assert!(!degradation.message.contains("Last check error"));
+    }
+
+    #[test]
+    fn search_degradation_missing_index_has_required_code_and_repair() {
+        let degradation = SearchDegradation::missing_index();
+        assert_eq!(degradation.code, "index_missing");
+        assert_eq!(degradation.severity, "medium");
+        assert!(degradation.message.contains("missing"));
+        assert!(
+            degradation
+                .repair
+                .as_ref()
+                .is_some_and(|r| r.contains("rebuild"))
+        );
+    }
+
+    #[test]
+    fn search_degradation_data_json_includes_all_fields() {
+        let degradation = SearchDegradation::corrupt_index(Some("test error"));
+        let json = degradation.data_json();
+        assert_eq!(json["code"], "index_corrupt");
+        assert_eq!(json["severity"], "high");
+        assert!(json["message"].as_str().is_some_and(|m| !m.is_empty()));
+        assert!(json["repair"].as_str().is_some());
     }
 }

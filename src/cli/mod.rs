@@ -127,6 +127,9 @@ use crate::core::tripwire::{
     CheckOptions as TripwireCheckOptions, ListOptions as TripwireListOptions, TripwireEventPayload,
     check_tripwire, list_tripwires,
 };
+use crate::core::preflight_guard::{
+    BypassTokenInput, PreflightGuardOptions, PreflightGuardRegistry, run_preflight_guard,
+};
 use crate::core::why::{WhyOptions, explain_memory};
 use crate::core::workspace as workspace_core;
 use crate::models::preflight::{TripwireState, TripwireType};
@@ -2518,6 +2521,8 @@ pub enum PreflightCommand {
     Show(PreflightShowArgs),
     /// Close a preflight run (mark as completed or cancelled).
     Close(PreflightCloseArgs),
+    /// Check a command against preflight guard rules.
+    Guard(PreflightGuardArgs),
 }
 
 /// Arguments for `ee preflight run`.
@@ -2582,6 +2587,22 @@ pub struct PreflightCloseArgs {
     /// Report the close action without executing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+}
+
+/// Arguments for `ee preflight guard`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct PreflightGuardArgs {
+    /// Command string to check against guard rules.
+    #[arg(value_name = "COMMAND")]
+    pub command: String,
+
+    /// Workspace path for workspace-specific rules.
+    #[arg(long, value_name = "PATH")]
+    pub workspace: Option<PathBuf>,
+
+    /// Bypass token for a specific rule (format: rule_id:token).
+    #[arg(long, value_name = "RULE_ID:TOKEN")]
+    pub bypass: Vec<String>,
 }
 
 /// Subcommands for `ee tripwire`.
@@ -5695,6 +5716,9 @@ where
         }
         Some(Command::Preflight(PreflightCommand::Close(ref args))) => {
             handle_preflight_close(&cli, args, stdout, stderr)
+        }
+        Some(Command::Preflight(PreflightCommand::Guard(ref args))) => {
+            handle_preflight_guard(&cli, args, stdout, stderr)
         }
         Some(Command::Plan(PlanCommand::Goal(ref args))) => {
             handle_plan_goal(&cli, args, stdout, stderr)
@@ -8960,6 +8984,65 @@ fn parse_preflight_feedback_arg(
                 "use --feedback helped|missed|stale-warning|false-alarm|neutral".to_owned(),
             ),
         })
+}
+
+fn handle_preflight_guard<W, E>(
+    cli: &Cli,
+    args: &PreflightGuardArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = args
+        .workspace
+        .clone()
+        .or_else(|| cli.workspace.clone())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let registry = match PreflightGuardRegistry::load(&workspace) {
+        Ok(r) => r,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    let bypass_tokens: Vec<BypassTokenInput> = args
+        .bypass
+        .iter()
+        .filter_map(|spec| {
+            let (rule_id, token) = spec.split_once(':')?;
+            Some(BypassTokenInput {
+                rule_id: rule_id.to_owned(),
+                token: token.to_owned(),
+            })
+        })
+        .collect();
+
+    let options = PreflightGuardOptions {
+        command: args.command.clone(),
+        workspace,
+        bypass_tokens,
+        bypass_secret: std::env::var("EE_PREFLIGHT_BYPASS_SECRET")
+            .ok()
+            .map(|s| s.into_bytes()),
+    };
+
+    let report = run_preflight_guard(&registry, &options);
+
+    if cli.wants_json() {
+        let json = report.to_json();
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+    } else {
+        let _ = stdout.write_all(report.human_summary().as_bytes());
+    }
+
+    if report.exit_code == 7 {
+        ProcessExitCode::PolicyDenied
+    } else {
+        ProcessExitCode::Success
+    }
 }
 
 // ============================================================================
@@ -20222,6 +20305,7 @@ impl NormalizedInvocation {
                     PreflightCommand::Run(_) => "preflight run".to_string(),
                     PreflightCommand::Show(_) => "preflight show".to_string(),
                     PreflightCommand::Close(_) => "preflight close".to_string(),
+                    PreflightCommand::Guard(_) => "preflight guard".to_string(),
                 },
                 Command::Plan(plan) => match plan {
                     PlanCommand::Goal(_) => "plan goal".to_string(),
