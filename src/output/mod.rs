@@ -7206,15 +7206,23 @@ pub fn render_support_inspect_human(report: &InspectReport) -> String {
     out.push_str(&format!("Files: {}\n", report.files_found.len()));
     out.push_str(&format!("Total Size: {} bytes\n", report.total_size_bytes));
 
-    if let Some(verified) = report.hash_verified {
-        out.push_str(&format!(
-            "Hash Verification: {}\n",
-            if verified { "passed" } else { "FAILED" }
-        ));
-    }
+    let hash_status = if report.hash_verified {
+        if report.hash_mismatches.is_empty() {
+            "passed"
+        } else {
+            "FAILED"
+        }
+    } else {
+        "not requested"
+    };
+    out.push_str(&format!("Hash Verification: {hash_status}\n"));
+    out.push_str(&format!(
+        "Valid: {}\n",
+        if report.valid { "yes" } else { "no" }
+    ));
 
-    if let Some(ref version) = report.version_info {
-        out.push_str(&format!("Version: {version}\n"));
+    if let Some(ref manifest) = report.manifest {
+        out.push_str(&format!("Version: {}\n", manifest.ee_version));
     }
 
     out

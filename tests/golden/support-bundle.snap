@@ -1,0 +1,38 @@
+---
+source: tests/contracts.rs
+assertion: support bundle commands create and verify redacted diagnostic bundles
+schema:
+  bundle: ee.support_bundle.v1
+  manifest: ee.support_bundle.manifest.v1
+  inspect: ee.support_bundle.inspect.v1
+contracts:
+  - bundle creates directory with status, doctor, audit, capabilities, and schema files
+  - bundle applies redaction to collected diagnostic content
+  - bundle generates manifest with content hashes for each file
+  - inspect reads bundle manifest and verifies file integrity
+  - inspect reports hash mismatches when content is tampered
+  - dry-run returns plan without writing files
+  - same workspace produces deterministic file list
+evidence:
+  - bundle_report.bundle_id
+  - bundle_report.files_collected
+  - bundle_report.total_size_bytes
+  - bundle_report.redaction_applied
+  - bundle_report.redaction_summary
+  - bundle_report.output_path
+  - bundle_report.manifest_hash
+  - manifest.schema
+  - manifest.bundle_id
+  - manifest.created_at
+  - manifest.workspace_path
+  - manifest.ee_version
+  - manifest.files
+  - manifest.total_size_bytes
+  - manifest.redaction_applied
+  - manifest.redaction_reasons
+  - inspect_report.bundle_path
+  - inspect_report.manifest
+  - inspect_report.files_found
+  - inspect_report.hash_verified
+  - inspect_report.hash_mismatches
+  - inspect_report.valid
