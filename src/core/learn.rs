@@ -44,17 +44,6 @@ pub const LEARN_CLOSE_SCHEMA_V1: &str = "ee.learn.close.v1";
 /// Schema for downstream learning feedback projections.
 pub const LEARN_DOWNSTREAM_EFFECTS_SCHEMA_V1: &str = "ee.learn.downstream_effects.v1";
 
-const EXPERIMENT_REGISTRY_UNAVAILABLE_MESSAGE: &str = "Experiment execution requires persisted experiment definitions from an evaluation registry. Hard-coded experiment templates have been removed to preserve deterministic explainable retrieval.";
-const EXPERIMENT_REGISTRY_UNAVAILABLE_REPAIR: &str =
-    "Provide explicit input datasets or use skill workflows for experiment orchestration.";
-
-fn experiment_registry_unavailable() -> DomainError {
-    DomainError::UnsatisfiedDegradedMode {
-        message: EXPERIMENT_REGISTRY_UNAVAILABLE_MESSAGE.to_string(),
-        repair: Some(EXPERIMENT_REGISTRY_UNAVAILABLE_REPAIR.to_string()),
-    }
-}
-
 // ============================================================================
 // Agenda Operation
 // ============================================================================
@@ -1813,13 +1802,160 @@ pub fn propose_experiments(
 }
 
 /// Run a deterministic dry-run-only active learning experiment rehearsal.
-///
-/// Abstains with `experiment_registry_unavailable` because experiment definitions
-/// must come from persisted evaluation registries, not hard-coded templates.
 pub fn run_experiment(
-    _options: &LearnExperimentRunOptions,
+    options: &LearnExperimentRunOptions,
 ) -> Result<LearnExperimentRunReport, DomainError> {
-    Err(experiment_registry_unavailable())
+    if !options.dry_run {
+        return Err(DomainError::PolicyDenied {
+            message: "Learning experiment execution requires --dry-run; durable outcome changes must go through learn observe and learn close.".to_string(),
+            repair: Some(
+                "Use ee learn experiment run --id <experiment-id> --dry-run --json".to_string(),
+            ),
+        });
+    }
+
+    let snapshot = load_learning_snapshot(&options.workspace)?;
+    let proposal =
+        registered_experiment_proposal(&snapshot, &options.experiment_id).ok_or_else(|| {
+            DomainError::NotFound {
+                resource: "learning experiment".to_string(),
+                id: options.experiment_id.clone(),
+                repair: Some(
+                    "Run ee learn experiment propose --json to register experiment definitions."
+                        .to_string(),
+                ),
+            }
+        })?;
+
+    Ok(run_report_from_registered_proposal(options, &proposal))
+}
+
+fn registered_experiment_proposal(
+    snapshot: &LearningSnapshot,
+    experiment_id: &str,
+) -> Option<ExperimentProposal> {
+    let mut clusters = build_learning_clusters(snapshot, None, &snapshot.feedback_events);
+    clusters.sort_by(|left, right| {
+        left.topic
+            .cmp(&right.topic)
+            .then_with(|| left.question_id().cmp(&right.question_id()))
+    });
+
+    clusters
+        .into_iter()
+        .filter(LearningCluster::is_non_trivial)
+        .find_map(|cluster| {
+            if cluster.experiment_id() != experiment_id {
+                return None;
+            }
+            let candidate_id = cluster.curation_candidate_id();
+            let registered = snapshot
+                .curation_candidates
+                .iter()
+                .any(|candidate| candidate.id == candidate_id && candidate.status == "pending");
+            registered.then(|| {
+                cluster.experiment_proposal(1_200, 300, ExperimentSafetyBoundary::DryRunOnly)
+            })
+        })
+}
+
+fn run_report_from_registered_proposal(
+    options: &LearnExperimentRunOptions,
+    proposal: &ExperimentProposal,
+) -> LearnExperimentRunReport {
+    let planned_attention_tokens = options
+        .max_attention_tokens
+        .min(proposal.budget.attention_tokens);
+    let planned_runtime_seconds = options
+        .max_runtime_seconds
+        .min(proposal.budget.max_runtime_seconds);
+    let shadow_budget_delta_tokens = i32::try_from(planned_attention_tokens).unwrap_or(i32::MAX)
+        - i32::try_from(proposal.budget.attention_tokens).unwrap_or(i32::MAX);
+    let evidence_ids = proposal.evidence_ids.clone();
+
+    LearnExperimentRunReport {
+        schema: LEARN_EXPERIMENT_RUN_SCHEMA_V1.to_string(),
+        status: "dry_run_ready".to_string(),
+        dry_run: true,
+        experiment_id: proposal.experiment_id.clone(),
+        experiment_kind: "active_learning_replay".to_string(),
+        title: proposal.title.clone(),
+        hypothesis: proposal.hypothesis.clone(),
+        budget: ExperimentRunBudget {
+            requested_attention_tokens: options.max_attention_tokens,
+            requested_runtime_seconds: options.max_runtime_seconds,
+            planned_attention_tokens,
+            planned_runtime_seconds,
+            shadow_budget_delta_tokens,
+            budget_class: budget_class(planned_attention_tokens, planned_runtime_seconds).to_string(),
+        },
+        safety: proposal.safety.clone(),
+        steps: vec![
+            ExperimentRunStep {
+                order: 1,
+                name: "load_registered_definition".to_string(),
+                action: format!(
+                    "Read persisted curation-backed experiment definition {}.",
+                    proposal.experiment_id
+                ),
+                expected_signal: "registered_definition_loaded".to_string(),
+                writes_storage: false,
+            },
+            ExperimentRunStep {
+                order: 2,
+                name: "replay_evidence_cluster".to_string(),
+                action: format!(
+                    "Review {} evidence pointer(s) for topic {}.",
+                    evidence_ids.len(),
+                    proposal.topic
+                ),
+                expected_signal: "evidence_replay_complete".to_string(),
+                writes_storage: false,
+            },
+            ExperimentRunStep {
+                order: 3,
+                name: "preview_learning_outcome".to_string(),
+                action: "Prepare learn observe and learn close payload previews without mutating storage."
+                    .to_string(),
+                expected_signal: "outcome_preview_ready".to_string(),
+                writes_storage: false,
+            },
+        ],
+        observations: vec![ExperimentRunObservationPreview {
+            signal: "neutral".to_string(),
+            measurement_name: "expected_value".to_string(),
+            measurement_value: Some(proposal.expected_value),
+            evidence_ids: evidence_ids.clone(),
+            note: format!(
+                "Dry-run replay for {} is ready for human review before learn observe records evidence.",
+                proposal.topic
+            ),
+        }],
+        outcome_preview: ExperimentRunOutcomePreview {
+            status: "pending_review".to_string(),
+            decision_impact: proposal.decision_impact.possible_change.clone(),
+            confidence_delta: rounded_metric(proposal.uncertainty_reduction * 0.1),
+            priority_delta: if proposal.expected_value >= 0.5 { 1 } else { 0 },
+            promoted_artifact_ids: Vec::new(),
+            demoted_artifact_ids: Vec::new(),
+            safety_notes: vec![
+                "Dry-run report does not write learning observations or curation decisions."
+                    .to_string(),
+                "Use learn observe and learn close to persist reviewed results.".to_string(),
+            ],
+        },
+        next_actions: vec![
+            format!(
+                "ee learn observe {} --signal neutral --measurement-name expected_value --json",
+                proposal.experiment_id
+            ),
+            format!(
+                "ee learn close {} --status inconclusive --dry-run --json",
+                proposal.experiment_id
+            ),
+        ],
+        generated_at: stable_learning_generated_at(),
+    }
 }
 
 fn rounded_metric(value: f64) -> f64 {
@@ -2661,27 +2797,6 @@ mod tests {
         Ok((dir, database, workspace_id))
     }
 
-    fn assert_experiment_registry_unavailable<T>(result: Result<T, DomainError>) -> TestResult {
-        match result {
-            Err(DomainError::UnsatisfiedDegradedMode { message, repair }) => {
-                assert_eq!(message, EXPERIMENT_REGISTRY_UNAVAILABLE_MESSAGE);
-                assert_eq!(
-                    repair.as_deref(),
-                    Some(EXPERIMENT_REGISTRY_UNAVAILABLE_REPAIR)
-                );
-                Ok(())
-            }
-            Err(error) => Err(format!(
-                "expected unsatisfied degraded mode for experiment registry, got {}",
-                error.code()
-            )),
-            Ok(_) => Err(
-                "expected unsatisfied degraded mode for experiment registry, got success"
-                    .to_string(),
-            ),
-        }
-    }
-
     fn seed_memory(
         connection: &DbConnection,
         workspace_id: &str,
@@ -3197,7 +3312,7 @@ mod tests {
             min_expected_value: 0.0,
             max_attention_tokens: 900,
             max_runtime_seconds: 180,
-            safety_boundary: ExperimentSafetyBoundary::HumanReview,
+            safety_boundary: ExperimentSafetyBoundary::DryRunOnly,
         };
         let first = propose_experiments(&options).map_err(|error| error.message())?;
         let second = propose_experiments(&options).map_err(|error| error.message())?;
@@ -3220,42 +3335,130 @@ mod tests {
     }
 
     #[test]
-    fn learn_experiment_run_abstains_until_backed_by_registry() -> TestResult {
-        assert_experiment_registry_unavailable(run_experiment(&LearnExperimentRunOptions {
-            experiment_id: "exp_database_contract_fixture".to_string(),
+    fn learn_experiment_run_uses_registered_persisted_proposal() -> TestResult {
+        let (dir, database, workspace_id) = seed_learning_workspace("ee-learn-run")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        for index in 0..4 {
+            let memory_id = format!("mem_{index:026}");
+            let feedback_id = format!("fb_{index:026}");
+            seed_memory(
+                &connection,
+                &workspace_id,
+                &memory_id,
+                "registered_cluster",
+                "Replay stored evidence before promoting a learning rule.",
+            )?;
+            seed_feedback(
+                &connection,
+                &workspace_id,
+                &feedback_id,
+                &memory_id,
+                "confirmation",
+            )?;
+        }
+        connection.close().map_err(|error| error.to_string())?;
+
+        let proposal_report = propose_experiments(&LearnExperimentProposeOptions {
+            workspace: dir.path().to_path_buf(),
+            limit: 1,
+            topic: Some("registered_cluster".to_string()),
+            min_expected_value: 0.0,
+            max_attention_tokens: 900,
+            max_runtime_seconds: 180,
+            safety_boundary: ExperimentSafetyBoundary::HumanReview,
+        })
+        .map_err(|error| error.message())?;
+        let proposal = proposal_report
+            .proposals
+            .first()
+            .ok_or_else(|| "expected a registered experiment proposal".to_string())?;
+
+        let run = run_experiment(&LearnExperimentRunOptions {
+            workspace: dir.path().to_path_buf(),
+            experiment_id: proposal.experiment_id.clone(),
             max_attention_tokens: 600,
             max_runtime_seconds: 90,
             dry_run: true,
-            ..Default::default()
-        }))
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(run.schema, LEARN_EXPERIMENT_RUN_SCHEMA_V1);
+        assert_eq!(run.status, "dry_run_ready");
+        assert_eq!(run.experiment_id, proposal.experiment_id);
+        assert_eq!(run.experiment_kind, "active_learning_replay");
+        assert!(run.dry_run);
+        assert_eq!(run.budget.requested_attention_tokens, 600);
+        assert!(run.budget.planned_attention_tokens <= 600);
+        assert!(run.safety.dry_run_first);
+        assert!(!run.safety.mutation_allowed);
+        assert_eq!(run.steps.len(), 3);
+        assert!(run.steps.iter().all(|step| !step.writes_storage));
+        assert_eq!(run.observations.len(), 1);
+        assert!(!run.observations[0].evidence_ids.is_empty());
+        assert_eq!(run.outcome_preview.status, "pending_review");
+        assert!(
+            run.next_actions
+                .iter()
+                .any(|action| action.contains("ee learn observe"))
+        );
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let observations = connection
+            .list_learning_observations(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            observations.is_empty(),
+            "dry-run experiment should not persist observations"
+        );
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]
-    fn learn_experiment_run_abstains_for_non_dry_run() -> TestResult {
-        assert_experiment_registry_unavailable(run_experiment(&LearnExperimentRunOptions {
+    fn learn_experiment_run_rejects_non_dry_run_before_loading_registry() -> TestResult {
+        match run_experiment(&LearnExperimentRunOptions {
             experiment_id: "exp_database_contract_fixture".to_string(),
             dry_run: false,
             ..Default::default()
-        }))
+        }) {
+            Err(DomainError::PolicyDenied { message, repair }) => {
+                assert!(message.contains("--dry-run"));
+                assert!(
+                    repair
+                        .as_deref()
+                        .is_some_and(|repair| repair.contains("learn experiment run"))
+                );
+                Ok(())
+            }
+            Err(error) => Err(format!("expected policy denial, got {}", error.code())),
+            Ok(_) => Err("expected policy denial, got success".to_string()),
+        }
     }
 
     #[test]
-    fn learn_experiment_run_abstains_for_all_experiment_ids() -> TestResult {
-        let experiment_ids = [
-            "exp_replay_error_boundary",
-            "exp_database_contract_fixture",
-            "exp_cli_validation_shadow",
-            "exp_shadow_budget_probe",
-            "exp_unknown_experiment",
-        ];
-
-        for experiment_id in experiment_ids {
-            assert_experiment_registry_unavailable(run_experiment(&LearnExperimentRunOptions {
-                experiment_id: experiment_id.to_string(),
-                dry_run: true,
-                ..Default::default()
-            }))?;
+    fn learn_experiment_run_reports_not_found_for_unregistered_experiment() -> TestResult {
+        let (dir, _database, _workspace_id) = seed_learning_workspace("ee-learn-run-missing")?;
+        match run_experiment(&LearnExperimentRunOptions {
+            workspace: dir.path().to_path_buf(),
+            experiment_id: "exp_unknown_experiment".to_string(),
+            dry_run: true,
+            ..Default::default()
+        }) {
+            Err(DomainError::NotFound {
+                resource,
+                id,
+                repair,
+            }) => {
+                assert_eq!(resource, "learning experiment");
+                assert_eq!(id, "exp_unknown_experiment");
+                assert!(
+                    repair
+                        .as_deref()
+                        .is_some_and(|repair| repair.contains("learn experiment propose"))
+                );
+                Ok(())
+            }
+            Err(error) => Err(format!("expected not_found, got {}", error.code())),
+            Ok(_) => Err("expected not_found, got success".to_string()),
         }
-        Ok(())
     }
 }

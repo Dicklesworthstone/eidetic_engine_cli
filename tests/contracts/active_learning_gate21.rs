@@ -12,7 +12,7 @@ use ee::core::learn::{
     LearnObserveOptions, LearnUncertaintyReport, UncertaintyItem, close_experiment,
     observe_experiment, run_experiment,
 };
-use ee::models::{ExperimentOutcomeStatus, LearningObservationSignal};
+use ee::models::{DomainError, ExperimentOutcomeStatus, LearningObservationSignal};
 use ee::output::{
     render_learn_agenda_json, render_learn_close_json, render_learn_experiment_proposal_json,
     render_learn_observe_json, render_learn_uncertainty_json,
@@ -253,23 +253,48 @@ fn proposal_fixture() -> Result<String, String> {
     Ok(render_learn_experiment_proposal_json(&report))
 }
 
-fn experiment_run_dry_run_unavailable_message() -> Result<String, String> {
-    let error = match run_experiment(&LearnExperimentRunOptions {
-        workspace: PathBuf::new(),
+fn experiment_run_missing_registered_proposal_error() -> TestResult {
+    let workspace = unique_workspace_dir("gate21-run-missing")?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let init = run_ee(&["--workspace", workspace_arg.as_str(), "--json", "init"])?;
+    ensure(
+        init.status.code() == Some(0),
+        format!(
+            "learn experiment run fixture init should succeed, got {:?}",
+            init.status.code()
+        ),
+    )?;
+
+    match run_experiment(&LearnExperimentRunOptions {
+        workspace,
         experiment_id: "exp_database_contract_fixture".to_string(),
         max_attention_tokens: 800,
         max_runtime_seconds: 180,
         dry_run: true,
     }) {
-        Ok(_) => {
-            return Err(
-                "experiment run dry-run should abstain until a persisted registry exists"
-                    .to_string(),
-            );
+        Err(DomainError::NotFound {
+            resource,
+            id,
+            repair,
+        }) => {
+            ensure(
+                resource == "learning experiment",
+                format!("run missing resource should identify learning experiment, got {resource}"),
+            )?;
+            ensure(
+                id == "exp_database_contract_fixture",
+                format!("run missing id should preserve fixture id, got {id}"),
+            )?;
+            ensure(
+                repair
+                    .as_deref()
+                    .is_some_and(|hint| hint.contains("learn experiment propose")),
+                "run missing proposal repair should point to learn experiment propose",
+            )
         }
-        Err(error) => error.message(),
-    };
-    Ok(error)
+        Err(error) => Err(format!("expected not_found, got {}", error.code())),
+        Ok(_) => Err("expected not_found, got success".to_string()),
+    }
 }
 
 fn observe_negative_fixture() -> Result<String, String> {
@@ -405,12 +430,8 @@ fn gate21_experiment_proposal_json_matches_golden() -> TestResult {
 }
 
 #[test]
-fn gate21_experiment_run_dry_run_abstains_without_registry() -> TestResult {
-    let message = experiment_run_dry_run_unavailable_message()?;
-    ensure(
-        message.contains("persisted experiment definitions"),
-        format!("experiment run should require persisted definitions, got {message}"),
-    )
+fn gate21_experiment_run_reports_missing_registered_proposal() -> TestResult {
+    experiment_run_missing_registered_proposal_error()
 }
 
 #[test]
@@ -516,12 +537,20 @@ fn gate21_learn_cli_json_keeps_diagnostics_off_stdout() -> TestResult {
         "agenda empty items",
     )?;
 
-    let workspace = unique_workspace_dir("gate21-cli-dry-run")?;
-    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let run_workspace = unique_workspace_dir("gate21-cli-run-missing")?;
+    let run_workspace_arg = run_workspace.to_string_lossy().into_owned();
+    let init = run_ee(&["--workspace", run_workspace_arg.as_str(), "--json", "init"])?;
+    ensure(
+        init.status.code() == Some(0),
+        format!(
+            "learn experiment run init should succeed, got {:?}",
+            init.status.code()
+        ),
+    )?;
 
     let run = run_ee(&[
         "--workspace",
-        workspace_arg.as_str(),
+        run_workspace_arg.as_str(),
         "--json",
         "learn",
         "experiment",
@@ -531,9 +560,9 @@ fn gate21_learn_cli_json_keeps_diagnostics_off_stdout() -> TestResult {
         "--dry-run",
     ])?;
     ensure(
-        run.status.code() == Some(6),
+        run.status.code() == Some(1),
         format!(
-            "learn experiment run dry-run should report degraded unavailable exit 6, got {:?}",
+            "learn experiment run dry-run should report not_found exit 1, got {:?}",
             run.status.code()
         ),
     )?;
@@ -553,16 +582,19 @@ fn gate21_learn_cli_json_keeps_diagnostics_off_stdout() -> TestResult {
     )?;
     ensure_json_equal(
         run_value.pointer("/error/code"),
-        JsonValue::String("unsatisfied_degraded_mode".to_string()),
-        "run degraded code",
+        JsonValue::String("not_found".to_string()),
+        "run missing code",
     )?;
     ensure(
         run_value
             .pointer("/error/message")
             .and_then(JsonValue::as_str)
-            .is_some_and(|message| message.contains("persisted experiment definitions")),
-        "run degraded message must require persisted definitions",
+            .is_some_and(|message| message.contains("learning experiment")),
+        "run missing message must identify the learning experiment",
     )?;
+
+    let workspace = unique_workspace_dir("gate21-cli-dry-run")?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
 
     let observe = run_ee(&[
         "--workspace",

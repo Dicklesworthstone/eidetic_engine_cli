@@ -23784,8 +23784,24 @@ mod tests {
 
     #[test]
     fn learn_experiment_run_json_writes_machine_data_to_stdout_only() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = workspace.path().to_string_lossy().into_owned();
+        let (init_exit, _init_stdout, init_stderr) =
+            invoke(&["ee", "--workspace", &workspace, "--json", "init"]);
+        ensure_equal(
+            &init_exit,
+            &ProcessExitCode::Success,
+            "learn experiment run setup init exit",
+        )?;
+        ensure(
+            init_stderr.is_empty(),
+            "learn experiment run setup init stderr clean",
+        )?;
+
         let (exit, stdout, stderr) = invoke(&[
             "ee",
+            "--workspace",
+            &workspace,
             "--json",
             "learn",
             "experiment",
@@ -23801,8 +23817,8 @@ mod tests {
 
         ensure_equal(
             &exit,
-            &ProcessExitCode::UnsatisfiedDegradedMode,
-            "learn experiment run abstains until backed by registry",
+            &ProcessExitCode::Usage,
+            "learn experiment run reports missing registered proposal",
         )?;
         ensure(stderr.is_empty(), "learn experiment run stderr clean")?;
         ensure_ends_with(&stdout, '\n', "learn experiment run newline")?;
@@ -23815,7 +23831,7 @@ mod tests {
         )?;
         ensure_equal(
             &json["error"]["code"],
-            &serde_json::json!("unsatisfied_degraded_mode"),
+            &serde_json::json!("not_found"),
             "error code",
         )
     }
