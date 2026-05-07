@@ -1,0 +1,36 @@
+---
+source: tests/degraded_honesty.rs
+command: ee --workspace <initialized-workspace> --json recorder tail run_fixture_001
+assertion: recorder tail reads initialized persisted recorder stores without degraded sentinels
+schema:
+  tail: ee.recorder.tail.v1
+  follow: ee.recorder.tail_follow_event.v1
+contracts:
+  - recorder tail opens the workspace recorder database
+  - recorder tail returns an empty events array for an initialized store with no matching events
+  - recorder tail returns persisted events in deterministic sequence and timestamp order
+  - recorder tail reports totalEvents and hasMore explicitly
+  - recorder tail preserves redaction status, event hashes, and chain status for each event
+  - recorder tail JSON stdout contains only the machine response
+evidence:
+  - runId
+  - events[].eventId
+  - events[].runId
+  - events[].sequence
+  - events[].eventType
+  - events[].timestamp
+  - events[].redacted
+  - events[].redactionStatus
+  - events[].eventHash
+  - events[].chainStatus
+  - totalEvents
+  - hasMore
+fixtures:
+  - tests/fixtures/golden/recorder/gate17_tail_and_follow.json.golden
+observed_stdout:
+  schema: ee.recorder.tail.v1
+  command: recorder tail
+  runId: run_fixture_001
+  events: []
+  totalEvents: 0
+  hasMore: false

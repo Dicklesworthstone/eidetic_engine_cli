@@ -1,0 +1,28 @@
+---
+source: src/core/procedure.rs
+command: ee --workspace <empty-workspace> --json procedure list --limit 3 --include-steps
+assertion: procedure list reads persisted procedure records and emits a stable empty-list contract when no records exist
+schema:
+  list: ee.procedure.list_report.v1
+contracts:
+  - procedure list is read-only and does not mutate procedure state
+  - empty workspaces return procedures as an empty array
+  - total_count and filtered_count are explicit numeric fields
+  - status filtering preserves deterministic ordering by created_at and procedure_id
+  - include-steps does not invent steps when no persisted procedure records exist
+  - JSON stdout contains only the machine response
+evidence:
+  - schema
+  - procedures
+  - total_count
+  - filtered_count
+  - procedure_id
+  - title
+  - status
+  - step_count
+  - created_at
+observed_stdout:
+  schema: ee.procedure.list_report.v1
+  procedures: []
+  total_count: 0
+  filtered_count: 0
