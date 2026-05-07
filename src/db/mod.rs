@@ -3731,6 +3731,47 @@ impl DbConnection {
         Ok(())
     }
 
+    /// Upsert a workspace with explicit scope metadata.
+    ///
+    /// Uses `INSERT OR IGNORE` to atomically skip the insert if a workspace with
+    /// the same id or path already exists. This avoids the TOCTOU race inherent
+    /// in check-then-insert patterns when multiple processes hit the same registry.
+    pub fn upsert_workspace_with_scope(
+        &self,
+        id: &str,
+        input: &CreateWorkspaceInput,
+        scope: &WorkspaceScopeFields,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT OR IGNORE INTO workspaces (id, path, name, scope_kind, repository_root, repository_fingerprint, subproject_path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.path.clone()),
+                input.name.as_ref().map_or(Value::Null, |n| Value::Text(n.clone())),
+                Value::Text(scope.scope_kind.clone()),
+                scope
+                    .repository_root
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                scope
+                    .repository_fingerprint
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                scope
+                    .subproject_path
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(now.clone()),
+                Value::Text(now),
+            ],
+        )?;
+
+        Ok(())
+    }
+
     /// Get a workspace by ID.
     pub fn get_workspace(&self, id: &str) -> Result<Option<StoredWorkspace>> {
         let rows = self.query_for(
@@ -11864,9 +11905,9 @@ fn stored_recorder_run_from_row(row: &Row) -> Result<StoredRecorderRun> {
         status: required_text(row, 6, DbOperation::Query, "status")?.to_string(),
         started_at: required_text(row, 7, DbOperation::Query, "started_at")?.to_string(),
         ended_at: optional_text(row, 8)?.map(str::to_string),
-        event_count: row.get(9).and_then(|v| v.as_i64()).unwrap_or(0) as u64,
-        redacted_count: row.get(10).and_then(|v| v.as_i64()).unwrap_or(0) as u64,
-        payload_bytes: row.get(11).and_then(|v| v.as_i64()).unwrap_or(0) as u64,
+        event_count: required_u64(row, 9, DbOperation::Query, "event_count")?,
+        redacted_count: required_u64(row, 10, DbOperation::Query, "redacted_count")?,
+        payload_bytes: required_u64(row, 11, DbOperation::Query, "payload_bytes")?,
         chain_complete: row
             .get(12)
             .and_then(|value| value.as_i64())
@@ -11879,20 +11920,20 @@ fn stored_recorder_event_from_row(row: &Row) -> Result<StoredRecorderEvent> {
     Ok(StoredRecorderEvent {
         event_id: required_text(row, 0, DbOperation::Query, "event_id")?.to_string(),
         run_id: required_text(row, 1, DbOperation::Query, "run_id")?.to_string(),
-        sequence: row.get(2).and_then(|v| v.as_i64()).unwrap_or(0) as u64,
+        sequence: required_u64(row, 2, DbOperation::Query, "sequence")?,
         event_type: required_text(row, 3, DbOperation::Query, "event_type")?.to_string(),
         timestamp: required_text(row, 4, DbOperation::Query, "timestamp")?.to_string(),
         payload_hash: optional_text(row, 5)?.map(str::to_string),
-        payload_bytes: row.get(6).and_then(|v| v.as_i64()).unwrap_or(0) as u64,
+        payload_bytes: required_u64(row, 6, DbOperation::Query, "payload_bytes")?,
         redaction_status: required_text(row, 7, DbOperation::Query, "redaction_status")?
             .to_string(),
-        redacted_bytes: row.get(8).and_then(|v| v.as_i64()).unwrap_or(0) as u64,
+        redacted_bytes: required_u64(row, 8, DbOperation::Query, "redacted_bytes")?,
         previous_event_hash: optional_text(row, 9)?.map(str::to_string),
         event_hash: required_text(row, 10, DbOperation::Query, "event_hash")?.to_string(),
         chain_status: required_text(row, 11, DbOperation::Query, "chain_status")?.to_string(),
         source_span_id: optional_text(row, 12)?.map(str::to_string),
-        source_line_start: row.get(13).and_then(|v| v.as_i64()).map(|v| v as u32),
-        source_line_end: row.get(14).and_then(|v| v.as_i64()).map(|v| v as u32),
+        source_line_start: optional_u32(row, 13, DbOperation::Query, "source_line_start")?,
+        source_line_end: optional_u32(row, 14, DbOperation::Query, "source_line_end")?,
         created_at: required_text(row, 15, DbOperation::Query, "created_at")?.to_string(),
     })
 }
