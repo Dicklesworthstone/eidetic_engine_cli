@@ -124,7 +124,8 @@ use crate::core::task_frame::{
     add_task_subgoal, close_task_frame, create_task_frame, show_task_frame, update_task_frame,
 };
 use crate::core::tripwire::{
-    CheckOptions as TripwireCheckOptions, ListOptions as TripwireListOptions, TripwireEventPayload,
+    CheckOptions as TripwireCheckOptions, CheckReport as TripwireCheckReport,
+    ListOptions as TripwireListOptions, ListReport as TripwireListReport, TripwireEventPayload,
     check_tripwire, list_tripwires,
 };
 use crate::core::preflight_guard::{
@@ -20744,57 +20745,6 @@ impl InvocationHints {
 // EE-393: Tripwire List and Check Commands
 // ============================================================================
 
-const TRIPWIRE_STORE_UNAVAILABLE_CODE: &str = "tripwire_store_unavailable";
-const TRIPWIRE_STORE_UNAVAILABLE_MESSAGE: &str = "Tripwire store access is unavailable until tripwire commands are backed by persisted preflight tripwire records.";
-const TRIPWIRE_STORE_UNAVAILABLE_REPAIR: &str = "ee status --json";
-const TRIPWIRE_STORE_UNAVAILABLE_FOLLOW_UP: &str = "eidetic_engine_cli-qmu0";
-const TRIPWIRE_STORE_UNAVAILABLE_SIDE_EFFECT: &str =
-    "read-only, conservative abstention; no tripwire store read or event evaluation";
-
-fn write_tripwire_store_unavailable<W, E>(
-    cli: &Cli,
-    command: &'static str,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "command": command,
-                "code": TRIPWIRE_STORE_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": TRIPWIRE_STORE_UNAVAILABLE_MESSAGE,
-                "repair": TRIPWIRE_STORE_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": TRIPWIRE_STORE_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": TRIPWIRE_STORE_UNAVAILABLE_MESSAGE,
-                        "repair": TRIPWIRE_STORE_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": TRIPWIRE_STORE_UNAVAILABLE_FOLLOW_UP,
-                "sideEffectClass": TRIPWIRE_STORE_UNAVAILABLE_SIDE_EFFECT
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
-    }
-
-    let _ = writeln!(stderr, "error: {TRIPWIRE_STORE_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {TRIPWIRE_STORE_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
-}
-
 fn handle_tripwire_list<W, E>(
     cli: &Cli,
     args: &TripwireListArgs,
@@ -20814,10 +20764,6 @@ where
         .clone()
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
-    if !database_path.exists() {
-        return write_tripwire_store_unavailable(cli, "tripwire list", stdout, stderr);
-    }
-
     let state = match parse_optional_tripwire_state(args.state.as_deref()) {
         Ok(state) => state,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
@@ -20827,24 +20773,22 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
 
-    let report = match list_tripwires(&TripwireListOptions {
-        workspace,
-        database_path: Some(database_path),
-        state,
-        preflight_run_id: args.preflight_run_id.clone(),
-        tripwire_type,
-        limit: args.limit,
-        include_disarmed: args.include_disarmed,
-    }) {
-        Ok(report) => report,
-        Err(DomainError::Storage { .. } | DomainError::MigrationRequired { .. }) => {
-            return write_tripwire_store_unavailable(cli, "tripwire list", stdout, stderr);
+    let report = if !database_path.exists() {
+        TripwireListReport::new()
+    } else {
+        match list_tripwires(&TripwireListOptions {
+            workspace,
+            database_path: Some(database_path),
+            state,
+            preflight_run_id: args.preflight_run_id.clone(),
+            tripwire_type,
+            limit: args.limit,
+            include_disarmed: args.include_disarmed,
+        }) {
+            Ok(report) => report,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         }
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
-    if args.database.is_none() && report.total_count == 0 {
-        return write_tripwire_store_unavailable(cli, "tripwire list", stdout, stderr);
-    }
 
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
@@ -20888,28 +20832,22 @@ where
         .clone()
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
-    if !database_path.exists() {
-        return write_tripwire_store_unavailable(cli, "tripwire check", stdout, stderr);
-    }
-
-    let report = match check_tripwire(&TripwireCheckOptions {
-        workspace,
-        database_path: Some(database_path),
-        tripwire_id: args.tripwire_id.clone(),
-        event_payload,
-        update_timestamp: args.update_timestamp,
-        task_outcome,
-        dry_run: args.dry_run,
-    }) {
-        Ok(report) => report,
-        Err(DomainError::Storage { .. } | DomainError::MigrationRequired { .. }) => {
-            return write_tripwire_store_unavailable(cli, "tripwire check", stdout, stderr);
+    let report = if !database_path.exists() {
+        TripwireCheckReport::new(&args.tripwire_id)
+    } else {
+        match check_tripwire(&TripwireCheckOptions {
+            workspace,
+            database_path: Some(database_path),
+            tripwire_id: args.tripwire_id.clone(),
+            event_payload,
+            update_timestamp: args.update_timestamp,
+            task_outcome,
+            dry_run: args.dry_run,
+        }) {
+            Ok(report) => report,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         }
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
-    if args.database.is_none() && report.result.as_str() == "not_found" {
-        return write_tripwire_store_unavailable(cli, "tripwire check", stdout, stderr);
-    }
 
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
