@@ -1,0 +1,36 @@
+# Project-specific RCH sync exclusions
+#
+# NOTE: RCH reads exclude patterns from ~/.config/rch/config.toml, not from
+# this file. This .rchignore documents the project's sync hygiene intent —
+# these patterns have been added to the global config's [transfer.exclude_patterns].
+#
+# These are generated artifacts that slow down remote compilation sync
+# without contributing to the build.
+
+# Diagnostic output files created by verification scripts
+.clippy_out.txt
+.closure-lint-report.json
+.ubs_out.txt
+.vision-coverage-report.json
+.git_log_tmp.txt
+clippy_out_dump
+exit_code_test_out
+recent_commits.txt
+
+# Agent session reports (multi-pane orchestration artifacts)
+GEMINI_PANE*.md
+GEMINI_PANE_REPORT.md
+
+# Per-agent target directories (these are in /tmp but pattern for completeness)
+/tmp/ee_target_pane*/
+
+# Broken shell expansion artifacts
+${TMPDIR:-/
+
+# perf profiling data (already in global config but explicit here)
+perf.data
+perf.data.*
+
+# Test run artifacts
+*.test_output
+*.test_log
