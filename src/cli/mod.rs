@@ -18035,7 +18035,7 @@ where
     E: Write,
 {
     if matches!(args.command, Some(DaemonCommand::Status(_))) || !args.foreground {
-        return write_daemon_status(cli, args, stdout);
+        return write_daemon_status(cli, args, stdout, stderr);
     }
 
     let job_types = if args.jobs.is_empty() {
@@ -18063,8 +18063,43 @@ where
     options.job_types = job_types;
     options.runner_options = runner_options;
 
+    if !options.dry_run {
+        if let Err(message) =
+            crate::serve::recover_orphaned_daemon_jobs(&workspace_path, "daemon foreground restart")
+        {
+            let error = DomainError::Storage {
+                message,
+                repair: Some("ee daemon status --json".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    }
+    let run_plan = match crate::serve::record_daemon_foreground_start(&workspace_path, &options) {
+        Ok(plan) => plan,
+        Err(message) => {
+            let error = DomainError::Storage {
+                message,
+                repair: Some("ee daemon status --json".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
     match crate::steward::run_daemon_foreground(&options) {
-        Ok(report) => write_daemon_report(cli, &report, stdout),
+        Ok(report) => {
+            if let Err(message) = crate::serve::record_daemon_foreground_report(
+                &workspace_path,
+                &report,
+                &run_plan.run_id,
+            ) {
+                let error = DomainError::Storage {
+                    message,
+                    repair: Some("ee daemon status --json".to_owned()),
+                };
+                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            }
+            write_daemon_report(cli, &report, stdout)
+        }
         Err(message) => {
             let error = DomainError::Configuration {
                 message,
@@ -18075,9 +18110,15 @@ where
     }
 }
 
-fn write_daemon_status<W>(cli: &Cli, args: &DaemonArgs, stdout: &mut W) -> ProcessExitCode
+fn write_daemon_status<W, E>(
+    cli: &Cli,
+    args: &DaemonArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
 where
     W: Write,
+    E: Write,
 {
     let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
     let job_types = if args.jobs.is_empty() {
@@ -18090,28 +18131,16 @@ where
     } else {
         args.jobs.clone()
     };
-    let data = serde_json::json!({
-        "schema": "ee.steward.daemon_status.v1",
-        "command": "daemon status",
-        "workspace": workspace_path.to_string_lossy(),
-        "running": false,
-        "daemonized": false,
-        "foregroundAvailable": true,
-        "backgroundAvailable": false,
-        "supervisor": "asupersync_foreground",
-        "jobTypes": job_types
-            .iter()
-            .map(|job_type| job_type.as_str())
-            .collect::<Vec<_>>(),
-        "degraded": [
-            {
-                "code": "daemon_background_mode_unimplemented",
-                "severity": "low",
-                "message": "Only bounded foreground daemon mode is implemented.",
-                "repair": "ee daemon --foreground --once --json"
-            }
-        ],
-    });
+    let data = match crate::serve::daemon_status_report(&workspace_path, &job_types, 20) {
+        Ok(report) => report.data_json(),
+        Err(message) => {
+            let error = DomainError::Storage {
+                message,
+                repair: Some("ee daemon --foreground --once --json".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
     let response = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V1,
         "success": true,
@@ -18119,10 +18148,17 @@ where
     });
 
     match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
-            stdout,
-            "ee daemon status\n================\n\nRunning:    false\nSupervisor: asupersync_foreground\nMode:       bounded foreground\n\nNext:\n  ee daemon --foreground --once --json\n",
-        ),
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let running = data["running"].as_bool().unwrap_or(false);
+            let open_jobs = data["durable"]["openJobCount"].as_u64().unwrap_or(0);
+            let recent = data["durable"]["recentOutcomeCount"].as_u64().unwrap_or(0);
+            write_stdout(
+                stdout,
+                &format!(
+                    "ee daemon status\n================\n\nRunning:    {running}\nSupervisor: asupersync_foreground\nMode:       bounded foreground\nOpen jobs:  {open_jobs}\nRecent:     {recent}\n\nNext:\n  ee daemon --foreground --once --json\n"
+                ),
+            )
+        }
         output::Renderer::Toon => {
             let rendered = output::render_toon_from_json(&response.to_string());
             write_stdout(stdout, &(rendered + "\n"))

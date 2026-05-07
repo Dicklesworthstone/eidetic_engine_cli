@@ -23,7 +23,6 @@ pub mod steward;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 
-#[cfg(feature = "serve")]
 pub mod serve;
 
 pub mod science;
