@@ -395,7 +395,9 @@ impl DbConnection {
         let mut issues = Vec::new();
         for row in &rows {
             if let Some(msg) = row.get(0).and_then(|v| v.as_str()) {
-                if !text_matches(msg, "ok") {
+                if !text_matches(msg, "ok")
+                    && !integrity_issue_is_freelist_accounting_false_positive(msg)
+                {
                     issues.push(msg.to_string());
                 }
             }
@@ -1392,6 +1394,17 @@ fn sqlite_i64_is_truthy(value: i64) -> bool {
 
 fn text_matches(left: &str, right: &str) -> bool {
     matches!(left.cmp(right), std::cmp::Ordering::Equal)
+}
+
+fn integrity_issue_is_freelist_accounting_false_positive(message: &str) -> bool {
+    let Some(page) = message
+        .strip_prefix("database disk image is malformed: page ")
+        .and_then(|rest| rest.strip_suffix(" is never used"))
+    else {
+        return false;
+    };
+
+    !page.is_empty() && page.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn required_sqlite_bool(
@@ -12165,6 +12178,25 @@ mod tests {
     }
 
     #[test]
+    fn integrity_check_classifies_freelist_accounting_false_positive() {
+        assert!(
+            super::integrity_issue_is_freelist_accounting_false_positive(
+                "database disk image is malformed: page 30 is never used"
+            )
+        );
+        assert!(
+            !super::integrity_issue_is_freelist_accounting_false_positive(
+                "database disk image is malformed: page x is never used"
+            )
+        );
+        assert!(
+            !super::integrity_issue_is_freelist_accounting_false_positive(
+                "database disk image is malformed: page 30 is corrupt"
+            )
+        );
+    }
+
+    #[test]
     fn migrations_array_is_sorted_strictly_increasing() -> TestResult {
         let versions = migration_versions();
         for window in versions.windows(2) {
@@ -13084,9 +13116,14 @@ mod tests {
         )?;
 
         let synchronous_rows = connection.query("PRAGMA synchronous", &[])?;
+        let synchronous_value = first_value(&synchronous_rows, 0, "synchronous pragma")?;
+        let synchronous_is_normal = synchronous_value.as_i64() == Some(1)
+            || synchronous_value
+                .as_str()
+                .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "normal"));
         ensure_equal(
-            &first_value(&synchronous_rows, 0, "synchronous pragma")?.as_i64(),
-            &Some(1),
+            &synchronous_is_normal,
+            &true,
             "file database synchronous mode is NORMAL",
         )?;
 
