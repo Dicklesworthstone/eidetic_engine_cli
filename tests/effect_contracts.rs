@@ -10,17 +10,18 @@ use std::path::Path;
 use std::process::Command;
 
 const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
-const NORMALIZED_CLI_COMMAND_COUNT: usize = 179;
+const NORMALIZED_CLI_COMMAND_COUNT: usize = 186;
 const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
     "daemon background",
     "daemon foreground decay_sweep",
     "daemon foreground non-decay",
+    "review session --propose",
 ];
 
 type TestResult = Result<(), String>;
 
 fn ensure<T: std::fmt::Debug + PartialEq>(actual: T, expected: T, ctx: &str) -> TestResult {
-    if actual == expected {
+    if actual.eq(&expected) {
         Ok(())
     } else {
         Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
@@ -712,7 +713,8 @@ fn effect_manifest_tracks_certificate_and_quarantine_as_real_read_only_surfaces(
         "certificate list",
         "certificate show",
         "certificate verify",
-        "diag quarantine",
+        "diag quarantine list",
+        "diag quarantine show",
     ] {
         let effect = manifest
             .get(command)

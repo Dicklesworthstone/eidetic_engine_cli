@@ -31,7 +31,7 @@ fn ensure_equal<T>(actual: &T, expected: &T, context: &str) -> TestResult
 where
     T: Debug + PartialEq,
 {
-    if actual == expected {
+    if actual.eq(expected) {
         Ok(())
     } else {
         Err(format!("{context}: expected {expected:?}, got {actual:?}"))
@@ -85,6 +85,13 @@ fn initialized_recorder_workspace() -> Result<(tempfile::TempDir, String), Strin
 fn empty_workspace() -> Result<(tempfile::TempDir, String), String> {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
     let workspace = tempdir.path().to_string_lossy().to_string();
+    Ok((tempdir, workspace))
+}
+
+fn initialized_workspace() -> Result<(tempfile::TempDir, String), String> {
+    let (tempdir, workspace) = empty_workspace()?;
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(&init.status.code(), &Some(0), "workspace init exit")?;
     Ok((tempdir, workspace))
 }
 
@@ -782,8 +789,11 @@ fn economy_prune_plan_requires_dry_run() -> TestResult {
 // ============================================================================
 
 #[test]
-fn learn_experiment_run_dry_run_returns_plan_shape() -> TestResult {
+fn learn_experiment_run_dry_run_reports_missing_registered_proposal() -> TestResult {
+    let (_tempdir, workspace) = initialized_workspace()?;
     let output = run_ee(&[
+        "--workspace",
+        &workspace,
         "learn",
         "experiment",
         "run",
@@ -796,11 +806,7 @@ fn learn_experiment_run_dry_run_returns_plan_shape() -> TestResult {
         "--dry-run",
         "--json",
     ])?;
-    ensure_equal(
-        &output.status.code(),
-        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
-        "exit code",
-    )?;
+    ensure_equal(&output.status.code(), &Some(1), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(output.stderr.is_empty(), "stderr must be empty")?;
@@ -813,14 +819,20 @@ fn learn_experiment_run_dry_run_returns_plan_shape() -> TestResult {
     )?;
     ensure_equal(
         &json["error"]["code"],
-        &serde_json::json!("unsatisfied_degraded_mode"),
+        &serde_json::json!("not_found"),
         "error code",
     )?;
     ensure(
         json["error"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("persisted experiment definitions")),
-        "dry-run experiment must not use hard-coded templates",
+            .is_some_and(|message| message.contains("learning experiment")),
+        "dry-run experiment must identify the missing learning experiment",
+    )?;
+    ensure(
+        json["error"]["repair"]
+            .as_str()
+            .is_some_and(|repair| repair.contains("learn experiment propose")),
+        "dry-run experiment repair must point to registered proposals",
     )
 }
 
@@ -855,8 +867,11 @@ fn learn_experiment_run_rejects_non_dry_run() -> TestResult {
 }
 
 #[test]
-fn learn_experiment_run_supports_shadow_budget_template() -> TestResult {
+fn learn_experiment_run_shadow_budget_probe_reports_missing_registered_proposal() -> TestResult {
+    let (_tempdir, workspace) = initialized_workspace()?;
     let output = run_ee(&[
+        "--workspace",
+        &workspace,
         "learn",
         "experiment",
         "run",
@@ -865,19 +880,22 @@ fn learn_experiment_run_supports_shadow_budget_template() -> TestResult {
         "--dry-run",
         "--json",
     ])?;
-    ensure_equal(
-        &output.status.code(),
-        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
-        "exit code",
-    )?;
+    ensure_equal(&output.status.code(), &Some(1), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
+    ensure(output.stderr.is_empty(), "stderr must be empty")?;
 
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["error"]["code"],
-        &serde_json::json!("unsatisfied_degraded_mode"),
+        &serde_json::json!("not_found"),
         "error code",
+    )?;
+    ensure(
+        json["error"]["repair"]
+            .as_str()
+            .is_some_and(|repair| repair.contains("learn experiment propose")),
+        "shadow budget probe repair must point to registered proposals",
     )
 }
 

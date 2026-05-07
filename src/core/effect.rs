@@ -723,6 +723,46 @@ impl CommandEffect {
         }
     }
 
+    /// Create a config-file-write entry that does not touch the ee database.
+    #[must_use]
+    pub fn config_file_write(
+        command_path: &'static str,
+        workspace_files: Vec<&'static str>,
+        idempotency_key: &'static str,
+        description: &'static str,
+    ) -> Self {
+        Self {
+            command_path,
+            default_effect: EffectClass::ConfigWrite,
+            dry_run_effect: Some(EffectClass::ReadOnly),
+            idempotency: IdempotencyClass::DryRunAvailable,
+            write_surfaces: WriteSurfaces {
+                db_tables: Vec::new(),
+                derived_paths: Vec::new(),
+                workspace_files,
+            },
+            mutation_contract: CommandMutationContract {
+                side_effect_class: SideEffectClass::SidePathArtifact,
+                transaction_scope: Some("config/key file create-or-explicit-force overwrite"),
+                idempotency_key: Some(idempotency_key),
+                audit_surface: None,
+                db_generation_effect: "source DB generation unchanged",
+                index_generation_effect: "none",
+                dry_run_behavior: Some(
+                    "--show reads existing key material only; no files are written",
+                ),
+                recovery_behavior: "partial key-file output is reported as failed, never deleted by ee, and not treated as valid key material",
+                no_overwrite_behavior: Some(
+                    "no-overwrite by default; --force is an explicit overwrite, and no-delete: ee never deletes key material",
+                ),
+                degraded_code: None,
+            },
+            runtime_contract: CommandRuntimeContract::side_path_artifact(),
+            requires_audit: false,
+            description,
+        }
+    }
+
     /// Create a degraded/unavailable read-only effect entry.
     #[must_use]
     pub const fn degraded_unavailable(
@@ -873,6 +913,10 @@ impl EffectManifest {
             CommandEffect::read_only(
                 "certificate verify",
                 "Verify persisted certificate hash and signature evidence",
+            ),
+            CommandEffect::read_only(
+                "certificate sign",
+                "Compute a certificate signature from local key material without persisting it",
             ),
             CommandEffect::read_only("check", "Quick posture summary"),
             CommandEffect::read_only("claim list", "List executable claims from claims.yaml"),
@@ -1333,6 +1377,11 @@ impl EffectManifest {
                 "Persist a procedure candidate from explicit evidence",
             ),
             CommandEffect::durable_write(
+                "procedure retire",
+                vec!["procedures", "procedure_events", "audit_log"],
+                "Retire a persisted procedure with an audited reason",
+            ),
+            CommandEffect::durable_write(
                 "outcome quarantine release",
                 vec!["feedback_quarantine", "audit_log"],
                 "Release feedback from quarantine",
@@ -1389,6 +1438,12 @@ impl EffectManifest {
                 vec![".ee/workspaces.toml"],
                 "alias name and workspace root",
                 "Create or update a workspace alias",
+            ),
+            CommandEffect::config_file_write(
+                "certificate keygen",
+                vec!["~/.config/ee/keys/<workspace>.ed25519"],
+                "workspace key path plus --show/--force mode",
+                "Generate or inspect a local certificate signing key",
             ),
         ]
     }

@@ -578,14 +578,16 @@ impl CassClient {
 
     /// Build a `cass sessions --json` invocation for import discovery.
     pub fn sessions_invocation(&self, workspace_path: &Path, limit: u32) -> CassInvocation {
-        self.invocation([
+        let mut args = vec![
             "sessions".to_owned(),
             "--workspace".to_owned(),
             workspace_path.to_string_lossy().into_owned(),
             "--json".to_owned(),
             "--limit".to_owned(),
             limit.to_string(),
-        ])
+        ];
+        append_data_dir_args_from_env(&mut args);
+        self.invocation(args)
     }
 
     /// Build an import-safe `cass sessions --json` invocation.
@@ -594,14 +596,16 @@ impl CassClient {
         workspace_path: &Path,
         limit: u32,
     ) -> Result<CassInvocation, CassError> {
-        self.import_invocation([
+        let mut args = vec![
             "sessions".to_owned(),
             "--workspace".to_owned(),
             workspace_path.to_string_lossy().into_owned(),
             "--json".to_owned(),
             "--limit".to_owned(),
             limit.to_string(),
-        ])
+        ];
+        append_data_dir_args_from_env(&mut args);
+        self.import_invocation(args)
     }
 
     /// Build a `cass view -n <line> -C <context> --json -- <path>` invocation.
@@ -666,6 +670,17 @@ impl CassClient {
     ) -> Result<super::process::CassOutcome, CassError> {
         invocation.run()
     }
+}
+
+fn append_data_dir_args_from_env(args: &mut Vec<String>) {
+    let Some(data_dir) = std::env::var_os("CASS_DATA_DIR") else {
+        return;
+    };
+    if data_dir.is_empty() {
+        return;
+    }
+    args.push("--data-dir".to_owned());
+    args.push(data_dir.to_string_lossy().into_owned());
 }
 
 impl Default for CassClient {

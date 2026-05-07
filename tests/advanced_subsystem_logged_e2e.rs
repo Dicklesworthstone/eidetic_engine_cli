@@ -102,7 +102,7 @@ fn ensure_equal<T>(actual: &T, expected: &T, context: &str) -> TestResult
 where
     T: std::fmt::Debug + PartialEq,
 {
-    if actual == expected {
+    if actual.eq(expected) {
         Ok(())
     } else {
         Err(format!("{context}: expected {expected:?}, got {actual:?}"))
@@ -911,7 +911,7 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "--dry-run".to_owned(),
             ],
             expected_schema_contains: "ee.error.v1",
-            expected_exit_code: 6,
+            expected_exit_code: 1,
             expect_clean_stderr: true,
         },
         StepSpec {

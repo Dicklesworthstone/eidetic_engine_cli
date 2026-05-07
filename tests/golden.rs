@@ -544,7 +544,11 @@ mod tests {
 
     #[test]
     fn agent_status_json_matches_golden() -> TestResult {
-        assert_agent_stdout_golden(&["status", "--json"], "status.json", true)
+        assert_agent_stdout_golden(
+            &["--workspace", DOCTOR_GOLDEN_WORKSPACE, "status", "--json"],
+            "status.json",
+            true,
+        )
     }
 
     #[test]
@@ -713,22 +717,22 @@ mod tests {
                 "triggered",
                 "--include-disarmed",
             ],
-            false,
+            true,
         )?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.tripwire.list.v1"),
             "tripwire list schema",
         )?;
         ensure_equal(
-            &value["success"],
-            &serde_json::json!(false),
-            "tripwire list success flag",
+            &value["total_count"],
+            &serde_json::json!(0),
+            "tripwire list total count",
         )?;
         ensure_equal(
-            &value["data"]["code"],
-            &serde_json::json!("tripwire_store_unavailable"),
-            "tripwire list degraded code",
+            &value["filters_applied"],
+            &serde_json::json!(["state=triggered"]),
+            "tripwire list filters",
         )
     }
 
@@ -744,21 +748,21 @@ mod tests {
                 "success",
                 "--dry-run",
             ],
-            false,
+            true,
         )?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.tripwire.check.v1"),
             "tripwire check schema",
         )?;
         ensure_equal(
-            &value["success"],
-            &serde_json::json!(false),
-            "tripwire check success flag",
+            &value["result"],
+            &serde_json::json!("not_found"),
+            "tripwire check result",
         )?;
         ensure_equal(
-            &value["data"]["code"],
-            &serde_json::json!("tripwire_store_unavailable"),
+            &value["degraded"][0]["code"],
+            &serde_json::json!("tripwire_inputs_incomplete"),
             "tripwire check degraded code",
         )
     }

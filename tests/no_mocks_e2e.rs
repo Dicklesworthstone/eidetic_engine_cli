@@ -178,6 +178,15 @@ fn first_failure(
     None
 }
 
+fn stream_snippet(text: &str) -> String {
+    let trimmed = text.trim();
+    let mut snippet = trimmed.chars().take(1200).collect::<String>();
+    if trimmed.chars().nth(1200).is_some() {
+        snippet.push_str("...");
+    }
+    snippet
+}
+
 fn run_step(
     scenario_id: &'static str,
     log_path: &Path,
@@ -257,9 +266,11 @@ fn run_step_with_env(
     })?;
     if let Some(failure) = &event.first_failure {
         return Err(format!(
-            "{} failed no-mocks contract: {}; log={}",
+            "{} failed no-mocks contract: {}; stdout={}; stderr={}; log={}",
             event.step,
             failure,
+            stream_snippet(&event.stdout),
+            stream_snippet(&event.stderr),
             log_path.display()
         ));
     }
@@ -305,6 +316,32 @@ fn json_array<'a>(
         .pointer(pointer)
         .and_then(JsonValue::as_array)
         .ok_or_else(|| format!("{context} missing array at {pointer}"))
+}
+
+fn cass_sessions_array<'a>(
+    value: &'a JsonValue,
+    context: &str,
+) -> Result<&'a Vec<JsonValue>, String> {
+    value
+        .get("sessions")
+        .and_then(JsonValue::as_array)
+        .or_else(|| value.pointer("/data/sessions").and_then(JsonValue::as_array))
+        .or_else(|| value.get("hits").and_then(JsonValue::as_array))
+        .or_else(|| value.as_array())
+        .ok_or_else(|| {
+            let payload =
+                serde_json::to_string(value).unwrap_or_else(|error| format!("<unprintable: {error}>"));
+            format!(
+                "{context} missing sessions array at /sessions, /data/sessions, or top level; payload={payload}"
+            )
+        })
+}
+
+fn cass_session_source_path(value: &JsonValue) -> Option<&str> {
+    value
+        .get("path")
+        .or_else(|| value.get("source_path"))
+        .and_then(JsonValue::as_str)
 }
 
 fn degradation_codes(value: &JsonValue) -> Result<Vec<String>, String> {
@@ -717,6 +754,8 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
             OsString::from("--workspace"),
             OsString::from(workspace_arg.clone()),
             OsString::from("--json"),
+            OsString::from("--data-dir"),
+            OsString::from(cass_data_arg.clone()),
             OsString::from("--limit"),
             OsString::from("5"),
         ],
@@ -724,13 +763,16 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &envs,
         "sessions fixture discovery",
     )?;
+    let cass_session = cass_sessions_array(&cass_sessions, "cass sessions")?
+        .first()
+        .ok_or_else(|| "cass fixture discovery returned no sessions".to_owned())?;
     ensure_equal(
-        &cass_sessions.pointer("/sessions/0/path"),
-        &Some(&json!(session_arg)),
+        &cass_session_source_path(cass_session),
+        &Some(session_arg.as_str()),
         "cass fixture session path",
     )?;
     ensure_equal(
-        &cass_sessions.pointer("/sessions/0/workspace"),
+        &cass_session.get("workspace"),
         &Some(&json!(workspace_arg)),
         "cass fixture workspace path",
     )?;

@@ -736,13 +736,15 @@ fn parse_sessions_json(input: &[u8]) -> Result<Vec<CassSessionInfo>, CassImportE
             source: "sessions",
             message: error.to_string(),
         })?;
-    let sessions = value
-        .get("sessions")
-        .and_then(JsonValue::as_array)
-        .ok_or_else(|| CassImportError::InvalidJson {
+    let Some(sessions) = value.get("sessions").and_then(JsonValue::as_array) else {
+        if let Some(hits) = value.get("hits").and_then(JsonValue::as_array) {
+            return parse_legacy_search_hits_as_sessions(hits);
+        }
+        return Err(CassImportError::InvalidJson {
             source: "sessions",
             message: "missing sessions array".to_string(),
-        })?;
+        });
+    };
 
     let mut parsed = Vec::with_capacity(sessions.len());
     for item in sessions {
@@ -782,6 +784,58 @@ fn parse_sessions_json(input: &[u8]) -> Result<Vec<CassSessionInfo>, CassImportE
         parsed.push(session);
     }
     Ok(parsed)
+}
+
+fn parse_legacy_search_hits_as_sessions(
+    hits: &[JsonValue],
+) -> Result<Vec<CassSessionInfo>, CassImportError> {
+    let mut sessions =
+        std::collections::BTreeMap::<String, (CassSessionInfo, Option<i64>, Option<i64>)>::new();
+    for hit in hits {
+        let path = required_string(hit, "source_path", "sessions")?;
+        validate_reported_session_path(&path)?;
+        let created_at = hit.get("created_at").and_then(JsonValue::as_i64);
+        let entry = sessions.entry(path.clone()).or_insert_with(|| {
+            let mut session = CassSessionInfo::new(path.clone());
+            session.content_hash = Some(content_hash_for_session(hit, &path));
+            (session, None, None)
+        });
+        if let Some(agent) = hit.get("agent").and_then(JsonValue::as_str) {
+            entry.0.agent = agent.parse().unwrap_or(CassAgent::Unknown);
+        }
+        if entry.0.workspace_dir.is_none() {
+            entry.0.workspace_dir = hit
+                .get("workspace")
+                .and_then(JsonValue::as_str)
+                .map(str::to_string);
+        }
+        entry.0.message_count = Some(entry.0.message_count.unwrap_or(0).saturating_add(1));
+        if let Some(timestamp) = created_at {
+            entry.1 = Some(
+                entry
+                    .1
+                    .map_or(timestamp, |existing| existing.min(timestamp)),
+            );
+            entry.2 = Some(
+                entry
+                    .2
+                    .map_or(timestamp, |existing| existing.max(timestamp)),
+            );
+        }
+    }
+
+    let mut parsed = Vec::with_capacity(sessions.len());
+    for (_, (mut session, started_at, ended_at)) in sessions {
+        session.started_at = started_at.and_then(millis_to_rfc3339);
+        session.ended_at = ended_at.and_then(millis_to_rfc3339);
+        parsed.push(session);
+    }
+    Ok(parsed)
+}
+
+fn millis_to_rfc3339(value: i64) -> Option<String> {
+    DateTime::<Utc>::from_timestamp_millis(value)
+        .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
 fn validate_reported_session_path(path: &str) -> Result<(), CassImportError> {
@@ -1453,6 +1507,50 @@ mod tests {
         )?;
         ensure_equal(&first.message_count, &Some(12), "message_count")?;
         ensure(first.content_hash.is_some(), "content hash filled")
+    }
+
+    #[test]
+    fn parses_legacy_cass_search_hits_as_session_discovery() -> TestResult {
+        let input = br#"{
+          "count": 2,
+          "hits": [
+            {
+              "source_path": "/tmp/session.jsonl",
+              "workspace": "/tmp/project",
+              "agent": "codex",
+              "created_at": 1778133601000
+            },
+            {
+              "source_path": "/tmp/session.jsonl",
+              "workspace": "/tmp/project",
+              "agent": "codex",
+              "created_at": 1778133603000
+            }
+          ]
+        }"#;
+
+        let sessions = parse_sessions_json(input).map_err(|error| error.to_string())?;
+        ensure_equal(&sessions.len(), &1, "session count")?;
+        let first = sessions
+            .first()
+            .ok_or_else(|| "missing parsed session".to_string())?;
+        ensure_equal(&first.source_path.as_str(), &"/tmp/session.jsonl", "path")?;
+        ensure_equal(
+            &first.workspace_dir.as_deref(),
+            &Some("/tmp/project"),
+            "workspace",
+        )?;
+        ensure_equal(&first.message_count, &Some(2), "message_count")?;
+        ensure_equal(
+            &first.started_at.as_deref(),
+            &Some("2026-05-07T06:00:01Z"),
+            "started_at",
+        )?;
+        ensure_equal(
+            &first.ended_at.as_deref(),
+            &Some("2026-05-07T06:00:03Z"),
+            "ended_at",
+        )
     }
 
     #[test]

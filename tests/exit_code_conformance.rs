@@ -289,11 +289,11 @@ fn exit_4_search_index_on_stale_or_missing_index() -> TestResult {
 }
 
 // ============================================================================
-// Exit Code 6: Degraded Mode
+// Implemented Surfaces With Degraded Data
 // ============================================================================
 
 #[test]
-fn exit_6_degraded_on_recorder_without_store() -> TestResult {
+fn exit_0_recorder_dry_run_returns_start_contract() -> TestResult {
     let output = run_ee(&[
         "recorder",
         "start",
@@ -302,36 +302,79 @@ fn exit_6_degraded_on_recorder_without_store() -> TestResult {
         "--dry-run",
         "--json",
     ])?;
-    persist_artifact("exit_6_recorder_degraded", &output);
+    persist_artifact("exit_0_recorder_dry_run", &output);
 
     ensure_equal(
         &output.status.code(),
-        &Some(EXIT_DEGRADED),
-        "recorder degraded exit code",
+        &Some(EXIT_SUCCESS),
+        "recorder dry-run exit code",
+    )?;
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.recorder.start.v1"),
+        "recorder dry-run schema",
+    )?;
+    ensure_equal(
+        &json["agentId"],
+        &serde_json::json!("test"),
+        "recorder dry-run agent",
+    )?;
+    ensure_equal(
+        &json["dryRun"],
+        &serde_json::json!(true),
+        "recorder dry-run flag",
     )
 }
 
 #[test]
-fn exit_6_degraded_on_procedure_without_store() -> TestResult {
+fn exit_0_procedure_list_empty_store_returns_list_contract() -> TestResult {
     let output = run_ee(&["procedure", "list", "--json"])?;
-    persist_artifact("exit_6_procedure_degraded", &output);
+    persist_artifact("exit_0_procedure_list_empty", &output);
 
     ensure_equal(
         &output.status.code(),
-        &Some(EXIT_DEGRADED),
-        "procedure degraded exit code",
+        &Some(EXIT_SUCCESS),
+        "procedure list exit code",
+    )?;
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.procedure.list_report.v1"),
+        "procedure list schema",
+    )?;
+    ensure_equal(
+        &json["total_count"],
+        &serde_json::json!(0),
+        "procedure list total count",
+    )?;
+    ensure_equal(
+        &json["procedures"],
+        &serde_json::json!([]),
+        "procedure list empty procedures",
     )
 }
 
 #[test]
-fn exit_6_degraded_on_economy_without_metrics() -> TestResult {
+fn exit_0_economy_report_empty_workspace_abstains_with_degraded_data() -> TestResult {
     let output = run_ee(&["economy", "report", "--json"])?;
-    persist_artifact("exit_6_economy_degraded", &output);
+    persist_artifact("exit_0_economy_empty_report", &output);
 
     ensure_equal(
         &output.status.code(),
-        &Some(EXIT_DEGRADED),
-        "economy degraded exit code",
+        &Some(EXIT_SUCCESS),
+        "economy report exit code",
+    )?;
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["data"]["report"]["status"],
+        &serde_json::json!("abstain"),
+        "economy report abstain status",
+    )?;
+    ensure_equal(
+        &json["data"]["report"]["degraded"][0]["code"],
+        &serde_json::json!("economy_metrics_empty"),
+        "economy report degraded code",
     )
 }
 
@@ -387,14 +430,20 @@ fn exit_0_on_causal_dry_run_after_init() -> TestResult {
 // ============================================================================
 
 #[test]
-fn exit_7_policy_denied_on_promote_without_dry_run() -> TestResult {
+fn exit_1_not_found_on_missing_procedure_promote_target() -> TestResult {
     let output = run_ee(&["procedure", "promote", "proc_test", "--json"])?;
-    persist_artifact("exit_7_promote_denied", &output);
+    persist_artifact("exit_1_promote_missing_procedure", &output);
 
     ensure_equal(
         &output.status.code(),
-        &Some(EXIT_POLICY_DENIED),
-        "promote without dry-run exit code",
+        &Some(EXIT_USAGE),
+        "missing procedure promote exit code",
+    )?;
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["error"]["code"],
+        &serde_json::json!("not_found"),
+        "missing procedure promote error code",
     )
 }
 
@@ -580,24 +629,23 @@ fn error_responses_use_ee_error_v1_schema() -> TestResult {
 
 #[test]
 fn degraded_responses_include_repair_guidance() -> TestResult {
-    let output = run_ee(&[
-        "recorder",
-        "start",
-        "--agent-id",
-        "test",
-        "--dry-run",
-        "--json",
-    ])?;
+    let output = run_ee(&["preflight", "run", "deploy production migration", "--json"])?;
     persist_artifact("degraded_repair", &output);
 
     let json = stdout_json(&output)?;
-
-    // Degraded responses should include repair guidance
+    let degraded = json["data"]["degraded"]
+        .as_array()
+        .ok_or("degraded response must include data.degraded array")?;
     ensure(
-        json["data"]["repair"].as_str().is_some()
-            || json["error"]["repair"].as_str().is_some()
-            || json["data"]["followUpBead"].as_str().is_some(),
-        "degraded response must include repair or followUpBead",
+        !degraded.is_empty(),
+        "degraded response must include at least one degraded entry",
+    )?;
+
+    ensure(
+        degraded
+            .iter()
+            .all(|entry| entry["repair"].as_str().is_some()),
+        "degraded entries must include repair guidance",
     )
 }
 
@@ -612,7 +660,7 @@ fn exit_codes_are_deterministic() -> TestResult {
         ("status", vec!["status", "--json"]),
         ("help", vec!["--help"]),
         (
-            "recorder_degraded",
+            "recorder_dry_run",
             vec![
                 "recorder",
                 "start",
@@ -622,7 +670,7 @@ fn exit_codes_are_deterministic() -> TestResult {
                 "--json",
             ],
         ),
-        ("procedure_degraded", vec!["procedure", "list", "--json"]),
+        ("procedure_list", vec!["procedure", "list", "--json"]),
     ];
 
     for (name, args) in commands {
@@ -694,18 +742,11 @@ fn all_exit_codes_are_in_documented_range() -> TestResult {
         ),
         (
             "degraded",
-            vec![
-                "recorder",
-                "start",
-                "--agent-id",
-                "t",
-                "--dry-run",
-                "--json",
-            ],
+            vec!["preflight", "run", "deploy production migration", "--json"],
         ),
         (
             "policy",
-            vec!["procedure", "promote", "proc_test", "--json"],
+            vec!["learn", "experiment", "run", "--id", "exp_test", "--json"],
         ),
     ];
 
