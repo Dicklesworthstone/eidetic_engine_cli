@@ -2024,6 +2024,10 @@ fn select_facility_candidate_index(
         let Some(candidate) = profile.candidate.as_ref() else {
             continue;
         };
+        debug_assert!(
+            candidate.estimated_tokens > 0,
+            "facility-location candidate token estimate must stay positive"
+        );
         if candidate.estimated_tokens > remaining_budget {
             continue;
         }
@@ -5049,6 +5053,45 @@ mod tests {
         ensure(
             similarity < FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR,
             format!("non-matching diversity_keys must not trigger the floor, got {similarity}"),
+        )
+    }
+
+    #[test]
+    fn facility_location_selector_asserts_positive_candidate_tokens() -> TestResult {
+        let mut zero_token_candidate =
+            candidate_with_content(1, 1.0, 0.5, 10, "alpha bravo charlie")?;
+        zero_token_candidate.estimated_tokens = 0;
+
+        let budget =
+            TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let quotas = super::SectionQuotas::for_profile(ContextPackProfile::Submodular, 100);
+        let universe = vec![super::FacilityCandidateProfile::from(zero_token_candidate)];
+        let current_coverages = vec![0.0_f32];
+
+        let result = std::panic::catch_unwind(|| {
+            let _selection = super::select_facility_candidate_index(
+                &[0],
+                &universe,
+                &current_coverages,
+                0,
+                budget,
+                &quotas,
+                &[],
+            );
+        });
+        let Err(payload) = result else {
+            return Err("selector accepted zero-token candidate".to_owned());
+        };
+        let message = if let Some(value) = payload.downcast_ref::<&str>() {
+            *value
+        } else if let Some(value) = payload.downcast_ref::<String>() {
+            value.as_str()
+        } else {
+            ""
+        };
+        ensure(
+            message.contains("facility-location candidate token estimate must stay positive"),
+            format!("unexpected panic payload: {message}"),
         )
     }
 
