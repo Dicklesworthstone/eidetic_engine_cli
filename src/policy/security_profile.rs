@@ -300,7 +300,8 @@ fn check_file_permissions(path: &Path, max_mode: u32, file_type: &str) -> FilePe
         match std::fs::metadata(path) {
             Ok(metadata) => {
                 let mode = metadata.permissions().mode() & 0o777;
-                if mode <= max_mode {
+                let excess_bits = mode & !max_mode;
+                if excess_bits == 0 {
                     FilePermissionCheck::pass(path.display().to_string(), mode, max_mode)
                 } else {
                     FilePermissionCheck::fail(
@@ -308,8 +309,8 @@ fn check_file_permissions(path: &Path, max_mode: u32, file_type: &str) -> FilePe
                         mode,
                         max_mode,
                         format!(
-                            "{} has mode {:04o}, exceeds max allowed {:04o}",
-                            file_type, mode, max_mode
+                            "{} has mode {:04o}, has disallowed bits {:04o} (max {:04o})",
+                            file_type, mode, excess_bits, max_mode
                         ),
                         format!("chmod {:04o} {}", max_mode, path.display()),
                     )
@@ -345,7 +346,8 @@ fn check_directory_permissions(path: &Path, max_mode: u32, dir_type: &str) -> Fi
             Ok(metadata) => {
                 let mode = metadata.permissions().mode() & 0o777;
                 let max_dir_mode = max_mode | 0o111;
-                if mode <= max_dir_mode {
+                let excess_bits = mode & !max_dir_mode;
+                if excess_bits == 0 {
                     FilePermissionCheck::pass(path.display().to_string(), mode, max_dir_mode)
                 } else {
                     FilePermissionCheck::fail(
@@ -353,8 +355,8 @@ fn check_directory_permissions(path: &Path, max_mode: u32, dir_type: &str) -> Fi
                         mode,
                         max_dir_mode,
                         format!(
-                            "{} has mode {:04o}, exceeds max allowed {:04o}",
-                            dir_type, mode, max_dir_mode
+                            "{} has mode {:04o}, has disallowed bits {:04o} (max {:04o})",
+                            dir_type, mode, excess_bits, max_dir_mode
                         ),
                         format!("chmod {:04o} {}", max_dir_mode, path.display()),
                     )
