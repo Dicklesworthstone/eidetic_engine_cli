@@ -2024,10 +2024,9 @@ fn select_facility_candidate_index(
         let Some(candidate) = profile.candidate.as_ref() else {
             continue;
         };
-        debug_assert!(
-            candidate.estimated_tokens > 0,
-            "facility-location candidate token estimate must stay positive"
-        );
+        if candidate.estimated_tokens == 0 {
+            continue;
+        }
         if candidate.estimated_tokens > remaining_budget {
             continue;
         }
@@ -4782,6 +4781,28 @@ mod tests {
     }
 
     #[test]
+    fn redacted_pack_candidate_never_has_zero_token_estimate() -> TestResult {
+        let raw_value = format!("{}{}", concat!("sk", "-ant", "-api03", "-"), "C".repeat(52));
+        let candidate = candidate_with_content(44, 1.0, 0.8, 80, raw_value)?;
+
+        let (redacted, redactions) = super::redact_pack_candidate(candidate);
+
+        ensure(
+            !redactions.is_empty(),
+            "fixture should exercise the redaction path",
+        )?;
+        ensure(
+            redacted.estimated_tokens >= 1,
+            "redacted pack candidate token estimate must stay positive",
+        )?;
+        ensure_equal(
+            &redacted.estimated_tokens,
+            &estimate_tokens_default(&redacted.content).max(1),
+            "redacted pack candidate uses rendered token estimate with one-token floor",
+        )
+    }
+
+    #[test]
     fn assemble_draft_omits_items_that_exceed_budget() -> TestResult {
         let budget = match TokenBudget::new(34) {
             Ok(budget) => budget,
@@ -5057,7 +5078,7 @@ mod tests {
     }
 
     #[test]
-    fn facility_location_selector_asserts_positive_candidate_tokens() -> TestResult {
+    fn facility_location_selector_skips_zero_token_candidates() -> TestResult {
         let mut zero_token_candidate =
             candidate_with_content(1, 1.0, 0.5, 10, "alpha bravo charlie")?;
         zero_token_candidate.estimated_tokens = 0;
@@ -5068,30 +5089,18 @@ mod tests {
         let universe = vec![super::FacilityCandidateProfile::from(zero_token_candidate)];
         let current_coverages = vec![0.0_f32];
 
-        let result = std::panic::catch_unwind(|| {
-            let _selection = super::select_facility_candidate_index(
-                &[0],
-                &universe,
-                &current_coverages,
-                0,
-                budget,
-                &quotas,
-                &[],
-            );
-        });
-        let Err(payload) = result else {
-            return Err("selector accepted zero-token candidate".to_owned());
-        };
-        let message = if let Some(value) = payload.downcast_ref::<&str>() {
-            *value
-        } else if let Some(value) = payload.downcast_ref::<String>() {
-            value.as_str()
-        } else {
-            ""
-        };
+        let selection = super::select_facility_candidate_index(
+            &[0],
+            &universe,
+            &current_coverages,
+            0,
+            budget,
+            &quotas,
+            &[],
+        );
         ensure(
-            message.contains("facility-location candidate token estimate must stay positive"),
-            format!("unexpected panic payload: {message}"),
+            selection.is_none(),
+            "selector should skip zero-token candidates instead of computing infinite gain ratios",
         )
     }
 
