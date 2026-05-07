@@ -646,6 +646,58 @@ impl CommandEffect {
         }
     }
 
+    /// Create an audited external-I/O command entry.
+    #[must_use]
+    pub fn external_io_write(
+        command_path: &'static str,
+        db_tables: Vec<&'static str>,
+        workspace_files: Vec<&'static str>,
+        idempotency_key: &'static str,
+        description: &'static str,
+    ) -> Self {
+        Self {
+            command_path,
+            default_effect: EffectClass::ExternalIo,
+            dry_run_effect: Some(EffectClass::ReadOnly),
+            idempotency: IdempotencyClass::NonIdempotent,
+            write_surfaces: WriteSurfaces {
+                db_tables,
+                derived_paths: Vec::new(),
+                workspace_files,
+            },
+            mutation_contract: CommandMutationContract {
+                side_effect_class: SideEffectClass::AuditedMutation,
+                transaction_scope: Some("one audit ledger append per executed command step"),
+                idempotency_key: Some(idempotency_key),
+                audit_surface: Some("audit_log"),
+                db_generation_effect: "advances audit log for each executed step; unchanged for dry-run or rejected unsafe steps",
+                index_generation_effect: "none",
+                dry_run_behavior: Some(
+                    "parses the manifest and reports planned steps without executing commands or writing evidence",
+                ),
+                recovery_behavior: "failed steps keep evidence and audit rows; later steps are skipped unless the caller opts into continuing",
+                no_overwrite_behavior: Some(
+                    "no-overwrite/no-delete: evidence paths use fresh run IDs and ee never deletes partial demo evidence",
+                ),
+                degraded_code: None,
+            },
+            runtime_contract: CommandRuntimeContract {
+                runtime_class: RuntimeClass::MultiStage,
+                default_budget_ms: Some(120_000),
+                cancellation_points: &[
+                    "before_start",
+                    "before_step_execute",
+                    "after_step_evidence",
+                    "before_audit_commit",
+                ],
+                partial_progress_policy: "each executed step writes evidence plus one audit row; remaining steps are skipped after the first failure unless explicitly continued",
+                outcome_mapping: "success, policy_denied, usage_error, storage_error, or step failure with persisted evidence",
+            },
+            requires_audit: true,
+            description,
+        }
+    }
+
     /// Create a config-write effect entry.
     #[must_use]
     pub fn config_write(
@@ -759,6 +811,11 @@ impl EffectManifest {
             entries.insert(entry.command_path, entry);
         }
 
+        // Audited external command execution surfaces
+        for entry in Self::external_io_write_commands() {
+            entries.insert(entry.command_path, entry);
+        }
+
         // Supervised steward jobs
         for entry in Self::supervised_job_commands() {
             entries.insert(entry.command_path, entry);
@@ -828,6 +885,7 @@ impl EffectManifest {
             CommandEffect::read_only("curate candidates", "List curation candidates"),
             CommandEffect::read_only("curate validate", "Validate curation candidate"),
             CommandEffect::read_only("demo list", "List demo manifests"),
+            CommandEffect::read_only("demo show", "Show persisted demo audit rows"),
             CommandEffect::read_only("demo verify", "Verify demo artifacts"),
             CommandEffect::read_only("diag claims", "Inspect claim diagnostics"),
             CommandEffect::read_only("diag dependencies", "Inspect dependency diagnostics"),
@@ -991,11 +1049,6 @@ impl EffectManifest {
             )
             .with_runtime_contract(CommandRuntimeContract::supervised_unavailable()),
             CommandEffect::degraded_unavailable(
-                "demo run",
-                "demo_command_execution_unavailable",
-                "Non-dry-run demo execution abstains until audit-ledger artifacts exist",
-            ),
-            CommandEffect::degraded_unavailable(
                 "economy report",
                 "economy_metrics_unavailable",
                 "Economy reporting abstains until persisted workspace metrics exist",
@@ -1125,6 +1178,19 @@ impl EffectManifest {
                 "Tripwire checks abstain until explicit event payload evaluation exists",
             ),
         ]
+    }
+
+    fn external_io_write_commands() -> Vec<CommandEffect> {
+        vec![CommandEffect::external_io_write(
+            "demo run",
+            vec!["audit_log"],
+            vec![
+                "demo evidence root",
+                "manifest-declared demo artifact paths",
+            ],
+            "demo id plus manifest hash plus generated run id",
+            "Execute safe demo manifest steps with audit ledger rows and evidence artifacts",
+        )]
     }
 
     fn supervised_job_commands() -> Vec<CommandEffect> {
@@ -1966,10 +2032,7 @@ mod tests {
     fn manifest_tracks_unavailable_commands_as_non_mutating_degraded_paths() -> TestResult {
         let manifest = EffectManifest::build();
 
-        for (command, code) in [
-            ("demo run", "demo_command_execution_unavailable"),
-            ("support bundle", "support_bundle_unavailable"),
-        ] {
+        for (command, code) in [("support bundle", "support_bundle_unavailable")] {
             let effect = manifest
                 .get(command)
                 .ok_or_else(|| format!("{command} not found"))?;
@@ -1996,6 +2059,45 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn manifest_tracks_demo_run_as_audited_external_io() -> TestResult {
+        let manifest = EffectManifest::build();
+        let effect = manifest
+            .get("demo run")
+            .ok_or_else(|| "demo run not found".to_owned())?;
+
+        ensure(
+            effect.default_effect,
+            EffectClass::ExternalIo,
+            "demo run executes manifest commands",
+        )?;
+        ensure(
+            effect.dry_run_effect,
+            Some(EffectClass::ReadOnly),
+            "demo run --dry-run is read-only",
+        )?;
+        ensure(
+            effect.mutation_contract.side_effect_class,
+            SideEffectClass::AuditedMutation,
+            "demo run writes audit rows",
+        )?;
+        ensure(
+            effect.write_surfaces.db_tables.contains(&"audit_log"),
+            true,
+            "demo run writes audit_log",
+        )?;
+        ensure(
+            effect.write_surfaces.workspace_files.is_empty(),
+            false,
+            "demo run names evidence/artifact write surfaces",
+        )?;
+        ensure(
+            effect.mutation_contract.degraded_code,
+            None,
+            "demo run has no unavailable sentinel",
+        )
     }
 
     #[test]

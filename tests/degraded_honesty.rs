@@ -280,7 +280,9 @@ fn side_effect_class(args: &[String]) -> &'static str {
         } else if args.iter().any(|arg| arg == "run") && args.iter().any(|arg| arg == "--dry-run") {
             "dry-run plan; no command execution, audit ledger, or artifact write"
         } else if args.iter().any(|arg| arg == "run") {
-            "conservative abstention; no demo execution, audit ledger, or artifact write"
+            "command execution with audit ledger rows and evidence artifacts"
+        } else if args.iter().any(|arg| arg == "show") {
+            "read-only audit ledger inspection; no demo mutation"
         } else {
             "read-only manifest parse; no command execution or artifact write"
         }
@@ -385,6 +387,15 @@ fn run_ee_logged(
     workspace: Option<&Path>,
     args: Vec<String>,
 ) -> Result<LoggedCommand, String> {
+    run_ee_logged_with_env(name, workspace, args, &[])
+}
+
+fn run_ee_logged_with_env(
+    name: &str,
+    workspace: Option<&Path>,
+    args: Vec<String>,
+    env_overrides: &[(&str, String)],
+) -> Result<LoggedCommand, String> {
     let dossier_dir = unique_artifact_dir(name)?;
     let stdout_path = dossier_dir.join("stdout.json");
     let stderr_path = dossier_dir.join("stderr.txt");
@@ -392,9 +403,12 @@ fn run_ee_logged(
     let cwd = env::current_dir().map_err(|error| format!("failed to resolve cwd: {error}"))?;
 
     let start = Instant::now();
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(&args)
-        .current_dir(&cwd)
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    command.args(&args).current_dir(&cwd);
+    for (key, value) in env_overrides {
+        command.env(key, value);
+    }
+    let output = command
         .output()
         .map_err(|error| format!("failed to run ee {:?}: {error}", args))?;
     let elapsed = start.elapsed();
@@ -3844,8 +3858,6 @@ fn demo_commands_parse_manifests_and_verify_real_artifacts() -> TestResult {
     })?;
     let artifact_payload = b"{\"schema\":\"ee.response.v1\",\"success\":true}\n";
     let artifact_hash = blake3::hash(artifact_payload).to_hex().to_string();
-    fs::write(artifacts.join("stdout.json"), artifact_payload)
-        .map_err(|error| format!("failed to write artifact: {error}"))?;
     fs::write(
         workspace.join("demo.yaml"),
         format!(
@@ -3859,7 +3871,7 @@ demos:
     tags:
       - gate14
     commands:
-      - command: \"ee status --json\"
+      - command: \"printf '%s\\\\n' '{{\\\"schema\\\":\\\"ee.response.v1\\\",\\\"success\\\":true}}' > artifacts/stdout.json\"
         expected_exit_code: 0
         artifact_outputs:
           - path: stdout.json
@@ -3872,6 +3884,19 @@ demos:
     .map_err(|error| format!("failed to write demo.yaml: {error}"))?;
     let workspace_arg = workspace.display().to_string();
     let demo_id = "demo_00000000000000000000000001".to_owned();
+    let evidence_root = workspace_root.join("demo-evidence");
+
+    let init_result = run_ee_logged(
+        "demo-init-real",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "init".to_owned(),
+        ],
+    )?;
+    ensure_equal(&init_result.exit_code, &0, "demo init exit code")?;
 
     let list_result = run_ee_logged(
         "demo-list-real",
@@ -3943,6 +3968,100 @@ demos:
         "demo run dry-run does not execute",
     )?;
 
+    let execution_result = run_ee_logged_with_env(
+        "demo-run-executes-real",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "demo".to_owned(),
+            "run".to_owned(),
+            demo_id.clone(),
+        ],
+        &[("EE_DEMO_EVIDENCE_ROOT", evidence_root.display().to_string())],
+    )?;
+    ensure_equal(&execution_result.exit_code, &0, "demo run exit code")?;
+    ensure(
+        execution_result.stderr.is_empty(),
+        "demo run JSON stderr empty",
+    )?;
+    ensure_json_pointer(
+        &execution_result.parsed,
+        "/success",
+        json!(true),
+        "demo run success",
+    )?;
+    ensure_json_pointer(
+        &execution_result.parsed,
+        "/data/dryRun",
+        json!(false),
+        "demo run non-dry-run flag",
+    )?;
+    ensure_json_pointer(
+        &execution_result.parsed,
+        "/data/demos/0/commands/0/executed",
+        json!(true),
+        "demo run executes command",
+    )?;
+    ensure_json_pointer(
+        &execution_result.parsed,
+        "/data/demos/0/commands/0/status",
+        json!("passed"),
+        "demo run command status",
+    )?;
+    let audit_id = execution_result
+        .parsed
+        .pointer("/data/auditIds/0")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "demo run should return first audit id".to_string())?
+        .to_owned();
+    let evidence_dir = execution_result
+        .parsed
+        .pointer("/data/demos/0/commands/0/evidenceDir")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "demo run should return evidence dir".to_string())?;
+    ensure(
+        Path::new(evidence_dir).join("stdout.txt").is_file(),
+        "demo run writes stdout evidence artifact",
+    )?;
+    ensure(
+        Path::new(evidence_dir).join("metadata.json").is_file(),
+        "demo run writes metadata evidence artifact",
+    )?;
+
+    let show_result = run_ee_logged(
+        "demo-show-real",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "demo".to_owned(),
+            "show".to_owned(),
+            demo_id.clone(),
+        ],
+    )?;
+    ensure_equal(&show_result.exit_code, &0, "demo show exit code")?;
+    ensure_json_pointer(
+        &show_result.parsed,
+        "/data/schema",
+        json!("ee.demo.show.v1"),
+        "demo show schema",
+    )?;
+    ensure_json_pointer(
+        &show_result.parsed,
+        "/data/rowCount",
+        json!(1),
+        "demo show audit row count",
+    )?;
+    ensure_json_pointer(
+        &show_result.parsed,
+        "/data/rows/0/auditId",
+        json!(audit_id),
+        "demo show audit id",
+    )?;
+
     let verify_result = run_ee_logged(
         "demo-verify-real-artifact",
         Some(&workspace),
@@ -3983,30 +4102,6 @@ demos:
         "/data/demos/0/artifactResults/0/verified",
         json!(true),
         "demo verify artifact verified",
-    )?;
-
-    let execution_result = run_ee_logged(
-        "demo-run-execution-unavailable",
-        Some(&workspace),
-        vec![
-            "--workspace".to_owned(),
-            workspace_arg.clone(),
-            "--json".to_owned(),
-            "demo".to_owned(),
-            "run".to_owned(),
-            demo_id.clone(),
-        ],
-    )?;
-    ensure_equal(
-        &execution_result.exit_code,
-        &UNSATISFIED_DEGRADED_MODE_EXIT,
-        "demo run execution unavailable exit code",
-    )?;
-    ensure_json_pointer(
-        &execution_result.parsed,
-        "/data/degraded/0/code",
-        json!("demo_command_execution_unavailable"),
-        "demo run non-dry-run unavailable code",
     )?;
 
     let no_artifact_demo_id = "demo_00000000000000000000000002".to_owned();
@@ -4154,22 +4249,24 @@ demos:
     for (command, result) in [
         ("demo list", &list_result),
         ("demo run --dry-run", &run_plan),
-        ("demo verify", &verify_result),
         ("demo run", &execution_result),
+        ("demo show", &show_result),
+        ("demo verify", &verify_result),
         ("demo verify without artifacts", &no_artifact_verify),
         (
             "demo verify optional missing artifacts",
             &optional_missing_verify,
         ),
     ] {
-        let fake_success = validate_no_fake_success_output(command, false, false, &result.stdout);
+        let success = success_flag(&result.parsed);
+        let fake_success = validate_no_fake_success_output(command, success, false, &result.stdout);
         ensure(
             fake_success.passed,
             format!("{command} output should not be fake success: {fake_success:?}"),
         )?;
 
         let unsupported_claims =
-            validate_no_unsupported_evidence_claims(command, false, false, &result.stdout);
+            validate_no_unsupported_evidence_claims(command, success, false, &result.stdout);
         ensure(
             unsupported_claims.passed,
             format!(
@@ -4179,6 +4276,131 @@ demos:
     }
 
     Ok(())
+}
+
+#[test]
+fn demo_run_aborts_after_failure_and_rejects_unsafe_steps() -> TestResult {
+    let workspace_root = unique_artifact_dir("demo-failure-workspace")?;
+    let workspace = workspace_root.join("workspace");
+    let artifacts = workspace.join("artifacts");
+    fs::create_dir_all(&artifacts).map_err(|error| {
+        format!(
+            "failed to create artifacts dir {}: {error}",
+            artifacts.display()
+        )
+    })?;
+    let workspace_arg = workspace.display().to_string();
+    let evidence_root = workspace_root.join("demo-evidence");
+    let demo_id = "demo_00000000000000000000000011".to_owned();
+
+    let init_result = run_ee_logged(
+        "demo-failure-init",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "init".to_owned(),
+        ],
+    )?;
+    ensure_equal(&init_result.exit_code, &0, "demo failure init exit")?;
+
+    fs::write(
+        workspace.join("demo.yaml"),
+        "\
+schema: ee.demo_file.v1
+version: 1
+demos:
+  - id: demo_00000000000000000000000011
+    title: abort after failure
+    description: failed first step skips later steps
+    commands:
+      - command: \"exit 3\"
+        expected_exit_code: 0
+      - command: \"printf skipped > artifacts/after.txt\"
+        expected_exit_code: 0
+",
+    )
+    .map_err(|error| format!("failed to write failing demo.yaml: {error}"))?;
+
+    let failed_run = run_ee_logged_with_env(
+        "demo-run-fails-and-skips",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "demo".to_owned(),
+            "run".to_owned(),
+            demo_id.clone(),
+        ],
+        &[("EE_DEMO_EVIDENCE_ROOT", evidence_root.display().to_string())],
+    )?;
+    ensure_equal(&failed_run.exit_code, &1, "failed demo run exit")?;
+    ensure_json_pointer(
+        &failed_run.parsed,
+        "/success",
+        json!(false),
+        "failed demo run success",
+    )?;
+    ensure_json_pointer(
+        &failed_run.parsed,
+        "/data/firstFailure/stepIndex",
+        json!(0),
+        "failed demo first failure step",
+    )?;
+    ensure_json_pointer(
+        &failed_run.parsed,
+        "/data/demos/0/commands/1/executed",
+        json!(false),
+        "failed demo skips second step",
+    )?;
+    ensure_json_pointer(
+        &failed_run.parsed,
+        "/data/demos/0/commands/1/status",
+        json!("skipped"),
+        "failed demo skipped status",
+    )?;
+    ensure(
+        !artifacts.join("after.txt").exists(),
+        "skipped demo step must not write artifact",
+    )?;
+
+    fs::write(
+        workspace.join("demo.yaml"),
+        "\
+schema: ee.demo_file.v1
+version: 1
+demos:
+  - id: demo_00000000000000000000000011
+    title: unsafe command
+    description: destructive commands are rejected before execution
+    commands:
+      - command: \"rm -rf target\"
+        expected_exit_code: 0
+",
+    )
+    .map_err(|error| format!("failed to write unsafe demo.yaml: {error}"))?;
+    let unsafe_run = run_ee_logged_with_env(
+        "demo-run-rejects-unsafe",
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg,
+            "--json".to_owned(),
+            "demo".to_owned(),
+            "run".to_owned(),
+            demo_id,
+        ],
+        &[("EE_DEMO_EVIDENCE_ROOT", evidence_root.display().to_string())],
+    )?;
+    ensure_equal(&unsafe_run.exit_code, &7, "unsafe demo exit")?;
+    ensure_json_pointer(
+        &unsafe_run.parsed,
+        "/error/code",
+        json!("policy_denied"),
+        "unsafe demo error code",
+    )
 }
 
 #[cfg(unix)]

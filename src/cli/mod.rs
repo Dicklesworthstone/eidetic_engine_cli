@@ -129,10 +129,10 @@ use crate::core::why::{WhyOptions, explain_memory};
 use crate::core::workspace as workspace_core;
 use crate::models::preflight::{TripwireState, TripwireType};
 use crate::models::{
-    CertificateKind, CertificateStatus, DEMO_FILE_SCHEMA_V1, DemoEntry, DemoFile, DemoId,
-    DemoStatus, DomainError, ExperimentOutcomeStatus, ExperimentSafetyBoundary, InstallOperation,
-    LearningObservationSignal, OutputVerification, ProcessExitCode, QUERY_SCHEMA_V1,
-    RedactionLevel, is_valid_demo_artifact_path, parse_demo_file_yaml,
+    CertificateKind, CertificateStatus, DEMO_FILE_SCHEMA_V1, DEMO_RUN_RESULT_SCHEMA_V1, DemoEntry,
+    DemoFile, DemoId, DemoStatus, DomainError, ExperimentOutcomeStatus, ExperimentSafetyBoundary,
+    InstallOperation, LearningObservationSignal, OutputVerification, ProcessExitCode,
+    QUERY_SCHEMA_V1, RedactionLevel, is_valid_demo_artifact_path, parse_demo_file_yaml,
 };
 use crate::output;
 use crate::pack::{
@@ -837,6 +837,8 @@ pub enum DemoCommand {
     List(DemoListArgs),
     /// Run a specific demo or all demos.
     Run(DemoRunArgs),
+    /// Show persisted audit-ledger evidence for one demo.
+    Show(DemoShowArgs),
     /// Verify demo results against expected outputs.
     Verify(DemoVerifyArgs),
 }
@@ -879,6 +881,18 @@ pub struct DemoRunArgs {
     /// Dry-run mode: show what would be executed without running.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+}
+
+/// Arguments for `ee demo show`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct DemoShowArgs {
+    /// Demo ID to inspect.
+    #[arg(value_name = "DEMO_ID")]
+    pub demo_id: String,
+
+    /// Maximum audit rows to return.
+    #[arg(long, default_value_t = 50)]
+    pub limit: u32,
 }
 
 /// Arguments for `ee demo verify`.
@@ -5120,6 +5134,7 @@ where
         Some(Command::Demo(ref demo_cmd)) => match demo_cmd {
             DemoCommand::List(args) => handle_demo_list(&cli, args, stdout, stderr),
             DemoCommand::Run(args) => handle_demo_run(&cli, args, stdout, stderr),
+            DemoCommand::Show(args) => handle_demo_show(&cli, args, stdout, stderr),
             DemoCommand::Verify(args) => handle_demo_verify(&cli, args, stdout, stderr),
         },
         Some(Command::Daemon(ref args)) => handle_daemon(&cli, args, stdout, stderr),
@@ -16600,17 +16615,17 @@ where
 
 const DEMO_LIST_SCHEMA_V1: &str = "ee.demo.list.v1";
 const DEMO_RUN_PLAN_SCHEMA_V1: &str = "ee.demo.run_plan.v1";
+const DEMO_SHOW_SCHEMA_V1: &str = "ee.demo.show.v1";
 const DEMO_VERIFY_SCHEMA_V1: &str = "ee.demo.verify.v1";
-const DEMO_EXECUTION_UNAVAILABLE_CODE: &str = "demo_command_execution_unavailable";
-const DEMO_EXECUTION_UNAVAILABLE_MESSAGE: &str = "Demo manifests are parsed, but non-dry-run command execution is unavailable until demo runs persist an audit ledger and evidence artifacts.";
-const DEMO_EXECUTION_UNAVAILABLE_REPAIR: &str = "ee demo run <demo-id> --dry-run --json";
-const DEMO_FOLLOW_UP_BEAD: &str = "eidetic_engine_cli-jp06.1";
+const DEMO_AUDIT_STEP_SCHEMA_V1: &str = "ee.demo.audit_step.v1";
+const DEMO_AUDIT_ACTION_STEP: &str = "demo.run.step";
 const DEMO_LIST_SIDE_EFFECT: &str =
     "read-only manifest parse; no command execution or artifact write";
-const DEMO_EXECUTION_UNAVAILABLE_SIDE_EFFECT: &str =
-    "conservative abstention; no demo execution, audit ledger, or artifact write";
 const DEMO_RUN_DRY_RUN_SIDE_EFFECT: &str =
     "dry-run plan; no command execution, audit ledger, or artifact write";
+const DEMO_RUN_SIDE_EFFECT: &str =
+    "command execution with audit ledger rows and evidence artifacts";
+const DEMO_SHOW_SIDE_EFFECT: &str = "read-only audit ledger inspection; no demo mutation";
 const DEMO_VERIFY_SIDE_EFFECT: &str =
     "read-only artifact verification; no command execution or artifact write";
 
@@ -16794,44 +16809,508 @@ fn demo_run_plan_json(entry: &DemoEntry, cwd_override: Option<&PathBuf>) -> serd
     })
 }
 
-fn write_demo_unavailable<W, E>(cli: &Cli, stdout: &mut W, stderr: &mut E) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    if cli.wants_json() {
-        let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
-            "success": false,
-            "data": {
-                "schema": DEMO_RUN_PLAN_SCHEMA_V1,
-                "command": "demo run",
-                "code": DEMO_EXECUTION_UNAVAILABLE_CODE,
-                "severity": "warning",
-                "message": DEMO_EXECUTION_UNAVAILABLE_MESSAGE,
-                "repair": DEMO_EXECUTION_UNAVAILABLE_REPAIR,
-                "degraded": [
-                    {
-                        "code": DEMO_EXECUTION_UNAVAILABLE_CODE,
-                        "severity": "warning",
-                        "message": DEMO_EXECUTION_UNAVAILABLE_MESSAGE,
-                        "repair": DEMO_EXECUTION_UNAVAILABLE_REPAIR
-                    }
-                ],
-                "evidenceIds": [],
-                "sourceIds": [],
-                "followUpBead": DEMO_FOLLOW_UP_BEAD,
-                "sideEffectClass": DEMO_EXECUTION_UNAVAILABLE_SIDE_EFFECT
-            }
-        });
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-        return ProcessExitCode::UnsatisfiedDegradedMode;
-    }
+struct DemoCommandExecution {
+    json: serde_json::Value,
+    audit_id: String,
+    passed: bool,
+    failure: Option<String>,
+}
 
-    let _ = writeln!(stderr, "error: {DEMO_EXECUTION_UNAVAILABLE_MESSAGE}");
-    let _ = writeln!(stderr, "\nNext:\n  {DEMO_EXECUTION_UNAVAILABLE_REPAIR}");
-    ProcessExitCode::UnsatisfiedDegradedMode
+fn demo_manifest_hash(path: &Path) -> Result<String, DomainError> {
+    fs::read(path)
+        .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
+        .map_err(|error| DomainError::Configuration {
+            message: format!("failed to hash demo manifest {}: {error}", path.display()),
+            repair: Some("ee demo run <demo-id> --json".to_owned()),
+        })
+}
+
+fn demo_workspace_canonical(cli: &Cli) -> Result<PathBuf, DomainError> {
+    let raw = demo_workspace_path(cli);
+    let absolute = if raw.is_absolute() {
+        raw
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(raw)
+    };
+    absolute
+        .canonicalize()
+        .map_err(|error| DomainError::Configuration {
+            message: format!(
+                "failed to resolve demo workspace {}: {error}",
+                absolute.display()
+            ),
+            repair: Some("ee init --workspace .".to_owned()),
+        })
+}
+
+fn open_demo_database(
+    cli: &Cli,
+) -> Result<(crate::db::DbConnection, String, PathBuf), DomainError> {
+    let workspace = demo_workspace_canonical(cli)?;
+    let database_path = workspace.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_owned()),
+        });
+    }
+    let conn = crate::db::DbConnection::open_file(&database_path).map_err(|error| {
+        DomainError::Storage {
+            message: format!("Failed to open demo database: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        }
+    })?;
+    conn.migrate().map_err(|error| DomainError::Storage {
+        message: format!("Failed to migrate demo database: {error}"),
+        repair: Some("ee init --workspace .".to_owned()),
+    })?;
+    let workspace_id = stable_causal_workspace_id(&workspace);
+    ensure_demo_workspace_row(&conn, &workspace_id, &workspace)?;
+    Ok((conn, workspace_id, workspace))
+}
+
+fn ensure_demo_workspace_row(
+    conn: &crate::db::DbConnection,
+    workspace_id: &str,
+    workspace: &Path,
+) -> Result<(), DomainError> {
+    let path = workspace.to_string_lossy().into_owned();
+    if conn
+        .get_workspace_by_path(&path)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query demo workspace row: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?
+        .is_some()
+    {
+        return Ok(());
+    }
+    conn.insert_workspace(
+        workspace_id,
+        &crate::db::CreateWorkspaceInput {
+            path,
+            name: workspace
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
+        },
+    )
+    .map_err(|error| DomainError::Storage {
+        message: format!("Failed to create demo workspace row: {error}"),
+        repair: Some("ee doctor --json".to_owned()),
+    })
+}
+
+fn demo_evidence_root() -> Result<PathBuf, DomainError> {
+    if let Some(root) = std::env::var_os("EE_DEMO_EVIDENCE_ROOT") {
+        return Ok(PathBuf::from(root));
+    }
+    if let Some(root) = std::env::var_os("XDG_DATA_HOME") {
+        return Ok(PathBuf::from(root).join("ee").join("demos"));
+    }
+    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(home_var)
+        .map(PathBuf::from)
+        .map(|home| home.join(".local").join("share").join("ee").join("demos"))
+        .ok_or_else(|| DomainError::Configuration {
+            message: format!("{home_var} is not set; cannot choose demo evidence directory"),
+            repair: Some("Set XDG_DATA_HOME or EE_DEMO_EVIDENCE_ROOT.".to_owned()),
+        })
+}
+
+fn effective_demo_cwd(
+    workspace: &Path,
+    command: &crate::models::DemoCommand,
+    cwd_override: Option<&PathBuf>,
+) -> PathBuf {
+    if let Some(path) = cwd_override {
+        return if path.is_absolute() {
+            path.clone()
+        } else {
+            workspace.join(path)
+        };
+    }
+    command
+        .cwd
+        .as_ref()
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                workspace.join(path)
+            }
+        })
+        .unwrap_or_else(|| workspace.to_path_buf())
+}
+
+fn validate_demo_command_safe(command: &str) -> Result<(), DomainError> {
+    let lowered = command.to_ascii_lowercase();
+    let forbidden = [
+        "rm -rf",
+        "git reset --hard",
+        "git clean -fd",
+        "git worktree add",
+        "git stash",
+        "cargo clean",
+        "sudo ",
+        "mkfs",
+        "shred ",
+        ":(){",
+    ];
+    if let Some(pattern) = forbidden.iter().find(|pattern| lowered.contains(**pattern)) {
+        return Err(DomainError::PolicyDenied {
+            message: format!("demo command rejected by safety policy: matched `{pattern}`"),
+            repair: Some("Use a non-destructive command in demo.yaml.".to_owned()),
+        });
+    }
+    Ok(())
+}
+
+fn install_current_ee_on_path(command: &mut std::process::Command) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(bin_dir) = exe.parent() else {
+        return;
+    };
+    let mut paths = vec![bin_dir.to_path_buf()];
+    if let Some(existing) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    if let Ok(joined) = std::env::join_paths(paths) {
+        command.env("PATH", joined);
+    }
+}
+
+fn text_constraints_verified(text: &str, contains: &[String], excludes: &[String]) -> bool {
+    contains.iter().all(|needle| text.contains(needle))
+        && excludes.iter().all(|needle| !text.contains(needle))
+}
+
+fn stdout_verified(command: &crate::models::DemoCommand, stdout: &str) -> bool {
+    let text_ok = text_constraints_verified(
+        stdout,
+        &command.expected_stdout_contains,
+        &command.expected_stdout_excludes,
+    );
+    let schema_ok = command
+        .expected_stdout_schema
+        .as_ref()
+        .is_none_or(|schema| {
+            serde_json::from_str::<serde_json::Value>(stdout).is_ok_and(|value| {
+                value.get("schema").and_then(serde_json::Value::as_str) == Some(schema.as_str())
+                    || value
+                        .pointer("/data/schema")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(schema.as_str())
+            })
+        });
+    text_ok && schema_ok
+}
+
+fn stderr_verified(command: &crate::models::DemoCommand, stderr: &str) -> bool {
+    text_constraints_verified(
+        stderr,
+        &command.expected_stderr_contains,
+        &command.expected_stderr_excludes,
+    )
+}
+
+fn read_text_lossy(path: &Path) -> String {
+    fs::read(path)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default()
+}
+
+fn file_blake3(path: &Path) -> Option<String> {
+    fs::read(path)
+        .ok()
+        .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
+}
+
+fn demo_status_from_execution(
+    timed_out: bool,
+    exit_matched: bool,
+    stdout_ok: bool,
+    stderr_ok: bool,
+    artifacts_ok: bool,
+) -> (&'static str, Option<String>, bool) {
+    if timed_out {
+        return (
+            DemoStatus::TimedOut.as_str(),
+            Some("command timed out".to_owned()),
+            false,
+        );
+    }
+    if !exit_matched {
+        return (
+            DemoStatus::Failed.as_str(),
+            Some("exit code did not match expected value".to_owned()),
+            false,
+        );
+    }
+    if !stdout_ok {
+        return (
+            DemoStatus::Failed.as_str(),
+            Some("stdout verification failed".to_owned()),
+            false,
+        );
+    }
+    if !stderr_ok {
+        return (
+            DemoStatus::Failed.as_str(),
+            Some("stderr verification failed".to_owned()),
+            false,
+        );
+    }
+    if !artifacts_ok {
+        return (
+            DemoStatus::Failed.as_str(),
+            Some("artifact verification failed".to_owned()),
+            false,
+        );
+    }
+    (DemoStatus::Passed.as_str(), None, true)
+}
+
+struct DemoCommandContext<'a> {
+    conn: &'a crate::db::DbConnection,
+    workspace_id: &'a str,
+    workspace: &'a Path,
+    manifest_path: &'a Path,
+    manifest_hash: &'a str,
+    evidence_root: &'a Path,
+    demo: &'a DemoEntry,
+    command_index: usize,
+    command: &'a crate::models::DemoCommand,
+    cwd_override: Option<&'a PathBuf>,
+}
+
+fn execute_demo_command(ctx: DemoCommandContext<'_>) -> Result<DemoCommandExecution, DomainError> {
+    validate_demo_command_safe(&ctx.command.command)?;
+    let effective_cwd = effective_demo_cwd(ctx.workspace, ctx.command, ctx.cwd_override);
+    let step_dir = ctx
+        .evidence_root
+        .join(ctx.demo.id.to_string())
+        .join(ctx.command_index.to_string());
+    fs::create_dir_all(&step_dir).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to create demo evidence dir {}: {error}",
+            step_dir.display()
+        ),
+        repair: Some("Check permissions for the demo evidence directory.".to_owned()),
+    })?;
+    let stdout_path = step_dir.join("stdout.txt");
+    let stderr_path = step_dir.join("stderr.txt");
+    let stdout_file = fs::File::create(&stdout_path).map_err(|error| DomainError::Storage {
+        message: format!("Failed to create demo stdout artifact: {error}"),
+        repair: Some("Check permissions for the demo evidence directory.".to_owned()),
+    })?;
+    let stderr_file = fs::File::create(&stderr_path).map_err(|error| DomainError::Storage {
+        message: format!("Failed to create demo stderr artifact: {error}"),
+        repair: Some("Check permissions for the demo evidence directory.".to_owned()),
+    })?;
+
+    let mut process = if cfg!(windows) {
+        let mut command = std::process::Command::new("cmd");
+        command.arg("/C");
+        command
+    } else {
+        let mut command = std::process::Command::new("sh");
+        command.arg("-c");
+        command
+    };
+    install_current_ee_on_path(&mut process);
+    process
+        .arg(&ctx.command.command)
+        .current_dir(&effective_cwd)
+        .envs(&ctx.demo.env_overrides)
+        .env("EE_DEMO_ID", ctx.demo.id.to_string())
+        .env("EE_DEMO_STEP_INDEX", ctx.command_index.to_string())
+        .env("EE_DEMO_EVIDENCE_DIR", &step_dir)
+        .env("EE_WORKSPACE", ctx.workspace)
+        .stdout(std::process::Stdio::from(stdout_file))
+        .stderr(std::process::Stdio::from(stderr_file));
+
+    let started = Instant::now();
+    let mut child = process.spawn().map_err(|error| DomainError::Storage {
+        message: format!("Failed to execute demo command: {error}"),
+        repair: Some("Check demo.yaml command and working directory.".to_owned()),
+    })?;
+    let timeout = Duration::from_millis(ctx.command.timeout_ms.max(1));
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= timeout => {
+                timed_out = true;
+                let _ = child.kill();
+                break child.wait().map_err(|error| DomainError::Storage {
+                    message: format!("Failed to wait for timed-out demo command: {error}"),
+                    repair: Some("Retry the demo run.".to_owned()),
+                })?;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                return Err(DomainError::Storage {
+                    message: format!("Failed to poll demo command: {error}"),
+                    repair: Some("Retry the demo run.".to_owned()),
+                });
+            }
+        }
+    };
+    let elapsed_ms = started.elapsed().as_millis();
+    let exit_code = status.code().unwrap_or(-1);
+    let stdout_text = read_text_lossy(&stdout_path);
+    let stderr_text = read_text_lossy(&stderr_path);
+    let stdout_ok = stdout_verified(ctx.command, &stdout_text);
+    let stderr_ok = stderr_verified(ctx.command, &stderr_text);
+    let exit_matched = !timed_out && exit_code == ctx.command.expected_exit_code;
+    let artifacts_dir = ctx.workspace.join("artifacts");
+    let artifact_results = ctx
+        .command
+        .artifact_outputs
+        .iter()
+        .map(|artifact| verify_demo_artifact(&artifacts_dir, ctx.command_index, artifact))
+        .collect::<Vec<_>>();
+    let artifacts_ok = artifact_results.iter().all(|result| result.verified);
+    let artifact_json = artifact_results
+        .into_iter()
+        .map(|result| result.json)
+        .collect::<Vec<_>>();
+    let (status_label, failure, passed) =
+        demo_status_from_execution(timed_out, exit_matched, stdout_ok, stderr_ok, artifacts_ok);
+    let metadata_path = step_dir.join("metadata.json");
+    let audit_id = crate::db::generate_audit_id();
+    let details_json = serde_json::json!({
+        "schema": DEMO_AUDIT_STEP_SCHEMA_V1,
+        "manifestPath": ctx.manifest_path.display().to_string(),
+        "manifestHash": ctx.manifest_hash,
+        "demoId": ctx.demo.id.to_string(),
+        "stepIndex": ctx.command_index,
+        "command": ctx.command.command,
+        "effectiveCwd": effective_cwd.display().to_string(),
+        "expectedExitCode": ctx.command.expected_exit_code,
+        "exitCode": exit_code,
+        "status": status_label,
+        "passed": passed,
+        "elapsedMs": elapsed_ms,
+        "evidenceDir": step_dir.display().to_string(),
+        "stdoutPath": stdout_path.display().to_string(),
+        "stderrPath": stderr_path.display().to_string(),
+        "stdoutBlake3": file_blake3(&stdout_path),
+        "stderrBlake3": file_blake3(&stderr_path),
+        "artifactResults": artifact_json,
+        "error": failure,
+    });
+    let mut metadata =
+        serde_json::to_string_pretty(&details_json).map_err(|error| DomainError::Storage {
+            message: format!("Failed to serialize demo metadata: {error}"),
+            repair: Some("Retry the demo run.".to_owned()),
+        })?;
+    metadata.push('\n');
+    fs::write(&metadata_path, metadata).map_err(|error| DomainError::Storage {
+        message: format!("Failed to write demo metadata artifact: {error}"),
+        repair: Some("Check permissions for the demo evidence directory.".to_owned()),
+    })?;
+
+    ctx.conn
+        .insert_audit(
+            &audit_id,
+            &crate::db::CreateAuditInput {
+                workspace_id: Some(ctx.workspace_id.to_owned()),
+                actor: Some("ee demo run".to_owned()),
+                action: DEMO_AUDIT_ACTION_STEP.to_owned(),
+                target_type: Some("demo".to_owned()),
+                target_id: Some(ctx.demo.id.to_string()),
+                details: Some(details_json.to_string()),
+            },
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to write demo audit row: {error}"),
+            repair: Some("ee audit timeline --surface demo --json".to_owned()),
+        })?;
+
+    let command_json = serde_json::json!({
+        "index": ctx.command_index,
+        "command": ctx.command.command,
+        "effectiveCwd": effective_cwd.display().to_string(),
+        "executed": true,
+        "status": status_label,
+        "exitCode": exit_code,
+        "expectedExitCode": ctx.command.expected_exit_code,
+        "exitCodeMatched": exit_matched,
+        "stdoutVerified": stdout_ok,
+        "stderrVerified": stderr_ok,
+        "artifactsVerified": artifacts_ok,
+        "elapsedMs": elapsed_ms,
+        "evidenceDir": step_dir.display().to_string(),
+        "stdoutPath": stdout_path.display().to_string(),
+        "stderrPath": stderr_path.display().to_string(),
+        "metadataPath": metadata_path.display().to_string(),
+        "auditId": audit_id,
+        "error": failure,
+    });
+    Ok(DemoCommandExecution {
+        json: command_json,
+        audit_id,
+        passed,
+        failure,
+    })
+}
+
+fn skipped_demo_command_json(
+    command_index: usize,
+    command: &crate::models::DemoCommand,
+    reason: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "index": command_index,
+        "command": command.command,
+        "executed": false,
+        "status": DemoStatus::Skipped.as_str(),
+        "auditId": null,
+        "error": reason,
+    })
+}
+
+fn latest_demo_audit_by_id(cli: &Cli) -> Result<BTreeMap<String, serde_json::Value>, DomainError> {
+    let (conn, _workspace_id, _workspace) = open_demo_database(cli)?;
+    let entries =
+        conn.list_audit_entries(None, Some(500))
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to list demo audit rows: {error}"),
+                repair: Some("ee audit timeline --surface demo --json".to_owned()),
+            })?;
+    let mut latest = BTreeMap::new();
+    for entry in entries {
+        if entry.action != DEMO_AUDIT_ACTION_STEP {
+            continue;
+        }
+        let Some(details) = entry
+            .details
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        else {
+            continue;
+        };
+        let Some(demo_id) = details.get("demoId").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        latest.entry(demo_id.to_owned()).or_insert_with(|| {
+            serde_json::json!({
+                "auditId": entry.id,
+                "timestamp": entry.timestamp,
+                "status": details.get("status").cloned().unwrap_or_else(|| serde_json::json!("unknown")),
+                "stepIndex": details.get("stepIndex").cloned().unwrap_or_else(|| serde_json::json!(null)),
+                "manifestHash": details.get("manifestHash").cloned().unwrap_or_else(|| serde_json::json!(null)),
+                "evidenceDir": details.get("evidenceDir").cloned().unwrap_or_else(|| serde_json::json!(null)),
+            })
+        });
+    }
+    Ok(latest)
 }
 
 fn handle_demo_list<W, E>(
@@ -16857,6 +17336,7 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
 
+    let latest_runs = latest_demo_audit_by_id(cli).unwrap_or_default();
     let demos = manifest
         .demos
         .iter()
@@ -16867,7 +17347,19 @@ where
                     .as_ref()
                     .is_none_or(|tag| demo.tags.iter().any(|demo_tag| demo_tag == tag))
         })
-        .map(|demo| demo_entry_json(demo, cli.fields_level() != FieldsLevel::Minimal))
+        .map(|demo| {
+            let mut json = demo_entry_json(demo, cli.fields_level() != FieldsLevel::Minimal);
+            if let Some(object) = json.as_object_mut() {
+                object.insert(
+                    "latestRun".to_owned(),
+                    latest_runs
+                        .get(&demo.id.to_string())
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+            json
+        })
         .collect::<Vec<_>>();
 
     if cli.wants_json() {
@@ -16881,6 +17373,7 @@ where
                 "manifestPath": manifest_path.display().to_string(),
                 "demoCount": manifest.demo_count(),
                 "filteredCount": demos.len(),
+                "runLedgerAvailable": !latest_runs.is_empty(),
                 "demos": demos,
                 "sideEffectClass": DEMO_LIST_SIDE_EFFECT,
                 "auditSemantics": "read-only; no audit record persisted"
@@ -16926,13 +17419,240 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
 
-    if !args.dry_run {
-        return write_demo_unavailable(cli, stdout, stderr);
+    if args.dry_run {
+        let planned = demos
+            .iter()
+            .map(|demo| demo_run_plan_json(demo, args.cwd.as_ref()))
+            .collect::<Vec<_>>();
+
+        if cli.wants_json() {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": {
+                    "schema": DEMO_RUN_PLAN_SCHEMA_V1,
+                    "command": "demo run",
+                    "dryRun": true,
+                    "manifestPath": manifest_path.display().to_string(),
+                    "selectedCount": planned.len(),
+                    "continueOnError": args.continue_on_error,
+                    "demos": planned,
+                    "sideEffectClass": DEMO_RUN_DRY_RUN_SIDE_EFFECT,
+                    "auditSemantics": "dry-run report only; no audit record persisted"
+                }
+            });
+            return write_stdout(stdout, &(json.to_string() + "\n"));
+        }
+
+        let mut text = String::new();
+        for demo in demos {
+            text.push_str(&format!("DRY RUN {}\t{}\n", demo.id, demo.title));
+            for command in &demo.commands {
+                text.push_str(&format!("  {}\n", command.command));
+            }
+        }
+        return write_stdout(stdout, &text);
     }
 
-    let planned = demos
-        .iter()
-        .map(|demo| demo_run_plan_json(demo, args.cwd.as_ref()))
+    let manifest_hash = match demo_manifest_hash(&manifest_path) {
+        Ok(hash) => hash,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let (conn, workspace_id, workspace) = match open_demo_database(cli) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let evidence_root = match demo_evidence_root() {
+        Ok(root) => root,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    let started_at = chrono::Utc::now().to_rfc3339();
+    let run_started = Instant::now();
+    let mut demo_results = Vec::new();
+    let mut audit_ids = Vec::new();
+    let mut passed_demos = 0usize;
+    let mut failed_demos = 0usize;
+    let mut skipped_steps = 0usize;
+    let mut first_failure: Option<serde_json::Value> = None;
+    let mut abort_remaining = false;
+
+    for demo in demos {
+        let mut command_results = Vec::new();
+        let mut demo_failed = false;
+        for (index, command) in demo.commands.iter().enumerate() {
+            if abort_remaining {
+                skipped_steps += 1;
+                command_results.push(skipped_demo_command_json(
+                    index,
+                    command,
+                    "previous demo failure aborted remaining steps",
+                ));
+                continue;
+            }
+            if demo_failed && !args.continue_on_error {
+                skipped_steps += 1;
+                command_results.push(skipped_demo_command_json(
+                    index,
+                    command,
+                    "previous step failed",
+                ));
+                continue;
+            }
+
+            let execution = match execute_demo_command(DemoCommandContext {
+                conn: &conn,
+                workspace_id: &workspace_id,
+                workspace: &workspace,
+                manifest_path: &manifest_path,
+                manifest_hash: &manifest_hash,
+                evidence_root: &evidence_root,
+                demo,
+                command_index: index,
+                command,
+                cwd_override: args.cwd.as_ref(),
+            }) {
+                Ok(execution) => execution,
+                Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            };
+            audit_ids.push(execution.audit_id.clone());
+            if !execution.passed {
+                demo_failed = true;
+                if first_failure.is_none() {
+                    first_failure = Some(serde_json::json!({
+                        "demoId": demo.id.to_string(),
+                        "stepIndex": index,
+                        "command": command.command,
+                        "error": execution.failure,
+                    }));
+                }
+            }
+            command_results.push(execution.json);
+        }
+
+        let status = if demo_failed {
+            failed_demos += 1;
+            DemoStatus::Failed
+        } else {
+            passed_demos += 1;
+            DemoStatus::Passed
+        };
+        demo_results.push(serde_json::json!({
+            "id": demo.id.to_string(),
+            "title": demo.title,
+            "status": status.as_str(),
+            "commandCount": demo.commands.len(),
+            "commands": command_results,
+        }));
+        if demo_failed && !args.continue_on_error {
+            abort_remaining = true;
+        }
+    }
+
+    let success = failed_demos == 0 && first_failure.is_none();
+    let completed_at = chrono::Utc::now().to_rfc3339();
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": success,
+            "data": {
+                "schema": DEMO_RUN_RESULT_SCHEMA_V1,
+                "command": "demo run",
+                "dryRun": false,
+                "persisted": true,
+                "manifestPath": manifest_path.display().to_string(),
+                "manifestHash": manifest_hash,
+                "evidenceRoot": evidence_root.display().to_string(),
+                "startedAt": started_at,
+                "completedAt": completed_at,
+                "elapsedMs": run_started.elapsed().as_millis(),
+                "selectedCount": demo_results.len(),
+                "passedDemos": passed_demos,
+                "failedDemos": failed_demos,
+                "skippedSteps": skipped_steps,
+                "continueOnError": args.continue_on_error,
+                "firstFailure": first_failure,
+                "auditIds": audit_ids,
+                "demos": demo_results,
+                "sideEffectClass": DEMO_RUN_SIDE_EFFECT,
+                "auditSemantics": "one audit row per executed step; evidence artifacts written before audit insert"
+            }
+        });
+        let exit = write_stdout(stdout, &(json.to_string() + "\n"));
+        return if success {
+            exit
+        } else {
+            ProcessExitCode::Usage
+        };
+    }
+
+    let mut text = String::new();
+    for demo in &demo_results {
+        let id = demo
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let status = demo
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("failed");
+        text.push_str(&format!("{id}\t{status}\n"));
+    }
+    let exit = write_stdout(stdout, &text);
+    if success {
+        exit
+    } else {
+        ProcessExitCode::Usage
+    }
+}
+
+fn handle_demo_show<W, E>(
+    cli: &Cli,
+    args: &DemoShowArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if let Err(error) = args.demo_id.parse::<DemoId>() {
+        let error = DomainError::Usage {
+            message: format!("invalid demo id `{}`: {error}", args.demo_id),
+            repair: Some("ee demo list --json".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    let (conn, _workspace_id, _workspace) = match open_demo_database(cli) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let entries = match conn.list_audit_by_target("demo", &args.demo_id, Some(args.limit)) {
+        Ok(entries) => entries,
+        Err(error) => {
+            let error = DomainError::Storage {
+                message: format!("Failed to list demo audit rows: {error}"),
+                repair: Some("ee audit timeline --surface demo --json".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let rows = entries
+        .into_iter()
+        .filter(|entry| entry.action == DEMO_AUDIT_ACTION_STEP)
+        .map(|entry| {
+            serde_json::json!({
+                "auditId": entry.id,
+                "timestamp": entry.timestamp,
+                "action": entry.action,
+                "targetId": entry.target_id,
+                "details": entry.details
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
+                "rowHash": entry.this_row_hash,
+                "prevRowHash": entry.prev_row_hash,
+            })
+        })
         .collect::<Vec<_>>();
 
     if cli.wants_json() {
@@ -16940,26 +17660,29 @@ where
             "schema": crate::models::RESPONSE_SCHEMA_V1,
             "success": true,
             "data": {
-                "schema": DEMO_RUN_PLAN_SCHEMA_V1,
-                "command": "demo run",
-                "dryRun": true,
-                "manifestPath": manifest_path.display().to_string(),
-                "selectedCount": planned.len(),
-                "continueOnError": args.continue_on_error,
-                "demos": planned,
-                "sideEffectClass": DEMO_RUN_DRY_RUN_SIDE_EFFECT,
-                "auditSemantics": "dry-run report only; no audit record persisted"
+                "schema": DEMO_SHOW_SCHEMA_V1,
+                "command": "demo show",
+                "demoId": args.demo_id,
+                "rowCount": rows.len(),
+                "rows": rows,
+                "sideEffectClass": DEMO_SHOW_SIDE_EFFECT,
+                "auditSemantics": "read-only demo audit ledger projection"
             }
         });
         return write_stdout(stdout, &(json.to_string() + "\n"));
     }
 
     let mut text = String::new();
-    for demo in demos {
-        text.push_str(&format!("DRY RUN {}\t{}\n", demo.id, demo.title));
-        for command in &demo.commands {
-            text.push_str(&format!("  {}\n", command.command));
-        }
+    for row in &rows {
+        let audit_id = row
+            .get("auditId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let timestamp = row
+            .get("timestamp")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        text.push_str(&format!("{timestamp}\t{audit_id}\n"));
     }
     write_stdout(stdout, &text)
 }
@@ -18731,6 +19454,7 @@ impl NormalizedInvocation {
                 Command::Demo(demo) => match demo {
                     DemoCommand::List(_) => "demo list".to_string(),
                     DemoCommand::Run(_) => "demo run".to_string(),
+                    DemoCommand::Show(_) => "demo show".to_string(),
                     DemoCommand::Verify(_) => "demo verify".to_string(),
                 },
                 Command::Daemon(_) => "daemon".to_string(),

@@ -483,7 +483,6 @@ fn effect_manifest_tracks_degraded_unavailable_paths_as_non_mutating() -> TestRe
     let manifest = EffectManifest::build();
 
     for (command, code) in [
-        ("demo run", "demo_command_execution_unavailable"),
         ("memory revise", "revision_write_unavailable"),
         ("support bundle", "support_bundle_unavailable"),
         ("tripwire check", "tripwire_store_unavailable"),
@@ -517,6 +516,48 @@ fn effect_manifest_tracks_degraded_unavailable_paths_as_non_mutating() -> TestRe
             &format!("{command} degraded code"),
         )?;
     }
+    Ok(())
+}
+
+#[test]
+fn effect_manifest_tracks_demo_run_as_real_execution_surface() -> TestResult {
+    use ee::core::effect::{EffectClass, EffectManifest, SideEffectClass};
+
+    let manifest = EffectManifest::build();
+    let effect = manifest
+        .get("demo run")
+        .ok_or_else(|| "demo run not in manifest".to_string())?;
+
+    ensure(
+        effect.default_effect,
+        EffectClass::ExternalIo,
+        "demo run executes manifest commands",
+    )?;
+    ensure(
+        effect.dry_run_effect,
+        Some(EffectClass::ReadOnly),
+        "demo run --dry-run stays read-only",
+    )?;
+    ensure(
+        effect.mutation_contract.side_effect_class,
+        SideEffectClass::AuditedMutation,
+        "demo run writes an audited ledger",
+    )?;
+    ensure(
+        effect.write_surfaces.db_tables.contains(&"audit_log"),
+        true,
+        "demo run writes audit_log",
+    )?;
+    ensure(
+        effect.write_surfaces.workspace_files.is_empty(),
+        false,
+        "demo run names evidence/artifact paths",
+    )?;
+    ensure(
+        effect.mutation_contract.degraded_code,
+        None,
+        "demo run has no unavailable sentinel",
+    )?;
     Ok(())
 }
 

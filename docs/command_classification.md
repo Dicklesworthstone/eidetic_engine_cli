@@ -112,7 +112,7 @@ mechanical sub-surface with concrete evidence.
 | `daemon` | `src/cli/mod.rs` `DAEMON_UNAVAILABLE_CODE` | Simulated scheduler ticks and processed item counts. | Returns `daemon_jobs_unavailable`; follow-up `eidetic_engine_cli-5g6d`. |
 | `recorder start/event/finish` | `src/cli/mod.rs` recorder store unavailable handlers | Generated run/event IDs. | Returns `recorder_store_unavailable`; follow-up `eidetic_engine_cli-6xzc`. |
 | `recorder tail/follow` | `src/core/recorder.rs` + V027 `recorder_events` | Read-only persisted recorder event stream. | Reads real events with deterministic tail windows and JSONL follow output; implemented by `eidetic_engine_cli-qow7`. |
-| `demo list/run/verify` | `src/cli/mod.rs` demo handlers | Empty timestamped demo placeholders. | `list`, `run --dry-run`, and `verify` parse real `demo.yaml` / artifact evidence; non-dry-run execution returns `demo_command_execution_unavailable`; follow-up `eidetic_engine_cli-jp06.1`. |
+| `demo list/run/show/verify` | `src/cli/mod.rs` demo handlers + `audit_log` | Empty timestamped demo placeholders. | `run --no-dry-run` executes safe manifest steps, writes per-step audit rows and evidence artifacts; `list`/`show` read persisted runs; `verify` checks declared artifact evidence. Implemented by `eidetic_engine_cli-z58u`. |
 
 Executable coverage lives primarily in `tests/degraded_honesty.rs`, with
 supporting unit and contract coverage in `src/models/demo.rs` and
