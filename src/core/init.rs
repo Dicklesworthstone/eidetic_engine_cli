@@ -3,7 +3,11 @@
 //! Initializes the ee workspace with database and index directories.
 //! Supports dry-run mode and idempotent re-runs.
 
-use std::path::PathBuf;
+use std::{
+    fs::OpenOptions,
+    io::{ErrorKind, Write},
+    path::{Path, PathBuf},
+};
 
 use super::build_info;
 use crate::db::DbConnection;
@@ -372,57 +376,55 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
 
     if !options.skip_boilerplate && !options.repair_plan && !options.dry_run {
         let agents_path = workspace.join("AGENTS.md");
-        if !agents_path.exists() {
-            match std::fs::write(&agents_path, AGENTS_MD_BOILERPLATE) {
-                Ok(()) => {
-                    actions.push(InitAction {
-                        action: "create_file",
-                        path: agents_path,
-                        status: "created",
-                    });
-                    any_created = true;
-                }
-                Err(_) => {
-                    actions.push(InitAction {
-                        action: "create_file",
-                        path: agents_path,
-                        status: "failed",
-                    });
-                }
+        match create_boilerplate_file(&agents_path, AGENTS_MD_BOILERPLATE) {
+            Ok(BoilerplateCreateStatus::Created) => {
+                actions.push(InitAction {
+                    action: "create_file",
+                    path: agents_path,
+                    status: "created",
+                });
+                any_created = true;
             }
-        } else {
-            actions.push(InitAction {
-                action: "check_file",
-                path: agents_path,
-                status: "exists",
-            });
+            Ok(BoilerplateCreateStatus::Exists) => {
+                actions.push(InitAction {
+                    action: "check_file",
+                    path: agents_path,
+                    status: "exists",
+                });
+            }
+            Err(_) => {
+                actions.push(InitAction {
+                    action: "create_file",
+                    path: agents_path,
+                    status: "failed",
+                });
+            }
         }
 
         let claude_path = workspace.join("CLAUDE.md");
-        if !claude_path.exists() {
-            match std::fs::write(&claude_path, CLAUDE_MD_BOILERPLATE) {
-                Ok(()) => {
-                    actions.push(InitAction {
-                        action: "create_file",
-                        path: claude_path,
-                        status: "created",
-                    });
-                    any_created = true;
-                }
-                Err(_) => {
-                    actions.push(InitAction {
-                        action: "create_file",
-                        path: claude_path,
-                        status: "failed",
-                    });
-                }
+        match create_boilerplate_file(&claude_path, CLAUDE_MD_BOILERPLATE) {
+            Ok(BoilerplateCreateStatus::Created) => {
+                actions.push(InitAction {
+                    action: "create_file",
+                    path: claude_path,
+                    status: "created",
+                });
+                any_created = true;
             }
-        } else {
-            actions.push(InitAction {
-                action: "check_file",
-                path: claude_path,
-                status: "exists",
-            });
+            Ok(BoilerplateCreateStatus::Exists) => {
+                actions.push(InitAction {
+                    action: "check_file",
+                    path: claude_path,
+                    status: "exists",
+                });
+            }
+            Err(_) => {
+                actions.push(InitAction {
+                    action: "create_file",
+                    path: claude_path,
+                    status: "failed",
+                });
+            }
         }
     }
 
@@ -453,6 +455,28 @@ fn initialize_database(database_path: &PathBuf) -> Result<(), String> {
         .migrate()
         .map_err(|error| format!("failed to migrate database: {error}"))?;
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BoilerplateCreateStatus {
+    Created,
+    Exists,
+}
+
+fn create_boilerplate_file(
+    path: &Path,
+    contents: &str,
+) -> Result<BoilerplateCreateStatus, std::io::Error> {
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            return Ok(BoilerplateCreateStatus::Exists);
+        }
+        Err(error) => return Err(error),
+    };
+
+    file.write_all(contents.as_bytes())?;
+    Ok(BoilerplateCreateStatus::Created)
 }
 
 const AGENTS_MD_BOILERPLATE: &str = r#"# AGENTS.md
@@ -758,6 +782,78 @@ mod tests {
             workspace.join("CLAUDE.md").exists(),
             true,
             "CLAUDE.md boilerplate should exist",
+        )
+    }
+
+    #[test]
+    fn boilerplate_creation_preserves_existing_file() -> TestResult {
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let path = temp_dir.path().join("AGENTS.md");
+
+        let first = create_boilerplate_file(&path, "first\n").map_err(|e| e.to_string())?;
+        let second = create_boilerplate_file(&path, "second\n").map_err(|e| e.to_string())?;
+        let contents = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+
+        ensure(
+            first,
+            BoilerplateCreateStatus::Created,
+            "first call creates",
+        )?;
+        ensure(
+            second,
+            BoilerplateCreateStatus::Exists,
+            "second call observes existing file",
+        )?;
+        ensure(
+            contents,
+            "first\n".to_string(),
+            "existing file contents are preserved",
+        )
+    }
+
+    #[test]
+    fn boilerplate_creation_allows_one_concurrent_creator() -> TestResult {
+        use std::sync::{Arc, Barrier};
+
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let path = Arc::new(temp_dir.path().join("AGENTS.md"));
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+
+        for contents in ["first\n", "second\n"] {
+            let path = Arc::clone(&path);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                create_boilerplate_file(&path, contents)
+            }));
+        }
+
+        let mut statuses = Vec::new();
+        for handle in handles {
+            let status = handle
+                .join()
+                .map_err(|_| "boilerplate writer thread panicked".to_string())?
+                .map_err(|e| e.to_string())?;
+            statuses.push(status);
+        }
+
+        let created_count = statuses
+            .iter()
+            .filter(|status| **status == BoilerplateCreateStatus::Created)
+            .count();
+        let exists_count = statuses
+            .iter()
+            .filter(|status| **status == BoilerplateCreateStatus::Exists)
+            .count();
+        let contents = std::fs::read_to_string(path.as_ref()).map_err(|e| e.to_string())?;
+
+        ensure(created_count, 1, "exactly one writer creates the file")?;
+        ensure(exists_count, 1, "exactly one writer observes existing file")?;
+        ensure(
+            contents == "first\n" || contents == "second\n",
+            true,
+            "file contains one complete winning write",
         )
     }
 
