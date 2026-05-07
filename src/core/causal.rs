@@ -1436,6 +1436,86 @@ pub fn estimate_causal_chain_from_store(
     Ok(report)
 }
 
+/// Estimate causal uplift for chains matching artifact_id or decision_id filters.
+///
+/// When `chain_id` is not provided but `artifact_id` or `decision_id` is, this
+/// function finds all matching chains and estimates each one.
+pub fn estimate_causal_filtered_from_store(
+    conn: &DbConnection,
+    workspace_id: &str,
+    options: &EstimateOptions,
+) -> Result<EstimateReport, DomainError> {
+    let mut report = estimate_causal_uplift(options);
+    report.degradations.retain(|d| {
+        d.code != "causal_sample_underpowered" && d.code != "no_filters"
+    });
+
+    if options.dry_run {
+        return Ok(report);
+    }
+
+    let (edges, _) = load_causal_ledger_edges(conn, workspace_id)?;
+    if edges.is_empty() {
+        report.degradations.push(trace_degradation(
+            "causal_ledger_empty",
+            "No causal ledger edges found in workspace.",
+            "warning",
+        ));
+        return Ok(report);
+    }
+
+    let candidate_failures = edges
+        .iter()
+        .map(|edge| edge.failure_id.clone())
+        .collect::<BTreeSet<_>>();
+
+    let mut matching_chains = Vec::new();
+    for failure_id in candidate_failures {
+        let trace_opts = TraceOptions::new()
+            .with_memory_id(failure_id)
+            .with_depth(32)
+            .with_limit(usize::MAX);
+        for chain in build_causal_chains(
+            conn,
+            workspace_id,
+            trace_opts.memory_id.as_deref().unwrap_or_default(),
+            &edges,
+            &trace_opts,
+        )? {
+            let chain_artifact_id = chain.root_cause_id.as_deref();
+            let chain_decision_id = chain.failure_id.as_deref();
+
+            let artifact_match = options
+                .artifact_id
+                .as_ref()
+                .map_or(true, |id| chain_artifact_id == Some(id.as_str()));
+            let decision_match = options
+                .decision_id
+                .as_ref()
+                .map_or(true, |id| chain_decision_id == Some(id.as_str()));
+
+            if artifact_match && decision_match {
+                matching_chains.push(chain);
+            }
+        }
+    }
+
+    if matching_chains.is_empty() {
+        report.degradations.push(trace_degradation(
+            "causal_no_matching_chains",
+            "No causal chains match the provided filters.",
+            "info",
+        ));
+    } else {
+        report.estimates = matching_chains
+            .iter()
+            .map(|chain| estimate_from_chain(chain, report.method_used.clone()))
+            .collect();
+    }
+
+    Ok(report)
+}
+
 fn estimate_from_chain(chain: &CausalChain, method: String) -> CausalUpliftEstimate {
     let evidence_strength = causal_evidence_strength(&chain.edges);
     let confidence_state = ConfidenceState::from_evidence_strength(evidence_strength);
