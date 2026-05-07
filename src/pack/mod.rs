@@ -1406,7 +1406,7 @@ fn redact_pack_candidate(candidate: PackCandidate) -> (PackCandidate, Vec<PackIt
     let estimated_tokens = if redactions.is_empty() {
         estimated_tokens
     } else {
-        estimate_tokens_default(&content)
+        estimate_tokens_default(&content).max(1)
     };
     (
         PackCandidate {
