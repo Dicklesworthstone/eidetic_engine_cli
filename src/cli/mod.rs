@@ -12709,6 +12709,13 @@ where
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
     };
+    if let Err(error) = conn.migrate() {
+        let domain_error = DomainError::MigrationRequired {
+            message: format!("Failed to migrate graph database: {error}"),
+            repair: Some("ee db migrate --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
 
     let workspace_id = match resolve_graph_export_workspace_id(&conn, &workspace, args) {
         Ok(workspace_id) => workspace_id,
@@ -21019,7 +21026,7 @@ mod tests {
     use std::ffi::OsString;
     use std::fmt::Debug;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use clap::{Parser, error::ErrorKind};
 
@@ -21103,6 +21110,51 @@ mod tests {
         let stdout = String::from_utf8_lossy(&stdout).into_owned();
         let stderr = String::from_utf8_lossy(&stderr).into_owned();
         (exit, stdout, stderr)
+    }
+
+    fn seed_legacy_v011_database(workspace: &Path) -> Result<String, String> {
+        let ee_dir = workspace.join(".ee");
+        fs::create_dir_all(&ee_dir).map_err(|error| format!("create .ee dir: {error}"))?;
+        let database_path = ee_dir.join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database_path)
+            .map_err(|error| error.to_string())?;
+        connection
+            .ensure_migration_table()
+            .map_err(|error| error.to_string())?;
+        for migration in crate::db::MIGRATIONS.iter().take(11) {
+            connection
+                .execute_raw(migration.sql())
+                .map_err(|error| error.to_string())?;
+            let record = crate::db::MigrationRecord::new(
+                migration.version(),
+                migration.name(),
+                migration.checksum_label(),
+                "2026-05-01T00:00:00Z",
+            )
+            .map_err(|error| error.to_string())?;
+            connection
+                .record_migration(&record)
+                .map_err(|error| error.to_string())?;
+        }
+
+        let workspace_path = workspace
+            .canonicalize()
+            .map_err(|error| format!("canonicalize workspace: {error}"))?;
+        let escaped_path = workspace_path.to_string_lossy().replace('\'', "''");
+        let workspace_id = "wsp_01234567890123456789012345";
+        let memory_id = "mem_01234567890123456789012345";
+        connection
+            .execute_raw(&format!(
+                "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('{workspace_id}', '{escaped_path}', '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z')",
+            ))
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(&format!(
+                "INSERT INTO memories (id, workspace_id, level, kind, content, confidence, utility, importance, provenance_uri, created_at, updated_at, trust_class, trust_subclass) VALUES ('{memory_id}', '{workspace_id}', 'procedural', 'rule', 'Legacy schema memory for migration read checks.', 0.8, 0.7, 0.6, 'test://legacy-v011', '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z', 'human_explicit', 'test')",
+            ))
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        Ok(memory_id.to_owned())
     }
 
     fn unique_temp_workspace(prefix: &str) -> Result<String, String> {
@@ -22603,6 +22655,89 @@ mod tests {
     }
 
     #[test]
+    fn stale_legacy_v011_database_is_migrated_before_schema_dependent_reads() -> TestResult {
+        let why_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let why_memory_id = seed_legacy_v011_database(why_dir.path())?;
+        let why_workspace = why_dir.path().to_string_lossy().into_owned();
+        let (why_exit, why_stdout, why_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &why_workspace,
+            "--json",
+            "why",
+            &why_memory_id,
+        ]);
+        ensure_equal(&why_exit, &ProcessExitCode::Success, "why exit")?;
+        ensure(why_stderr.is_empty(), "why JSON stderr clean")?;
+        let why_json: serde_json::Value =
+            serde_json::from_str(&why_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &why_json["data"]["found"],
+            &serde_json::json!(true),
+            "why found memory after migration",
+        )?;
+        ensure_equal(
+            &why_json["data"]["storage"]["workflowId"],
+            &serde_json::Value::Null,
+            "why storage reads migrated workflowId column",
+        )?;
+
+        let curate_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        seed_legacy_v011_database(curate_dir.path())?;
+        let curate_workspace = curate_dir.path().to_string_lossy().into_owned();
+        let (curate_exit, curate_stdout, curate_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &curate_workspace,
+            "--json",
+            "curate",
+            "candidates",
+            "--all",
+        ]);
+        ensure_equal(
+            &curate_exit,
+            &ProcessExitCode::Success,
+            "curate candidates exit",
+        )?;
+        ensure(
+            curate_stderr.is_empty(),
+            "curate candidates JSON stderr clean",
+        )?;
+        let curate_json: serde_json::Value =
+            serde_json::from_str(&curate_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &curate_json["data"]["command"],
+            &serde_json::json!("curate candidates"),
+            "curate candidates command",
+        )?;
+        ensure(
+            curate_json["data"]["candidates"].is_array(),
+            "curate candidates reads migrated review_state column",
+        )?;
+
+        let graph_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        seed_legacy_v011_database(graph_dir.path())?;
+        let graph_workspace = graph_dir.path().to_string_lossy().into_owned();
+        let (graph_exit, graph_stdout, graph_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &graph_workspace,
+            "--json",
+            "graph",
+            "export",
+        ]);
+        ensure_equal(&graph_exit, &ProcessExitCode::Success, "graph export exit")?;
+        ensure(graph_stderr.is_empty(), "graph export JSON stderr clean")?;
+        let graph_json: serde_json::Value =
+            serde_json::from_str(&graph_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &graph_json["data"]["status"],
+            &serde_json::json!("no_snapshot"),
+            "graph export reaches migrated scope_kind read",
+        )
+    }
+
+    #[test]
     fn preflight_show_invalid_run_id_returns_usage_exit() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "--json", "preflight", "show", "invalid"]);
         ensure_equal(&exit, &ProcessExitCode::Usage, "preflight show usage exit")?;
@@ -23354,8 +23489,12 @@ mod tests {
 
     #[test]
     fn learn_experiment_propose_json_writes_machine_data_to_stdout_only() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = workspace.path().to_string_lossy().into_owned();
         let (exit, stdout, stderr) = invoke(&[
             "ee",
+            "--workspace",
+            &workspace,
             "--json",
             "learn",
             "experiment",

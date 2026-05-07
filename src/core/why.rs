@@ -529,6 +529,12 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
             );
         }
     };
+    if let Err(error) = conn.migrate() {
+        return WhyReport::error(
+            memory_id.to_string(),
+            format!("Failed to migrate database before why query: {error}"),
+        );
+    }
 
     if let Some(source) = target.unsupported_result_source() {
         return WhyReport::unsupported_result_target(memory_id.to_string(), source, &conn);

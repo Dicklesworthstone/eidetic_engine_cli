@@ -1,12 +1,12 @@
 schema: ee.response.v1
-success: false
+success: true
 data:
   command: check
   version: 0.1.0
-  posture: needs_attention
+  posture: degraded
   workspaceInitialized: true
-  databaseReady: false
+  databaseReady: true
   searchReady: false
   runtimeReady: true
   suggestedActions[1]{priority,command,reason}:
-    2,ee doctor --json,Run diagnostics to identify database issues.
+    3,ee index status --workspace . --json,Inspect search index readiness before rebuilding.

@@ -5,7 +5,7 @@ data:
   version: 0.1.0
   subsystems[5]{name,status,description}:
     runtime,ready,Asupersync async runtime
-    storage,degraded,FrankenSQLite/SQLModel persistence
+    storage,ready,FrankenSQLite/SQLModel persistence
     search,degraded,Frankensearch hybrid retrieval
     graph,pending,FrankenNetworkX graph analytics
     cass,pending,CASS session import adapter
@@ -65,30 +65,30 @@ data:
         diagnostic:
           schema: ee.output_size_diagnostic.v1
           json:
-            bytes: 3189
-            estimatedTokens: 134
+            bytes: 2427
+            estimatedTokens: 624
           toon:
-            bytes: 3033
-            estimatedTokens: 330
+            bytes: 2443
+            estimatedTokens: 675
           savings:
-            bytes: 156
-            tokens: -196
-            compressionRatio: 0.951
+            bytes: -16
+            tokens: -51
+            compressionRatio: 1.007
       - command: health
         diagnostic:
           schema: ee.output_size_diagnostic.v1
           json:
-            bytes: 532
-            estimatedTokens: 22
+            bytes: 396
+            estimatedTokens: 98
           toon:
-            bytes: 479
-            estimatedTokens: 58
+            bytes: 389
+            estimatedTokens: 112
           savings:
-            bytes: 53
-            tokens: -36
-            compressionRatio: 0.9
+            bytes: 7
+            tokens: -14
+            compressionRatio: 0.982
   summary:
-    readySubsystems: 1
+    readySubsystems: 2
     totalSubsystems: 5
     enabledFeatures: 4
     totalFeatures: 7

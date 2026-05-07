@@ -848,8 +848,8 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "ee-tst-005-agent".to_owned(),
                 "--dry-run".to_owned(),
             ],
-            expected_schema_contains: "ee.response.v1",
-            expected_exit_code: 6,
+            expected_schema_contains: "ee.recorder.start.v1",
+            expected_exit_code: 0,
             expect_clean_stderr: true,
         },
         StepSpec {
@@ -864,7 +864,7 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "deploy production database migration".to_owned(),
             ],
             expected_schema_contains: "ee.response.v1",
-            expected_exit_code: 6,
+            expected_exit_code: 0,
             expect_clean_stderr: true,
         },
         StepSpec {
@@ -877,8 +877,8 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "procedure".to_owned(),
                 "list".to_owned(),
             ],
-            expected_schema_contains: "ee.response.v1",
-            expected_exit_code: 6,
+            expected_schema_contains: "ee.procedure.list_report.v1",
+            expected_exit_code: 0,
             expect_clean_stderr: true,
         },
         StepSpec {
@@ -928,7 +928,7 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "--dry-run".to_owned(),
             ],
             expected_schema_contains: "ee.response.v1",
-            expected_exit_code: 6,
+            expected_exit_code: 0,
             expect_clean_stderr: true,
         },
         StepSpec {
@@ -945,7 +945,7 @@ fn advanced_subsystems_emit_logged_json_contracts() -> TestResult {
                 "--dry-run".to_owned(),
             ],
             expected_schema_contains: "ee.response.v1",
-            expected_exit_code: 6,
+            expected_exit_code: 0,
             expect_clean_stderr: true,
         },
         StepSpec {

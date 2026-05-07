@@ -4236,10 +4236,18 @@ fn open_existing_database(database_path: &Path) -> Result<DbConnection, DomainEr
             repair: Some("ee init --workspace .".to_owned()),
         });
     }
-    DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
-        message: format!("Failed to open database: {error}"),
-        repair: Some("ee doctor".to_owned()),
-    })
+    let connection =
+        DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open database: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+    connection
+        .migrate()
+        .map_err(|error| DomainError::MigrationRequired {
+            message: format!("Failed to migrate curation database: {error}"),
+            repair: Some("ee db migrate --workspace .".to_owned()),
+        })?;
+    Ok(connection)
 }
 
 fn parse_optional_candidate_type(raw: Option<&str>) -> Result<Option<String>, DomainError> {

@@ -82,6 +82,12 @@ fn initialized_recorder_workspace() -> Result<(tempfile::TempDir, String), Strin
     Ok((tempdir, workspace))
 }
 
+fn empty_workspace() -> Result<(tempfile::TempDir, String), String> {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+    Ok((tempdir, workspace))
+}
+
 #[test]
 fn recorder_start_dry_run_reports_without_store_mutation() -> TestResult {
     let output = run_ee(&[
@@ -488,104 +494,18 @@ fn recorder_tail_returns_empty_snapshot_from_initialized_store() -> TestResult {
 }
 
 // ============================================================================
-// Procedure Tests (EE-411 - Degraded until persisted lifecycle records exist)
+// Procedure Tests (EE-411 - Persisted lifecycle records)
 // ============================================================================
 
-fn assert_procedure_unavailable(output: &std::process::Output, command: &str) -> TestResult {
-    ensure_equal(
-        &output.status.code(),
-        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
-        "exit code",
-    )?;
+fn assert_procedure_not_found(output: &std::process::Output, procedure_id: &str) -> TestResult {
+    ensure_equal(&output.status.code(), &Some(1), "exit code")?;
     ensure(stdout_is_json(output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(output), "stdout must be clean")?;
     ensure(
         output.stderr.is_empty(),
-        "json degraded response must keep stderr empty",
+        "json not-found response must keep stderr empty",
     )?;
     let json = stdout_json(output)?;
-    ensure_equal(
-        &json["schema"],
-        &serde_json::json!("ee.response.v1"),
-        "response schema",
-    )?;
-    ensure_equal(&json["success"], &serde_json::json!(false), "success")?;
-    ensure_equal(
-        &json["data"]["command"],
-        &serde_json::json!(command),
-        "command",
-    )?;
-    ensure_equal(
-        &json["data"]["code"],
-        &serde_json::json!("procedure_store_unavailable"),
-        "degraded code",
-    )?;
-    ensure_equal(
-        &json["data"]["repair"],
-        &serde_json::json!("ee status --json"),
-        "repair",
-    )?;
-    ensure_equal(
-        &json["data"]["followUpBead"],
-        &serde_json::json!("eidetic_engine_cli-q5vf"),
-        "follow-up bead",
-    )?;
-    ensure_equal(
-        &json["data"]["sideEffectClass"],
-        &serde_json::json!("conservative abstention; no procedure mutation or artifact write"),
-        "side-effect class",
-    )
-}
-
-#[test]
-fn procedure_list_degrades_until_persisted_records_exist() -> TestResult {
-    let output = run_ee(&["procedure", "list", "--json"])?;
-    assert_procedure_unavailable(&output, "procedure list")
-}
-
-#[test]
-fn procedure_show_degrades_instead_of_rendering_generated_detail() -> TestResult {
-    let output = run_ee(&["procedure", "show", "proc_nonexistent", "--json"])?;
-    assert_procedure_unavailable(&output, "procedure show")
-}
-
-#[test]
-fn procedure_export_degrades_instead_of_rendering_skill_capsule() -> TestResult {
-    let output = run_ee(&[
-        "procedure",
-        "export",
-        "proc_export",
-        "--export-format",
-        "skill-capsule",
-        "--json",
-    ])?;
-    assert_procedure_unavailable(&output, "procedure export")
-}
-
-#[test]
-fn procedure_promote_dry_run_degrades_until_audited_promotion_exists() -> TestResult {
-    let output = run_ee(&[
-        "procedure",
-        "promote",
-        "proc_promote",
-        "--dry-run",
-        "--actor",
-        "MistySalmon",
-        "--json",
-    ])?;
-    assert_procedure_unavailable(&output, "procedure promote")
-}
-
-#[test]
-fn procedure_promote_without_dry_run_is_policy_denied() -> TestResult {
-    let output = run_ee(&["procedure", "promote", "proc_promote", "--json"])?;
-    ensure_equal(&output.status.code(), &Some(7), "exit code")?;
-    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
-    ensure(
-        output.stderr.is_empty(),
-        "json policy response must keep stderr empty",
-    )?;
-    let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
         &serde_json::json!("ee.error.v1"),
@@ -593,9 +513,106 @@ fn procedure_promote_without_dry_run_is_policy_denied() -> TestResult {
     )?;
     ensure_equal(
         &json["error"]["code"],
-        &serde_json::json!("policy_denied"),
+        &serde_json::json!("not_found"),
         "error code",
+    )?;
+    ensure_equal(
+        &json["error"]["details"]["resource"],
+        &serde_json::json!("procedure"),
+        "resource",
+    )?;
+    ensure_equal(
+        &json["error"]["details"]["id"],
+        &serde_json::json!(procedure_id),
+        "procedure id",
     )
+}
+
+#[test]
+fn procedure_list_returns_empty_persisted_records() -> TestResult {
+    let (_tempdir, workspace) = empty_workspace()?;
+    let output = run_ee(&["--workspace", &workspace, "procedure", "list", "--json"])?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
+    ensure(stdout_is_clean(&output), "stdout must be clean")?;
+    ensure(output.stderr.is_empty(), "json response stderr empty")?;
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.procedure.list_report.v1"),
+        "list schema",
+    )?;
+    ensure_equal(&json["total_count"], &serde_json::json!(0), "total count")?;
+    ensure_equal(
+        &json["procedures"],
+        &serde_json::json!([]),
+        "empty procedures",
+    )
+}
+
+#[test]
+fn procedure_show_reports_not_found_for_missing_record() -> TestResult {
+    let (_tempdir, workspace) = empty_workspace()?;
+    let procedure_id = "proc_nonexistent";
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "procedure",
+        "show",
+        procedure_id,
+        "--json",
+    ])?;
+    assert_procedure_not_found(&output, procedure_id)
+}
+
+#[test]
+fn procedure_export_reports_not_found_for_missing_record() -> TestResult {
+    let (_tempdir, workspace) = empty_workspace()?;
+    let procedure_id = "proc_export";
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "procedure",
+        "export",
+        procedure_id,
+        "--export-format",
+        "skill-capsule",
+        "--json",
+    ])?;
+    assert_procedure_not_found(&output, procedure_id)
+}
+
+#[test]
+fn procedure_promote_dry_run_reports_not_found_for_missing_record() -> TestResult {
+    let (_tempdir, workspace) = empty_workspace()?;
+    let procedure_id = "proc_promote";
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "procedure",
+        "promote",
+        procedure_id,
+        "--dry-run",
+        "--actor",
+        "MistySalmon",
+        "--json",
+    ])?;
+    assert_procedure_not_found(&output, procedure_id)
+}
+
+#[test]
+fn procedure_promote_without_dry_run_reports_not_found_for_missing_record() -> TestResult {
+    let (_tempdir, workspace) = initialized_recorder_workspace()?;
+    let procedure_id = "proc_promote";
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "procedure",
+        "promote",
+        procedure_id,
+        "--json",
+    ])?;
+    assert_procedure_not_found(&output, procedure_id)
 }
 
 // ============================================================================
@@ -604,7 +621,8 @@ fn procedure_promote_without_dry_run_is_policy_denied() -> TestResult {
 
 #[test]
 fn economy_report_degrades_until_db_backed_metrics_exist() -> TestResult {
-    let output = run_ee(&["economy", "report", "--json"])?;
+    let (_tempdir, workspace) = empty_workspace()?;
+    let output = run_ee(&["--workspace", &workspace, "economy", "report", "--json"])?;
     ensure_equal(
         &output.status.code(),
         &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
@@ -627,7 +645,15 @@ fn economy_report_degrades_until_db_backed_metrics_exist() -> TestResult {
 
 #[test]
 fn economy_score_degrades_instead_of_scoring_seed_artifacts() -> TestResult {
-    let output = run_ee(&["economy", "score", "mem_nonexistent", "--json"])?;
+    let (_tempdir, workspace) = empty_workspace()?;
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "economy",
+        "score",
+        "mem_nonexistent",
+        "--json",
+    ])?;
     ensure_equal(
         &output.status.code(),
         &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
@@ -644,7 +670,10 @@ fn economy_score_degrades_instead_of_scoring_seed_artifacts() -> TestResult {
 
 #[test]
 fn economy_simulate_degrades_instead_of_ranking_seed_artifacts() -> TestResult {
+    let (_tempdir, workspace) = empty_workspace()?;
     let output = run_ee(&[
+        "--workspace",
+        &workspace,
         "economy",
         "simulate",
         "--baseline-budget",
@@ -705,7 +734,10 @@ fn economy_simulate_rejects_zero_budget() -> TestResult {
 
 #[test]
 fn economy_prune_plan_dry_run_degrades_until_db_backed_metrics_exist() -> TestResult {
+    let (_tempdir, workspace) = empty_workspace()?;
     let output = run_ee(&[
+        "--workspace",
+        &workspace,
         "economy",
         "prune-plan",
         "--dry-run",
@@ -1744,7 +1776,15 @@ fn preflight_run_blocks_high_risk_deploy_task() -> TestResult {
 
 #[test]
 fn preflight_show_returns_stubbed_storage_details() -> TestResult {
-    let output = run_ee(&["preflight", "show", "pf_gate16_contract", "--json"])?;
+    let (_tempdir, workspace) = empty_workspace()?;
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "preflight",
+        "show",
+        "pf_gate16_contract",
+        "--json",
+    ])?;
     ensure_equal(&output.status.code(), &Some(1), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
