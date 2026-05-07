@@ -20,6 +20,7 @@
       "createdAt": "TIMESTAMP"
     }
   ],
+  "curationCandidateIds": [],
   "recommendations": {
     "revalidation": [
       "Collect persisted exposure, baseline, outcome, and confounder evidence for `mem_fixture_001` before any causal estimate."

@@ -13,7 +13,8 @@
     "preflight_id=pre_fixture_001",
     "tripwire_id=trip_fixture_001",
     "procedure_id=proc_fixture_001",
-    "agent_id=agent_fixture_001"
+    "agent_id=agent_fixture_001",
+    "depth=8"
   ],
   "degradations": [
     {
