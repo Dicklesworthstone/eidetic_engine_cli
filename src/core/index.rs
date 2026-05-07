@@ -1594,6 +1594,7 @@ pub struct IndexStatusReport {
     pub db_generation: Option<u64>,
     pub index_generation: Option<u64>,
     pub last_rebuild_at: Option<String>,
+    pub last_check_error: Option<String>,
     pub repair_hint: Option<&'static str>,
     pub elapsed_ms: f64,
 }
@@ -1638,6 +1639,10 @@ impl IndexStatusReport {
             output.push_str(&format!("  Last rebuild: {timestamp}\n"));
         }
 
+        if let Some(ref error) = self.last_check_error {
+            output.push_str(&format!("  Last check error: {error}\n"));
+        }
+
         output.push_str(&format!("  Elapsed: {:.1}ms\n", self.elapsed_ms));
 
         if let Some(hint) = self.repair_hint {
@@ -1663,6 +1668,7 @@ impl IndexStatusReport {
             "dbGeneration": self.db_generation,
             "indexGeneration": self.index_generation,
             "lastRebuildAt": self.last_rebuild_at,
+            "lastCheckError": self.last_check_error,
             "repairHint": self.repair_hint,
             "elapsedMs": self.elapsed_ms,
         })
@@ -1732,8 +1738,8 @@ pub fn get_index_status(
             (0, 0, None)
         };
 
-    // Read index metadata if available
-    let (index_generation, last_rebuild_at) = read_index_metadata(&index_dir);
+    // Read index metadata if available.
+    let (index_generation, last_rebuild_at, last_check_error) = read_index_metadata(&index_dir);
 
     // Determine health
     let health = determine_health(
@@ -1741,6 +1747,7 @@ pub fn get_index_status(
         index_file_count,
         db_generation,
         index_generation,
+        last_check_error.is_some(),
     );
 
     let repair_hint = match health {
@@ -1764,6 +1771,7 @@ pub fn get_index_status(
         db_generation,
         index_generation,
         last_rebuild_at,
+        last_check_error,
         repair_hint,
         elapsed_ms,
     })
@@ -1829,21 +1837,50 @@ fn get_db_stats(db: &DbConnection) -> Result<(u32, u32, Option<u64>), DbError> {
     Ok((memory_count, session_count, generation))
 }
 
-fn read_index_metadata(index_dir: &Path) -> (Option<u64>, Option<String>) {
+fn read_index_metadata(index_dir: &Path) -> (Option<u64>, Option<String>, Option<String>) {
     let meta_path = index_dir.join("meta.json");
     if !meta_path.exists() {
-        return (None, None);
+        return (None, None, None);
     }
 
     let content = match std::fs::read_to_string(&meta_path) {
         Ok(c) => c,
-        Err(_) => return (None, None),
+        Err(error) => {
+            return (
+                None,
+                None,
+                Some(format!(
+                    "failed to read index metadata '{}': {error}",
+                    meta_path.display()
+                )),
+            );
+        }
     };
 
     let parsed: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
-        Err(_) => return (None, None),
+        Err(error) => {
+            return (
+                None,
+                None,
+                Some(format!(
+                    "failed to parse index metadata '{}': {error}",
+                    meta_path.display()
+                )),
+            );
+        }
     };
+
+    if !parsed.is_object() {
+        return (
+            None,
+            None,
+            Some(format!(
+                "index metadata '{}' must be a JSON object",
+                meta_path.display()
+            )),
+        );
+    }
 
     let generation = parsed.get("generation").and_then(|v| v.as_u64());
     let last_rebuild = parsed
@@ -1852,7 +1889,7 @@ fn read_index_metadata(index_dir: &Path) -> (Option<u64>, Option<String>) {
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
-    (generation, last_rebuild)
+    (generation, last_rebuild, None)
 }
 
 fn determine_health(
@@ -1860,9 +1897,14 @@ fn determine_health(
     index_file_count: u32,
     db_generation: Option<u64>,
     index_generation: Option<u64>,
+    metadata_corrupt: bool,
 ) -> IndexHealth {
     if !index_exists || index_file_count == 0 {
         return IndexHealth::Missing;
+    }
+
+    if metadata_corrupt {
+        return IndexHealth::Corrupt;
     }
 
     match (db_generation, index_generation) {
@@ -2313,52 +2355,59 @@ mod tests {
 
     #[test]
     fn cache_invalidation_missing_index_detected() {
-        let health = determine_health(false, 0, Some(10), Some(10));
+        let health = determine_health(false, 0, Some(10), Some(10), false);
         assert_eq!(health, IndexHealth::Missing);
         assert_eq!(health.degradation_code(), Some("index_missing"));
     }
 
     #[test]
     fn cache_invalidation_empty_index_detected() {
-        let health = determine_health(true, 0, Some(10), Some(10));
+        let health = determine_health(true, 0, Some(10), Some(10), false);
         assert_eq!(health, IndexHealth::Missing);
     }
 
     #[test]
     fn cache_invalidation_stale_when_db_ahead() {
-        let health = determine_health(true, 5, Some(12), Some(9));
+        let health = determine_health(true, 5, Some(12), Some(9), false);
         assert_eq!(health, IndexHealth::Stale);
         assert_eq!(health.degradation_code(), Some("index_stale"));
     }
 
     #[test]
     fn cache_invalidation_stale_when_index_has_no_generation() {
-        let health = determine_health(true, 5, Some(12), None);
+        let health = determine_health(true, 5, Some(12), None, false);
         assert_eq!(health, IndexHealth::Stale);
     }
 
     #[test]
+    fn cache_invalidation_corrupt_when_metadata_parse_fails() {
+        let health = determine_health(true, 5, Some(12), None, true);
+        assert_eq!(health, IndexHealth::Corrupt);
+        assert_eq!(health.degradation_code(), Some("index_corrupt"));
+    }
+
+    #[test]
     fn cache_invalidation_ready_when_generations_match() {
-        let health = determine_health(true, 5, Some(10), Some(10));
+        let health = determine_health(true, 5, Some(10), Some(10), false);
         assert_eq!(health, IndexHealth::Ready);
         assert_eq!(health.degradation_code(), None);
     }
 
     #[test]
     fn cache_invalidation_ready_when_index_ahead() {
-        let health = determine_health(true, 5, Some(8), Some(10));
+        let health = determine_health(true, 5, Some(8), Some(10), false);
         assert_eq!(health, IndexHealth::Ready);
     }
 
     #[test]
     fn cache_invalidation_ready_when_no_generations_tracked() {
-        let health = determine_health(true, 5, None, None);
+        let health = determine_health(true, 5, None, None, false);
         assert_eq!(health, IndexHealth::Ready);
     }
 
     #[test]
     fn cache_invalidation_ready_when_db_has_no_generation() {
-        let health = determine_health(true, 5, None, Some(10));
+        let health = determine_health(true, 5, None, Some(10), false);
         assert_eq!(health, IndexHealth::Ready);
     }
 
@@ -2398,6 +2447,7 @@ mod tests {
             db_generation: Some(12),
             index_generation: Some(9),
             last_rebuild_at: Some("2026-04-30T12:00:00Z".to_string()),
+            last_check_error: None,
             repair_hint: Some("ee index rebuild --workspace ."),
             elapsed_ms: 5.2,
         };
@@ -2426,6 +2476,7 @@ mod tests {
             db_generation: Some(12),
             index_generation: Some(9),
             last_rebuild_at: None,
+            last_check_error: None,
             repair_hint: Some("ee index rebuild --workspace ."),
             elapsed_ms: 5.2,
         };
@@ -2440,7 +2491,7 @@ mod tests {
     #[test]
     fn cache_invalidation_boundary_condition_equal_generations() {
         for generation in [0_u64, 1, 100, u64::MAX] {
-            let health = determine_health(true, 1, Some(generation), Some(generation));
+            let health = determine_health(true, 1, Some(generation), Some(generation), false);
             assert_eq!(
                 health,
                 IndexHealth::Ready,
@@ -2451,7 +2502,7 @@ mod tests {
 
     #[test]
     fn cache_invalidation_boundary_condition_db_one_ahead() {
-        let health = determine_health(true, 1, Some(1), Some(0));
+        let health = determine_health(true, 1, Some(1), Some(0), false);
         assert_eq!(health, IndexHealth::Stale);
     }
 
@@ -2644,7 +2695,7 @@ mod tests {
         std::fs::create_dir_all(&index_dir).map_err(|e| e.to_string())?;
 
         write_index_metadata(&index_dir, 42, 7).map_err(|e| e.to_string())?;
-        let (generation, rebuilt_at) = read_index_metadata(&index_dir);
+        let (generation, rebuilt_at, check_error) = read_index_metadata(&index_dir);
 
         ensure(
             generation == Some(42),
@@ -2653,6 +2704,43 @@ mod tests {
         ensure(
             rebuilt_at.is_some(),
             "metadata should include last rebuild timestamp",
+        )?;
+        ensure(
+            check_error.is_none(),
+            format!("metadata should not report check error: {check_error:?}"),
+        )
+    }
+
+    #[test]
+    fn index_status_marks_invalid_metadata_as_corrupt() -> TestResult {
+        let root = unique_test_dir("metadata-corrupt-status");
+        let index_dir = root.join("index");
+        std::fs::create_dir_all(&index_dir).map_err(|e| e.to_string())?;
+        std::fs::write(index_dir.join("meta.json"), "{ not-json").map_err(|e| e.to_string())?;
+
+        let report = get_index_status(&IndexStatusOptions {
+            workspace_path: root.clone(),
+            database_path: Some(root.join("missing.db")),
+            index_dir: Some(index_dir),
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure(
+            report.health == IndexHealth::Corrupt,
+            format!("invalid metadata should report corrupt health: {report:?}"),
+        )?;
+        ensure(
+            report.last_check_error.as_deref().is_some_and(|error| {
+                error.contains("failed to parse index metadata") && error.contains("meta.json")
+            }),
+            format!(
+                "invalid metadata should preserve parse error detail: {:?}",
+                report.last_check_error
+            ),
+        )?;
+        ensure(
+            report.data_json()["lastCheckError"].as_str().is_some(),
+            "status JSON should expose lastCheckError for corrupt metadata",
         )
     }
 }

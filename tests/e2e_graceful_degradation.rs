@@ -215,6 +215,77 @@ fn derived_asset_status(status_json: &Value, name: &str) -> Option<String> {
 }
 
 #[test]
+fn corrupt_index_metadata_search_reports_corrupt_degradation() -> TestResult {
+    let artifact_dir = unique_artifact_dir("corrupt-index-metadata")?;
+    let workspace = artifact_dir.join("workspace");
+    fs::create_dir_all(&workspace)
+        .map_err(|error| format!("failed to create workspace: {error}"))?;
+
+    let init = run_ee_json(&workspace, ["init"], "init")?;
+    assert_success(&init, "init")?;
+
+    let memory_id = remember(
+        &workspace,
+        "corruptindex alpha search should report corrupt metadata before repair",
+    )?;
+
+    let rebuild = run_ee_json(&workspace, ["index", "rebuild"], "initial index rebuild")?;
+    assert_success(&rebuild, "initial index rebuild")?;
+
+    let metadata_path = workspace.join(".ee").join("index").join("meta.json");
+    fs::write(&metadata_path, "{ not-json")
+        .map_err(|error| format!("failed to corrupt {}: {error}", metadata_path.display()))?;
+
+    let corrupt_status = run_ee_json(&workspace, ["index", "status"], "corrupt index status")?;
+    assert_success(&corrupt_status, "corrupt index status")?;
+    ensure_equal(
+        &corrupt_status.json.pointer("/data/health"),
+        &Some(&Value::String("corrupt".to_owned())),
+        "corrupt metadata reports corrupt index health",
+    )?;
+
+    let corrupt_search = run_ee_json(
+        &workspace,
+        ["search", "corruptindex alpha metadata", "--limit", "10"],
+        "corrupt metadata search",
+    )?;
+    assert_success(&corrupt_search, "corrupt metadata search")?;
+
+    let corrupt_degraded_codes = degraded_codes(&corrupt_search.json);
+    ensure(
+        corrupt_degraded_codes
+            .iter()
+            .any(|code| code == "index_corrupt"),
+        format!(
+            "corrupt search should expose index_corrupt degradation: {corrupt_degraded_codes:?}"
+        ),
+    )?;
+    ensure(
+        corrupt_search
+            .json
+            .pointer("/data/degraded/0/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| {
+                message.contains("failed integrity checks") && message.contains("meta.json")
+            }),
+        "corrupt search degradation must explain the metadata failure",
+    )?;
+
+    let corrupt_doc_ids = result_doc_ids(&corrupt_search.json)?;
+    ensure(
+        corrupt_search
+            .json
+            .pointer("/data/status")
+            .and_then(Value::as_str)
+            == Some("index_error")
+            || corrupt_doc_ids.iter().any(|doc_id| doc_id == &memory_id),
+        format!(
+            "corrupt search should either surface index_error or still return indexed memory with a warning: {corrupt_doc_ids:?}"
+        ),
+    )
+}
+
+#[test]
 fn stale_index_search_degrades_to_lexical_fallback_and_recovers_after_rebuild() -> TestResult {
     let artifact_dir = unique_artifact_dir("stale-index-search")?;
     let workspace = artifact_dir.join("workspace");

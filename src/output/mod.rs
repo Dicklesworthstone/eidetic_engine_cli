@@ -8078,7 +8078,7 @@ pub fn render_preflight_close_toon(report: &CloseReport) -> String {
 
 use crate::core::procedure::{
     ProcedureDriftReport, ProcedureExportReport, ProcedureListReport, ProcedurePromoteReport,
-    ProcedureProposeReport, ProcedureRetireReport, ProcedureShowReport,
+    ProcedureProposeReport, ProcedureRetireReport, ProcedureShowReport, ProcedureVerifyReport,
 };
 
 /// Render a procedure propose report as JSON.
@@ -8470,6 +8470,53 @@ pub fn render_procedure_retire_toon(report: &ProcedureRetireReport) -> String {
     format!(
         "PROCEDURE_RETIRE|id={}|from={}|to={}|audit={}",
         report.procedure_id, report.from_maturity, report.to_maturity, report.audit_id
+    )
+}
+
+/// Render a procedure verify report as JSON.
+#[must_use]
+pub fn render_procedure_verify_json(report: &ProcedureVerifyReport) -> String {
+    serde_json::json!({
+        "schema": RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "schema": report.schema,
+            "command": "procedure verify",
+            "procedureId": report.procedure_id,
+            "verificationId": report.verification_id,
+            "status": report.status,
+            "sourceKind": report.source_kind,
+            "sourcesChecked": report.sources_checked,
+            "passCount": report.pass_count,
+            "failCount": report.fail_count,
+            "skipCount": report.skip_count,
+            "overallResult": report.overall_result,
+            "verifiedAt": report.verified_at,
+            "dryRun": report.dry_run,
+            "confidence": report.confidence,
+            "nextActions": report.next_actions,
+        }
+    })
+    .to_string()
+}
+
+/// Render a procedure verify report as human-readable text.
+#[must_use]
+pub fn render_procedure_verify_human(report: &ProcedureVerifyReport) -> String {
+    report.human_summary()
+}
+
+/// Render a procedure verify report as TOON.
+#[must_use]
+pub fn render_procedure_verify_toon(report: &ProcedureVerifyReport) -> String {
+    format!(
+        "PROCEDURE_VERIFY|id={}|status={}|result={}|passed={}|failed={}|skipped={}",
+        report.procedure_id,
+        report.status,
+        report.overall_result,
+        report.pass_count,
+        report.fail_count,
+        report.skip_count
     )
 }
 

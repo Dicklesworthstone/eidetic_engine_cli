@@ -544,6 +544,8 @@ fn appendix_c_agent_flow_parity_scenario() -> TestResult {
             OsString::from("--workspace"),
             OsString::from(workspace_arg.clone()),
             OsString::from("--json"),
+            OsString::from("--data-dir"),
+            OsString::from(cass_data_arg.clone()),
             OsString::from("--limit"),
             OsString::from("5"),
         ],
@@ -892,7 +894,9 @@ fn appendix_c_agent_flow_parity_scenario() -> TestResult {
         "why must explain storage origin",
     )?;
     ensure(
-        why_json.pointer("/data/selection/latestPackSelection").is_some(),
+        why_json
+            .pointer("/data/selection/latestPackSelection")
+            .is_some(),
         "why must include latest pack selection state",
     )?;
 
@@ -1015,7 +1019,7 @@ fn appendix_c_agent_flow_parity_scenario() -> TestResult {
     let workspace_id =
         json_string(&validate_json, "/data/workspaceId", "curate validate")?.to_owned();
 
-    let (outcome_target_id, outcome_target_type) = if validation_passed {
+    let (outcome_target_id, outcome_target_type, created_rule_id) = if validation_passed {
         ensure_equal(
             &validate_json.pointer("/data/mutation/toStatus"),
             &Some(&json!("approved")),
@@ -1097,14 +1101,14 @@ fn appendix_c_agent_flow_parity_scenario() -> TestResult {
             "rule show should find the created rule",
         )?;
 
-        (created_rule_id, "rule")
+        (created_rule_id.clone(), "rule", Some(created_rule_id))
     } else {
         ensure_equal(
             &validate_json.pointer("/data/mutation/toStatus"),
             &Some(&json!("rejected")),
             "curate validate transition (rejected)",
         )?;
-        (candidate_id.clone(), "candidate")
+        (candidate_id.clone(), "candidate", None)
     };
 
     let (_outcome_event, outcome_json) = run_step_with_env(
@@ -1195,6 +1199,7 @@ fn appendix_c_agent_flow_parity_scenario() -> TestResult {
                 "contextItemIds": context_item_ids,
                 "curationCandidateId": candidate_id,
                 "validationPassed": validation_passed,
+                "createdRuleId": created_rule_id,
                 "outcomeTargetId": outcome_target_id,
                 "outcomeTargetType": outcome_target_type,
                 "outcomeStatus": "recorded"

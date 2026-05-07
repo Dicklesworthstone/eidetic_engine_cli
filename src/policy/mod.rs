@@ -55,6 +55,31 @@ const SECRET_KEY_PATTERNS: &[SecretKeyPattern] = &[
         whitespace_value: false,
     },
     SecretKeyPattern {
+        code: "oauth_access_token",
+        key: "access_token",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "oauth_refresh_token",
+        key: "refresh_token",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "oidc_id_token",
+        key: "id_token",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "oauth_token",
+        key: "oauth_token",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "oauth_secret",
+        key: "oauth_secret",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
         code: "bearer_token",
         key: "bearer_token",
         whitespace_value: false,
@@ -72,6 +97,91 @@ const SECRET_KEY_PATTERNS: &[SecretKeyPattern] = &[
     SecretKeyPattern {
         code: "connection_string",
         key: "connection_string",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "webhook_secret",
+        key: "webhook_secret",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "signing_key",
+        key: "signing_key",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "signing_secret",
+        key: "signing_secret",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "master_key",
+        key: "master_key",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "encryption_key",
+        key: "encryption_key",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "session_token",
+        key: "session_token",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "session_secret",
+        key: "session_secret",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "aws_secret_access_key",
+        key: "aws_secret_access_key",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "aws_access_key_id",
+        key: "aws_access_key_id",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "personal_access_token",
+        key: "personal_access_token",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "personal_access_token",
+        key: "pat",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "service_account_key",
+        key: "service_account_key",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "service_account_json",
+        key: "service_account_json",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "azure_account_key",
+        key: "account_key",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "azure_account_key",
+        key: "accountkey",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "sas_token",
+        key: "sas_token",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "sas_token",
+        key: "shared_access_signature",
         whitespace_value: false,
     },
     SecretKeyPattern {
@@ -472,7 +582,9 @@ pub fn redact_secret_like_content(content: &str) -> SecretRedactionReport {
     let (without_raw_tokens, raw_token_redacted) =
         redact_raw_api_tokens(&without_pem_blocks, &mut reasons);
     let (without_jwt, jwt_redacted) = redact_jwt_tokens(&without_raw_tokens, &mut reasons);
-    let (without_pii, pii_redacted) = redact_pii_values(&without_jwt, &mut reasons);
+    let (without_high_entropy, high_entropy_redacted) =
+        redact_high_entropy_secret_values(&without_jwt, &mut reasons);
+    let (without_pii, pii_redacted) = redact_pii_values(&without_high_entropy, &mut reasons);
 
     reasons.sort_unstable();
     reasons.dedup();
@@ -484,6 +596,7 @@ pub fn redact_secret_like_content(content: &str) -> SecretRedactionReport {
             || pem_block_redacted
             || raw_token_redacted
             || jwt_redacted
+            || high_entropy_redacted
             || pii_redacted,
         redacted_reasons: reasons,
     }
@@ -721,6 +834,27 @@ fn redact_raw_api_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (Strin
         ("rk_test_", "stripe_restricted_key", 24),
         // GCP API keys: AIza...
         ("AIza", "gcp_api_key", 35),
+        // Slack bot/user/app/refresh tokens: xoxb-..., xoxp-..., xoxa-..., xoxr-...
+        ("xoxb-", "slack_token", 24),
+        ("xoxp-", "slack_token", 24),
+        ("xoxa-", "slack_token", 24),
+        ("xoxr-", "slack_token", 24),
+        // npm automation/access tokens: npm_...
+        ("npm_", "npm_token", 16),
+        // Hugging Face tokens: hf_...
+        ("hf_", "huggingface_token", 16),
+        // PyPI API tokens: pypi-...
+        ("pypi-", "pypi_token", 24),
+        // Twilio account SIDs: AC + 32 characters.
+        ("AC", "twilio_account_sid", 32),
+        // SendGrid keys: SG.<id>.<token>
+        ("SG.", "sendgrid_api_key", 24),
+        // Square application and secret tokens.
+        ("sq0idp-", "square_token", 20),
+        ("sq0csp-", "square_token", 20),
+        // Mailgun private and public API keys.
+        ("key-", "mailgun_key", 24),
+        ("pubkey-", "mailgun_key", 24),
     ];
 
     for &(prefix, code, min_suffix_len) in RAW_TOKEN_PATTERNS {
@@ -747,7 +881,7 @@ fn redact_raw_api_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (Strin
             let token_end = output[after_prefix..]
                 .char_indices()
                 .find_map(|(offset, ch)| {
-                    if !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-' {
+                    if !is_raw_token_char(ch) {
                         Some(after_prefix + offset)
                     } else {
                         None
@@ -755,10 +889,11 @@ fn redact_raw_api_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (Strin
                 })
                 .unwrap_or(output.len());
 
-            let suffix_len = token_end - after_prefix;
+            let actual_token_end = trim_raw_token_end(&output, after_prefix, token_end);
+            let suffix_len = actual_token_end - after_prefix;
             if suffix_len >= min_suffix_len {
                 let placeholder = redaction_placeholder(code);
-                output.replace_range(token_start..token_end, &placeholder);
+                output.replace_range(token_start..actual_token_end, &placeholder);
                 reasons.push(code);
                 changed = true;
                 search_start = token_start + placeholder.len();
@@ -769,6 +904,22 @@ fn redact_raw_api_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (Strin
     }
 
     (output, changed)
+}
+
+fn is_raw_token_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')
+}
+
+fn trim_raw_token_end(input: &str, after_prefix: usize, mut token_end: usize) -> usize {
+    while token_end > after_prefix
+        && matches!(
+            input.as_bytes().get(token_end - 1),
+            Some(b'.' | b',' | b';' | b':')
+        )
+    {
+        token_end -= 1;
+    }
+    token_end
 }
 
 fn redact_jwt_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (String, bool) {
@@ -799,7 +950,7 @@ fn redact_jwt_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (String, b
         let jwt_end = input[jwt_start..]
             .char_indices()
             .find_map(|(offset, ch)| {
-                if !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-' && ch != '.' {
+                if !is_jwt_segment_char(ch) {
                     Some(jwt_start + offset)
                 } else {
                     None
@@ -835,6 +986,222 @@ fn redact_jwt_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (String, b
     } else {
         (input.to_owned(), false)
     }
+}
+
+fn is_jwt_segment_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')
+}
+
+fn redact_high_entropy_secret_values(
+    input: &str,
+    reasons: &mut Vec<&'static str>,
+) -> (String, bool) {
+    let mut output = String::new();
+    let mut emit_start = 0;
+    let mut changed = false;
+    let mut cursor = 0;
+    let placeholder = redaction_placeholder("high_entropy_secret");
+
+    while cursor < input.len() {
+        let Some((token_start, token_end)) = next_entropy_candidate(input, cursor) else {
+            break;
+        };
+        let candidate = &input[token_start..token_end];
+        if looks_like_high_entropy_secret(candidate)
+            && has_nearby_secret_keyword(input, token_start, token_end)
+        {
+            if !changed {
+                output = String::with_capacity(input.len());
+            }
+            output.push_str(&input[emit_start..token_start]);
+            output.push_str(&placeholder);
+            emit_start = token_end;
+            changed = true;
+        }
+        cursor = token_end;
+    }
+
+    if changed {
+        output.push_str(&input[emit_start..]);
+        reasons.push("high_entropy_secret");
+        (output, true)
+    } else {
+        (input.to_owned(), false)
+    }
+}
+
+fn next_entropy_candidate(input: &str, mut cursor: usize) -> Option<(usize, usize)> {
+    while cursor < input.len() {
+        let ch = input[cursor..].chars().next()?;
+        if is_entropy_candidate_char(ch) {
+            break;
+        }
+        cursor += ch.len_utf8();
+    }
+
+    if cursor >= input.len() {
+        return None;
+    }
+
+    let token_start = cursor;
+    while cursor < input.len() {
+        let Some(ch) = input[cursor..].chars().next() else {
+            break;
+        };
+        if !is_entropy_candidate_char(ch) {
+            break;
+        }
+        cursor += ch.len_utf8();
+    }
+
+    let token_end = trim_entropy_candidate_end(input, token_start, cursor);
+    if token_end <= token_start {
+        Some((token_start, cursor))
+    } else {
+        Some((token_start, token_end))
+    }
+}
+
+fn is_entropy_candidate_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '+' | '/' | '_' | '-' | '=')
+}
+
+fn trim_entropy_candidate_end(input: &str, token_start: usize, mut token_end: usize) -> usize {
+    while token_end > token_start
+        && matches!(
+            input.as_bytes().get(token_end - 1),
+            Some(b'.' | b',' | b';' | b':' | b'=')
+        )
+    {
+        token_end -= 1;
+    }
+    token_end
+}
+
+fn looks_like_high_entropy_secret(candidate: &str) -> bool {
+    let trimmed = candidate.trim_matches('=');
+    if trimmed.len() < 32 {
+        return false;
+    }
+
+    let unique_count = unique_ascii_byte_count(trimmed);
+    if trimmed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return unique_count >= 8;
+    }
+
+    unique_count >= 12 && entropy_candidate_class_count(trimmed) >= 3
+}
+
+fn unique_ascii_byte_count(input: &str) -> usize {
+    let mut seen = [false; 128];
+    let mut count = 0;
+    for byte in input.bytes().filter(u8::is_ascii) {
+        let index = usize::from(byte);
+        if !seen[index] {
+            seen[index] = true;
+            count += 1;
+        }
+    }
+    count
+}
+
+fn entropy_candidate_class_count(input: &str) -> usize {
+    let mut has_lower = false;
+    let mut has_upper = false;
+    let mut has_digit = false;
+    let mut has_symbol = false;
+
+    for byte in input.bytes() {
+        if byte.is_ascii_lowercase() {
+            has_lower = true;
+        } else if byte.is_ascii_uppercase() {
+            has_upper = true;
+        } else if byte.is_ascii_digit() {
+            has_digit = true;
+        } else {
+            has_symbol = true;
+        }
+    }
+
+    usize::from(has_lower)
+        + usize::from(has_upper)
+        + usize::from(has_digit)
+        + usize::from(has_symbol)
+}
+
+fn has_nearby_secret_keyword(input: &str, token_start: usize, token_end: usize) -> bool {
+    let before_start = previous_char_boundary(input, token_start.saturating_sub(64));
+    let after_end = next_char_boundary(input, (token_end + 32).min(input.len()));
+    contains_secret_keyword(&input[before_start..token_start])
+        || contains_secret_keyword(&input[token_end..after_end])
+}
+
+fn previous_char_boundary(input: &str, mut index: usize) -> usize {
+    while index > 0 && !input.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn next_char_boundary(input: &str, mut index: usize) -> usize {
+    while index < input.len() && !input.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
+fn contains_secret_keyword(input: &str) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "access token",
+        "account key",
+        "api key",
+        "auth token",
+        "credential",
+        "encryption key",
+        "master key",
+        "oauth",
+        "refresh token",
+        "secret",
+        "service account",
+        "session token",
+        "signing key",
+        "token",
+        "webhook secret",
+        "accountkey",
+        "connectionstring",
+    ];
+
+    let lower = input.to_ascii_lowercase();
+    KEYWORDS
+        .iter()
+        .any(|keyword| contains_bounded_phrase(&lower, keyword))
+}
+
+fn contains_bounded_phrase(input: &str, phrase: &str) -> bool {
+    let mut search_start = 0;
+    while search_start < input.len() {
+        let Some(relative) = input[search_start..].find(phrase) else {
+            return false;
+        };
+        let start = search_start + relative;
+        let end = start + phrase.len();
+        if is_phrase_boundary(input.as_bytes(), start, end) {
+            return true;
+        }
+        search_start = end;
+    }
+    false
+}
+
+fn is_phrase_boundary(bytes: &[u8], start: usize, end: usize) -> bool {
+    let before_ok = start == 0
+        || bytes
+            .get(start.saturating_sub(1))
+            .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_');
+    let after_ok = bytes
+        .get(end)
+        .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_');
+    before_ok && after_ok
 }
 
 fn redact_pii_values(input: &str, reasons: &mut Vec<&'static str>) -> (String, bool) {
@@ -1141,6 +1508,20 @@ mod tests {
         }
         value.extend(std::iter::repeat_n('A', suffix_len));
         value
+    }
+
+    fn synthetic_hex_secret(len: usize) -> String {
+        const HEX: &[u8] = b"0123456789abcdef";
+        (0..len)
+            .map(|index| char::from(HEX[index % HEX.len()]))
+            .collect()
+    }
+
+    fn synthetic_base64_secret(len: usize) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        (0..len)
+            .map(|index| char::from(ALPHABET[(index * 17 + 5) % ALPHABET.len()]))
+            .collect()
     }
 
     fn append_malformed_jwt_prefixes(input: &mut String, count: usize) {
@@ -1477,6 +1858,109 @@ mod tests {
         assert!(report.redacted);
         assert!(report.redacted_reasons.contains(&"gcp_api_key"));
         assert!(!report.content.contains(&gcp));
+    }
+
+    #[test]
+    fn secret_redactor_masks_oauth_session_and_service_account_key_values() {
+        let access = "access-token-value";
+        let refresh = "refresh-token-value";
+        let session = "session-token-value";
+        let service_account = "service-account-json-value";
+        let account_key = "azure-account-key-value";
+        let report = redact_secret_like_content(&format!(
+            "access_token={access} refresh_token:{refresh} session_secret={session} \
+             service_account_json={service_account} AccountKey={account_key}"
+        ));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"oauth_access_token"));
+        assert!(report.redacted_reasons.contains(&"oauth_refresh_token"));
+        assert!(report.redacted_reasons.contains(&"session_secret"));
+        assert!(report.redacted_reasons.contains(&"service_account_json"));
+        assert!(report.redacted_reasons.contains(&"azure_account_key"));
+        assert!(!report.content.contains(access));
+        assert!(!report.content.contains(refresh));
+        assert!(!report.content.contains(session));
+        assert!(!report.content.contains(service_account));
+        assert!(!report.content.contains(account_key));
+    }
+
+    #[test]
+    fn secret_redactor_masks_raw_service_tokens() {
+        let slack = synthetic_raw_value(&["x", "o", "x", "b", "-"], 32);
+        let npm = synthetic_raw_value(&["n", "p", "m", "_"], 24);
+        let huggingface = synthetic_raw_value(&["h", "f", "_"], 24);
+        let pypi = synthetic_raw_value(&["p", "y", "p", "i", "-"], 32);
+        let twilio = synthetic_raw_value(&["A", "C"], 32);
+        let square = synthetic_raw_value(&["s", "q", "0", "c", "s", "p", "-"], 24);
+        let report = redact_secret_like_content(&format!(
+            "Service tokens: {slack} {npm} {huggingface} {pypi} {twilio} {square}"
+        ));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"slack_token"));
+        assert!(report.redacted_reasons.contains(&"npm_token"));
+        assert!(report.redacted_reasons.contains(&"huggingface_token"));
+        assert!(report.redacted_reasons.contains(&"pypi_token"));
+        assert!(report.redacted_reasons.contains(&"twilio_account_sid"));
+        assert!(report.redacted_reasons.contains(&"square_token"));
+        for raw in [&slack, &npm, &huggingface, &pypi, &twilio, &square] {
+            assert!(!report.content.contains(raw));
+        }
+    }
+
+    #[test]
+    fn secret_redactor_masks_dot_delimited_raw_tokens_without_eating_punctuation() {
+        let sendgrid = format!(
+            "SG.{}.{}",
+            synthetic_raw_value(&[""], 12),
+            synthetic_raw_value(&[""], 32)
+        );
+        let mailgun_private = synthetic_raw_value(&["k", "e", "y", "-"], 32);
+        let mailgun_public = synthetic_raw_value(&["p", "u", "b", "k", "e", "y", "-"], 32);
+        let report = redact_secret_like_content(&format!(
+            "Sendgrid {sendgrid}; Mailgun {mailgun_private} and {mailgun_public}."
+        ));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"sendgrid_api_key"));
+        assert!(report.redacted_reasons.contains(&"mailgun_key"));
+        assert!(!report.content.contains(&sendgrid));
+        assert!(!report.content.contains(&mailgun_private));
+        assert!(!report.content.contains(&mailgun_public));
+        assert!(
+            report.content.ends_with('.'),
+            "raw-token redaction should not consume trailing sentence punctuation: {}",
+            report.content
+        );
+    }
+
+    #[test]
+    fn secret_redactor_masks_high_entropy_values_adjacent_to_secret_keywords() {
+        let hex_secret = synthetic_hex_secret(48);
+        let base64_secret = synthetic_base64_secret(48);
+        let report = redact_secret_like_content(&format!(
+            "Azure account key {hex_secret}; webhook secret: {base64_secret}"
+        ));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"high_entropy_secret"));
+        assert!(
+            report
+                .content
+                .contains(&redaction_placeholder("high_entropy_secret"))
+        );
+        assert!(!report.content.contains(&hex_secret));
+        assert!(!report.content.contains(&base64_secret));
+    }
+
+    #[test]
+    fn secret_redactor_does_not_mask_high_entropy_values_without_secret_context() {
+        let public_hash = synthetic_hex_secret(48);
+        let report = redact_secret_like_content(&format!("Artifact digest {public_hash}."));
+
+        assert!(!report.redacted);
+        assert!(report.content.contains(&public_hash));
     }
 
     #[test]

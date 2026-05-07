@@ -6380,8 +6380,8 @@ impl DbConnection {
         let mut counts = FeedbackCounts::default();
         for row in &rows {
             let signal = optional_text(row, 0)?.unwrap_or_default();
-            let weight = row.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-            let count = row.get(2).and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+            let weight = required_f64(row, 1, DbOperation::Query, "weight")? as f32;
+            let count = required_u32(row, 2, DbOperation::Query, "count")?;
 
             match signal {
                 "positive" | "helpful" | "confirmation" => {
@@ -7608,7 +7608,7 @@ impl DbConnection {
         rows.iter()
             .map(|row| {
                 let tag = required_text(row, 0, DbOperation::Query, "tag")?.to_string();
-                let count = required_i64(row, 1, DbOperation::Query, "count")? as u32;
+                let count = required_u32(row, 1, DbOperation::Query, "count")?;
                 Ok(TagCount { tag, count })
             })
             .collect()
@@ -10192,14 +10192,10 @@ fn stored_pack_record_from_row(row: &Row) -> Result<StoredPackRecord> {
         workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
         query: required_text(row, 2, DbOperation::Query, "query")?.to_string(),
         profile: required_text(row, 3, DbOperation::Query, "profile")?.to_string(),
-        max_tokens: u32::try_from(required_i64(row, 4, DbOperation::Query, "max_tokens")?)
-            .unwrap_or(0),
-        used_tokens: u32::try_from(required_i64(row, 5, DbOperation::Query, "used_tokens")?)
-            .unwrap_or(0),
-        item_count: u32::try_from(required_i64(row, 6, DbOperation::Query, "item_count")?)
-            .unwrap_or(0),
-        omitted_count: u32::try_from(required_i64(row, 7, DbOperation::Query, "omitted_count")?)
-            .unwrap_or(0),
+        max_tokens: required_u32(row, 4, DbOperation::Query, "max_tokens")?,
+        used_tokens: required_u32(row, 5, DbOperation::Query, "used_tokens")?,
+        item_count: required_u32(row, 6, DbOperation::Query, "item_count")?,
+        omitted_count: required_u32(row, 7, DbOperation::Query, "omitted_count")?,
         pack_hash: required_text(row, 8, DbOperation::Query, "pack_hash")?.to_string(),
         degraded_json: optional_text(row, 9)?.map(str::to_string),
         created_at: required_text(row, 10, DbOperation::Query, "created_at")?.to_string(),
@@ -10215,16 +10211,9 @@ fn stored_pack_item_from_joined_row(row: &Row, offset: usize) -> Result<StoredPa
     Ok(StoredPackItem {
         pack_id: required_text(row, offset, DbOperation::Query, "pack_id")?.to_string(),
         memory_id: required_text(row, offset + 1, DbOperation::Query, "memory_id")?.to_string(),
-        rank: u32::try_from(required_i64(row, offset + 2, DbOperation::Query, "rank")?)
-            .unwrap_or(0),
+        rank: required_u32(row, offset + 2, DbOperation::Query, "rank")?,
         section: required_text(row, offset + 3, DbOperation::Query, "section")?.to_string(),
-        estimated_tokens: u32::try_from(required_i64(
-            row,
-            offset + 4,
-            DbOperation::Query,
-            "estimated_tokens",
-        )?)
-        .unwrap_or(0),
+        estimated_tokens: required_u32(row, offset + 4, DbOperation::Query, "estimated_tokens")?,
         relevance: required_f64(row, offset + 5, DbOperation::Query, "relevance")? as f32,
         utility: required_f64(row, offset + 6, DbOperation::Query, "utility")? as f32,
         why: required_text(row, offset + 7, DbOperation::Query, "why")?.to_string(),
@@ -11400,7 +11389,7 @@ fn stored_task_episode_from_row(row: &Row) -> Result<StoredTaskEpisode> {
         outcome_details: optional_text(row, 8)?.map(str::to_string),
         started_at: required_text(row, 9, DbOperation::Query, "started_at")?.to_string(),
         ended_at: optional_text(row, 10)?.map(str::to_string),
-        duration_ms: row.get(11).and_then(|v| v.as_i64()).map(|i| i as u64),
+        duration_ms: optional_u64(row, 11, DbOperation::Query, "duration_ms")?,
         agent: optional_text(row, 12)?.map(str::to_string),
         episode_hash: optional_text(row, 13)?.map(str::to_string),
         created_at: required_text(row, 14, DbOperation::Query, "created_at")?.to_string(),

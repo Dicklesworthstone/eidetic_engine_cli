@@ -2123,6 +2123,7 @@ mod tests {
             db_generation: Some(12),
             index_generation: Some(9),
             last_rebuild_at: Some("2026-04-30T12:00:00Z".to_string()),
+            last_check_error: None,
             repair_hint: Some("ee index rebuild --workspace ."),
             elapsed_ms: 1.0,
         };

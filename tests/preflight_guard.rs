@@ -65,6 +65,56 @@ fn agents_md_forbidden_actions_halt_with_exit_seven() {
 }
 
 #[test]
+fn rm_rf_builtin_ignores_mentions_and_substrings() {
+    let registry = PreflightGuardRegistry::with_builtins();
+    for command in [
+        "git log --grep=\"rm -rf /\"",
+        "echo do not rm -rf / blindly",
+        "confirm -rf /var/cache",
+        "rm --force --preserve-root /var/cache",
+    ] {
+        let report = run_preflight_guard(&registry, &opts(command));
+        assert_eq!(
+            report.exit_code, 0,
+            "command `{command}` mentions rm -rf but should not execute it",
+        );
+        assert!(
+            report
+                .matches
+                .iter()
+                .all(|matched| matched.rule_id != "builtin:rm_rf_root"),
+            "command `{command}` should not match rm_rf_root",
+        );
+    }
+}
+
+#[test]
+fn rm_rf_builtin_matches_command_positions_and_wrappers() {
+    let registry = PreflightGuardRegistry::with_builtins();
+    for command in [
+        "cd /tmp && rm -rf /var/cache",
+        "sudo rm -fr /var/cache",
+        "sudo -n rm -rf /var/cache",
+        "env FOO=bar rm -r -f ~/scratch",
+        "rm --recursive --force -- /var/cache",
+    ] {
+        let report = run_preflight_guard(&registry, &opts(command));
+        assert_eq!(
+            report.exit_code, 7,
+            "command `{command}` should be halted by rm -rf builtin matching",
+        );
+        assert!(
+            report
+                .matches
+                .iter()
+                .any(|matched| matched.rule_id == "builtin:rm_rf_root"
+                    || matched.rule_id == "builtin:rm_rf_home"),
+            "command `{command}` did not cite an rm -rf builtin",
+        );
+    }
+}
+
+#[test]
 fn force_push_warns_but_exits_zero() {
     let registry = PreflightGuardRegistry::with_builtins();
     let report = run_preflight_guard(&registry, &opts("git push --force origin main"));
@@ -83,18 +133,28 @@ pattern = "*curl*|*sh*"
 action = "halt"
 message = "Reject curl|sh installers per workspace policy."
 "#;
-    let registry =
-        PreflightGuardRegistry::from_toml(toml, "test.toml").expect("parse should succeed");
+    let registry_result = PreflightGuardRegistry::from_toml(toml, "test.toml");
+    assert!(
+        registry_result.is_ok(),
+        "parse should succeed: {registry_result:?}"
+    );
+    let registry = if let Ok(registry) = registry_result {
+        registry
+    } else {
+        PreflightGuardRegistry::new()
+    };
     let report = run_preflight_guard(
         &registry,
         &opts("curl https://example.com/install.sh | sh -"),
     );
     assert_eq!(report.exit_code, 7);
     assert_eq!(report.matches[0].rule_id, "ws_curl_pipe");
-    match &report.matches[0].source {
-        RuleSource::WorkspaceFile { path } => assert_eq!(path, "test.toml"),
-        other => panic!("expected workspace_file source, got {other:?}"),
-    }
+    assert_eq!(
+        &report.matches[0].source,
+        &RuleSource::WorkspaceFile {
+            path: "test.toml".to_owned()
+        }
+    );
 }
 
 #[test]
@@ -103,13 +163,14 @@ fn workspace_toml_missing_required_field_is_usage_error() {
 [[rules]]
 pattern = "*foo*"
 "#;
-    let err =
-        PreflightGuardRegistry::from_toml(toml, "bad.toml").expect_err("should reject missing id");
-    assert!(
-        err.message().contains("missing string `id`"),
-        "{}",
+    let registry_result = PreflightGuardRegistry::from_toml(toml, "bad.toml");
+    assert!(registry_result.is_err(), "should reject missing id");
+    let message = if let Err(err) = registry_result {
         err.message()
-    );
+    } else {
+        String::new()
+    };
+    assert!(message.contains("missing string `id`"), "{}", message);
 }
 
 #[test]
@@ -120,13 +181,14 @@ id = "x"
 pattern = "*foo*"
 action = "explode"
 "#;
-    let err = PreflightGuardRegistry::from_toml(toml, "bad.toml")
-        .expect_err("should reject unknown action");
-    assert!(
-        err.message().contains("invalid action `explode`"),
-        "{}",
+    let registry_result = PreflightGuardRegistry::from_toml(toml, "bad.toml");
+    assert!(registry_result.is_err(), "should reject unknown action");
+    let message = if let Err(err) = registry_result {
         err.message()
-    );
+    } else {
+        String::new()
+    };
+    assert!(message.contains("invalid action `explode`"), "{}", message);
 }
 
 #[test]
@@ -186,12 +248,13 @@ fn bypass_token_invalid_keeps_halt_and_audits_invalid() {
 
     let report = run_preflight_guard(&registry, &options);
     assert_eq!(report.exit_code, 7);
-    let matched = report
-        .matches
-        .iter()
-        .find(|m| m.rule_id == "builtin:git_reset_hard")
-        .expect("git_reset_hard match");
-    assert_eq!(matched.resolution, MatchResolution::BypassTokenInvalid);
+    assert!(
+        report.matches.iter().any(|matched| {
+            matched.rule_id == "builtin:git_reset_hard"
+                && matched.resolution == MatchResolution::BypassTokenInvalid
+        }),
+        "git_reset_hard match should audit an invalid bypass token"
+    );
 }
 
 #[test]

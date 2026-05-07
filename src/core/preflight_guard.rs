@@ -175,8 +175,196 @@ impl PreflightGuardRegistry {
     pub fn match_command(&self, command: &str) -> Vec<&PreflightGuardRule> {
         self.rules
             .iter()
-            .filter(|rule| glob_match(&rule.pattern, command))
+            .filter(|rule| rule_matches_command(rule, command))
             .collect()
+    }
+}
+
+fn rule_matches_command(rule: &PreflightGuardRule, command: &str) -> bool {
+    if let RuleSource::Builtin { name } = &rule.source {
+        match name.as_str() {
+            "rm_rf_root" => return matches_rm_rf_target(command, RmTargetClass::Absolute),
+            "rm_rf_home" => return matches_rm_rf_target(command, RmTargetClass::Home),
+            _ => {}
+        }
+    }
+    glob_match(&rule.pattern, command)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RmTargetClass {
+    Absolute,
+    Home,
+}
+
+fn matches_rm_rf_target(command: &str, target_class: RmTargetClass) -> bool {
+    shell_command_segments(command)
+        .iter()
+        .any(|segment| rm_segment_matches_target(segment, target_class))
+}
+
+fn rm_segment_matches_target(segment: &[String], target_class: RmTargetClass) -> bool {
+    let Some(command_index) = shell_segment_command_index(segment) else {
+        return false;
+    };
+    if segment.get(command_index).is_none_or(|word| word != "rm") {
+        return false;
+    }
+
+    let mut has_recursive = false;
+    let mut has_force = false;
+    let mut saw_option_end = false;
+    let mut targets = Vec::new();
+
+    for word in segment.iter().skip(command_index + 1) {
+        if !saw_option_end && word == "--" {
+            saw_option_end = true;
+            continue;
+        }
+        if !saw_option_end && word.starts_with('-') && word != "-" {
+            if rm_option_has_recursive(word) {
+                has_recursive = true;
+            }
+            if rm_option_has_force(word) {
+                has_force = true;
+            }
+            continue;
+        }
+        targets.push(word.as_str());
+    }
+
+    has_recursive
+        && has_force
+        && targets
+            .iter()
+            .any(|target| rm_target_matches_class(target, target_class))
+}
+
+fn shell_segment_command_index(segment: &[String]) -> Option<usize> {
+    let mut index = 0;
+    while index < segment.len() {
+        let word = &segment[index];
+        if word == "sudo" {
+            index += 1;
+            while segment
+                .get(index)
+                .is_some_and(|candidate| candidate.starts_with('-'))
+            {
+                index += 1;
+            }
+            continue;
+        }
+        if word == "command" || word == "builtin" {
+            index += 1;
+            continue;
+        }
+        if word == "env" {
+            index += 1;
+            while segment
+                .get(index)
+                .is_some_and(|candidate| looks_like_env_assignment(candidate))
+            {
+                index += 1;
+            }
+            continue;
+        }
+        if looks_like_env_assignment(word) {
+            index += 1;
+            continue;
+        }
+        return Some(index);
+    }
+    None
+}
+
+fn looks_like_env_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn rm_option_has_recursive(option: &str) -> bool {
+    if option.starts_with("--") {
+        option == "--recursive"
+    } else {
+        option[1..].chars().any(|ch| matches!(ch, 'r' | 'R'))
+    }
+}
+
+fn rm_option_has_force(option: &str) -> bool {
+    if option.starts_with("--") {
+        option == "--force"
+    } else {
+        option[1..].chars().any(|ch| ch == 'f')
+    }
+}
+
+fn rm_target_matches_class(target: &str, target_class: RmTargetClass) -> bool {
+    match target_class {
+        RmTargetClass::Absolute => target.starts_with('/'),
+        RmTargetClass::Home => target.starts_with('~'),
+    }
+}
+
+fn shell_command_segments(command: &str) -> Vec<Vec<String>> {
+    let mut segments = Vec::new();
+    let mut current_segment = Vec::new();
+    let mut current_word = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for ch in command.chars() {
+        if escaped {
+            current_word.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(quote_ch) = quote {
+            if ch == quote_ch {
+                quote = None;
+            } else {
+                current_word.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            ';' | '|' | '&' => {
+                finish_shell_word(&mut current_word, &mut current_segment);
+                finish_shell_segment(&mut current_segment, &mut segments);
+            }
+            ch if ch.is_whitespace() => finish_shell_word(&mut current_word, &mut current_segment),
+            _ => current_word.push(ch),
+        }
+    }
+
+    if escaped {
+        current_word.push('\\');
+    }
+    finish_shell_word(&mut current_word, &mut current_segment);
+    finish_shell_segment(&mut current_segment, &mut segments);
+    segments
+}
+
+fn finish_shell_word(current_word: &mut String, current_segment: &mut Vec<String>) {
+    if !current_word.is_empty() {
+        current_segment.push(std::mem::take(current_word));
+    }
+}
+
+fn finish_shell_segment(current_segment: &mut Vec<String>, segments: &mut Vec<Vec<String>>) {
+    if !current_segment.is_empty() {
+        segments.push(std::mem::take(current_segment));
     }
 }
 
@@ -730,18 +918,28 @@ pattern = "*curl*|*sh*"
 action = "halt"
 message = "Reject curl|sh installers per workspace policy."
 "#;
-        let registry =
-            PreflightGuardRegistry::from_toml(toml, "test.toml").expect("parse should succeed");
+        let registry_result = PreflightGuardRegistry::from_toml(toml, "test.toml");
+        assert!(
+            registry_result.is_ok(),
+            "parse should succeed: {registry_result:?}"
+        );
+        let registry = if let Ok(registry) = registry_result {
+            registry
+        } else {
+            PreflightGuardRegistry::new()
+        };
         let report = run_preflight_guard(
             &registry,
             &opts("curl https://example.com/install.sh | sh -"),
         );
         assert_eq!(report.exit_code, 7);
         assert_eq!(report.matches[0].rule_id, "ws_curl_pipe");
-        match &report.matches[0].source {
-            RuleSource::WorkspaceFile { path } => assert_eq!(path, "test.toml"),
-            other => panic!("expected workspace_file source, got {other:?}"),
-        }
+        assert_eq!(
+            &report.matches[0].source,
+            &RuleSource::WorkspaceFile {
+                path: "test.toml".to_owned()
+            }
+        );
     }
 
     #[test]
@@ -750,9 +948,13 @@ message = "Reject curl|sh installers per workspace policy."
 [[rules]]
 pattern = "*foo*"
 "#;
-        let err = PreflightGuardRegistry::from_toml(toml, "bad.toml")
-            .expect_err("should reject missing id");
-        let message = err.message();
+        let registry_result = PreflightGuardRegistry::from_toml(toml, "bad.toml");
+        assert!(registry_result.is_err(), "should reject missing id");
+        let message = if let Err(err) = registry_result {
+            err.message()
+        } else {
+            String::new()
+        };
         assert!(message.contains("missing string `id`"), "{message}");
     }
 
@@ -764,9 +966,13 @@ id = "x"
 pattern = "*foo*"
 action = "explode"
 "#;
-        let err = PreflightGuardRegistry::from_toml(toml, "bad.toml")
-            .expect_err("should reject unknown action");
-        let message = err.message();
+        let registry_result = PreflightGuardRegistry::from_toml(toml, "bad.toml");
+        assert!(registry_result.is_err(), "should reject unknown action");
+        let message = if let Err(err) = registry_result {
+            err.message()
+        } else {
+            String::new()
+        };
         assert!(message.contains("invalid action `explode`"), "{message}");
     }
 
@@ -798,6 +1004,37 @@ action = "explode"
                     .any(|m| matches!(m.source, RuleSource::Builtin { .. })),
                 "command `{command}` did not cite a builtin rule",
             );
+        }
+    }
+
+    #[test]
+    fn builtin_rm_rf_rules_require_command_position() {
+        let registry = PreflightGuardRegistry::with_builtins();
+
+        for command in [
+            "git log --grep=\"rm -rf /\"",
+            "echo do not rm -rf / blindly",
+            "confirm -rf /var/cache",
+            "rm --force --preserve-root /var/cache",
+        ] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            assert_eq!(report.exit_code, 0, "command `{command}` should pass");
+            assert!(report.matches.iter().all(|matched| {
+                matched.rule_id != "builtin:rm_rf_root" && matched.rule_id != "builtin:rm_rf_home"
+            }));
+        }
+
+        for command in [
+            "cd /tmp && rm -rf /var/cache",
+            "sudo rm -fr /var/cache",
+            "sudo -n rm -rf /var/cache",
+            "env FOO=bar rm -r -f ~/scratch",
+        ] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+            assert!(report.matches.iter().any(|matched| {
+                matched.rule_id == "builtin:rm_rf_root" || matched.rule_id == "builtin:rm_rf_home"
+            }));
         }
     }
 
