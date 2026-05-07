@@ -542,19 +542,13 @@ fn workspace_scope_fields(scope: &WorkspaceScope) -> WorkspaceScopeFields {
 }
 
 fn upsert_workspace_row(conn: &DbConnection, target: &StoredWorkspace) -> crate::db::Result<()> {
-    if conn.get_workspace(&target.id)?.is_some() {
-        return Ok(());
-    }
-    if conn.get_workspace_by_path(&target.path)?.is_some() {
-        return Ok(());
-    }
     let scope = WorkspaceScopeFields {
         scope_kind: target.scope_kind.clone(),
         repository_root: target.repository_root.clone(),
         repository_fingerprint: target.repository_fingerprint.clone(),
         subproject_path: target.subproject_path.clone(),
     };
-    conn.insert_workspace_with_scope(
+    conn.upsert_workspace_with_scope(
         &target.id,
         &CreateWorkspaceInput {
             path: target.path.clone(),
