@@ -669,6 +669,9 @@ fn normalize_alias(raw: &str) -> Result<String, String> {
     if alias == "." || alias == ".." {
         return Err("workspace alias cannot be `.` or `..`".to_string());
     }
+    if alias.starts_with('.') {
+        return Err("workspace alias cannot start with `.`".to_string());
+    }
     if alias.len() > 64 {
         return Err("workspace alias cannot exceed 64 bytes".to_string());
     }
@@ -778,8 +781,14 @@ mod tests {
     #[test]
     fn alias_validation_rejects_paths() {
         assert!(normalize_alias("client-api").is_ok());
+        assert!(normalize_alias("client.api").is_ok());
         assert!(normalize_alias("client/api").is_err());
         assert!(normalize_alias(".").is_err());
+        assert!(normalize_alias("..").is_err());
+        assert!(normalize_alias("...").is_err());
+        assert!(normalize_alias("..foo").is_err());
+        assert!(normalize_alias(".bar.").is_err());
+        assert!(normalize_alias("foo..").is_ok());
     }
 
     #[test]
