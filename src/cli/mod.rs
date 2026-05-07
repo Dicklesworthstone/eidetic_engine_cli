@@ -23382,7 +23382,10 @@ mod tests {
             &serde_json::json!("ee.error.v1"),
             "error schema",
         )?;
-        ensure_equal(&json["success"], &serde_json::json!(false), "success flag")?;
+        ensure(
+            json.get("success").is_none(),
+            "ee.error.v1 must not include response success flag",
+        )?;
         ensure(
             json["error"]["code"].as_str().is_some(),
             "learn experiment propose error has code",

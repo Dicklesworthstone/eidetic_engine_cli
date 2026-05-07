@@ -4609,6 +4609,7 @@ mod tests {
     };
     use asupersync::runtime::JoinError;
     use asupersync::{Budget, CancelReason, Cx, LabConfig, LabRuntime, Outcome};
+    use std::sync::{Arc, Mutex as StdMutex};
 
     type TestResult = Result<(), String>;
 
@@ -5981,6 +5982,8 @@ mod tests {
         options.interval_ms = 1_000;
         options.tick_limit = 2;
         options.job_types = vec![JobType::HealthCheck];
+        let observed_cx: Arc<StdMutex<Option<Cx>>> = Arc::new(StdMutex::new(None));
+        let observed_cx_for_task = Arc::clone(&observed_cx);
 
         let (task_id, mut handle) = lab
             .state
@@ -5988,6 +5991,12 @@ mod tests {
                 let Some(cx) = Cx::current() else {
                     return Outcome::Err("LabRuntime task should install Cx".to_owned());
                 };
+                {
+                    let Ok(mut slot) = observed_cx_for_task.lock() else {
+                        return Outcome::Err("daemon cancellation Cx slot poisoned".to_owned());
+                    };
+                    *slot = Some(cx.clone());
+                }
                 run_daemon_foreground_supervised(&cx, &options).await
             })
             .map_err(|error| error.to_string())?;
@@ -6007,25 +6016,40 @@ mod tests {
         lab.advance_time(1_000_000_000);
         lab.run_until_quiescent();
 
-        match handle.try_join() {
-            Ok(Some(Outcome::Cancelled(reason))) | Err(JoinError::Cancelled(reason)) => {
-                let golden = json!({
-                    "schema": "ee.steward.daemon_cancellation_golden.v1",
-                    "outcome": "cancelled",
-                    "reason": "daemon cancellation test",
-                });
-                let actual = json!({
-                    "schema": "ee.steward.daemon_cancellation_golden.v1",
-                    "outcome": "cancelled",
-                    "reason": reason.message.as_deref(),
-                });
-                ensure(actual, golden, "daemon cancellation golden")
+        let cancellation_reason = match handle.try_join() {
+            Ok(Some(Outcome::Cancelled(reason))) => reason,
+            Err(JoinError::Cancelled(reason))
+                if reason.message.as_deref() == Some("join channel closed") =>
+            {
+                observed_cx
+                    .lock()
+                    .map_err(|_| "daemon cancellation Cx slot poisoned".to_owned())?
+                    .as_ref()
+                    .and_then(Cx::cancel_reason)
+                    .ok_or_else(|| "daemon cancellation reason missing from Cx".to_owned())?
             }
-            Ok(Some(other)) => Err(format!(
-                "daemon cancellation outcome was not cancelled: {other:?}"
-            )),
-            Ok(None) => Err("daemon cancellation task did not finish".to_owned()),
-            Err(error) => Err(format!("daemon cancellation join failed: {error}")),
+            Err(JoinError::Cancelled(reason)) => reason,
+            Ok(Some(other)) => {
+                return Err(format!(
+                    "daemon cancellation outcome was not cancelled: {other:?}"
+                ));
+            }
+            Ok(None) => return Err("daemon cancellation task did not finish".to_owned()),
+            Err(error) => return Err(format!("daemon cancellation join failed: {error}")),
+        };
+
+        {
+            let golden = json!({
+                "schema": "ee.steward.daemon_cancellation_golden.v1",
+                "outcome": "cancelled",
+                "reason": "daemon cancellation test",
+            });
+            let actual = json!({
+                "schema": "ee.steward.daemon_cancellation_golden.v1",
+                "outcome": "cancelled",
+                "reason": cancellation_reason.message.as_deref(),
+            });
+            ensure(actual, golden, "daemon cancellation golden")
         }
     }
 
