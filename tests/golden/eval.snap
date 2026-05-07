@@ -1,0 +1,20 @@
+---
+source: src/eval/runner.rs
+assertion: eval commands use deterministic fixtures and metrics
+schema:
+  fixture: ee.eval_fixture.v1
+  source_memory: ee.eval_source_memory.v1
+  report: ee.eval.report.v1
+contracts:
+  - eval list enumerates fixtures from tests/fixtures/eval/
+  - eval run loads scenario.json and source_memory.json per fixture
+  - same fixture yields byte-identical JSON report
+  - precision_at_k, ndcg_at_k, mrr computed for each query
+  - missing fixture returns clear error with repair hint
+  - malformed fixture returns parse error with path
+evidence:
+  - FixtureScenario.fixture_id
+  - FixtureScenario.journey
+  - SourceMemory.memory_id
+  - EvalRunReport.metrics
+  - EvalRunReport.data_hash
