@@ -24,11 +24,15 @@
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Instant;
 
 use crate::config::WorkspaceLocation;
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
-use crate::core::search::{SearchError, SearchOptions, SearchStatus, run_search};
+use crate::core::search::{
+    PERFORMANCE_EXPLAIN_SCHEMA_V1, SearchError, SearchOptions, SearchReport, SearchStatus,
+    elapsed_timing_json, performance_redaction_json, query_observation_json, run_search,
+};
 use crate::db::{
     CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, DbConnection, StoredMemory,
 };
@@ -271,6 +275,53 @@ pub struct ContextPackOptions {
     pub candidate_pool: Option<u32>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContextPackPerformanceRun {
+    pub response: ContextResponse,
+    pub performance: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ContextPerformanceTrace {
+    db_open_count: usize,
+    index_status_checks: usize,
+    pack_record_writes: usize,
+    filter_input_count: usize,
+    filtered_count: usize,
+    focus_state_read_attempts: usize,
+    focus_state_hits: usize,
+    focus_candidate_count: usize,
+    candidate_resolution: CandidateResolutionMetrics,
+    timings: Vec<PerformanceTiming>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct CandidateResolutionMetrics {
+    search_hits: usize,
+    artifact_link_lookups: usize,
+    resolved_memory_ids: usize,
+    unique_memory_ids: usize,
+    memory_batch_reads: usize,
+    tag_batch_reads: usize,
+    converted_candidates: usize,
+    skipped_candidates: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PerformanceTiming {
+    name: &'static str,
+    elapsed: std::time::Duration,
+}
+
+impl ContextPerformanceTrace {
+    fn record_elapsed(&mut self, name: &'static str, start: Instant) {
+        self.timings.push(PerformanceTiming {
+            name,
+            elapsed: start.elapsed(),
+        });
+    }
+}
+
 #[derive(Debug)]
 pub enum ContextPackError {
     Storage(String),
@@ -301,6 +352,17 @@ impl std::fmt::Display for ContextPackError {
 impl std::error::Error for ContextPackError {}
 
 pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse, ContextPackError> {
+    run_context_pack_with_performance(options, "context").map(|run| run.response)
+}
+
+pub fn run_context_pack_with_performance(
+    options: &ContextPackOptions,
+    command: &'static str,
+) -> Result<ContextPackPerformanceRun, ContextPackError> {
+    let total_start = Instant::now();
+    let mut trace = ContextPerformanceTrace::default();
+
+    let request_start = Instant::now();
     let request = ContextRequest::new(ContextRequestInput {
         query: options.query.clone(),
         profile: options.profile,
@@ -309,6 +371,7 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
         sections: Vec::new(),
     })
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    trace.record_elapsed("requestValidate", request_start);
 
     let database_path = options
         .database_path
@@ -321,9 +384,13 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
         )));
     }
 
+    let db_open_start = Instant::now();
     let connection = DbConnection::open_file(&database_path)
         .map_err(|error| ContextPackError::Storage(format!("Failed to open database: {error}")))?;
+    trace.db_open_count = trace.db_open_count.saturating_add(1);
+    trace.record_elapsed("dbOpen", db_open_start);
 
+    let search_start = Instant::now();
     let mut search_report = run_search(&SearchOptions {
         workspace_path: options.workspace_path.clone(),
         database_path: Some(database_path),
@@ -334,6 +401,8 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
         explain: false,
     })
     .map_err(ContextPackError::Search)?;
+    trace.index_status_checks = trace.index_status_checks.saturating_add(1);
+    trace.record_elapsed("search", search_start);
 
     if search_report.status == SearchStatus::IndexError {
         return Err(ContextPackError::Search(SearchError::Index(
@@ -346,10 +415,12 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
     // Apply query filters to search results
     if !options.filters.is_empty() {
         let pre_filter_count = search_report.results.len();
+        trace.filter_input_count = pre_filter_count;
         search_report
             .results
             .retain(|hit| options.filters.matches(hit.metadata.as_ref()));
         let filtered_count = pre_filter_count - search_report.results.len();
+        trace.filtered_count = filtered_count;
         if filtered_count > 0 {
             push_degradation(
                 &mut degraded,
@@ -373,15 +444,25 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
         );
     }
 
-    let mut candidates = candidates_from_search(&connection, &search_report, &mut degraded);
+    let candidate_start = Instant::now();
+    let (mut candidates, candidate_metrics) =
+        candidates_from_search_with_metrics(&connection, &search_report, &mut degraded);
+    trace.candidate_resolution = candidate_metrics;
+    trace.record_elapsed("candidateResolution", candidate_start);
+
+    let focus_start = Instant::now();
+    trace.focus_state_read_attempts = trace.focus_state_read_attempts.saturating_add(1);
     match read_active_focus_state(&options.workspace_path) {
         Ok(Some(focus_state)) => {
-            candidates.extend(focus_candidates_from_state(
+            trace.focus_state_hits = trace.focus_state_hits.saturating_add(1);
+            let focus_candidates = focus_candidates_from_state(
                 &connection,
                 &options.workspace_path,
                 &focus_state,
                 &mut degraded,
-            ));
+            );
+            trace.focus_candidate_count = focus_candidates.len();
+            candidates.extend(focus_candidates);
         }
         Ok(None) => {}
         Err(error) => push_degradation(
@@ -392,6 +473,9 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
             Some("ee focus show --json".to_string()),
         ),
     }
+    trace.record_elapsed("focusState", focus_start);
+
+    let pack_start = Instant::now();
     let budget = match options.max_tokens {
         Some(max_tokens) => TokenBudget::new(max_tokens)
             .map_err(|error| ContextPackError::Pack(error.to_string()))?,
@@ -402,9 +486,12 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
             .map_err(|error| ContextPackError::Pack(error.to_string()))?;
 
     draft.hash = Some(compute_pack_hash(&request, &draft, &degraded));
+    trace.record_elapsed("packAssembly", pack_start);
 
     let mut response_degraded = degraded.clone();
 
+    let persist_start = Instant::now();
+    trace.pack_record_writes = trace.pack_record_writes.saturating_add(1);
     if let Err(persist_error) = persist_pack_record(
         &connection,
         &options.workspace_path,
@@ -420,9 +507,179 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
             Some("ee status --json".to_string()),
         );
     }
+    trace.record_elapsed("packPersistence", persist_start);
+    trace.record_elapsed("total", total_start);
 
-    ContextResponse::new(request, draft, response_degraded)
-        .map_err(|error| ContextPackError::Pack(error.to_string()))
+    let performance = context_performance_json(
+        command,
+        options,
+        &request,
+        &search_report,
+        &draft,
+        &response_degraded,
+        &trace,
+    );
+    let response = ContextResponse::new(request, draft, response_degraded)
+        .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+
+    Ok(ContextPackPerformanceRun {
+        response,
+        performance,
+    })
+}
+
+fn context_performance_json(
+    command: &'static str,
+    options: &ContextPackOptions,
+    request: &ContextRequest,
+    search_report: &SearchReport,
+    draft: &crate::pack::PackDraft,
+    degraded: &[ContextResponseDegradation],
+    trace: &ContextPerformanceTrace,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": PERFORMANCE_EXPLAIN_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "command": command,
+            "query": query_observation_json(&request.query),
+            "queryPlan": {
+                "retrievalMode": options.speed.as_str(),
+                "requestedCandidatePool": request.candidate_pool,
+                "effectiveCandidatePool": search_report.requested_limit,
+                "maxTokens": draft.budget.max_tokens(),
+                "profile": request.profile.as_str(),
+                "filtersApplied": !options.filters.is_empty(),
+            },
+            "dbReads": context_db_reads_json(trace),
+            "search": context_search_json(search_report, options.speed),
+            "candidates": candidate_resolution_json(trace),
+            "pack": context_pack_json(draft),
+            "cache": {
+                "status": "fallback",
+                "reason": "pack_cache_governor_not_enabled_for_context_command",
+                "selectedItemsUnaffected": true,
+            },
+            "graph": {
+                "status": "not_used",
+                "reason": "context_pack_did_not_request_graph_projection",
+            },
+            "timings": trace.timings.iter().map(performance_timing_json).collect::<Vec<_>>(),
+            "fallbacks": degraded.iter().map(context_degradation_json).collect::<Vec<_>>(),
+            "redaction": performance_redaction_json(),
+        },
+    })
+}
+
+fn context_db_reads_json(trace: &ContextPerformanceTrace) -> serde_json::Value {
+    serde_json::json!({
+        "dbOpenCount": trace.db_open_count,
+        "indexStatusChecks": trace.index_status_checks,
+        "memoryBatchReads": trace.candidate_resolution.memory_batch_reads,
+        "tagBatchReads": trace.candidate_resolution.tag_batch_reads,
+        "artifactLinkReads": trace.candidate_resolution.artifact_link_lookups,
+        "focusStateReads": trace.focus_state_read_attempts,
+        "packRecordWrites": trace.pack_record_writes,
+    })
+}
+
+fn context_search_json(
+    search_report: &SearchReport,
+    speed: crate::search::SpeedMode,
+) -> serde_json::Value {
+    let metrics = search_report.retrieval_metrics();
+    serde_json::json!({
+        "status": search_report.status.as_str(),
+        "requestedLimit": search_report.requested_limit,
+        "candidateBudget": speed.candidate_limit(),
+        "returnedHits": search_report.results.len(),
+        "usesEmbeddings": speed.uses_embeddings(),
+        "metrics": metrics.data_json(),
+        "degraded": search_report.degraded.iter().map(search_degradation_summary_json).collect::<Vec<_>>(),
+        "elapsed": elapsed_timing_json(search_report.elapsed_ms),
+    })
+}
+
+fn candidate_resolution_json(trace: &ContextPerformanceTrace) -> serde_json::Value {
+    let metrics = &trace.candidate_resolution;
+    serde_json::json!({
+        "searchHits": metrics.search_hits,
+        "resolvedMemoryIds": metrics.resolved_memory_ids,
+        "uniqueMemoryIds": metrics.unique_memory_ids,
+        "convertedCandidates": metrics.converted_candidates,
+        "skippedCandidates": metrics.skipped_candidates,
+        "filteredBeforeResolution": trace.filtered_count,
+        "filterInputCount": trace.filter_input_count,
+        "focusStateHits": trace.focus_state_hits,
+        "focusCandidateCount": trace.focus_candidate_count,
+    })
+}
+
+fn context_pack_json(draft: &crate::pack::PackDraft) -> serde_json::Value {
+    let quality = draft.quality_metrics();
+    serde_json::json!({
+        "profile": draft.selection_certificate.profile.as_str(),
+        "objective": draft.selection_certificate.objective.as_str(),
+        "algorithm": draft.selection_certificate.algorithm,
+        "candidateCount": draft.selection_certificate.candidate_count,
+        "selectedCount": draft.selection_certificate.selected_count,
+        "omittedCount": draft.selection_certificate.omitted_count,
+        "selectionSteps": draft.selection_certificate.steps.len(),
+        "tokenBudget": {
+            "limit": draft.selection_certificate.budget_limit,
+            "used": draft.selection_certificate.budget_used,
+            "utilization": quality.budget_utilization,
+        },
+        "pruning": {
+            "tokenBudgetExceeded": quality.omissions.token_budget_exceeded,
+            "redundantCandidates": quality.omissions.redundant_candidates,
+        },
+        "hashPresent": draft.hash.is_some(),
+    })
+}
+
+fn performance_timing_json(timing: &PerformanceTiming) -> serde_json::Value {
+    elapsed_timing_json(timing.elapsed.as_secs_f64() * 1000.0)
+        .as_object()
+        .map(|elapsed| {
+            let mut object = serde_json::Map::new();
+            object.insert(
+                "name".to_string(),
+                serde_json::Value::String(timing.name.to_string()),
+            );
+            for (key, value) in elapsed {
+                object.insert(key.clone(), value.clone());
+            }
+            serde_json::Value::Object(object)
+        })
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "name": timing.name,
+                "elapsedMs": 0.0,
+                "elapsedMsBucket": "lt_1ms",
+                "nondeterministic": true,
+            })
+        })
+}
+
+fn context_degradation_json(degraded: &ContextResponseDegradation) -> serde_json::Value {
+    serde_json::json!({
+        "code": &degraded.code,
+        "severity": degraded.severity.as_str(),
+        "message": &degraded.message,
+        "repair": &degraded.repair,
+    })
+}
+
+fn search_degradation_summary_json(
+    degraded: &crate::core::search::SearchDegradation,
+) -> serde_json::Value {
+    serde_json::json!({
+        "code": &degraded.code,
+        "severity": &degraded.severity,
+        "message": &degraded.message,
+        "repair": &degraded.repair,
+    })
 }
 
 fn persist_pack_record(
@@ -563,11 +820,16 @@ fn compute_pack_hash(
 }
 
 #[allow(clippy::type_complexity)]
-fn candidates_from_search(
+fn candidates_from_search_with_metrics(
     connection: &DbConnection,
     search_report: &crate::core::search::SearchReport,
     degraded: &mut Vec<ContextResponseDegradation>,
-) -> Vec<PackCandidate> {
+) -> (Vec<PackCandidate>, CandidateResolutionMetrics) {
+    let mut metrics = CandidateResolutionMetrics {
+        search_hits: search_report.results.len(),
+        ..CandidateResolutionMetrics::default()
+    };
+
     // Phase 1: Resolve all memory IDs from hits (including artifact links).
     // This still does per-hit artifact link lookups but avoids O(k) memory/tag lookups.
     let mut hit_resolutions: Vec<(
@@ -577,8 +839,14 @@ fn candidates_from_search(
     for hit in &search_report.results {
         let resolution = match MemoryId::from_str(&hit.doc_id) {
             Ok(id) => Some((id, None)),
-            Err(_) => artifact_linked_memory_id(connection, hit, degraded),
+            Err(_) => {
+                metrics.artifact_link_lookups = metrics.artifact_link_lookups.saturating_add(1);
+                artifact_linked_memory_id(connection, hit, degraded)
+            }
         };
+        if resolution.is_some() {
+            metrics.resolved_memory_ids = metrics.resolved_memory_ids.saturating_add(1);
+        }
         hit_resolutions.push((hit, resolution));
     }
 
@@ -587,15 +855,21 @@ fn candidates_from_search(
         .iter()
         .filter_map(|(_, res)| res.as_ref().map(|(mid, _)| mid.to_string()))
         .collect();
+    metrics.unique_memory_ids = memory_ids
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     let memory_ids_refs: Vec<&str> = memory_ids.iter().map(|s| s.as_str()).collect();
 
     // Phase 2: Batch load all memories and tags.
     let memories = connection
         .get_memories_batch(&memory_ids_refs)
         .unwrap_or_default();
+    metrics.memory_batch_reads = usize::from(!memory_ids_refs.is_empty());
     let tags_map = connection
         .get_memory_tags_batch(&memory_ids_refs)
         .unwrap_or_default();
+    metrics.tag_batch_reads = usize::from(!memory_ids_refs.is_empty());
 
     // Phase 3: Build candidates from preloaded data.
     let mut candidates = Vec::new();
@@ -611,32 +885,42 @@ fn candidates_from_search(
                     artifact_id,
                     degraded,
                 ) {
-                    Some(candidate) => candidates.push(candidate),
-                    None => push_degradation(
-                        degraded,
-                        "context_candidate_skipped",
-                        ContextResponseSeverity::Low,
-                        format!(
-                            "Search hit {} could not be converted into a pack candidate.",
-                            hit.doc_id
-                        ),
-                        Some("ee index rebuild --workspace .".to_string()),
-                    ),
+                    Some(candidate) => {
+                        metrics.converted_candidates =
+                            metrics.converted_candidates.saturating_add(1);
+                        candidates.push(candidate);
+                    }
+                    None => {
+                        metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
+                        push_degradation(
+                            degraded,
+                            "context_candidate_skipped",
+                            ContextResponseSeverity::Low,
+                            format!(
+                                "Search hit {} could not be converted into a pack candidate.",
+                                hit.doc_id
+                            ),
+                            Some("ee index rebuild --workspace .".to_string()),
+                        );
+                    }
                 }
             }
-            None => push_degradation(
-                degraded,
-                "context_candidate_skipped",
-                ContextResponseSeverity::Low,
-                format!(
-                    "Search hit {} could not be converted into a pack candidate.",
-                    hit.doc_id
-                ),
-                Some("ee index rebuild --workspace .".to_string()),
-            ),
+            None => {
+                metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
+                push_degradation(
+                    degraded,
+                    "context_candidate_skipped",
+                    ContextResponseSeverity::Low,
+                    format!(
+                        "Search hit {} could not be converted into a pack candidate.",
+                        hit.doc_id
+                    ),
+                    Some("ee index rebuild --workspace .".to_string()),
+                );
+            }
         }
     }
-    candidates
+    (candidates, metrics)
 }
 
 fn candidate_from_hit_preloaded(
@@ -1056,14 +1340,23 @@ fn push_degradation(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use super::{
-        AccessLevel, CapabilitySet, CommandContext, candidate_selection_why, focus_candidate_why,
-        focus_relevance, unit_score,
+        AccessLevel, CandidateResolutionMetrics, CapabilitySet, CommandContext,
+        ContextPerformanceTrace, PerformanceTiming, candidate_selection_why,
+        context_performance_json, focus_candidate_why, focus_relevance, unit_score,
     };
     use crate::config::WorkspaceLocation;
     use crate::core::budget::RequestBudget;
-    use crate::models::{FocusItem, FocusState, MemoryId, WorkspaceId};
+    use crate::core::search::{
+        PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchHit, SearchReport, SearchStatus,
+    };
+    use crate::models::{FocusItem, FocusState, MemoryId, ProvenanceUri, UnitScore, WorkspaceId};
+    use crate::pack::{
+        ContextPackProfile, ContextRequest, ContextRequestInput, PackCandidate, PackCandidateInput,
+        PackProvenance, PackSection, TokenBudget, assemble_draft_with_profile,
+    };
 
     fn workspace_at(root: &str) -> WorkspaceLocation {
         WorkspaceLocation::new(PathBuf::from(root))
@@ -1075,6 +1368,143 @@ mod tests {
             RequestBudget::unbounded(),
             caps,
         )
+    }
+
+    #[test]
+    fn context_performance_explain_report_is_redaction_safe_and_counts_pruning()
+    -> Result<(), String> {
+        let memory_a = MemoryId::from_uuid(uuid::Uuid::from_u128(10));
+        let memory_b = MemoryId::from_uuid(uuid::Uuid::from_u128(11));
+        let provenance = vec![
+            PackProvenance::new(ProvenanceUri::EeMemory(memory_a), "fixture provenance")
+                .map_err(|error| error.to_string())?,
+        ];
+        let candidate_a = PackCandidate::new(PackCandidateInput {
+            memory_id: memory_a,
+            section: PackSection::ProceduralRules,
+            content: "Rotate SECRET_VALUE_ONE before release.".to_string(),
+            estimated_tokens: 45,
+            relevance: UnitScore::parse(0.95).map_err(|error| error.to_string())?,
+            utility: UnitScore::parse(0.80).map_err(|error| error.to_string())?,
+            provenance: provenance.clone(),
+            why: "selected by fixture".to_string(),
+        })
+        .map_err(|error| error.to_string())?
+        .with_diversity_key("release".to_string());
+        let candidate_b = PackCandidate::new(PackCandidateInput {
+            memory_id: memory_b,
+            section: PackSection::Decisions,
+            content: "Check SECRET_VALUE_TWO in CI before deploy.".to_string(),
+            estimated_tokens: 45,
+            relevance: UnitScore::parse(0.90).map_err(|error| error.to_string())?,
+            utility: UnitScore::parse(0.70).map_err(|error| error.to_string())?,
+            provenance,
+            why: "selected by fixture".to_string(),
+        })
+        .map_err(|error| error.to_string())?
+        .with_diversity_key("ci".to_string());
+        let request = ContextRequest::new(ContextRequestInput {
+            query: "explain sk_live_do_not_emit".to_string(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(60),
+            candidate_pool: Some(2),
+            sections: Vec::new(),
+        })
+        .map_err(|error| error.to_string())?;
+        let draft = assemble_draft_with_profile(
+            request.profile,
+            request.query.clone(),
+            TokenBudget::new(60).map_err(|error| error.to_string())?,
+            [candidate_a, candidate_b],
+        )
+        .map_err(|error| error.to_string())?;
+        let search_report = SearchReport {
+            status: SearchStatus::Success,
+            query: request.query.clone(),
+            requested_limit: 2,
+            results: vec![
+                SearchHit {
+                    doc_id: memory_a.to_string(),
+                    score: 0.95,
+                    source: ScoreSource::Lexical,
+                    fast_score: None,
+                    quality_score: None,
+                    lexical_score: Some(0.95),
+                    rerank_score: None,
+                    metadata: None,
+                    explanation: None,
+                },
+                SearchHit {
+                    doc_id: memory_b.to_string(),
+                    score: 0.90,
+                    source: ScoreSource::Lexical,
+                    fast_score: None,
+                    quality_score: None,
+                    lexical_score: Some(0.90),
+                    rerank_score: None,
+                    metadata: None,
+                    explanation: None,
+                },
+            ],
+            elapsed_ms: 3.4,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+        };
+        let options = super::ContextPackOptions {
+            workspace_path: PathBuf::from("/tmp/ee-explain"),
+            database_path: None,
+            index_dir: None,
+            query: request.query.clone(),
+            speed: crate::search::SpeedMode::Instant,
+            filters: crate::models::QueryFilters::default(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(60),
+            candidate_pool: Some(2),
+        };
+        let trace = ContextPerformanceTrace {
+            db_open_count: 1,
+            index_status_checks: 1,
+            pack_record_writes: 1,
+            candidate_resolution: CandidateResolutionMetrics {
+                search_hits: 2,
+                resolved_memory_ids: 2,
+                unique_memory_ids: 2,
+                memory_batch_reads: 1,
+                tag_batch_reads: 1,
+                converted_candidates: 2,
+                ..CandidateResolutionMetrics::default()
+            },
+            timings: vec![PerformanceTiming {
+                name: "packAssembly",
+                elapsed: Duration::from_millis(3),
+            }],
+            ..ContextPerformanceTrace::default()
+        };
+
+        let json = context_performance_json(
+            "pack",
+            &options,
+            &request,
+            &search_report,
+            &draft,
+            &[],
+            &trace,
+        );
+        let rendered = json.to_string();
+
+        assert_eq!(json["schema"], PERFORMANCE_EXPLAIN_SCHEMA_V1);
+        assert_eq!(json["data"]["command"], "pack");
+        assert_eq!(json["data"]["query"]["textIncluded"], false);
+        assert_eq!(json["data"]["dbReads"]["memoryBatchReads"], 1);
+        assert_eq!(json["data"]["candidates"]["convertedCandidates"], 2);
+        assert_eq!(json["data"]["pack"]["pruning"]["tokenBudgetExceeded"], 2);
+        assert_eq!(json["data"]["cache"]["status"], "fallback");
+        assert_eq!(json["data"]["redaction"]["memoryContentIncluded"], false);
+        assert!(!rendered.contains("sk_live_do_not_emit"));
+        assert!(!rendered.contains("SECRET_VALUE_ONE"));
+        assert!(!rendered.contains("SECRET_VALUE_TWO"));
+        assert!(!rendered.contains(&memory_a.to_string()));
+        Ok(())
     }
 
     #[test]

@@ -8,6 +8,7 @@ use crate::search::{
 };
 
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";
+pub const PERFORMANCE_EXPLAIN_SCHEMA_V1: &str = "ee.explain.performance.v1";
 
 #[derive(Clone, Debug)]
 pub struct SearchOptions {
@@ -362,6 +363,68 @@ impl SearchReport {
             "degraded": self.degraded.iter().map(SearchDegradation::data_json).collect::<Vec<_>>(),
         })
     }
+
+    #[must_use]
+    pub fn performance_explain_json(
+        &self,
+        speed: SpeedMode,
+        score_explanations_requested: bool,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "schema": PERFORMANCE_EXPLAIN_SCHEMA_V1,
+            "success": true,
+            "data": self.performance_explain_data_json(speed, score_explanations_requested),
+        })
+    }
+
+    #[must_use]
+    pub fn performance_explain_data_json(
+        &self,
+        speed: SpeedMode,
+        score_explanations_requested: bool,
+    ) -> serde_json::Value {
+        let metrics = self.retrieval_metrics();
+        serde_json::json!({
+            "command": "search",
+            "query": query_observation_json(&self.query),
+            "queryPlan": {
+                "retrievalMode": speed.as_str(),
+                "requestedLimit": self.requested_limit,
+                "candidateBudget": speed.candidate_limit(),
+                "usesEmbeddings": speed.uses_embeddings(),
+                "scoreExplanationsRequested": score_explanations_requested,
+            },
+            "dbReads": {
+                "indexStatusChecks": 1,
+                "memoryReads": 0,
+                "tagReads": 0,
+                "artifactLinkReads": 0,
+            },
+            "search": {
+                "status": self.status.as_str(),
+                "returnedHits": self.results.len(),
+                "sourceCounts": retrieval_source_counts_json(metrics.source_counts),
+                "scoreDistribution": retrieval_score_distribution_json(metrics.score_distribution),
+                "fieldCoverage": retrieval_field_coverage_json(metrics.field_coverage),
+                "errors": self.errors,
+                "elapsed": elapsed_timing_json(self.elapsed_ms),
+            },
+            "pack": {
+                "status": "not_used",
+                "reason": "search_command_does_not_assemble_context_pack",
+            },
+            "cache": {
+                "status": "not_used",
+                "reason": "search_command_reads_derived_search_index_directly",
+            },
+            "graph": {
+                "status": "not_used",
+                "reason": "search_command_does_not_request_graph_projection",
+            },
+            "fallbacks": self.degraded.iter().map(SearchDegradation::data_json).collect::<Vec<_>>(),
+            "redaction": performance_redaction_json(),
+        })
+    }
 }
 
 impl SearchHit {
@@ -521,10 +584,88 @@ impl RetrievalFieldCoverage {
     }
 }
 
+#[must_use]
+pub fn query_observation_json(query: &str) -> serde_json::Value {
+    serde_json::json!({
+        "textIncluded": false,
+        "lengthBytes": query.len(),
+        "fingerprint": format!("blake3:{}", blake3::hash(query.as_bytes()).to_hex()),
+    })
+}
+
+#[must_use]
+pub fn elapsed_timing_json(elapsed_ms: f64) -> serde_json::Value {
+    serde_json::json!({
+        "elapsedMs": round_metric_f64(elapsed_ms),
+        "elapsedMsBucket": elapsed_ms_bucket(elapsed_ms),
+        "nondeterministic": true,
+    })
+}
+
+#[must_use]
+pub fn performance_redaction_json() -> serde_json::Value {
+    serde_json::json!({
+        "memoryContentIncluded": false,
+        "queryTextIncluded": false,
+        "safeFields": [
+            "counts",
+            "elapsedMs",
+            "elapsedMsBucket",
+            "status",
+            "fingerprints",
+            "degradationCodes"
+        ],
+    })
+}
+
+fn retrieval_source_counts_json(counts: RetrievalSourceCounts) -> serde_json::Value {
+    serde_json::json!({
+        "lexical": counts.lexical,
+        "semanticFast": counts.semantic_fast,
+        "semanticQuality": counts.semantic_quality,
+        "hybrid": counts.hybrid,
+        "reranked": counts.reranked,
+    })
+}
+
+fn retrieval_score_distribution_json(
+    distribution: RetrievalScoreDistribution,
+) -> serde_json::Value {
+    serde_json::json!({
+        "top": optional_score_json(distribution.top),
+        "min": optional_score_json(distribution.min),
+        "max": optional_score_json(distribution.max),
+        "mean": optional_score_json(distribution.mean),
+    })
+}
+
+fn retrieval_field_coverage_json(coverage: RetrievalFieldCoverage) -> serde_json::Value {
+    serde_json::json!({
+        "fastScoreCount": coverage.fast_score_count,
+        "qualityScoreCount": coverage.quality_score_count,
+        "lexicalScoreCount": coverage.lexical_score_count,
+        "rerankScoreCount": coverage.rerank_score_count,
+        "metadataCount": coverage.metadata_count,
+        "explanationCount": coverage.explanation_count,
+    })
+}
+
 fn optional_score_json(score: Option<f32>) -> serde_json::Value {
     score.map_or(serde_json::Value::Null, |score| {
         serde_json::json!(round_metric_f32(score))
     })
+}
+
+fn elapsed_ms_bucket(elapsed_ms: f64) -> &'static str {
+    match elapsed_ms {
+        elapsed if elapsed < 1.0 => "lt_1ms",
+        elapsed if elapsed < 10.0 => "1_9ms",
+        elapsed if elapsed < 50.0 => "10_49ms",
+        elapsed if elapsed < 100.0 => "50_99ms",
+        elapsed if elapsed < 500.0 => "100_499ms",
+        elapsed if elapsed < 1_000.0 => "500_999ms",
+        _ => "gte_1000ms",
+    }
 }
 
 fn round_metric_f32(score: f32) -> f32 {
@@ -884,6 +1025,44 @@ mod tests {
         assert_eq!(json["metrics"]["errorCount"], 0);
         assert!(json["results"][0]["why"].is_string());
         assert!(json["results"][0]["provenance"].is_array());
+    }
+
+    #[test]
+    fn search_performance_explain_report_is_redaction_safe_and_pins_fallbacks() {
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "rotate secret sk_live_do_not_emit".to_string(),
+            requested_limit: 10,
+            results: vec![SearchHit {
+                doc_id: "mem-secret-doc".to_string(),
+                score: 0.95,
+                source: ScoreSource::Lexical,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: Some(0.95),
+                rerank_score: None,
+                metadata: Some(serde_json::json!({
+                    "content": "token should not leave normal search output",
+                })),
+                explanation: None,
+            }],
+            elapsed_ms: 12.3,
+            errors: Vec::new(),
+            degraded: vec![SearchDegradation::stale_index(Some(12), Some(9))],
+        };
+
+        let json = report.performance_explain_json(SpeedMode::Instant, false);
+        let rendered = json.to_string();
+
+        assert_eq!(json["schema"], PERFORMANCE_EXPLAIN_SCHEMA_V1);
+        assert_eq!(json["data"]["command"], "search");
+        assert_eq!(json["data"]["query"]["textIncluded"], false);
+        assert_eq!(json["data"]["search"]["returnedHits"], 1);
+        assert_eq!(json["data"]["fallbacks"][0]["code"], "search_index_stale");
+        assert_eq!(json["data"]["redaction"]["memoryContentIncluded"], false);
+        assert!(!rendered.contains("sk_live_do_not_emit"));
+        assert!(!rendered.contains("mem-secret-doc"));
+        assert!(!rendered.contains("token should not leave"));
     }
 
     #[test]
