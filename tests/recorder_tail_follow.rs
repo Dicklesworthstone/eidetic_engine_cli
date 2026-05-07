@@ -72,7 +72,7 @@ fn insert_event(
 }
 
 #[test]
-fn tail_empty_store_returns_successful_empty_snapshot() -> TestResult {
+fn recorder_tail_empty_store_returns_successful_empty_snapshot() -> TestResult {
     let conn = connect()?;
     let report = tail_recording_from_store(
         &conn,
@@ -94,7 +94,7 @@ fn tail_empty_store_returns_successful_empty_snapshot() -> TestResult {
 }
 
 #[test]
-fn tail_returns_last_n_events_in_chronological_order() -> TestResult {
+fn recorder_tail_returns_last_n_events_in_chronological_order() -> TestResult {
     let conn = connect()?;
     insert_run(&conn, "run_tail_n", "active")?;
     insert_event(
@@ -145,7 +145,7 @@ fn tail_returns_last_n_events_in_chronological_order() -> TestResult {
 }
 
 #[test]
-fn tail_applies_since_and_filter_expression() -> TestResult {
+fn recorder_tail_applies_since_and_filter_expression() -> TestResult {
     let conn = connect()?;
     insert_run(&conn, "run_filter", "active")?;
     insert_event(
@@ -196,7 +196,7 @@ fn tail_applies_since_and_filter_expression() -> TestResult {
 }
 
 #[test]
-fn follow_poll_emits_multiple_new_events_once() -> TestResult {
+fn recorder_tail_follow_poll_emits_multiple_new_events_once() -> TestResult {
     let conn = connect()?;
     insert_run(&conn, "run_follow_multi", "active")?;
     insert_event(
@@ -247,7 +247,7 @@ fn follow_poll_emits_multiple_new_events_once() -> TestResult {
 }
 
 #[test]
-fn tail_caps_sql_fetch_to_caller_limit_when_no_client_filters() -> TestResult {
+fn recorder_tail_caps_sql_fetch_to_caller_limit_when_no_client_filters() -> TestResult {
     // Regression for eidetic_engine_cli-yv29: tail_recording_from_store used to pass
     // u32::MAX to the SQL LIMIT, materialising every row in recorder_events even
     // when the caller asked for `--limit 5`. After the fix the SQL LIMIT tracks
@@ -298,7 +298,7 @@ fn tail_caps_sql_fetch_to_caller_limit_when_no_client_filters() -> TestResult {
 }
 
 #[test]
-fn tail_applies_headroom_when_client_only_filter_terms_present() -> TestResult {
+fn recorder_tail_applies_headroom_when_client_only_filter_terms_present() -> TestResult {
     // With a client-only filter term (`event_type`), the SQL fetch must include
     // headroom so the post-filter limit can still be satisfied — but it must
     // remain bounded (4 * limit, capped at 10_000), not u32::MAX.
@@ -352,7 +352,7 @@ fn tail_applies_headroom_when_client_only_filter_terms_present() -> TestResult {
 }
 
 #[test]
-fn follow_idle_timeout_exits_without_hanging() -> TestResult {
+fn recorder_tail_follow_idle_timeout_exits_without_hanging() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
     fs::create_dir_all(tempdir.path().join(".ee")).map_err(|error| error.to_string())?;
     let database = tempdir.path().join(".ee").join("ee.db");
@@ -374,5 +374,65 @@ fn follow_idle_timeout_exits_without_hanging() -> TestResult {
     assert_eq!(output.status.code(), Some(0));
     assert!(output.stdout.is_empty());
     assert!(output.stderr.is_empty());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn recorder_tail_follow_sigint_exits_quickly() -> TestResult {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Stdio;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    fs::create_dir_all(tempdir.path().join(".ee")).map_err(|error| error.to_string())?;
+    let database = tempdir.path().join(".ee").join("ee.db");
+    let conn = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+    conn.migrate().map_err(|error| error.to_string())?;
+    conn.close().map_err(|error| error.to_string())?;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .arg("--workspace")
+        .arg(tempdir.path())
+        .arg("recorder")
+        .arg("follow")
+        .arg("--json-lines")
+        .arg("--poll-ms")
+        .arg("1000")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("failed to spawn recorder follow: {error}"))?;
+
+    thread::sleep(Duration::from_millis(150));
+    let start = Instant::now();
+    let kill = Command::new("kill")
+        .arg("-INT")
+        .arg(child.id().to_string())
+        .status()
+        .map_err(|error| format!("failed to send SIGINT: {error}"))?;
+    assert!(kill.success(), "failed to send SIGINT");
+
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("failed to poll recorder follow: {error}"))?
+        {
+            break status;
+        }
+        if start.elapsed() >= Duration::from_secs(2) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("recorder follow did not terminate promptly after SIGINT".to_owned());
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(
+        status.code() == Some(130) || status.signal() == Some(2),
+        "expected SIGINT termination, got code {:?}, signal {:?}",
+        status.code(),
+        status.signal(),
+    );
     Ok(())
 }
