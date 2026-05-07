@@ -1,6 +1,7 @@
 //! Integration tests for the tripwire event-payload evaluator and
 //! harm-feedback → tripwire candidate promotion path (eidetic_engine_cli-2mad).
 
+// These tripwire tests use unwrap/expect as direct assertions on fixed fixtures.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::path::PathBuf;

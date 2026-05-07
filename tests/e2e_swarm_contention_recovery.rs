@@ -8,26 +8,22 @@
 //! profile. Logs include per-process command, pid, timing, exit code, stderr, JSON
 //! stdout hash, and artifact path for post-mortem debugging.
 
-#![allow(clippy::expect_used, clippy::unwrap_used, dead_code, unused_imports)]
+// This concurrency harness treats poisoned test coordination mutexes as fatal.
+#![allow(clippy::unwrap_used)]
 
-use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use ee::db::DbConnection;
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
-
-const EXIT_SUCCESS: i32 = 0;
 
 /// Per-process execution log entry for debugging and artifact retention.
 #[derive(Debug, Clone)]

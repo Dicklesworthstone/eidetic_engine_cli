@@ -584,6 +584,7 @@ impl From<StoredAuditEntry> for AuditTimelineEntry {
 }
 
 #[cfg(test)]
+// Audit tests use expect only for deterministic fixture setup failures.
 #[allow(clippy::expect_used)]
 mod tests {
     use std::fs;

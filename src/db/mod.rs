@@ -11947,6 +11947,7 @@ fn stored_recorder_event_from_row(row: &Row) -> Result<StoredRecorderEvent> {
 }
 
 #[cfg(test)]
+// DB tests use unwrap/expect only as fixture assertions around in-memory stores.
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use std::error::Error as StdError;

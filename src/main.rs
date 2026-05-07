@@ -126,6 +126,7 @@ fn main() -> ExitCode {
 }
 
 #[cfg(test)]
+// Main tests treat poisoned in-memory log buffers as fatal test failures.
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;

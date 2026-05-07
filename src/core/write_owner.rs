@@ -1217,6 +1217,7 @@ impl WriteSpool {
 }
 
 #[cfg(test)]
+// Write-owner tests use expect for fixture-only assertions around queued intents.
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;

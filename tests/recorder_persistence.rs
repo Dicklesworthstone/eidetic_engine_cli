@@ -5,6 +5,7 @@
 //! and `finish_and_persist_recording` against an in-memory FrankenSQLite
 //! database with the full migration set applied.
 
+// These persistence tests use unwrap/expect as direct assertions on fixed fixtures.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use ee::core::recorder::{

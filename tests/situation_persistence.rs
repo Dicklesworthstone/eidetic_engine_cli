@@ -5,6 +5,7 @@
 //! Lives in `tests/` so it runs even when other agents' in-flight changes
 //! break unrelated `#[cfg(test)]` blocks elsewhere in the lib.
 
+// These taxonomy tests use unwrap/expect as direct assertions on fixed fixtures.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::str::FromStr;

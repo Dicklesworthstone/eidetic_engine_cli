@@ -20974,6 +20974,7 @@ fn render_tripwire_check_human(report: &crate::core::tripwire::CheckReport) -> S
 }
 
 #[cfg(test)]
+// CLI tests use expect for fixed parser fixture setup and explicit failure messages.
 #[allow(clippy::expect_used)]
 mod tests {
     use std::ffi::OsString;
@@ -22680,51 +22681,6 @@ mod tests {
             &value["error"]["code"],
             &serde_json::json!("policy_denied"),
             "policy code",
-        )
-    }
-
-    #[allow(dead_code)]
-    fn assert_situation_unavailable(
-        exit: ProcessExitCode,
-        stdout: &str,
-        stderr: &str,
-        command: &str,
-    ) -> TestResult {
-        ensure_equal(
-            &exit,
-            &ProcessExitCode::UnsatisfiedDegradedMode,
-            "situation exit",
-        )?;
-        ensure(stderr.is_empty(), "situation JSON stderr clean")?;
-        let value: serde_json::Value =
-            serde_json::from_str(stdout).map_err(|error| error.to_string())?;
-        ensure_equal(
-            &value["schema"],
-            &serde_json::json!("ee.response.v1"),
-            "response schema",
-        )?;
-        ensure_equal(&value["success"], &serde_json::json!(false), "success flag")?;
-        ensure_equal(
-            &value["data"]["command"],
-            &serde_json::json!(command),
-            "command",
-        )?;
-        ensure_equal(
-            &value["data"]["code"],
-            &serde_json::json!("situation_decisioning_unavailable"),
-            "degraded code",
-        )?;
-        ensure_equal(
-            &value["data"]["followUpBead"],
-            &serde_json::json!("eidetic_engine_cli-6cks"),
-            "follow-up bead",
-        )?;
-        ensure_equal(
-            &value["data"]["sideEffectClass"],
-            &serde_json::json!(
-                "conservative abstention; no situation routing, link, or recommendation mutation"
-            ),
-            "side effect class",
         )
     }
 
