@@ -70,6 +70,10 @@ where
 /// default token estimator no longer uses this constant — see
 /// `TokenEstimationStrategy::TiktokenCl100kBase`.
 pub const DEFAULT_CHARS_PER_TOKEN: f32 = 3.5;
+const CHARACTER_HEURISTIC_CHARS_PER_TOKEN_NUMERATOR: u64 = 7;
+const CHARACTER_HEURISTIC_CHARS_PER_TOKEN_DENOMINATOR: u64 = 2;
+const WORD_HEURISTIC_TOKEN_MULTIPLIER_NUMERATOR: u64 = 13;
+const WORD_HEURISTIC_TOKEN_MULTIPLIER_DENOMINATOR: u64 = 10;
 
 /// Process-wide cache for the cl100k_base BPE encoder. The encoder is
 /// expensive to construct (loads embedded merge tables) and immutable once
@@ -99,6 +103,28 @@ fn cl100k_base_encoder() -> Option<&'static CoreBPE> {
             }
         })
         .as_ref()
+}
+
+fn estimate_character_heuristic_tokens(char_count: u64) -> u32 {
+    if char_count == 0 {
+        return 0;
+    }
+
+    let estimate = char_count
+        .saturating_mul(CHARACTER_HEURISTIC_CHARS_PER_TOKEN_DENOMINATOR)
+        .div_ceil(CHARACTER_HEURISTIC_CHARS_PER_TOKEN_NUMERATOR);
+    u32::try_from(estimate.max(1)).unwrap_or(u32::MAX)
+}
+
+fn estimate_word_heuristic_tokens(word_count: u64) -> u32 {
+    if word_count == 0 {
+        return 0;
+    }
+
+    let estimate = word_count
+        .saturating_mul(WORD_HEURISTIC_TOKEN_MULTIPLIER_NUMERATOR)
+        .div_ceil(WORD_HEURISTIC_TOKEN_MULTIPLIER_DENOMINATOR);
+    u32::try_from(estimate.max(1)).unwrap_or(u32::MAX)
 }
 
 /// Token estimation strategy (EE-143, eidetic_engine_cli-aitk).
@@ -175,22 +201,16 @@ pub fn estimate_tokens(content: &str, strategy: TokenEstimationStrategy) -> u32 
                 // Embedded BPE tables failed to load; the warning was
                 // already emitted on first init. Fall back to the
                 // character heuristic so budget enforcement still runs.
-                let char_count = trimmed.chars().count();
-                let estimate = (char_count as f32 / DEFAULT_CHARS_PER_TOKEN).ceil();
-                (estimate as u32).max(1)
+                estimate_character_heuristic_tokens(usize_to_u64(trimmed.chars().count()))
             }
         }
         TokenEstimationStrategy::CharacterHeuristic => {
-            let char_count = trimmed.chars().count();
             // Divide by chars-per-token, round up for conservatism.
-            let estimate = (char_count as f32 / DEFAULT_CHARS_PER_TOKEN).ceil();
-            (estimate as u32).max(1)
+            estimate_character_heuristic_tokens(usize_to_u64(trimmed.chars().count()))
         }
         TokenEstimationStrategy::WordHeuristic => {
-            let word_count = trimmed.split_whitespace().count();
             // Multiply by 1.3 to account for punctuation and subword tokens.
-            let estimate = (word_count as f32 * 1.3).ceil();
-            (estimate as u32).max(1)
+            estimate_word_heuristic_tokens(usize_to_u64(trimmed.split_whitespace().count()))
         }
     }
 }
@@ -3100,16 +3120,19 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        CONTEXT_COMMAND, CandidateSignature, ContextPackProfile, ContextRequest,
-        ContextRequestInput, ContextResponse, ContextResponseDegradation, ContextResponseSeverity,
-        DEFAULT_CHARS_PER_TOKEN, FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR,
-        PackCacheGovernor, PackCacheStatus, PackCandidate, PackCandidateInput, PackHotset,
-        PackHotsetEntry, PackItemRedaction, PackOmissionReason, PackProvenance, PackSection,
-        PackSelectionObjective, PackTrustSignal, PackValidationError, SectionQuota, SectionQuotas,
-        TokenBudget, TokenEstimationStrategy, assemble_draft, assemble_draft_with_cache_governor,
-        assemble_draft_with_profile, candidate_similarity, estimate_tokens,
-        estimate_tokens_default, facility_similarity, pack_item_provenance_json,
-        prewarm_pack_hotset, subsystem_name,
+        CHARACTER_HEURISTIC_CHARS_PER_TOKEN_DENOMINATOR,
+        CHARACTER_HEURISTIC_CHARS_PER_TOKEN_NUMERATOR, CONTEXT_COMMAND, CandidateSignature,
+        ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
+        ContextResponseDegradation, ContextResponseSeverity, DEFAULT_CHARS_PER_TOKEN,
+        FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR, PackCacheGovernor, PackCacheStatus,
+        PackCandidate, PackCandidateInput, PackHotset, PackHotsetEntry, PackItemRedaction,
+        PackOmissionReason, PackProvenance, PackSection, PackSelectionObjective, PackTrustSignal,
+        PackValidationError, SectionQuota, SectionQuotas, TokenBudget, TokenEstimationStrategy,
+        WORD_HEURISTIC_TOKEN_MULTIPLIER_DENOMINATOR, WORD_HEURISTIC_TOKEN_MULTIPLIER_NUMERATOR,
+        assemble_draft, assemble_draft_with_cache_governor, assemble_draft_with_profile,
+        candidate_similarity, estimate_character_heuristic_tokens, estimate_tokens,
+        estimate_tokens_default, estimate_word_heuristic_tokens, facility_similarity,
+        pack_item_provenance_json, prewarm_pack_hotset, subsystem_name,
     };
     use crate::cache::{CacheBudget, MemoryPressure};
     use crate::models::{ContextProfile, MemoryId, ProvenanceUri, TrustClass, UnitScore};
@@ -3378,6 +3401,49 @@ mod tests {
         ensure(
             estimate_tokens("word", TokenEstimationStrategy::WordHeuristic) >= 1,
             "single word should estimate at least 1 token",
+        )
+    }
+
+    #[test]
+    fn estimate_tokens_character_heuristic_saturates_explicitly() -> TestResult {
+        ensure_equal(
+            &estimate_character_heuristic_tokens(7),
+            &2,
+            "7 chars at 3.5 chars/token",
+        )?;
+        ensure_equal(
+            &estimate_character_heuristic_tokens(11),
+            &4,
+            "11 chars at 3.5 chars/token",
+        )?;
+
+        let first_overflowing_char_count = (u64::from(u32::MAX)
+            * CHARACTER_HEURISTIC_CHARS_PER_TOKEN_NUMERATOR
+            / CHARACTER_HEURISTIC_CHARS_PER_TOKEN_DENOMINATOR)
+            + 1;
+        ensure_equal(
+            &estimate_character_heuristic_tokens(first_overflowing_char_count),
+            &u32::MAX,
+            "huge character counts saturate explicitly at u32::MAX",
+        )
+    }
+
+    #[test]
+    fn estimate_tokens_word_heuristic_saturates_explicitly() -> TestResult {
+        ensure_equal(
+            &estimate_word_heuristic_tokens(5),
+            &7,
+            "5 words at 1.3 tokens/word",
+        )?;
+
+        let first_overflowing_word_count = (u64::from(u32::MAX)
+            * WORD_HEURISTIC_TOKEN_MULTIPLIER_DENOMINATOR
+            / WORD_HEURISTIC_TOKEN_MULTIPLIER_NUMERATOR)
+            + 1;
+        ensure_equal(
+            &estimate_word_heuristic_tokens(first_overflowing_word_count),
+            &u32::MAX,
+            "huge word counts saturate explicitly at u32::MAX",
         )
     }
 
