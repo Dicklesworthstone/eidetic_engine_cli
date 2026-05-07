@@ -2398,6 +2398,7 @@ impl RecorderEventsListReport {
             "schema": self.schema,
             "command": "recorder events list",
             "count": self.events.len(),
+            "totalCount": self.events.len(),
             "filters": {
                 "since": self.filters.since,
                 "source": self.filters.source,

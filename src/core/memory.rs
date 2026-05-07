@@ -1377,9 +1377,9 @@ impl MemoryShowReport {
 /// Returns `None` if the memory does not exist. If `include_tombstoned` is false,
 /// tombstoned memories are treated as not found.
 pub fn get_memory_details(options: &GetMemoryOptions<'_>) -> MemoryShowReport {
-    let conn = match DbConnection::open_file(options.database_path) {
+    let conn = match open_migrated_memory_database(options.database_path) {
         Ok(c) => c,
-        Err(e) => return MemoryShowReport::error(format!("Failed to open database: {e}")),
+        Err(message) => return MemoryShowReport::error(message),
     };
 
     let memory = match conn.get_memory(options.memory_id) {
@@ -1510,6 +1510,14 @@ impl MemoryListReport {
 
 const CONTENT_PREVIEW_LEN: usize = 80;
 
+fn open_migrated_memory_database(database_path: &Path) -> Result<DbConnection, String> {
+    let conn = DbConnection::open_file(database_path)
+        .map_err(|error| format!("Failed to open database: {error}"))?;
+    conn.migrate()
+        .map_err(|error| format!("Failed to migrate database: {error}"))?;
+    Ok(conn)
+}
+
 fn truncate_content(content: &str) -> String {
     let char_count = content.chars().count();
     if char_count <= CONTENT_PREVIEW_LEN {
@@ -1522,9 +1530,9 @@ fn truncate_content(content: &str) -> String {
 
 /// List memories matching the given criteria.
 pub fn list_memories(options: &ListMemoriesOptions<'_>) -> MemoryListReport {
-    let conn = match DbConnection::open_file(options.database_path) {
+    let conn = match open_migrated_memory_database(options.database_path) {
         Ok(c) => c,
-        Err(e) => return MemoryListReport::error(format!("Failed to open database: {e}")),
+        Err(message) => return MemoryListReport::error(message),
     };
 
     let filter = MemoryListFilter {
@@ -1698,14 +1706,9 @@ impl MemoryHistoryReport {
 /// Returns all audit entries for the specified memory, ordered from newest to oldest.
 /// If the memory does not exist, returns a not-found report.
 pub fn get_memory_history(options: &GetMemoryHistoryOptions<'_>) -> MemoryHistoryReport {
-    let conn = match DbConnection::open_file(options.database_path) {
+    let conn = match open_migrated_memory_database(options.database_path) {
         Ok(c) => c,
-        Err(e) => {
-            return MemoryHistoryReport::error(
-                options.memory_id.to_string(),
-                format!("Failed to open database: {e}"),
-            );
-        }
+        Err(message) => return MemoryHistoryReport::error(options.memory_id.to_string(), message),
     };
 
     // First check if memory exists
@@ -2015,13 +2018,10 @@ impl MemoryReviseReport {
 ///
 /// If `dry_run` is true, no changes are made but the report shows what would happen.
 pub fn revise_memory(options: &ReviseMemoryOptions<'_>) -> MemoryReviseReport {
-    let conn = match DbConnection::open_file(options.database_path) {
+    let conn = match open_migrated_memory_database(options.database_path) {
         Ok(c) => c,
-        Err(e) => {
-            return MemoryReviseReport::error(
-                options.original_memory_id.to_owned(),
-                format!("Failed to open database: {e}"),
-            );
+        Err(message) => {
+            return MemoryReviseReport::error(options.original_memory_id.to_owned(), message);
         }
     };
 
@@ -2303,9 +2303,9 @@ fn jaccard_similarity(a: &str, b: &str) -> f32 {
 /// Scans existing memories and returns warnings for any that are similar
 /// to the provided content. Uses exact matching and lexical similarity.
 pub fn check_for_duplicates(options: &DedupeCheckOptions<'_>) -> DedupeCheckReport {
-    let conn = match DbConnection::open_file(options.database_path) {
+    let conn = match open_migrated_memory_database(options.database_path) {
         Ok(c) => c,
-        Err(e) => return DedupeCheckReport::error(format!("Failed to open database: {e}")),
+        Err(message) => return DedupeCheckReport::error(message),
     };
 
     // Get workspace ID - for now use default

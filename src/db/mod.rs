@@ -1530,6 +1530,11 @@ impl Migration {
     pub fn checksum(&self) -> String {
         migration_sql_checksum(self.sql)
     }
+
+    fn checksum_matches_applied_record(&self, applied_checksum: &str) -> bool {
+        text_matches(applied_checksum, &self.checksum())
+            || text_matches(applied_checksum, self.checksum_label())
+    }
 }
 
 fn migration_sql_checksum(sql: &str) -> String {
@@ -3515,15 +3520,14 @@ fn validate_applied_migration_records(records: &[MigrationRecord]) -> Result<()>
             });
         };
 
-        let expected_checksum = expected.checksum();
         if !text_matches(record.name(), expected.name())
-            || !text_matches(record.checksum(), &expected_checksum)
+            || !expected.checksum_matches_applied_record(record.checksum())
         {
             return Err(DbError::MigrationDrift {
                 version: record.version(),
                 expected_name: Some(expected.name().to_string()),
                 actual_name: record.name().to_string(),
-                expected_checksum: Some(expected_checksum),
+                expected_checksum: Some(expected.checksum()),
                 actual_checksum: record.checksum().to_string(),
             });
         }
@@ -12645,6 +12649,48 @@ mod tests {
             &second.skipped().to_vec(),
             &migration_versions(),
             "clean applied migrations should be skipped",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn migration_validation_accepts_legacy_audit_label_for_applied_v001() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_migration_table()?;
+        connection.execute_raw(super::V001_INIT_SCHEMA.sql())?;
+        connection.record_migration(&MigrationRecord::new(
+            super::V001_INIT_SCHEMA.version(),
+            super::V001_INIT_SCHEMA.name(),
+            super::V001_INIT_SCHEMA.checksum_label(),
+            "2026-04-29T19:59:00Z",
+        )?)?;
+
+        connection.validate_applied_migrations()?;
+        ensure(
+            connection.needs_migration()?,
+            "legacy V001-only database should still need later migrations",
+        )?;
+
+        let result = connection.migrate()?;
+        ensure_equal(
+            &result.skipped().to_vec(),
+            &vec![super::V001_INIT_SCHEMA.version()],
+            "legacy V001 row should be accepted and skipped",
+        )?;
+        ensure_equal(
+            &result.applied().to_vec(),
+            &super::MIGRATIONS
+                .iter()
+                .skip(1)
+                .map(super::Migration::version)
+                .collect::<Vec<_>>(),
+            "later migrations should still be applied",
+        )?;
+        ensure(
+            !connection.needs_migration()?,
+            "legacy V001 database should be current after migrate",
         )?;
 
         connection.close()?;
