@@ -2,7 +2,7 @@
 //!
 //! Provides commands for:
 //! - Labeling task text with explicit keyword heuristic tags
-//! - Declining route/planning decisions until backed by stored evidence
+//! - Producing deterministic heuristic route hints without automatic planning
 //! - Returning no fake show/explain records when storage is not wired
 
 use super::build_info;
@@ -150,7 +150,7 @@ impl ClassifyResult {
                 {
                     "code": SITUATION_DECISIONING_UNAVAILABLE_CODE,
                     "severity": "warning",
-                    "message": "Situation output is limited to static keyword heuristic tags; routing, planning, show, and explain require stored evidence.",
+                    "message": "Situation routing is limited to deterministic heuristic hints; automatic planning, show, and explain require stored evidence.",
                     "repair": "ee status --json"
                 }
             ],
@@ -1305,7 +1305,16 @@ pub fn classify_task(text: &str) -> ClassifyResult {
         .take(3)
         .map(|(cat, score, _)| (*cat, *score))
         .collect();
-    let routing_decisions = Vec::new();
+    let routing_decisions = if text.trim().is_empty() {
+        Vec::new()
+    } else {
+        route_situation_with_alternatives(
+            category,
+            confidence,
+            confidence_score,
+            &alternative_categories,
+        )
+    };
 
     ClassifyResult {
         version,
@@ -1366,11 +1375,10 @@ pub fn route_situation(
     confidence: ConfidenceLevel,
     confidence_score: f32,
 ) -> Vec<RoutingDecision> {
-    let _ = (category, confidence, confidence_score);
     route_situation_with_alternatives(category, confidence, confidence_score, &[])
 }
 
-/// Return no route decisions while situation output is heuristic-only.
+/// Build deterministic heuristic route hints for downstream surfaces.
 #[must_use]
 pub fn route_situation_with_alternatives(
     category: SituationCategory,
@@ -1378,13 +1386,214 @@ pub fn route_situation_with_alternatives(
     confidence_score: f32,
     alternative_categories: &[(SituationCategory, f32)],
 ) -> Vec<RoutingDecision> {
-    let _ = (
-        category,
-        confidence,
-        confidence_score,
-        alternative_categories,
+    let mut decisions = Vec::new();
+    let situation_id = stable_hash_id(
+        "situation_route",
+        &format!(
+            "{}:{}:{:.3}",
+            category.as_str(),
+            confidence.as_str(),
+            stable_score_json(confidence_score)
+        ),
     );
-    Vec::new()
+    let fixture_ids = fixture_route_ids(category, alternative_categories);
+    let preflight_profile = preflight_profile_for(category);
+
+    let mut fixture_decision = RoutingDecision::new(
+        stable_hash_id(
+            "route",
+            &format!("{}:{}:fixture_family", situation_id, category.as_str()),
+        ),
+        situation_id.clone(),
+        SituationRoutingSurface::FixtureFamily,
+        DRY_RUN_CREATED_AT,
+    )
+    .with_confidence(confidence, confidence_score)
+    .replay_policy(SituationReplayPolicy::DryRunOnly)
+    .with_reason(format!(
+        "primary category {} selects fixture family {}",
+        category.as_str(),
+        situation_fixture_id(category)
+    ))
+    .with_reason(format!(
+        "preflight fixture {} selected for {} tasks",
+        preflight_fixture_id(category),
+        category.as_str()
+    ));
+
+    for fixture_id in fixture_ids {
+        fixture_decision = fixture_decision.with_fixture(fixture_id);
+    }
+
+    decisions.push(fixture_decision);
+
+    decisions.push(
+        RoutingDecision::new(
+            stable_hash_id(
+                "route",
+                &format!("{}:{}:preflight_profile", situation_id, category.as_str()),
+            ),
+            situation_id.clone(),
+            SituationRoutingSurface::PreflightProfile,
+            DRY_RUN_CREATED_AT,
+        )
+        .with_confidence(confidence, confidence_score)
+        .preflight_profile(preflight_profile)
+        .replay_policy(SituationReplayPolicy::DryRunOnly)
+        .with_reason(format!(
+            "category {} maps to {} preflight coverage",
+            category.as_str(),
+            preflight_profile
+        )),
+    );
+
+    for high_risk_category in high_risk_categories(category, alternative_categories) {
+        let tripwire_id = tripwire_candidate_id(high_risk_category);
+        decisions.push(
+            RoutingDecision::new(
+                stable_hash_id(
+                    "route",
+                    &format!(
+                        "{}:{}:tripwire_candidate",
+                        situation_id,
+                        high_risk_category.as_str()
+                    ),
+                ),
+                situation_id.clone(),
+                SituationRoutingSurface::TripwireCandidate,
+                DRY_RUN_CREATED_AT,
+            )
+            .with_confidence(confidence, confidence_score)
+            .with_tripwire_candidate(tripwire_id)
+            .replay_policy(SituationReplayPolicy::DryRunOnly)
+            .with_reason(format!(
+                "high-risk category {} requires {}",
+                high_risk_category.as_str(),
+                tripwire_id
+            )),
+        );
+    }
+
+    if confidence == ConfidenceLevel::Low {
+        decisions.push(
+            RoutingDecision::new(
+                stable_hash_id(
+                    "route",
+                    &format!("{}:{}:manual_review", situation_id, category.as_str()),
+                ),
+                situation_id,
+                SituationRoutingSurface::ManualReview,
+                DRY_RUN_CREATED_AT,
+            )
+            .with_confidence(confidence, confidence_score)
+            .replay_policy(SituationReplayPolicy::DryRunOnly)
+            .with_reason(
+                "low-confidence heuristic classification requires human review before mutation",
+            ),
+        );
+    }
+
+    decisions
+}
+
+fn fixture_route_ids(
+    category: SituationCategory,
+    alternative_categories: &[(SituationCategory, f32)],
+) -> Vec<String> {
+    let mut fixture_ids = vec![
+        situation_fixture_id(category).to_string(),
+        preflight_fixture_id(category).to_string(),
+    ];
+
+    if category != SituationCategory::Unknown {
+        for (alternative, _) in alternative_categories {
+            let fixture_id = situation_fixture_id(*alternative).to_string();
+            if !fixture_ids.contains(&fixture_id) {
+                fixture_ids.push(fixture_id);
+            }
+        }
+    }
+
+    fixture_ids
+}
+
+fn situation_fixture_id(category: SituationCategory) -> &'static str {
+    match category {
+        SituationCategory::BugFix => "fixture.situation.bug_fix",
+        SituationCategory::Feature => "fixture.situation.feature",
+        SituationCategory::Refactor => "fixture.situation.refactor",
+        SituationCategory::Investigation => "fixture.situation.investigation",
+        SituationCategory::Documentation => "fixture.situation.documentation",
+        SituationCategory::Testing => "fixture.situation.testing",
+        SituationCategory::Configuration => "fixture.situation.configuration",
+        SituationCategory::Deployment => "fixture.situation.deployment",
+        SituationCategory::Release => "fixture.situation.release",
+        SituationCategory::Exploration => "fixture.situation.exploration",
+        SituationCategory::IncidentResponse => "fixture.situation.incident_response",
+        SituationCategory::Review => "fixture.situation.review",
+        SituationCategory::Unknown => "fixture.situation.unknown",
+    }
+}
+
+fn preflight_fixture_id(category: SituationCategory) -> &'static str {
+    match category {
+        SituationCategory::Deployment
+        | SituationCategory::Release
+        | SituationCategory::IncidentResponse => "fixture.preflight.full",
+        SituationCategory::Documentation => "fixture.preflight.minimal",
+        SituationCategory::Testing
+        | SituationCategory::Exploration
+        | SituationCategory::Unknown => "fixture.preflight.summary",
+        SituationCategory::BugFix
+        | SituationCategory::Feature
+        | SituationCategory::Refactor
+        | SituationCategory::Investigation
+        | SituationCategory::Configuration
+        | SituationCategory::Review => "fixture.preflight.standard",
+    }
+}
+
+fn preflight_profile_for(category: SituationCategory) -> &'static str {
+    match preflight_fixture_id(category) {
+        "fixture.preflight.full" => "preflight.full",
+        "fixture.preflight.minimal" => "preflight.minimal",
+        "fixture.preflight.summary" => "preflight.summary",
+        _ => "preflight.standard",
+    }
+}
+
+fn high_risk_categories(
+    category: SituationCategory,
+    alternative_categories: &[(SituationCategory, f32)],
+) -> Vec<SituationCategory> {
+    let mut categories = Vec::new();
+    if is_high_risk_category(category) {
+        categories.push(category);
+    }
+    for (alternative, _) in alternative_categories {
+        if is_high_risk_category(*alternative) && !categories.contains(alternative) {
+            categories.push(*alternative);
+        }
+    }
+    categories
+}
+
+fn is_high_risk_category(category: SituationCategory) -> bool {
+    matches!(
+        category,
+        SituationCategory::Deployment
+            | SituationCategory::Release
+            | SituationCategory::IncidentResponse
+    )
+}
+
+fn tripwire_candidate_id(category: SituationCategory) -> &'static str {
+    match category {
+        SituationCategory::Deployment => "tripwire.deployment_readiness",
+        SituationCategory::Release => "tripwire.release_readiness",
+        SituationCategory::IncidentResponse => "tripwire.incident_response",
+        _ => "tripwire.manual_review",
+    }
 }
 
 fn category_list(categories: &[SituationCategory]) -> String {
@@ -1879,14 +2088,14 @@ mod tests {
         ensure(
             json.get("routingDecisions")
                 .and_then(serde_json::Value::as_array)
-                .is_some_and(Vec::is_empty),
+                .is_some_and(|routes| !routes.is_empty()),
             true,
-            "has no routing decisions",
+            "has heuristic routing decisions",
         )
     }
 
     #[test]
-    fn classify_task_labels_heuristics_without_routing() -> TestResult {
+    fn classify_task_labels_heuristics_with_fixture_routes() -> TestResult {
         let result = classify_task("fix failing release workflow");
 
         ensure(result.category, SituationCategory::BugFix, "bug-fix tag")?;
@@ -1897,14 +2106,22 @@ mod tests {
         )?;
         ensure(result.confidence_score, 0.49, "confidence capped")?;
         ensure(
-            result.routing_decisions.is_empty(),
+            result.routing_decisions.iter().any(|decision| {
+                decision.surface == SituationRoutingSurface::FixtureFamily
+                    && decision
+                        .fixture_ids
+                        .contains(&"fixture.situation.bug_fix".to_string())
+                    && decision
+                        .fixture_ids
+                        .contains(&"fixture.preflight.standard".to_string())
+            }),
             true,
-            "heuristic tags do not route downstream surfaces",
+            "heuristic tags route fixture and preflight hints",
         )
     }
 
     #[test]
-    fn ambiguous_heuristic_tags_preserve_alternatives_without_broadening_routes() -> TestResult {
+    fn ambiguous_heuristic_tags_broaden_fixture_routes() -> TestResult {
         let result = classify_task("docs fix");
         ensure(
             result.category,
@@ -1924,14 +2141,22 @@ mod tests {
             "bug-fix alternative preserved as heuristic tag",
         )?;
         ensure(
-            result.routing_decisions.is_empty(),
+            result.routing_decisions.iter().any(|decision| {
+                decision.surface == SituationRoutingSurface::FixtureFamily
+                    && decision
+                        .fixture_ids
+                        .contains(&"fixture.situation.documentation".to_string())
+                    && decision
+                        .fixture_ids
+                        .contains(&"fixture.situation.bug_fix".to_string())
+            }),
             true,
-            "ambiguous heuristic tags do not broaden routes",
+            "low-confidence alternative broadens fixture route",
         )
     }
 
     #[test]
-    fn high_risk_alternative_stays_a_tag_not_a_tripwire_route() -> TestResult {
+    fn high_risk_alternative_emits_tripwire_route() -> TestResult {
         let result = classify_task("fix failing release workflow");
         ensure(
             result.category,
@@ -1948,9 +2173,14 @@ mod tests {
         )?;
 
         ensure(
-            result.routing_decisions.is_empty(),
+            result.routing_decisions.iter().any(|decision| {
+                decision.surface == SituationRoutingSurface::TripwireCandidate
+                    && decision
+                        .tripwire_candidate_ids
+                        .contains(&"tripwire.release_readiness".to_string())
+            }),
             true,
-            "high-risk alternative does not produce a tripwire route",
+            "high-risk alternative produces a tripwire route",
         )
     }
 
@@ -1994,9 +2224,12 @@ mod tests {
             "shared signal",
         )?;
         ensure(
-            report.overlap.routing_targets.is_empty(),
+            report
+                .overlap
+                .routing_targets
+                .contains(&"fixture_family:fixture.situation.bug_fix".to_string()),
             true,
-            "no shared routing target",
+            "shared routing target",
         )?;
         ensure(
             report
@@ -2121,7 +2354,7 @@ mod tests {
             1.0,
             "classification precision",
         )?;
-        ensure(evaluation.routing_usefulness, 0.0, "routing usefulness")?;
+        ensure(evaluation.routing_usefulness, 1.0, "routing usefulness")?;
         ensure(
             evaluation.alternative_recall,
             Some(1.0),

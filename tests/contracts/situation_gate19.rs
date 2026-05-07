@@ -240,10 +240,12 @@ fn gate19_heuristic_tag_goldens_are_stable_and_non_decisioning() -> TestResult {
             JsonValue::String("low".to_owned()),
             format!("{name} confidence").as_str(),
         )?;
-        ensure_json_equal(
-            envelope.pointer("/data/routingDecisions"),
-            serde_json::json!([]),
-            format!("{name} routes").as_str(),
+        ensure(
+            envelope
+                .pointer("/data/routingDecisions")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|routes| !routes.is_empty()),
+            format!("{name} routes should include deterministic heuristic hints").as_str(),
         )?;
     }
 
@@ -252,8 +254,15 @@ fn gate19_heuristic_tag_goldens_are_stable_and_non_decisioning() -> TestResult {
         .and_then(JsonValue::as_array)
         .ok_or("low-confidence routing decisions missing")?;
     ensure(
-        low_routes.is_empty(),
-        "low-confidence classifications must not route",
+        low_routes.iter().any(|route| {
+            route
+                .get("fixtureIds")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|fixtures| {
+                    fixtures.contains(&JsonValue::String("fixture.situation.bug_fix".to_owned()))
+                })
+        }),
+        "low-confidence classifications should broaden fixture routes",
     )?;
 
     ensure(
@@ -346,7 +355,10 @@ fn gate19_compare_and_link_dry_run_goldens_are_stable() -> TestResult {
     )?;
     ensure_json_equal(
         compare.pointer("/overlap/routingTargets"),
-        serde_json::json!([]),
+        serde_json::json!([
+            "fixture_family:fixture.situation.bug_fix",
+            "preflight_profile:preflight.standard"
+        ]),
         "routing targets",
     )?;
     ensure(
@@ -383,7 +395,7 @@ fn gate19_fixture_metrics_match_golden_and_cover_gate_surfaces() -> TestResult {
     )?;
     ensure_json_equal(
         actual.get("routingUsefulness"),
-        serde_json::json!(0.0),
+        serde_json::json!(1.0),
         "routing usefulness",
     )?;
     ensure_json_equal(
@@ -398,11 +410,11 @@ fn gate19_fixture_metrics_match_golden_and_cover_gate_surfaces() -> TestResult {
 }
 
 #[test]
-fn gate19_heuristic_tags_never_emit_downstream_routes() -> TestResult {
+fn gate19_heuristic_tags_emit_routes_without_decisioning() -> TestResult {
     let result = classify_task("fix failing release workflow");
     ensure(
-        result.routing_decisions.is_empty(),
-        "heuristic tags must not route",
+        !result.routing_decisions.is_empty(),
+        "heuristic tags should emit deterministic routes",
     )?;
     let json = result.data_json();
     ensure_json_equal(

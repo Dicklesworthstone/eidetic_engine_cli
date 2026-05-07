@@ -3,35 +3,35 @@
   "version": "0.1.0",
   "caseCount": 9,
   "classificationPrecision": 1.0,
-  "routingUsefulness": 0.0,
+  "routingUsefulness": 1.0,
   "alternativeRecall": 1.0,
   "families": [
     {
       "family": "classification_precision",
       "caseCount": 4,
       "classificationPrecision": 1.0,
-      "routingUsefulness": 0.0,
+      "routingUsefulness": 1.0,
       "alternativeRecall": 1.0
     },
     {
       "family": "routing_usefulness",
       "caseCount": 2,
       "classificationPrecision": 1.0,
-      "routingUsefulness": 0.0,
+      "routingUsefulness": 1.0,
       "alternativeRecall": 1.0
     },
     {
       "family": "alternative_recall",
       "caseCount": 2,
       "classificationPrecision": 1.0,
-      "routingUsefulness": 0.0,
+      "routingUsefulness": 1.0,
       "alternativeRecall": 1.0
     },
     {
       "family": "low_confidence",
       "caseCount": 1,
       "classificationPrecision": 1.0,
-      "routingUsefulness": 0.0,
+      "routingUsefulness": 1.0,
       "alternativeRecall": null
     }
   ],
@@ -47,8 +47,11 @@
         "fixture.situation.bug_fix",
         "fixture.preflight.standard"
       ],
-      "observedFixtureIds": [],
-      "routingHits": 0,
+      "observedFixtureIds": [
+        "fixture.situation.bug_fix",
+        "fixture.preflight.standard"
+      ],
+      "routingHits": 2,
       "routingExpected": 2,
       "expectedAlternativeCategories": [],
       "observedAlternativeCategories": [],
@@ -66,8 +69,11 @@
         "fixture.situation.feature",
         "fixture.preflight.standard"
       ],
-      "observedFixtureIds": [],
-      "routingHits": 0,
+      "observedFixtureIds": [
+        "fixture.situation.feature",
+        "fixture.preflight.standard"
+      ],
+      "routingHits": 2,
       "routingExpected": 2,
       "expectedAlternativeCategories": [],
       "observedAlternativeCategories": [],
@@ -85,8 +91,11 @@
         "fixture.situation.refactor",
         "fixture.preflight.standard"
       ],
-      "observedFixtureIds": [],
-      "routingHits": 0,
+      "observedFixtureIds": [
+        "fixture.situation.refactor",
+        "fixture.preflight.standard"
+      ],
+      "routingHits": 2,
       "routingExpected": 2,
       "expectedAlternativeCategories": [],
       "observedAlternativeCategories": [],
@@ -104,8 +113,12 @@
         "fixture.situation.documentation",
         "fixture.preflight.minimal"
       ],
-      "observedFixtureIds": [],
-      "routingHits": 0,
+      "observedFixtureIds": [
+        "fixture.situation.documentation",
+        "fixture.preflight.minimal",
+        "fixture.situation.configuration"
+      ],
+      "routingHits": 2,
       "routingExpected": 2,
       "expectedAlternativeCategories": [
         "configuration"
@@ -127,8 +140,13 @@
         "fixture.situation.deployment",
         "fixture.preflight.full"
       ],
-      "observedFixtureIds": [],
-      "routingHits": 0,
+      "observedFixtureIds": [
+        "fixture.situation.deployment",
+        "fixture.preflight.full",
+        "fixture.situation.release",
+        "fixture.situation.review"
+      ],
+      "routingHits": 2,
       "routingExpected": 2,
       "expectedAlternativeCategories": [
         "release",
@@ -152,8 +170,11 @@
         "fixture.situation.review",
         "fixture.preflight.standard"
       ],
-      "observedFixtureIds": [],
-      "routingHits": 0,
+      "observedFixtureIds": [
+        "fixture.situation.review",
+        "fixture.preflight.standard"
+      ],
+      "routingHits": 2,
       "routingExpected": 2,
       "expectedAlternativeCategories": [],
       "observedAlternativeCategories": [],
@@ -171,8 +192,12 @@
         "fixture.situation.bug_fix",
         "fixture.preflight.standard"
       ],
-      "observedFixtureIds": [],
-      "routingHits": 0,
+      "observedFixtureIds": [
+        "fixture.situation.bug_fix",
+        "fixture.preflight.standard",
+        "fixture.situation.release"
+      ],
+      "routingHits": 2,
       "routingExpected": 2,
       "expectedAlternativeCategories": [
         "release"
@@ -194,8 +219,13 @@
         "fixture.situation.testing",
         "fixture.preflight.summary"
       ],
-      "observedFixtureIds": [],
-      "routingHits": 0,
+      "observedFixtureIds": [
+        "fixture.situation.testing",
+        "fixture.preflight.summary",
+        "fixture.situation.configuration",
+        "fixture.situation.feature"
+      ],
+      "routingHits": 2,
       "routingExpected": 2,
       "expectedAlternativeCategories": [
         "configuration",
@@ -219,8 +249,11 @@
         "fixture.situation.unknown",
         "fixture.preflight.summary"
       ],
-      "observedFixtureIds": [],
-      "routingHits": 0,
+      "observedFixtureIds": [
+        "fixture.situation.unknown",
+        "fixture.preflight.summary"
+      ],
+      "routingHits": 2,
       "routingExpected": 2,
       "expectedAlternativeCategories": [],
       "observedAlternativeCategories": [],
