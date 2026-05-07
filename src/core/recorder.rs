@@ -3566,7 +3566,10 @@ mod tests {
         let outcome = connection.execute_raw(
             "UPDATE recorder_events SET event_type = 'error' WHERE event_type IN ('user_message','tool_call')",
         );
-        let error = outcome.expect_err("trigger should reject UPDATE on recorder_events");
+        let error = match outcome {
+            Ok(()) => return Err("trigger should reject UPDATE on recorder_events".to_string()),
+            Err(error) => error,
+        };
         let message = error.to_string().to_lowercase();
         ensure(
             message.contains("recorder_events") && message.contains("append-only"),
@@ -3591,6 +3594,70 @@ mod tests {
     /// V036 / eidetic_engine_cli-is96 — DELETE on recorder_events is NOT
     /// blocked, because recorder_runs uses ON DELETE CASCADE. Deleting a
     /// run must still cascade-delete its events.
+    #[test]
+    fn direct_delete_on_recorder_events_succeeds_and_cascade_still_works() -> TestResult {
+        use crate::db::DbConnection;
+        let connection = DbConnection::open_memory().map_err(|e| e.to_string())?;
+        connection.migrate().map_err(|e| e.to_string())?;
+
+        let run_id = import_two_event_run(&connection)?;
+        let before = connection
+            .list_recorder_events(&run_id)
+            .map_err(|e| e.to_string())?;
+        ensure(before.len(), 2, "two events persisted before direct delete")?;
+        let deleted_event_id = before[0].event_id.clone();
+
+        connection
+            .execute_raw(&format!(
+                "DELETE FROM recorder_events WHERE event_id = '{deleted_event_id}'"
+            ))
+            .map_err(|e| format!("direct recorder_events DELETE must remain permitted: {e}"))?;
+
+        let after_direct_delete = connection
+            .list_recorder_events(&run_id)
+            .map_err(|e| e.to_string())?;
+        ensure(
+            after_direct_delete.len(),
+            1,
+            "one event remains after direct event delete",
+        )?;
+        ensure(
+            after_direct_delete
+                .iter()
+                .any(|event| event.event_id == deleted_event_id),
+            false,
+            "direct event delete removed the targeted event",
+        )?;
+        ensure(
+            connection
+                .get_recorder_run(&run_id)
+                .map_err(|e| e.to_string())?
+                .is_some(),
+            true,
+            "parent run remains after direct event delete",
+        )?;
+
+        connection
+            .execute_raw("PRAGMA foreign_keys = ON")
+            .map_err(|e| e.to_string())?;
+        connection
+            .execute_raw(&format!(
+                "DELETE FROM recorder_runs WHERE run_id = '{run_id}'"
+            ))
+            .map_err(|e| {
+                format!("recorder_runs DELETE must still cascade after direct delete: {e}")
+            })?;
+
+        let after_parent_delete = connection
+            .list_recorder_events(&run_id)
+            .map_err(|e| e.to_string())?;
+        ensure(
+            after_parent_delete.is_empty(),
+            true,
+            "remaining recorder_events still cascade-delete with parent run",
+        )
+    }
+
     #[test]
     fn deleting_recorder_run_still_cascades_to_events() -> TestResult {
         use crate::db::DbConnection;
