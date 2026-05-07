@@ -2454,10 +2454,8 @@ mod tests {
             "honest mention of removed algorithm",
         )?;
         ensure(
-            report
-                .message
-                .contains("implements-surface:certificate-signing"),
-            "points at follow-up bead label",
+            report.message.contains("ee.ed25519.v1"),
+            "directs user to real signing implementation",
         )
     }
 
@@ -2525,5 +2523,135 @@ mod tests {
         ensure_equal(&summary.kind, &cert.kind, "kind")?;
         ensure_equal(&summary.status, &cert.status, "status")?;
         ensure(summary.is_usable, "should be usable")
+    }
+
+    #[test]
+    fn ed25519_round_trip_sign_verify_succeeds() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let key_dir = dir.path().join("keys");
+        fs::create_dir_all(&key_dir).map_err(|e| e.to_string())?;
+
+        let key_path = key_dir.join("test_workspace.ed25519");
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)
+            .map_err(|e| e.to_string())?;
+        fs::write(&key_path, pkcs8.as_ref()).map_err(|e| e.to_string())?;
+
+        let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+            .map_err(|e| e.to_string())?;
+        let public_key = keypair.public_key().as_ref();
+        let fingerprint = blake3::hash(public_key).to_hex().to_string();
+        let signer = format!("ed25519:fp:{fingerprint}");
+
+        let payload_hash = "test_payload_hash_abc123";
+        let sig_bytes = keypair.sign(payload_hash.as_bytes());
+        let signature = format!("ed25519:{}", hex_lower(sig_bytes.as_ref()));
+
+        let result = verify_ed25519_signature(&signature, &signer, payload_hash, Some(&key_dir));
+        match result {
+            AttestationVerification::Ok { .. } => Ok(()),
+            AttestationVerification::Mismatch { message, .. } => {
+                Err(format!("round-trip verification should pass: {message}"))
+            }
+        }
+    }
+
+    #[test]
+    fn ed25519_forged_signature_from_public_inputs_fails() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let key_dir = dir.path().join("keys");
+        fs::create_dir_all(&key_dir).map_err(|e| e.to_string())?;
+
+        let key_path = key_dir.join("test_workspace.ed25519");
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)
+            .map_err(|e| e.to_string())?;
+        fs::write(&key_path, pkcs8.as_ref()).map_err(|e| e.to_string())?;
+
+        let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+            .map_err(|e| e.to_string())?;
+        let public_key = keypair.public_key().as_ref();
+        let fingerprint = blake3::hash(public_key).to_hex().to_string();
+        let signer = format!("ed25519:fp:{fingerprint}");
+        let payload_hash = "victim_payload_hash_xyz789";
+
+        let forged_sig = "ed25519:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+        let result = verify_ed25519_signature(forged_sig, &signer, payload_hash, Some(&key_dir));
+        match result {
+            AttestationVerification::Mismatch { .. } => Ok(()),
+            AttestationVerification::Ok { .. } => {
+                Err("forged signature should NOT pass verification".to_string())
+            }
+        }
+    }
+
+    #[test]
+    fn ed25519_mutated_payload_verification_fails() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let key_dir = dir.path().join("keys");
+        fs::create_dir_all(&key_dir).map_err(|e| e.to_string())?;
+
+        let key_path = key_dir.join("test_workspace.ed25519");
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)
+            .map_err(|e| e.to_string())?;
+        fs::write(&key_path, pkcs8.as_ref()).map_err(|e| e.to_string())?;
+
+        let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+            .map_err(|e| e.to_string())?;
+        let public_key = keypair.public_key().as_ref();
+        let fingerprint = blake3::hash(public_key).to_hex().to_string();
+        let signer = format!("ed25519:fp:{fingerprint}");
+
+        let original_payload = "original_payload_hash";
+        let sig_bytes = keypair.sign(original_payload.as_bytes());
+        let signature = format!("ed25519:{}", hex_lower(sig_bytes.as_ref()));
+
+        let mutated_payload = "mutated_payload_hash";
+        let result = verify_ed25519_signature(&signature, &signer, mutated_payload, Some(&key_dir));
+        match result {
+            AttestationVerification::Mismatch { .. } => Ok(()),
+            AttestationVerification::Ok { .. } => {
+                Err("mutated payload should NOT pass verification".to_string())
+            }
+        }
+    }
+
+    #[test]
+    fn ed25519_adversarial_attacker_cannot_mint_valid_attestation() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let key_dir = dir.path().join("keys");
+        fs::create_dir_all(&key_dir).map_err(|e| e.to_string())?;
+
+        let victim_key_path = key_dir.join("victim.ed25519");
+        let rng = ring::rand::SystemRandom::new();
+        let victim_pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)
+            .map_err(|e| e.to_string())?;
+        fs::write(&victim_key_path, victim_pkcs8.as_ref()).map_err(|e| e.to_string())?;
+
+        let victim_keypair = ring::signature::Ed25519KeyPair::from_pkcs8(victim_pkcs8.as_ref())
+            .map_err(|e| e.to_string())?;
+        let victim_public = victim_keypair.public_key().as_ref();
+        let victim_fp = blake3::hash(victim_public).to_hex().to_string();
+        let victim_signer = format!("ed25519:fp:{victim_fp}");
+
+        let payload_hash = "sensitive_data_hash";
+
+        let attacker_pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)
+            .map_err(|e| e.to_string())?;
+        let attacker_keypair = ring::signature::Ed25519KeyPair::from_pkcs8(attacker_pkcs8.as_ref())
+            .map_err(|e| e.to_string())?;
+        let attacker_sig = attacker_keypair.sign(payload_hash.as_bytes());
+        let forged_signature = format!("ed25519:{}", hex_lower(attacker_sig.as_ref()));
+
+        let result =
+            verify_ed25519_signature(&forged_signature, &victim_signer, payload_hash, Some(&key_dir));
+        match result {
+            AttestationVerification::Mismatch { .. } => Ok(()),
+            AttestationVerification::Ok { .. } => Err(
+                "attacker signature with victim's signer should NOT pass verification".to_string(),
+            ),
+        }
     }
 }
