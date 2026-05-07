@@ -1802,13 +1802,15 @@ fn get_db_stats(db: &DbConnection) -> Result<(u32, u32, Option<u64>), DbError> {
         .query("SELECT COUNT(*) FROM memories", &[])?
         .first()
         .and_then(|row| row.get(0).and_then(|v| v.as_i64()))
-        .unwrap_or(0) as u32;
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(0);
 
     let session_count = db
         .query("SELECT COUNT(*) FROM sessions", &[])?
         .first()
         .and_then(|row| row.get(0).and_then(|v| v.as_i64()))
-        .unwrap_or(0) as u32;
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(0);
 
     let artifact_count = db
         .query("SELECT COUNT(*) FROM artifacts", &[])
@@ -1817,7 +1819,8 @@ fn get_db_stats(db: &DbConnection) -> Result<(u32, u32, Option<u64>), DbError> {
             rows.first()
                 .and_then(|row| row.get(0).and_then(|v| v.as_i64()))
         })
-        .unwrap_or(0) as u64;
+        .and_then(|v| u64::try_from(v).ok())
+        .unwrap_or(0);
 
     let source_document_count = u64::from(memory_count) + u64::from(session_count) + artifact_count;
 
@@ -1830,7 +1833,8 @@ fn get_db_stats(db: &DbConnection) -> Result<(u32, u32, Option<u64>), DbError> {
             rows.first()
                 .and_then(|row| row.get(0).and_then(|v| v.as_i64()))
         })
-        .unwrap_or(0) as u64;
+        .and_then(|v| u64::try_from(v).ok())
+        .unwrap_or(0);
 
     let generation = Some(source_document_count.max(audit_count));
 
