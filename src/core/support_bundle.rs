@@ -18,15 +18,25 @@ use std::path::{Path, PathBuf};
 use blake3::Hasher;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
+use crate::cache::CacheBudget;
 use crate::db::DbConnection;
 use crate::models::DomainError;
 use crate::output;
+use crate::pack::{
+    PackCacheGovernor, PackHotset, PackHotsetEntry, PackHotsetEntryKind, PackSection,
+    prewarm_pack_hotset,
+};
 use crate::policy::redact_secret_like_content;
+use crate::search::{SearchCacheGovernor, SearchHotset, SearchHotsetEntry, prewarm_search_hotset};
 
 use super::doctor::DoctorReport;
-use super::status::StatusReport;
+use super::status::{
+    STATUS_BENCH_GROUP_NAME, STATUS_BENCH_HARD_CEILING_MS, STATUS_BENCH_QUICK_ITERATIONS,
+    STATUS_BENCH_SCALES, StatusReport,
+};
+use super::write_owner::{WriteSpool, WriteSpoolConfig};
 
 pub const SUPPORT_BUNDLE_SCHEMA_V1: &str = "ee.support_bundle.v1";
 pub const SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1: &str = "ee.support_bundle.manifest.v1";
@@ -38,6 +48,14 @@ const DOCTOR_FILE: &str = "doctor.json";
 const AUDIT_FILE: &str = "audit.jsonl";
 const CAPABILITIES_FILE: &str = "capabilities.json";
 const SCHEMA_FILE: &str = "schema_version.json";
+const SCALE_BENCHMARK_SUMMARY_FILE: &str = "scale_benchmark_summary.json";
+const SCALE_FIXTURE_MANIFEST_FILE: &str = "scale_fixture_manifest.json";
+const CACHE_REPORTS_FILE: &str = "scale_cache_reports.json";
+const WRITE_QUEUE_REPORT_FILE: &str = "scale_write_queue_report.json";
+const PERFORMANCE_EXPLAIN_SAMPLES_FILE: &str = "scale_performance_explain_samples.json";
+const TRIAGE_SUMMARY_FILE: &str = "scale_triage_summary.json";
+const SWARM_SCALE_WORKLOADS_MANIFEST: &str =
+    include_str!("../../tests/fixtures/swarm_scale/workloads.json");
 
 /// Options for creating a support bundle.
 #[derive(Clone, Debug)]
@@ -174,6 +192,12 @@ struct CollectedDiagnostics {
     audit_json: String,
     capabilities_json: String,
     schema_json: String,
+    scale_benchmark_summary_json: String,
+    scale_fixture_manifest_json: String,
+    cache_reports_json: String,
+    write_queue_report_json: String,
+    performance_explain_samples_json: String,
+    triage_summary_json: String,
 }
 
 /// Plan what would be collected without actually creating the bundle.
@@ -239,6 +263,24 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         (AUDIT_FILE, &diagnostics.audit_json),
         (CAPABILITIES_FILE, &diagnostics.capabilities_json),
         (SCHEMA_FILE, &diagnostics.schema_json),
+        (
+            SCALE_BENCHMARK_SUMMARY_FILE,
+            &diagnostics.scale_benchmark_summary_json,
+        ),
+        (
+            SCALE_FIXTURE_MANIFEST_FILE,
+            &diagnostics.scale_fixture_manifest_json,
+        ),
+        (CACHE_REPORTS_FILE, &diagnostics.cache_reports_json),
+        (
+            WRITE_QUEUE_REPORT_FILE,
+            &diagnostics.write_queue_report_json,
+        ),
+        (
+            PERFORMANCE_EXPLAIN_SAMPLES_FILE,
+            &diagnostics.performance_explain_samples_json,
+        ),
+        (TRIAGE_SUMMARY_FILE, &diagnostics.triage_summary_json),
     ];
 
     for (filename, content) in files_to_write {
@@ -421,13 +463,323 @@ fn collect_diagnostics(
     })
     .to_string();
 
+    let swarm_reports = discover_swarm_report_summaries(workspace);
+    let scale_benchmark_summary_json = scale_benchmark_summary_json(workspace, &swarm_reports);
+    let scale_fixture_manifest_json = scale_fixture_manifest_json();
+    let cache_reports_json = cache_reports_json();
+    let write_queue_report_json = write_queue_report_json();
+    let performance_explain_samples_json = performance_explain_samples_json();
+    let triage_summary_json = triage_summary_json(&status, &swarm_reports);
+
     Ok(CollectedDiagnostics {
         status_json,
         doctor_json,
         audit_json,
         capabilities_json,
         schema_json,
+        scale_benchmark_summary_json,
+        scale_fixture_manifest_json,
+        cache_reports_json,
+        write_queue_report_json,
+        performance_explain_samples_json,
+        triage_summary_json,
     })
+}
+
+fn scale_benchmark_summary_json(workspace: &Path, swarm_reports: &[Value]) -> String {
+    stable_json(&json!({
+        "schema": "ee.support_bundle.scale_benchmark_summary.v1",
+        "owningBead": "eidetic_engine_cli-fcq1.7",
+        "workspacePath": workspace.display().to_string(),
+        "sourceArtifacts": [
+            "tests/perf_bench_status.rs",
+            "tests/e2e_swarm_contention_recovery.rs",
+            "tests/fixtures/swarm_scale/workloads.json"
+        ],
+        "statusBenchmark": {
+            "groupName": STATUS_BENCH_GROUP_NAME,
+            "quickIterations": STATUS_BENCH_QUICK_ITERATIONS,
+            "hardCeilingMs": STATUS_BENCH_HARD_CEILING_MS,
+            "scales": STATUS_BENCH_SCALES
+                .iter()
+                .map(|scale| json!({
+                    "name": scale.name,
+                    "memoryCount": scale.memory_count,
+                }))
+                .collect::<Vec<_>>(),
+        },
+        "swarmSmokeReports": swarm_reports,
+        "redactionStatus": "content_redacted_before_manifest_write",
+    }))
+}
+
+fn scale_fixture_manifest_json() -> String {
+    let manifest =
+        serde_json::from_str::<Value>(SWARM_SCALE_WORKLOADS_MANIFEST).unwrap_or_else(|error| {
+            json!({
+                "schema": "ee.swarm_scale.workloads.unparseable",
+                "parseError": error.to_string(),
+            })
+        });
+
+    stable_json(&json!({
+        "schema": "ee.support_bundle.scale_fixture_manifest.v1",
+        "source": "tests/fixtures/swarm_scale/workloads.json",
+        "redactionStatus": "fixture_contract_declares_no_synthetic_secrets",
+        "manifest": manifest,
+    }))
+}
+
+fn cache_reports_json() -> String {
+    let generation = 7;
+    let mut search_entries = vec![
+        SearchHotsetEntry::memory("mem_swarm_small_00000001", generation, 9),
+        SearchHotsetEntry::graph_neighborhood("mem_swarm_small_00000001", 2, generation, 3),
+    ];
+    if let Some(query_entry) =
+        SearchHotsetEntry::query_shape("prepare release under swarm load", generation, 12)
+    {
+        search_entries.push(query_entry);
+    }
+    let search_hotset = SearchHotset::new(search_entries);
+    let search_report = prewarm_search_hotset(
+        &search_hotset,
+        SearchCacheGovernor::new(generation, CacheBudget::new(16, 64 * 1024)),
+    );
+
+    let pack_hotset = PackHotset::new([
+        PackHotsetEntry {
+            key: support_cache_key("pack:section:procedural_rules"),
+            kind: PackHotsetEntryKind::PackSection,
+            section: Some(PackSection::ProceduralRules),
+            generation,
+            estimated_bytes: 256,
+            hit_count: 8,
+            redaction_status: "content_not_stored",
+        },
+        PackHotsetEntry {
+            key: support_cache_key("pack:selection_certificate:swarm"),
+            kind: PackHotsetEntryKind::SelectionCertificate,
+            section: None,
+            generation,
+            estimated_bytes: 192,
+            hit_count: 3,
+            redaction_status: "content_not_stored",
+        },
+    ]);
+    let pack_report = prewarm_pack_hotset(
+        &pack_hotset,
+        PackCacheGovernor::new(generation, CacheBudget::new(16, 64 * 1024)),
+    );
+
+    stable_json(&json!({
+        "schema": "ee.support_bundle.scale_cache_reports.v1",
+        "redactionStatus": "content_not_stored",
+        "reports": {
+            "search": search_report.data_json(),
+            "pack": pack_report.data_json(),
+        },
+    }))
+}
+
+fn write_queue_report_json() -> String {
+    let spool = WriteSpool::new(WriteSpoolConfig::default(), 0);
+    stable_json(&json!({
+        "schema": "ee.support_bundle.write_queue_report.v1",
+        "status": "not_attached",
+        "reason": "support_bundle_cli_process_has_no_live_daemon_spool",
+        "emptySpoolContract": spool.status(0),
+        "owner": "daemon_write_queue",
+        "repair": "Run ee daemon status --json when daemon mode owns writes.",
+    }))
+}
+
+fn performance_explain_samples_json() -> String {
+    stable_json(&json!({
+        "schema": "ee.support_bundle.performance_explain_samples.v1",
+        "sourceSchema": super::search::PERFORMANCE_EXPLAIN_SCHEMA_V1,
+        "samples": [
+            {
+                "command": "search",
+                "queryPlan": {
+                    "retrievalMode": "instant",
+                    "requestedLimit": 10,
+                    "candidateBudget": 200,
+                    "usesEmbeddings": false,
+                    "scoreExplanationsRequested": true,
+                },
+                "owners": ["search", "host_resource_pressure"],
+                "redactionStatus": "query_shape_only",
+            },
+            {
+                "command": "context",
+                "queryPlan": {
+                    "retrievalMode": "balanced",
+                    "requestedCandidatePool": 100,
+                    "maxTokens": 4000,
+                    "profile": "balanced",
+                },
+                "owners": ["pack", "search", "graph"],
+                "redactionStatus": "query_shape_only",
+            }
+        ],
+    }))
+}
+
+fn triage_summary_json(status: &StatusReport, swarm_reports: &[Value]) -> String {
+    let index_state = status
+        .derived_assets
+        .iter()
+        .find(|asset| asset.name == "search_index")
+        .map_or("not_reported", |asset| asset.status.as_str());
+
+    let has_failures = swarm_reports.iter().any(|report| {
+        report
+            .get("failureCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
+    });
+    let db_integrity_failed = swarm_reports
+        .iter()
+        .any(|report| report.get("dbIntegrityOk") == Some(&Value::Bool(false)));
+    let determinism_failed = swarm_reports
+        .iter()
+        .any(|report| report.get("determinismOk") == Some(&Value::Bool(false)));
+
+    stable_json(&json!({
+        "schema": "ee.support_bundle.scale_triage.v1",
+        "ownerSignals": [
+            {
+                "owner": "search",
+                "severity": if matches!(index_state, "current" | "not_reported") { "low" } else { "medium" },
+                "signals": [format!("search_index={index_state}")],
+                "next": "ee index status --workspace . --json",
+            },
+            {
+                "owner": "pack",
+                "severity": "low",
+                "signals": ["performance explain samples include pack assembly and token-budget fields"],
+                "next": "ee context <query> --explain-performance",
+            },
+            {
+                "owner": "db",
+                "severity": if db_integrity_failed { "high" } else { "low" },
+                "signals": [if db_integrity_failed { "swarm report dbIntegrityOk=false" } else { "no DB integrity failure observed" }],
+                "next": "ee doctor --workspace . --json",
+            },
+            {
+                "owner": "daemon_write_queue",
+                "severity": if has_failures { "medium" } else { "low" },
+                "signals": [if has_failures { "one or more swarm processes failed" } else { "no process failures observed in bundled swarm reports" }],
+                "next": "ee daemon status --json",
+            },
+            {
+                "owner": "graph",
+                "severity": "low",
+                "signals": ["graph metrics are derived and should be checked only after DB/search are healthy"],
+                "next": "ee status --workspace . --json",
+            },
+            {
+                "owner": "policy_redaction",
+                "severity": "low",
+                "signals": ["scale artifacts pass through support-bundle redaction before hashing"],
+                "next": "ee support inspect <bundle> --verify-hashes --json",
+            },
+            {
+                "owner": "host_resource_pressure",
+                "severity": if swarm_reports.is_empty() { "unknown" } else if determinism_failed { "medium" } else { "low" },
+                "signals": [if swarm_reports.is_empty() { "no swarm smoke report was found under .ee/swarm-contention" } else if determinism_failed { "swarm report determinismOk=false" } else { "swarm reports did not flag determinism failure" }],
+                "next": "Inspect RCH logs and host CPU/memory telemetry for the benchmark run.",
+            }
+        ],
+        "recommendedOrder": [
+            "db",
+            "search",
+            "daemon_write_queue",
+            "pack",
+            "host_resource_pressure",
+            "graph",
+            "policy_redaction"
+        ],
+    }))
+}
+
+fn discover_swarm_report_summaries(workspace: &Path) -> Vec<Value> {
+    let report_dir = workspace.join(".ee").join("swarm-contention");
+    let Ok(entries) = fs::read_dir(report_dir) else {
+        return Vec::new();
+    };
+
+    let mut paths = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "json"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.truncate(16);
+
+    paths
+        .iter()
+        .filter_map(|path| summarize_swarm_report(workspace, path))
+        .collect()
+}
+
+fn summarize_swarm_report(workspace: &Path, path: &Path) -> Option<Value> {
+    let raw_content = fs::read_to_string(path).ok()?;
+    let redaction = redact_secret_like_content(&raw_content);
+    let parsed = serde_json::from_str::<Value>(&raw_content).ok()?;
+    let relative_path = path.strip_prefix(workspace).unwrap_or(path);
+    let relative_path = redact_secret_like_content(&relative_path.display().to_string()).content;
+    let redaction_reasons = redaction
+        .redacted_reasons
+        .iter()
+        .map(|reason| (*reason).to_owned())
+        .collect::<Vec<_>>();
+
+    Some(json!({
+        "path": relative_path,
+        "contentHash": compute_hash(&redaction.content),
+        "schema": parsed.get("schema").map(redact_json_value).unwrap_or(Value::Null),
+        "scenario": parsed.get("scenario").map(redact_json_value).unwrap_or(Value::Null),
+        "processCount": parsed.get("processCount").cloned().unwrap_or(Value::Null),
+        "successCount": parsed.get("successCount").cloned().unwrap_or(Value::Null),
+        "failureCount": parsed.get("failureCount").cloned().unwrap_or(Value::Null),
+        "totalDurationMs": parsed.get("totalDurationMs").cloned().unwrap_or(Value::Null),
+        "dbIntegrityOk": parsed.get("dbIntegrityOk").cloned().unwrap_or(Value::Null),
+        "determinismOk": parsed.get("determinismOk").cloned().unwrap_or(Value::Null),
+        "degradations": parsed.get("degradations").map(redact_json_value).unwrap_or_else(|| json!([])),
+        "redacted": redaction.redacted,
+        "redactionReasons": redaction_reasons,
+    }))
+}
+
+fn redact_json_value(value: &Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(redact_secret_like_content(text).content),
+        Value::Array(items) => Value::Array(items.iter().map(redact_json_value).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), redact_json_value(value)))
+                .collect(),
+        ),
+        Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
+    }
+}
+
+fn stable_json(value: &Value) -> String {
+    match serde_json::to_string(value) {
+        Ok(serialized) => serialized,
+        Err(error) => json!({
+            "schema": "ee.support_bundle.serialization_error.v1",
+            "message": error.to_string(),
+        })
+        .to_string(),
+    }
+}
+
+fn support_cache_key(payload: &str) -> String {
+    format!("blake3:{}", compute_hash(payload))
 }
 
 fn collect_audit_entries(workspace: &Path, limit: u32) -> String {
@@ -473,6 +825,12 @@ fn planned_files() -> Vec<String> {
         AUDIT_FILE.to_owned(),
         CAPABILITIES_FILE.to_owned(),
         SCHEMA_FILE.to_owned(),
+        SCALE_BENCHMARK_SUMMARY_FILE.to_owned(),
+        SCALE_FIXTURE_MANIFEST_FILE.to_owned(),
+        CACHE_REPORTS_FILE.to_owned(),
+        WRITE_QUEUE_REPORT_FILE.to_owned(),
+        PERFORMANCE_EXPLAIN_SAMPLES_FILE.to_owned(),
+        TRIAGE_SUMMARY_FILE.to_owned(),
         MANIFEST_FILE.to_owned(),
     ]
 }
@@ -572,5 +930,139 @@ mod tests {
         };
         assert_eq!(summary.total_redactions, 2);
         assert_eq!(summary.reasons.len(), 2);
+    }
+
+    #[test]
+    fn planned_files_include_scale_regression_artifacts() {
+        let files = planned_files();
+        for required in [
+            SCALE_BENCHMARK_SUMMARY_FILE,
+            SCALE_FIXTURE_MANIFEST_FILE,
+            CACHE_REPORTS_FILE,
+            WRITE_QUEUE_REPORT_FILE,
+            PERFORMANCE_EXPLAIN_SAMPLES_FILE,
+            TRIAGE_SUMMARY_FILE,
+        ] {
+            assert!(
+                files.contains(&required.to_owned()),
+                "planned support-bundle files must include {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn scale_fixture_manifest_is_wrapped_with_support_bundle_schema() -> TestResult {
+        let wrapped = scale_fixture_manifest_json();
+        let value: Value = serde_json::from_str(&wrapped)
+            .map_err(|error| format!("fixture manifest wrapper must parse: {error}"))?;
+        assert_eq!(
+            value.pointer("/schema"),
+            Some(&json!("ee.support_bundle.scale_fixture_manifest.v1"))
+        );
+        assert_eq!(
+            value.pointer("/manifest/schema"),
+            Some(&json!("ee.swarm_scale.workloads.v1"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn create_bundle_collects_scale_artifacts_and_detects_tamper() -> TestResult {
+        let root = unique_test_path("scale-artifacts");
+        let workspace = root.join("workspace");
+        let report_dir = workspace.join(".ee").join("swarm-contention");
+        fs::create_dir_all(&report_dir)
+            .map_err(|error| format!("failed to create report dir: {error}"))?;
+
+        let raw_secret = "api_key=sk_test_123";
+        let swarm_report = json!({
+            "schema": "ee.swarm_contention.report.v1",
+            "scenario": "mixed_read_write_contention",
+            "processCount": 5,
+            "successCount": 4,
+            "failureCount": 1,
+            "totalDurationMs": 42,
+            "dbIntegrityOk": true,
+            "determinismOk": true,
+            "degradations": [format!("worker stderr included {raw_secret}")],
+        });
+        fs::write(report_dir.join("report.json"), swarm_report.to_string())
+            .map_err(|error| format!("failed to write swarm report: {error}"))?;
+
+        let output_dir = root.join("out");
+        fs::create_dir_all(&output_dir)
+            .map_err(|error| format!("failed to create output dir: {error}"))?;
+
+        let report = create_bundle(&BundleOptions {
+            workspace,
+            output_dir: Some(output_dir),
+            dry_run: false,
+            redacted: true,
+            include_raw: false,
+            audit_limit: 5,
+        })
+        .map_err(|error| error.message())?;
+
+        for required in [
+            SCALE_BENCHMARK_SUMMARY_FILE,
+            SCALE_FIXTURE_MANIFEST_FILE,
+            CACHE_REPORTS_FILE,
+            WRITE_QUEUE_REPORT_FILE,
+            PERFORMANCE_EXPLAIN_SAMPLES_FILE,
+            TRIAGE_SUMMARY_FILE,
+        ] {
+            assert!(
+                report.files_collected.contains(&required.to_owned()),
+                "created support bundle must include {required}"
+            );
+        }
+
+        let bundle_dir = report
+            .output_path
+            .clone()
+            .ok_or_else(|| "created bundle must report output path".to_owned())?;
+        let benchmark_summary =
+            fs::read_to_string(bundle_dir.join(SCALE_BENCHMARK_SUMMARY_FILE))
+                .map_err(|error| format!("failed to read benchmark summary: {error}"))?;
+        assert!(
+            benchmark_summary.contains("mixed_read_write_contention"),
+            "benchmark summary must include the discovered swarm scenario"
+        );
+        assert!(
+            !benchmark_summary.contains(raw_secret),
+            "benchmark summary must not leak secret-like report content"
+        );
+
+        let clean_inspect = inspect_bundle(&InspectOptions {
+            bundle_path: bundle_dir.clone(),
+            verify_hashes: true,
+        })
+        .map_err(|error| error.message())?;
+        assert!(clean_inspect.valid);
+
+        fs::write(bundle_dir.join(CACHE_REPORTS_FILE), "{}")
+            .map_err(|error| format!("failed to tamper cache report: {error}"))?;
+        let tampered_inspect = inspect_bundle(&InspectOptions {
+            bundle_path: bundle_dir,
+            verify_hashes: true,
+        })
+        .map_err(|error| error.message())?;
+        assert!(!tampered_inspect.valid);
+        assert!(
+            tampered_inspect
+                .hash_mismatches
+                .contains(&CACHE_REPORTS_FILE.to_owned()),
+            "tampered metric attachment must be reported as a hash mismatch"
+        );
+
+        Ok(())
+    }
+
+    fn unique_test_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ee-support-bundle-{name}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ))
     }
 }
