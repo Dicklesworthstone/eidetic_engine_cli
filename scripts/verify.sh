@@ -1,5 +1,5 @@
-#!/bin/sh
-set -eu
+#!/bin/bash
+set -euo pipefail
 
 # EE-TST-LP4P-GAP-001 / EE-TST-LP4P-GAP-004: Central Verification Runner
 #
