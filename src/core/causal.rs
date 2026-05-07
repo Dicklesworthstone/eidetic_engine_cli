@@ -5,7 +5,7 @@
 //! influence.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value as JsonValue, json};
 use sqlmodel_core::{Row, Value};
@@ -43,6 +43,8 @@ pub struct TraceOptions {
     pub agent_id: Option<String>,
     /// Filter by workspace ID.
     pub workspace_id: Option<String>,
+    /// Explicit database path for direct helper calls that need persisted ledger rows.
+    pub database_path: Option<PathBuf>,
     /// Maximum number of traces to return.
     pub limit: Option<usize>,
     /// Maximum number of causal edges to walk backward from the failure.
@@ -66,6 +68,7 @@ impl Default for TraceOptions {
             procedure_id: None,
             agent_id: None,
             workspace_id: None,
+            database_path: None,
             limit: None,
             depth: 8,
             include_exposures: false,
@@ -126,6 +129,12 @@ impl TraceOptions {
     #[must_use]
     pub fn with_workspace_id(mut self, id: impl Into<String>) -> Self {
         self.workspace_id = Some(id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_database_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.database_path = Some(path.into());
         self
     }
 
@@ -471,11 +480,19 @@ impl TraceReport {
 
 /// Trace causal chains based on the provided options.
 ///
-/// Currently returns a placeholder report since the full database integration
-/// requires recorder, pack, preflight, and tripwire table queries that will
-/// be wired up as those subsystems mature.
+/// Filter-only calls return an empty report with explicit evidence status.
+/// Calls that provide a database path, workspace ID, and failure memory ID read
+/// persisted `causal_evidence` rows and build deterministic causal paths.
 #[must_use]
 pub fn trace_causal_chains(options: &TraceOptions) -> TraceReport {
+    if options.database_path.is_some() {
+        return trace_causal_chains_from_options_store(options);
+    }
+
+    base_trace_report(options)
+}
+
+fn base_trace_report(options: &TraceOptions) -> TraceReport {
     let mut filters_applied = Vec::new();
     let mut degradations = Vec::new();
 
@@ -534,13 +551,82 @@ pub fn trace_causal_chains(options: &TraceOptions) -> TraceReport {
     }
 }
 
+fn trace_causal_chains_from_options_store(options: &TraceOptions) -> TraceReport {
+    let mut report = base_trace_report(options);
+    report.degradations.retain(|degradation| {
+        degradation.code != "causal_evidence_unavailable" && degradation.code != "no_filters"
+    });
+
+    if options.dry_run {
+        return report;
+    }
+
+    let Some(database_path) = options.database_path.as_deref() else {
+        return report;
+    };
+
+    let Some(workspace_id) = options.workspace_id.as_deref() else {
+        report.degradations.push(trace_degradation(
+            "causal_workspace_id_required",
+            "Provide a workspace ID when reading causal trace rows through the direct helper.",
+            "warning",
+        ));
+        return report;
+    };
+
+    if !database_path.exists() {
+        report.degradations.push(trace_degradation(
+            "causal_database_missing",
+            format!(
+                "Causal trace database does not exist at {}.",
+                database_path.display()
+            ),
+            "warning",
+        ));
+        return report;
+    }
+
+    let conn = match DbConnection::open_file(database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            report.degradations.push(trace_degradation(
+                "causal_database_open_failed",
+                format!("Failed to open causal trace database: {error}"),
+                "warning",
+            ));
+            return report;
+        }
+    };
+
+    if let Err(error) = conn.migrate() {
+        report.degradations.push(trace_degradation(
+            "causal_database_migration_failed",
+            format!("Failed to migrate causal trace database: {error}"),
+            "warning",
+        ));
+        return report;
+    }
+
+    match trace_causal_chains_from_store(&conn, workspace_id, options) {
+        Ok(store_report) => store_report,
+        Err(error) => {
+            report.degradations.push(trace_degradation(
+                "causal_trace_store_failed",
+                format!("Failed to read causal trace rows: {}", error.message()),
+                "warning",
+            ));
+            report
+        }
+    }
+}
+
 /// Trace causal chains from persisted `causal_evidence` ledger rows.
 pub fn trace_causal_chains_from_store(
     conn: &DbConnection,
     workspace_id: &str,
     options: &TraceOptions,
 ) -> Result<TraceReport, DomainError> {
-    let mut report = trace_causal_chains(options);
+    let mut report = base_trace_report(options);
     report.degradations.retain(|degradation| {
         degradation.code != "causal_evidence_unavailable" && degradation.code != "no_filters"
     });

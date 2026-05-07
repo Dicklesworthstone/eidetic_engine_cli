@@ -177,6 +177,8 @@ fn seeded_causal_cli_fixture() -> Result<CausalCliFixture, String> {
     Ok(CausalCliFixture {
         _temp: temp,
         workspace: canonical_workspace,
+        workspace_id,
+        database_path,
         failure,
     })
 }
@@ -226,6 +228,8 @@ fn insert_causal_fixture_edge(
 struct CausalCliFixture {
     _temp: tempfile::TempDir,
     workspace: PathBuf,
+    workspace_id: String,
+    database_path: PathBuf,
     failure: String,
 }
 
@@ -392,6 +396,51 @@ fn causal_cli_json_subcommands_use_persisted_evidence_ledgers() -> TestResult {
             .and_then(JsonValue::as_str)
             .is_some_and(|id| id.starts_with("curate_")),
         "promote-plan must create a curation candidate",
+    )
+}
+
+#[test]
+fn direct_trace_helper_reads_persisted_causal_ledger() -> TestResult {
+    let fixture = seeded_causal_cli_fixture()?;
+    let report = trace_causal_chains(
+        &TraceOptions::new()
+            .with_memory_id(fixture.failure.clone())
+            .with_workspace_id(fixture.workspace_id.clone())
+            .with_database_path(fixture.database_path.clone())
+            .with_depth(2),
+    );
+    let json = report.data_json();
+
+    assert_schema_field(&json, CAUSAL_TRACE_SCHEMA_V1, "direct trace helper")?;
+    ensure(
+        json.pointer("/summary/totalChains")
+            .and_then(JsonValue::as_u64)
+            == Some(2),
+        "direct helper must return both seeded causal chains",
+    )?;
+    ensure(
+        json.pointer("/chains/0/evidenceUris/0")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|uri| uri.starts_with("agent-mail://causal-contract/")),
+        "direct helper must expose persisted evidence URIs",
+    )?;
+    ensure(
+        json.pointer("/chains/0/edgeCount")
+            .and_then(JsonValue::as_u64)
+            == Some(1),
+        "direct helper must build a real edge-backed path",
+    )?;
+    let degradations = json
+        .get("degradations")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| "direct helper missing degradations array".to_owned())?;
+    ensure(
+        !degradations.iter().any(|item| {
+            item.get("code")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|code| code == "causal_evidence_unavailable")
+        }),
+        "direct helper must not report missing causal evidence when ledger rows exist",
     )
 }
 
