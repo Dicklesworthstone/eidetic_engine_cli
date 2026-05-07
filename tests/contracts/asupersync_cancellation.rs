@@ -1,8 +1,9 @@
 use std::sync::{
-    Arc,
+    Arc, Mutex as StdMutex,
     atomic::{AtomicBool, AtomicU8, Ordering},
 };
 
+use asupersync::runtime::JoinError;
 use asupersync::runtime::yield_now::yield_now;
 use asupersync::{
     Budget, CancelKind, CancelReason, Cx, LabConfig, LabRuntime, Outcome, OutcomeError,
@@ -372,6 +373,8 @@ fn daemon_foreground_loop_cancels_between_maintenance_ticks() -> TestResult {
     options.interval_ms = 1_000;
     options.tick_limit = 2;
     options.job_types = vec![JobType::HealthCheck];
+    let observed_cx: Arc<StdMutex<Option<Cx>>> = Arc::new(StdMutex::new(None));
+    let observed_cx_for_task = Arc::clone(&observed_cx);
 
     let (task_id, mut handle) = lab
         .state
@@ -379,6 +382,12 @@ fn daemon_foreground_loop_cancels_between_maintenance_ticks() -> TestResult {
             let Some(cx) = Cx::current() else {
                 return Outcome::Err("LabRuntime task should install Cx".to_owned());
             };
+            {
+                let Ok(mut slot) = observed_cx_for_task.lock() else {
+                    return Outcome::Err("daemon contract Cx slot poisoned".to_owned());
+                };
+                *slot = Some(cx.clone());
+            }
             run_daemon_foreground_supervised(&cx, &options).await
         })
         .map_err(|error| format!("failed to create daemon contract task: {error}"))?;
@@ -405,20 +414,33 @@ fn daemon_foreground_loop_cancels_between_maintenance_ticks() -> TestResult {
         ),
     )?;
 
-    let outcome = handle
-        .try_join()
-        .map_err(|error| format!("daemon contract join failed: {error}"))?
-        .ok_or_else(|| "daemon contract task did not finish".to_owned())?;
-    match outcome {
-        Outcome::Cancelled(reason) => ensure_equal(
-            &reason.message.as_deref(),
-            &Some("daemon contract cancellation"),
-            "daemon cancellation reason",
-        ),
-        other => Err(format!(
-            "daemon contract expected cancellation, got {other:?}"
-        )),
-    }
+    let cancellation_reason = match handle.try_join() {
+        Ok(Some(Outcome::Cancelled(reason))) => reason,
+        Err(JoinError::Cancelled(reason))
+            if reason.message.as_deref() == Some("join channel closed") =>
+        {
+            observed_cx
+                .lock()
+                .map_err(|_| "daemon contract Cx slot poisoned".to_owned())?
+                .as_ref()
+                .and_then(Cx::cancel_reason)
+                .ok_or_else(|| "daemon contract cancellation reason missing from Cx".to_owned())?
+        }
+        Err(JoinError::Cancelled(reason)) => reason,
+        Ok(Some(other)) => {
+            return Err(format!(
+                "daemon contract expected cancellation, got {other:?}"
+            ));
+        }
+        Ok(None) => return Err("daemon contract task did not finish".to_owned()),
+        Err(error) => return Err(format!("daemon contract join failed: {error}")),
+    };
+
+    ensure_equal(
+        &cancellation_reason.message.as_deref(),
+        &Some("daemon contract cancellation"),
+        "daemon cancellation reason",
+    )
 }
 
 #[test]
