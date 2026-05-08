@@ -224,9 +224,9 @@ fn matrix_tags_require_only() -> TestResult {
     let json = stdout_json(&output)?;
     assert_response_envelope(&json, "tags require")?;
 
-    let items = json["data"]["pack"]["items"].as_array();
-    ensure(items.is_some(), "tags require: missing pack items")?;
-    let items = items.unwrap();
+    let items = json["data"]["pack"]["items"]
+        .as_array()
+        .ok_or_else(|| "tags require: missing pack items".to_string())?;
     ensure(
         items.iter().all(|item| {
             item["content"]
@@ -1148,21 +1148,15 @@ fn matrix_deterministic_output() -> TestResult {
     let json1 = stdout_json(&output1)?;
     let json2 = stdout_json(&output2)?;
 
-    let items1 = json1["data"]["pack"]["items"].as_array();
-    let items2 = json2["data"]["pack"]["items"].as_array();
+    let items1 = json1["data"]["pack"]["items"]
+        .as_array()
+        .ok_or_else(|| "run 1 missing pack items".to_string())?;
+    let items2 = json2["data"]["pack"]["items"]
+        .as_array()
+        .ok_or_else(|| "run 2 missing pack items".to_string())?;
 
-    ensure(items1.is_some() && items2.is_some(), "both runs have items")?;
-
-    let ids1: Vec<_> = items1
-        .unwrap()
-        .iter()
-        .filter_map(|i| i["id"].as_str())
-        .collect();
-    let ids2: Vec<_> = items2
-        .unwrap()
-        .iter()
-        .filter_map(|i| i["id"].as_str())
-        .collect();
+    let ids1: Vec<_> = items1.iter().filter_map(|i| i["id"].as_str()).collect();
+    let ids2: Vec<_> = items2.iter().filter_map(|i| i["id"].as_str()).collect();
 
     ensure_equal(&ids1, &ids2, "item IDs should be deterministic across runs")
 }
