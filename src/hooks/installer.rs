@@ -528,6 +528,15 @@ fn write_hook_file(hook_dir: &Path, target_path: &Path, content: &str) -> Result
 /// PATH hijack attacks. The binary path is captured via `std::env::current_exe()`
 /// and canonicalized before being embedded in generated hook scripts.
 pub fn install_hooks(options: &HookInstallOptions) -> Result<HookInstallReport, DomainError> {
+    // Capture absolute binary path at install time to embed in hooks (security fix)
+    let ee_binary_path = get_ee_binary_path()?;
+    install_hooks_with_binary_path(options, &ee_binary_path)
+}
+
+fn install_hooks_with_binary_path(
+    options: &HookInstallOptions,
+    ee_binary_path: &Path,
+) -> Result<HookInstallReport, DomainError> {
     let now = Utc::now().to_rfc3339();
     let mut plan = Vec::new();
     let mut installed_count = 0u32;
@@ -536,12 +545,9 @@ pub fn install_hooks(options: &HookInstallOptions) -> Result<HookInstallReport, 
     let mut no_change_count = 0u32;
     let mut writes = Vec::new();
 
-    // Capture absolute binary path at install time to embed in hooks (security fix)
-    let ee_binary_path = get_ee_binary_path()?;
-
     for hook_type in &options.hooks {
         let target_path = options.hook_dir.join(hook_type.filename());
-        let content = generate_hook_content(*hook_type, &ee_binary_path);
+        let content = generate_hook_content(*hook_type, ee_binary_path);
         let existing = check_existing_hook(&target_path);
         let (action, reason) = determine_action(
             &target_path,
@@ -715,6 +721,12 @@ mod tests {
 
     type TestResult = Result<(), String>;
 
+    fn install_hooks_for_test(
+        options: &HookInstallOptions,
+    ) -> Result<HookInstallReport, DomainError> {
+        install_hooks_with_binary_path(options, std::path::Path::new("/usr/local/bin/ee"))
+    }
+
     #[test]
     fn dry_run_does_not_create_files() -> TestResult {
         let temp = TempDir::new().map_err(|e| e.to_string())?;
@@ -726,7 +738,7 @@ mod tests {
             force: false,
         };
 
-        let report = install_hooks(&options).map_err(|e| e.message())?;
+        let report = install_hooks_for_test(&options).map_err(|e| e.message())?;
         assert!(report.dry_run);
         assert_eq!(report.installed_count, 1);
 
@@ -746,7 +758,7 @@ mod tests {
             force: false,
         };
 
-        let report = install_hooks(&options).map_err(|e| e.message())?;
+        let report = install_hooks_for_test(&options).map_err(|e| e.message())?;
         assert!(!report.dry_run);
         assert_eq!(report.installed_count, 1);
 
@@ -769,12 +781,12 @@ mod tests {
             force: false,
         };
 
-        let report1 = install_hooks(&options).map_err(|e| e.message())?;
+        let report1 = install_hooks_for_test(&options).map_err(|e| e.message())?;
         assert_eq!(report1.installed_count, 1);
 
         let hook_path = temp.path().join("pre-commit");
         let installed_content = fs::read_to_string(&hook_path).map_err(|e| e.to_string())?;
-        let report2 = install_hooks(&options).map_err(|e| e.message())?;
+        let report2 = install_hooks_for_test(&options).map_err(|e| e.message())?;
         assert_eq!(report2.no_change_count, 1);
         assert!(report2.idempotent);
         assert_eq!(report2.updated_count, 0);
@@ -801,7 +813,7 @@ mod tests {
             force: false,
         };
 
-        let report = install_hooks(&options).map_err(|e| e.message())?;
+        let report = install_hooks_for_test(&options).map_err(|e| e.message())?;
         assert_eq!(report.updated_count, 1);
         assert_eq!(report.no_change_count, 0);
         let content = fs::read_to_string(&hook_path).map_err(|e| e.to_string())?;
@@ -824,7 +836,7 @@ mod tests {
             force: false,
         };
 
-        let report = install_hooks(&options).map_err(|e| e.message())?;
+        let report = install_hooks_for_test(&options).map_err(|e| e.message())?;
         assert_eq!(report.skipped_count, 1);
 
         let content = fs::read_to_string(&hook_path).map_err(|e| e.to_string())?;
@@ -849,7 +861,7 @@ mod tests {
             force: true,
         };
 
-        let report = install_hooks(&options).map_err(|e| e.message())?;
+        let report = install_hooks_for_test(&options).map_err(|e| e.message())?;
         assert_eq!(report.updated_count, 1);
 
         let content = fs::read_to_string(&hook_path).map_err(|e| e.to_string())?;
@@ -993,7 +1005,7 @@ mod tests {
             force: false,
         };
 
-        let error = match install_hooks(&options) {
+        let error = match install_hooks_for_test(&options) {
             Ok(_) => return Err("install should fail when hook_dir is a file".to_string()),
             Err(error) => error,
         };
@@ -1022,7 +1034,7 @@ mod tests {
             force: true,
         };
 
-        let error = match install_hooks(&options) {
+        let error = match install_hooks_for_test(&options) {
             Ok(_) => return Err("install should fail before writing any hook".to_string()),
             Err(error) => error,
         };
@@ -1063,7 +1075,7 @@ mod tests {
             force: true,
         };
 
-        let error = match install_hooks(&options) {
+        let error = match install_hooks_for_test(&options) {
             Ok(_) => return Err("install should reject special hook targets".to_string()),
             Err(error) => error,
         };
@@ -1093,7 +1105,7 @@ mod tests {
             force: false,
         };
 
-        let _report = install_hooks(&options).map_err(|e| e.message())?;
+        let _report = install_hooks_for_test(&options).map_err(|e| e.message())?;
 
         let hook_path = temp.path().join("pre-task");
         let content = fs::read_to_string(&hook_path).map_err(|e| e.to_string())?;
@@ -1142,7 +1154,7 @@ mod tests {
             force: true,
         };
 
-        let report = install_hooks(&options).map_err(|e| e.message())?;
+        let report = install_hooks_for_test(&options).map_err(|e| e.message())?;
         assert_eq!(report.skipped_count, 1, "symlink hook should be skipped");
 
         let plan_entry = report
@@ -1185,7 +1197,7 @@ mod tests {
             force: false,
         };
 
-        let error = match install_hooks(&options) {
+        let error = match install_hooks_for_test(&options) {
             Ok(_) => return Err("install should reject symlinked hook directory".to_owned()),
             Err(error) => error,
         };
@@ -1225,7 +1237,7 @@ mod tests {
             force: false,
         };
 
-        let error = match install_hooks(&options) {
+        let error = match install_hooks_for_test(&options) {
             Ok(_) => {
                 return Err(
                     "install should reject hook directory beneath a symlinked parent".to_owned(),
