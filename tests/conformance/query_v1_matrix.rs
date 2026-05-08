@@ -707,15 +707,73 @@ fn matrix_unsupported_graph() -> TestResult {
     assert_stderr_empty(&output, "graph")
 }
 
+// ============================================================================
+// SECTION 3.1: Pagination Features (Implemented via eidetic_engine_cli-4x80)
+// ============================================================================
+
 #[test]
-fn matrix_unsupported_pagination() -> TestResult {
+fn matrix_pagination_limit() -> TestResult {
     let (tempdir, workspace) = setup_workspace_with_memories()?;
     let query_file = write_query_file(
         &tempdir,
         r#"{
             "version": "ee.query.v1",
             "query": {"text": "release"},
-            "pagination": {"limit": 10}
+            "pagination": {"limit": 2}
+        }"#,
+    )?;
+
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "pack",
+        "--query-file",
+        &query_file,
+        "--json",
+    ])?;
+
+    ensure_equal(&output.status.code(), &Some(EXIT_SUCCESS), "pagination limit")?;
+    let json = stdout_json(&output)?;
+    assert_response_envelope(&json, "pagination limit")?;
+    assert_stderr_empty(&output, "pagination limit")
+}
+
+#[test]
+fn matrix_pagination_cursor_first_page() -> TestResult {
+    let (tempdir, workspace) = setup_workspace_with_memories()?;
+    let query_file = write_query_file(
+        &tempdir,
+        r#"{
+            "version": "ee.query.v1",
+            "query": {"text": "release"},
+            "pagination": {"limit": 1}
+        }"#,
+    )?;
+
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "pack",
+        "--query-file",
+        &query_file,
+        "--json",
+    ])?;
+
+    ensure_equal(&output.status.code(), &Some(EXIT_SUCCESS), "pagination first page")?;
+    let json = stdout_json(&output)?;
+    assert_response_envelope(&json, "pagination first page")?;
+    assert_stderr_empty(&output, "pagination first page")
+}
+
+#[test]
+fn matrix_pagination_invalid_cursor() -> TestResult {
+    let (tempdir, workspace) = setup_workspace_with_memories()?;
+    let query_file = write_query_file(
+        &tempdir,
+        r#"{
+            "version": "ee.query.v1",
+            "query": {"text": "release"},
+            "pagination": {"limit": 10, "cursor": "not-valid-base64-cursor"}
         }"#,
     )?;
 
@@ -730,11 +788,41 @@ fn matrix_unsupported_pagination() -> TestResult {
 
     ensure(
         output.status.code() != Some(EXIT_SUCCESS),
-        "pagination should fail",
+        "invalid cursor should fail",
     )?;
     let json = stdout_json(&output)?;
-    assert_error_envelope(&json, "ERR_UNSUPPORTED_FEATURE", "pagination")?;
-    assert_stderr_empty(&output, "pagination")
+    assert_error_envelope(&json, "ERR_INVALID_CURSOR", "invalid cursor")?;
+    assert_stderr_empty(&output, "invalid cursor")
+}
+
+#[test]
+fn matrix_pagination_zero_limit() -> TestResult {
+    let (tempdir, workspace) = setup_workspace_with_memories()?;
+    let query_file = write_query_file(
+        &tempdir,
+        r#"{
+            "version": "ee.query.v1",
+            "query": {"text": "release"},
+            "pagination": {"limit": 0}
+        }"#,
+    )?;
+
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "pack",
+        "--query-file",
+        &query_file,
+        "--json",
+    ])?;
+
+    ensure(
+        output.status.code() != Some(EXIT_SUCCESS),
+        "zero limit should fail",
+    )?;
+    let json = stdout_json(&output)?;
+    assert_error_envelope(&json, "ERR_INVALID_PAGINATION", "zero limit")?;
+    assert_stderr_empty(&output, "zero limit")
 }
 
 // ============================================================================
