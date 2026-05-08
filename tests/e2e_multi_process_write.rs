@@ -20,6 +20,7 @@ type TestResult = Result<(), String>;
 
 const EXIT_SUCCESS: i32 = 0;
 const WRITER_COUNT: usize = 2;
+const CONTEXT_COUNT: usize = 2;
 
 struct EeOutput {
     exit_code: Option<i32>,
@@ -168,6 +169,124 @@ fn concurrent_remember_processes_serialize_durable_writes() -> TestResult {
     connection.close().map_err(|error| error.to_string())
 }
 
+#[test]
+fn concurrent_context_and_remember_processes_persist_pack_records() -> TestResult {
+    let artifact_dir = unique_artifact_dir("context-pack-contention")?;
+    let workspace = artifact_dir.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+
+    let init = run_ee_json(&workspace, ["init"], "init")?;
+    assert_success(&init, "init")?;
+
+    let run_id = unique_run_id()?;
+    let context_query = format!("g2gn context pack persistence {run_id}");
+    let mut seed_memories = Vec::new();
+    for index in 0..3 {
+        let seed_content = format!("{context_query} seed memory {index}");
+        let seed = run_ee_json(
+            &workspace,
+            [
+                "remember",
+                seed_content.as_str(),
+                "--level",
+                "procedural",
+                "--kind",
+                "rule",
+            ],
+            &format!("seed memory {index}"),
+        )?;
+        assert_success(&seed, &format!("seed memory {index}"))?;
+        seed_memories.push(parse_remembered_memory(seed, index)?);
+    }
+
+    let total_processes = WRITER_COUNT + CONTEXT_COUNT;
+    let start = Arc::new(Barrier::new(total_processes));
+    let mut writer_handles = Vec::with_capacity(WRITER_COUNT);
+    for index in 0..WRITER_COUNT {
+        let content = format!("g2gn concurrent writer {run_id} process {index} persists safely");
+        writer_handles.push(spawn_remember_process(
+            Arc::clone(&start),
+            workspace.clone(),
+            content,
+        ));
+    }
+
+    let mut context_handles = Vec::with_capacity(CONTEXT_COUNT);
+    for _ in 0..CONTEXT_COUNT {
+        context_handles.push(spawn_context_process(
+            Arc::clone(&start),
+            workspace.clone(),
+            context_query.clone(),
+        ));
+    }
+
+    for (index, handle) in writer_handles.into_iter().enumerate() {
+        let output = handle
+            .join()
+            .map_err(|_| format!("remember subprocess thread {index} panicked"))??;
+        let parsed = parse_json_output(output, &format!("remember subprocess {index}"))?;
+        assert_success(&parsed, &format!("remember subprocess {index}"))?;
+        assert_no_lock_contention_error(&parsed.stderr, index)?;
+    }
+
+    for (index, handle) in context_handles.into_iter().enumerate() {
+        let output = handle
+            .join()
+            .map_err(|_| format!("context subprocess thread {index} panicked"))??;
+        let parsed = parse_json_output(output, &format!("context subprocess {index}"))?;
+        assert_success(&parsed, &format!("context subprocess {index}"))?;
+        assert_no_lock_contention_error(&parsed.stderr, index)?;
+        assert_no_context_pack_persist_failure(&parsed, index)?;
+        assert_context_selected_memory(&parsed, index)?;
+    }
+
+    let database_path = seed_memories
+        .first()
+        .ok_or_else(|| "no seed memories collected".to_owned())?
+        .database_path
+        .clone();
+    let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+
+    let mut pack_record_ids = BTreeSet::new();
+    for memory in &seed_memories {
+        let history = connection
+            .list_pack_records_for_memory(&memory.memory_id, 20)
+            .map_err(|error| error.to_string())?;
+        for (record, _item) in history {
+            if record.query == context_query {
+                ensure_equal(
+                    &record.created_by.as_deref(),
+                    &Some("ee context"),
+                    "context pack created_by",
+                )?;
+                pack_record_ids.insert(record.id);
+            }
+        }
+    }
+    ensure_equal(
+        &pack_record_ids.len(),
+        &CONTEXT_COUNT,
+        "each concurrent context process should persist one pack record",
+    )?;
+
+    let integrity = connection
+        .check_integrity()
+        .map_err(|error| error.to_string())?;
+    ensure(
+        integrity.passed,
+        format!(
+            "database integrity_check should pass after mixed context/write contention; issues: {:?}",
+            integrity.issues
+        ),
+    )?;
+    connection.close().map_err(|error| error.to_string())
+}
+
 fn unique_artifact_dir(name: &str) -> Result<PathBuf, String> {
     let target_dir = env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
@@ -226,6 +345,28 @@ fn spawn_remember_process(
             .env("NO_COLOR", "1")
             .output()
             .map_err(|error| format!("failed to run ee remember: {error}"))
+    })
+}
+
+fn spawn_context_process(
+    start: Arc<Barrier>,
+    workspace: PathBuf,
+    query: String,
+) -> thread::JoinHandle<Result<Output, String>> {
+    thread::spawn(move || {
+        start.wait();
+        Command::new(env!("CARGO_BIN_EXE_ee"))
+            .arg("--workspace")
+            .arg(workspace)
+            .arg("--json")
+            .arg("context")
+            .arg(query)
+            .args(["--max-tokens", "2000"])
+            .env_remove("EE_WORKSPACE")
+            .env_remove("EE_WORKSPACE_REGISTRY")
+            .env("NO_COLOR", "1")
+            .output()
+            .map_err(|error| format!("failed to run ee context: {error}"))
     })
 }
 
@@ -298,7 +439,43 @@ fn assert_no_lock_contention_error(stderr: &str, index: usize) -> TestResult {
             && !lower.contains("sqlite_busy")
             && !lower.contains("database locked")
             && !lower.contains("panicked"),
-        format!("remember subprocess {index} leaked write contention failure: {stderr:?}"),
+        format!("subprocess {index} leaked write contention failure: {stderr:?}"),
+    )
+}
+
+fn assert_no_context_pack_persist_failure(output: &EeOutput, index: usize) -> TestResult {
+    let has_persist_failure = output
+        .json
+        .pointer("/data/degraded")
+        .and_then(Value::as_array)
+        .is_some_and(|degraded| {
+            degraded.iter().any(|entry| {
+                entry
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .is_some_and(|code| code == "context_pack_persist_failed")
+            })
+        });
+    ensure(
+        !has_persist_failure,
+        format!("context subprocess {index} reported context_pack_persist_failed"),
+    )
+}
+
+fn assert_context_selected_memory(output: &EeOutput, index: usize) -> TestResult {
+    let item_count = output
+        .json
+        .pointer("/data/pack/quality/itemCount")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            format!(
+                "context subprocess {index} missing /data/pack/quality/itemCount: {}",
+                output.json
+            )
+        })?;
+    ensure(
+        item_count > 0,
+        format!("context subprocess {index} should select at least one memory"),
     )
 }
 
