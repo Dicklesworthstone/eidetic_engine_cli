@@ -1058,7 +1058,7 @@ impl LegacyMappingReport {
     /// Render as TOON output.
     #[must_use]
     pub fn toon_output(&self) -> String {
-        let json_str = serde_json::to_string(&self.data_json()).unwrap_or_default();
+        let json_str = crate::core::serialize_or_error(&self.data_json());
         crate::output::render_toon_from_json(&json_str)
     }
 }

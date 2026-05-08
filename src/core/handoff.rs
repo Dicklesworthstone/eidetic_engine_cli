@@ -427,12 +427,12 @@ impl PreviewReport {
 
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 
     #[must_use]
     pub fn to_json_pretty(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_default()
+        crate::core::serialize_pretty_or_error(self)
     }
 }
 
@@ -514,12 +514,12 @@ impl CreateReport {
 
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 
     #[must_use]
     pub fn to_json_pretty(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_default()
+        crate::core::serialize_pretty_or_error(self)
     }
 }
 
@@ -622,12 +622,12 @@ impl InspectReport {
 
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 
     #[must_use]
     pub fn to_json_pretty(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_default()
+        crate::core::serialize_pretty_or_error(self)
     }
 }
 
@@ -726,12 +726,12 @@ impl ResumeReport {
 
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 
     #[must_use]
     pub fn to_json_pretty(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_default()
+        crate::core::serialize_pretty_or_error(self)
     }
 }
 
@@ -1175,7 +1175,7 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         "created_at": Utc::now().to_rfc3339(),
     });
 
-    let content_str = serde_json::to_string_pretty(&capsule_content).unwrap_or_default();
+    let content_str = crate::core::serialize_pretty_or_error(&capsule_content);
     report.content_hash = compute_content_hash(&content_str);
 
     if !options.dry_run {

@@ -82,12 +82,12 @@ pub struct ProcedureProposeReport {
 impl ProcedureProposeReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 
     #[must_use]
     pub fn to_json_pretty(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_default()
+        crate::core::serialize_pretty_or_error(self)
     }
 }
 
@@ -314,7 +314,7 @@ pub struct ProcedureHistoryEvent {
 impl ProcedureShowReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 
@@ -396,7 +396,7 @@ pub struct ProcedureListItem {
 impl ProcedureListReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 
@@ -477,7 +477,7 @@ pub struct ProcedureExportReport {
 impl ProcedureExportReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 
@@ -984,7 +984,7 @@ pub struct ProcedurePromotionEffect {
 impl ProcedurePromoteReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 
@@ -1430,7 +1430,7 @@ pub struct ProcedureRetireReport {
 impl ProcedureRetireReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 
@@ -1631,7 +1631,7 @@ pub struct StepVerificationResult {
 impl ProcedureVerifyReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 
     #[must_use]
@@ -2608,7 +2608,7 @@ pub struct ProcedureDriftDetail {
 impl ProcedureDriftReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 

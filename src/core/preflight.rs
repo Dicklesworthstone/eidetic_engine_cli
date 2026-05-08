@@ -427,7 +427,7 @@ impl RunReport {
 
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 
@@ -455,7 +455,7 @@ impl ShowReport {
 
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 
@@ -621,7 +621,7 @@ impl CloseReport {
 
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 

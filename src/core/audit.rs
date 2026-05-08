@@ -100,7 +100,7 @@ pub struct AuditTimelineReport {
 impl AuditTimelineReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 
@@ -126,7 +126,7 @@ pub struct AuditShowReport {
 impl AuditShowReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 
@@ -143,7 +143,7 @@ pub struct AuditDiffReport {
 impl AuditDiffReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 
@@ -169,7 +169,7 @@ pub struct AuditVerifyReport {
 impl AuditVerifyReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 

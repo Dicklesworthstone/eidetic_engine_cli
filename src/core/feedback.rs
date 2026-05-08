@@ -331,7 +331,7 @@ impl FeedbackRecord {
 
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 
@@ -443,7 +443,7 @@ impl RecordFeedbackReport {
 
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 
@@ -495,7 +495,7 @@ impl FeedbackSummary {
 
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 

@@ -16871,7 +16871,7 @@ where
     match cli.renderer() {
         output::Renderer::Json => write_stdout(
             stdout,
-            &(serde_json::to_string_pretty(&report.data_json()).unwrap_or_default() + "\n"),
+            &(crate::core::serialize_pretty_or_error(&report.data_json()) + "\n"),
         ),
         _ => write_stdout(stdout, &(report.human_summary() + "\n")),
     };
@@ -16903,7 +16903,7 @@ where
             match cli.renderer() {
                 output::Renderer::Json => write_stdout(
                     stdout,
-                    &(serde_json::to_string_pretty(&report.data_json()).unwrap_or_default() + "\n"),
+                    &(crate::core::serialize_pretty_or_error(&report.data_json()) + "\n"),
                 ),
                 _ => write_stdout(stdout, &(report.human_summary() + "\n")),
             };

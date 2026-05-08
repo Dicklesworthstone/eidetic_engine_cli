@@ -798,7 +798,7 @@ fn create_env_json(include_vars: bool, timestamp: &str) -> String {
         "tool_versions": tool_versions
     });
 
-    serde_json::to_string_pretty(&env).unwrap_or_default()
+    crate::core::serialize_pretty_or_error(&env)
 }
 
 /// Create manifest.json content.
@@ -827,7 +827,7 @@ fn create_manifest_json(
         "created_at": timestamp
     });
 
-    serde_json::to_string_pretty(&manifest).unwrap_or_default()
+    crate::core::serialize_pretty_or_error(&manifest)
 }
 
 /// Create repro.lock content.
@@ -839,7 +839,7 @@ fn create_lock_json(timestamp: &str) -> String {
         "dependencies": []
     });
 
-    serde_json::to_string_pretty(&lock).unwrap_or_default()
+    crate::core::serialize_pretty_or_error(&lock)
 }
 
 /// Create provenance.json content.
@@ -852,7 +852,7 @@ fn create_provenance_json(timestamp: &str) -> String {
         "updated_at": timestamp
     });
 
-    serde_json::to_string_pretty(&provenance).unwrap_or_default()
+    crate::core::serialize_pretty_or_error(&provenance)
 }
 
 /// Hash content using blake3.

@@ -163,7 +163,7 @@ pub struct NonRehearsableCommand {
 impl RehearsePlanReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 
     #[must_use]
@@ -320,7 +320,7 @@ pub struct EffectRecord {
 impl RehearseRunReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 
     #[must_use]
@@ -596,7 +596,7 @@ pub struct EffectSummary {
 impl RehearseInspectReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 
     #[must_use]
@@ -730,7 +730,7 @@ pub struct Precondition {
 impl RehearsePromotePlanReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 
     #[must_use]

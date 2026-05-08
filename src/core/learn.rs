@@ -86,7 +86,7 @@ pub struct LearnAgendaReport {
 impl LearnAgendaReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 
@@ -184,7 +184,7 @@ pub struct LearnUncertaintyReport {
 impl LearnUncertaintyReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 
@@ -276,7 +276,7 @@ pub struct LearnSummaryReport {
 impl LearnSummaryReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 
@@ -1577,7 +1577,7 @@ pub struct LearnExperimentProposalReport {
 impl LearnExperimentProposalReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        crate::core::serialize_or_error(self)
     }
 }
 

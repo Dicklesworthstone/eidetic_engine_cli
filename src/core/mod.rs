@@ -353,6 +353,30 @@ where
     Ok(runtime.block_on(future))
 }
 
+/// Serialize a value to JSON, returning a stable error envelope on failure.
+///
+/// Use for display-only `to_json()` methods where failure should produce valid JSON
+/// rather than an empty string. For machine-facing APIs, prefer returning `Result`.
+#[must_use]
+pub fn serialize_or_error<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|e| format!(r#"{{"error":"serialization_failed","message":"{}"}}"#, e))
+}
+
+/// Serialize a value to pretty JSON, returning a stable error envelope on failure.
+#[must_use]
+pub fn serialize_pretty_or_error<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|e| {
+        format!(
+            r#"{{
+  "error": "serialization_failed",
+  "message": "{}"
+}}"#,
+            e
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::fmt::Debug;
@@ -362,7 +386,8 @@ mod tests {
     use super::{
         BUILD_TIMESTAMP_POLICY, RuntimeProfile, VERSION_PROVENANCE_SCHEMA_V1, VersionReport,
         build_features, build_info, clean_build_metadata, db_migration_range, parse_build_bool,
-        run_cli_future, runtime_status, supported_schemas,
+        run_cli_future, runtime_status, serialize_or_error, serialize_pretty_or_error,
+        supported_schemas,
     };
 
     type TestResult = Result<(), String>;
@@ -540,5 +565,47 @@ mod tests {
 
         ensure_equal(&first.now(), &second.now(), "lab runtime start time")?;
         ensure_equal(&first.steps(), &second.steps(), "lab runtime step count")
+    }
+
+    #[test]
+    fn serialize_or_error_produces_valid_json_on_success() -> TestResult {
+        #[derive(serde::Serialize)]
+        struct TestData {
+            name: String,
+            count: u32,
+        }
+        let data = TestData {
+            name: "test".to_string(),
+            count: 42,
+        };
+        let json = serialize_or_error(&data);
+        ensure(
+            json.contains("\"name\":\"test\""),
+            "should contain name field",
+        )?;
+        ensure(json.contains("\"count\":42"), "should contain count field")
+    }
+
+    #[test]
+    fn serialize_or_error_produces_error_envelope_on_failure() -> TestResult {
+        use std::collections::HashMap;
+        let mut map: HashMap<Vec<u8>, String> = HashMap::new();
+        map.insert(vec![0xFF], "invalid key".to_string());
+        let json = serialize_or_error(&map);
+        ensure(
+            json.contains("serialization_failed"),
+            "should contain error marker",
+        )
+    }
+
+    #[test]
+    fn serialize_pretty_or_error_produces_formatted_json() -> TestResult {
+        #[derive(serde::Serialize)]
+        struct TestData {
+            value: u32,
+        }
+        let data = TestData { value: 1 };
+        let json = serialize_pretty_or_error(&data);
+        ensure(json.contains('\n'), "pretty output should have newlines")
     }
 }
