@@ -2627,6 +2627,59 @@ mod tests {
     }
 
     #[test]
+    fn runtime_profile_caps_context_search_and_pack_budgets() -> TestResult {
+        let profile = RuntimeProfileReport::for_profile(OperatingProfile::Constrained, "test");
+
+        ensure(
+            profile.cap_search_limit(12),
+            (12, false),
+            "search under cap",
+        )?;
+        ensure(profile.cap_search_limit(4_000), (48, true), "search cap")?;
+        ensure(
+            profile.cap_pack_max_tokens(2_000),
+            (2_000, false),
+            "pack tokens under cap",
+        )?;
+        ensure(
+            profile.cap_pack_max_tokens(50_000),
+            (3_000, true),
+            "pack token cap",
+        )?;
+        ensure(
+            profile.cap_pack_candidate_pool(12),
+            (12, false),
+            "candidate pool under cap",
+        )?;
+        ensure(
+            profile.cap_pack_candidate_pool(1_000),
+            (24, true),
+            "candidate pool cap",
+        )
+    }
+
+    #[test]
+    fn runtime_profile_caps_index_jobs_from_write_spool_budget() -> TestResult {
+        let profile = RuntimeProfileReport::for_profile(OperatingProfile::Constrained, "test");
+
+        ensure(
+            profile.cap_index_job_limit(Some(12)),
+            (Some(12), false),
+            "index job limit under cap",
+        )?;
+        ensure(
+            profile.cap_index_job_limit(Some(4_000)),
+            (Some(32), true),
+            "index job limit cap",
+        )?;
+        ensure(
+            profile.cap_index_job_limit(None),
+            (Some(32), true),
+            "missing index job limit defaults to profile cap",
+        )
+    }
+
+    #[test]
     fn verification_recipe_constrained_skips_heavy_gates() -> TestResult {
         let recipe = VerificationRecipe::for_profile(OperatingProfile::Constrained);
 

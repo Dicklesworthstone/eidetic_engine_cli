@@ -13,11 +13,11 @@ passing conformance.
 | Recommendation thresholds | 9 | 9 | 100% |
 | Probe shape and redaction | 10 | 10 | 100% |
 | Recommendation determinism | 5 | 5 | 100% |
-| Budget defaults and scaling | 5 | 5 | 100% |
+| Budget defaults and scaling | 9 | 9 | 100% |
 | Verification recipes | 6 | 6 | 100% |
 | Budget conformance command | 7 | 7 | 100% |
 | Workflow and JSON contracts | 7 | 7 | 100% |
-| **Total** | **53** | **53** | **100%** |
+| **Total** | **57** | **57** | **100%** |
 
 MUST score: **100%**. SHOULD gaps are tracked separately and do not affect the
 MUST score.
@@ -116,6 +116,10 @@ when both the CPU and memory thresholds for that tier are met.
 | BD-03 | MUST scale pack token limits monotonically. | `budget_scaling_is_monotonic_with_profile_tier`; `profile_budgets_scale_with_profile` |
 | BD-04 | MUST scale cache memory caps monotonically. | `budget_scaling_is_monotonic_with_profile_tier`; `profile_budgets_scale_with_profile` |
 | BD-05 | MUST persist planned budget keys in stable TOML output. | `profile_config_plan_reports_exact_toml_without_writing`; JSON snapshots |
+| BD-06 | MUST cap runtime search requests by the active profile. | `runtime_profile_caps_context_search_and_pack_budgets` |
+| BD-07 | MUST cap runtime pack token requests by the active profile. | `runtime_profile_caps_context_search_and_pack_budgets` |
+| BD-08 | MUST cap runtime pack candidate pools by the active profile. | `runtime_profile_caps_context_search_and_pack_budgets` |
+| BD-09 | MUST cap index job limits by profile write-spool batch cap. | `runtime_profile_caps_index_jobs_from_write_spool_budget` |
 
 ## Verification Recipes
 
@@ -181,4 +185,3 @@ TMPDIR=/data/tmp CARGO_TARGET_DIR=/data/tmp/ee-profile-target rch exec -- cargo 
 | SH-01 | SHOULD add direct tests that `memory.cgroupLimitBytes` constrains recommendation when it differs from total/available memory, if that becomes implemented behavior. | Not a current MUST; recommendation does not use cgroup limits today. |
 | SH-02 | SHOULD extend monotonic property tests to every numeric budget field, including write-spool queue cap, retry budget, steward windows, and graph refresh budget. | Partially covered by snapshots, positivity checks, and conformance artifacts. |
 | SH-03 | SHOULD add direct assertions for probe degradation codes instead of relying on constructor branches and snapshots. | Stable branches exist; dedicated tests would make failures easier to diagnose. |
-| SH-04 | SHOULD add direct unit tests for `RuntimeProfileReport` cap helpers: search limit, pack tokens, pack candidate pool, and index job limit. | Helpers are implemented, but this matrix does not count them as covered MUST clauses. |
