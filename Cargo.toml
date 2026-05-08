@@ -125,6 +125,10 @@ harness = false
 name = "cass_contracts"
 path = "tests/conformance/cass_contracts.rs"
 
+[[test]]
+name = "query_v1_matrix"
+path = "tests/conformance/query_v1_matrix.rs"
+
 [patch.crates-io]
 asupersync = { path = "/data/projects/asupersync" }
 fsqlite = { path = "/data/projects/frankensqlite/crates/fsqlite" }
