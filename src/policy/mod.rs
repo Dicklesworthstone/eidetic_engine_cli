@@ -354,9 +354,8 @@ pub fn validate_trust_promotion_evidence(
     let proposed_trust_class = proposed_trust_class.trim();
     let source_type = source_type.trim();
     let source_id = source_id.trim();
-    let Ok(trust_class) = TrustClass::from_str(proposed_trust_class) else {
-        return Ok(());
-    };
+    let trust_class = TrustClass::from_str(proposed_trust_class)
+        .map_err(|_| TrustPromotionEvidenceRejection::new("unknown_trust_class"))?;
 
     match trust_class {
         TrustClass::AgentValidated => {
@@ -1499,6 +1498,32 @@ mod tests {
             validate_trust_promotion_evidence("agent_assertion", "agent_inference", "reviewer");
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn trust_promotion_rejects_unknown_trust_class() {
+        let rejection =
+            validate_trust_promotion_evidence("superadmin", "any_source", "any_id").unwrap_err();
+
+        assert_eq!(rejection.code, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE);
+        assert_eq!(rejection.reason, "unknown_trust_class");
+    }
+
+    #[test]
+    fn trust_promotion_rejects_empty_trust_class() {
+        let rejection = validate_trust_promotion_evidence("", "any_source", "any_id").unwrap_err();
+
+        assert_eq!(rejection.code, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE);
+        assert_eq!(rejection.reason, "unknown_trust_class");
+    }
+
+    #[test]
+    fn trust_promotion_rejects_whitespace_only_trust_class() {
+        let rejection =
+            validate_trust_promotion_evidence("   ", "any_source", "any_id").unwrap_err();
+
+        assert_eq!(rejection.code, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE);
+        assert_eq!(rejection.reason, "unknown_trust_class");
     }
 
     fn synthetic_raw_value(prefix_parts: &[&str], suffix_len: usize) -> String {
