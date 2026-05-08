@@ -1071,6 +1071,7 @@ pub fn apply_profile_config(
     })?;
 
     report.applied = true;
+    report.repair = None;
     for edit in &mut report.edits {
         if edit.status == "planned" {
             edit.status = "applied";
@@ -1768,6 +1769,19 @@ mod tests {
         }
     }
 
+    fn config_options(
+        workspace_root: &Path,
+        profile: OperatingProfile,
+        dry_run: bool,
+    ) -> ProfileConfigOptions {
+        ProfileConfigOptions {
+            workspace_root: workspace_root.to_path_buf(),
+            config_path: None,
+            requested_profile: Some(profile),
+            dry_run,
+        }
+    }
+
     #[test]
     fn proc_meminfo_parser_extracts_total_and_available_bytes() -> TestResult {
         let (total, available) = parse_proc_meminfo_bytes(
@@ -1849,6 +1863,129 @@ mod tests {
                 .all(|probe| probe.redaction == "path_not_emitted"),
             "path probes never emit raw paths",
         )
+    }
+
+    #[test]
+    fn profile_config_plan_reports_exact_toml_without_writing() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_path = temp.path().join(".ee").join("config.toml");
+        let options = config_options(temp.path(), OperatingProfile::Portable, true);
+
+        let report = plan_profile_config(&options).map_err(|error| error.to_string())?;
+        let rendered = serde_json::to_value(&report).map_err(|error| error.to_string())?;
+
+        ensure(report.schema, PROFILE_CONFIG_PLAN_SCHEMA_V1, "schema")?;
+        ensure(
+            report.profile.effective,
+            OperatingProfile::Portable,
+            "effective profile",
+        )?;
+        ensure_true(report.dry_run, "plan reports dry-run posture")?;
+        ensure_true(report.would_write, "new config has pending edits")?;
+        ensure_true(!report.applied, "plan does not apply")?;
+        ensure_true(!config_path.exists(), "plan does not write config")?;
+        ensure_true(
+            report.planned_toml.contains("selected = \"portable\""),
+            "planned TOML contains requested profile",
+        )?;
+        ensure_true(
+            report.planned_toml.contains("pack_max_tokens = "),
+            "planned TOML contains budget keys",
+        )?;
+        ensure_true(
+            rendered.get("plannedToml").is_some(),
+            "JSON uses stable camelCase plannedToml field",
+        )?;
+        ensure_true(
+            rendered.get("wouldWrite").is_some(),
+            "JSON uses stable camelCase wouldWrite field",
+        )
+    }
+
+    #[test]
+    fn profile_config_apply_dry_run_does_not_write() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_path = temp.path().join(".ee").join("config.toml");
+        let options = config_options(temp.path(), OperatingProfile::Workstation, true);
+
+        let report = apply_profile_config(&options).map_err(|error| error.to_string())?;
+
+        ensure_true(report.dry_run, "apply reports dry-run posture")?;
+        ensure_true(report.would_write, "dry-run apply has pending edits")?;
+        ensure_true(!report.applied, "dry-run apply does not write")?;
+        ensure_true(
+            report
+                .edits
+                .iter()
+                .any(|edit| edit.key == "profile.selected" && edit.status == "planned"),
+            "dry-run keeps selected profile edit planned",
+        )?;
+        ensure_true(!config_path.exists(), "dry-run apply leaves config absent")
+    }
+
+    #[test]
+    fn profile_config_apply_writes_and_next_plan_is_unchanged() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_path = temp.path().join(".ee").join("config.toml");
+        let options = config_options(temp.path(), OperatingProfile::Swarm, false);
+
+        let applied = apply_profile_config(&options).map_err(|error| error.to_string())?;
+        let saved = fs::read_to_string(&config_path).map_err(|error| error.to_string())?;
+        let runtime = runtime_profile_for_workspace(temp.path());
+        let next_plan = plan_profile_config(&options).map_err(|error| error.to_string())?;
+
+        ensure_true(applied.applied, "apply reports written config")?;
+        ensure(applied.repair, None, "successful apply clears repair hint")?;
+        ensure(saved, applied.planned_toml, "written TOML matches plan")?;
+        ensure(
+            runtime.active_profile,
+            OperatingProfile::Swarm,
+            "runtime profile reads selected config",
+        )?;
+        ensure_true(
+            !next_plan.would_write,
+            "planning after apply reports no pending write",
+        )?;
+        ensure_true(
+            next_plan
+                .edits
+                .iter()
+                .all(|edit| edit.status == "unchanged"),
+            "planning after apply marks every edit unchanged",
+        )
+    }
+
+    #[test]
+    fn profile_config_conflict_blocks_write() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_dir = temp.path().join(".ee");
+        let config_path = config_dir.join("config.toml");
+        fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        fs::write(&config_path, "profile = 7\n").map_err(|error| error.to_string())?;
+        let before = fs::read_to_string(&config_path).map_err(|error| error.to_string())?;
+        let options = config_options(temp.path(), OperatingProfile::Constrained, false);
+
+        let report = apply_profile_config(&options).map_err(|error| error.to_string())?;
+        let after = fs::read_to_string(&config_path).map_err(|error| error.to_string())?;
+
+        ensure_true(
+            report.has_conflicts(),
+            "conflicting profile table is reported",
+        )?;
+        ensure_true(!report.applied, "conflict blocks apply")?;
+        ensure(
+            report
+                .conflicts
+                .first()
+                .map(|conflict| conflict.key.as_str()),
+            Some("profile"),
+            "conflict key",
+        )?;
+        ensure_true(
+            report.edits.iter().all(|edit| edit.status == "blocked"),
+            "conflict blocks all planned edits",
+        )?;
+        ensure(after, before, "conflict leaves config unchanged")
     }
 
     fn probe_with_resources(
