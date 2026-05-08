@@ -49,34 +49,7 @@ impl HostResourceProbeReport {
         let paths = gather_path_probes(workspace_root);
         let tools = gather_tool_probes(env::var_os("PATH").as_deref());
         let environment = EnvironmentProbe::gather();
-        let mut degraded = Vec::new();
-
-        if cpu.logical_cores.is_none() {
-            degraded.push(HostProbeDegradation::warning(
-                "cpu_probe_unavailable",
-                "CPU parallelism could not be inspected.",
-                "Run `ee status --json` and check host permissions.",
-            ));
-        }
-        if memory.total_bytes.is_none() {
-            degraded.push(HostProbeDegradation::warning(
-                "memory_probe_unavailable",
-                "Host memory totals could not be inspected.",
-                "Run on a platform with /proc/meminfo or provide explicit profile config.",
-            ));
-        }
-        for path in &paths {
-            if path.available_bytes.is_none() {
-                degraded.push(HostProbeDegradation::warning(
-                    "path_capacity_unavailable",
-                    format!(
-                        "Capacity for path label `{}` could not be inspected.",
-                        path.label
-                    ),
-                    "Check filesystem permissions or configure profile budgets explicitly.",
-                ));
-            }
-        }
+        let degraded = host_probe_degradations(&cpu, &memory, &paths);
 
         let complete = degraded.is_empty();
 
@@ -94,6 +67,43 @@ impl HostResourceProbeReport {
             degraded,
         }
     }
+}
+
+fn host_probe_degradations(
+    cpu: &CpuProbe,
+    memory: &MemoryProbe,
+    paths: &[PathCapacityProbe],
+) -> Vec<HostProbeDegradation> {
+    let mut degraded = Vec::new();
+
+    if cpu.logical_cores.is_none() {
+        degraded.push(HostProbeDegradation::warning(
+            "cpu_probe_unavailable",
+            "CPU parallelism could not be inspected.",
+            "Run `ee status --json` and check host permissions.",
+        ));
+    }
+    if memory.total_bytes.is_none() {
+        degraded.push(HostProbeDegradation::warning(
+            "memory_probe_unavailable",
+            "Host memory totals could not be inspected.",
+            "Run on a platform with /proc/meminfo or provide explicit profile config.",
+        ));
+    }
+    for path in paths {
+        if path.available_bytes.is_none() {
+            degraded.push(HostProbeDegradation::warning(
+                "path_capacity_unavailable",
+                format!(
+                    "Capacity for path label `{}` could not be inspected.",
+                    path.label
+                ),
+                "Check filesystem permissions or configure profile budgets explicitly.",
+            ));
+        }
+    }
+
+    degraded
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -2444,6 +2454,72 @@ mod tests {
             },
             degraded: vec![],
         }
+    }
+
+    #[test]
+    fn host_probe_degradation_codes_are_stable() -> TestResult {
+        let degraded = host_probe_degradations(
+            &CpuProbe {
+                logical_cores: None,
+                physical_cores: None,
+                source: "test_unavailable",
+            },
+            &MemoryProbe {
+                total_bytes: None,
+                available_bytes: None,
+                cgroup_limit_bytes: None,
+                source: "test_unavailable",
+            },
+            &[PathCapacityProbe {
+                label: "workspace",
+                role: "workspace_root",
+                exists: false,
+                nearest_existing_ancestor: false,
+                same_filesystem_as_workspace: None,
+                total_bytes: None,
+                available_bytes: None,
+                redaction: "path_not_emitted",
+            }],
+        );
+
+        ensure(degraded.len(), 3usize, "degradation count")?;
+        ensure(
+            degraded[0].code,
+            "cpu_probe_unavailable",
+            "cpu degradation code",
+        )?;
+        ensure(degraded[0].severity, "warning", "cpu severity")?;
+        ensure(
+            degraded[0].repair,
+            "Run `ee status --json` and check host permissions.",
+            "cpu repair hint",
+        )?;
+        ensure(
+            degraded[1].code,
+            "memory_probe_unavailable",
+            "memory degradation code",
+        )?;
+        ensure(degraded[1].severity, "warning", "memory severity")?;
+        ensure(
+            degraded[1].repair,
+            "Run on a platform with /proc/meminfo or provide explicit profile config.",
+            "memory repair hint",
+        )?;
+        ensure(
+            degraded[2].code,
+            "path_capacity_unavailable",
+            "path degradation code",
+        )?;
+        ensure(degraded[2].severity, "warning", "path severity")?;
+        ensure_true(
+            degraded[2].message.contains("`workspace`"),
+            "path degradation includes stable label",
+        )?;
+        ensure(
+            degraded[2].repair,
+            "Check filesystem permissions or configure profile budgets explicitly.",
+            "path repair hint",
+        )
     }
 
     #[test]

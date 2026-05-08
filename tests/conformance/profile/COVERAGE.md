@@ -66,7 +66,7 @@ when both the CPU and memory thresholds for that tier are met.
 | `paths[]` | `/paths[]` | `path_probe_labels_are_stable`; `profile_probe_includes_path_filesystem_info` |
 | `tools[]` | `/tools[]` | `tool_probe_order_is_stable_and_presence_only`; `profile_probe_includes_tool_availability` |
 | `environment` | `/environment` | JSON snapshots preserve presence-only booleans |
-| `degraded[]` | `/degraded[]` | Probe construction emits stable degradation codes for missing CPU, memory, or path capacity |
+| `degraded[]` | `/degraded[]` | `host_probe_degradation_codes_are_stable`; probe construction emits stable degradation codes for missing CPU, memory, or path capacity |
 
 ### MUST Clauses
 
@@ -184,4 +184,3 @@ TMPDIR=/data/tmp CARGO_TARGET_DIR=/data/tmp/ee-profile-target rch exec -- cargo 
 |----|--------|--------|
 | SH-01 | SHOULD add direct tests that `memory.cgroupLimitBytes` constrains recommendation when it differs from total/available memory, if that becomes implemented behavior. | Not a current MUST; recommendation does not use cgroup limits today. |
 | SH-02 | SHOULD extend monotonic property tests to every numeric budget field, including write-spool queue cap, retry budget, steward windows, and graph refresh budget. | Partially covered by snapshots, positivity checks, and conformance artifacts. |
-| SH-03 | SHOULD add direct assertions for probe degradation codes instead of relying on constructor branches and snapshots. | Stable branches exist; dedicated tests would make failures easier to diagnose. |
