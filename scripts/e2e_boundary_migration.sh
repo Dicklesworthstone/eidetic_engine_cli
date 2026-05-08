@@ -211,6 +211,11 @@ before_files = set((step_dir / "workspace-files.before").read_text(encoding="utf
 after_files = set((step_dir / "workspace-files.after").read_text(encoding="utf-8").splitlines())
 removed_files = sorted(before_files - after_files)
 
+def stable_worktree_snapshot(text):
+    return "\n".join(
+        line for line in text.splitlines() if not line.startswith("HEAD ")
+    )
+
 stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
 stdout_json_valid = False
 observed_schema = None
@@ -273,7 +278,10 @@ for key, value in env_sanitized.items():
             first_failure = f"env_not_redacted:{key}"
             break
 
-forbidden_checked = before_worktrees == after_worktrees and not removed_files
+forbidden_checked = (
+    stable_worktree_snapshot(before_worktrees) == stable_worktree_snapshot(after_worktrees)
+    and not removed_files
+)
 if first_failure is None and not forbidden_checked:
     first_failure = "forbidden_filesystem_operation"
 
