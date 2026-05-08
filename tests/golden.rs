@@ -1034,6 +1034,15 @@ mod tests {
             r#"{
               "version": "ee.query.v1",
               "query": {"text": "format before release", "mode": "hybrid"},
+              "time": {
+                "after": "2026-04-29T12:00:00+00:00",
+                "before": "2026-04-29T12:00:00+00:00"
+              },
+              "asOf": "2026-04-29T12:00:00+00:00",
+              "temporalValidity": {
+                "posture": "strict",
+                "referenceTime": "2026-04-29T12:00:00+00:00"
+              },
               "budget": {"maxTokens": 4000, "candidatePool": 10, "maxResults": 1},
               "output": {"format": "json", "profile": "compact", "explain": true}
             }"#,

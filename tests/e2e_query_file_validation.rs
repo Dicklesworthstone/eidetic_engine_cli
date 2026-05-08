@@ -1,7 +1,7 @@
 //! EE-xufd: query-file validation errors produce JSON error envelope
 //!
-//! Validates that `ee pack --query-file` accepts supported tag filters and
-//! rejects unsupported fields with a proper ee.error.v1 envelope.
+//! Validates that `ee pack --query-file` accepts supported tag/temporal filters
+//! and rejects unsupported fields with a proper ee.error.v1 envelope.
 //!
 //! NO MOCKS. Real ee binary, temp workspace.
 
@@ -90,6 +90,15 @@ fn assert_stderr_empty(output: &Output, context: &str) -> TestResult {
         stderr.trim().is_empty(),
         format!("{context}: stderr should be empty in JSON mode, got: {stderr}"),
     )
+}
+
+fn degraded_codes(json: &serde_json::Value) -> Vec<&str> {
+    json["data"]["degraded"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry["code"].as_str())
+        .collect()
 }
 
 #[test]
@@ -216,11 +225,10 @@ fn query_file_with_invalid_tags_array_returns_error() -> TestResult {
 }
 
 #[test]
-fn query_file_with_unsupported_time_field_returns_error() -> TestResult {
+fn query_file_with_future_time_window_excludes_current_memories() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let workspace = tempdir.path().to_string_lossy().to_string();
 
-    // Init workspace
     let init_output = run_ee(&["--workspace", &workspace, "init", "--json"])?;
     ensure_equal(
         &init_output.status.code(),
@@ -228,12 +236,29 @@ fn query_file_with_unsupported_time_field_returns_error() -> TestResult {
         "init exit code",
     )?;
 
-    // Create query file with unsupported 'time' field (using valid RFC3339 timestamps)
+    let remember = run_ee(&[
+        "--workspace",
+        &workspace,
+        "--json",
+        "remember",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "test query current temporal result",
+    ])?;
+    ensure_equal(
+        &remember.status.code(),
+        &Some(EXIT_SUCCESS),
+        "remember exit code",
+    )?;
+    assert_stderr_empty(&remember, "remember")?;
+
     let query_file = tempdir.path().join("query.json");
     let query_content = r#"{
         "version": "ee.query.v1",
-        "query": "test query",
-        "time": {"after": "2024-01-01T00:00:00Z"}
+        "query": {"text": "test query"},
+        "time": {"after": "2099-01-01T00:00:00Z"}
     }"#;
     fs::write(&query_file, query_content).map_err(|e| e.to_string())?;
 
@@ -246,14 +271,145 @@ fn query_file_with_unsupported_time_field_returns_error() -> TestResult {
         "--json",
     ])?;
 
-    ensure(
-        output.status.code() != Some(EXIT_SUCCESS),
-        "unsupported time field should produce non-zero exit code",
+    ensure_equal(
+        &output.status.code(),
+        &Some(EXIT_SUCCESS),
+        "future time window should succeed",
     )?;
 
     let json = stdout_json(&output)?;
-    assert_error_envelope(&json, "ERR_UNSUPPORTED_FEATURE", "time field")?;
-    assert_stderr_empty(&output, "time field")
+    assert_response_envelope(&json, "future time window")?;
+    let items = json["data"]["pack"]["items"]
+        .as_array()
+        .ok_or_else(|| "future time window: missing pack items array".to_string())?;
+    ensure(
+        items.is_empty(),
+        "future time window: current memory should be excluded",
+    )?;
+    ensure(
+        degraded_codes(&json).contains(&"context_temporal_filtered_results"),
+        "future time window: temporal filter degradation should be reported",
+    )?;
+    assert_stderr_empty(&output, "future time window")
+}
+
+#[test]
+fn query_file_with_strict_temporal_validity_filters_future_and_expired_memories() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    let init_output = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(
+        &init_output.status.code(),
+        &Some(EXIT_SUCCESS),
+        "init exit code",
+    )?;
+
+    for args in [
+        vec![
+            "--workspace",
+            &workspace,
+            "--json",
+            "remember",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--valid-from",
+            "2026-04-01T00:00:00Z",
+            "--valid-to",
+            "2026-05-01T00:00:00Z",
+            "test query current validity result",
+        ],
+        vec![
+            "--workspace",
+            &workspace,
+            "--json",
+            "remember",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--valid-from",
+            "2099-01-01T00:00:00Z",
+            "test query future validity result",
+        ],
+        vec![
+            "--workspace",
+            &workspace,
+            "--json",
+            "remember",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--valid-to",
+            "2026-04-30T23:59:59Z",
+            "test query expired validity result",
+        ],
+    ] {
+        let remember = run_ee(&args)?;
+        ensure_equal(
+            &remember.status.code(),
+            &Some(EXIT_SUCCESS),
+            "remember exit code",
+        )?;
+        assert_stderr_empty(&remember, "remember")?;
+    }
+
+    let query_file = tempdir.path().join("query.json");
+    let query_content = r#"{
+        "version": "ee.query.v1",
+        "query": {"text": "test query"},
+        "temporalValidity": {
+            "posture": "strict",
+            "referenceTime": "2026-05-01T00:00:00Z"
+        }
+    }"#;
+    fs::write(&query_file, query_content).map_err(|e| e.to_string())?;
+
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "pack",
+        "--query-file",
+        &query_file.to_string_lossy(),
+        "--json",
+    ])?;
+
+    ensure_equal(
+        &output.status.code(),
+        &Some(EXIT_SUCCESS),
+        "strict temporal validity should succeed",
+    )?;
+
+    let json = stdout_json(&output)?;
+    assert_response_envelope(&json, "strict temporal validity")?;
+    let items = json["data"]["pack"]["items"]
+        .as_array()
+        .ok_or_else(|| "strict temporal validity: missing pack items array".to_string())?;
+    ensure(
+        items.iter().any(|item| {
+            item["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("current validity result"))
+        }),
+        "strict temporal validity: current boundary memory should be selected",
+    )?;
+    ensure(
+        items.iter().all(|item| {
+            item["content"].as_str().is_some_and(|content| {
+                !content.contains("future validity result")
+                    && !content.contains("expired validity result")
+            })
+        }),
+        "strict temporal validity: future and expired memories should be excluded",
+    )?;
+    ensure(
+        degraded_codes(&json).contains(&"context_temporal_filtered_results"),
+        "strict temporal validity: temporal filter degradation should be reported",
+    )?;
+    assert_stderr_empty(&output, "strict temporal validity")
 }
 
 #[test]

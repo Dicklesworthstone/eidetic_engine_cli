@@ -6924,27 +6924,17 @@ fn pack_query_file_invalid_timestamp_uses_stable_machine_error() -> TestResult {
 #[cfg(unix)]
 #[test]
 fn pack_query_file_unsupported_recognized_fields_use_stable_machine_error() -> TestResult {
-    let cases = [
-        (
-            "time",
-            r#"{
-              "version": "ee.query.v1",
-              "query": {"text": "prepare release"},
-              "time": {"after": "2026-04-01T00:00:00Z"}
-            }"#,
-        ),
-        (
-            "graph",
-            r#"{
-              "version": "ee.query.v1",
-              "query": {"text": "prepare release"},
-              "graph": {
-                "seedMemories": ["mem_00000000000000000000000001"],
-                "maxHops": 1
-              }
-            }"#,
-        ),
-    ];
+    let cases = [(
+        "graph",
+        r#"{
+          "version": "ee.query.v1",
+          "query": {"text": "prepare release"},
+          "graph": {
+            "seedMemories": ["mem_00000000000000000000000001"],
+            "maxHops": 1
+          }
+        }"#,
+    )];
 
     for (field, query_document) in cases {
         let workspace = unique_artifact_dir(&format!("pack-unsupported-{field}"))?;
