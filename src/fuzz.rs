@@ -59,11 +59,15 @@ impl FuzzRng {
     }
 
     /// Generate a value in [0, max).
+    ///
+    /// Uses full 64-bit entropy before truncating to usize, ensuring correct
+    /// distribution on 32-bit platforms where direct `u64 as usize` would
+    /// lose the upper 32 bits before the modulo operation.
     pub fn next_usize(&mut self, max: usize) -> usize {
         if max == 0 {
             return 0;
         }
-        (self.next_u64() as usize) % max
+        (self.next_u64() % (max as u64)) as usize
     }
 
     /// Generate a boolean with given probability of true.
@@ -268,6 +272,35 @@ mod tests {
         for _ in 0..1000 {
             let val = rng.next_usize(10);
             ensure(val < 10, "value should be < max")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fuzz_rng_next_usize_uses_full_entropy() -> TestResult {
+        let mut rng = FuzzRng::new(0xDEADBEEF_CAFEBABE);
+        let mut buckets = [0usize; 10];
+        let iterations = 10_000;
+
+        for _ in 0..iterations {
+            let val = rng.next_usize(10);
+            buckets[val] += 1;
+        }
+
+        let expected = iterations / 10;
+        let tolerance = expected / 3;
+        for (i, &count) in buckets.iter().enumerate() {
+            let diff = if count > expected {
+                count - expected
+            } else {
+                expected - count
+            };
+            ensure(
+                diff < tolerance,
+                &format!(
+                    "bucket {i} has {count} samples, expected ~{expected} (diff {diff} >= tolerance {tolerance})"
+                ),
+            )?;
         }
         Ok(())
     }
