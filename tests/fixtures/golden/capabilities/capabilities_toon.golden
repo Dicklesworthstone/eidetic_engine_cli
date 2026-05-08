@@ -7,7 +7,7 @@ data:
     runtime,ready,Asupersync async runtime
     storage,ready,FrankenSQLite/SQLModel persistence
     search,degraded,Frankensearch hybrid retrieval
-    graph,pending,FrankenNetworkX graph analytics
+    graph,ready,FrankenNetworkX graph analytics
     cass,pending,CASS session import adapter
   features[7]{name,enabled,description}:
     fts5,true,FTS5 full-text search
@@ -88,7 +88,7 @@ data:
             tokens: -14
             compressionRatio: 0.982
   summary:
-    readySubsystems: 2
+    readySubsystems: 3
     totalSubsystems: 5
     enabledFeatures: 4
     totalFeatures: 7
