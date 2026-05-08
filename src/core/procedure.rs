@@ -3,14 +3,14 @@
 //! Provides propose, show, list, and export operations for procedures
 //! distilled from recorder runs and curation events.
 
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::db::{
     CreateAuditInput, CreateProcedureEventInput, CreateProcedureInput, CreateWorkspaceInput,
@@ -1552,6 +1552,26 @@ impl VerificationSourceKind {
     }
 }
 
+impl FromStr for VerificationSourceKind {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().replace('-', "_").as_str() {
+            "eval_fixture" => Ok(Self::EvalFixture),
+            "repro_pack" => Ok(Self::ReproPack),
+            "claim_evidence" => Ok(Self::ClaimEvidence),
+            "recorder_run" => Ok(Self::RecorderRun),
+            other => Err(DomainError::Usage {
+                message: format!("unsupported procedure verification source kind '{other}'"),
+                repair: Some(
+                    "Use one of: eval_fixture, repro_pack, claim_evidence, recorder_run."
+                        .to_owned(),
+                ),
+            }),
+        }
+    }
+}
+
 /// Options for verifying a procedure.
 #[derive(Clone, Debug, Default)]
 pub struct ProcedureVerifyOptions {
@@ -1658,27 +1678,15 @@ impl ProcedureVerifyReport {
 pub fn verify_procedure(
     options: &ProcedureVerifyOptions,
 ) -> Result<ProcedureVerifyReport, DomainError> {
-    let source_kind = options
-        .source_kind
-        .clone()
-        .unwrap_or_else(|| "eval_fixture".to_owned());
+    let source_kind = options.source_kind.as_deref().unwrap_or("eval_fixture");
+    let source_kind = VerificationSourceKind::from_str(source_kind)?;
+    let source_kind_name = source_kind.as_str().to_owned();
     let sources_checked: Vec<_> = options
         .source_ids
         .iter()
-        .map(|source_id| {
-            VerificationSourceResult {
-            source_id: source_id.clone(),
-            source_kind: source_kind.clone(),
-            result: "skipped".to_owned(),
-            step_results: Vec::new(),
-            message: Some(
-                "verification evidence was named but no executable or inspected result was supplied"
-                    .to_owned(),
-            ),
-        }
-        })
+        .map(|source_id| inspect_named_verification_source(options, &source_kind, source_id))
         .collect();
-    let mut report = build_verification_report(options, source_kind, sources_checked)?;
+    let mut report = build_verification_report(options, source_kind_name, sources_checked)?;
     if report.next_actions.is_empty() {
         report.next_actions.push(
             "Provide explicit verification evidence before trusting or promoting this procedure."
@@ -1686,6 +1694,665 @@ pub fn verify_procedure(
         );
     }
     Ok(report)
+}
+
+fn inspect_named_verification_source(
+    options: &ProcedureVerifyOptions,
+    source_kind: &VerificationSourceKind,
+    source_id: &str,
+) -> VerificationSourceResult {
+    let source_id = source_id.trim();
+    if source_id.is_empty() {
+        return verification_source_result(
+            "",
+            source_kind.as_str(),
+            "failed",
+            Some("verification source id is empty".to_owned()),
+            Vec::new(),
+        );
+    }
+
+    let file_result = match source_kind {
+        VerificationSourceKind::ReproPack => inspect_repro_pack_source(options, source_id),
+        VerificationSourceKind::EvalFixture
+        | VerificationSourceKind::ClaimEvidence
+        | VerificationSourceKind::RecorderRun => inspect_filesystem_verification_source(
+            &options.workspace,
+            source_kind.as_str(),
+            source_id,
+        ),
+    };
+    if let Some(result) = file_result {
+        return result;
+    }
+
+    match source_kind {
+        VerificationSourceKind::EvalFixture => verification_source_result(
+            source_id,
+            source_kind.as_str(),
+            "failed",
+            Some(
+                "named eval fixture was not found in workspace evidence or eval fixtures"
+                    .to_owned(),
+            ),
+            Vec::new(),
+        ),
+        VerificationSourceKind::ReproPack => verification_source_result(
+            source_id,
+            source_kind.as_str(),
+            "failed",
+            Some(
+                "named repro pack was not found or did not contain required pack files".to_owned(),
+            ),
+            Vec::new(),
+        ),
+        VerificationSourceKind::ClaimEvidence => {
+            inspect_persisted_claim_evidence(options, source_id).unwrap_or_else(|| {
+                verification_source_result(
+                    source_id,
+                    source_kind.as_str(),
+                    "failed",
+                    Some(
+                        "named claim evidence was not found in persisted evidence spans".to_owned(),
+                    ),
+                    Vec::new(),
+                )
+            })
+        }
+        VerificationSourceKind::RecorderRun => inspect_persisted_recorder_run(options, source_id)
+            .unwrap_or_else(|| {
+                verification_source_result(
+                    source_id,
+                    source_kind.as_str(),
+                    "failed",
+                    Some("named recorder run was not found in persisted recorder runs".to_owned()),
+                    Vec::new(),
+                )
+            }),
+    }
+}
+
+fn inspect_filesystem_verification_source(
+    workspace: &Path,
+    source_kind: &str,
+    source_id: &str,
+) -> Option<VerificationSourceResult> {
+    for path in verification_source_candidate_paths(workspace, source_kind, source_id) {
+        if path.is_file() {
+            return Some(inspect_verification_json_file(
+                &path,
+                source_kind,
+                source_id,
+            ));
+        }
+    }
+
+    if source_kind == "eval_fixture" {
+        for root in source_search_roots(workspace) {
+            if let Some(path) = find_eval_fixture_scenario(&root, source_id) {
+                return Some(inspect_verification_json_file(
+                    &path,
+                    source_kind,
+                    source_id,
+                ));
+            }
+        }
+    }
+
+    None
+}
+
+fn inspect_repro_pack_source(
+    options: &ProcedureVerifyOptions,
+    source_id: &str,
+) -> Option<VerificationSourceResult> {
+    for path in verification_source_candidate_paths(&options.workspace, "repro_pack", source_id) {
+        if path.is_file() {
+            return Some(inspect_verification_json_file(
+                &path,
+                "repro_pack",
+                source_id,
+            ));
+        }
+        if path.is_dir() {
+            return Some(inspect_repro_pack_dir(&path, source_id));
+        }
+    }
+    None
+}
+
+fn inspect_persisted_claim_evidence(
+    options: &ProcedureVerifyOptions,
+    source_id: &str,
+) -> Option<VerificationSourceResult> {
+    let store = match open_procedure_store(&options.workspace) {
+        Ok(Some(store)) => store,
+        Ok(None) | Err(_) => return None,
+    };
+    let evidence_id = source_id.strip_prefix("evidence://").unwrap_or(source_id);
+    let evidence = match store.connection.get_evidence_span(evidence_id) {
+        Ok(Some(evidence)) => evidence,
+        Ok(None) | Err(_) => return None,
+    };
+    let result =
+        if evidence.workspace_id == store.workspace_id && !evidence.excerpt.trim().is_empty() {
+            "passed"
+        } else {
+            "failed"
+        };
+    Some(verification_source_result(
+        source_id,
+        "claim_evidence",
+        result,
+        Some(format!(
+            "inspected persisted evidence span {} from session {}",
+            evidence.id, evidence.session_id
+        )),
+        vec![StepVerificationResult {
+            step_id: format!("claim_evidence_{}", evidence.id),
+            sequence: 1,
+            result: result.to_owned(),
+            expected: Some(
+                "evidence span exists in this workspace with non-empty excerpt".to_owned(),
+            ),
+            actual: Some(format!(
+                "workspace={}, lines={}-{}, hash={}",
+                evidence.workspace_id,
+                evidence.start_line,
+                evidence.end_line,
+                evidence.content_hash
+            )),
+        }],
+    ))
+}
+
+fn inspect_persisted_recorder_run(
+    options: &ProcedureVerifyOptions,
+    source_id: &str,
+) -> Option<VerificationSourceResult> {
+    let store = match open_procedure_store(&options.workspace) {
+        Ok(Some(store)) => store,
+        Ok(None) | Err(_) => return None,
+    };
+    let run = match store.connection.get_recorder_run(source_id) {
+        Ok(Some(run)) => run,
+        Ok(None) | Err(_) => return None,
+    };
+    let workspace_matches = run
+        .workspace_id
+        .as_deref()
+        .is_none_or(|workspace_id| workspace_id == store.workspace_id);
+    let passed = workspace_matches
+        && run.chain_complete
+        && run.event_count > 0
+        && matches!(run.status.as_str(), "completed" | "imported");
+    let result = if passed { "passed" } else { "failed" };
+    Some(verification_source_result(
+        source_id,
+        "recorder_run",
+        result,
+        Some(format!(
+            "inspected persisted recorder run with status {} and {} event(s)",
+            run.status, run.event_count
+        )),
+        vec![
+            StepVerificationResult {
+                step_id: format!("recorder_run_{source_id}_status"),
+                sequence: 1,
+                result: if matches!(run.status.as_str(), "completed" | "imported") {
+                    "passed".to_owned()
+                } else {
+                    "failed".to_owned()
+                },
+                expected: Some("recorder run status is completed or imported".to_owned()),
+                actual: Some(run.status),
+            },
+            StepVerificationResult {
+                step_id: format!("recorder_run_{source_id}_chain"),
+                sequence: 2,
+                result: if run.chain_complete {
+                    "passed"
+                } else {
+                    "failed"
+                }
+                .to_owned(),
+                expected: Some("recorder event chain is complete".to_owned()),
+                actual: Some(format!("chain_complete={}", run.chain_complete)),
+            },
+            StepVerificationResult {
+                step_id: format!("recorder_run_{source_id}_events"),
+                sequence: 3,
+                result: if run.event_count > 0 {
+                    "passed"
+                } else {
+                    "failed"
+                }
+                .to_owned(),
+                expected: Some("recorder run has at least one event".to_owned()),
+                actual: Some(format!("event_count={}", run.event_count)),
+            },
+        ],
+    ))
+}
+
+fn inspect_verification_json_file(
+    path: &Path,
+    source_kind: &str,
+    source_id: &str,
+) -> VerificationSourceResult {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) => {
+            return verification_source_result(
+                source_id,
+                source_kind,
+                "failed",
+                Some(format!(
+                    "failed to read verification source {}: {error}",
+                    path.display()
+                )),
+                Vec::new(),
+            );
+        }
+    };
+    let value: Value = match serde_json::from_str(&content) {
+        Ok(value) => value,
+        Err(error) => {
+            return verification_source_result(
+                source_id,
+                source_kind,
+                "failed",
+                Some(format!(
+                    "verification source {} is not valid JSON: {error}",
+                    path.display()
+                )),
+                Vec::new(),
+            );
+        }
+    };
+    verification_result_from_json(&value, source_kind, source_id).unwrap_or_else(|| {
+        verification_source_result(
+            source_id,
+            source_kind,
+            "failed",
+            Some(format!(
+                "verification source {} did not contain a recognized procedure verification result",
+                path.display()
+            )),
+            Vec::new(),
+        )
+    })
+}
+
+fn verification_result_from_json(
+    value: &Value,
+    source_kind: &str,
+    source_id: &str,
+) -> Option<VerificationSourceResult> {
+    if let Some(result) = procedure_report_source_result(value, source_kind, source_id) {
+        return Some(result);
+    }
+    if source_kind == "eval_fixture"
+        && value.get("schema").and_then(Value::as_str)
+            == Some(crate::eval::runner::EVAL_FIXTURE_SCHEMA_V1)
+    {
+        return Some(eval_fixture_source_result(value, source_id));
+    }
+    if let Some(fixtures) = value.get("fixtures").and_then(Value::as_array) {
+        for fixture in fixtures {
+            let id_matches = fixture.get("id").and_then(Value::as_str) == Some(source_id);
+            let command_matches = fixture
+                .get("eeCommands")
+                .and_then(Value::as_array)
+                .is_some_and(|commands| {
+                    commands.iter().filter_map(Value::as_str).any(|command| {
+                        command.contains(&format!("--source {source_id}"))
+                            || command.contains(&format!("--source={source_id}"))
+                    })
+                });
+            if id_matches || command_matches {
+                return Some(status_object_source_result(fixture, source_kind, source_id));
+            }
+        }
+    }
+    status_object_source_result_opt(value, source_kind, source_id)
+}
+
+fn procedure_report_source_result(
+    value: &Value,
+    source_kind: &str,
+    source_id: &str,
+) -> Option<VerificationSourceResult> {
+    let sources = value
+        .get("sources_checked")
+        .or_else(|| value.get("sourcesChecked"))
+        .and_then(Value::as_array)?;
+    let source = sources
+        .iter()
+        .find(|source| {
+            source
+                .get("source_id")
+                .or_else(|| source.get("sourceId"))
+                .and_then(Value::as_str)
+                == Some(source_id)
+        })
+        .or_else(|| (sources.len() == 1).then(|| &sources[0]))?;
+    status_object_source_result_opt(source, source_kind, source_id)
+}
+
+fn eval_fixture_source_result(value: &Value, source_id: &str) -> VerificationSourceResult {
+    let fixture_id = value
+        .get("fixture_id")
+        .or_else(|| value.get("fixtureId"))
+        .and_then(Value::as_str)
+        .unwrap_or(source_id);
+    let mut step_results = Vec::new();
+    let mut failed = fixture_id != source_id;
+    if let Some(commands) = value.get("command_sequence").and_then(Value::as_array) {
+        for (index, command) in commands.iter().enumerate() {
+            let sequence = command
+                .get("step")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or_else(|| usize_to_u32_saturating(index + 1));
+            let stdout_schema = command
+                .get("stdout_schema")
+                .and_then(Value::as_str)
+                .unwrap_or("unspecified");
+            let expected_exit_code = command
+                .get("expected_exit_code")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            step_results.push(StepVerificationResult {
+                step_id: format!("eval_fixture_{fixture_id}_{sequence:03}"),
+                sequence,
+                result: "passed".to_owned(),
+                expected: Some(format!(
+                    "declared expected exit {expected_exit_code} and stdout schema {stdout_schema}"
+                )),
+                actual: Some("eval fixture command declaration parsed".to_owned()),
+            });
+        }
+    } else {
+        failed = true;
+    }
+    let implemented = value
+        .get("coverage_state")
+        .or_else(|| value.get("coverageState"))
+        .and_then(Value::as_str)
+        .is_none_or(|state| state == "implemented");
+    if !implemented {
+        failed = true;
+    }
+    let result = if failed { "failed" } else { "passed" };
+    verification_source_result(
+        source_id,
+        "eval_fixture",
+        result,
+        Some(format!("inspected eval fixture {fixture_id}")),
+        step_results,
+    )
+}
+
+fn status_object_source_result(
+    value: &Value,
+    source_kind: &str,
+    source_id: &str,
+) -> VerificationSourceResult {
+    status_object_source_result_opt(value, source_kind, source_id).unwrap_or_else(|| {
+        verification_source_result(
+            source_id,
+            source_kind,
+            "failed",
+            Some("verification source did not include a result or verification status".to_owned()),
+            Vec::new(),
+        )
+    })
+}
+
+fn status_object_source_result_opt(
+    value: &Value,
+    source_kind: &str,
+    source_id: &str,
+) -> Option<VerificationSourceResult> {
+    let result = value
+        .get("result")
+        .or_else(|| value.get("status"))
+        .or_else(|| value.get("verificationStatus"))
+        .and_then(Value::as_str)
+        .and_then(normalize_verification_result)?;
+    let step_results = json_step_results(value);
+    let message = value
+        .get("message")
+        .or_else(|| value.get("firstFailureDiagnosis"))
+        .or_else(|| value.get("description"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let source_kind = value
+        .get("source_kind")
+        .or_else(|| value.get("sourceKind"))
+        .and_then(Value::as_str)
+        .unwrap_or(source_kind);
+    let source_id = value
+        .get("source_id")
+        .or_else(|| value.get("sourceId"))
+        .or_else(|| value.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or(source_id);
+    Some(verification_source_result(
+        source_id,
+        source_kind,
+        result,
+        message,
+        step_results,
+    ))
+}
+
+fn json_step_results(value: &Value) -> Vec<StepVerificationResult> {
+    let Some(steps) = value
+        .get("step_results")
+        .or_else(|| value.get("stepResults"))
+        .or_else(|| value.get("steps"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            let sequence = step
+                .get("sequence")
+                .or_else(|| step.get("step"))
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or_else(|| usize_to_u32_saturating(index + 1));
+            StepVerificationResult {
+                step_id: step
+                    .get("step_id")
+                    .or_else(|| step.get("stepId"))
+                    .or_else(|| step.get("id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("step_{sequence:03}")),
+                sequence,
+                result: step
+                    .get("result")
+                    .or_else(|| step.get("status"))
+                    .and_then(Value::as_str)
+                    .and_then(normalize_verification_result)
+                    .unwrap_or("failed")
+                    .to_owned(),
+                expected: step
+                    .get("expected")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                actual: step
+                    .get("actual")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            }
+        })
+        .collect()
+}
+
+fn normalize_verification_result(value: &str) -> Option<&'static str> {
+    match value.trim().replace('-', "_").as_str() {
+        "passed" | "pass" | "success" | "succeeded" | "ok" => Some("passed"),
+        "failed" | "fail" | "failure" | "error" | "blocked" | "invalid" => Some("failed"),
+        "skipped" | "skip" | "missing" | "stale" | "pending" | "not_run" => Some("skipped"),
+        _ => None,
+    }
+}
+
+fn inspect_repro_pack_dir(path: &Path, source_id: &str) -> VerificationSourceResult {
+    let required = ["env.json", "manifest.json", "repro.lock", "provenance.json"];
+    let mut step_results = Vec::new();
+    let mut failed = false;
+    for (index, file_name) in required.iter().enumerate() {
+        let file_path = path.join(file_name);
+        let result = if file_path.is_file() && valid_json_file(&file_path) {
+            "passed"
+        } else {
+            failed = true;
+            "failed"
+        };
+        step_results.push(StepVerificationResult {
+            step_id: format!("repro_pack_{source_id}_{file_name}"),
+            sequence: usize_to_u32_saturating(index + 1),
+            result: result.to_owned(),
+            expected: Some(format!("{file_name} exists and parses as JSON")),
+            actual: Some(file_path.display().to_string()),
+        });
+    }
+    verification_source_result(
+        source_id,
+        "repro_pack",
+        if failed { "failed" } else { "passed" },
+        Some(format!("inspected repro pack {}", path.display())),
+        step_results,
+    )
+}
+
+fn valid_json_file(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+        .is_some()
+}
+
+fn verification_source_candidate_paths(
+    workspace: &Path,
+    source_kind: &str,
+    source_id: &str,
+) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let source_path = Path::new(source_id);
+    if source_path.is_absolute() {
+        push_source_path_candidates(&mut paths, source_path.to_path_buf());
+    }
+    for root in source_search_roots(workspace) {
+        push_source_path_candidates(&mut paths, root.join(source_id));
+        push_source_path_candidates(
+            &mut paths,
+            root.join(".ee")
+                .join("procedure-verification")
+                .join(source_kind)
+                .join(source_id),
+        );
+        push_source_path_candidates(
+            &mut paths,
+            root.join(".ee")
+                .join("procedure-verification")
+                .join(source_id),
+        );
+        push_source_path_candidates(
+            &mut paths,
+            root.join("tests")
+                .join("fixtures")
+                .join("procedure")
+                .join(source_kind)
+                .join(source_id),
+        );
+        push_source_path_candidates(
+            &mut paths,
+            root.join("tests")
+                .join("fixtures")
+                .join("procedure")
+                .join(source_id),
+        );
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn push_source_path_candidates(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    paths.push(path.clone());
+    if path.extension().is_none() {
+        paths.push(path.with_extension("json"));
+    }
+}
+
+fn source_search_roots(workspace: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if !workspace.as_os_str().is_empty() {
+        if let Ok(workspace) = resolve_workspace_path(workspace) {
+            roots.push(workspace);
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn find_eval_fixture_scenario(root: &Path, source_id: &str) -> Option<PathBuf> {
+    let fixture_root = root.join("tests").join("fixtures").join("eval");
+    let entries = fs::read_dir(fixture_root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path().join("scenario.json");
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&content) else {
+            continue;
+        };
+        if value.get("fixture_id").and_then(Value::as_str) == Some(source_id)
+            || value
+                .get("scenario_ids")
+                .and_then(Value::as_array)
+                .is_some_and(|ids| {
+                    ids.iter()
+                        .filter_map(Value::as_str)
+                        .any(|id| id == source_id)
+                })
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn verification_source_result(
+    source_id: &str,
+    source_kind: &str,
+    result: &str,
+    message: Option<String>,
+    step_results: Vec<StepVerificationResult>,
+) -> VerificationSourceResult {
+    VerificationSourceResult {
+        source_id: source_id.to_owned(),
+        source_kind: source_kind.to_owned(),
+        result: result.to_owned(),
+        step_results,
+        message,
+    }
 }
 
 /// Verify a procedure from explicit source results supplied by a fixture or repository.
@@ -2482,7 +3149,9 @@ fn generate_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{CreateWorkspaceInput, DbConnection};
+    use crate::db::{
+        CreateEvidenceSpanInput, CreateRecorderRunInput, CreateWorkspaceInput, DbConnection,
+    };
     use std::fs;
 
     type TestResult = Result<(), String>;
@@ -2571,6 +3240,16 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
         Ok(workspace)
+    }
+
+    fn procedure_store_connection(workspace: &Path) -> Result<(DbConnection, String), String> {
+        let connection = DbConnection::open_file(workspace.join(".ee").join("ee.db"))
+            .map_err(|error| error.to_string())?;
+        let workspace_row = connection
+            .get_workspace_by_path(&workspace.display().to_string())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "workspace row missing".to_owned())?;
+        Ok((connection, workspace_row.id))
     }
 
     #[test]
@@ -2974,7 +3653,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_checks_specified_sources() -> TestResult {
+    fn verify_fails_missing_named_sources() -> TestResult {
         let options = ProcedureVerifyOptions {
             procedure_id: "proc_test".to_owned(),
             source_ids: vec!["src_001".to_owned(), "src_002".to_owned()],
@@ -2989,9 +3668,147 @@ mod tests {
                 .iter()
                 .any(|s| s.source_id == "src_001")
         );
-        assert!(report.sources_checked.iter().all(|s| s.result == "skipped"));
+        assert!(report.sources_checked.iter().all(|s| s.result == "failed"));
         assert_eq!(report.pass_count, 0);
-        assert_eq!(report.overall_result, "skipped");
+        assert_eq!(report.fail_count, 2);
+        assert_eq!(report.overall_result, "failed");
+        Ok(())
+    }
+
+    #[test]
+    fn verify_inspects_repository_eval_fixture_by_id() -> TestResult {
+        let options = ProcedureVerifyOptions {
+            workspace: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            procedure_id: "proc_test".to_owned(),
+            source_kind: Some("eval_fixture".to_owned()),
+            source_ids: vec!["fx.release_failure.v1".to_owned()],
+            dry_run: true,
+            ..Default::default()
+        };
+
+        let report = verify_procedure(&options).map_err(|error| error.message())?;
+        assert_eq!(report.overall_result, "passed");
+        assert_eq!(report.pass_count, 1);
+        assert_eq!(report.fail_count, 0);
+        assert_eq!(report.sources_checked[0].source_id, "fx.release_failure.v1");
+        assert_eq!(report.sources_checked[0].result, "passed");
+        assert!(!report.sources_checked[0].step_results.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn verify_fails_malformed_named_eval_fixture_file() -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let fixture_dir = workspace
+            .join(".ee")
+            .join("procedure-verification")
+            .join("eval_fixture");
+        fs::create_dir_all(&fixture_dir).map_err(|error| error.to_string())?;
+        fs::write(
+            fixture_dir.join("fixture_bad.json"),
+            r#"{"schema":"ee.eval_fixture.v1","fixture_id":"different_fixture","coverage_state":"implemented"}"#,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let report = verify_procedure(&ProcedureVerifyOptions {
+            workspace,
+            procedure_id: "proc_test".to_owned(),
+            source_kind: Some("eval_fixture".to_owned()),
+            source_ids: vec!["fixture_bad".to_owned()],
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.overall_result, "failed");
+        assert_eq!(report.fail_count, 1);
+        assert_eq!(report.sources_checked[0].result, "failed");
+        assert_eq!(
+            report.sources_checked[0].message.as_deref(),
+            Some("inspected eval fixture different_fixture")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn verify_inspects_persisted_recorder_run() -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let (connection, workspace_id) = procedure_store_connection(&workspace)?;
+        connection
+            .insert_recorder_run(
+                "run_verify_named_001",
+                &CreateRecorderRunInput {
+                    workspace_id: Some(workspace_id),
+                    agent_id: "agent_verify".to_owned(),
+                    session_id: Some("sess_verify".to_owned()),
+                    source_type: "synthetic".to_owned(),
+                    source_id: Some("fixture://procedure-verify".to_owned()),
+                    status: "completed".to_owned(),
+                    started_at: "2026-05-01T00:00:00Z".to_owned(),
+                    ended_at: Some("2026-05-01T00:01:00Z".to_owned()),
+                    event_count: 2,
+                    redacted_count: 0,
+                    payload_bytes: 128,
+                    chain_complete: true,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let report = verify_procedure(&ProcedureVerifyOptions {
+            workspace,
+            procedure_id: "proc_test".to_owned(),
+            source_kind: Some("recorder_run".to_owned()),
+            source_ids: vec!["run_verify_named_001".to_owned()],
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.overall_result, "passed");
+        assert_eq!(report.pass_count, 1);
+        assert_eq!(report.sources_checked[0].source_kind, "recorder_run");
+        assert_eq!(report.sources_checked[0].step_results.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn verify_inspects_persisted_claim_evidence() -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let (connection, workspace_id) = procedure_store_connection(&workspace)?;
+        connection
+            .insert_evidence_span(
+                "ev_61234567890123456789012345",
+                &CreateEvidenceSpanInput {
+                    workspace_id,
+                    session_id: "sess_verify_claim".to_owned(),
+                    memory_id: None,
+                    cass_span_id: "span_verify_claim".to_owned(),
+                    span_kind: "summary".to_owned(),
+                    start_line: 10,
+                    end_line: 12,
+                    start_byte: None,
+                    end_byte: None,
+                    role: Some("assistant".to_owned()),
+                    excerpt: "The verification command passed against real evidence.".to_owned(),
+                    content_hash: "blake3:claimverify".to_owned(),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let report = verify_procedure(&ProcedureVerifyOptions {
+            workspace,
+            procedure_id: "proc_test".to_owned(),
+            source_kind: Some("claim_evidence".to_owned()),
+            source_ids: vec!["ev_61234567890123456789012345".to_owned()],
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.overall_result, "passed");
+        assert_eq!(report.pass_count, 1);
+        assert_eq!(report.sources_checked[0].source_kind, "claim_evidence");
         Ok(())
     }
 
