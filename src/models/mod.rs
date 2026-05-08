@@ -197,8 +197,9 @@ pub use progress::{
 };
 pub use provenance::{LineSpan, ProvenanceUri, ProvenanceUriError};
 pub use query::{
-    FilterOperator, FilterPredicate, FilterValue, QueryFilter, QueryFilters, TagFilters,
-    parse_filters, parse_tags,
+    FilterOperator, FilterPredicate, FilterValue, QueryFilter, QueryFilters, QueryTemporalFilters,
+    QueryTemporalValidity, QueryTemporalValidityPosture, RedactionFilters, TagFilters,
+    TrustFilters, parse_filters, parse_redaction, parse_tags, parse_trust, posture_for_trust_class,
 };
 pub use recorder::{
     IMPORT_CURSOR_SCHEMA_V1, ImportCursor, ImportSourceType, ParseImportSourceTypeError,

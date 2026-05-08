@@ -27,6 +27,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Instant;
 
+use chrono::{DateTime, Utc};
+
 use crate::config::WorkspaceLocation;
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
@@ -39,7 +41,9 @@ use crate::core::search::{
 use crate::db::{
     CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, DbConnection, StoredMemory,
 };
-use crate::models::{MemoryId, PackId, ProvenanceUri, TrustClass, UnitScore, WorkspaceId};
+use crate::models::{
+    MemoryId, PackId, ProvenanceUri, TrustClass, UnitScore, WorkspaceId, posture_for_trust_class,
+};
 use crate::pack::{
     ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
     ContextResponseDegradation, ContextResponseSeverity, PackCandidate, PackCandidateInput,
@@ -308,6 +312,10 @@ struct CandidateResolutionMetrics {
     memory_batch_reads: usize,
     tag_batch_reads: usize,
     tag_filtered_candidates: usize,
+    trust_filtered_candidates: usize,
+    redaction_filtered_candidates: usize,
+    temporal_filtered_candidates: usize,
+    temporal_relaxed_candidates: usize,
     converted_candidates: usize,
     skipped_candidates: usize,
 }
@@ -332,6 +340,7 @@ pub enum ContextPackError {
     Storage(String),
     Search(SearchError),
     Pack(String),
+    PolicyDenied(String),
 }
 
 impl ContextPackError {
@@ -341,14 +350,22 @@ impl ContextPackError {
             Self::Storage(_) => Some("ee init --workspace ."),
             Self::Search(error) => error.repair_hint(),
             Self::Pack(_) => Some("ee context --help"),
+            Self::PolicyDenied(_) => None,
         }
+    }
+
+    #[must_use]
+    pub const fn is_policy_denied(&self) -> bool {
+        matches!(self, Self::PolicyDenied(_))
     }
 }
 
 impl std::fmt::Display for ContextPackError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Storage(message) | Self::Pack(message) => formatter.write_str(message),
+            Self::Storage(message) | Self::Pack(message) | Self::PolicyDenied(message) => {
+                formatter.write_str(message)
+            }
             Self::Search(error) => std::fmt::Display::fmt(error, formatter),
         }
     }
@@ -394,6 +411,14 @@ pub fn run_context_pack_with_performance(
         .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     }
     trace.record_elapsed("requestValidate", request_start);
+
+    if options.filters.redaction.requests_bypass() {
+        return Err(ContextPackError::PolicyDenied(
+            "Redaction bypass requires elevated permission. The 'bypass' policy is not yet \
+             supported; use 'respect' (default) to apply redaction filtering."
+                .to_string(),
+        ));
+    }
 
     let database_path = options
         .database_path
@@ -538,6 +563,47 @@ pub fn run_context_pack_with_performance(
                 }
             ),
             None,
+        );
+    }
+    if candidate_metrics.temporal_filtered_candidates > 0 {
+        trace.filter_input_count = trace.filter_input_count.max(candidate_filter_input_count);
+        trace.filtered_count = trace
+            .filtered_count
+            .saturating_add(candidate_metrics.temporal_filtered_candidates);
+        push_degradation(
+            &mut degraded,
+            "context_temporal_filtered_results",
+            ContextResponseSeverity::Low,
+            format!(
+                "{} candidate memor{} excluded by temporal query filters.",
+                candidate_metrics.temporal_filtered_candidates,
+                if candidate_metrics.temporal_filtered_candidates == 1 {
+                    "y was"
+                } else {
+                    "ies were"
+                }
+            ),
+            None,
+        );
+    }
+    if candidate_metrics.temporal_relaxed_candidates > 0 {
+        push_degradation(
+            &mut degraded,
+            "context_temporal_validity_relaxed",
+            ContextResponseSeverity::Low,
+            format!(
+                "{} temporally invalid candidate memor{} kept because temporalValidity.posture=relaxed.",
+                candidate_metrics.temporal_relaxed_candidates,
+                if candidate_metrics.temporal_relaxed_candidates == 1 {
+                    "y was"
+                } else {
+                    "ies were"
+                }
+            ),
+            Some(
+                "Use temporalValidity.posture=strict to exclude expired or not-yet-valid memories."
+                    .to_string(),
+            ),
         );
     }
     trace.candidate_resolution = candidate_metrics;
@@ -727,6 +793,10 @@ fn candidate_resolution_json(trace: &ContextPerformanceTrace) -> serde_json::Val
         "convertedCandidates": metrics.converted_candidates,
         "skippedCandidates": metrics.skipped_candidates,
         "tagFilteredCandidates": metrics.tag_filtered_candidates,
+        "trustFilteredCandidates": metrics.trust_filtered_candidates,
+        "redactionFilteredCandidates": metrics.redaction_filtered_candidates,
+        "temporalFilteredCandidates": metrics.temporal_filtered_candidates,
+        "temporalRelaxedCandidates": metrics.temporal_relaxed_candidates,
         "filteredBeforeResolution": trace.filtered_count,
         "filterInputCount": trace.filter_input_count,
         "focusStateHits": trace.focus_state_hits,
@@ -1192,12 +1262,66 @@ fn candidates_from_search_with_metrics(
     for (hit, resolution) in hit_resolutions {
         match resolution {
             Some((memory_id, artifact_id)) => {
+                let memory_key = memory_id.to_string();
                 if !filters.tags.is_empty() {
-                    let memory_key = memory_id.to_string();
                     let tags = tags_map.get(&memory_key).cloned().unwrap_or_default();
                     if !filters.matches_tags(&tags) {
                         metrics.tag_filtered_candidates =
                             metrics.tag_filtered_candidates.saturating_add(1);
+                        continue;
+                    }
+                }
+                if !filters.temporal.is_empty() {
+                    let Some(memory) = memories.get(&memory_key) else {
+                        metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
+                        push_degradation(
+                            degraded,
+                            "context_candidate_skipped",
+                            ContextResponseSeverity::Low,
+                            format!(
+                                "Search hit {} could not be converted into a pack candidate.",
+                                hit.doc_id
+                            ),
+                            Some("ee index rebuild --workspace .".to_string()),
+                        );
+                        continue;
+                    };
+                    if memory.tombstoned_at.is_some() {
+                        metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
+                        push_degradation(
+                            degraded,
+                            "context_candidate_skipped",
+                            ContextResponseSeverity::Low,
+                            format!(
+                                "Search hit {} could not be converted into a pack candidate.",
+                                hit.doc_id
+                            ),
+                            Some("ee index rebuild --workspace .".to_string()),
+                        );
+                        continue;
+                    }
+                    match temporal_memory_outcome(memory, &filters.temporal) {
+                        TemporalCandidateOutcome::Include => {}
+                        TemporalCandidateOutcome::Exclude => {
+                            metrics.temporal_filtered_candidates =
+                                metrics.temporal_filtered_candidates.saturating_add(1);
+                            continue;
+                        }
+                        TemporalCandidateOutcome::IncludeRelaxedInvalid => {
+                            metrics.temporal_relaxed_candidates =
+                                metrics.temporal_relaxed_candidates.saturating_add(1);
+                        }
+                    }
+                }
+                if !filters.trust.is_empty() {
+                    let Some(memory) = memories.get(&memory_key) else {
+                        metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
+                        continue;
+                    };
+                    let posture = posture_for_trust_class(&memory.trust_class);
+                    if !filters.trust.matches(&memory.trust_class, posture) {
+                        metrics.trust_filtered_candidates =
+                            metrics.trust_filtered_candidates.saturating_add(1);
                         continue;
                     }
                 }
@@ -1246,6 +1370,104 @@ fn candidates_from_search_with_metrics(
         }
     }
     (candidates, metrics)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TemporalCandidateOutcome {
+    Include,
+    Exclude,
+    IncludeRelaxedInvalid,
+}
+
+fn temporal_memory_outcome(
+    memory: &StoredMemory,
+    filters: &crate::models::QueryTemporalFilters,
+) -> TemporalCandidateOutcome {
+    if filters.is_empty() {
+        return TemporalCandidateOutcome::Include;
+    }
+
+    let Some(created_at) = parse_stored_memory_timestamp(&memory.created_at) else {
+        return TemporalCandidateOutcome::Exclude;
+    };
+
+    if let Some(after) = filters.after
+        && created_at < after
+    {
+        return TemporalCandidateOutcome::Exclude;
+    }
+    if let Some(before) = filters.before
+        && created_at > before
+    {
+        return TemporalCandidateOutcome::Exclude;
+    }
+    if let Some(as_of) = filters.as_of {
+        let Some(updated_at) = parse_stored_memory_timestamp(&memory.updated_at) else {
+            return TemporalCandidateOutcome::Exclude;
+        };
+        if created_at > as_of || updated_at > as_of {
+            return TemporalCandidateOutcome::Exclude;
+        }
+    }
+
+    let Some(validity) = &filters.validity else {
+        return TemporalCandidateOutcome::Include;
+    };
+    match validity.posture {
+        crate::models::QueryTemporalValidityPosture::Ignore => TemporalCandidateOutcome::Include,
+        crate::models::QueryTemporalValidityPosture::Strict => {
+            if memory_temporally_invalid_at(
+                memory,
+                validity
+                    .reference_time
+                    .or(filters.as_of)
+                    .unwrap_or_else(Utc::now),
+            ) {
+                TemporalCandidateOutcome::Exclude
+            } else {
+                TemporalCandidateOutcome::Include
+            }
+        }
+        crate::models::QueryTemporalValidityPosture::Relaxed => {
+            if memory_temporally_invalid_at(
+                memory,
+                validity
+                    .reference_time
+                    .or(filters.as_of)
+                    .unwrap_or_else(Utc::now),
+            ) {
+                TemporalCandidateOutcome::IncludeRelaxedInvalid
+            } else {
+                TemporalCandidateOutcome::Include
+            }
+        }
+    }
+}
+
+fn memory_temporally_invalid_at(memory: &StoredMemory, reference_time: DateTime<Utc>) -> bool {
+    if let Some(valid_from) = memory.valid_from.as_deref() {
+        let Some(valid_from) = parse_stored_memory_timestamp(valid_from) else {
+            return true;
+        };
+        if valid_from > reference_time {
+            return true;
+        }
+    }
+    if let Some(valid_to) = memory.valid_to.as_deref() {
+        let Some(valid_to) = parse_stored_memory_timestamp(valid_to) else {
+            return true;
+        };
+        if valid_to < reference_time {
+            return true;
+        }
+    }
+    false
+}
+
+fn parse_stored_memory_timestamp(raw: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .ok()
 }
 
 fn load_candidate_batch_maps(
@@ -1722,9 +1944,10 @@ mod tests {
     use crate::core::search::{
         PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchHit, SearchReport, SearchStatus,
     };
-    use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
+    use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection, StoredMemory};
     use crate::models::{
-        FocusItem, FocusState, MemoryId, ProvenanceUri, TrustClass, UnitScore, WorkspaceId,
+        FocusItem, FocusState, MemoryId, ProvenanceUri, QueryTemporalFilters,
+        QueryTemporalValidity, QueryTemporalValidityPosture, TrustClass, UnitScore, WorkspaceId,
     };
     use crate::pack::{
         ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponseSeverity,
@@ -1746,6 +1969,166 @@ mod tests {
 
     fn test_runtime_profile() -> RuntimeProfileReport {
         RuntimeProfileReport::for_profile(OperatingProfile::Workstation, "test_fixture")
+    }
+
+    fn query_time(raw: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(raw)
+            .expect("test timestamp is RFC3339")
+            .with_timezone(&chrono::Utc)
+    }
+
+    fn stored_memory_with_time(
+        created_at: &str,
+        updated_at: &str,
+        valid_from: Option<&str>,
+        valid_to: Option<&str>,
+    ) -> StoredMemory {
+        StoredMemory {
+            id: MemoryId::from_uuid(uuid::Uuid::from_u128(700)).to_string(),
+            workspace_id: WorkspaceId::from_uuid(uuid::Uuid::from_u128(701)).to_string(),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            content: "Run cargo fmt --check before release.".to_owned(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.8,
+            importance: 0.7,
+            provenance_uri: None,
+            trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+            trust_subclass: None,
+            provenance_chain_hash: None,
+            provenance_chain_hash_version: "1".to_owned(),
+            provenance_verification_status: "pending".to_owned(),
+            provenance_verified_at: None,
+            provenance_verification_note: None,
+            created_at: created_at.to_owned(),
+            updated_at: updated_at.to_owned(),
+            tombstoned_at: None,
+            valid_from: valid_from.map(str::to_owned),
+            valid_to: valid_to.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn temporal_time_window_filters_created_at_with_inclusive_boundaries() {
+        let memory =
+            stored_memory_with_time("2026-05-01T12:00:00Z", "2026-05-01T12:00:00Z", None, None);
+
+        let inclusive = QueryTemporalFilters {
+            after: Some(query_time("2026-05-01T12:00:00Z")),
+            before: Some(query_time("2026-05-01T12:00:00Z")),
+            ..QueryTemporalFilters::default()
+        };
+        assert_eq!(
+            super::temporal_memory_outcome(&memory, &inclusive),
+            super::TemporalCandidateOutcome::Include
+        );
+
+        let after_window = QueryTemporalFilters {
+            after: Some(query_time("2026-05-01T12:00:01Z")),
+            ..QueryTemporalFilters::default()
+        };
+        assert_eq!(
+            super::temporal_memory_outcome(&memory, &after_window),
+            super::TemporalCandidateOutcome::Exclude
+        );
+
+        let before_window = QueryTemporalFilters {
+            before: Some(query_time("2026-05-01T11:59:59Z")),
+            ..QueryTemporalFilters::default()
+        };
+        assert_eq!(
+            super::temporal_memory_outcome(&memory, &before_window),
+            super::TemporalCandidateOutcome::Exclude
+        );
+    }
+
+    #[test]
+    fn temporal_as_of_excludes_later_updates() {
+        let later_update =
+            stored_memory_with_time("2026-05-01T00:00:00Z", "2026-05-03T00:00:00Z", None, None);
+        let filters = QueryTemporalFilters {
+            as_of: Some(query_time("2026-05-02T00:00:00Z")),
+            ..QueryTemporalFilters::default()
+        };
+        assert_eq!(
+            super::temporal_memory_outcome(&later_update, &filters),
+            super::TemporalCandidateOutcome::Exclude
+        );
+
+        let boundary_update =
+            stored_memory_with_time("2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", None, None);
+        assert_eq!(
+            super::temporal_memory_outcome(&boundary_update, &filters),
+            super::TemporalCandidateOutcome::Include
+        );
+    }
+
+    #[test]
+    fn temporal_validity_postures_handle_future_expired_and_current_windows() {
+        let future = stored_memory_with_time(
+            "2026-05-01T00:00:00Z",
+            "2026-05-01T00:00:00Z",
+            Some("2026-06-01T00:00:00Z"),
+            None,
+        );
+        let expired = stored_memory_with_time(
+            "2026-04-01T00:00:00Z",
+            "2026-04-01T00:00:00Z",
+            None,
+            Some("2026-04-30T23:59:59Z"),
+        );
+        let current = stored_memory_with_time(
+            "2026-04-01T00:00:00Z",
+            "2026-04-01T00:00:00Z",
+            Some("2026-04-01T00:00:00Z"),
+            Some("2026-05-01T00:00:00Z"),
+        );
+        let reference_time = query_time("2026-05-01T00:00:00Z");
+
+        let strict = QueryTemporalFilters {
+            validity: Some(QueryTemporalValidity {
+                posture: QueryTemporalValidityPosture::Strict,
+                reference_time: Some(reference_time),
+            }),
+            ..QueryTemporalFilters::default()
+        };
+        assert_eq!(
+            super::temporal_memory_outcome(&future, &strict),
+            super::TemporalCandidateOutcome::Exclude
+        );
+        assert_eq!(
+            super::temporal_memory_outcome(&expired, &strict),
+            super::TemporalCandidateOutcome::Exclude
+        );
+        assert_eq!(
+            super::temporal_memory_outcome(&current, &strict),
+            super::TemporalCandidateOutcome::Include
+        );
+
+        let relaxed = QueryTemporalFilters {
+            validity: Some(QueryTemporalValidity {
+                posture: QueryTemporalValidityPosture::Relaxed,
+                reference_time: Some(reference_time),
+            }),
+            ..QueryTemporalFilters::default()
+        };
+        assert_eq!(
+            super::temporal_memory_outcome(&future, &relaxed),
+            super::TemporalCandidateOutcome::IncludeRelaxedInvalid
+        );
+
+        let ignore = QueryTemporalFilters {
+            validity: Some(QueryTemporalValidity {
+                posture: QueryTemporalValidityPosture::Ignore,
+                reference_time: Some(reference_time),
+            }),
+            ..QueryTemporalFilters::default()
+        };
+        assert_eq!(
+            super::temporal_memory_outcome(&future, &ignore),
+            super::TemporalCandidateOutcome::Include
+        );
     }
 
     #[test]

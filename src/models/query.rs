@@ -8,12 +8,19 @@ use serde::{Deserialize, Serialize};
 pub struct QueryFilters {
     pub filters: Vec<QueryFilter>,
     pub tags: TagFilters,
+    pub temporal: QueryTemporalFilters,
+    pub trust: TrustFilters,
+    pub redaction: RedactionFilters,
 }
 
 impl QueryFilters {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.filters.is_empty() && self.tags.is_empty()
+        self.filters.is_empty()
+            && self.tags.is_empty()
+            && self.temporal.is_empty()
+            && self.trust.is_empty()
+            && self.redaction.is_empty()
     }
 
     /// Check if a metadata value matches all filters.
@@ -26,6 +33,59 @@ impl QueryFilters {
     #[must_use]
     pub fn matches_tags(&self, memory_tags: &[String]) -> bool {
         self.tags.matches(memory_tags)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QueryTemporalFilters {
+    pub after: Option<DateTime<Utc>>,
+    pub before: Option<DateTime<Utc>>,
+    pub as_of: Option<DateTime<Utc>>,
+    pub validity: Option<QueryTemporalValidity>,
+}
+
+impl QueryTemporalFilters {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.after.is_none()
+            && self.before.is_none()
+            && self.as_of.is_none()
+            && self.validity.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryTemporalValidity {
+    pub posture: QueryTemporalValidityPosture,
+    pub reference_time: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum QueryTemporalValidityPosture {
+    Strict,
+    #[default]
+    Relaxed,
+    Ignore,
+}
+
+impl QueryTemporalValidityPosture {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Relaxed => "relaxed",
+            Self::Ignore => "ignore",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "strict" => Some(Self::Strict),
+            "relaxed" => Some(Self::Relaxed),
+            "ignore" => Some(Self::Ignore),
+            _ => None,
+        }
     }
 }
 
@@ -314,6 +374,9 @@ pub fn parse_filters(value: &serde_json::Value) -> Option<QueryFilters> {
     Some(QueryFilters {
         filters,
         tags: TagFilters::default(),
+        temporal: QueryTemporalFilters::default(),
+        trust: TrustFilters::default(),
+        redaction: RedactionFilters::default(),
     })
 }
 
@@ -489,6 +552,9 @@ impl EqlQuery {
         QueryFilters {
             filters,
             tags: TagFilters::default(),
+            temporal: QueryTemporalFilters::default(),
+            trust: TrustFilters::default(),
+            redaction: RedactionFilters::default(),
         }
     }
 
@@ -1019,6 +1085,159 @@ pub fn parse_tags(value: &serde_json::Value) -> TagFilters {
     }
 }
 
+/// Trust filters from ee.query.v1 trust object.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TrustFilters {
+    /// Minimum trust class to include (memories with lower trust are excluded).
+    pub min_class: Option<String>,
+    /// Trust classes to exclude entirely.
+    pub exclude_classes: Vec<String>,
+    /// Required trust posture (authoritative, provisional, untrusted).
+    pub require_posture: Option<String>,
+}
+
+impl TrustFilters {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.min_class.is_none()
+            && self.exclude_classes.is_empty()
+            && self.require_posture.is_none()
+    }
+
+    /// Check if the given trust class satisfies all trust filter constraints.
+    #[must_use]
+    pub fn matches(&self, trust_class: &str, trust_posture: &str) -> bool {
+        if let Some(ref min_class) = self.min_class {
+            if !trust_class_meets_minimum(trust_class, min_class) {
+                return false;
+            }
+        }
+        if self.exclude_classes.iter().any(|excl| excl == trust_class) {
+            return false;
+        }
+        if let Some(ref required) = self.require_posture {
+            if trust_posture != required {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Check if a trust class meets the minimum threshold.
+fn trust_class_meets_minimum(actual: &str, min: &str) -> bool {
+    let order = [
+        "human_explicit",
+        "agent_validated",
+        "agent_assertion",
+        "cass_evidence",
+        "legacy_import",
+    ];
+    let actual_rank = order
+        .iter()
+        .position(|&c| c == actual)
+        .unwrap_or(order.len());
+    let min_rank = order.iter().position(|&c| c == min).unwrap_or(0);
+    actual_rank <= min_rank
+}
+
+/// Derive trust posture from trust class string (EE-260, ADR-0009).
+#[must_use]
+pub fn posture_for_trust_class(trust_class: &str) -> &'static str {
+    match trust_class {
+        "human_explicit" | "agent_validated" => "authoritative",
+        "agent_assertion" | "cass_evidence" => "advisory",
+        "legacy_import" => "legacy_evidence",
+        _ => "advisory",
+    }
+}
+
+/// Parse trust filters from an ee.query.v1 trust object.
+#[must_use]
+pub fn parse_trust(value: &serde_json::Value) -> TrustFilters {
+    let Some(object) = value.as_object() else {
+        return TrustFilters::default();
+    };
+
+    let min_class = object
+        .get("minClass")
+        .and_then(serde_json::Value::as_str)
+        .map(String::from);
+
+    let exclude_classes = object
+        .get("excludeClasses")
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let require_posture = object
+        .get("requirePosture")
+        .and_then(serde_json::Value::as_str)
+        .map(String::from);
+
+    TrustFilters {
+        min_class,
+        exclude_classes,
+        require_posture,
+    }
+}
+
+/// Redaction filters from ee.query.v1 redaction object.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RedactionFilters {
+    /// Redaction policy: "respect" (apply redaction) or "bypass" (requires elevated permission).
+    pub policy: Option<String>,
+    /// Redaction categories that are acceptable to include.
+    pub allow_categories: Vec<String>,
+}
+
+impl RedactionFilters {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.policy.is_none() && self.allow_categories.is_empty()
+    }
+
+    /// Check if bypass is requested (requires elevated permission).
+    #[must_use]
+    pub fn requests_bypass(&self) -> bool {
+        self.policy.as_deref() == Some("bypass")
+    }
+}
+
+/// Parse redaction filters from an ee.query.v1 redaction object.
+#[must_use]
+pub fn parse_redaction(value: &serde_json::Value) -> RedactionFilters {
+    let Some(object) = value.as_object() else {
+        return RedactionFilters::default();
+    };
+
+    let policy = object
+        .get("policy")
+        .and_then(serde_json::Value::as_str)
+        .map(String::from);
+
+    let allow_categories = object
+        .get("allowCategories")
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    RedactionFilters {
+        policy,
+        allow_categories,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1346,6 +1565,184 @@ mod tests {
         ensure(
             !matches_until(&metadata, "2026-05-04T12:00:00Z"),
             "invalid metadata timestamp should not match",
+        )
+    }
+
+    #[test]
+    fn trust_filters_empty_allows_all() -> TestResult {
+        let filters = TrustFilters::default();
+        ensure(filters.is_empty(), "default TrustFilters should be empty")?;
+        ensure(
+            filters.matches("human_explicit", "authoritative"),
+            "empty filter should allow human_explicit",
+        )?;
+        ensure(
+            filters.matches("legacy_import", "legacy_evidence"),
+            "empty filter should allow legacy_import",
+        )
+    }
+
+    #[test]
+    fn trust_filters_min_class_enforced() -> TestResult {
+        let filters = TrustFilters {
+            min_class: Some("agent_validated".to_string()),
+            exclude_classes: vec![],
+            require_posture: None,
+        };
+        ensure(
+            filters.matches("human_explicit", "authoritative"),
+            "human_explicit should pass min_class=agent_validated",
+        )?;
+        ensure(
+            filters.matches("agent_validated", "authoritative"),
+            "agent_validated should pass min_class=agent_validated",
+        )?;
+        ensure(
+            !filters.matches("agent_assertion", "advisory"),
+            "agent_assertion should fail min_class=agent_validated",
+        )?;
+        ensure(
+            !filters.matches("legacy_import", "legacy_evidence"),
+            "legacy_import should fail min_class=agent_validated",
+        )
+    }
+
+    #[test]
+    fn trust_filters_exclude_classes_enforced() -> TestResult {
+        let filters = TrustFilters {
+            min_class: None,
+            exclude_classes: vec!["legacy_import".to_string(), "cass_evidence".to_string()],
+            require_posture: None,
+        };
+        ensure(
+            filters.matches("human_explicit", "authoritative"),
+            "human_explicit should pass exclusion filter",
+        )?;
+        ensure(
+            !filters.matches("legacy_import", "legacy_evidence"),
+            "legacy_import should be excluded",
+        )?;
+        ensure(
+            !filters.matches("cass_evidence", "advisory"),
+            "cass_evidence should be excluded",
+        )
+    }
+
+    #[test]
+    fn trust_filters_require_posture_enforced() -> TestResult {
+        let filters = TrustFilters {
+            min_class: None,
+            exclude_classes: vec![],
+            require_posture: Some("authoritative".to_string()),
+        };
+        ensure(
+            filters.matches("human_explicit", "authoritative"),
+            "authoritative posture should pass",
+        )?;
+        ensure(
+            !filters.matches("agent_assertion", "advisory"),
+            "advisory posture should fail require_posture=authoritative",
+        )
+    }
+
+    #[test]
+    fn parse_trust_from_json() -> TestResult {
+        let json = serde_json::json!({
+            "minClass": "agent_validated",
+            "excludeClasses": ["legacy_import"],
+            "requirePosture": "authoritative"
+        });
+        let filters = parse_trust(&json);
+        ensure(
+            filters.min_class.as_deref() == Some("agent_validated"),
+            "should parse minClass",
+        )?;
+        ensure(
+            filters.exclude_classes == vec!["legacy_import"],
+            "should parse excludeClasses",
+        )?;
+        ensure(
+            filters.require_posture.as_deref() == Some("authoritative"),
+            "should parse requirePosture",
+        )
+    }
+
+    #[test]
+    fn redaction_filters_empty_is_default() -> TestResult {
+        let filters = RedactionFilters::default();
+        ensure(
+            filters.is_empty(),
+            "default RedactionFilters should be empty",
+        )?;
+        ensure(
+            !filters.requests_bypass(),
+            "default should not request bypass",
+        )
+    }
+
+    #[test]
+    fn redaction_filters_bypass_detected() -> TestResult {
+        let filters = RedactionFilters {
+            policy: Some("bypass".to_string()),
+            allow_categories: vec![],
+        };
+        ensure(
+            filters.requests_bypass(),
+            "policy=bypass should be detected",
+        )?;
+
+        let respect_filters = RedactionFilters {
+            policy: Some("respect".to_string()),
+            allow_categories: vec![],
+        };
+        ensure(
+            !respect_filters.requests_bypass(),
+            "policy=respect should not be bypass",
+        )
+    }
+
+    #[test]
+    fn parse_redaction_from_json() -> TestResult {
+        let json = serde_json::json!({
+            "policy": "bypass",
+            "allowCategories": ["pii", "internal"]
+        });
+        let filters = parse_redaction(&json);
+        ensure(
+            filters.policy.as_deref() == Some("bypass"),
+            "should parse policy",
+        )?;
+        ensure(
+            filters.allow_categories == vec!["pii", "internal"],
+            "should parse allowCategories",
+        )
+    }
+
+    #[test]
+    fn posture_for_trust_class_mapping() -> TestResult {
+        ensure(
+            posture_for_trust_class("human_explicit") == "authoritative",
+            "human_explicit should map to authoritative",
+        )?;
+        ensure(
+            posture_for_trust_class("agent_validated") == "authoritative",
+            "agent_validated should map to authoritative",
+        )?;
+        ensure(
+            posture_for_trust_class("agent_assertion") == "advisory",
+            "agent_assertion should map to advisory",
+        )?;
+        ensure(
+            posture_for_trust_class("cass_evidence") == "advisory",
+            "cass_evidence should map to advisory",
+        )?;
+        ensure(
+            posture_for_trust_class("legacy_import") == "legacy_evidence",
+            "legacy_import should map to legacy_evidence",
+        )?;
+        ensure(
+            posture_for_trust_class("unknown_class") == "advisory",
+            "unknown class should default to advisory",
         )
     }
 }
