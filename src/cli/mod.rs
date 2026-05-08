@@ -11690,7 +11690,7 @@ where
 
     #[cfg(feature = "graph")]
     {
-        return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
+        match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
             Ok(input) => {
                 let result = fnx_algorithms::pagerank_directed(&input.directed);
                 let data = graph_metric_data(
@@ -11704,7 +11704,7 @@ where
                 write_graph_surface_data(cli, stdout, data)
             }
             Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-        };
+        }
     }
 
     #[cfg(not(feature = "graph"))]
@@ -11731,7 +11731,7 @@ where
 
     #[cfg(feature = "graph")]
     {
-        return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
+        match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
             Ok(input) => {
                 let result = fnx_algorithms::betweenness_centrality_directed(&input.directed);
                 let data = graph_metric_data(
@@ -11745,7 +11745,7 @@ where
                 write_graph_surface_data(cli, stdout, data)
             }
             Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-        };
+        }
     }
 
     #[cfg(not(feature = "graph"))]
@@ -11776,7 +11776,7 @@ where
 
     #[cfg(feature = "graph")]
     {
-        return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
+        match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
             Ok(input) => {
                 let result = fnx_algorithms::hits_centrality_directed(&input.directed);
                 let data = graph_metric_data(
@@ -11791,7 +11791,7 @@ where
                 write_graph_surface_data(cli, stdout, data)
             }
             Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-        };
+        }
     }
 
     #[cfg(not(feature = "graph"))]
@@ -11820,7 +11820,7 @@ where
 
     #[cfg(feature = "graph")]
     {
-        return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
+        match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
             Ok(input) => {
                 let communities = fnx_algorithms::louvain_communities(
                     &input.undirected,
@@ -11834,7 +11834,7 @@ where
                 write_graph_surface_data(cli, stdout, data)
             }
             Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-        };
+        }
     }
 
     #[cfg(not(feature = "graph"))]
@@ -11861,7 +11861,7 @@ where
 
     #[cfg(feature = "graph")]
     {
-        return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
+        match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
             Ok(input) => {
                 let communities = fnx_algorithms::label_propagation_communities(&input.undirected);
                 let data =
@@ -11869,7 +11869,7 @@ where
                 write_graph_surface_data(cli, stdout, data)
             }
             Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-        };
+        }
     }
 
     #[cfg(not(feature = "graph"))]
@@ -11900,7 +11900,7 @@ where
 
     #[cfg(feature = "graph")]
     {
-        return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
+        match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
             Ok(input) => {
                 let result = fnx_algorithms::k_core(&input.undirected, args.k);
                 let mut sorted_nodes = result.nodes.clone();
@@ -11932,7 +11932,7 @@ where
                 write_graph_surface_data(cli, stdout, data)
             }
             Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-        };
+        }
     }
 
     #[cfg(not(feature = "graph"))]
@@ -11959,7 +11959,7 @@ where
 
     #[cfg(feature = "graph")]
     {
-        return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
+        match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
             Ok(input) => {
                 let result = fnx_algorithms::articulation_points(&input.undirected);
                 let mut sorted_nodes = result.nodes.clone();
@@ -11975,7 +11975,7 @@ where
                 write_graph_surface_data(cli, stdout, data)
             }
             Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-        };
+        }
     }
 
     #[cfg(not(feature = "graph"))]
@@ -12008,7 +12008,7 @@ where
 
     #[cfg(feature = "graph")]
     {
-        return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
+        match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
             Ok(input) => {
                 let result = fnx_algorithms::shortest_path_unweighted_directed(
                     &input.directed,
@@ -12039,7 +12039,7 @@ where
                 write_graph_surface_data(cli, stdout, data)
             }
             Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-        };
+        }
     }
 
     #[cfg(not(feature = "graph"))]
@@ -12068,7 +12068,7 @@ where
 
     #[cfg(feature = "graph")]
     {
-        return match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
+        match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
             Ok(input) => {
                 let result = fnx_algorithms::shortest_path_unweighted_directed(
                     &input.directed,
@@ -12100,7 +12100,7 @@ where
                 write_graph_surface_data(cli, stdout, data)
             }
             Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
-        };
+        }
     }
 
     #[cfg(not(feature = "graph"))]

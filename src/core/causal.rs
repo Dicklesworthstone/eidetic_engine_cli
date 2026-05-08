@@ -1488,11 +1488,11 @@ pub fn estimate_causal_filtered_from_store(
             let artifact_match = options
                 .artifact_id
                 .as_ref()
-                .map_or(true, |id| chain_artifact_id == Some(id.as_str()));
+                .is_none_or(|id| chain_artifact_id == Some(id.as_str()));
             let decision_match = options
                 .decision_id
                 .as_ref()
-                .map_or(true, |id| chain_decision_id == Some(id.as_str()));
+                .is_none_or(|id| chain_decision_id == Some(id.as_str()));
 
             if artifact_match && decision_match {
                 matching_chains.push(chain);
@@ -2111,11 +2111,11 @@ pub fn compare_causal_filtered_from_store(
             let artifact_match = options
                 .artifact_id
                 .as_ref()
-                .map_or(true, |id| chain_artifact_id == Some(id.as_str()));
+                .is_none_or(|id| chain_artifact_id == Some(id.as_str()));
             let decision_match = options
                 .decision_id
                 .as_ref()
-                .map_or(true, |id| chain_decision_id == Some(id.as_str()));
+                .is_none_or(|id| chain_decision_id == Some(id.as_str()));
 
             if artifact_match && decision_match {
                 matching_chains.push(chain);

@@ -13,7 +13,7 @@ use crate::models::TrustClass;
 pub const SEVERE_HARMFUL_HISTORY_COUNT: u32 = 3;
 
 /// Recovery ceiling for sources with severe harmful history.
-pub const SEVERE_HARM_RECOVERY_CEILING: f32 = 0.49;
+pub const SEVERE_HARM_RECOVERY_CEILING: f32 = 0.30;
 
 /// Decay factor configuration per signal type.
 #[derive(Clone, Copy, Debug)]
@@ -246,12 +246,16 @@ impl TrustDecayCalculator {
     /// Determine if a source should be blocked based on decay.
     #[must_use]
     pub fn should_block(&self, state: &SourceTrustState) -> bool {
-        let effective = self.effective_trust(state);
-        effective <= self.config.trust_floor * 2.0
+        Self::has_severe_harmful_history(state)
+            || self.effective_trust(state) <= self.config.trust_floor * 2.0
+    }
+
+    fn has_severe_harmful_history(state: &SourceTrustState) -> bool {
+        state.harmful_count >= SEVERE_HARMFUL_HISTORY_COUNT
     }
 
     fn positive_recovery_ceiling(&self, state: &SourceTrustState) -> f32 {
-        let ceiling = if state.harmful_count >= SEVERE_HARMFUL_HISTORY_COUNT {
+        let ceiling = if Self::has_severe_harmful_history(state) {
             self.config.trust_ceiling.min(SEVERE_HARM_RECOVERY_CEILING)
         } else {
             self.config.trust_ceiling
@@ -265,7 +269,14 @@ impl TrustDecayCalculator {
         let effective = self.effective_trust(state);
         let decay_factor = self.calculate_decay_factor(state);
 
-        if effective <= self.config.trust_floor * 2.0 {
+        if Self::has_severe_harmful_history(state) {
+            TrustAdvisory::Block {
+                reason: format!(
+                    "Source has {} harmful events; manual review required before import",
+                    state.harmful_count
+                ),
+            }
+        } else if effective <= self.config.trust_floor * 2.0 {
             TrustAdvisory::Block {
                 reason: format!(
                     "Source trust ({:.2}) below threshold after {} negative signals",
@@ -461,10 +472,16 @@ mod tests {
             0.001,
             "severe harm recovery ceiling",
         )?;
+        ensure(calc.should_block(&state), true, "severe harm blocks import")?;
+        ensure(
+            advisory.permits_import(),
+            false,
+            "severe harm recovery does not permit import",
+        )?;
         ensure(
             advisory.code(),
-            "quarantine",
-            "severe harm history remains visible after recovery",
+            "block",
+            "severe harm history remains blocking after recovery",
         )
     }
 
