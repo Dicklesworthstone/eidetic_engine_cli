@@ -1390,8 +1390,8 @@ fn render_records(
                         .map_err(export_build_error("build backup memory record"))?,
                 )
                 .map_err(io_error("write backup memory record"))?;
-            for tag in memory_tags(data, memory)
-                .map_err(export_build_error("build backup tag record"))?
+            for tag in
+                memory_tags(data, memory).map_err(export_build_error("build backup tag record"))?
             {
                 exporter
                     .write_tag(tag)
