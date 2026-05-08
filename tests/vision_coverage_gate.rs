@@ -203,6 +203,10 @@ fn vision_coverage_compare_ref_includes_delta_report() -> TestResult {
         pointer_str(&report, "/delta_vs_main/ref")? == "HEAD",
         "delta report records comparison ref",
     )?;
+    let delta_available = report
+        .pointer("/delta_vs_main/available")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| "/delta_vs_main/available is not a boolean".to_owned())?;
     ensure(
         report
             .pointer("/delta_vs_main/current_gap_percentage")
@@ -210,12 +214,28 @@ fn vision_coverage_compare_ref_includes_delta_report() -> TestResult {
             .is_some(),
         "delta report includes current gap",
     )?;
-    ensure(
-        report
-            .pointer("/delta_vs_main/baseline_gap_percentage")
-            .and_then(serde_json::Value::as_f64)
-            .is_some(),
-        "delta report includes baseline gap",
-    )?;
+    if delta_available {
+        ensure(
+            report
+                .pointer("/delta_vs_main/baseline_gap_percentage")
+                .and_then(serde_json::Value::as_f64)
+                .is_some(),
+            "available delta report includes baseline gap",
+        )?;
+    } else {
+        ensure(
+            pointer_str(&report, "/delta_vs_main/reason")? == "compare_ref_unavailable",
+            "unavailable delta report records repairable reason",
+        )?;
+        ensure(
+            report.pointer("/delta_vs_main/baseline_gap_percentage")
+                == Some(&serde_json::Value::Null),
+            "unavailable delta report has no synthetic baseline gap",
+        )?;
+        ensure(
+            report.pointer("/delta_vs_main/gap_delta_percentage") == Some(&serde_json::Value::Null),
+            "unavailable delta report has no synthetic gap delta",
+        )?;
+    }
     Ok(())
 }

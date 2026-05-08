@@ -469,11 +469,32 @@ if compare_ref_available; then
               $current
               + {
                   delta_vs_main: {
+                    available: true,
                     ref: $ref,
                     baseline_gap_percentage: $baseline.gap_percentage,
                     current_gap_percentage: $current.gap_percentage,
                     gap_delta_percentage: (($current.gap_percentage - $baseline.gap_percentage) * 100 | round / 100),
                     baseline_surfaces: $baseline.surfaces,
+                    current_surfaces: $current.surfaces
+                  }
+                }
+            '
+    )
+elif [ -n "$COMPARE_REF" ]; then
+    REPORT_JSON=$(
+        jq -n \
+            --argjson current "$REPORT_JSON" \
+            --arg ref "$COMPARE_REF" '
+              $current
+              + {
+                  delta_vs_main: {
+                    available: false,
+                    ref: $ref,
+                    reason: "compare_ref_unavailable",
+                    baseline_gap_percentage: null,
+                    current_gap_percentage: $current.gap_percentage,
+                    gap_delta_percentage: null,
+                    baseline_surfaces: null,
                     current_surfaces: $current.surfaces
                   }
                 }
