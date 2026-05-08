@@ -23,7 +23,11 @@ use sqlmodel_core::{Row as SqlRow, Value as SqlValue};
 
 use crate::cache::CacheBudget;
 use crate::db::DbConnection;
-use crate::models::DomainError;
+use crate::models::{
+    ArtifactDegradationSeverity, ArtifactKind, ArtifactSummary, DomainError, MetricValue,
+    ProfileReference, ProvenanceEntry, RedactionPosture, SummaryDegradation,
+    SummaryDegradationCode,
+};
 use crate::output;
 use crate::pack::{
     PackCacheGovernor, PackHotset, PackHotsetEntry, PackHotsetEntryKind, PackSection,
@@ -58,6 +62,18 @@ const PERFORMANCE_EXPLAIN_SAMPLES_FILE: &str = "scale_performance_explain_sample
 const PERFORMANCE_EXPLAIN_SAMPLE_DIR: &str = "performance-explain";
 const MAX_PERFORMANCE_EXPLAIN_SAMPLES: usize = 16;
 const TRIAGE_SUMMARY_FILE: &str = "scale_triage_summary.json";
+const PERF_COMPARE_BUNDLE_SECTIONS: [(&str, &str); 7] = [
+    ("profile_evidence", PROFILE_EVIDENCE_FILE),
+    ("benchmark_summary", SCALE_BENCHMARK_SUMMARY_FILE),
+    ("fixture_manifest", SCALE_FIXTURE_MANIFEST_FILE),
+    ("cache_reports", CACHE_REPORTS_FILE),
+    ("write_queue_report", WRITE_QUEUE_REPORT_FILE),
+    (
+        "performance_explain_samples",
+        PERFORMANCE_EXPLAIN_SAMPLES_FILE,
+    ),
+    ("swarm_contention_reports", SCALE_BENCHMARK_SUMMARY_FILE),
+];
 const SWARM_SCALE_WORKLOADS_MANIFEST: &str =
     include_str!("../../tests/fixtures/swarm_scale/workloads.json");
 
@@ -441,6 +457,245 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
         hash_mismatches,
         valid,
     })
+}
+
+/// Summarize an inspected support bundle as a normalized perf artifact.
+///
+/// The adapter is read-only: it verifies manifest-listed hashes, copies only
+/// stable counts/profile labels/source hashes, and never embeds raw bundle file
+/// contents in the returned summary.
+pub fn summarize_bundle_for_perf_compare(
+    bundle_path: &Path,
+) -> Result<ArtifactSummary, DomainError> {
+    let inspect = inspect_bundle(&InspectOptions {
+        bundle_path: bundle_path.to_path_buf(),
+        verify_hashes: true,
+    })?;
+    Ok(summarize_inspected_bundle_for_perf_compare(&inspect))
+}
+
+#[must_use]
+pub fn summarize_inspected_bundle_for_perf_compare(inspect: &InspectReport) -> ArtifactSummary {
+    let bundle_dir = inspected_bundle_dir(inspect);
+    let manifest = inspect.manifest.as_ref();
+    let artifact_id = manifest.map_or_else(
+        || "support-bundle:missing-manifest".to_owned(),
+        |manifest| format!("support-bundle:{}", manifest.bundle_id),
+    );
+    let source_schema = manifest.map_or(SUPPORT_BUNDLE_INSPECT_SCHEMA_V1, |manifest| {
+        manifest.schema.as_str()
+    });
+    let mut summary = ArtifactSummary::new(
+        artifact_id.clone(),
+        ArtifactKind::SupportBundleManifest,
+        source_schema,
+    )
+    .with_source_path(inspect.bundle_path.display().to_string())
+    .with_command_family("support_bundle");
+
+    if let Some(manifest) = manifest {
+        summary.content_hash = Some(declared_bundle_signature(manifest));
+        summary.observed_hash = Some(observed_bundle_signature(&bundle_dir, manifest));
+        summary.add_metric(
+            "bundle.manifest_file_count",
+            MetricValue::measured(manifest.files.len() as f64, "count"),
+        );
+        summary.add_metric(
+            "bundle.files_found_count",
+            MetricValue::measured(inspect.files_found.len() as f64, "count"),
+        );
+        summary.add_metric(
+            "bundle.total_size_bytes",
+            MetricValue::measured(inspect.total_size_bytes as f64, "bytes"),
+        );
+        summary.add_metric(
+            "bundle.hash_mismatch_count",
+            MetricValue::measured(inspect.hash_mismatches.len() as f64, "count"),
+        );
+        summary.add_metric(
+            "bundle.redaction_reason_count",
+            MetricValue::measured(manifest.redaction_reasons.len() as f64, "count"),
+        );
+        summary.set_redaction(if manifest.redaction_applied {
+            RedactionPosture::Redacted
+        } else {
+            RedactionPosture::Clean
+        });
+
+        if manifest.schema != SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1 {
+            summary.add_degradation(SummaryDegradation {
+                code: SummaryDegradationCode::StaleSchemaVersion,
+                severity: ArtifactDegradationSeverity::High,
+                artifact_id: Some(artifact_id.clone()),
+                field_path: Some("manifest.schema".to_owned()),
+                message: format!(
+                    "Unsupported support bundle manifest schema `{}`.",
+                    manifest.schema
+                ),
+                repair: Some(
+                    "Regenerate the support bundle with the current ee version.".to_owned(),
+                ),
+            });
+        }
+
+        for mismatch in &inspect.hash_mismatches {
+            summary.add_degradation(SummaryDegradation {
+                code: SummaryDegradationCode::TamperedHash,
+                severity: ArtifactDegradationSeverity::High,
+                artifact_id: Some(artifact_id.clone()),
+                field_path: Some(format!("files.{mismatch}.contentHash")),
+                message: format!(
+                    "Support bundle attachment `{mismatch}` failed hash verification."
+                ),
+                repair: Some("Regenerate the support bundle before comparing it.".to_owned()),
+            });
+        }
+
+        for (section, file_name) in PERF_COMPARE_BUNDLE_SECTIONS {
+            let present = manifest.files.iter().any(|entry| entry.path == file_name)
+                && inspect.files_found.iter().any(|found| found == file_name);
+            summary.add_metric(
+                format!("section.{section}.present"),
+                MetricValue::measured(if present { 1.0 } else { 0.0 }, "bool"),
+            );
+            summary.add_provenance(ProvenanceEntry {
+                field: format!("section.{section}.present"),
+                source_path: file_name.to_owned(),
+                source_line: None,
+            });
+            if !present {
+                summary.add_degradation(missing_bundle_section(&artifact_id, section, file_name));
+            }
+        }
+
+        if let Some(profile) =
+            read_bundle_json(&bundle_dir, PROFILE_EVIDENCE_FILE).and_then(|json| {
+                json.pointer("/profile/activeProfile")
+                    .and_then(|value| value.as_str())
+                    .map(ToOwned::to_owned)
+            })
+        {
+            summary.profile = Some(ProfileReference {
+                profile_name: profile,
+                confidence: read_bundle_json(&bundle_dir, PROFILE_EVIDENCE_FILE).and_then(|json| {
+                    json.pointer("/profile/confidence")
+                        .and_then(|value| value.as_str())
+                        .map(ToOwned::to_owned)
+                }),
+                override_source: None,
+            });
+            summary.add_provenance(ProvenanceEntry {
+                field: "profile.profileName".to_owned(),
+                source_path: PROFILE_EVIDENCE_FILE.to_owned(),
+                source_line: None,
+            });
+        }
+
+        add_optional_json_metrics(&mut summary, &bundle_dir);
+        summary.verify_hash();
+    } else {
+        summary.set_redaction(RedactionPosture::Uncertain);
+        summary.add_degradation(SummaryDegradation {
+            code: SummaryDegradationCode::SourceUnavailable,
+            severity: ArtifactDegradationSeverity::High,
+            artifact_id: Some(artifact_id),
+            field_path: Some("manifest.json".to_owned()),
+            message: "Support bundle manifest is missing or malformed.".to_owned(),
+            repair: Some(
+                "Run ee support bundle --out <dir> and inspect the generated bundle.".to_owned(),
+            ),
+        });
+    }
+
+    summary
+}
+
+fn inspected_bundle_dir(inspect: &InspectReport) -> PathBuf {
+    if inspect.bundle_path.is_dir() {
+        inspect.bundle_path.clone()
+    } else {
+        inspect
+            .bundle_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf()
+    }
+}
+
+fn declared_bundle_signature(manifest: &BundleManifest) -> String {
+    let mut parts = manifest
+        .files
+        .iter()
+        .map(|entry| format!("{}={}", entry.path, entry.content_hash))
+        .collect::<Vec<_>>();
+    parts.sort();
+    compute_hash(&parts.join("\n"))
+}
+
+fn observed_bundle_signature(bundle_dir: &Path, manifest: &BundleManifest) -> String {
+    let mut parts = manifest
+        .files
+        .iter()
+        .map(|entry| {
+            let path = bundle_dir.join(&entry.path);
+            let observed = fs::read_to_string(&path)
+                .map(|content| compute_hash(&content))
+                .unwrap_or_else(|_| "missing_or_unreadable".to_owned());
+            format!("{}={observed}", entry.path)
+        })
+        .collect::<Vec<_>>();
+    parts.sort();
+    compute_hash(&parts.join("\n"))
+}
+
+fn missing_bundle_section(artifact_id: &str, section: &str, file_name: &str) -> SummaryDegradation {
+    SummaryDegradation {
+        code: SummaryDegradationCode::MissingMetric,
+        severity: ArtifactDegradationSeverity::Medium,
+        artifact_id: Some(artifact_id.to_owned()),
+        field_path: Some(format!("files.{file_name}")),
+        message: format!("Support bundle section `{section}` is missing (`{file_name}`)."),
+        repair: Some(format!(
+            "Regenerate the support bundle and ensure `{file_name}` is present."
+        )),
+    }
+}
+
+fn read_bundle_json(bundle_dir: &Path, file_name: &str) -> Option<Value> {
+    fs::read_to_string(bundle_dir.join(file_name))
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+}
+
+fn add_optional_json_metrics(summary: &mut ArtifactSummary, bundle_dir: &Path) {
+    if let Some(json) = read_bundle_json(bundle_dir, SCALE_BENCHMARK_SUMMARY_FILE) {
+        let report_count = json
+            .get("swarmSmokeReports")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        summary.add_metric(
+            "swarm_contention.report_count",
+            MetricValue::measured(report_count as f64, "count"),
+        );
+    }
+    if let Some(json) = read_bundle_json(bundle_dir, PERFORMANCE_EXPLAIN_SAMPLES_FILE) {
+        let sample_count = json.get("sampleCount").and_then(Value::as_u64).unwrap_or(0);
+        summary.add_metric(
+            "performance_explain.sample_count",
+            MetricValue::measured(sample_count as f64, "count"),
+        );
+    }
+    if let Some(json) = read_bundle_json(bundle_dir, CACHE_REPORTS_FILE) {
+        if let Some(memory_count) = json
+            .pointer("/database/memoryCount")
+            .and_then(Value::as_u64)
+        {
+            summary.add_metric(
+                "cache.database_memory_count",
+                MetricValue::measured(memory_count as f64, "count"),
+            );
+        }
+    }
 }
 
 fn collect_diagnostics(
