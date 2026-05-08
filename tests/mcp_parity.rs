@@ -75,7 +75,7 @@ fn run_cli(args: Vec<OsString>) -> (ee::models::ProcessExitCode, String, String)
     )
 }
 
-fn run_mcp_tool_call(name: &str, arguments: JsonValue) -> JsonValue {
+fn run_mcp_tool_call(name: &str, arguments: JsonValue) -> Result<JsonValue, String> {
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -85,7 +85,8 @@ fn run_mcp_tool_call(name: &str, arguments: JsonValue) -> JsonValue {
             "arguments": arguments
         }
     });
-    ee::mcp::handle_json_rpc_message(&request).expect("MCP handler returned None for tools/call")
+    ee::mcp::handle_json_rpc_message(&request)
+        .ok_or_else(|| "MCP handler returned None for tools/call".to_owned())
 }
 
 fn extract_mcp_tool_text(response: &JsonValue) -> Result<String, String> {
@@ -210,7 +211,7 @@ fn mcp_parity_status_command() -> TestResult {
     )?;
 
     let mcp_response =
-        run_mcp_tool_call("ee_status", json!({ "workspace": dir.to_string_lossy() }));
+        run_mcp_tool_call("ee_status", json!({ "workspace": dir.to_string_lossy() }))?;
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
     assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "status")
@@ -235,7 +236,7 @@ fn mcp_parity_health_command() -> TestResult {
     )?;
 
     let mcp_response =
-        run_mcp_tool_call("ee_health", json!({ "workspace": dir.to_string_lossy() }));
+        run_mcp_tool_call("ee_health", json!({ "workspace": dir.to_string_lossy() }))?;
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
     assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "health")
@@ -262,7 +263,7 @@ fn mcp_parity_capabilities_command() -> TestResult {
     let mcp_response = run_mcp_tool_call(
         "ee_capabilities",
         json!({ "workspace": dir.to_string_lossy() }),
-    );
+    )?;
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
     assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "capabilities")
@@ -313,7 +314,7 @@ fn mcp_parity_search_command() -> TestResult {
             "query": "cargo test release",
             "limit": 5
         }),
-    );
+    )?;
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
     assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "search")
@@ -364,7 +365,7 @@ fn mcp_parity_context_command() -> TestResult {
             "query": "prepare a release",
             "maxTokens": 2000
         }),
-    );
+    )?;
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
     assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "context")
@@ -405,7 +406,7 @@ fn mcp_parity_remember_dry_run_command() -> TestResult {
             "level": "semantic",
             "confidence": 0.85
         }),
-    );
+    )?;
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
     assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "remember --dry-run")

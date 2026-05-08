@@ -287,6 +287,7 @@ fn prompt_optional_string<'a>(
     arguments: &'a Value,
     names: &[&str],
 ) -> Result<Option<&'a str>, String> {
+    argument_name(names)?;
     if arguments.is_null() {
         return Ok(None);
     }
@@ -294,13 +295,15 @@ fn prompt_optional_string<'a>(
 }
 
 fn prompt_required_string<'a>(arguments: &'a Value, names: &[&str]) -> Result<&'a str, String> {
+    let name = argument_name(names)?;
     if arguments.is_null() {
-        return Err(format!("Missing required prompt argument '{}'", names[0]));
+        return Err(format!("Missing required prompt argument '{name}'"));
     }
     required_string(arguments, names)
 }
 
 fn prompt_optional_bool(arguments: &Value, names: &[&str]) -> Result<bool, String> {
+    argument_name(names)?;
     if arguments.is_null() {
         return Ok(false);
     }
@@ -873,33 +876,44 @@ fn find_argument<'a>(arguments: &'a Value, names: &[&str]) -> Option<&'a Value> 
     names.iter().find_map(|name| arguments.get(*name))
 }
 
+fn argument_name<'name>(names: &[&'name str]) -> Result<&'name str, String> {
+    names
+        .first()
+        .copied()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "MCP argument helper requires at least one argument name".to_owned())
+}
+
 fn required_string<'a>(arguments: &'a Value, names: &[&str]) -> Result<&'a str, String> {
+    let name = argument_name(names)?;
     let Some(value) = find_argument(arguments, names) else {
-        return Err(format!("Missing required argument '{}'", names[0]));
+        return Err(format!("Missing required argument '{name}'"));
     };
     value
         .as_str()
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("Argument '{}' must be a non-empty string", names[0]))
+        .ok_or_else(|| format!("Argument '{name}' must be a non-empty string"))
 }
 
 fn optional_string<'a>(arguments: &'a Value, names: &[&str]) -> Result<Option<&'a str>, String> {
+    let name = argument_name(names)?;
     let Some(value) = find_argument(arguments, names) else {
         return Ok(None);
     };
     value
         .as_str()
         .map(Some)
-        .ok_or_else(|| format!("Argument '{}' must be a string", names[0]))
+        .ok_or_else(|| format!("Argument '{name}' must be a string"))
 }
 
 fn optional_bool(arguments: &Value, names: &[&str]) -> Result<bool, String> {
+    let name = argument_name(names)?;
     let Some(value) = find_argument(arguments, names) else {
         return Ok(false);
     };
     value
         .as_bool()
-        .ok_or_else(|| format!("Argument '{}' must be a boolean", names[0]))
+        .ok_or_else(|| format!("Argument '{name}' must be a boolean"))
 }
 
 fn optional_bool_with_default(
@@ -907,38 +921,38 @@ fn optional_bool_with_default(
     names: &[&str],
     default: bool,
 ) -> Result<bool, String> {
+    let name = argument_name(names)?;
     let Some(value) = find_argument(arguments, names) else {
         return Ok(default);
     };
     value
         .as_bool()
-        .ok_or_else(|| format!("Argument '{}' must be a boolean", names[0]))
+        .ok_or_else(|| format!("Argument '{name}' must be a boolean"))
 }
 
 fn optional_u32(arguments: &Value, names: &[&str]) -> Result<Option<u32>, String> {
+    let name = argument_name(names)?;
     let Some(value) = find_argument(arguments, names) else {
         return Ok(None);
     };
     let Some(raw) = value.as_u64() else {
-        return Err(format!(
-            "Argument '{}' must be a non-negative integer",
-            names[0]
-        ));
+        return Err(format!("Argument '{name}' must be a non-negative integer"));
     };
     u32::try_from(raw)
         .map(Some)
-        .map_err(|_| format!("Argument '{}' is too large", names[0]))
+        .map_err(|_| format!("Argument '{name}' is too large"))
 }
 
 fn optional_number_string(arguments: &Value, names: &[&str]) -> Result<Option<String>, String> {
+    let name = argument_name(names)?;
     let Some(value) = find_argument(arguments, names) else {
         return Ok(None);
     };
     let Some(raw) = value.as_f64() else {
-        return Err(format!("Argument '{}' must be a number", names[0]));
+        return Err(format!("Argument '{name}' must be a number"));
     };
     if !raw.is_finite() {
-        return Err(format!("Argument '{}' must be finite", names[0]));
+        return Err(format!("Argument '{name}' must be finite"));
     }
     Ok(Some(raw.to_string()))
 }
@@ -1259,18 +1273,21 @@ fn query_param<'a>(query: &'a [(String, String)], names: &[&str]) -> Option<&'a 
         .map(|(_, value)| value.as_str())
 }
 
+fn query_parameter_name<'name>(names: &[&'name str]) -> Result<&'name str, String> {
+    names
+        .first()
+        .copied()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "MCP URI query helper requires at least one query parameter name".to_owned())
+}
+
 fn required_query_param(query: &[(String, String)], names: &[&str]) -> Result<String, String> {
+    let name = query_parameter_name(names)?;
     let Some(value) = query_param(query, names) else {
-        return Err(format!(
-            "Missing required URI query parameter '{}'",
-            names[0]
-        ));
+        return Err(format!("Missing required URI query parameter '{name}'"));
     };
     if value.is_empty() {
-        return Err(format!(
-            "URI query parameter '{}' must not be empty",
-            names[0]
-        ));
+        return Err(format!("URI query parameter '{name}' must not be empty"));
     }
     Ok(value.to_string())
 }
@@ -1312,6 +1329,7 @@ fn append_resource_bool_flag(
     names: &[&str],
     flag: &str,
 ) -> Result<(), String> {
+    let name = query_parameter_name(names)?;
     let Some(value) = query_param(query, names) else {
         return Ok(());
     };
@@ -1322,8 +1340,7 @@ fn append_resource_bool_flag(
         }
         "false" => Ok(()),
         _ => Err(format!(
-            "URI query parameter '{}' must be true or false",
-            names[0]
+            "URI query parameter '{name}' must be true or false"
         )),
     }
 }
@@ -1673,6 +1690,16 @@ mod tests {
             .collect()
     }
 
+    fn expect_error<T>(result: Result<T, String>, expected: &str) -> Result<(), String> {
+        match result {
+            Ok(_) => Err(format!("expected error: {expected}")),
+            Err(error) => {
+                assert_eq!(error, expected);
+                Ok(())
+            }
+        }
+    }
+
     #[test]
     fn mcp_server_info_has_correct_values() {
         let info = McpServerInfo::new();
@@ -1700,6 +1727,42 @@ mod tests {
         );
         assert_eq!(McpMethod::parse("shutdown"), McpMethod::Shutdown);
         assert!(matches!(McpMethod::parse("unknown"), McpMethod::Unknown(_)));
+    }
+
+    #[test]
+    fn argument_helpers_reject_empty_name_lists_without_panicking() -> Result<(), String> {
+        let arguments = json!({
+            "query": "prepare release",
+            "flag": true,
+            "limit": 5,
+            "score": 0.75
+        });
+        let expected = "MCP argument helper requires at least one argument name";
+
+        expect_error(required_string(&arguments, &[]), expected)?;
+        expect_error(optional_string(&arguments, &[]), expected)?;
+        expect_error(optional_bool(&arguments, &[]), expected)?;
+        expect_error(optional_bool_with_default(&arguments, &[], true), expected)?;
+        expect_error(optional_u32(&arguments, &[]), expected)?;
+        expect_error(optional_number_string(&arguments, &[]), expected)?;
+        expect_error(prompt_optional_string(&Value::Null, &[]), expected)?;
+        expect_error(prompt_required_string(&Value::Null, &[]), expected)?;
+        expect_error(prompt_optional_bool(&Value::Null, &[]), expected)
+    }
+
+    #[test]
+    fn uri_query_helpers_reject_empty_name_lists_without_panicking() -> Result<(), String> {
+        let query = vec![("includeContent".to_owned(), "maybe".to_owned())];
+        let expected = "MCP URI query helper requires at least one query parameter name";
+        let mut args = Vec::new();
+
+        expect_error(required_query_param(&query, &[]), expected)?;
+        expect_error(
+            append_resource_bool_flag(&mut args, &query, &[], "--include-content"),
+            expected,
+        )?;
+        assert!(args.is_empty());
+        Ok(())
     }
 
     #[test]
