@@ -233,16 +233,26 @@ fn recorder_start_event_finish_persist_and_list_events() -> TestResult {
     let listed_json = stdout_json(&listed)?;
     ensure_equal(
         &listed_json["schema"],
-        &serde_json::json!("ee.recorder.events_list.v1"),
-        "list schema",
+        &serde_json::json!("ee.response.v1"),
+        "list response schema",
     )?;
     ensure_equal(
-        &listed_json["totalCount"],
+        &listed_json["success"],
+        &serde_json::json!(true),
+        "list response success",
+    )?;
+    ensure_equal(
+        &listed_json["data"]["schema"],
+        &serde_json::json!("ee.recorder.events_list.v1"),
+        "list data schema",
+    )?;
+    ensure_equal(
+        &listed_json["data"]["totalCount"],
         &serde_json::json!(1),
         "list total count",
     )?;
     ensure_equal(
-        &listed_json["events"][0]["eventHash"],
+        &listed_json["data"]["events"][0]["eventHash"],
         &serde_json::json!(event_hash),
         "listed event hash",
     )

@@ -48,7 +48,11 @@ fn stdout_json(output: &Output) -> Result<serde_json::Value, String> {
         .map_err(|error| format!("stdout was not JSON: {error}\nstdout: {stdout}"))
 }
 
-fn assert_error_envelope(json: &serde_json::Value, expected_code: &str, context: &str) -> TestResult {
+fn assert_error_envelope(
+    json: &serde_json::Value,
+    expected_code: &str,
+    context: &str,
+) -> TestResult {
     let schema = json
         .get("schema")
         .and_then(|s| s.as_str())

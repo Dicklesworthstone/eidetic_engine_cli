@@ -19,6 +19,7 @@ pub mod learn;
 pub mod memory;
 pub mod model_registry;
 pub mod mutation;
+pub mod perf_artifact;
 pub mod posture;
 pub mod preflight;
 pub mod procedure;
@@ -164,6 +165,13 @@ pub use mutation::{
     MUTATION_RESPONSE_SCHEMA_V1, MutationActionStatus, MutationActionType, MutationResponse,
     MutationSummary, ParseIdempotencyClassError, ParseMutationActionStatusError,
     ParseMutationActionTypeError, PlannedAction,
+};
+pub use perf_artifact::{
+    ARTIFACT_SUMMARY_SCHEMA_V1, ArtifactKind, ArtifactSummary, DegradationSeverity,
+    DegradedSummary, MetricValue, MetricValueKind, PERF_METRIC_SCHEMA_V1, PERF_SCHEMA_CATALOG_V1,
+    ParseArtifactKindError, PerfSchemaCatalog, PerfSchemaEntry, ProfileReference, ProvenanceEntry,
+    RedactionPosture, SummaryDegradation, SummaryDegradationCode, perf_schema_catalog,
+    perf_schema_catalog_json, perf_schemas,
 };
 pub use posture::{ActionCategory, Posture, PostureSummary, SuggestedAction};
 pub use preflight::{

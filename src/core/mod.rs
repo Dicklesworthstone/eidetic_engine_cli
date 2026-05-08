@@ -36,6 +36,7 @@ pub mod legacy_import;
 pub mod memory;
 pub mod model;
 pub mod outcome;
+pub mod perf_forensics;
 pub mod plan;
 pub mod preflight;
 pub mod preflight_guard;
@@ -198,6 +199,11 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
         ),
         SupportedSchema::new("runtime_profile", profile::RUNTIME_PROFILE_SCHEMA_V1),
         SupportedSchema::new("update_plan", UPDATE_PLAN_SCHEMA_V1),
+        SupportedSchema::new(
+            "artifact_summary",
+            perf_forensics::ARTIFACT_SUMMARY_SCHEMA_V1,
+        ),
+        SupportedSchema::new("compare_result", perf_forensics::COMPARE_RESULT_SCHEMA_V1),
     ]
 }
 
@@ -509,6 +515,8 @@ mod tests {
                 "verification_recipe",
                 "runtime_profile",
                 "update_plan",
+                "artifact_summary",
+                "compare_result",
             ],
             "schema names",
         )
