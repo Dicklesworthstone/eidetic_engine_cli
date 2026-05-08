@@ -428,3 +428,57 @@ Gate 18 closure evidence is anchored in:
 
 These fixtures and contracts are the canonical references for procedure
 proposal, verification, and skill-capsule parity behavior under Gate 18.
+
+## Verification Drift Guard (`eidetic_engine_cli-eism`)
+
+The drift guard prevents "invisible baseline drift" where failing verification
+gates become normalized background noise without explicit tracking.
+
+### Rule
+
+When a verification gate is red (failing), there MUST be an open bead tracking
+that failure. If a gate fails and no corresponding bead exists, the drift guard
+fails with exit code 1.
+
+### Implementation
+
+The guard lives at `scripts/verification-drift-guard.sh` and runs as Gate 2.5 in
+`verify.sh`, immediately after the closure linter. It checks:
+
+1. **Closure-lint violations**: If `.closure-lint-report.json` shows violations,
+   there must be an open bead with keywords matching "closure" or "lint" in its
+   title, labels, or description.
+
+2. **Test failures**: If vision coverage shows significant missing surfaces,
+   there must be an open bead tracking core functionality gaps.
+
+3. **Forbidden dependencies** (on-demand): If `cargo tree` finds forbidden deps,
+   there must be an open bead tracking the violation.
+
+### How Agents Should File Blockers
+
+When a verification gate fails, create a bead before closing related work:
+
+```bash
+br create --title "[verify] Fix <gate-name> violations" \
+    --type bug --priority 1 \
+    --description "Gate <name> is red. <N> issues found. Details: <summary>"
+```
+
+Include keywords that the drift guard can match: "closure", "lint", "test",
+"forbidden", "verification", or the gate name itself.
+
+### Contract Tests
+
+`tests/verification_drift_guard.rs` provides contract tests for the guard:
+
+- Script exists and is executable
+- `--json` produces valid JSON report
+- `--help` flag works
+- `verify.sh` includes the drift guard gate
+
+### Accepted Exclusions
+
+None. All red gates must have tracking beads. If a gate is intentionally ignored
+(e.g., feature-gated or out of scope), the gate itself should be disabled rather
+than carrying silent failures.
