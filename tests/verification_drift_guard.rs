@@ -46,8 +46,7 @@ fn drift_guard_produces_json_report() {
     // The script should always produce a report file
     if report_path.exists() {
         let contents = fs::read_to_string(&report_path).expect("read report");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&contents).expect("parse as JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&contents).expect("parse as JSON");
 
         assert!(
             parsed.get("status").is_some(),
@@ -97,7 +96,10 @@ fn drift_guard_detects_closure_violations_without_bead() {
     // the script's JSON output structure is correct when run.
 
     let output = Command::new("sh")
-        .args(["-c", "./scripts/verification-drift-guard.sh --json 2>&1 || true"])
+        .args([
+            "-c",
+            "./scripts/verification-drift-guard.sh --json 2>&1 || true",
+        ])
         .current_dir(project_root())
         .output()
         .expect("run drift guard");
@@ -126,8 +128,8 @@ fn drift_guard_detects_closure_violations_without_bead() {
 
 #[test]
 fn verify_sh_includes_drift_guard_gate() {
-    let verify_script = fs::read_to_string(project_root().join("scripts/verify.sh"))
-        .expect("read verify.sh");
+    let verify_script =
+        fs::read_to_string(project_root().join("scripts/verify.sh")).expect("read verify.sh");
 
     assert!(
         verify_script.contains("verification-drift-guard.sh"),
