@@ -39,6 +39,8 @@ GEMINI_PANE_REPORT.md
 
 # Broken shell expansion artifacts
 ${TMPDIR:-/
+.../
+.../**
 
 # perf profiling data (already in global config but explicit here)
 perf.data
