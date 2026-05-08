@@ -489,13 +489,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     ),
 ];
 
-const MANUAL_FINDINGS: &[ManualFinding] = &[ManualFinding {
-    id: "NSF-OUTPUT-INTEGRITY-PROVENANCE-SAMPLE",
-    file: "src/output/mod.rs",
-    fragment: "provenanceSample",
-    follow_up: "eidetic_engine_cli-sos5.7",
-    reason: "Integrity diagnostics can fabricate an empty provenance sample when none was collected.",
-}];
+const MANUAL_FINDINGS: &[ManualFinding] = &[];
 
 const REQUIRED_SURFACE_FILES: &[&str] = &[
     "src/cass/process.rs",

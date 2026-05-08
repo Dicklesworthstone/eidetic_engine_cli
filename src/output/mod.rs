@@ -2680,20 +2680,11 @@ pub fn render_integrity_diagnostics_json(report: &IntegrityDiagnosticsReport) ->
         d.field_object("provenanceSample", |sample| {
             match report.provenance_sample.as_ref() {
                 Some(provenance) => build_provenance_sample(sample, provenance),
-                None => {
-                    let empty_records: &[crate::db::ProvenanceVerificationRecord] = &[];
-                    sample.field_str("workspaceId", &report.workspace_id);
-                    sample.field_u32("requestedSampleSize", report.sample_size);
-                    sample.field_u32("checkedCount", 0);
-                    sample.field_u32("verifiedCount", 0);
-                    sample.field_u32("missingCount", 0);
-                    sample.field_u32("mismatchCount", 0);
-                    sample.field_array_of_objects(
-                        "records",
-                        empty_records,
-                        build_provenance_record,
-                    );
-                }
+                None => build_provenance_sample_not_collected(
+                    sample,
+                    &report.workspace_id,
+                    report.sample_size,
+                ),
             }
         });
         d.field_object("canary", |canary| {
@@ -2715,6 +2706,7 @@ fn build_provenance_sample(
     obj: &mut JsonBuilder,
     report: &crate::db::ProvenanceSampleVerificationReport,
 ) {
+    obj.field_str("status", "collected");
     obj.field_str("workspaceId", &report.workspace_id);
     obj.field_u32("requestedSampleSize", report.requested_sample_size);
     obj.field_u32("checkedCount", report.checked_count);
@@ -2722,6 +2714,20 @@ fn build_provenance_sample(
     obj.field_u32("missingCount", report.missing_count);
     obj.field_u32("mismatchCount", report.mismatch_count);
     obj.field_array_of_objects("records", &report.records, build_provenance_record);
+}
+
+fn build_provenance_sample_not_collected(
+    obj: &mut JsonBuilder,
+    workspace_id: &str,
+    requested_sample_size: u32,
+) {
+    obj.field_str("status", "not_collected");
+    obj.field_str("workspaceId", workspace_id);
+    obj.field_u32("requestedSampleSize", requested_sample_size);
+    obj.field_str(
+        "message",
+        "No provenance sample was collected for this diagnostic run.",
+    );
 }
 
 fn build_provenance_record(
@@ -9780,15 +9786,18 @@ mod tests {
         render_doctor_toon, render_handoff_create_json, render_handoff_create_toon,
         render_handoff_inspect_json, render_handoff_inspect_toon, render_handoff_preview_json,
         render_handoff_preview_toon, render_handoff_resume_json, render_handoff_resume_toon,
-        render_health_json, render_health_toon, render_learn_experiment_proposal_human,
-        render_learn_experiment_proposal_json, render_learn_experiment_proposal_toon,
-        render_memory_history_json, render_memory_history_toon, render_schema_export_json,
-        render_shadow_run_human, render_shadow_run_json, render_shadow_run_toon,
-        render_status_json, render_status_json_filtered, render_status_toon, render_version_json,
-        status_response_json,
+        render_health_json, render_health_toon, render_integrity_diagnostics_json,
+        render_learn_experiment_proposal_human, render_learn_experiment_proposal_json,
+        render_learn_experiment_proposal_toon, render_memory_history_json,
+        render_memory_history_toon, render_schema_export_json, render_shadow_run_human,
+        render_shadow_run_json, render_shadow_run_toon, render_status_json,
+        render_status_json_filtered, render_status_toon, render_version_json, status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
-    use crate::core::doctor::DoctorReport;
+    use crate::core::doctor::{
+        DoctorReport, IntegrityCanaryReport, IntegrityDiagnosticCheck,
+        IntegrityDiagnosticDegradation, IntegrityDiagnosticsReport, IntegrityDiagnosticsStatus,
+    };
     use crate::core::handoff::{
         CapsuleProfile, CreateReport as HandoffCreateReport, InspectReport as HandoffInspectReport,
         PreviewReport as HandoffPreviewReport, ResumeReport as HandoffResumeReport,
@@ -10379,6 +10388,59 @@ mod tests {
         b.field_raw("config", "[1,2,3]");
         let json = b.finish();
         ensure_contains(&json, "\"config\":[1,2,3]", "raw json array")
+    }
+
+    #[test]
+    fn integrity_diagnostics_json_marks_uncollected_provenance_sample() -> TestResult {
+        let report = IntegrityDiagnosticsReport {
+            version: "0.1.0",
+            schema: crate::core::doctor::INTEGRITY_DIAGNOSTICS_SCHEMA_V1,
+            status: IntegrityDiagnosticsStatus::Degraded,
+            workspace_id: "default".to_owned(),
+            database_path: PathBuf::from("missing.db"),
+            sample_size: 16,
+            checks: vec![IntegrityDiagnosticCheck::warning(
+                "database_exists",
+                "Database not found.",
+                Some("ee init --workspace ."),
+            )],
+            provenance_sample: None,
+            canary: IntegrityCanaryReport::not_requested(),
+            degraded: vec![IntegrityDiagnosticDegradation {
+                code: "integrity_database_missing",
+                severity: "medium",
+                message: "Integrity checks require an initialized ee database.".to_owned(),
+                repair: Some("ee init --workspace ."),
+            }],
+        };
+
+        let json = render_integrity_diagnostics_json(&report);
+        let value: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        let sample = &value["data"]["provenanceSample"];
+
+        ensure_equal(
+            &sample["status"],
+            &serde_json::json!("not_collected"),
+            "uncollected provenance sample status",
+        )?;
+        ensure_equal(
+            &sample["requestedSampleSize"],
+            &serde_json::json!(16),
+            "uncollected provenance requested sample size",
+        )?;
+        ensure(
+            sample.get("checkedCount").is_none(),
+            "uncollected provenance must not fabricate checkedCount",
+        )?;
+        ensure(
+            sample.get("verifiedCount").is_none(),
+            "uncollected provenance must not fabricate verifiedCount",
+        )?;
+        ensure(
+            sample.get("records").is_none(),
+            "uncollected provenance must not fabricate an empty records array",
+        )
     }
 
     #[test]
