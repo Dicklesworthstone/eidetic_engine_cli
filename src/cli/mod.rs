@@ -118,6 +118,10 @@ use crate::core::preflight_guard::{
     BypassTokenInput, PreflightGuardOptions, PreflightGuardRegistry, PreflightGuardRule,
     RuleSource, run_preflight_guard,
 };
+use crate::core::profile::{
+    OperatingProfile, ProfileConfigError, ProfileConfigOptions, ProfileConfigReport,
+    apply_profile_config, plan_profile_config,
+};
 use crate::core::rehearse::{
     CommandSpec, RehearsalProfile, RehearseInspectOptions, RehearsePlanOptions,
     RehearsePromotePlanOptions, RehearseRunOptions, inspect_rehearsal, plan_rehearsal,
@@ -446,6 +450,9 @@ pub enum Command {
     /// Extract playbook rule candidates from repeated memory evidence.
     #[command(subcommand)]
     Playbook(PlaybookCommand),
+    /// Plan and apply host-adaptive operating profile configuration.
+    #[command(subcommand)]
+    Profile(ProfileCommand),
     /// Manage distilled procedures and skill capsules.
     #[command(subcommand)]
     Procedure(ProcedureCommand),
@@ -2806,6 +2813,51 @@ pub struct PlaybookExtractArgs {
     /// Actor recorded in audit metadata.
     #[arg(long, value_name = "ACTOR")]
     pub actor: Option<String>,
+}
+
+/// Subcommands for `ee profile`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum ProfileCommand {
+    /// Plan or apply `.ee/config.toml` operating profile changes.
+    #[command(subcommand)]
+    Config(ProfileConfigCommand),
+}
+
+/// Subcommands for `ee profile config`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum ProfileConfigCommand {
+    /// Show exact profile TOML changes without writing.
+    Plan(ProfileConfigPlanArgs),
+    /// Write profile TOML changes unless `--dry-run` is set.
+    Apply(ProfileConfigApplyArgs),
+}
+
+/// Arguments for `ee profile config plan`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct ProfileConfigPlanArgs {
+    /// Override the host-adaptive recommendation.
+    #[arg(long, value_name = "PROFILE", value_parser = parse_operating_profile)]
+    pub profile: Option<OperatingProfile>,
+
+    /// Config path to plan. Defaults to <workspace>/.ee/config.toml.
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+}
+
+/// Arguments for `ee profile config apply`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct ProfileConfigApplyArgs {
+    /// Override the host-adaptive recommendation.
+    #[arg(long, value_name = "PROFILE", value_parser = parse_operating_profile)]
+    pub profile: Option<OperatingProfile>,
+
+    /// Config path to update. Defaults to <workspace>/.ee/config.toml.
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+
+    /// Report the planned write without mutating the config file.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 }
 
 /// Subcommands for `ee procedure`.
@@ -5757,6 +5809,9 @@ where
         }
         Some(Command::Playbook(PlaybookCommand::Extract(ref args))) => {
             handle_playbook_extract(&cli, args, stdout, stderr)
+        }
+        Some(Command::Profile(ref profile_cmd)) => {
+            handle_profile_command(&cli, profile_cmd, stdout, stderr)
         }
         Some(Command::Procedure(ProcedureCommand::Propose(ref args))) => {
             handle_procedure_propose(&cli, args, stdout, stderr)
@@ -9568,6 +9623,192 @@ where
         | output::Renderer::Hook => {
             write_stdout(stdout, &(output::render_plan_recommend_json(report) + "\n"))
         }
+    }
+}
+
+fn handle_profile_command<W, E>(
+    cli: &Cli,
+    command: &ProfileCommand,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match command {
+        ProfileCommand::Config(ProfileConfigCommand::Plan(args)) => {
+            let workspace_root = resolve_cli_workspace_path(
+                cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")),
+            );
+            let options = ProfileConfigOptions {
+                workspace_root,
+                config_path: args.config.clone(),
+                requested_profile: args.profile,
+                dry_run: true,
+            };
+            match plan_profile_config(&options) {
+                Ok(report) => write_profile_config_report(cli, &report, stdout),
+                Err(error) => {
+                    let domain_error = profile_config_error_to_domain(error);
+                    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+                }
+            }
+        }
+        ProfileCommand::Config(ProfileConfigCommand::Apply(args)) => {
+            let workspace_root = resolve_cli_workspace_path(
+                cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")),
+            );
+            let options = ProfileConfigOptions {
+                workspace_root,
+                config_path: args.config.clone(),
+                requested_profile: args.profile,
+                dry_run: args.dry_run,
+            };
+            match apply_profile_config(&options) {
+                Ok(report) => write_profile_config_report(cli, &report, stdout),
+                Err(error) => {
+                    let domain_error = profile_config_error_to_domain(error);
+                    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+                }
+            }
+        }
+    }
+}
+
+fn write_profile_config_report<W>(
+    cli: &Cli,
+    report: &ProfileConfigReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let exit_code = if report.has_conflicts() {
+        ProcessExitCode::Configuration
+    } else {
+        ProcessExitCode::Success
+    };
+    let output_status = match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &profile_config_human_output(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(profile_config_toon_output(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let rendered = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": !report.has_conflicts(),
+                "data": report,
+            });
+            write_stdout(stdout, &(rendered.to_string() + "\n"))
+        }
+    };
+    if output_status == ProcessExitCode::Success {
+        exit_code
+    } else {
+        output_status
+    }
+}
+
+fn profile_config_human_output(report: &ProfileConfigReport) -> String {
+    let result = if report.has_conflicts() {
+        "blocked"
+    } else if report.applied {
+        "written"
+    } else if report.would_write {
+        "planned"
+    } else {
+        "unchanged"
+    };
+    let mut out = String::new();
+    out.push_str(&format!("Profile config {}\n", report.command));
+    out.push_str(&format!("  Config: {}\n", report.config_path));
+    out.push_str(&format!(
+        "  Profile: recommended={} effective={} confidence={}\n",
+        report.profile.recommended, report.profile.effective, report.profile.confidence
+    ));
+    out.push_str(&format!(
+        "  Result: {result} (dry-run: {})\n",
+        report.dry_run
+    ));
+    if !report.conflicts.is_empty() {
+        out.push_str("\nConflicts:\n");
+        for conflict in &report.conflicts {
+            out.push_str(&format!(
+                "  {}: found {}, expected {}. {}\n",
+                conflict.key, conflict.found, conflict.expected, conflict.repair
+            ));
+        }
+    }
+    if !report.edits.is_empty() {
+        out.push_str("\nEdits:\n");
+        for edit in &report.edits {
+            let before = edit.before.as_deref().unwrap_or("<unset>");
+            out.push_str(&format!(
+                "  {}: {} -> {} ({})\n",
+                edit.key, before, edit.after, edit.status
+            ));
+        }
+    }
+    if let Some(repair) = report.repair {
+        out.push_str(&format!("\nNext:\n  {repair}\n"));
+    }
+    out.push_str("\nPlanned TOML:\n");
+    out.push_str(&report.planned_toml);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+fn profile_config_toon_output(report: &ProfileConfigReport) -> String {
+    let result = if report.has_conflicts() {
+        "blocked"
+    } else if report.applied {
+        "written"
+    } else if report.would_write {
+        "planned"
+    } else {
+        "unchanged"
+    };
+    format!(
+        "PROFILE_CONFIG|{}|{}|{}|edits={}|conflicts={}",
+        report.command,
+        report.profile.effective,
+        result,
+        report.edits.len(),
+        report.conflicts.len()
+    )
+}
+
+fn profile_config_error_to_domain(error: ProfileConfigError) -> DomainError {
+    match error {
+        ProfileConfigError::Read { path, source } => DomainError::Configuration {
+            message: format!(
+                "Could not read profile config `{}`: {source}",
+                path.display()
+            ),
+            repair: Some("Check the config path and file permissions.".to_string()),
+        },
+        ProfileConfigError::Parse { path, message } => DomainError::Configuration {
+            message: format!(
+                "Could not parse profile config `{}`: {message}",
+                path.display()
+            ),
+            repair: Some("Fix the TOML syntax, then rerun `ee profile config plan`.".to_string()),
+        },
+        ProfileConfigError::Write { path, source } => DomainError::Storage {
+            message: format!(
+                "Could not write profile config `{}`: {source}",
+                path.display()
+            ),
+            repair: Some("Check the parent directory and file permissions.".to_string()),
+        },
     }
 }
 
@@ -13578,6 +13819,12 @@ fn parse_context_profile(value: &str) -> Result<ContextPackProfile, String> {
             "Invalid context profile '{value}'. Expected compact, balanced, thorough, or submodular."
         )),
     }
+}
+
+fn parse_operating_profile(value: &str) -> Result<OperatingProfile, String> {
+    value
+        .parse::<OperatingProfile>()
+        .map_err(|error| error.to_string())
 }
 
 fn parse_speed_mode_arg(value: &str) -> Result<crate::search::SpeedMode, String> {
@@ -20275,6 +20522,7 @@ const COMMAND_NAMES: &[&str] = &[
     "plan",
     "playbook",
     "preflight",
+    "profile",
     "procedure",
     "recorder",
     "remember",
@@ -20362,6 +20610,8 @@ const PLAN_SUBCOMMANDS: &[&str] = &["goal", "recipe", "explain"];
 const PLAN_RECIPE_SUBCOMMANDS: &[&str] = &["list", "show"];
 const PLAYBOOK_SUBCOMMANDS: &[&str] = &["extract"];
 const PREFLIGHT_SUBCOMMANDS: &[&str] = &["run", "show", "close"];
+const PROFILE_SUBCOMMANDS: &[&str] = &["config"];
+const PROFILE_CONFIG_SUBCOMMANDS: &[&str] = &["plan", "apply"];
 const PROCEDURE_SUBCOMMANDS: &[&str] = &[
     "propose", "show", "list", "export", "promote", "verify", "drift",
 ];
@@ -20621,6 +20871,14 @@ impl NormalizedInvocation {
                 Command::Playbook(playbook) => match playbook {
                     PlaybookCommand::Extract(_) => "playbook extract".to_string(),
                 },
+                Command::Profile(profile) => match profile {
+                    ProfileCommand::Config(ProfileConfigCommand::Plan(_)) => {
+                        "profile config plan".to_string()
+                    }
+                    ProfileCommand::Config(ProfileConfigCommand::Apply(_)) => {
+                        "profile config apply".to_string()
+                    }
+                },
                 Command::Procedure(proc) => match proc {
                     ProcedureCommand::Propose(_) => "procedure propose".to_string(),
                     ProcedureCommand::Show(_) => "procedure show".to_string(),
@@ -20810,6 +21068,8 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "plan recipe" => Some(PLAN_RECIPE_SUBCOMMANDS),
         "playbook" => Some(PLAYBOOK_SUBCOMMANDS),
         "preflight" => Some(PREFLIGHT_SUBCOMMANDS),
+        "profile" => Some(PROFILE_SUBCOMMANDS),
+        "profile config" => Some(PROFILE_CONFIG_SUBCOMMANDS),
         "procedure" => Some(PROCEDURE_SUBCOMMANDS),
         "recorder" => Some(RECORDER_SUBCOMMANDS),
         "rehearse" => Some(REHEARSE_SUBCOMMANDS),

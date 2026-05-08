@@ -40,6 +40,7 @@ pub mod plan;
 pub mod preflight;
 pub mod preflight_guard;
 pub mod procedure;
+pub mod profile;
 pub mod quarantine;
 pub mod recorder;
 pub mod rehearse;
@@ -186,6 +187,11 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
         SupportedSchema::new("version_provenance", VERSION_PROVENANCE_SCHEMA_V1),
         SupportedSchema::new("install_check", INSTALL_CHECK_SCHEMA_V1),
         SupportedSchema::new("install_plan", INSTALL_PLAN_SCHEMA_V1),
+        SupportedSchema::new("host_profile_probe", profile::HOST_PROFILE_PROBE_SCHEMA_V1),
+        SupportedSchema::new(
+            "profile_config_plan",
+            profile::PROFILE_CONFIG_PLAN_SCHEMA_V1,
+        ),
         SupportedSchema::new("update_plan", UPDATE_PLAN_SCHEMA_V1),
     ]
 }
