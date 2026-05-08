@@ -19,6 +19,10 @@
 set -eu
 
 BEADS_FILE=".beads/issues.jsonl"
+BEADS_DIR=".beads"
+BEADS_WRITE_LOCK="$BEADS_DIR/.write.lock"
+BEADS_SYNC_LOCK="$BEADS_DIR/.sync.lock"
+BEADS_LOCK_WAIT_SECONDS="${EE_BEADS_LOCK_WAIT_SECONDS:-30}"
 CLI_MOD="src/cli/mod.rs"
 REPORT_FILE=".closure-lint-report.json"
 GOLDEN_DIR="tests/golden"
@@ -35,6 +39,59 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     exit 0
 fi
 
+write_skip_report() {
+    local reason="$1"
+    jq -cn --arg reason "$reason" \
+        '{violations:[],count:0,status:"skipped",skipped:true,reason:$reason}' > "$REPORT_FILE"
+}
+
+beads_lock_wait_seconds() {
+    case "$BEADS_LOCK_WAIT_SECONDS" in
+        ''|*[!0-9]*)
+            echo "error: EE_BEADS_LOCK_WAIT_SECONDS must be a non-negative integer" >&2
+            exit 1
+            ;;
+        *)
+            printf "%s" "$BEADS_LOCK_WAIT_SECONDS"
+            ;;
+    esac
+}
+
+skip_for_beads_lock() {
+    local reason="$1"
+    write_skip_report "$reason"
+    if [ "$JSON_OUTPUT" != true ]; then
+        echo "Skipping closure-lint: $reason" >&2
+    fi
+    exit 0
+}
+
+acquire_beads_read_locks() {
+    [ -d "$BEADS_DIR" ] || return 0
+
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "warning: flock not found; reading Beads files without lock coordination" >&2
+        return 0
+    fi
+
+    local wait_seconds
+    wait_seconds=$(beads_lock_wait_seconds)
+
+    if ! exec 8<>"$BEADS_WRITE_LOCK"; then
+        skip_for_beads_lock "could not open $BEADS_WRITE_LOCK"
+    fi
+    if ! flock -s -w "$wait_seconds" 8; then
+        skip_for_beads_lock "$BEADS_WRITE_LOCK is held by another process"
+    fi
+
+    if ! exec 9<>"$BEADS_SYNC_LOCK"; then
+        skip_for_beads_lock "could not open $BEADS_SYNC_LOCK"
+    fi
+    if ! flock -s -w "$wait_seconds" 9; then
+        skip_for_beads_lock "$BEADS_SYNC_LOCK is held by another process"
+    fi
+}
+
 JSON_OUTPUT=false
 AUDIT_MODE=false
 COMMITS="${CLOSURE_LINT_COMMITS:-1}"
@@ -45,6 +102,8 @@ for arg in "$@"; do
         --commits=*) COMMITS="${arg#--commits=}" ;;
     esac
 done
+
+acquire_beads_read_locks
 
 if [ ! -f "$BEADS_FILE" ]; then
     echo "error: $BEADS_FILE not found"

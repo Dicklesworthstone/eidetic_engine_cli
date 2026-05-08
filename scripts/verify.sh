@@ -28,6 +28,8 @@ set -euo pipefail
 INCLUDE_BENCH=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+BEADS_LOCK_WAIT_SECONDS="${EE_BEADS_LOCK_WAIT_SECONDS:-30}"
+BEADS_LOCK_SKIP_CODE=75
 
 for arg in "$@"; do
     case "$arg" in
@@ -60,6 +62,72 @@ if [ -z "${EE_BINARY:-}" ]; then
     fi
 fi
 
+beads_lock_wait_seconds() {
+    case "$BEADS_LOCK_WAIT_SECONDS" in
+        ''|*[!0-9]*)
+            echo "error: EE_BEADS_LOCK_WAIT_SECONDS must be a non-negative integer" >&2
+            exit 1
+            ;;
+        *)
+            printf "%s" "$BEADS_LOCK_WAIT_SECONDS"
+            ;;
+    esac
+}
+
+with_beads_read_locks() {
+    local beads_dir="${REPO_ROOT}/.beads"
+    [ -d "$beads_dir" ] || {
+        "$@"
+        return $?
+    }
+
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "warning: flock not found; running Beads-reading gate without lock coordination" >&2
+        "$@"
+        return $?
+    fi
+
+    local wait_seconds
+    wait_seconds=$(beads_lock_wait_seconds)
+
+    local write_lock="${beads_dir}/.write.lock"
+    local sync_lock="${beads_dir}/.sync.lock"
+
+    if ! exec 8<>"$write_lock"; then
+        echo "[!] SKIP: could not open Beads write lock $write_lock" >&2
+        return "$BEADS_LOCK_SKIP_CODE"
+    fi
+    if ! flock -s -w "$wait_seconds" 8; then
+        echo "[!] SKIP: Beads write lock is held: $write_lock" >&2
+        return "$BEADS_LOCK_SKIP_CODE"
+    fi
+
+    if ! exec 9<>"$sync_lock"; then
+        echo "[!] SKIP: could not open Beads sync lock $sync_lock" >&2
+        flock -u 8 2>/dev/null || true
+        exec 8>&- || true
+        return "$BEADS_LOCK_SKIP_CODE"
+    fi
+    if ! flock -s -w "$wait_seconds" 9; then
+        echo "[!] SKIP: Beads sync lock is held: $sync_lock" >&2
+        flock -u 9 2>/dev/null || true
+        exec 9>&- || true
+        flock -u 8 2>/dev/null || true
+        exec 8>&- || true
+        return "$BEADS_LOCK_SKIP_CODE"
+    fi
+
+    set +e
+    "$@"
+    local status=$?
+    set -e
+    flock -u 9 2>/dev/null || true
+    exec 9>&- || true
+    flock -u 8 2>/dev/null || true
+    exec 8>&- || true
+    return "$status"
+}
+
 run_stage() {
     local name="$1"
     local cmd="$2"
@@ -86,6 +154,13 @@ run_stage() {
         local exit_code=$?
         local end_time=$(date +%s)
         local duration=$((end_time - start_time))
+        if [ "$exit_code" -eq "$BEADS_LOCK_SKIP_CODE" ]; then
+            echo "[!] SKIP: $name (${duration}s)"
+            STAGE_RESULTS="${STAGE_RESULTS}SKIP ${name} (${duration}s)\n"
+            rm -f "$output_file"
+            echo ""
+            return 0
+        fi
         echo "[-] FAIL: $name (Exit code: $exit_code, ${duration}s)"
         rm -f "$output_file"
         exit $exit_code
@@ -96,13 +171,13 @@ run_stage() {
 run_stage "Forbidden Dependencies" "./scripts/check-forbidden-deps.sh"
 
 # Gate 2: Closure Discipline
-run_stage "Closure Linter" "./scripts/closure-lint.sh --audit --json"
+run_stage "Closure Linter" "with_beads_read_locks ./scripts/closure-lint.sh --audit --json"
 
 # Gate 2.5: Drift Guard (ensures red gates have tracking beads)
-run_stage "Verification Drift Guard" "./scripts/verification-drift-guard.sh --json"
+run_stage "Verification Drift Guard" "with_beads_read_locks ./scripts/verification-drift-guard.sh --json"
 
 # Gate 3: Strategic Vision Coverage
-run_stage "Vision Coverage" "sh ./scripts/vision-coverage.sh --json"
+run_stage "Vision Coverage" "with_beads_read_locks sh ./scripts/vision-coverage.sh --json"
 
 # Gate 4: Core Cargo Tests (Contracts, Logic, Golden). Benchmarks are
 # deliberately excluded here and run only through the explicit benchmark gate.

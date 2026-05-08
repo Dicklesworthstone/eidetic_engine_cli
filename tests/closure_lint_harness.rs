@@ -6,6 +6,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -72,10 +73,21 @@ fn write_workspace(
 }
 
 fn run_linter(root: &Path) -> Result<(Output, Value), String> {
-    let output = Command::new("sh")
+    run_linter_with_env(root, &[])
+}
+
+fn run_linter_with_env(root: &Path, envs: &[(&str, &str)]) -> Result<(Output, Value), String> {
+    let mut command = Command::new("sh");
+    command
         .arg(script_path())
         .args(["--audit", "--json"])
-        .current_dir(root)
+        .current_dir(root);
+
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+
+    let output = command
         .output()
         .map_err(|error| format!("run closure-lint.sh: {error}"))?;
 
@@ -85,6 +97,13 @@ fn run_linter(root: &Path) -> Result<(Output, Value), String> {
     let report_json: Value = serde_json::from_slice(&report)
         .map_err(|error| format!("parse {}: {error}", report_path.display()))?;
     Ok((output, report_json))
+}
+
+fn flock_available() -> bool {
+    Command::new("flock")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 fn report_status(report: &Value) -> Result<&str, String> {
@@ -219,5 +238,75 @@ fn closure_lint_accepts_clean_implementation_and_honesty_sibling() -> TestResult
         violation_keys(&report)?,
         Vec::<(String, String, String)>::new(),
         "no violations",
+    )
+}
+
+#[test]
+fn closure_lint_skips_when_beads_write_lock_is_held() -> TestResult {
+    if !flock_available() {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    write_workspace(
+        temp.path(),
+        &[
+            r#"{"id":"closed-clean","title":"[implements-surface:clean-surface] real implementation","status":"closed","close_reason":"implemented with durable evidence","labels":["implements-surface:clean-surface"]}"#,
+        ],
+        "",
+        &["clean-surface"],
+    )?;
+
+    let lock_path = temp.path().join(".beads").join(".write.lock");
+    let ready_path = temp.path().join("lock-ready");
+    let mut holder = Command::new("flock")
+        .arg("-x")
+        .arg(&lock_path)
+        .arg("sh")
+        .arg("-c")
+        .arg("printf ready > \"$1\"; sleep 2")
+        .arg("sh")
+        .arg(&ready_path)
+        .spawn()
+        .map_err(|error| format!("start lock holder: {error}"))?;
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !ready_path.exists() && Instant::now() < deadline {
+        if let Some(status) = holder
+            .try_wait()
+            .map_err(|error| format!("poll lock holder: {error}"))?
+        {
+            return Err(format!("lock holder exited before ready: {status}"));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    ensure(ready_path.exists(), "lock holder did not report ready")?;
+
+    let linter_result = run_linter_with_env(temp.path(), &[("EE_BEADS_LOCK_WAIT_SECONDS", "0")]);
+    let holder_status = holder
+        .wait()
+        .map_err(|error| format!("wait for lock holder: {error}"))?;
+    ensure(
+        holder_status.success(),
+        format!("lock holder failed: {holder_status}"),
+    )?;
+
+    let (output, report) = linter_result?;
+    ensure(
+        output.status.success(),
+        format!(
+            "linter should skip successfully while write lock is held\n{}",
+            output_excerpt(&output)
+        ),
+    )?;
+    ensure_eq(report_status(&report)?, "skipped", "report status")?;
+    ensure_eq(report_count(&report)?, 0, "report count")?;
+    let reason = report
+        .get("reason")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "report.reason must be a string".to_owned())?;
+    ensure(
+        reason.contains(".beads/.write.lock"),
+        format!("skip reason should name the held write lock, got {reason:?}"),
     )
 }
