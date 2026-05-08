@@ -16,7 +16,7 @@ set -euo pipefail
 #   1. Forbidden Dependencies  - cargo tree audit for banned crates
 #   2. Closure Linter          - prevent abstention-as-implementation closure
 #   3. Vision Coverage         - report documented implemented/stubbed/missing surfaces
-#   4. Unit/Contract/Golden    - cargo test --workspace --all-targets
+#   4. Unit/Contract/Golden    - cargo test --workspace --lib --bins --tests --examples
 #   5. Basic E2E               - scripts/e2e_test.sh
 #   6. Advanced E2E            - scripts/e2e_advanced.sh
 #   7. Boundary Migration      - scripts/e2e_boundary_migration.sh
@@ -94,8 +94,9 @@ run_stage "Verification Drift Guard" "./scripts/verification-drift-guard.sh --js
 # Gate 3: Strategic Vision Coverage
 run_stage "Vision Coverage" "sh ./scripts/vision-coverage.sh --json"
 
-# Gate 4: Core Cargo Tests (Contracts, Logic, Golden)
-run_stage "Unit, Contract, and Golden Tests" "cargo test --workspace --all-targets"
+# Gate 4: Core Cargo Tests (Contracts, Logic, Golden). Benchmarks are
+# deliberately excluded here and run only through the explicit benchmark gate.
+run_stage "Unit, Contract, and Golden Tests" "cargo test --workspace --lib --bins --tests --examples"
 
 # Gate 5: Basic End-to-End
 run_stage "Basic E2E Scripts" "./scripts/e2e_test.sh"
