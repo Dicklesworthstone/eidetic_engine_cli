@@ -825,6 +825,156 @@ fn status_json_stdout_is_stable_machine_data() -> TestResult {
 
 #[cfg(unix)]
 #[test]
+fn profile_config_plan_and_apply_json_are_stable_machine_data() -> TestResult {
+    let workspace = unique_artifact_dir("profile-config-plan-apply")?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let config_path = workspace.join(".ee").join("config.toml");
+
+    let plan = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "profile",
+        "config",
+        "plan",
+        "--profile",
+        "portable",
+    ])?;
+    let plan_stdout = String::from_utf8_lossy(&plan.stdout);
+    let plan_stderr = String::from_utf8_lossy(&plan.stderr);
+    ensure(
+        plan.status.success(),
+        format!("profile config plan should succeed; stdout: {plan_stdout}; stderr: {plan_stderr}"),
+    )?;
+    ensure(plan.stderr.is_empty(), "profile config plan stderr clean")?;
+    let plan_json: serde_json::Value = serde_json::from_slice(&plan.stdout)
+        .map_err(|error| format!("profile config plan stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &plan_json["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "profile config plan outer schema",
+    )?;
+    ensure_equal(
+        &plan_json["data"]["schema"],
+        &serde_json::json!("ee.profile.config.plan.v1"),
+        "profile config plan data schema",
+    )?;
+    ensure_equal(
+        &plan_json["data"]["profile"]["effective"],
+        &serde_json::json!("portable"),
+        "profile config plan effective profile",
+    )?;
+    ensure_equal(
+        &plan_json["data"]["dryRun"],
+        &serde_json::json!(true),
+        "profile config plan dry-run",
+    )?;
+    ensure_equal(
+        &plan_json["data"]["applied"],
+        &serde_json::json!(false),
+        "profile config plan does not apply",
+    )?;
+    ensure_equal(
+        &plan_json["data"]["wouldWrite"],
+        &serde_json::json!(true),
+        "profile config plan reports pending write",
+    )?;
+    ensure(
+        !config_path.exists(),
+        "profile config plan must not write config",
+    )?;
+    ensure_contains(
+        plan_json["data"]["plannedToml"]
+            .as_str()
+            .unwrap_or_default(),
+        "selected = \"portable\"",
+        "profile config plan planned TOML",
+    )?;
+
+    let apply = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "profile",
+        "config",
+        "apply",
+        "--profile",
+        "portable",
+    ])?;
+    let apply_stdout = String::from_utf8_lossy(&apply.stdout);
+    let apply_stderr = String::from_utf8_lossy(&apply.stderr);
+    ensure(
+        apply.status.success(),
+        format!(
+            "profile config apply should succeed; stdout: {apply_stdout}; stderr: {apply_stderr}"
+        ),
+    )?;
+    ensure(apply.stderr.is_empty(), "profile config apply stderr clean")?;
+    let apply_json: serde_json::Value = serde_json::from_slice(&apply.stdout)
+        .map_err(|error| format!("profile config apply stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &apply_json["data"]["applied"],
+        &serde_json::json!(true),
+        "profile config apply writes",
+    )?;
+    ensure_equal(
+        &apply_json["data"]["repair"],
+        &serde_json::Value::Null,
+        "profile config apply clears repair hint",
+    )?;
+    let saved = fs::read_to_string(&config_path).map_err(|error| error.to_string())?;
+    ensure_equal(
+        &saved,
+        &apply_json["data"]["plannedToml"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        "profile config apply writes planned TOML",
+    )?;
+
+    let unchanged = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "profile",
+        "config",
+        "plan",
+        "--profile",
+        "portable",
+    ])?;
+    let unchanged_stdout = String::from_utf8_lossy(&unchanged.stdout);
+    let unchanged_stderr = String::from_utf8_lossy(&unchanged.stderr);
+    ensure(
+        unchanged.status.success(),
+        format!(
+            "profile config plan after apply should succeed; stdout: {unchanged_stdout}; stderr: {unchanged_stderr}"
+        ),
+    )?;
+    ensure(
+        unchanged.stderr.is_empty(),
+        "profile config plan after apply stderr clean",
+    )?;
+    let unchanged_json: serde_json::Value = serde_json::from_slice(&unchanged.stdout)
+        .map_err(|error| format!("profile config unchanged stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &unchanged_json["data"]["wouldWrite"],
+        &serde_json::json!(false),
+        "profile config plan after apply reports no pending write",
+    )?;
+    let edits = unchanged_json["data"]["edits"]
+        .as_array()
+        .ok_or_else(|| "profile config plan after apply edits must be an array".to_string())?;
+    ensure(
+        edits
+            .iter()
+            .all(|edit| edit["status"] == serde_json::json!("unchanged")),
+        "profile config plan after apply marks edits unchanged",
+    )
+}
+
+#[cfg(unix)]
+#[test]
 fn model_status_and_list_json_report_registry_contracts() -> TestResult {
     let workspace = unique_artifact_dir("model-status-list")?;
     fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
