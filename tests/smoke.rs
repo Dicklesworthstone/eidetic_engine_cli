@@ -6548,6 +6548,57 @@ fn pack_query_file_invalid_timestamp_uses_stable_machine_error() -> TestResult {
 
 #[cfg(unix)]
 #[test]
+fn pack_query_file_unsupported_recognized_fields_use_stable_machine_error() -> TestResult {
+    let cases = [
+        (
+            "tags",
+            r#"{
+              "version": "ee.query.v1",
+              "query": {"text": "prepare release"},
+              "tags": {"require": ["release"]}
+            }"#,
+        ),
+        (
+            "time",
+            r#"{
+              "version": "ee.query.v1",
+              "query": {"text": "prepare release"},
+              "time": {"after": "2026-04-01T00:00:00Z"}
+            }"#,
+        ),
+        (
+            "graph",
+            r#"{
+              "version": "ee.query.v1",
+              "query": {"text": "prepare release"},
+              "graph": {
+                "seedMemories": ["mem_00000000000000000000000001"],
+                "maxHops": 1
+              }
+            }"#,
+        ),
+    ];
+
+    for (field, query_document) in cases {
+        let workspace = unique_artifact_dir(&format!("pack-unsupported-{field}"))?;
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let query_file = workspace.join(format!("unsupported-{field}.eeq.json"));
+        fs::write(&query_file, query_document).map_err(|error| error.to_string())?;
+        let query_file_arg = query_file.to_string_lossy().into_owned();
+
+        ensure_pack_query_file_machine_error(
+            &format!("pack-unsupported-{field}-run"),
+            query_file_arg.as_str(),
+            "ERR_UNSUPPORTED_FEATURE",
+            &format!("unsupported {field} query-file field"),
+        )?;
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn pack_query_file_rejects_unsafe_path_before_io() -> TestResult {
     ensure_pack_query_file_machine_error(
         "pack-unsafe-query-path",
