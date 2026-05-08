@@ -9607,6 +9607,28 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn serialized_report_json_reports_serializer_failures() -> TestResult {
+        let json = super::render_serialized_report_json(&FailingSerialize, "DirectFailingReport");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+
+        assert_eq!(parsed["schema"].as_str(), Some(ERROR_SCHEMA_V1));
+        assert_eq!(
+            parsed["error"]["code"].as_str(),
+            Some("serialization_failed")
+        );
+        assert_eq!(
+            parsed["error"]["details"]["report"].as_str(),
+            Some("DirectFailingReport")
+        );
+        assert!(
+            !json.is_empty(),
+            "serialization failure must not be hidden as an empty string"
+        );
+        Ok(())
+    }
+
     fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
         if condition {
             Ok(())

@@ -161,8 +161,35 @@ pub struct HookInstallReport {
 impl HookInstallReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        serialize_hook_report(self, "HookInstallReport")
     }
+}
+
+fn serialize_hook_report<T>(report: &T, report_name: &str) -> String
+where
+    T: Serialize,
+{
+    match serde_json::to_string(report) {
+        Ok(raw) => raw,
+        Err(error) => hook_serialization_failure_json(report_name, &error),
+    }
+}
+
+fn hook_serialization_failure_json(report_name: &str, error: &serde_json::Error) -> String {
+    serde_json::json!({
+        "schema": crate::models::ERROR_SCHEMA_V1,
+        "error": {
+            "code": "serialization_failed",
+            "message": format!("Failed to serialize {report_name} as JSON."),
+            "severity": "high",
+            "repair": "Fix the hook report serializer; refusing to emit empty JSON.",
+            "details": {
+                "report": report_name,
+                "serializerError": error.to_string()
+            }
+        }
+    })
+    .to_string()
 }
 
 /// The marker that identifies ee-managed hooks.
@@ -642,7 +669,7 @@ pub struct HookStatusReport {
 impl HookStatusReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        serialize_hook_report(self, "HookStatusReport")
     }
 }
 
@@ -721,10 +748,48 @@ mod tests {
 
     type TestResult = Result<(), String>;
 
+    struct FailingSerialize;
+
+    impl Serialize for FailingSerialize {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom(
+                "intentional hook serialization failure",
+            ))
+        }
+    }
+
     fn install_hooks_for_test(
         options: &HookInstallOptions,
     ) -> Result<HookInstallReport, DomainError> {
         install_hooks_with_binary_path(options, std::path::Path::new("/usr/local/bin/ee"))
+    }
+
+    #[test]
+    fn hook_report_serializer_failures_return_error_json() -> TestResult {
+        let json = serialize_hook_report(&FailingSerialize, "FailingHookReport");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            parsed["schema"].as_str(),
+            Some(crate::models::ERROR_SCHEMA_V1)
+        );
+        assert_eq!(
+            parsed["error"]["code"].as_str(),
+            Some("serialization_failed")
+        );
+        assert_eq!(
+            parsed["error"]["details"]["report"].as_str(),
+            Some("FailingHookReport")
+        );
+        assert!(
+            !json.is_empty(),
+            "hook report serialization failure must not be hidden as an empty string"
+        );
+        Ok(())
     }
 
     #[test]
