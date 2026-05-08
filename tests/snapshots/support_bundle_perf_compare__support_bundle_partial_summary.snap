@@ -1,0 +1,165 @@
+---
+source: tests/support_bundle_perf_compare.rs
+expression: snapshot_value(&summary)?
+---
+{
+  "schema": "ee.perf.artifact_summary.v1",
+  "artifactId": "support-bundle:partial-portable",
+  "artifactKind": "support_bundle_manifest",
+  "sourceSchema": "ee.support_bundle.manifest.v1",
+  "sourcePath": "[BUNDLE_PATH]",
+  "contentHash": "[HASH]",
+  "observedHash": "[HASH]",
+  "profile": {
+    "profileName": "portable",
+    "confidence": "high"
+  },
+  "commandFamily": "support_bundle",
+  "metrics": {
+    "bundle.files_found_count": {
+      "kind": "measured",
+      "value": 1.0,
+      "unit": "count"
+    },
+    "bundle.hash_mismatch_count": {
+      "kind": "measured",
+      "value": 0.0,
+      "unit": "count"
+    },
+    "bundle.manifest_file_count": {
+      "kind": "measured",
+      "value": 1.0,
+      "unit": "count"
+    },
+    "bundle.redaction_reason_count": {
+      "kind": "measured",
+      "value": 1.0,
+      "unit": "count"
+    },
+    "bundle.total_size_bytes": {
+      "kind": "measured",
+      "value": 272.0,
+      "unit": "bytes"
+    },
+    "section.benchmark_summary.present": {
+      "kind": "measured",
+      "value": 0.0,
+      "unit": "bool"
+    },
+    "section.cache_reports.present": {
+      "kind": "measured",
+      "value": 0.0,
+      "unit": "bool"
+    },
+    "section.fixture_manifest.present": {
+      "kind": "measured",
+      "value": 0.0,
+      "unit": "bool"
+    },
+    "section.performance_explain_samples.present": {
+      "kind": "measured",
+      "value": 0.0,
+      "unit": "bool"
+    },
+    "section.profile_evidence.present": {
+      "kind": "measured",
+      "value": 1.0,
+      "unit": "bool"
+    },
+    "section.swarm_contention_reports.present": {
+      "kind": "measured",
+      "value": 0.0,
+      "unit": "bool"
+    },
+    "section.write_queue_report.present": {
+      "kind": "measured",
+      "value": 0.0,
+      "unit": "bool"
+    }
+  },
+  "degraded": [
+    {
+      "code": "missing_metric",
+      "severity": "medium",
+      "artifactId": "support-bundle:partial-portable",
+      "fieldPath": "files.scale_benchmark_summary.json",
+      "message": "Support bundle section `benchmark_summary` is missing (`scale_benchmark_summary.json`).",
+      "repair": "Regenerate the support bundle and ensure `scale_benchmark_summary.json` is present."
+    },
+    {
+      "code": "missing_metric",
+      "severity": "medium",
+      "artifactId": "support-bundle:partial-portable",
+      "fieldPath": "files.scale_benchmark_summary.json",
+      "message": "Support bundle section `swarm_contention_reports` is missing (`scale_benchmark_summary.json`).",
+      "repair": "Regenerate the support bundle and ensure `scale_benchmark_summary.json` is present."
+    },
+    {
+      "code": "missing_metric",
+      "severity": "medium",
+      "artifactId": "support-bundle:partial-portable",
+      "fieldPath": "files.scale_cache_reports.json",
+      "message": "Support bundle section `cache_reports` is missing (`scale_cache_reports.json`).",
+      "repair": "Regenerate the support bundle and ensure `scale_cache_reports.json` is present."
+    },
+    {
+      "code": "missing_metric",
+      "severity": "medium",
+      "artifactId": "support-bundle:partial-portable",
+      "fieldPath": "files.scale_fixture_manifest.json",
+      "message": "Support bundle section `fixture_manifest` is missing (`scale_fixture_manifest.json`).",
+      "repair": "Regenerate the support bundle and ensure `scale_fixture_manifest.json` is present."
+    },
+    {
+      "code": "missing_metric",
+      "severity": "medium",
+      "artifactId": "support-bundle:partial-portable",
+      "fieldPath": "files.scale_performance_explain_samples.json",
+      "message": "Support bundle section `performance_explain_samples` is missing (`scale_performance_explain_samples.json`).",
+      "repair": "Regenerate the support bundle and ensure `scale_performance_explain_samples.json` is present."
+    },
+    {
+      "code": "missing_metric",
+      "severity": "medium",
+      "artifactId": "support-bundle:partial-portable",
+      "fieldPath": "files.scale_write_queue_report.json",
+      "message": "Support bundle section `write_queue_report` is missing (`scale_write_queue_report.json`).",
+      "repair": "Regenerate the support bundle and ensure `scale_write_queue_report.json` is present."
+    }
+  ],
+  "redaction": "redacted",
+  "provenance": [
+    {
+      "field": "profile.profileName",
+      "sourcePath": "[BUNDLE_PATH]"
+    },
+    {
+      "field": "section.benchmark_summary.present",
+      "sourcePath": "[BUNDLE_PATH]"
+    },
+    {
+      "field": "section.cache_reports.present",
+      "sourcePath": "[BUNDLE_PATH]"
+    },
+    {
+      "field": "section.fixture_manifest.present",
+      "sourcePath": "[BUNDLE_PATH]"
+    },
+    {
+      "field": "section.performance_explain_samples.present",
+      "sourcePath": "[BUNDLE_PATH]"
+    },
+    {
+      "field": "section.profile_evidence.present",
+      "sourcePath": "[BUNDLE_PATH]"
+    },
+    {
+      "field": "section.swarm_contention_reports.present",
+      "sourcePath": "[BUNDLE_PATH]"
+    },
+    {
+      "field": "section.write_queue_report.present",
+      "sourcePath": "[BUNDLE_PATH]"
+    }
+  ]
+}

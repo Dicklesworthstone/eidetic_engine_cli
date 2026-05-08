@@ -1,0 +1,500 @@
+---
+source: tests/support_bundle_perf_compare.rs
+expression: snapshot_value(&report)?
+---
+{
+  "schema": "ee.perf.compare.v1",
+  "artifacts": {
+    "baseline": {
+      "schema": "ee.perf.artifact_summary.v1",
+      "artifactId": "support-bundle:baseline-portable",
+      "artifactKind": "support_bundle_manifest",
+      "sourceSchema": "ee.support_bundle.manifest.v1",
+      "sourcePath": "[BUNDLE_PATH]",
+      "contentHash": "[HASH]",
+      "observedHash": "[HASH]",
+      "profile": "portable",
+      "fixtureTier": null,
+      "commandFamily": "support_bundle",
+      "metrics": {
+        "bundle.files_found_count": {
+          "value": 7.0,
+          "unit": "count",
+          "volatility": "stable",
+          "sourceField": "metrics.bundle.files_found_count"
+        },
+        "bundle.hash_mismatch_count": {
+          "value": 0.0,
+          "unit": "count",
+          "volatility": "stable",
+          "sourceField": "metrics.bundle.hash_mismatch_count"
+        },
+        "bundle.manifest_file_count": {
+          "value": 7.0,
+          "unit": "count",
+          "volatility": "stable",
+          "sourceField": "metrics.bundle.manifest_file_count"
+        },
+        "bundle.redaction_reason_count": {
+          "value": 1.0,
+          "unit": "count",
+          "volatility": "stable",
+          "sourceField": "metrics.bundle.redaction_reason_count"
+        },
+        "bundle.total_size_bytes": {
+          "value": 970.0,
+          "unit": "bytes",
+          "volatility": "resource",
+          "sourceField": "metrics.bundle.total_size_bytes"
+        },
+        "cache.database_memory_count": {
+          "value": 12.0,
+          "unit": "count",
+          "volatility": "resource",
+          "sourceField": "metrics.cache.database_memory_count"
+        },
+        "performance_explain.sample_count": {
+          "value": 2.0,
+          "unit": "count",
+          "volatility": "stable",
+          "sourceField": "metrics.performance_explain.sample_count"
+        },
+        "section.benchmark_summary.present": {
+          "value": 1.0,
+          "unit": "bool",
+          "volatility": "stable",
+          "sourceField": "metrics.section.benchmark_summary.present"
+        },
+        "section.cache_reports.present": {
+          "value": 1.0,
+          "unit": "bool",
+          "volatility": "stable",
+          "sourceField": "metrics.section.cache_reports.present"
+        },
+        "section.fixture_manifest.present": {
+          "value": 1.0,
+          "unit": "bool",
+          "volatility": "stable",
+          "sourceField": "metrics.section.fixture_manifest.present"
+        },
+        "section.performance_explain_samples.present": {
+          "value": 1.0,
+          "unit": "bool",
+          "volatility": "stable",
+          "sourceField": "metrics.section.performance_explain_samples.present"
+        },
+        "section.profile_evidence.present": {
+          "value": 1.0,
+          "unit": "bool",
+          "volatility": "stable",
+          "sourceField": "metrics.section.profile_evidence.present"
+        },
+        "section.swarm_contention_reports.present": {
+          "value": 1.0,
+          "unit": "bool",
+          "volatility": "stable",
+          "sourceField": "metrics.section.swarm_contention_reports.present"
+        },
+        "section.write_queue_report.present": {
+          "value": 1.0,
+          "unit": "bool",
+          "volatility": "stable",
+          "sourceField": "metrics.section.write_queue_report.present"
+        },
+        "swarm_contention.report_count": {
+          "value": 1.0,
+          "unit": "count",
+          "volatility": "stable",
+          "sourceField": "metrics.swarm_contention.report_count"
+        }
+      },
+      "degraded": [],
+      "redaction": {
+        "applied": true,
+        "uncertainFields": [],
+        "secretIndicators": 0
+      },
+      "provenance": [
+        {
+          "field": "profile.profileName",
+          "source": "profile_evidence.json",
+          "confidence": null
+        },
+        {
+          "field": "section.benchmark_summary.present",
+          "source": "scale_benchmark_summary.json",
+          "confidence": null
+        },
+        {
+          "field": "section.cache_reports.present",
+          "source": "scale_cache_reports.json",
+          "confidence": null
+        },
+        {
+          "field": "section.fixture_manifest.present",
+          "source": "scale_fixture_manifest.json",
+          "confidence": null
+        },
+        {
+          "field": "section.performance_explain_samples.present",
+          "source": "scale_performance_explain_samples.json",
+          "confidence": null
+        },
+        {
+          "field": "section.profile_evidence.present",
+          "source": "profile_evidence.json",
+          "confidence": null
+        },
+        {
+          "field": "section.swarm_contention_reports.present",
+          "source": "scale_benchmark_summary.json",
+          "confidence": null
+        },
+        {
+          "field": "section.write_queue_report.present",
+          "source": "scale_write_queue_report.json",
+          "confidence": null
+        }
+      ]
+    },
+    "candidate": {
+      "schema": "ee.perf.artifact_summary.v1",
+      "artifactId": "support-bundle:candidate-swarm",
+      "artifactKind": "support_bundle_manifest",
+      "sourceSchema": "ee.support_bundle.manifest.v1",
+      "sourcePath": "[BUNDLE_PATH]",
+      "contentHash": "[HASH]",
+      "observedHash": "[HASH]",
+      "profile": "swarm",
+      "fixtureTier": null,
+      "commandFamily": "support_bundle",
+      "metrics": {
+        "bundle.files_found_count": {
+          "value": 7.0,
+          "unit": "count",
+          "volatility": "stable",
+          "sourceField": "metrics.bundle.files_found_count"
+        },
+        "bundle.hash_mismatch_count": {
+          "value": 0.0,
+          "unit": "count",
+          "volatility": "stable",
+          "sourceField": "metrics.bundle.hash_mismatch_count"
+        },
+        "bundle.manifest_file_count": {
+          "value": 7.0,
+          "unit": "count",
+          "volatility": "stable",
+          "sourceField": "metrics.bundle.manifest_file_count"
+        },
+        "bundle.redaction_reason_count": {
+          "value": 1.0,
+          "unit": "count",
+          "volatility": "stable",
+          "sourceField": "metrics.bundle.redaction_reason_count"
+        },
+        "bundle.total_size_bytes": {
+          "value": 961.0,
+          "unit": "bytes",
+          "volatility": "resource",
+          "sourceField": "metrics.bundle.total_size_bytes"
+        },
+        "cache.database_memory_count": {
+          "value": 12.0,
+          "unit": "count",
+          "volatility": "resource",
+          "sourceField": "metrics.cache.database_memory_count"
+        },
+        "performance_explain.sample_count": {
+          "value": 2.0,
+          "unit": "count",
+          "volatility": "stable",
+          "sourceField": "metrics.performance_explain.sample_count"
+        },
+        "section.benchmark_summary.present": {
+          "value": 1.0,
+          "unit": "bool",
+          "volatility": "stable",
+          "sourceField": "metrics.section.benchmark_summary.present"
+        },
+        "section.cache_reports.present": {
+          "value": 1.0,
+          "unit": "bool",
+          "volatility": "stable",
+          "sourceField": "metrics.section.cache_reports.present"
+        },
+        "section.fixture_manifest.present": {
+          "value": 1.0,
+          "unit": "bool",
+          "volatility": "stable",
+          "sourceField": "metrics.section.fixture_manifest.present"
+        },
+        "section.performance_explain_samples.present": {
+          "value": 1.0,
+          "unit": "bool",
+          "volatility": "stable",
+          "sourceField": "metrics.section.performance_explain_samples.present"
+        },
+        "section.profile_evidence.present": {
+          "value": 1.0,
+          "unit": "bool",
+          "volatility": "stable",
+          "sourceField": "metrics.section.profile_evidence.present"
+        },
+        "section.swarm_contention_reports.present": {
+          "value": 1.0,
+          "unit": "bool",
+          "volatility": "stable",
+          "sourceField": "metrics.section.swarm_contention_reports.present"
+        },
+        "section.write_queue_report.present": {
+          "value": 1.0,
+          "unit": "bool",
+          "volatility": "stable",
+          "sourceField": "metrics.section.write_queue_report.present"
+        },
+        "swarm_contention.report_count": {
+          "value": 1.0,
+          "unit": "count",
+          "volatility": "stable",
+          "sourceField": "metrics.swarm_contention.report_count"
+        }
+      },
+      "degraded": [],
+      "redaction": {
+        "applied": true,
+        "uncertainFields": [],
+        "secretIndicators": 0
+      },
+      "provenance": [
+        {
+          "field": "profile.profileName",
+          "source": "profile_evidence.json",
+          "confidence": null
+        },
+        {
+          "field": "section.benchmark_summary.present",
+          "source": "scale_benchmark_summary.json",
+          "confidence": null
+        },
+        {
+          "field": "section.cache_reports.present",
+          "source": "scale_cache_reports.json",
+          "confidence": null
+        },
+        {
+          "field": "section.fixture_manifest.present",
+          "source": "scale_fixture_manifest.json",
+          "confidence": null
+        },
+        {
+          "field": "section.performance_explain_samples.present",
+          "source": "scale_performance_explain_samples.json",
+          "confidence": null
+        },
+        {
+          "field": "section.profile_evidence.present",
+          "source": "profile_evidence.json",
+          "confidence": null
+        },
+        {
+          "field": "section.swarm_contention_reports.present",
+          "source": "scale_benchmark_summary.json",
+          "confidence": null
+        },
+        {
+          "field": "section.write_queue_report.present",
+          "source": "scale_write_queue_report.json",
+          "confidence": null
+        }
+      ]
+    }
+  },
+  "summary": {
+    "result": "unchanged",
+    "confidence": "medium",
+    "worstSeverity": "medium",
+    "deltaCount": 15,
+    "regressionCount": 0,
+    "improvementCount": 0
+  },
+  "deltas": [
+    {
+      "metric": "bundle.files_found_count",
+      "baselineValue": 7.0,
+      "candidateValue": 7.0,
+      "delta": 0.0,
+      "deltaPercent": 0.0,
+      "direction": "unchanged",
+      "severity": "low",
+      "ownerHint": "unknown",
+      "volatility": "stable"
+    },
+    {
+      "metric": "bundle.hash_mismatch_count",
+      "baselineValue": 0.0,
+      "candidateValue": 0.0,
+      "delta": 0.0,
+      "deltaPercent": null,
+      "direction": "unchanged",
+      "severity": "low",
+      "ownerHint": "unknown",
+      "volatility": "stable"
+    },
+    {
+      "metric": "bundle.manifest_file_count",
+      "baselineValue": 7.0,
+      "candidateValue": 7.0,
+      "delta": 0.0,
+      "deltaPercent": 0.0,
+      "direction": "unchanged",
+      "severity": "low",
+      "ownerHint": "unknown",
+      "volatility": "stable"
+    },
+    {
+      "metric": "bundle.redaction_reason_count",
+      "baselineValue": 1.0,
+      "candidateValue": 1.0,
+      "delta": 0.0,
+      "deltaPercent": 0.0,
+      "direction": "unchanged",
+      "severity": "low",
+      "ownerHint": "unknown",
+      "volatility": "stable"
+    },
+    {
+      "metric": "bundle.total_size_bytes",
+      "baselineValue": 970.0,
+      "candidateValue": 961.0,
+      "delta": -9.0,
+      "deltaPercent": -0.9278350515463918,
+      "direction": "decreased",
+      "severity": "low",
+      "ownerHint": "unknown",
+      "volatility": "resource"
+    },
+    {
+      "metric": "cache.database_memory_count",
+      "baselineValue": 12.0,
+      "candidateValue": 12.0,
+      "delta": 0.0,
+      "deltaPercent": 0.0,
+      "direction": "unchanged",
+      "severity": "low",
+      "ownerHint": "cache",
+      "volatility": "resource"
+    },
+    {
+      "metric": "performance_explain.sample_count",
+      "baselineValue": 2.0,
+      "candidateValue": 2.0,
+      "delta": 0.0,
+      "deltaPercent": 0.0,
+      "direction": "unchanged",
+      "severity": "low",
+      "ownerHint": "unknown",
+      "volatility": "stable"
+    },
+    {
+      "metric": "section.benchmark_summary.present",
+      "baselineValue": 1.0,
+      "candidateValue": 1.0,
+      "delta": 0.0,
+      "deltaPercent": 0.0,
+      "direction": "unchanged",
+      "severity": "low",
+      "ownerHint": "unknown",
+      "volatility": "stable"
+    },
+    {
+      "metric": "section.cache_reports.present",
+      "baselineValue": 1.0,
+      "candidateValue": 1.0,
+      "delta": 0.0,
+      "deltaPercent": 0.0,
+      "direction": "unchanged",
+      "severity": "low",
+      "ownerHint": "cache",
+      "volatility": "stable"
+    },
+    {
+      "metric": "section.fixture_manifest.present",
+      "baselineValue": 1.0,
+      "candidateValue": 1.0,
+      "delta": 0.0,
+      "deltaPercent": 0.0,
+      "direction": "unchanged",
+      "severity": "low",
+      "ownerHint": "unknown",
+      "volatility": "stable"
+    },
+    {
+      "metric": "section.performance_explain_samples.present",
+      "baselineValue": 1.0,
+      "candidateValue": 1.0,
+      "delta": 0.0,
+      "deltaPercent": 0.0,
+      "direction": "unchanged",
+      "severity": "low",
+      "ownerHint": "unknown",
+      "volatility": "stable"
+    },
+    {
+      "metric": "section.profile_evidence.present",
+      "baselineValue": 1.0,
+      "candidateValue": 1.0,
+      "delta": 0.0,
+      "deltaPercent": 0.0,
+      "direction": "unchanged",
+      "severity": "low",
+      "ownerHint": "profile",
+      "volatility": "stable"
+    },
+    {
+      "metric": "section.swarm_contention_reports.present",
+      "baselineValue": 1.0,
+      "candidateValue": 1.0,
+      "delta": 0.0,
+      "deltaPercent": 0.0,
+      "direction": "unchanged",
+      "severity": "low",
+      "ownerHint": "unknown",
+      "volatility": "stable"
+    },
+    {
+      "metric": "section.write_queue_report.present",
+      "baselineValue": 1.0,
+      "candidateValue": 1.0,
+      "delta": 0.0,
+      "deltaPercent": 0.0,
+      "direction": "unchanged",
+      "severity": "low",
+      "ownerHint": "write_spool",
+      "volatility": "stable"
+    },
+    {
+      "metric": "swarm_contention.report_count",
+      "baselineValue": 1.0,
+      "candidateValue": 1.0,
+      "delta": 0.0,
+      "deltaPercent": 0.0,
+      "direction": "unchanged",
+      "severity": "low",
+      "ownerHint": "unknown",
+      "volatility": "stable"
+    }
+  ],
+  "ownerHints": [],
+  "degraded": [
+    {
+      "code": "profile_mismatch",
+      "severity": "medium",
+      "artifactSide": "both",
+      "affectedField": "profile",
+      "message": "Profile mismatch: baseline=portable, candidate=swarm",
+      "repair": "Compare artifacts from the same profile"
+    }
+  ],
+  "nextCommands": []
+}

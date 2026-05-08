@@ -1,0 +1,148 @@
+---
+source: tests/support_bundle_perf_compare.rs
+expression: snapshot_value(&summary)?
+---
+{
+  "schema": "ee.perf.artifact_summary.v1",
+  "artifactId": "support-bundle:tampered-workstation",
+  "artifactKind": "support_bundle_manifest",
+  "sourceSchema": "ee.support_bundle.manifest.v1",
+  "sourcePath": "[BUNDLE_PATH]",
+  "contentHash": "[HASH]",
+  "observedHash": "[HASH]",
+  "profile": {
+    "profileName": "workstation",
+    "confidence": "high"
+  },
+  "commandFamily": "support_bundle",
+  "metrics": {
+    "bundle.files_found_count": {
+      "kind": "measured",
+      "value": 7.0,
+      "unit": "count"
+    },
+    "bundle.hash_mismatch_count": {
+      "kind": "measured",
+      "value": 1.0,
+      "unit": "count"
+    },
+    "bundle.manifest_file_count": {
+      "kind": "measured",
+      "value": 7.0,
+      "unit": "count"
+    },
+    "bundle.redaction_reason_count": {
+      "kind": "measured",
+      "value": 1.0,
+      "unit": "count"
+    },
+    "bundle.total_size_bytes": {
+      "kind": "measured",
+      "value": 979.0,
+      "unit": "bytes"
+    },
+    "cache.database_memory_count": {
+      "kind": "measured",
+      "value": 12.0,
+      "unit": "count"
+    },
+    "performance_explain.sample_count": {
+      "kind": "measured",
+      "value": 2.0,
+      "unit": "count"
+    },
+    "section.benchmark_summary.present": {
+      "kind": "measured",
+      "value": 1.0,
+      "unit": "bool"
+    },
+    "section.cache_reports.present": {
+      "kind": "measured",
+      "value": 1.0,
+      "unit": "bool"
+    },
+    "section.fixture_manifest.present": {
+      "kind": "measured",
+      "value": 1.0,
+      "unit": "bool"
+    },
+    "section.performance_explain_samples.present": {
+      "kind": "measured",
+      "value": 1.0,
+      "unit": "bool"
+    },
+    "section.profile_evidence.present": {
+      "kind": "measured",
+      "value": 1.0,
+      "unit": "bool"
+    },
+    "section.swarm_contention_reports.present": {
+      "kind": "measured",
+      "value": 1.0,
+      "unit": "bool"
+    },
+    "section.write_queue_report.present": {
+      "kind": "measured",
+      "value": 1.0,
+      "unit": "bool"
+    },
+    "swarm_contention.report_count": {
+      "kind": "measured",
+      "value": 1.0,
+      "unit": "count"
+    }
+  },
+  "degraded": [
+    {
+      "code": "tampered_hash",
+      "severity": "high",
+      "artifactId": "support-bundle:tampered-workstation",
+      "fieldPath": "contentHash",
+      "message": "Declared hash `[HASH]` does not match observed hash `[HASH]`.",
+      "repair": "Re-generate the artifact or use --inspection-only mode."
+    },
+    {
+      "code": "tampered_hash",
+      "severity": "high",
+      "artifactId": "support-bundle:tampered-workstation",
+      "fieldPath": "files.scale_cache_reports.json.contentHash",
+      "message": "Support bundle attachment `scale_cache_reports.json` failed hash verification.",
+      "repair": "Regenerate the support bundle before comparing it."
+    }
+  ],
+  "redaction": "redacted",
+  "provenance": [
+    {
+      "field": "profile.profileName",
+      "sourcePath": "[BUNDLE_PATH]"
+    },
+    {
+      "field": "section.benchmark_summary.present",
+      "sourcePath": "[BUNDLE_PATH]"
+    },
+    {
+      "field": "section.cache_reports.present",
+      "sourcePath": "[BUNDLE_PATH]"
+    },
+    {
+      "field": "section.fixture_manifest.present",
+      "sourcePath": "[BUNDLE_PATH]"
+    },
+    {
+      "field": "section.performance_explain_samples.present",
+      "sourcePath": "[BUNDLE_PATH]"
+    },
+    {
+      "field": "section.profile_evidence.present",
+      "sourcePath": "[BUNDLE_PATH]"
+    },
+    {
+      "field": "section.swarm_contention_reports.present",
+      "sourcePath": "[BUNDLE_PATH]"
+    },
+    {
+      "field": "section.write_queue_report.present",
+      "sourcePath": "[BUNDLE_PATH]"
+    }
+  ]
+}

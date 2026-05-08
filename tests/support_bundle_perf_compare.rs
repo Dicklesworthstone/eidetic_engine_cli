@@ -15,7 +15,9 @@ use ee::core::support_bundle::{
 use ee::models::{
     ArtifactDegradationSeverity, ArtifactKind, RedactionPosture, SummaryDegradationCode,
 };
-use serde_json::json;
+use insta::assert_json_snapshot;
+use serde::Serialize;
+use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
 
@@ -215,6 +217,85 @@ fn has_degradation(
     })
 }
 
+fn snapshot_value<T: Serialize>(value: &T) -> Result<Value, String> {
+    let mut value = serde_json::to_value(value).map_err(|error| error.to_string())?;
+    scrub_snapshot_value(&mut value);
+    Ok(value)
+}
+
+fn scrub_snapshot_value(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object.iter_mut() {
+                scrub_snapshot_value(child);
+                scrub_value_for_key(key, child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                scrub_snapshot_value(item);
+            }
+        }
+        Value::String(text) => {
+            *text = scrub_string(text);
+        }
+        Value::Number(_) | Value::Bool(_) | Value::Null => {}
+    }
+}
+
+fn scrub_value_for_key(key: &str, value: &mut Value) {
+    let normalized = key.to_ascii_lowercase();
+    if normalized.contains("hash") {
+        if value.is_string() {
+            *value = Value::String("[HASH]".to_owned());
+        }
+    } else if normalized == "sourcepath" && value.is_string() {
+        *value = Value::String("[BUNDLE_PATH]".to_owned());
+    }
+}
+
+fn looks_like_timestamp(text: &str) -> bool {
+    text.len() >= 20
+        && text.as_bytes().get(4) == Some(&b'-')
+        && text.as_bytes().get(7) == Some(&b'-')
+        && text.as_bytes().get(10) == Some(&b'T')
+        && (text.ends_with('Z') || text.contains("+00:00"))
+}
+
+fn scrub_string(text: &str) -> String {
+    if looks_like_timestamp(text) {
+        return "[TIMESTAMP]".to_owned();
+    }
+
+    let mut output = String::with_capacity(text.len());
+    let mut hex_run = String::new();
+    let mut changed = false;
+
+    for character in text.chars() {
+        if character.is_ascii_hexdigit() {
+            hex_run.push(character);
+        } else {
+            if hex_run.len() >= 32 {
+                output.push_str("[HASH]");
+                changed = true;
+            } else {
+                output.push_str(&hex_run);
+            }
+            hex_run.clear();
+            output.push(character);
+        }
+    }
+
+    if hex_run.len() >= 32 {
+        output.push_str("[HASH]");
+        changed = true;
+    } else {
+        output.push_str(&hex_run);
+    }
+
+    if changed { output } else { text.to_owned() }
+}
+
 #[test]
 fn complete_bundle_summarizes_redacted_sections_and_hashes() -> TestResult {
     let bundle = write_bundle(
@@ -264,6 +345,7 @@ fn complete_bundle_summarizes_redacted_sections_and_hashes() -> TestResult {
         !rendered.contains("sk_live"),
         "summary must not include raw secret-like bundle content"
     );
+    assert_json_snapshot!("support_bundle_complete_summary", snapshot_value(&summary)?);
 
     Ok(())
 }
@@ -304,6 +386,7 @@ fn partial_bundle_reports_missing_sections_with_repairs() -> TestResult {
             .as_deref()
             .is_some_and(|repair| !repair.is_empty())
     }));
+    assert_json_snapshot!("support_bundle_partial_summary", snapshot_value(&summary)?);
 
     Ok(())
 }
@@ -342,6 +425,10 @@ fn tampered_bundle_reports_hash_mismatch_before_comparison() -> TestResult {
         degradation.code == SummaryDegradationCode::TamperedHash
             && degradation.severity == ArtifactDegradationSeverity::High
     }));
+    assert_json_snapshot!(
+        "support_bundle_tampered_hash_summary",
+        snapshot_value(&summary)?
+    );
 
     Ok(())
 }
@@ -375,6 +462,10 @@ fn mismatched_profile_bundles_degrade_compare_confidence() -> TestResult {
     assert!(
         !rendered.contains("mixed_read_write_contention"),
         "compare output must not copy raw support-bundle report contents"
+    );
+    assert_json_snapshot!(
+        "support_bundle_profile_mismatch_compare",
+        snapshot_value(&report)?
     );
 
     Ok(())
