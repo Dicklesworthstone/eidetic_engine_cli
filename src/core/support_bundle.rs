@@ -19,6 +19,7 @@ use blake3::Hasher;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sqlmodel_core::{Row as SqlRow, Value as SqlValue};
 
 use crate::cache::CacheBudget;
 use crate::db::DbConnection;
@@ -53,6 +54,8 @@ const SCALE_FIXTURE_MANIFEST_FILE: &str = "scale_fixture_manifest.json";
 const CACHE_REPORTS_FILE: &str = "scale_cache_reports.json";
 const WRITE_QUEUE_REPORT_FILE: &str = "scale_write_queue_report.json";
 const PERFORMANCE_EXPLAIN_SAMPLES_FILE: &str = "scale_performance_explain_samples.json";
+const PERFORMANCE_EXPLAIN_SAMPLE_DIR: &str = "performance-explain";
+const MAX_PERFORMANCE_EXPLAIN_SAMPLES: usize = 16;
 const TRIAGE_SUMMARY_FILE: &str = "scale_triage_summary.json";
 const SWARM_SCALE_WORKLOADS_MANIFEST: &str =
     include_str!("../../tests/fixtures/swarm_scale/workloads.json");
@@ -466,9 +469,9 @@ fn collect_diagnostics(
     let swarm_reports = discover_swarm_report_summaries(workspace);
     let scale_benchmark_summary_json = scale_benchmark_summary_json(workspace, &swarm_reports);
     let scale_fixture_manifest_json = scale_fixture_manifest_json();
-    let cache_reports_json = cache_reports_json();
+    let cache_reports_json = cache_reports_json(workspace);
     let write_queue_report_json = write_queue_report_json();
-    let performance_explain_samples_json = performance_explain_samples_json();
+    let performance_explain_samples_json = performance_explain_samples_json(workspace);
     let triage_summary_json = triage_summary_json(&status, &swarm_reports);
 
     Ok(CollectedDiagnostics {
@@ -530,56 +533,431 @@ fn scale_fixture_manifest_json() -> String {
     }))
 }
 
-fn cache_reports_json() -> String {
-    let generation = 7;
-    let mut search_entries = vec![
-        SearchHotsetEntry::memory("mem_swarm_small_00000001", generation, 9),
-        SearchHotsetEntry::graph_neighborhood("mem_swarm_small_00000001", 2, generation, 3),
-    ];
-    if let Some(query_entry) =
-        SearchHotsetEntry::query_shape("prepare release under swarm load", generation, 12)
-    {
-        search_entries.push(query_entry);
-    }
-    let search_hotset = SearchHotset::new(search_entries);
+fn cache_reports_json(workspace: &Path) -> String {
+    let cache_state = collect_cache_directory_state(workspace);
+    let snapshot = collect_cache_hotset_snapshot(workspace, &cache_state);
+    let search_hotset = SearchHotset::new(snapshot.search_entries);
     let search_report = prewarm_search_hotset(
         &search_hotset,
-        SearchCacheGovernor::new(generation, CacheBudget::new(16, 64 * 1024)),
+        SearchCacheGovernor::new(snapshot.generation, CacheBudget::new(16, 64 * 1024))
+            .with_current_usage(cache_state.search.entries, cache_state.search.bytes),
     );
 
-    let pack_hotset = PackHotset::new([
-        PackHotsetEntry {
-            key: support_cache_key("pack:section:procedural_rules"),
-            kind: PackHotsetEntryKind::PackSection,
-            section: Some(PackSection::ProceduralRules),
-            generation,
-            estimated_bytes: 256,
-            hit_count: 8,
-            redaction_status: "content_not_stored",
-        },
-        PackHotsetEntry {
-            key: support_cache_key("pack:selection_certificate:swarm"),
-            kind: PackHotsetEntryKind::SelectionCertificate,
-            section: None,
-            generation,
-            estimated_bytes: 192,
-            hit_count: 3,
-            redaction_status: "content_not_stored",
-        },
-    ]);
+    let pack_hotset = PackHotset::new(snapshot.pack_entries);
     let pack_report = prewarm_pack_hotset(
         &pack_hotset,
-        PackCacheGovernor::new(generation, CacheBudget::new(16, 64 * 1024)),
+        PackCacheGovernor::new(snapshot.generation, CacheBudget::new(16, 64 * 1024))
+            .with_current_usage(cache_state.pack.entries, cache_state.pack.bytes),
     );
 
     stable_json(&json!({
         "schema": "ee.support_bundle.scale_cache_reports.v1",
         "redactionStatus": "content_not_stored",
+        "source": "workspace_database_and_cache_state",
+        "workspacePath": workspace.display().to_string(),
+        "database": {
+            "present": snapshot.database_present,
+            "readable": snapshot.database_readable,
+            "workspaceRowPresent": snapshot.workspace_row_present,
+            "schemaVersion": snapshot.schema_version,
+            "memoryCount": snapshot.memory_count,
+            "packRecordCount": snapshot.pack_record_count,
+            "packItemCount": snapshot.pack_item_count,
+        },
+        "cacheState": {
+            "root": ".ee/cache",
+            "rootPresent": cache_state.root_present,
+            "search": cache_state.search.data_json(),
+            "pack": cache_state.pack.data_json(),
+            "unclassified": cache_state.unclassified.data_json(),
+        },
         "reports": {
             "search": search_report.data_json(),
             "pack": pack_report.data_json(),
         },
     }))
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CacheUsage {
+    entries: usize,
+    bytes: usize,
+}
+
+impl CacheUsage {
+    fn record_file(&mut self, bytes: u64) {
+        self.entries = self.entries.saturating_add(1);
+        self.bytes = self
+            .bytes
+            .saturating_add(usize::try_from(bytes).unwrap_or(usize::MAX));
+    }
+
+    fn data_json(self) -> Value {
+        json!({
+            "entries": self.entries,
+            "bytes": self.bytes,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CacheDirectoryState {
+    root_present: bool,
+    search: CacheUsage,
+    pack: CacheUsage,
+    unclassified: CacheUsage,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CacheBucket {
+    Search,
+    Pack,
+    Unclassified,
+}
+
+#[derive(Debug, Default)]
+struct CacheHotsetSnapshot {
+    database_present: bool,
+    database_readable: bool,
+    workspace_row_present: bool,
+    schema_version: Option<u32>,
+    generation: u64,
+    memory_count: usize,
+    pack_record_count: usize,
+    pack_item_count: usize,
+    search_entries: Vec<SearchHotsetEntry>,
+    pack_entries: Vec<PackHotsetEntry>,
+}
+
+fn collect_cache_directory_state(workspace: &Path) -> CacheDirectoryState {
+    let cache_root = workspace.join(".ee").join("cache");
+    let mut state = CacheDirectoryState {
+        root_present: cache_root.is_dir(),
+        ..CacheDirectoryState::default()
+    };
+    if state.root_present {
+        let mut relative_segments = Vec::new();
+        collect_cache_directory_entries(&cache_root, &mut relative_segments, &mut state);
+    }
+    state
+}
+
+fn collect_cache_directory_entries(
+    directory: &Path,
+    relative_segments: &mut Vec<String>,
+    state: &mut CacheDirectoryState,
+) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut paths = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    paths.sort();
+
+    for path in paths {
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        let name = name.to_string_lossy().to_ascii_lowercase();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        relative_segments.push(name);
+        if metadata.is_dir() {
+            collect_cache_directory_entries(&path, relative_segments, state);
+        } else if metadata.is_file() {
+            match classify_cache_path(relative_segments) {
+                CacheBucket::Search => state.search.record_file(metadata.len()),
+                CacheBucket::Pack => state.pack.record_file(metadata.len()),
+                CacheBucket::Unclassified => state.unclassified.record_file(metadata.len()),
+            }
+        }
+        relative_segments.pop();
+    }
+}
+
+fn classify_cache_path(relative_segments: &[String]) -> CacheBucket {
+    if relative_segments
+        .iter()
+        .any(|segment| segment.contains("search"))
+    {
+        CacheBucket::Search
+    } else if relative_segments
+        .iter()
+        .any(|segment| segment.contains("pack") || segment.contains("context"))
+    {
+        CacheBucket::Pack
+    } else {
+        CacheBucket::Unclassified
+    }
+}
+
+fn collect_cache_hotset_snapshot(
+    workspace: &Path,
+    cache_state: &CacheDirectoryState,
+) -> CacheHotsetSnapshot {
+    let database_path = workspace.join(".ee").join("ee.db");
+    let mut snapshot = CacheHotsetSnapshot {
+        database_present: database_path.is_file(),
+        ..CacheHotsetSnapshot::default()
+    };
+    if !snapshot.database_present {
+        snapshot.generation = cache_source_generation(&snapshot, cache_state);
+        return snapshot;
+    }
+
+    let Ok(connection) = DbConnection::open_file(&database_path) else {
+        snapshot.generation = cache_source_generation(&snapshot, cache_state);
+        return snapshot;
+    };
+    snapshot.database_readable = true;
+    snapshot.schema_version = connection.schema_version().ok().flatten();
+
+    let workspace_path = workspace.display().to_string();
+    let Ok(Some(workspace_row)) = connection.get_workspace_by_path(&workspace_path) else {
+        snapshot.generation = cache_source_generation(&snapshot, cache_state);
+        return snapshot;
+    };
+    snapshot.workspace_row_present = true;
+    snapshot.memory_count = connection
+        .list_memories(&workspace_row.id, None, false)
+        .map_or(0, |memories| memories.len());
+    snapshot.pack_record_count = query_cache_count(
+        &connection,
+        "SELECT COUNT(*) FROM pack_records WHERE workspace_id = ?1",
+        &workspace_row.id,
+    );
+    snapshot.pack_item_count = query_cache_count(
+        &connection,
+        "SELECT COUNT(*)
+         FROM pack_items pi
+         JOIN pack_records pr ON pr.id = pi.pack_id
+         WHERE pr.workspace_id = ?1",
+        &workspace_row.id,
+    );
+    snapshot.generation = cache_source_generation(&snapshot, cache_state);
+    snapshot.search_entries =
+        collect_search_cache_hotset_entries(&connection, &workspace_row.id, snapshot.generation);
+    snapshot.pack_entries =
+        collect_pack_cache_hotset_entries(&connection, &workspace_row.id, snapshot.generation);
+    snapshot
+}
+
+fn cache_source_generation(
+    snapshot: &CacheHotsetSnapshot,
+    cache_state: &CacheDirectoryState,
+) -> u64 {
+    let payload = format!(
+        "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        snapshot.schema_version.unwrap_or(0),
+        snapshot.memory_count,
+        snapshot.pack_record_count,
+        snapshot.pack_item_count,
+        cache_state.root_present,
+        cache_state.search.entries,
+        cache_state.search.bytes,
+        cache_state.pack.entries,
+        cache_state.pack.bytes,
+        cache_state.unclassified.entries,
+    );
+    let hash = blake3::hash(payload.as_bytes());
+    let bytes = hash.as_bytes();
+    let generation = u64::from_be_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]);
+    if snapshot.memory_count == 0
+        && snapshot.pack_record_count == 0
+        && snapshot.pack_item_count == 0
+        && cache_state.search.entries == 0
+        && cache_state.pack.entries == 0
+        && cache_state.unclassified.entries == 0
+    {
+        0
+    } else {
+        generation.max(1)
+    }
+}
+
+fn collect_search_cache_hotset_entries(
+    connection: &DbConnection,
+    workspace_id: &str,
+    generation: u64,
+) -> Vec<SearchHotsetEntry> {
+    let mut entries = Vec::new();
+    if generation == 0 {
+        return entries;
+    }
+
+    if let Ok(rows) = connection.query(
+        "SELECT m.id, COALESCE(COUNT(pi.memory_id), 0) AS hits
+         FROM memories m
+         LEFT JOIN pack_items pi ON pi.memory_id = m.id
+         WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL
+         GROUP BY m.id
+         ORDER BY hits DESC, m.importance DESC, m.utility DESC, m.id ASC
+         LIMIT 8",
+        &[SqlValue::Text(workspace_id.to_owned())],
+    ) {
+        entries.extend(rows.iter().filter_map(|row| {
+            let memory_id = row_text(row, 0)?;
+            Some(SearchHotsetEntry::memory(
+                memory_id,
+                generation,
+                row_u64(row, 1).max(1),
+            ))
+        }));
+    }
+
+    if let Ok(rows) = connection.query(
+        "SELECT query, COUNT(*) AS hits
+         FROM pack_records
+         WHERE workspace_id = ?1
+         GROUP BY query
+         ORDER BY hits DESC, MAX(created_at) DESC, query ASC
+         LIMIT 4",
+        &[SqlValue::Text(workspace_id.to_owned())],
+    ) {
+        entries.extend(rows.iter().filter_map(|row| {
+            SearchHotsetEntry::query_shape(row_text(row, 0)?, generation, row_u64(row, 1).max(1))
+        }));
+    }
+
+    if let Ok(rows) = connection.query(
+        "SELECT ml.src_memory_id, COUNT(*) AS hits
+         FROM memory_links ml
+         JOIN memories m ON m.id = ml.src_memory_id
+         WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL
+         GROUP BY ml.src_memory_id
+         ORDER BY hits DESC, ml.src_memory_id ASC
+         LIMIT 4",
+        &[SqlValue::Text(workspace_id.to_owned())],
+    ) {
+        entries.extend(rows.iter().filter_map(|row| {
+            let memory_id = row_text(row, 0)?;
+            Some(SearchHotsetEntry::graph_neighborhood(
+                memory_id,
+                2,
+                generation,
+                row_u64(row, 1).max(1),
+            ))
+        }));
+    }
+
+    entries
+}
+
+fn collect_pack_cache_hotset_entries(
+    connection: &DbConnection,
+    workspace_id: &str,
+    generation: u64,
+) -> Vec<PackHotsetEntry> {
+    let mut entries = Vec::new();
+    if generation == 0 {
+        return entries;
+    }
+
+    if let Ok(rows) = connection.query(
+        "SELECT pr.id, pi.section, COUNT(*) AS item_count, COALESCE(SUM(pi.estimated_tokens), 0) AS used_tokens
+         FROM pack_records pr
+         JOIN pack_items pi ON pi.pack_id = pr.id
+         WHERE pr.workspace_id = ?1
+         GROUP BY pr.id, pi.section
+         ORDER BY item_count DESC, pr.id ASC, pi.section ASC
+         LIMIT 8",
+        &[SqlValue::Text(workspace_id.to_owned())],
+    ) {
+        entries.extend(rows.iter().filter_map(|row| {
+            let pack_id = row_text(row, 0)?;
+            let section_name = row_text(row, 1)?;
+            let item_count = row_usize(row, 2);
+            let used_tokens = row_usize(row, 3);
+            Some(PackHotsetEntry {
+                key: support_cache_key(&format!(
+                    "pack:section:{pack_id}:{section_name}:{used_tokens}:{item_count}"
+                )),
+                kind: PackHotsetEntryKind::PackSection,
+                section: pack_section_from_str(section_name),
+                generation,
+                estimated_bytes: 128_usize.saturating_add(item_count.saturating_mul(48)),
+                hit_count: cache_usize_to_u64(item_count).max(1),
+                redaction_status: "content_not_stored",
+            })
+        }));
+    }
+
+    if let Ok(rows) = connection.query(
+        "SELECT id, profile, max_tokens, used_tokens, item_count, pack_hash
+         FROM pack_records
+         WHERE workspace_id = ?1
+         ORDER BY created_at DESC, id ASC
+         LIMIT 4",
+        &[SqlValue::Text(workspace_id.to_owned())],
+    ) {
+        entries.extend(rows.iter().filter_map(|row| {
+            let pack_id = row_text(row, 0)?;
+            let profile = row_text(row, 1).unwrap_or("unknown");
+            let max_tokens = row_usize(row, 2);
+            let used_tokens = row_usize(row, 3);
+            let item_count = row_usize(row, 4);
+            let pack_hash = row_text(row, 5).unwrap_or("missing_hash");
+            Some(PackHotsetEntry {
+                key: support_cache_key(&format!(
+                    "pack:selection_certificate:{pack_id}:{profile}:{max_tokens}:{used_tokens}:{item_count}:{pack_hash}"
+                )),
+                kind: PackHotsetEntryKind::SelectionCertificate,
+                section: None,
+                generation,
+                estimated_bytes: 192_usize.saturating_add(item_count.saturating_mul(40)),
+                hit_count: cache_usize_to_u64(item_count).max(1),
+                redaction_status: "content_not_stored",
+            })
+        }));
+    }
+
+    entries
+}
+
+fn query_cache_count(connection: &DbConnection, sql: &str, workspace_id: &str) -> usize {
+    connection
+        .query(sql, &[SqlValue::Text(workspace_id.to_owned())])
+        .ok()
+        .and_then(|rows| rows.first().map(|row| row_usize(row, 0)))
+        .unwrap_or(0)
+}
+
+fn row_text(row: &SqlRow, index: usize) -> Option<&str> {
+    row.get(index).and_then(|value| value.as_str())
+}
+
+fn row_usize(row: &SqlRow, index: usize) -> usize {
+    row.get(index)
+        .and_then(|value| value.as_i64())
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0)
+}
+
+fn row_u64(row: &SqlRow, index: usize) -> u64 {
+    row.get(index)
+        .and_then(|value| value.as_i64())
+        .and_then(|value| u64::try_from(value).ok())
+        .unwrap_or(0)
+}
+
+fn cache_usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn pack_section_from_str(value: &str) -> Option<PackSection> {
+    match value {
+        "procedural_rules" => Some(PackSection::ProceduralRules),
+        "decisions" => Some(PackSection::Decisions),
+        "failures" => Some(PackSection::Failures),
+        "evidence" => Some(PackSection::Evidence),
+        "artifacts" => Some(PackSection::Artifacts),
+        _ => None,
+    }
 }
 
 fn write_queue_report_json() -> String {
@@ -594,35 +972,81 @@ fn write_queue_report_json() -> String {
     }))
 }
 
-fn performance_explain_samples_json() -> String {
+fn performance_explain_samples_json(workspace: &Path) -> String {
+    let samples = discover_performance_explain_samples(workspace);
+    let status = if samples.is_empty() {
+        "no_persisted_samples_found"
+    } else {
+        "persisted_samples_collected"
+    };
     stable_json(&json!({
         "schema": "ee.support_bundle.performance_explain_samples.v1",
         "sourceSchema": super::search::PERFORMANCE_EXPLAIN_SCHEMA_V1,
-        "samples": [
-            {
-                "command": "search",
-                "queryPlan": {
-                    "retrievalMode": "instant",
-                    "requestedLimit": 10,
-                    "candidateBudget": 200,
-                    "usesEmbeddings": false,
-                    "scoreExplanationsRequested": true,
-                },
-                "owners": ["search", "host_resource_pressure"],
-                "redactionStatus": "query_shape_only",
-            },
-            {
-                "command": "context",
-                "queryPlan": {
-                    "retrievalMode": "balanced",
-                    "requestedCandidatePool": 100,
-                    "maxTokens": 4000,
-                    "profile": "balanced",
-                },
-                "owners": ["pack", "search", "graph"],
-                "redactionStatus": "query_shape_only",
-            }
-        ],
+        "status": status,
+        "sampleSource": ".ee/performance-explain/*.json",
+        "sampleCount": samples.len(),
+        "samples": samples,
+    }))
+}
+
+fn discover_performance_explain_samples(workspace: &Path) -> Vec<Value> {
+    let report_dir = workspace.join(".ee").join(PERFORMANCE_EXPLAIN_SAMPLE_DIR);
+    let Ok(entries) = fs::read_dir(report_dir) else {
+        return Vec::new();
+    };
+
+    let mut paths = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "json"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.truncate(MAX_PERFORMANCE_EXPLAIN_SAMPLES);
+
+    paths
+        .iter()
+        .filter_map(|path| summarize_performance_explain_sample(workspace, path))
+        .collect()
+}
+
+fn summarize_performance_explain_sample(workspace: &Path, path: &Path) -> Option<Value> {
+    let raw_content = fs::read_to_string(path).ok()?;
+    let redaction = redact_secret_like_content(&raw_content);
+    let parsed = serde_json::from_str::<Value>(&raw_content).ok()?;
+    if parsed.get("schema") != Some(&json!(super::search::PERFORMANCE_EXPLAIN_SCHEMA_V1)) {
+        return None;
+    }
+    let data = parsed.get("data")?;
+    let relative_path = path.strip_prefix(workspace).unwrap_or(path);
+    let relative_path = redact_secret_like_content(&relative_path.display().to_string()).content;
+    let redaction_reasons = redaction
+        .redacted_reasons
+        .iter()
+        .map(|reason| (*reason).to_owned())
+        .collect::<Vec<_>>();
+    let fallback_count = data
+        .get("fallbacks")
+        .and_then(Value::as_array)
+        .map_or(Value::Null, |items| json!(items.len()));
+
+    Some(json!({
+        "path": relative_path,
+        "contentHash": compute_hash(&redaction.content),
+        "schema": parsed.get("schema").map(redact_json_value).unwrap_or(Value::Null),
+        "command": data.get("command").map(redact_json_value).unwrap_or(Value::Null),
+        "query": data.get("query").map(redact_json_value).unwrap_or(Value::Null),
+        "queryPlan": data.get("queryPlan").map(redact_json_value).unwrap_or_else(|| json!({})),
+        "measurements": {
+            "dbReads": data.get("dbReads").map(redact_json_value).unwrap_or(Value::Null),
+            "searchElapsed": data.pointer("/search/elapsed").map(redact_json_value).unwrap_or(Value::Null),
+            "returnedHits": data.pointer("/search/returnedHits").cloned().unwrap_or(Value::Null),
+            "timings": data.get("timings").map(redact_json_value).unwrap_or_else(|| json!([])),
+            "packSelectedCount": data.pointer("/pack/selectedCount").cloned().unwrap_or(Value::Null),
+            "tokenBudget": data.pointer("/pack/tokenBudget").map(redact_json_value).unwrap_or(Value::Null),
+            "fallbackCount": fallback_count,
+        },
+        "redacted": redaction.redacted,
+        "redactionReasons": redaction_reasons,
     }))
 }
 
@@ -963,6 +1387,333 @@ mod tests {
             value.pointer("/manifest/schema"),
             Some(&json!("ee.swarm_scale.workloads.v1"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn cache_reports_collect_live_workspace_hotsets() -> TestResult {
+        let root = unique_test_path("cache-hotsets");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(workspace.join(".ee"))
+            .map_err(|error| format!("failed to create workspace metadata dir: {error}"))?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| format!("failed to canonicalize workspace: {error}"))?;
+
+        let database_path = workspace.join(".ee").join("ee.db");
+        let connection = DbConnection::open_file(&database_path)
+            .map_err(|error| format!("failed to open test db: {error}"))?;
+        connection
+            .migrate()
+            .map_err(|error| format!("failed to migrate test db: {error}"))?;
+
+        let workspace_id = "wsp_01234567890123456789012345";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("cache-hotsets".to_owned()),
+                },
+            )
+            .map_err(|error| format!("failed to insert workspace: {error}"))?;
+
+        for (memory_id, content, importance) in [
+            (
+                "mem_00000000000000000000cygg01",
+                "Run cargo test before closing cache support bundle changes.",
+                0.92,
+            ),
+            (
+                "mem_00000000000000000000cygg02",
+                "Record cache state from the workspace database.",
+                0.81,
+            ),
+        ] {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &crate::db::CreateMemoryInput {
+                        workspace_id: workspace_id.to_owned(),
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.8,
+                        importance,
+                        provenance_uri: Some("test://support-bundle/cache-hotsets".to_owned()),
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: Some("test".to_owned()),
+                        tags: vec!["cache".to_owned()],
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| format!("failed to insert memory {memory_id}: {error}"))?;
+        }
+
+        let pack_id = "pack_000000000000000000000cygg1";
+        let pack_items = vec![
+            crate::db::CreatePackItemInput {
+                pack_id: pack_id.to_owned(),
+                memory_id: "mem_00000000000000000000cygg01".to_owned(),
+                rank: 1,
+                section: "procedural_rules".to_owned(),
+                estimated_tokens: 34,
+                relevance: 0.91,
+                utility: 0.82,
+                why: "exercise procedural section hotset".to_owned(),
+                diversity_key: None,
+                provenance_json: r#"{"schema":"ee.test.provenance.v1"}"#.to_owned(),
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: Some("test".to_owned()),
+            },
+            crate::db::CreatePackItemInput {
+                pack_id: pack_id.to_owned(),
+                memory_id: "mem_00000000000000000000cygg02".to_owned(),
+                rank: 2,
+                section: "decisions".to_owned(),
+                estimated_tokens: 21,
+                relevance: 0.77,
+                utility: 0.74,
+                why: "exercise decision section hotset".to_owned(),
+                diversity_key: None,
+                provenance_json: r#"{"schema":"ee.test.provenance.v1"}"#.to_owned(),
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: Some("test".to_owned()),
+            },
+        ];
+        connection
+            .insert_pack_record(
+                pack_id,
+                &crate::db::CreatePackRecordInput {
+                    workspace_id: workspace_id.to_owned(),
+                    query: "cache support bundle hotsets".to_owned(),
+                    profile: "balanced".to_owned(),
+                    max_tokens: 4000,
+                    used_tokens: 55,
+                    item_count: 2,
+                    omitted_count: 0,
+                    pack_hash: "blake3:cygg-cache-pack".to_owned(),
+                    degraded_json: None,
+                    created_by: Some("test".to_owned()),
+                },
+                &pack_items,
+                &[],
+            )
+            .map_err(|error| format!("failed to insert pack record: {error}"))?;
+        connection
+            .close()
+            .map_err(|error| format!("failed to close test db: {error}"))?;
+
+        let search_cache_dir = workspace.join(".ee").join("cache").join("search");
+        let pack_cache_dir = workspace.join(".ee").join("cache").join("pack");
+        fs::create_dir_all(&search_cache_dir)
+            .map_err(|error| format!("failed to create search cache dir: {error}"))?;
+        fs::create_dir_all(&pack_cache_dir)
+            .map_err(|error| format!("failed to create pack cache dir: {error}"))?;
+        fs::write(search_cache_dir.join("hotset.bin"), b"search-cache-index")
+            .map_err(|error| format!("failed to write search cache fixture: {error}"))?;
+        fs::write(pack_cache_dir.join("hotset.bin"), b"pack-cache-index")
+            .map_err(|error| format!("failed to write pack cache fixture: {error}"))?;
+
+        let rendered = cache_reports_json(&workspace);
+        let value: Value = serde_json::from_str(&rendered)
+            .map_err(|error| format!("cache report must parse: {error}"))?;
+
+        assert_eq!(
+            value.pointer("/source"),
+            Some(&json!("workspace_database_and_cache_state"))
+        );
+        assert_eq!(value.pointer("/database/present"), Some(&json!(true)));
+        assert_eq!(value.pointer("/database/readable"), Some(&json!(true)));
+        assert_eq!(
+            value.pointer("/database/workspaceRowPresent"),
+            Some(&json!(true))
+        );
+        assert_eq!(value.pointer("/database/memoryCount"), Some(&json!(2)));
+        assert_eq!(value.pointer("/database/packRecordCount"), Some(&json!(1)));
+        assert_eq!(value.pointer("/database/packItemCount"), Some(&json!(2)));
+        assert_eq!(value.pointer("/cacheState/search/entries"), Some(&json!(1)));
+        assert_eq!(value.pointer("/cacheState/pack/entries"), Some(&json!(1)));
+        assert_eq!(
+            value.pointer("/reports/search/requestedEntries"),
+            Some(&json!(3))
+        );
+        assert_eq!(
+            value.pointer("/reports/pack/requestedEntries"),
+            Some(&json!(3))
+        );
+
+        let search_admitted = value
+            .pointer("/reports/search/admitted")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "search admitted entries must be an array".to_owned())?;
+        assert!(
+            search_admitted
+                .iter()
+                .any(|entry| entry.pointer("/kind") == Some(&json!("memory"))),
+            "search hotset must include memory entries from persisted memories"
+        );
+        assert!(
+            search_admitted
+                .iter()
+                .any(|entry| entry.pointer("/kind") == Some(&json!("query_shape"))),
+            "search hotset must include query-shape entries from pack records"
+        );
+
+        let pack_admitted = value
+            .pointer("/reports/pack/admitted")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "pack admitted entries must be an array".to_owned())?;
+        assert!(
+            pack_admitted
+                .iter()
+                .any(|entry| entry.pointer("/kind") == Some(&json!("pack_section"))),
+            "pack hotset must include section entries from pack items"
+        );
+        assert!(
+            pack_admitted
+                .iter()
+                .any(|entry| entry.pointer("/kind") == Some(&json!("selection_certificate"))),
+            "pack hotset must include selection certificate entries from pack records"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn create_bundle_collects_persisted_performance_explain_samples() -> TestResult {
+        let root = unique_test_path("performance-samples");
+        let workspace = root.join("workspace");
+        let performance_dir = workspace.join(".ee").join(PERFORMANCE_EXPLAIN_SAMPLE_DIR);
+        fs::create_dir_all(&performance_dir)
+            .map_err(|error| format!("failed to create performance sample dir: {error}"))?;
+
+        let persisted_sample = json!({
+            "schema": crate::core::search::PERFORMANCE_EXPLAIN_SCHEMA_V1,
+            "success": true,
+            "data": {
+                "command": "search",
+                "query": {
+                    "textIncluded": false,
+                    "lengthBytes": 31,
+                    "fingerprint": "blake3:samplequeryhash"
+                },
+                "queryPlan": {
+                    "retrievalMode": "thorough",
+                    "requestedLimit": 17,
+                    "candidateBudget": 888,
+                    "usesEmbeddings": true,
+                    "scoreExplanationsRequested": false
+                },
+                "dbReads": {
+                    "indexStatusChecks": 2,
+                    "memoryReads": 3
+                },
+                "search": {
+                    "returnedHits": 7,
+                    "elapsed": {
+                        "elapsedMs": 12.5,
+                        "elapsedMsBucket": "lt_25ms",
+                        "nondeterministic": true
+                    }
+                },
+                "pack": {
+                    "selectedCount": 4,
+                    "tokenBudget": {
+                        "limit": 4000,
+                        "used": 1234
+                    }
+                },
+                "timings": [
+                    {
+                        "name": "fixture_run",
+                        "elapsedMs": 5.75,
+                        "elapsedMsBucket": "lt_10ms",
+                        "nondeterministic": true
+                    }
+                ],
+                "fallbacks": [
+                    {
+                        "code": "search_index_stale"
+                    }
+                ],
+                "redaction": {
+                    "memoryContentIncluded": false,
+                    "queryTextIncluded": false
+                }
+            }
+        });
+        fs::write(
+            performance_dir.join("search-release.json"),
+            serde_json::to_string_pretty(&persisted_sample)
+                .map_err(|error| format!("failed to serialize persisted sample: {error}"))?,
+        )
+        .map_err(|error| format!("failed to write persisted sample: {error}"))?;
+
+        let output_dir = root.join("out");
+        fs::create_dir_all(&output_dir)
+            .map_err(|error| format!("failed to create output dir: {error}"))?;
+
+        let report = create_bundle(&BundleOptions {
+            workspace,
+            output_dir: Some(output_dir),
+            dry_run: false,
+            redacted: true,
+            include_raw: false,
+            audit_limit: 5,
+        })
+        .map_err(|error| error.message())?;
+
+        let bundle_dir = report
+            .output_path
+            .clone()
+            .ok_or_else(|| "created bundle must report output path".to_owned())?;
+        let samples_json = fs::read_to_string(bundle_dir.join(PERFORMANCE_EXPLAIN_SAMPLES_FILE))
+            .map_err(|error| format!("failed to read performance samples: {error}"))?;
+        let samples: Value = serde_json::from_str(&samples_json)
+            .map_err(|error| format!("performance samples must parse: {error}"))?;
+
+        assert_eq!(samples.pointer("/sampleCount"), Some(&json!(1)));
+        assert_eq!(
+            samples.pointer("/status"),
+            Some(&json!("persisted_samples_collected"))
+        );
+        assert_eq!(
+            samples.pointer("/samples/0/command"),
+            Some(&json!("search"))
+        );
+        assert_eq!(
+            samples.pointer("/samples/0/queryPlan/requestedLimit"),
+            Some(&json!(17))
+        );
+        assert_eq!(
+            samples.pointer("/samples/0/queryPlan/candidateBudget"),
+            Some(&json!(888))
+        );
+        assert_eq!(
+            samples.pointer("/samples/0/measurements/searchElapsed/elapsedMs"),
+            Some(&json!(12.5))
+        );
+        assert_eq!(
+            samples.pointer("/samples/0/measurements/returnedHits"),
+            Some(&json!(7))
+        );
+        assert_eq!(
+            samples.pointer("/samples/0/measurements/fallbackCount"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            samples.pointer("/samples/0/measurements/tokenBudget/used"),
+            Some(&json!(1234))
+        );
+        assert_eq!(
+            samples.pointer("/samples/0/path"),
+            Some(&json!(".ee/performance-explain/search-release.json"))
+        );
+
         Ok(())
     }
 
