@@ -1162,6 +1162,10 @@ impl EffectManifest {
             CommandEffect::read_only("plan goal", "Recommends recipes for goals"),
             CommandEffect::read_only("plan explain", "Explains recipe selection"),
             CommandEffect::read_only("plan recommend", "Recommends recipes for tasks"),
+            CommandEffect::read_only(
+                "profile config plan",
+                "Plan operating profile configuration without writing files",
+            ),
             CommandEffect::degraded_unavailable(
                 "recorder start",
                 "recorder_store_unavailable",
@@ -1446,6 +1450,12 @@ impl EffectManifest {
                 vec![".ee/workspaces.toml"],
                 "alias name and workspace root",
                 "Create or update a workspace alias",
+            ),
+            CommandEffect::config_file_write(
+                "profile config apply",
+                vec![".ee/config.toml"],
+                "workspace profile config path plus requested profile",
+                "Apply operating profile configuration to the workspace config file",
             ),
             CommandEffect::config_file_write(
                 "certificate keygen",

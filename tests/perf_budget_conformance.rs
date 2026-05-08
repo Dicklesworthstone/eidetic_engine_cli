@@ -382,8 +382,8 @@ fn budget_check_json_stdout_contains_only_machine_data() -> TestResult {
         "--json",
     ])?;
 
-    let stdout = String::from_utf8(output.stdout.clone())
-        .map_err(|e| format!("stdout not UTF-8: {e}"))?;
+    let stdout =
+        String::from_utf8(output.stdout.clone()).map_err(|e| format!("stdout not UTF-8: {e}"))?;
 
     ensure(
         !stdout.contains("warning:"),
@@ -394,8 +394,8 @@ fn budget_check_json_stdout_contains_only_machine_data() -> TestResult {
         "stdout should not contain diagnostic notes",
     )?;
 
-    let json: serde_json::Value = serde_json::from_str(&stdout)
-        .map_err(|e| format!("stdout is not valid JSON: {e}"))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).map_err(|e| format!("stdout is not valid JSON: {e}"))?;
 
     ensure(json.is_object(), "stdout should be a JSON object")
 }
