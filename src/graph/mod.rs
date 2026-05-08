@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::error::Error;
 use std::fmt;
 use std::time::Duration;
@@ -1660,23 +1660,7 @@ fn refresh_centrality_from_links(
     let betweenness = compute_betweenness(&projection);
     let betweenness_ms = betweenness_start.elapsed().as_secs_f64() * 1000.0;
 
-    let mut scores: Vec<MemoryCentralityScore> = pagerank
-        .scores
-        .iter()
-        .map(|pr| {
-            let bc = betweenness
-                .scores
-                .iter()
-                .find(|b| b.node == pr.node)
-                .map(|b| b.score)
-                .unwrap_or(0.0);
-            MemoryCentralityScore {
-                memory_id: pr.node.clone(),
-                pagerank: pr.score,
-                betweenness: bc,
-            }
-        })
-        .collect();
+    let mut scores = merge_centrality_scores(&pagerank.scores, &betweenness.scores);
 
     scores.sort_by(|a, b| {
         b.pagerank
@@ -1711,6 +1695,30 @@ fn refresh_centrality_from_links(
         top_pagerank,
         top_betweenness,
     })
+}
+
+fn merge_centrality_scores(
+    pagerank_scores: &[fnx_algorithms::CentralityScore],
+    betweenness_scores: &[fnx_algorithms::CentralityScore],
+) -> Vec<MemoryCentralityScore> {
+    let mut betweenness_by_node = HashMap::with_capacity(betweenness_scores.len());
+    for score in betweenness_scores {
+        betweenness_by_node
+            .entry(score.node.as_str())
+            .or_insert(score.score);
+    }
+
+    pagerank_scores
+        .iter()
+        .map(|score| MemoryCentralityScore {
+            memory_id: score.node.clone(),
+            pagerank: score.score,
+            betweenness: betweenness_by_node
+                .get(score.node.as_str())
+                .copied()
+                .unwrap_or(0.0),
+        })
+        .collect()
 }
 
 fn graph_snapshot_metrics_json(
@@ -4491,6 +4499,54 @@ mod tests {
             pagerank,
             betweenness,
         }
+    }
+
+    fn raw_centrality_score(node: &str, score: f64) -> fnx_algorithms::CentralityScore {
+        fnx_algorithms::CentralityScore {
+            node: node.to_owned(),
+            score,
+        }
+    }
+
+    #[test]
+    fn merge_centrality_scores_uses_betweenness_lookup() -> TestResult {
+        let pagerank_scores = vec![
+            raw_centrality_score(MEMORY_A, 0.4),
+            raw_centrality_score(MEMORY_B, 0.3),
+            raw_centrality_score(MEMORY_C, 0.2),
+        ];
+        let betweenness_scores = vec![
+            raw_centrality_score(MEMORY_C, 0.9),
+            raw_centrality_score(MEMORY_A, 0.2),
+            raw_centrality_score(MEMORY_A, 0.7),
+        ];
+
+        let scores = super::merge_centrality_scores(&pagerank_scores, &betweenness_scores);
+        let scores_by_id: std::collections::BTreeMap<&str, &super::MemoryCentralityScore> = scores
+            .iter()
+            .map(|score| (score.memory_id.as_str(), score))
+            .collect();
+
+        let a = scores_by_id
+            .get(MEMORY_A)
+            .copied()
+            .ok_or_else(|| "MEMORY_A score missing".to_owned())?;
+        let b = scores_by_id
+            .get(MEMORY_B)
+            .copied()
+            .ok_or_else(|| "MEMORY_B score missing".to_owned())?;
+        let c = scores_by_id
+            .get(MEMORY_C)
+            .copied()
+            .ok_or_else(|| "MEMORY_C score missing".to_owned())?;
+
+        assert_eq!(a.pagerank, 0.4);
+        assert_eq!(a.betweenness, 0.2);
+        assert_eq!(b.pagerank, 0.3);
+        assert_eq!(b.betweenness, 0.0);
+        assert_eq!(c.pagerank, 0.2);
+        assert_eq!(c.betweenness, 0.9);
+        Ok(())
     }
 
     fn karate_memory_id(node: u8) -> String {
