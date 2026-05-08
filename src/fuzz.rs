@@ -290,14 +290,10 @@ mod tests {
         let expected = iterations / 10;
         let tolerance = expected / 3;
         for (i, &count) in buckets.iter().enumerate() {
-            let diff = if count > expected {
-                count - expected
-            } else {
-                expected - count
-            };
+            let diff = count.abs_diff(expected);
             ensure(
                 diff < tolerance,
-                &format!(
+                format!(
                     "bucket {i} has {count} samples, expected ~{expected} (diff {diff} >= tolerance {tolerance})"
                 ),
             )?;
