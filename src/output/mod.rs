@@ -11672,6 +11672,98 @@ mod tests {
     }
 
     #[test]
+    fn exported_payload_schemas_match_known_emitted_fields() -> TestResult {
+        fn exported_schema(schema_id: &str) -> Result<serde_json::Value, String> {
+            let export_json = render_schema_export_json(Some(schema_id));
+            serde_json::from_str(&export_json).map_err(|error| error.to_string())
+        }
+
+        fn ensure_required_fields_exist_in_payload(
+            schema_id: &str,
+            payload: &serde_json::Value,
+        ) -> TestResult {
+            let schema = exported_schema(schema_id)?;
+            let required = schema["required"]
+                .as_array()
+                .ok_or_else(|| format!("{schema_id} export missing required array"))?;
+            let payload_object = payload
+                .as_object()
+                .ok_or_else(|| format!("{schema_id} sample payload must be an object"))?;
+
+            for field in required {
+                let field = field
+                    .as_str()
+                    .ok_or_else(|| format!("{schema_id} required entry must be a string"))?;
+                ensure(
+                    payload_object.contains_key(field),
+                    format!("{schema_id} requires {field}, but emitted sample lacks it"),
+                )?;
+            }
+            Ok(())
+        }
+
+        let recorder_report = crate::core::recorder::RecorderEventsListReport {
+            schema: crate::core::recorder::RECORDER_EVENTS_LIST_SCHEMA_V1,
+            events: Vec::new(),
+            filters: crate::core::recorder::RecorderEventsListOptions {
+                since: None,
+                source: None,
+                run_id: None,
+                limit: 100,
+            },
+        }
+        .data_json();
+        let recorder_schema =
+            exported_schema(crate::core::recorder::RECORDER_EVENTS_LIST_SCHEMA_V1)?;
+        let recorder_properties = recorder_schema["properties"]
+            .as_object()
+            .ok_or("recorder events list export missing properties object")?;
+        for key in recorder_report
+            .as_object()
+            .ok_or("recorder events list report must be an object")?
+            .keys()
+        {
+            ensure(
+                recorder_properties.contains_key(key),
+                format!("recorder events list export missing emitted field {key}"),
+            )?;
+        }
+        ensure(
+            !recorder_properties.contains_key("eventCount"),
+            "recorder events list export must not advertise obsolete eventCount field",
+        )?;
+        ensure_required_fields_exist_in_payload(
+            crate::core::recorder::RECORDER_EVENTS_LIST_SCHEMA_V1,
+            &recorder_report,
+        )?;
+
+        let job_list_error = serde_json::json!({
+            "schema": crate::steward::MAINTENANCE_JOB_LIST_SCHEMA_V1,
+            "command": "job list",
+            "code": "maintenance_job_since_invalid",
+            "message": "Invalid --since timestamp",
+            "repair": "Pass --since as an RFC 3339 timestamp.",
+            "jobs": [],
+        });
+        ensure_required_fields_exist_in_payload(
+            crate::steward::MAINTENANCE_JOB_LIST_SCHEMA_V1,
+            &job_list_error,
+        )?;
+
+        let job_show_error = serde_json::json!({
+            "schema": crate::steward::MAINTENANCE_JOB_SHOW_SCHEMA_V1,
+            "command": "job show",
+            "code": "maintenance_job_history_read_failed",
+            "message": "Could not read history",
+            "repair": "Check workspace .ee directory permissions.",
+        });
+        ensure_required_fields_exist_in_payload(
+            crate::steward::MAINTENANCE_JOB_SHOW_SCHEMA_V1,
+            &job_show_error,
+        )
+    }
+
+    #[test]
     fn toon_status_has_required_structure() -> TestResult {
         let report = StatusReport::gather();
         let actual = render_status_toon(&report);
