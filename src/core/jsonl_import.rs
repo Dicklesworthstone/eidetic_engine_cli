@@ -141,11 +141,14 @@ pub fn parse_jsonl_header(input: &str) -> Result<ExportHeader, JsonlHeaderParseE
         });
     }
 
-    serde_json::from_value::<ExportHeader>(value).map_err(|error| {
+    let header = serde_json::from_value::<ExportHeader>(value).map_err(|error| {
         JsonlHeaderParseError::InvalidHeader {
             message: error.to_string(),
         }
-    })
+    })?;
+    validate_export_header_required_fields(&header)
+        .map_err(|message| JsonlHeaderParseError::InvalidHeader { message })?;
+    Ok(header)
 }
 
 /// Summary returned by `ee import jsonl`.
@@ -566,14 +569,38 @@ fn parse_header_record(parsed: &mut ParsedJsonlImport, line_number: u32, value: 
         ));
         return;
     }
-    match serde_json::from_value::<ExportHeader>(value) {
+    match serde_json::from_value::<ExportHeader>(value)
+        .map_err(|error| error.to_string())
+        .and_then(|header| {
+            validate_export_header_required_fields(&header)?;
+            Ok(header)
+        }) {
         Ok(header) => parsed.header = Some(header),
         Err(error) => parsed.issues.push(JsonlImportIssue::error(
             Some(line_number),
             "invalid_header",
-            error.to_string(),
+            error,
         )),
     }
+}
+
+fn validate_export_header_required_fields(header: &ExportHeader) -> Result<(), String> {
+    for (field, value) in [
+        ("schema", header.schema.as_str()),
+        ("created_at", header.created_at.as_str()),
+        ("ee_version", header.ee_version.as_str()),
+        ("export_id", header.export_id.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(format!("header field `{field}` must not be blank"));
+        }
+    }
+    if header.schema != EXPORT_HEADER_SCHEMA_V1 {
+        return Err(format!(
+            "header field `schema` must be {EXPORT_HEADER_SCHEMA_V1}"
+        ));
+    }
+    Ok(())
 }
 
 fn parse_memory_record(
@@ -982,6 +1009,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_jsonl_header_rejects_blank_required_fields() -> TestResult {
+        let header_line = sample_jsonl()
+            .lines()
+            .next()
+            .ok_or_else(|| "sample JSONL must include a header line".to_string())?
+            .replace(
+                "\"created_at\":\"2026-04-30T00:00:00Z\"",
+                "\"created_at\":\"   \"",
+            );
+
+        let error =
+            parse_jsonl_header(&header_line).expect_err("blank created_at must reject header");
+        ensure(
+            error,
+            JsonlHeaderParseError::InvalidHeader {
+                message: "header field `created_at` must not be blank".to_string(),
+            },
+            "blank created_at",
+        )
+    }
+
+    #[test]
     fn parse_jsonl_source_collects_header_memory_and_tags() -> TestResult {
         let parsed = parse_jsonl_source(&sample_jsonl());
 
@@ -996,6 +1045,28 @@ mod tests {
                 .map(BTreeSet::len),
             Some(1),
             "tag count",
+        )
+    }
+
+    #[test]
+    fn parse_jsonl_source_reports_invalid_blank_header() -> TestResult {
+        let input = sample_jsonl()
+            .replace("\"ee_version\":\"0.1.0\"", "\"ee_version\":\"\"")
+            .replace("\"export_id\":\"exp-001\"", "\"export_id\":\"   \"");
+        let parsed = parse_jsonl_source(&input);
+
+        ensure(parsed.has_errors(), true, "has errors")?;
+        ensure(parsed.header.is_none(), true, "invalid header omitted")?;
+        ensure(
+            parsed.issues.iter().any(|issue| {
+                issue.line == Some(1)
+                    && issue.code == "invalid_header"
+                    && issue
+                        .message
+                        .contains("header field `ee_version` must not be blank")
+            }),
+            true,
+            "invalid header issue",
         )
     }
 
