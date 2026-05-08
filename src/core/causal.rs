@@ -1446,9 +1446,9 @@ pub fn estimate_causal_filtered_from_store(
     options: &EstimateOptions,
 ) -> Result<EstimateReport, DomainError> {
     let mut report = estimate_causal_uplift(options);
-    report.degradations.retain(|d| {
-        d.code != "causal_sample_underpowered" && d.code != "no_filters"
-    });
+    report
+        .degradations
+        .retain(|d| d.code != "causal_sample_underpowered" && d.code != "no_filters");
 
     if options.dry_run {
         return Ok(report);

@@ -39,9 +39,8 @@ use crate::core::backup::{
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::causal::{
     CompareOptions, EstimateOptions, PromotePlanOptions, TraceOptions,
-    compare_causal_chains_from_store, compare_causal_evidence,
-    compare_causal_filtered_from_store, estimate_causal_chain_from_store,
-    estimate_causal_filtered_from_store, estimate_causal_uplift,
+    compare_causal_chains_from_store, compare_causal_evidence, compare_causal_filtered_from_store,
+    estimate_causal_chain_from_store, estimate_causal_filtered_from_store, estimate_causal_uplift,
     promote_causal_chain_from_store, promote_causal_plan,
     stable_workspace_id as stable_causal_workspace_id, trace_causal_chains_from_store,
 };
