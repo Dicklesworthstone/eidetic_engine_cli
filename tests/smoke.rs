@@ -6311,7 +6311,7 @@ fn memory_temporal_links_and_graph_outputs_compose() -> TestResult {
         )?;
         ensure_equal(
             &graph_json["data"]["graph"]["edgeCount"],
-            &serde_json::json!(4),
+            &serde_json::json!(6),
             "graph dry-run edge count",
         )?;
     }
