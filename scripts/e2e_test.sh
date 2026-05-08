@@ -345,23 +345,24 @@ scenario_introspect() {
     local passed=0
     local failed=0
 
-    # Test: introspect commands --json
-    run_ee introspect commands_json introspect commands --json
+    # Test: introspect --json exposes command inventory
+    run_ee introspect commands_json introspect --json
     if assert_exit 0 "introspect commands exit" && \
        assert_stdout_json "introspect commands format" && \
        assert_stdout_contains "commands" "introspect has commands"; then
         ((passed++))
-        log_pass "introspect commands --json"
+        log_pass "introspect command inventory"
     else
         ((failed++))
     fi
 
-    # Test: introspect schemas --json
-    run_ee introspect schemas_json introspect schemas --json
+    # Test: introspect --json exposes schema inventory
+    run_ee introspect schemas_json introspect --json
     if assert_exit 0 "introspect schemas exit" && \
-       assert_stdout_json "introspect schemas format"; then
+       assert_stdout_json "introspect schemas format" && \
+       assert_stdout_contains "schemas" "introspect has schemas"; then
         ((passed++))
-        log_pass "introspect schemas --json"
+        log_pass "introspect schema inventory"
     else
         ((failed++))
     fi

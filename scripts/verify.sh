@@ -26,6 +26,8 @@ set -euo pipefail
 # Artifacts are written to /tmp/ee-e2e-*/artifacts by E2E scripts.
 
 INCLUDE_BENCH=false
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 for arg in "$@"; do
     case "$arg" in
@@ -49,6 +51,14 @@ echo ""
 ARTIFACT_DIRS=""
 STAGE_RESULTS=""
 TOTAL_START=$(date +%s)
+
+if [ -z "${EE_BINARY:-}" ]; then
+    if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+        export EE_BINARY="${CARGO_TARGET_DIR%/}/debug/ee"
+    else
+        export EE_BINARY="${REPO_ROOT}/target/debug/ee"
+    fi
+fi
 
 run_stage() {
     local name="$1"
