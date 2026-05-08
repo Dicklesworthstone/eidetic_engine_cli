@@ -4,6 +4,8 @@
 //! fixtures covering various secret types, encodings, and structural contexts.
 
 use ee::eval::{RedactionClass, RedactionLeakDetector};
+use proptest::prelude::*;
+use proptest::test_runner::Config as ProptestConfig;
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
@@ -48,6 +50,68 @@ fn class_from_str(s: &str) -> Option<RedactionClass> {
         "proprietary" => Some(RedactionClass::Proprietary),
         "custom" => Some(RedactionClass::Custom),
         _ => None,
+    }
+}
+
+fn edge_context_strategy(max_len: usize) -> impl Strategy<Value = String> {
+    prop::collection::vec(
+        prop::sample::select(vec![
+            ' ', '\n', '\t', '"', '\'', '`', '{', '}', '[', ']', '(', ')', '<', '>', ',', ':', ';',
+            '=', '/', '\\', '|', '.', 'λ', '東', '京', '💾', 'x', 'y', '0',
+        ]),
+        0..max_len,
+    )
+    .prop_map(|chars| chars.into_iter().collect())
+}
+
+fn detector_secret_case_strategy() -> impl Strategy<Value = (String, &'static str)> {
+    prop_oneof![
+        Just((
+            "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            "aws_secret_access_key",
+        )),
+        Just((
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c".to_string(),
+            "jwt_token",
+        )),
+        Just((
+            "-----BEGIN RSA PRIVATE KEY-----".to_string(),
+            "pem_private_key",
+        )),
+        Just(("sk-ant-api03-redaction-fuzz-token".to_string(), "anthropic_key")),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    #[test]
+    fn detector_finds_secret_shapes_in_edge_contexts(
+        prefix in edge_context_strategy(512),
+        (secret, pattern_name) in detector_secret_case_strategy(),
+        suffix in edge_context_strategy(512),
+    ) {
+        let input = format!("{prefix} {secret} {suffix}");
+        let detector = RedactionLeakDetector::new();
+        let first = detector.detect_leaks(&input);
+        let second = detector.detect_leaks(&input);
+
+        prop_assert_eq!(&first, &second, "detector output must be deterministic");
+        prop_assert!(
+            first
+                .iter()
+                .any(|leak| leak.class == RedactionClass::Secret
+                    && leak.pattern_name == pattern_name),
+            "expected pattern {pattern_name:?} in leaks {first:?} for input {input:?}",
+        );
+
+        for leak in first {
+            prop_assert!(
+                input.contains(&leak.matched_text),
+                "matched text should be drawn from input: {leak:?}",
+            );
+            prop_assert!(!leak.context.is_empty(), "leak context should not be empty");
+        }
     }
 }
 
