@@ -763,6 +763,81 @@ impl CommandEffect {
         }
     }
 
+    /// Create a workspace state-file write entry.
+    #[must_use]
+    pub fn workspace_state_write(
+        command_path: &'static str,
+        workspace_files: Vec<&'static str>,
+        idempotency_key: &'static str,
+        description: &'static str,
+    ) -> Self {
+        Self {
+            command_path,
+            default_effect: EffectClass::WorkspaceFileWrite,
+            dry_run_effect: Some(EffectClass::ReadOnly),
+            idempotency: IdempotencyClass::DryRunAvailable,
+            write_surfaces: WriteSurfaces {
+                db_tables: Vec::new(),
+                derived_paths: Vec::new(),
+                workspace_files,
+            },
+            mutation_contract: CommandMutationContract {
+                side_effect_class: SideEffectClass::AuditedMutation,
+                transaction_scope: Some("workspace-local state file update"),
+                idempotency_key: Some(idempotency_key),
+                audit_surface: Some("workspace state file"),
+                db_generation_effect: "source DB generation unchanged",
+                index_generation_effect: "none",
+                dry_run_behavior: Some(
+                    "--dry-run previews the state transition without writing workspace files",
+                ),
+                recovery_behavior: "failed workspace state writes return storage_error; rerun from the last readable state file",
+                no_overwrite_behavior: None,
+                degraded_code: None,
+            },
+            runtime_contract: CommandRuntimeContract::transactional(),
+            requires_audit: true,
+            description,
+        }
+    }
+
+    /// Create a durable state write backed by a non-audit-log evidence spine.
+    #[must_use]
+    pub fn durable_state_write(
+        command_path: &'static str,
+        db_tables: Vec<&'static str>,
+        idempotency_key: &'static str,
+        audit_surface: &'static str,
+        description: &'static str,
+    ) -> Self {
+        Self {
+            command_path,
+            default_effect: EffectClass::DurableMemoryWrite,
+            dry_run_effect: Some(EffectClass::ReadOnly),
+            idempotency: IdempotencyClass::DryRunAvailable,
+            write_surfaces: WriteSurfaces {
+                db_tables,
+                derived_paths: Vec::new(),
+                workspace_files: Vec::new(),
+            },
+            mutation_contract: CommandMutationContract {
+                side_effect_class: SideEffectClass::AuditedMutation,
+                transaction_scope: Some("single DB transaction across state/evidence rows"),
+                idempotency_key: Some(idempotency_key),
+                audit_surface: Some(audit_surface),
+                db_generation_effect: "advances on commit; unchanged for dry-run or rollback",
+                index_generation_effect: "none unless a downstream steward job is queued",
+                dry_run_behavior: Some("validates and renders the report without writing DB rows"),
+                recovery_behavior: "transaction rollback leaves no partial durable records",
+                no_overwrite_behavior: None,
+                degraded_code: None,
+            },
+            runtime_contract: CommandRuntimeContract::transactional(),
+            requires_audit: true,
+            description,
+        }
+    }
+
     /// Create a degraded/unavailable read-only effect entry.
     #[must_use]
     pub const fn degraded_unavailable(
@@ -996,6 +1071,10 @@ impl EffectManifest {
             CommandEffect::read_only("plan recipe list", "List static plan recipes"),
             CommandEffect::read_only("plan recipe show", "Show static plan recipe"),
             CommandEffect::read_only(
+                "preflight show",
+                "Read a persisted preflight run from the workspace-local store",
+            ),
+            CommandEffect::read_only(
                 "procedure drift",
                 "Inspect procedure maturity and feedback drift signals",
             ),
@@ -1026,7 +1105,12 @@ impl EffectManifest {
             CommandEffect::read_only("situation link", "Plan situation link (dry-run)"),
             CommandEffect::read_only("situation show", "Show stored situation details"),
             CommandEffect::read_only("status", "Report workspace status"),
+            CommandEffect::read_only(
+                "support inspect",
+                "Verify and inspect a redacted support bundle manifest",
+            ),
             CommandEffect::read_only("task-frame show", "Show passive task-frame state"),
+            CommandEffect::read_only("tripwire list", "List persisted tripwire rules"),
             CommandEffect::read_only("update", "Plan update without mutation"),
             CommandEffect::read_only("version", "Print version"),
             CommandEffect::read_only("workspace list", "List workspace aliases"),
@@ -1140,21 +1224,6 @@ impl EffectManifest {
                 "revision_write_unavailable",
                 "Memory revision abstains until immutable revision writes are implemented",
             ),
-            CommandEffect::degraded_unavailable(
-                "preflight run",
-                "preflight_evidence_unavailable",
-                "Preflight run abstains until persisted evidence matches exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "preflight show",
-                "preflight_evidence_unavailable",
-                "Preflight inspection abstains until stored preflight runs exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "preflight close",
-                "preflight_evidence_unavailable",
-                "Preflight close abstains until stored preflight runs exist",
-            ),
             CommandEffect::read_only(
                 "preflight guard",
                 "Checks command against preflight guard rules",
@@ -1165,21 +1234,6 @@ impl EffectManifest {
             CommandEffect::read_only(
                 "profile config plan",
                 "Plan operating profile configuration without writing files",
-            ),
-            CommandEffect::degraded_unavailable(
-                "recorder start",
-                "recorder_store_unavailable",
-                "Recorder start abstains until event storage exists",
-            ),
-            CommandEffect::degraded_unavailable(
-                "recorder event",
-                "recorder_store_unavailable",
-                "Recorder event abstains until event storage exists",
-            ),
-            CommandEffect::degraded_unavailable(
-                "recorder finish",
-                "recorder_store_unavailable",
-                "Recorder finish abstains until event storage exists",
             ),
             CommandEffect::read_only(
                 "recorder tail",
@@ -1216,26 +1270,6 @@ impl EffectManifest {
             CommandEffect::read_only(
                 "rehearse promote-plan",
                 "Rehearsal promotion planning reads a manifest and emits a conservative checklist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "support bundle",
-                "support_bundle_unavailable",
-                "Support bundle creation abstains until redacted archives are materialized",
-            ),
-            CommandEffect::degraded_unavailable(
-                "support inspect",
-                "support_bundle_unavailable",
-                "Support bundle inspection abstains until manifests are verified",
-            ),
-            CommandEffect::degraded_unavailable(
-                "tripwire list",
-                "tripwire_store_unavailable",
-                "Tripwire listing abstains until persisted tripwire storage exists",
-            ),
-            CommandEffect::degraded_unavailable(
-                "tripwire check",
-                "tripwire_store_unavailable",
-                "Tripwire checks abstain until explicit event payload evaluation exists",
             ),
         ]
     }
@@ -1408,6 +1442,27 @@ impl EffectManifest {
                 vec!["memories", "memory_tags", "audit_log"],
                 "Store a new memory",
             ),
+            CommandEffect::durable_state_write(
+                "recorder start",
+                vec!["recorder_runs"],
+                "generated recorder run id",
+                "recorder run store",
+                "Persist a recorder run start row",
+            ),
+            CommandEffect::durable_state_write(
+                "recorder event",
+                vec!["recorder_events"],
+                "run id plus next recorder sequence",
+                "recorder event spine",
+                "Append a redacted recorder event row",
+            ),
+            CommandEffect::durable_state_write(
+                "recorder finish",
+                vec!["recorder_runs"],
+                "recorder run id",
+                "recorder run store",
+                "Mark a recorder run finished and persist rolled-up counts",
+            ),
             CommandEffect::durable_write(
                 "review session --propose",
                 vec!["curation_candidates", "audit_log"],
@@ -1433,6 +1488,13 @@ impl EffectManifest {
                 "rule protect",
                 vec!["procedural_rules", "audit_log"],
                 "Protect or unprotect a procedural rule",
+            ),
+            CommandEffect::durable_state_write(
+                "tripwire check",
+                vec!["tripwires", "tripwire_check_events"],
+                "tripwire id plus checked_at plus event payload hash",
+                "tripwire check event store",
+                "Evaluate a persisted tripwire and record the check event unless --dry-run is used",
             ),
         ]
     }
@@ -1487,6 +1549,23 @@ impl EffectManifest {
                 "handoff create",
                 vec!["<--out path>"],
                 "Write a redacted continuity capsule to a user-specified output path",
+            ),
+            CommandEffect::workspace_state_write(
+                "preflight close",
+                vec![".ee/preflight_runs.json"],
+                "preflight run id",
+                "Close a persisted preflight run in the workspace-local run store",
+            ),
+            CommandEffect::workspace_state_write(
+                "preflight run",
+                vec![".ee/preflight_runs.json"],
+                "generated preflight run id",
+                "Persist an evidence-backed preflight run in the workspace-local run store",
+            ),
+            CommandEffect::workspace_file_write(
+                "support bundle",
+                vec!["<--out path>/"],
+                "Create a redacted support bundle side-path artifact",
             ),
             CommandEffect::workspace_file_write(
                 "focus clear",
@@ -1883,9 +1962,9 @@ mod tests {
     #[test]
     fn command_effect_degraded_unavailable_is_read_only_with_code() -> TestResult {
         let effect = CommandEffect::degraded_unavailable(
-            "support bundle",
-            "support_bundle_unavailable",
-            "Support bundles abstain until real artifacts exist",
+            "lab replay",
+            "lab_replay_unavailable",
+            "Lab replay abstains until replay evidence exists",
         );
         ensure(
             effect.default_effect,
@@ -1904,7 +1983,7 @@ mod tests {
         )?;
         ensure(
             effect.mutation_contract.degraded_code,
-            Some("support_bundle_unavailable"),
+            Some("lab_replay_unavailable"),
             "degraded code is explicit",
         )?;
         ensure(
@@ -2109,7 +2188,7 @@ mod tests {
     fn manifest_tracks_unavailable_commands_as_non_mutating_degraded_paths() -> TestResult {
         let manifest = EffectManifest::build();
 
-        let (command, code) = ("support bundle", "support_bundle_unavailable");
+        let (command, code) = ("lab replay", "lab_replay_unavailable");
         let effect = manifest
             .get(command)
             .ok_or_else(|| format!("{command} not found"))?;

@@ -1034,8 +1034,8 @@ mod tests {
             r#"{
               "version": "ee.query.v1",
               "query": {"text": "format before release", "mode": "hybrid"},
-              "budget": {"maxTokens": 4000, "candidatePool": 10},
-              "output": {"format": "json", "profile": "compact"}
+              "budget": {"maxTokens": 4000, "candidatePool": 10, "maxResults": 1},
+              "output": {"format": "json", "profile": "compact", "explain": true}
             }"#,
         )
         .map_err(|error| error.to_string())?;

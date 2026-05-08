@@ -8,6 +8,7 @@
       "profile": "compact",
       "maxTokens": 4000,
       "candidatePool": 10,
+      "maxResults": 1,
       "sections": [
         "procedural_rules",
         "decisions",
@@ -24,13 +25,21 @@
         "usedTokens": 8
       },
       "advisoryBanner": {
-        "status": "clear",
-        "summary": "Packed memories are from high-trust classes; still verify provenance before acting.",
+        "status": "degraded",
+        "summary": "Context includes 1 degraded signal; validate advisory memory and repair degraded sources before relying on this pack.",
         "authoritativeCount": 1,
         "advisoryCount": 0,
         "legacyCount": 0,
-        "degradationCount": 0,
-        "notes": []
+        "degradationCount": 1,
+        "notes": [
+          {
+            "code": "degraded_context",
+            "severity": "low",
+            "message": "1 degraded context signal present; inspect degraded[] repairs before relying on omitted or fallback sources.",
+            "memoryIds": [],
+            "action": "inspect_degraded_repairs"
+          }
+        ]
       },
       "quality": {
         "itemCount": 1,
@@ -172,6 +181,13 @@
         ]
       }
     },
-    "degraded": []
+    "degraded": [
+      {
+        "code": "query_output_explain_already_included",
+        "severity": "low",
+        "message": "output.explain was accepted; JSON context packs already include selection certificates and per-item why explanations.",
+        "repair": "Inspect data.pack.selectionCertificate and data.pack.items[].why."
+      }
+    ]
   }
 }

@@ -1408,6 +1408,9 @@ pub fn render_context_response_json(response: &ContextResponse) -> String {
             request.field_str("profile", response.data.request.profile.as_str());
             request.field_u32("maxTokens", response.data.request.budget.max_tokens());
             request.field_u32("candidatePool", response.data.request.candidate_pool);
+            if let Some(max_results) = response.data.request.max_results {
+                request.field_u32("maxResults", max_results);
+            }
             let sections = string_array_json(
                 response
                     .data

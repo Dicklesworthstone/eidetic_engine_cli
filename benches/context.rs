@@ -114,6 +114,7 @@ fn bench_context(c: &mut Criterion) {
                         profile: None,
                         max_tokens: Some(tokens),
                         candidate_pool: Some(50),
+                        max_results: None,
                     };
                     run_context_pack(&options).expect("context pack");
                 });
@@ -152,6 +153,7 @@ fn bench_context_memory_scales(c: &mut Criterion) {
                     profile: None,
                     max_tokens: Some(4000),
                     candidate_pool: Some(50),
+                    max_results: None,
                 };
                 run_context_pack(&options).expect("context pack");
             });

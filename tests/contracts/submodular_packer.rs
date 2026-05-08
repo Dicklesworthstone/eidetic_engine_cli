@@ -284,6 +284,7 @@ fn pack_selection_certificate_golden_is_stable() -> TestResult {
         profile: Some(ContextPackProfile::Submodular),
         max_tokens: Some(100),
         candidate_pool: Some(3),
+        max_results: None,
         sections: vec![PackSection::ProceduralRules],
     })
     .map_err(|error| format!("{error:?}"))?;

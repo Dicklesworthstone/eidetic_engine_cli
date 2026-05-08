@@ -6926,14 +6926,6 @@ fn pack_query_file_invalid_timestamp_uses_stable_machine_error() -> TestResult {
 fn pack_query_file_unsupported_recognized_fields_use_stable_machine_error() -> TestResult {
     let cases = [
         (
-            "tags",
-            r#"{
-              "version": "ee.query.v1",
-              "query": {"text": "prepare release"},
-              "tags": {"require": ["release"]}
-            }"#,
-        ),
-        (
             "time",
             r#"{
               "version": "ee.query.v1",
@@ -6970,6 +6962,113 @@ fn pack_query_file_unsupported_recognized_fields_use_stable_machine_error() -> T
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn pack_query_file_max_results_and_output_explain_are_observable() -> TestResult {
+    let workspace = unique_artifact_dir("pack-query-controls")?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+
+    let init = run_ee(&["--workspace", workspace_arg.as_str(), "--json", "init"])?;
+    let init_stderr = String::from_utf8_lossy(&init.stderr);
+    ensure(
+        init.status.success(),
+        format!("init should succeed; stderr: {init_stderr}"),
+    )?;
+    ensure(init.stderr.is_empty(), "init stderr clean")?;
+
+    for content in [
+        "Release checklist requires cargo fmt.",
+        "Release checklist requires cargo clippy.",
+    ] {
+        let remember = run_ee(&[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "remember",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--tags",
+            "release,checks",
+            content,
+        ])?;
+        let remember_stderr = String::from_utf8_lossy(&remember.stderr);
+        ensure(
+            remember.status.success(),
+            format!("remember should succeed; stderr: {remember_stderr}"),
+        )?;
+        ensure(remember.stderr.is_empty(), "remember stderr clean")?;
+    }
+
+    let query_file = workspace.join("query-controls.eeq.json");
+    fs::write(
+        &query_file,
+        r#"{
+          "version": "ee.query.v1",
+          "query": {"text": "release checklist"},
+          "budget": {"maxTokens": 4000, "candidatePool": 10, "maxResults": 1},
+          "output": {"format": "json", "explain": true}
+        }"#,
+    )
+    .map_err(|error| error.to_string())?;
+    let query_file_arg = query_file.to_string_lossy().into_owned();
+
+    let output = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "pack",
+        "--query-file",
+        query_file_arg.as_str(),
+    ])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    ensure(
+        output.status.success(),
+        format!("pack query-file controls should succeed; stderr: {stderr}"),
+    )?;
+    ensure(
+        output.stderr.is_empty(),
+        "pack query-file controls stderr clean",
+    )?;
+    ensure_no_ansi(&stdout, "pack query-file controls stdout")?;
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("pack query-file controls stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &json["data"]["request"]["maxResults"],
+        &serde_json::json!(1),
+        "query-file request maxResults",
+    )?;
+    let items = json["data"]["pack"]["items"]
+        .as_array()
+        .ok_or_else(|| "pack items must be an array".to_string())?;
+    ensure(
+        items.len() <= 1,
+        format!(
+            "budget.maxResults should cap selected items; got {}",
+            items.len()
+        ),
+    )?;
+    let degraded = json["data"]["degraded"]
+        .as_array()
+        .ok_or_else(|| "degraded must be an array".to_string())?;
+    ensure(
+        degraded
+            .iter()
+            .any(|item| item["code"] == "query_output_explain_already_included"),
+        "output.explain should be observable in degraded metadata",
+    )?;
+    ensure(
+        degraded
+            .iter()
+            .any(|item| item["code"] == "context_query_max_results_applied"),
+        "budget.maxResults should report candidate trimming",
+    )
 }
 
 #[cfg(unix)]

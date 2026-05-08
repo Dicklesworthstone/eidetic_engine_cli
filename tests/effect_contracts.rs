@@ -513,8 +513,8 @@ fn effect_manifest_tracks_degraded_unavailable_paths_as_non_mutating() -> TestRe
 
     for (command, code) in [
         ("memory revise", "revision_write_unavailable"),
-        ("support bundle", "support_bundle_unavailable"),
-        ("tripwire check", "tripwire_store_unavailable"),
+        ("lab replay", "lab_replay_unavailable"),
+        ("economy report", "economy_metrics_unavailable"),
     ] {
         let effect = manifest
             .get(command)
@@ -545,6 +545,105 @@ fn effect_manifest_tracks_degraded_unavailable_paths_as_non_mutating() -> TestRe
             &format!("{command} degraded code"),
         )?;
     }
+    Ok(())
+}
+
+#[test]
+fn effect_manifest_tracks_implemented_surfaces() -> TestResult {
+    use ee::core::effect::{EffectClass, EffectManifest, SideEffectClass};
+
+    let manifest = EffectManifest::build();
+
+    for command in ["support inspect", "preflight show", "tripwire list"] {
+        let effect = manifest
+            .get(command)
+            .ok_or_else(|| format!("{command} not in manifest"))?;
+        ensure(
+            effect.default_effect,
+            EffectClass::ReadOnly,
+            &format!("{command} is read-only"),
+        )?;
+        ensure(
+            effect.mutation_contract.side_effect_class,
+            SideEffectClass::ReadOnly,
+            &format!("{command} has read-only contract"),
+        )?;
+        ensure(
+            effect.mutation_contract.degraded_code,
+            None,
+            &format!("{command} has no unavailable sentinel"),
+        )?;
+    }
+
+    let support = manifest
+        .get("support bundle")
+        .ok_or_else(|| "support bundle not in manifest".to_string())?;
+    ensure(
+        support.default_effect,
+        EffectClass::WorkspaceFileWrite,
+        "support bundle creates side-path artifact",
+    )?;
+    ensure(
+        support.mutation_contract.side_effect_class,
+        SideEffectClass::SidePathArtifact,
+        "support bundle side-effect class",
+    )?;
+    ensure(
+        support.mutation_contract.degraded_code,
+        None,
+        "support bundle has no unavailable sentinel",
+    )?;
+
+    for command in ["preflight run", "preflight close"] {
+        let effect = manifest
+            .get(command)
+            .ok_or_else(|| format!("{command} not in manifest"))?;
+        ensure(
+            effect.default_effect,
+            EffectClass::WorkspaceFileWrite,
+            &format!("{command} writes workspace-local preflight state"),
+        )?;
+        ensure(
+            effect
+                .write_surfaces
+                .workspace_files
+                .contains(&".ee/preflight_runs.json"),
+            true,
+            &format!("{command} names the preflight run store"),
+        )?;
+        ensure(
+            effect.mutation_contract.degraded_code,
+            None,
+            &format!("{command} has no unavailable sentinel"),
+        )?;
+    }
+
+    for command in [
+        "recorder start",
+        "recorder event",
+        "recorder finish",
+        "tripwire check",
+    ] {
+        let effect = manifest
+            .get(command)
+            .ok_or_else(|| format!("{command} not in manifest"))?;
+        ensure(
+            effect.default_effect,
+            EffectClass::DurableMemoryWrite,
+            &format!("{command} writes durable DB state"),
+        )?;
+        ensure(
+            effect.mutation_contract.side_effect_class,
+            SideEffectClass::AuditedMutation,
+            &format!("{command} has audited mutation contract"),
+        )?;
+        ensure(
+            effect.mutation_contract.degraded_code,
+            None,
+            &format!("{command} has no unavailable sentinel"),
+        )?;
+    }
+
     Ok(())
 }
 
@@ -1048,8 +1147,8 @@ fn effect_manifest_runtime_budget_deadline_math_is_deterministic() -> TestResult
         .ok_or_else(|| "support bundle not in manifest".to_string())?;
     ensure(
         support.runtime_contract.effective_budget_ms(None),
-        Ok(None),
-        "degraded unavailable command has no runtime budget by default",
+        Ok(Some(120_000)),
+        "support bundle side-path artifact has default runtime budget",
     )
 }
 

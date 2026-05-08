@@ -486,6 +486,7 @@ pub struct ContextRequestInput {
     pub profile: Option<ContextPackProfile>,
     pub max_tokens: Option<u32>,
     pub candidate_pool: Option<u32>,
+    pub max_results: Option<u32>,
     pub sections: Vec<PackSection>,
 }
 
@@ -497,6 +498,7 @@ impl ContextRequestInput {
             profile: None,
             max_tokens: None,
             candidate_pool: None,
+            max_results: None,
             sections: Vec::new(),
         }
     }
@@ -508,6 +510,7 @@ pub struct ContextRequest {
     pub profile: ContextPackProfile,
     pub budget: TokenBudget,
     pub candidate_pool: u32,
+    pub max_results: Option<u32>,
     pub sections: Vec<PackSection>,
 }
 
@@ -531,6 +534,9 @@ impl ContextRequest {
         if candidate_pool == 0 {
             return Err(PackValidationError::ZeroCandidatePool);
         }
+        if input.max_results == Some(0) {
+            return Err(PackValidationError::ZeroMaxResults);
+        }
         let sections = if input.sections.is_empty() {
             PackSection::all().to_vec()
         } else {
@@ -542,6 +548,7 @@ impl ContextRequest {
             profile: input.profile.unwrap_or(ContextPackProfile::Balanced),
             budget,
             candidate_pool,
+            max_results: input.max_results,
             sections,
         })
     }
@@ -2429,6 +2436,7 @@ pub enum PackValidationError {
     EmptyQuery,
     ZeroTokenBudget,
     ZeroCandidatePool,
+    ZeroMaxResults,
     EmptyCandidateContent {
         memory_id: MemoryId,
     },
@@ -2463,6 +2471,7 @@ impl fmt::Display for PackValidationError {
             Self::ZeroCandidatePool => {
                 formatter.write_str("context candidate pool must be non-zero")
             }
+            Self::ZeroMaxResults => formatter.write_str("context max results must be non-zero"),
             Self::EmptyCandidateContent { memory_id } => {
                 write!(formatter, "pack candidate `{memory_id}` has empty content")
             }
@@ -4462,6 +4471,7 @@ mod tests {
             profile: Some(ContextPackProfile::Thorough),
             max_tokens: Some(8_000),
             candidate_pool: Some(12),
+            max_results: Some(3),
             sections: vec![PackSection::ProceduralRules, PackSection::Failures],
         })
         .map_err(|error| format!("request rejected: {error:?}"))?;
@@ -4473,6 +4483,7 @@ mod tests {
         )?;
         ensure_equal(&request.budget.max_tokens(), &8_000, "explicit max tokens")?;
         ensure_equal(&request.candidate_pool, &12, "explicit candidate pool")?;
+        ensure_equal(&request.max_results, &Some(3), "explicit max results")?;
         ensure_equal(
             &request.sections,
             &vec![PackSection::ProceduralRules, PackSection::Failures],
@@ -4493,6 +4504,7 @@ mod tests {
             profile: None,
             max_tokens: Some(0),
             candidate_pool: None,
+            max_results: None,
             sections: Vec::new(),
         });
         ensure(
@@ -4505,11 +4517,25 @@ mod tests {
             profile: None,
             max_tokens: None,
             candidate_pool: Some(0),
+            max_results: None,
             sections: Vec::new(),
         });
         ensure(
             matches!(zero_pool, Err(PackValidationError::ZeroCandidatePool)),
             "zero candidate pool must be rejected",
+        )?;
+
+        let zero_results = ContextRequest::new(ContextRequestInput {
+            query: "task".to_string(),
+            profile: None,
+            max_tokens: None,
+            candidate_pool: None,
+            max_results: Some(0),
+            sections: Vec::new(),
+        });
+        ensure(
+            matches!(zero_results, Err(PackValidationError::ZeroMaxResults)),
+            "zero max results must be rejected",
         )
     }
 

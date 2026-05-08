@@ -1,7 +1,7 @@
 //! EE-xufd: query-file validation errors produce JSON error envelope
 //!
-//! Validates that `ee pack --query-file` with unsupported fields (tags, time,
-//! graph, etc.) produces proper ee.error.v1 envelope with ERR_UNSUPPORTED_FEATURE.
+//! Validates that `ee pack --query-file` accepts supported tag filters and
+//! rejects unsupported fields with a proper ee.error.v1 envelope.
 //!
 //! NO MOCKS. Real ee binary, temp workspace.
 
@@ -70,6 +70,20 @@ fn assert_error_envelope(
     ensure_equal(&code, &expected_code, &format!("{context} error.code"))
 }
 
+fn assert_response_envelope(json: &serde_json::Value, context: &str) -> TestResult {
+    let schema = json
+        .get("schema")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| format!("{context}: missing schema field"))?;
+    ensure_equal(&schema, &"ee.response.v1", &format!("{context} schema"))?;
+
+    let success = json
+        .get("success")
+        .and_then(|s| s.as_bool())
+        .ok_or_else(|| format!("{context}: missing success field"))?;
+    ensure(success, format!("{context}: expected success=true"))
+}
+
 fn assert_stderr_empty(output: &Output, context: &str) -> TestResult {
     let stderr = String::from_utf8_lossy(&output.stderr);
     ensure(
@@ -79,7 +93,7 @@ fn assert_stderr_empty(output: &Output, context: &str) -> TestResult {
 }
 
 #[test]
-fn query_file_with_unsupported_tags_field_returns_error() -> TestResult {
+fn query_file_with_valid_tags_object_succeeds() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let workspace = tempdir.path().to_string_lossy().to_string();
 
@@ -91,11 +105,93 @@ fn query_file_with_unsupported_tags_field_returns_error() -> TestResult {
         "init exit code",
     )?;
 
-    // Create query file with unsupported 'tags' field
+    for (tags, content) in [
+        ("important", "test query important result"),
+        ("important,draft", "test query draft result"),
+    ] {
+        let remember = run_ee(&[
+            "--workspace",
+            &workspace,
+            "--json",
+            "remember",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--tags",
+            tags,
+            content,
+        ])?;
+        ensure_equal(
+            &remember.status.code(),
+            &Some(EXIT_SUCCESS),
+            "remember exit code",
+        )?;
+        assert_stderr_empty(&remember, "remember")?;
+    }
+
+    // Create query file with valid tags object
     let query_file = tempdir.path().join("query.json");
     let query_content = r#"{
         "version": "ee.query.v1",
-        "query": "test query",
+        "query": {"text": "test query"},
+        "tags": {
+            "require": ["important"],
+            "exclude": ["draft"]
+        }
+    }"#;
+    fs::write(&query_file, query_content).map_err(|e| e.to_string())?;
+
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "pack",
+        "--query-file",
+        &query_file.to_string_lossy(),
+        "--json",
+    ])?;
+
+    ensure_equal(
+        &output.status.code(),
+        &Some(EXIT_SUCCESS),
+        "valid tags object should succeed",
+    )?;
+
+    let json = stdout_json(&output)?;
+    assert_response_envelope(&json, "valid tags")?;
+    let items = json["data"]["pack"]["items"]
+        .as_array()
+        .ok_or_else(|| "valid tags: missing pack items array".to_string())?;
+    ensure(!items.is_empty(), "valid tags: expected selected memory")?;
+    ensure(
+        items.iter().all(|item| {
+            item["content"].as_str().is_some_and(|content| {
+                content.contains("important result") && !content.contains("draft result")
+            })
+        }),
+        "valid tags: selected memories must satisfy require and exclude filters",
+    )?;
+    assert_stderr_empty(&output, "valid tags")
+}
+
+#[test]
+fn query_file_with_invalid_tags_array_returns_error() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    // Init workspace
+    let init_output = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(
+        &init_output.status.code(),
+        &Some(EXIT_SUCCESS),
+        "init exit code",
+    )?;
+
+    // Create query file with invalid tags format (array instead of object)
+    let query_file = tempdir.path().join("query.json");
+    let query_content = r#"{
+        "version": "ee.query.v1",
+        "query": {"text": "test query"},
         "tags": ["important"]
     }"#;
     fs::write(&query_file, query_content).map_err(|e| e.to_string())?;
@@ -111,12 +207,12 @@ fn query_file_with_unsupported_tags_field_returns_error() -> TestResult {
 
     ensure(
         output.status.code() != Some(EXIT_SUCCESS),
-        "unsupported tags field should produce non-zero exit code",
+        "invalid tags array should produce non-zero exit code",
     )?;
 
     let json = stdout_json(&output)?;
-    assert_error_envelope(&json, "ERR_UNSUPPORTED_FEATURE", "tags field")?;
-    assert_stderr_empty(&output, "tags field")
+    assert_error_envelope(&json, "ERR_MALFORMED_JSON", "invalid tags format")?;
+    assert_stderr_empty(&output, "invalid tags format")
 }
 
 #[test]

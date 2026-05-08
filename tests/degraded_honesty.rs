@@ -217,7 +217,13 @@ fn side_effect_class(args: &[String]) -> &'static str {
     } else if args.iter().any(|arg| arg == "status") {
         "read-only capability probe; no workspace, database, index, job, or adapter mutation"
     } else if args.iter().any(|arg| arg == "support") {
-        "conservative abstention; no support bundle archive, manifest, or verification emitted"
+        if args.iter().any(|arg| arg == "inspect") {
+            "read-only support bundle verification; no bundle mutation"
+        } else if args.iter().any(|arg| arg == "--dry-run") {
+            "dry-run support bundle plan; no archive or manifest files written"
+        } else {
+            "side-path support bundle artifact write with redaction and manifest verification"
+        }
     } else if args.windows(2).any(
         |window| matches!(window, [first, second] if first == "diag" && second == "quarantine"),
     ) {
@@ -255,9 +261,19 @@ fn side_effect_class(args: &[String]) -> &'static str {
     } else if args.iter().any(|arg| arg == "plan") {
         "read-only recipe recommendation/explanation; no plan mutation"
     } else if args.iter().any(|arg| arg == "preflight") {
-        "conservative abstention; no preflight run, risk brief, or feedback ledger mutation"
+        if args.iter().any(|arg| arg == "show") {
+            "read-only persisted preflight run lookup"
+        } else if args.iter().any(|arg| arg == "--dry-run") {
+            "dry-run preflight report; no preflight run store mutation"
+        } else {
+            "workspace-local preflight run store mutation with evidence-backed tripwires"
+        }
     } else if args.iter().any(|arg| arg == "tripwire") {
-        "read-only tripwire store query/evaluation; no tripwire mutation"
+        if args.iter().any(|arg| arg == "check") && !args.iter().any(|arg| arg == "--dry-run") {
+            "persisted tripwire check event mutation when the tripwire exists"
+        } else {
+            "read-only tripwire store query/evaluation; no tripwire mutation"
+        }
     } else if args.iter().any(|arg| arg == "eval") {
         "read-only fixture discovery/evaluation report generation; no durable mutation"
     } else if args.iter().any(|arg| arg == "review") {

@@ -66,8 +66,8 @@ The `version` field is required. Unknown versions return `ERR_UNKNOWN_VERSION`.
 
 ## Tag Filtering
 
-> **Status: Not Implemented** — Tag fields are recognized but return `ERR_UNSUPPORTED_FEATURE`.
-> Use CLI flags: `ee context --tags release,checklist` or `ee search --tags release`.
+Tag filters select memories based on their tags. All tag constraints must be satisfied
+for a memory to be included in results.
 
 ### Positive Tags (require)
 
@@ -267,7 +267,7 @@ Boolean predicates on memory metadata fields.
 | `output.profile` | enum | `"balanced"` | `"compact"`, `"balanced"`, `"thorough"`, `"submodular"` (`"custom"` not implemented) |
 | `output.format` | enum | `"json"` | Hint for renderer selection |
 | `output.fields` | enum | `"standard"` | `"minimal"`, `"summary"`, `"standard"`, `"full"` (validated; projection controlled by `--fields` CLI flag) |
-| `output.explain` | bool | false | Include scoring/selection explanations (**not implemented**) |
+| `output.explain` | bool | false | Include scoring/selection explanations (JSON packs include `selectionCertificate` and per-item `why` by default; setting `true` emits an informational degradation confirming this) |
 
 ### Budget and Limits
 
@@ -284,10 +284,12 @@ Boolean predicates on memory metadata fields.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `budget.maxTokens` | int | 8000 | Token budget for context pack |
-| `budget.maxResults` | int | 100 | Maximum memories to return |
+| `budget.maxResults` | int | 100 | Maximum candidates admitted to pack assembly after retrieval/focus expansion |
 | `budget.candidatePool` | int | 200 | Candidate pool size before filtering |
 
 **Validation**: Zero values return `ERR_ZERO_BUDGET`.
+When `budget.maxResults` trims candidates, JSON output includes the
+`context_query_max_results_applied` degradation so the limit is observable.
 
 ### Pagination
 
@@ -385,7 +387,7 @@ Fields that are recognized but not yet implemented return `ERR_UNSUPPORTED_FEATU
 }
 ```
 
-### ⚠️ Tag Filtering (not implemented)
+### Tag Filtering (working)
 
 ```json
 {
@@ -398,7 +400,8 @@ Fields that are recognized but not yet implemented return `ERR_UNSUPPORTED_FEATU
 }
 ```
 
-Use CLI instead: `ee context "deployment" --tags production --exclude-tags deprecated`
+Equivalent CLI flags remain available for ad hoc commands:
+`ee context "deployment" --tags production --exclude-tags deprecated`
 
 ### Metadata Boolean Filters (working)
 
@@ -485,7 +488,7 @@ The following shows the full schema, but most fields will error. A working subse
     "text": "prepare release",
     "mode": "hybrid"
   },
-  "tags": {                           // ⚠️ Not implemented
+  "tags": {                           // Implemented
     "require": ["release"],
     "exclude": ["draft"]
   },
@@ -566,7 +569,7 @@ This schema **does not**:
 | `query.text` | **Implemented** | Core text search |
 | `query.mode` | **Implemented** | hybrid, lexical, semantic, exact |
 | `workspace` | **Implemented** | Workspace path resolution |
-| `tags.*` | Not Implemented | Use `--tags` CLI flag instead |
+| `tags.*` | **Implemented** | require, requireAny, exclude |
 | `filters.*` | **Implemented** | eq, neq, in, notIn, gte, lte, exists operators |
 | `time.*` | Not Implemented | Use `--after`/`--before` CLI flags |
 | `asOf` | Not Implemented | Point-in-time queries planned |
@@ -576,11 +579,11 @@ This schema **does not**:
 | `graph.*` | Not Implemented | Graph traversal hints planned |
 | `budget.maxTokens` | **Implemented** | Token budget for context pack |
 | `budget.candidatePool` | **Implemented** | Candidate pool size |
-| `budget.maxResults` | Not Implemented | Use `--limit` CLI flag |
+| `budget.maxResults` | **Implemented** | Caps candidates admitted to pack assembly |
 | `output.profile` | **Implemented** | compact, balanced, thorough, submodular |
 | `output.format` | **Implemented** | json, markdown, toon, human, jsonl, compact, hook |
 | `output.fields` | Validated | Projection controlled by `--fields` CLI flag |
-| `output.explain` | Not Implemented | Explanation output planned |
+| `output.explain` | **Implemented** | Accepted; JSON packs already include selection certificates and per-item `why` |
 | `pagination.*` | Not Implemented | Use `--offset`/`--limit` CLI flags |
 | `eval.*` | **Implemented** | Evaluation labels captured in output |
 
@@ -592,7 +595,7 @@ This schema **does not**:
 
 These fields are recognized and validated but not wired through to pack/search execution:
 
-- [ ] **tags.require, tags.requireAny, tags.exclude** — Wire to memory tag filtering
+- [x] **tags.require, tags.requireAny, tags.exclude** — Memory tag filtering
 - [ ] **time.after, time.before** — Wire to temporal window filtering
 - [ ] **asOf** — Point-in-time snapshot queries
 - [ ] **temporalValidity** — Valid-from/valid-to support (EE-TEMPORAL-VALIDITY-001)
@@ -600,8 +603,8 @@ These fields are recognized and validated but not wired through to pack/search e
 - [ ] **redaction.policy** — Wire to redaction policy enforcement
 - [ ] **graph.seedMemories, graph.traversal, graph.maxHops** — Wire to graph traversal
 - [ ] **pagination.cursor, pagination.limit** — Cursor-based pagination
-- [ ] **budget.maxResults** — Result count limit
-- [ ] **output.explain** — Explanation output in responses
+- [x] **budget.maxResults** — Candidate admission limit
+- [x] **output.explain** — Explanation metadata is observable in JSON responses
 
 ### Infrastructure
 

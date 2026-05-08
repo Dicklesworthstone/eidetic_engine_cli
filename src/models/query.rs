@@ -7,18 +7,25 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct QueryFilters {
     pub filters: Vec<QueryFilter>,
+    pub tags: TagFilters,
 }
 
 impl QueryFilters {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.filters.is_empty()
+        self.filters.is_empty() && self.tags.is_empty()
     }
 
     /// Check if a metadata value matches all filters.
     #[must_use]
     pub fn matches(&self, metadata: Option<&serde_json::Value>) -> bool {
         self.filters.iter().all(|filter| filter.matches(metadata))
+    }
+
+    /// Check if a memory's tags match the tag filters.
+    #[must_use]
+    pub fn matches_tags(&self, memory_tags: &[String]) -> bool {
+        self.tags.matches(memory_tags)
     }
 }
 
@@ -304,7 +311,10 @@ pub fn parse_filters(value: &serde_json::Value) -> Option<QueryFilters> {
         });
     }
 
-    Some(QueryFilters { filters })
+    Some(QueryFilters {
+        filters,
+        tags: TagFilters::default(),
+    })
 }
 
 const EQL_TOP_LEVEL_FIELDS: &[&str] = &[
@@ -476,7 +486,10 @@ impl EqlQuery {
                 });
             }
         }
-        QueryFilters { filters }
+        QueryFilters {
+            filters,
+            tags: TagFilters::default(),
+        }
     }
 
     #[must_use]
@@ -917,6 +930,93 @@ fn parse_rfc3339_instant(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|timestamp| timestamp.with_timezone(&Utc))
+}
+
+/// Tag filters from ee.query.v1 tags object.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TagFilters {
+    /// All tags must be present (AND).
+    pub require: Vec<String>,
+    /// At least one tag must be present (OR).
+    pub require_any: Vec<String>,
+    /// None of these tags may be present.
+    pub exclude: Vec<String>,
+}
+
+impl TagFilters {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.require.is_empty() && self.require_any.is_empty() && self.exclude.is_empty()
+    }
+
+    /// Check if the given memory tags satisfy all tag filter constraints.
+    #[must_use]
+    pub fn matches(&self, memory_tags: &[String]) -> bool {
+        if !self.require.is_empty() && !self.require.iter().all(|req| memory_tags.contains(req)) {
+            return false;
+        }
+        if !self.require_any.is_empty()
+            && !self.require_any.iter().any(|req| memory_tags.contains(req))
+        {
+            return false;
+        }
+        if self.exclude.iter().any(|excl| memory_tags.contains(excl)) {
+            return false;
+        }
+        true
+    }
+}
+
+/// Parse tag filters from an ee.query.v1 tags object.
+///
+/// The tags object may contain:
+/// - `require`: string[] - all tags must be present (AND)
+/// - `requireAny`: string[] - at least one tag must be present (OR)
+/// - `exclude`: string[] - none of these tags may be present
+#[must_use]
+pub fn parse_tags(value: &serde_json::Value) -> TagFilters {
+    let Some(object) = value.as_object() else {
+        return TagFilters::default();
+    };
+
+    let require = object
+        .get("require")
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let require_any = object
+        .get("requireAny")
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let exclude = object
+        .get("exclude")
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    TagFilters {
+        require,
+        require_any,
+        exclude,
+    }
 }
 
 #[cfg(test)]

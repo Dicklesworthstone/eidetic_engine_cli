@@ -14219,6 +14219,7 @@ where
         profile: Some(profile),
         max_tokens: Some(args.max_tokens),
         candidate_pool: Some(args.candidate_pool),
+        max_results: None,
         filters: crate::models::QueryFilters::default(),
     };
 
@@ -14333,6 +14334,7 @@ struct QueryFileRequest {
     profile: Option<ContextPackProfile>,
     max_tokens: Option<u32>,
     candidate_pool: Option<u32>,
+    max_results: Option<u32>,
     speed: crate::search::SpeedMode,
     renderer: Option<output::Renderer>,
     degraded: Vec<ContextResponseDegradation>,
@@ -14385,6 +14387,7 @@ where
         profile,
         max_tokens: args.max_tokens.or(request.max_tokens),
         candidate_pool: args.candidate_pool.or(request.candidate_pool),
+        max_results: request.max_results,
     };
     let renderer = effective_pack_renderer(cli, request.renderer);
 
@@ -14509,7 +14512,7 @@ fn parse_query_document(content: &str) -> Result<QueryFileRequest, QueryFileErro
 
     let query = query_text_from_document(object)?;
     let workspace_path = optional_path_field(object, "workspace")?;
-    let (max_tokens, candidate_pool) = budget_from_document(object)?;
+    let (max_tokens, candidate_pool, max_results) = budget_from_document(object)?;
     let speed = speed_from_document(object)?;
     let (profile, renderer, mut output_degraded) = output_from_document(object)?;
     degraded.append(&mut output_degraded);
@@ -14521,6 +14524,7 @@ fn parse_query_document(content: &str) -> Result<QueryFileRequest, QueryFileErro
         profile,
         max_tokens,
         candidate_pool,
+        max_results,
         speed,
         renderer,
         degraded,
@@ -14586,8 +14590,11 @@ fn validate_unsupported_query_features(
         validate_filters(filters)?;
     }
 
+    if let Some(tags) = object.get("tags") {
+        validate_tags_object(tags)?;
+    }
+
     for feature in [
-        "tags",
         "time",
         "asOf",
         "temporalValidity",
@@ -14616,10 +14623,54 @@ fn validate_unsupported_query_features(
 fn extract_query_filters(
     object: &serde_json::Map<String, serde_json::Value>,
 ) -> crate::models::QueryFilters {
-    object
+    let mut filters = object
         .get("filters")
         .and_then(crate::models::parse_filters)
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    if let Some(tags_value) = object.get("tags") {
+        filters.tags = crate::models::parse_tags(tags_value);
+    }
+
+    filters
+}
+
+fn validate_tags_object(value: &serde_json::Value) -> Result<(), QueryFileError> {
+    let Some(object) = value.as_object() else {
+        return Err(QueryFileError::new(
+            QueryFileErrorCode::MalformedJson,
+            "tags must be an object with require, requireAny, or exclude arrays.",
+            Some("Use tags: { require: [...], requireAny: [...], exclude: [...] }.".to_string()),
+        ));
+    };
+
+    for (key, arr_value) in object {
+        if !["require", "requireAny", "exclude"].contains(&key.as_str()) {
+            return Err(QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                format!("Unknown tags field '{key}'. Expected require, requireAny, or exclude."),
+                Some("Use only require, requireAny, or exclude inside tags.".to_string()),
+            ));
+        }
+        let Some(arr) = arr_value.as_array() else {
+            return Err(QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                format!("tags.{key} must be an array of strings."),
+                Some(format!("Use tags.{key}: [\"tag1\", \"tag2\"].")),
+            ));
+        };
+        for item in arr {
+            if !item.is_string() {
+                return Err(QueryFileError::new(
+                    QueryFileErrorCode::MalformedJson,
+                    format!("tags.{key} array elements must be strings."),
+                    Some(format!("Use tags.{key}: [\"tag1\", \"tag2\"].")),
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_temporal_fields(
@@ -14800,9 +14851,9 @@ fn optional_path_field(
 
 fn budget_from_document(
     object: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(Option<u32>, Option<u32>), QueryFileError> {
+) -> Result<(Option<u32>, Option<u32>, Option<u32>), QueryFileError> {
     let Some(budget) = object.get("budget") else {
-        return Ok((None, None));
+        return Ok((None, None, None));
     };
     let budget = budget.as_object().ok_or_else(|| {
         QueryFileError::new(
@@ -14813,7 +14864,8 @@ fn budget_from_document(
     })?;
     let max_tokens = optional_positive_u32(budget, "maxTokens")?;
     let candidate_pool = optional_positive_u32(budget, "candidatePool")?;
-    Ok((max_tokens, candidate_pool))
+    let max_results = optional_positive_u32(budget, "maxResults")?;
+    Ok((max_tokens, candidate_pool, max_results))
 }
 
 fn speed_from_document(
@@ -14919,8 +14971,9 @@ fn output_from_document(
     };
 
     validate_output_fields(output)?;
-    let degraded = if output.contains_key("fields") {
-        vec![
+    let mut degraded = Vec::new();
+    if output.contains_key("fields") {
+        degraded.push(
             ContextResponseDegradation::new(
                 "query_output_fields_cli_controlled",
                 ContextResponseSeverity::Low,
@@ -14934,10 +14987,35 @@ fn output_from_document(
                     Some("Fix the query document and retry.".to_string()),
                 )
             })?,
-        ]
-    } else {
-        Vec::new()
-    };
+        );
+    }
+    if let Some(explain) = output.get("explain") {
+        match explain.as_bool() {
+            Some(true) => degraded.push(
+                ContextResponseDegradation::new(
+                    "query_output_explain_already_included",
+                    ContextResponseSeverity::Low,
+                    "output.explain was accepted; JSON context packs already include selection certificates and per-item why explanations.",
+                    Some("Inspect data.pack.selectionCertificate and data.pack.items[].why.".to_string()),
+                )
+                .map_err(|error| {
+                    QueryFileError::new(
+                        QueryFileErrorCode::UnsupportedFeature,
+                        error.to_string(),
+                        Some("Fix the query document and retry.".to_string()),
+                    )
+                })?,
+            ),
+            Some(false) => {}
+            None => {
+                return Err(QueryFileError::new(
+                    QueryFileErrorCode::UnsupportedFeature,
+                    "output.explain must be a boolean.",
+                    Some("Use true or false for output.explain.".to_string()),
+                ));
+            }
+        }
+    }
 
     Ok((profile, renderer, degraded))
 }
@@ -26477,9 +26555,9 @@ mod tests {
               "version": "ee.query.v1",
               "workspace": "/data/projects/eidetic_engine_cli",
               "query": {"text": "prepare release", "mode": "hybrid"},
-              "budget": {"maxTokens": 3000, "candidatePool": 25},
+              "budget": {"maxTokens": 3000, "candidatePool": 25, "maxResults": 3},
               "speed": "quality",
-              "output": {"profile": "wide", "format": "json", "fields": "summary"}
+              "output": {"profile": "wide", "format": "json", "fields": "summary", "explain": true}
             }"#,
         )
         .map_err(|error| error.message)?;
@@ -26494,6 +26572,7 @@ mod tests {
         )?;
         ensure_equal(&request.max_tokens, &Some(3000), "max tokens")?;
         ensure_equal(&request.candidate_pool, &Some(25), "candidate pool")?;
+        ensure_equal(&request.max_results, &Some(3), "max results")?;
         ensure_equal(
             &request.speed,
             &crate::search::SpeedMode::Quality,
@@ -26515,6 +26594,13 @@ mod tests {
                 .iter()
                 .any(|entry| entry.code == "query_output_fields_cli_controlled"),
             "output.fields should produce a low-severity degradation",
+        )?;
+        ensure(
+            request
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "query_output_explain_already_included"),
+            "output.explain should produce an explicit explanation degradation",
         )
     }
 
@@ -26619,6 +26705,52 @@ mod tests {
             &super::QueryFileErrorCode::InvalidTimestamp,
             "invalid timestamp error code",
         )
+    }
+
+    #[test]
+    fn query_file_document_rejects_invalid_output_explain() -> TestResult {
+        let error = match super::parse_query_document(
+            r#"{
+              "version": "ee.query.v1",
+              "query": {"text": "release"},
+              "output": {"explain": "yes"}
+            }"#,
+        ) {
+            Ok(_) => return Err("mistyped output.explain should fail".into()),
+            Err(error) => error,
+        };
+
+        ensure_equal(
+            &error.code,
+            &super::QueryFileErrorCode::UnsupportedFeature,
+            "invalid output.explain error code",
+        )?;
+        ensure_contains(
+            &error.message,
+            "output.explain",
+            "invalid output.explain path",
+        )
+    }
+
+    #[test]
+    fn query_file_document_rejects_zero_max_results() -> TestResult {
+        let error = match super::parse_query_document(
+            r#"{
+              "version": "ee.query.v1",
+              "query": {"text": "release"},
+              "budget": {"maxResults": 0}
+            }"#,
+        ) {
+            Ok(_) => return Err("zero budget.maxResults should fail".into()),
+            Err(error) => error,
+        };
+
+        ensure_equal(
+            &error.code,
+            &super::QueryFileErrorCode::ZeroBudget,
+            "zero maxResults error code",
+        )?;
+        ensure_contains(&error.message, "budget.maxResults", "zero maxResults path")
     }
 
     #[test]
@@ -28675,5 +28807,117 @@ mod tests {
         let with = Cli::try_parse_from(["ee", "--policy", "p1", "status"])
             .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
         ensure_equal(&with.policy_id(), &Some("p1"), "policy accessor")
+    }
+
+    #[test]
+    fn budget_from_document_parses_max_results() -> TestResult {
+        use serde_json::json;
+        let doc = json!({
+            "budget": {
+                "maxTokens": 4000,
+                "candidatePool": 100,
+                "maxResults": 25
+            }
+        });
+        let object = doc
+            .as_object()
+            .ok_or_else(|| "test fixture must be an object".to_string())?;
+        let (max_tokens, candidate_pool, max_results) =
+            super::budget_from_document(object).map_err(|e| e.message)?;
+        ensure_equal(&max_tokens, &Some(4000), "maxTokens")?;
+        ensure_equal(&candidate_pool, &Some(100), "candidatePool")?;
+        ensure_equal(&max_results, &Some(25), "maxResults")
+    }
+
+    #[test]
+    fn budget_from_document_missing_max_results_is_none() -> TestResult {
+        use serde_json::json;
+        let doc = json!({
+            "budget": {
+                "maxTokens": 8000
+            }
+        });
+        let object = doc
+            .as_object()
+            .ok_or_else(|| "test fixture must be an object".to_string())?;
+        let (max_tokens, _, max_results) =
+            super::budget_from_document(object).map_err(|e| e.message)?;
+        ensure_equal(&max_tokens, &Some(8000), "maxTokens")?;
+        ensure_equal(&max_results, &None, "maxResults should be None when absent")
+    }
+
+    #[test]
+    fn output_from_document_explain_true_produces_degradation() -> TestResult {
+        use serde_json::json;
+        let doc = json!({
+            "output": {
+                "profile": "balanced",
+                "format": "json",
+                "explain": true
+            }
+        });
+        let object = doc
+            .as_object()
+            .ok_or_else(|| "test fixture must be an object".to_string())?;
+        let (profile, renderer, degraded) =
+            super::output_from_document(object).map_err(|e| e.message)?;
+        ensure_equal(
+            &profile,
+            &Some(super::ContextPackProfile::Balanced),
+            "profile",
+        )?;
+        ensure_equal(&renderer, &Some(output::Renderer::Json), "renderer")?;
+        ensure(
+            degraded
+                .iter()
+                .any(|d| d.code == "query_output_explain_already_included"),
+            "should have explain degradation code",
+        )?;
+        let explain_degradation = degraded
+            .iter()
+            .find(|d| d.code == "query_output_explain_already_included")
+            .ok_or_else(|| "explain degradation must exist".to_string())?;
+        ensure_contains(
+            &explain_degradation.message,
+            "selection certificates",
+            "degradation message should mention selection certificates",
+        )
+    }
+
+    #[test]
+    fn output_from_document_explain_false_no_degradation() -> TestResult {
+        use serde_json::json;
+        let doc = json!({
+            "output": {
+                "explain": false
+            }
+        });
+        let object = doc
+            .as_object()
+            .ok_or_else(|| "test fixture must be an object".to_string())?;
+        let (_, _, degraded) = super::output_from_document(object).map_err(|e| e.message)?;
+        ensure(
+            !degraded
+                .iter()
+                .any(|d| d.code == "query_output_explain_already_included"),
+            "explain=false should not produce degradation",
+        )
+    }
+
+    #[test]
+    fn output_from_document_explain_invalid_type_errors() -> TestResult {
+        use serde_json::json;
+        let doc = json!({
+            "output": {
+                "explain": "yes"
+            }
+        });
+        let object = doc
+            .as_object()
+            .ok_or_else(|| "test fixture must be an object".to_string())?;
+        let result = super::output_from_document(object);
+        ensure(result.is_err(), "explain='yes' should fail")?;
+        let error = result.err().ok_or_else(|| "expected error".to_string())?;
+        ensure_contains(&error.message, "must be a boolean", "error message")
     }
 }

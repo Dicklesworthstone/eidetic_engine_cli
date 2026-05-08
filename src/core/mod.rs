@@ -515,6 +515,7 @@ mod tests {
                 "update_plan",
                 "artifact_summary",
                 "compare_result",
+                "budget_check",
             ],
             "schema names",
         )

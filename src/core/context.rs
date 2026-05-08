@@ -276,6 +276,7 @@ pub struct ContextPackOptions {
     pub profile: Option<ContextPackProfile>,
     pub max_tokens: Option<u32>,
     pub candidate_pool: Option<u32>,
+    pub max_results: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -306,6 +307,7 @@ struct CandidateResolutionMetrics {
     unique_memory_ids: usize,
     memory_batch_reads: usize,
     tag_batch_reads: usize,
+    tag_filtered_candidates: usize,
     converted_candidates: usize,
     skipped_candidates: usize,
 }
@@ -372,6 +374,7 @@ pub fn run_context_pack_with_performance(
         profile: options.profile,
         max_tokens: options.max_tokens,
         candidate_pool: options.candidate_pool,
+        max_results: options.max_results,
         sections: Vec::new(),
     })
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
@@ -385,6 +388,7 @@ pub fn run_context_pack_with_performance(
             profile: Some(request.profile),
             max_tokens: Some(effective_max_tokens),
             candidate_pool: Some(effective_candidate_pool),
+            max_results: request.max_results,
             sections: Vec::new(),
         })
         .map_err(|error| ContextPackError::Pack(error.to_string()))?;
@@ -474,8 +478,9 @@ pub fn run_context_pack_with_performance(
         };
     }
 
-    // Apply query filters to search results
-    if !options.filters.is_empty() {
+    // Apply metadata query filters to search results. Tag filters are applied
+    // after memory tags have been batch-loaded during candidate resolution.
+    if !options.filters.filters.is_empty() {
         let pre_filter_count = search_report.results.len();
         trace.filter_input_count = pre_filter_count;
         search_report
@@ -507,8 +512,34 @@ pub fn run_context_pack_with_performance(
     }
 
     let candidate_start = Instant::now();
-    let (mut candidates, candidate_metrics) =
-        candidates_from_search_with_metrics(&connection, &search_report, &mut degraded);
+    let candidate_filter_input_count = search_report.results.len();
+    let (mut candidates, candidate_metrics) = candidates_from_search_with_metrics(
+        &connection,
+        &search_report,
+        &options.filters,
+        &mut degraded,
+    );
+    if candidate_metrics.tag_filtered_candidates > 0 {
+        trace.filter_input_count = trace.filter_input_count.max(candidate_filter_input_count);
+        trace.filtered_count = trace
+            .filtered_count
+            .saturating_add(candidate_metrics.tag_filtered_candidates);
+        push_degradation(
+            &mut degraded,
+            "context_filtered_results",
+            ContextResponseSeverity::Low,
+            format!(
+                "{} candidate memor{} excluded by query filters.",
+                candidate_metrics.tag_filtered_candidates,
+                if candidate_metrics.tag_filtered_candidates == 1 {
+                    "y was"
+                } else {
+                    "ies were"
+                }
+            ),
+            None,
+        );
+    }
     trace.candidate_resolution = candidate_metrics;
     trace.record_elapsed("candidateResolution", candidate_start);
 
@@ -536,6 +567,29 @@ pub fn run_context_pack_with_performance(
         ),
     }
     trace.record_elapsed("focusState", focus_start);
+
+    if let Some(max_results) = request.max_results {
+        let max_results = max_results as usize;
+        if candidates.len() > max_results {
+            let trimmed = candidates.len().saturating_sub(max_results);
+            candidates.truncate(max_results);
+            let noun = if trimmed == 1 {
+                "candidate"
+            } else {
+                "candidates"
+            };
+            push_degradation(
+                &mut degraded,
+                "context_query_max_results_applied",
+                ContextResponseSeverity::Low,
+                format!("{trimmed} context {noun} excluded by query-file budget.maxResults."),
+                Some(
+                    "Increase budget.maxResults or budget.candidatePool in the query file."
+                        .to_string(),
+                ),
+            );
+        }
+    }
 
     let pack_start = Instant::now();
     let budget = match options.max_tokens {
@@ -608,6 +662,7 @@ fn context_performance_json(
             "queryPlan": {
                 "retrievalMode": options.speed.as_str(),
                 "requestedCandidatePool": request.candidate_pool,
+                "maxResults": request.max_results,
                 "effectiveCandidatePool": search_report.requested_limit,
                 "maxTokens": draft.budget.max_tokens(),
                 "profile": request.profile.as_str(),
@@ -671,6 +726,7 @@ fn candidate_resolution_json(trace: &ContextPerformanceTrace) -> serde_json::Val
         "uniqueMemoryIds": metrics.unique_memory_ids,
         "convertedCandidates": metrics.converted_candidates,
         "skippedCandidates": metrics.skipped_candidates,
+        "tagFilteredCandidates": metrics.tag_filtered_candidates,
         "filteredBeforeResolution": trace.filtered_count,
         "filterInputCount": trace.filter_input_count,
         "focusStateHits": trace.focus_state_hits,
@@ -1087,6 +1143,7 @@ fn compute_pack_hash(
 fn candidates_from_search_with_metrics(
     connection: &DbConnection,
     search_report: &crate::core::search::SearchReport,
+    filters: &crate::models::QueryFilters,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> (Vec<PackCandidate>, CandidateResolutionMetrics) {
     let mut metrics = CandidateResolutionMetrics {
@@ -1135,6 +1192,15 @@ fn candidates_from_search_with_metrics(
     for (hit, resolution) in hit_resolutions {
         match resolution {
             Some((memory_id, artifact_id)) => {
+                if !filters.tags.is_empty() {
+                    let memory_key = memory_id.to_string();
+                    let tags = tags_map.get(&memory_key).cloned().unwrap_or_default();
+                    if !filters.matches_tags(&tags) {
+                        metrics.tag_filtered_candidates =
+                            metrics.tag_filtered_candidates.saturating_add(1);
+                        continue;
+                    }
+                }
                 match candidate_from_hit_preloaded(
                     &memories,
                     &tags_map,
@@ -1708,8 +1774,12 @@ mod tests {
         };
         let mut degraded = Vec::new();
 
-        let (candidates, metrics) =
-            super::candidates_from_search_with_metrics(&connection, &search_report, &mut degraded);
+        let (candidates, metrics) = super::candidates_from_search_with_metrics(
+            &connection,
+            &search_report,
+            &crate::models::QueryFilters::default(),
+            &mut degraded,
+        );
 
         assert!(candidates.is_empty());
         assert_eq!(metrics.search_hits, 1);
@@ -1788,6 +1858,7 @@ mod tests {
             profile: Some(ContextPackProfile::Balanced),
             max_tokens: Some(60),
             candidate_pool: Some(2),
+            max_results: None,
             sections: Vec::new(),
         })
         .map_err(|error| error.to_string())?;
@@ -1841,6 +1912,7 @@ mod tests {
             profile: Some(ContextPackProfile::Balanced),
             max_tokens: Some(60),
             candidate_pool: Some(2),
+            max_results: None,
         };
         let trace = ContextPerformanceTrace {
             db_open_count: 1,
@@ -1947,6 +2019,7 @@ mod tests {
             profile: Some(ContextPackProfile::Balanced),
             max_tokens: Some(400),
             candidate_pool: Some(10),
+            max_results: None,
         })
         .map_err(|error| error.to_string())?;
 
