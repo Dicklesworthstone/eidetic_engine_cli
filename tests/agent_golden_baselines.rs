@@ -1022,6 +1022,49 @@ fn version_json_matches_golden() -> TestResult {
 }
 
 #[test]
+fn version_json_advertises_supported_schemas_exactly() -> TestResult {
+    let output = run_ee(&["version", "--json"])?;
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("version --json stdout was not UTF-8: {error}"))?;
+    let stderr = String::from_utf8(output.stderr)
+        .map_err(|error| format!("version --json stderr was not UTF-8: {error}"))?;
+
+    ensure(output.status.success(), "version --json should succeed")?;
+    ensure(stderr.is_empty(), "version --json stderr must be empty")?;
+
+    let value: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("version --json stdout was not valid JSON: {error}"))?;
+    let actual = value
+        .pointer("/data/schemas")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "version --json data.schemas must be an array".to_string())?
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let name = entry
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("version schema entry {index} missing string name"))?;
+            let schema = entry
+                .get("schema")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("version schema entry {index} missing string schema"))?;
+            Ok((name.to_string(), schema.to_string()))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let expected = ee::core::supported_schemas()
+        .into_iter()
+        .map(|entry| (entry.name.to_string(), entry.schema.to_string()))
+        .collect::<Vec<_>>();
+
+    ensure_equal(
+        &actual,
+        &expected,
+        "version --json data.schemas must match ee::core::supported_schemas()",
+    )
+}
+
+#[test]
 fn version_json_contract_case_records_artifacts() -> TestResult {
     validate_contract_case(ContractCase {
         name: "version_json",
