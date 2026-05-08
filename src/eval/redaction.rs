@@ -408,6 +408,31 @@ fn default_leak_patterns() -> Vec<LeakPattern> {
         ),
     ];
 
+    if let Some(p) = LeakPattern::regex(
+        RedactionClass::Secret,
+        "aws_secret_access_key",
+        "AWS secret access key environment value",
+        r"\bAWS_SECRET_ACCESS_KEY\s*[:=]\s*[A-Za-z0-9/+=]{20,}",
+    ) {
+        patterns.push(p);
+    }
+    if let Some(p) = LeakPattern::regex(
+        RedactionClass::Secret,
+        "jwt_token",
+        "JWT token with base64url header, claims, and signature",
+        r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
+    ) {
+        patterns.push(p);
+    }
+    if let Some(p) = LeakPattern::regex(
+        RedactionClass::Secret,
+        "pem_private_key",
+        "PEM private key header",
+        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----",
+    ) {
+        patterns.push(p);
+    }
+
     // PII patterns
     if let Some(p) = LeakPattern::regex(
         RedactionClass::Pii,
@@ -574,6 +599,33 @@ mod tests {
             leaks.iter().any(|l| l.pattern_name == "password_field"),
             true,
             "should match password_field pattern",
+        )
+    }
+
+    #[test]
+    fn detector_detects_cloud_jwt_and_pem_secret_leaks() -> TestResult {
+        let detector = RedactionLeakDetector::new();
+        let output = [
+            "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+            "-----BEGIN RSA PRIVATE KEY-----",
+        ]
+        .join("\n");
+
+        let leaks = detector.detect_leaks(&output);
+        for pattern in ["aws_secret_access_key", "jwt_token", "pem_private_key"] {
+            ensure(
+                leaks.iter().any(|leak| leak.pattern_name == pattern),
+                true,
+                pattern,
+            )?;
+        }
+        ensure(
+            leaks
+                .iter()
+                .all(|leak| leak.class == RedactionClass::Secret),
+            true,
+            "resolved detector gaps should all be secret class",
         )
     }
 

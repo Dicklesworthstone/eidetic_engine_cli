@@ -146,6 +146,64 @@ fn negative_corpus_no_false_positives() {
 }
 
 #[test]
+fn resolved_gap_corpus_detects_secret_regressions() {
+    let fixtures_dir = Path::new("tests/fixtures/redaction/gaps");
+    let fixtures = load_fixtures(fixtures_dir);
+    assert!(!fixtures.is_empty(), "No gap fixtures found");
+
+    let detector = RedactionLeakDetector::new();
+    let resolved_ids = ["aws_secret_env", "jwt_raw", "private_key_pem"];
+    let mut checked = 0;
+    let mut failures = Vec::new();
+
+    for fixture in fixtures
+        .iter()
+        .filter(|fixture| resolved_ids.contains(&fixture.id.as_str()))
+    {
+        checked += 1;
+        let leaks = detector.detect_leaks(&fixture.input);
+        let detected = !leaks.is_empty();
+
+        if detected != fixture.expected_detected {
+            failures.push(format!(
+                "{}: expected detected={}, got detected={} (input: {:?})",
+                fixture.id, fixture.expected_detected, detected, fixture.input
+            ));
+            continue;
+        }
+
+        if let Some(ref expected_class_str) = fixture.expected_class {
+            if let Some(expected_class) = class_from_str(expected_class_str) {
+                let has_expected_class = leaks.iter().any(|leak| leak.class == expected_class);
+                if !has_expected_class {
+                    failures.push(format!(
+                        "{}: expected class {:?} but found {:?}",
+                        fixture.id,
+                        expected_class,
+                        leaks.iter().map(|leak| leak.class).collect::<Vec<_>>()
+                    ));
+                }
+            }
+        }
+    }
+
+    assert_eq!(
+        checked,
+        resolved_ids.len(),
+        "resolved redaction gap fixture count changed"
+    );
+
+    if !failures.is_empty() {
+        panic!(
+            "Resolved gap corpus failures ({}/{}):\n{}",
+            failures.len(),
+            checked,
+            failures.join("\n")
+        );
+    }
+}
+
+#[test]
 fn redaction_is_deterministic() {
     let fixtures_dir = Path::new("tests/fixtures/redaction/positive");
     let fixtures = load_fixtures(fixtures_dir);

@@ -120,6 +120,16 @@ const SECRET_KEY_PATTERNS: &[SecretKeyPattern] = &[
         whitespace_value: false,
     },
     SecretKeyPattern {
+        code: "jwt_token",
+        key: "jwt",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "jwt_token",
+        key: "json_web_token",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
         code: "oauth_token",
         key: "oauth_token",
         whitespace_value: false,
@@ -2321,6 +2331,29 @@ mod tests {
         assert!(report.redacted_reasons.contains(&"jwt_token"));
         assert!(report.content.contains(&redaction_placeholder("jwt_token")));
         assert!(!report.content.contains(&jwt));
+    }
+
+    #[test]
+    fn secret_redactor_masks_jwt_key_values() {
+        let jwt = [
+            "eyJhbGciOiJIUzI1NiJ9",
+            "eyJzdWIiOiJjYXNzLXJlZGFjdGlvbiJ9",
+            "signaturesegmentvalue",
+        ]
+        .join(".");
+        let report =
+            redact_secret_like_content(&format!("Found jwt={jwt} and json_web_token: {jwt}."));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"jwt_token"));
+        assert_eq!(report.content.matches(&jwt).count(), 0);
+        assert_eq!(
+            report
+                .content
+                .matches(&redaction_placeholder("jwt_token"))
+                .count(),
+            2
+        );
     }
 
     #[test]
