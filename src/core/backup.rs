@@ -20,7 +20,7 @@ use crate::models::{
     BACKUP_MANIFEST_SCHEMA_V1, BACKUP_RESTORE_SCHEMA_V1, BACKUP_VERIFY_SCHEMA_V1, BackupId,
     DomainError, ExportAuditRecord, ExportFooter, ExportHeader, ExportLinkRecord,
     ExportMemoryRecord, ExportScope, ExportTagRecord, ExportWorkspaceRecord, ImportSource,
-    RedactionLevel, TrustLevel,
+    RedactionLevel, TrustLevel, jsonl::ExportRecordBuildError,
 };
 use crate::output::jsonl_export::{ExportStats, JsonlExporter};
 
@@ -1344,7 +1344,9 @@ fn load_export_data(
     }
 
     Ok(BackupExportData {
-        workspace: workspace_builder.build(),
+        workspace: workspace_builder
+            .build()
+            .map_err(export_build_error("build backup workspace record"))?,
         memories,
         tags_by_memory,
         links,
@@ -1373,7 +1375,8 @@ fn render_records(
                     .export_id(backup_id)
                     .import_source(ImportSource::Native)
                     .trust_level(TrustLevel::Validated)
-                    .build(),
+                    .build()
+                    .map_err(export_build_error("build backup JSONL header"))?,
             )
             .map_err(io_error("write backup JSONL header"))?;
         exporter
@@ -1382,7 +1385,10 @@ fn render_records(
 
         for memory in &data.memories {
             exporter
-                .write_memory(memory_record(memory))
+                .write_memory(
+                    memory_record(memory)
+                        .map_err(export_build_error("build backup memory record"))?,
+                )
                 .map_err(io_error("write backup memory record"))?;
             for tag in memory_tags(data, memory) {
                 exporter
@@ -1392,12 +1398,16 @@ fn render_records(
         }
         for link in &data.links {
             exporter
-                .write_link(link_record(link))
+                .write_link(
+                    link_record(link).map_err(export_build_error("build backup link record"))?,
+                )
                 .map_err(io_error("write backup link record"))?;
         }
         for audit in &data.audits {
             exporter
-                .write_audit(audit_record(audit))
+                .write_audit(
+                    audit_record(audit).map_err(export_build_error("build backup audit record"))?,
+                )
                 .map_err(io_error("write backup audit record"))?;
         }
 
@@ -1406,7 +1416,8 @@ fn render_records(
                 ExportFooter::builder()
                     .export_id(backup_id)
                     .completed_at(created_at)
-                    .build(),
+                    .build()
+                    .map_err(export_build_error("build backup JSONL footer"))?,
             )
             .map_err(io_error("write backup JSONL footer"))?;
         exporter.flush().map_err(io_error("flush backup JSONL"))?;
@@ -1415,7 +1426,7 @@ fn render_records(
     Ok((output, stats))
 }
 
-fn memory_record(memory: &StoredMemory) -> ExportMemoryRecord {
+fn memory_record(memory: &StoredMemory) -> Result<ExportMemoryRecord, ExportRecordBuildError> {
     let mut builder = ExportMemoryRecord::builder()
         .memory_id(memory.id.clone())
         .workspace_id(memory.workspace_id.clone())
@@ -1443,7 +1454,7 @@ fn memory_tags(data: &BackupExportData, memory: &StoredMemory) -> Vec<ExportTagR
         .collect()
 }
 
-fn link_record(link: &StoredMemoryLink) -> ExportLinkRecord {
+fn link_record(link: &StoredMemoryLink) -> Result<ExportLinkRecord, ExportRecordBuildError> {
     ExportLinkRecord::builder()
         .link_id(link.id.clone())
         .source_memory_id(link.src_memory_id.clone())
@@ -1471,14 +1482,18 @@ fn link_metadata(link: &StoredMemoryLink) -> JsonValue {
     })
 }
 
-fn audit_record(audit: &StoredAuditEntry) -> ExportAuditRecord {
+fn audit_record(audit: &StoredAuditEntry) -> Result<ExportAuditRecord, ExportRecordBuildError> {
     let mut builder = ExportAuditRecord::builder()
         .audit_id(audit.id.clone())
         .operation(audit.action.clone())
-        .target_type(audit.target_type.clone().unwrap_or_default())
-        .target_id(audit.target_id.clone().unwrap_or_default())
         .performed_at(audit.timestamp.clone())
         .details(audit_details(audit.details.as_deref()));
+    if let Some(target_type) = &audit.target_type {
+        builder = builder.target_type(target_type.clone());
+    }
+    if let Some(target_id) = &audit.target_id {
+        builder = builder.target_id(target_id.clone());
+    }
     if let Some(actor) = &audit.actor {
         builder = builder.performed_by(actor.clone());
     }
@@ -1708,6 +1723,13 @@ fn hash_bytes(bytes: &[u8]) -> String {
 }
 
 fn io_error(context: &'static str) -> impl FnOnce(io::Error) -> DomainError {
+    move |error| DomainError::Storage {
+        message: format!("{context}: {error}"),
+        repair: Some("inspect database integrity and retry backup creation".to_owned()),
+    }
+}
+
+fn export_build_error(context: &'static str) -> impl FnOnce(ExportRecordBuildError) -> DomainError {
     move |error| DomainError::Storage {
         message: format!("{context}: {error}"),
         repair: Some("inspect database integrity and retry backup creation".to_owned()),

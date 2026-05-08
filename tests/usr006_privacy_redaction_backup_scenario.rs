@@ -3,6 +3,9 @@
 //! Validates that EE can preserve, export, and diagnose memory without leaking
 //! secrets or requiring destructive restore flows.
 
+// Test fixtures use `.expect()` for builder validation where failure indicates test setup bugs.
+#![allow(clippy::expect_used)]
+
 #[cfg(unix)]
 use std::fs;
 #[cfg(unix)]
@@ -341,7 +344,8 @@ fn export_record_redaction_covers_all_record_types() -> TestResult {
             .content(sensitive_value.clone())
             .provenance_uri("/home/user/file.txt")
             .created_at("2026-05-03T00:00:00Z")
-            .build(),
+            .build()
+            .expect("memory has required fields"),
     );
 
     if let ExportRecord::Memory(m) = redact_record(memory, RedactionLevel::Standard) {
@@ -372,7 +376,8 @@ fn export_record_redaction_covers_all_record_types() -> TestResult {
             .snippet(sensitive_value.clone())
             .created_at("2026-05-03T00:00:00Z")
             .updated_at("2026-05-03T00:00:00Z")
-            .build(),
+            .build()
+            .expect("artifact has required fields"),
     );
 
     if let ExportRecord::Artifact(a) = redact_record(artifact, RedactionLevel::Standard) {
@@ -393,7 +398,8 @@ fn export_record_redaction_covers_all_record_types() -> TestResult {
             .workspace_id("ws-test-long-identifier-001")
             .path("/home/user/private/project")
             .created_at("2026-05-03T00:00:00Z")
-            .build(),
+            .build()
+            .expect("workspace has required fields"),
     );
 
     if let ExportRecord::Workspace(w) = redact_record(workspace, RedactionLevel::Standard) {
@@ -412,7 +418,8 @@ fn export_record_redaction_covers_all_record_types() -> TestResult {
             .target_memory_id("mem-target-001234567890")
             .link_type("supports")
             .created_at("2026-05-03T00:00:00Z")
-            .build(),
+            .build()
+            .expect("link has required fields"),
     );
 
     if let ExportRecord::Link(l) = redact_record(link, RedactionLevel::Standard) {
@@ -426,7 +433,8 @@ fn export_record_redaction_covers_all_record_types() -> TestResult {
             .agent_id("agent-test-001234567890")
             .name("TestAgent")
             .created_at("2026-05-03T00:00:00Z")
-            .build(),
+            .build()
+            .expect("agent has required fields"),
     );
 
     if let ExportRecord::Agent(a) = redact_record(agent, RedactionLevel::Standard) {
@@ -469,7 +477,8 @@ fn jsonl_exporter_applies_redaction_and_tracks_counts() -> TestResult {
             .created_at("2026-05-03T00:00:00Z")
             .ee_version("0.1.0")
             .export_id("test-export-001")
-            .build();
+            .build()
+            .expect("header has required fields");
         exporter.write_header(header).map_err(|e| e.to_string())?;
 
         for i in 0..5 {
@@ -485,14 +494,16 @@ fn jsonl_exporter_applies_redaction_and_tracks_counts() -> TestResult {
                 .kind("rule")
                 .content(content)
                 .created_at("2026-05-03T00:00:00Z")
-                .build();
+                .build()
+                .expect("memory has required fields");
             exporter.write_memory(memory).map_err(|e| e.to_string())?;
         }
 
         let footer = ExportFooter::builder()
             .export_id("test-export-001")
             .completed_at("2026-05-03T00:01:00Z")
-            .build();
+            .build()
+            .expect("footer has required fields");
         exporter.write_footer(footer).map_err(|e| e.to_string())?
     };
 
@@ -937,7 +948,8 @@ fn redaction_preserves_metadata_and_marks_record() -> TestResult {
         .kind("rule")
         .content(sensitive_value)
         .created_at("2026-05-03T00:00:00Z")
-        .build();
+        .build()
+        .expect("memory has required fields");
 
     let redacted = redact_memory_record(record.clone(), RedactionLevel::Standard);
 

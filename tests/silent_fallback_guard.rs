@@ -140,8 +140,12 @@ fn no_unallowlisted_silent_fallbacks() {
             "src/",
         ])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("Failed to execute ripgrep");
+        .output();
+
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => panic!("Failed to execute ripgrep: {e}"),
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -219,7 +223,10 @@ fn guard_detects_synthetic_violation() {
     assert_eq!(parts.len(), 3);
 
     let file_path = parts[0];
-    let line_num: u32 = parts[1].parse().unwrap();
+    let line_num: u32 = match parts[1].parse() {
+        Ok(n) => n,
+        Err(_) => panic!("test setup: invalid line number"),
+    };
 
     // This synthetic line should NOT be in the allowlist
     let is_allowlisted = ALLOWLIST.iter().any(|(path, allowed_line, _)| {
