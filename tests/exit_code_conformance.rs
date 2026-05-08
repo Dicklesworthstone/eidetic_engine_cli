@@ -66,6 +66,10 @@ fn stdout_json(output: &Output) -> Result<serde_json::Value, String> {
     serde_json::from_str(&stdout).map_err(|error| format!("stdout was not JSON: {error}\n{stdout}"))
 }
 
+fn stderr_text(output: &Output) -> Result<&str, String> {
+    std::str::from_utf8(&output.stderr).map_err(|error| format!("stderr was not UTF-8: {error}"))
+}
+
 fn artifact_dir() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("exit_code_conformance_artifacts");
     let _ = fs::create_dir_all(&dir);
@@ -624,6 +628,54 @@ fn error_responses_use_ee_error_v1_schema() -> TestResult {
     ensure(
         json["error"]["code"].as_str().is_some(),
         "error.code must be a string",
+    )
+}
+
+#[test]
+fn json_errors_follow_documented_contract_and_keep_stderr_clean() -> TestResult {
+    let output = run_ee(&["procedure", "promote", "proc_test", "--json"])?;
+    persist_artifact("error_contract_full", &output);
+
+    ensure_equal(
+        &output.status.code(),
+        &Some(EXIT_USAGE),
+        "procedure promote missing target exit code",
+    )?;
+    ensure(
+        stderr_text(&output)?.is_empty(),
+        "JSON error diagnostics must not leak to stderr",
+    )?;
+
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.error.v1"),
+        "error schema",
+    )?;
+    ensure(
+        json.get("success").is_none(),
+        "ee.error.v1 must not include success flag",
+    )?;
+
+    let error = json
+        .get("error")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("error field must be an object")?;
+    for field in ["code", "message", "severity", "repair"] {
+        ensure(
+            error
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
+            format!("error.{field} must be a string"),
+        )?;
+    }
+    ensure(
+        error
+            .get("details")
+            .and_then(serde_json::Value::as_object)
+            .is_some(),
+        "error.details must be an object",
     )
 }
 
