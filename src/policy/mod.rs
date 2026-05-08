@@ -1736,7 +1736,7 @@ mod tests {
     }
 
     #[test]
-    fn trust_promotion_timing_invariant_structure() -> Result<(), String> {
+    fn trust_promotion_timing_invariant_structure() -> Result<(), &'static str> {
         // This test verifies the STRUCTURE that ensures timing invariance:
         // All validation checks must be performed regardless of input.
         //
@@ -1783,9 +1783,7 @@ mod tests {
                 result.is_err(),
                 "expected Err for invalid class '{invalid_class}'"
             );
-            let rejection = result
-                .err()
-                .ok_or_else(|| format!("expected rejection for `{invalid_class}`"))?;
+            let rejection = result.err().ok_or("expected invalid class rejection")?;
             assert_eq!(rejection.reason, "unknown_trust_class");
         }
 
@@ -1793,7 +1791,7 @@ mod tests {
     }
 
     #[test]
-    fn trust_promotion_unknown_class_reason_ignores_evidence_shape() -> Result<(), String> {
+    fn trust_promotion_unknown_class_reason_ignores_evidence_shape() -> Result<(), &'static str> {
         for (source_type, source_id) in [
             ("feedback_event", "fb_01234567890123456789012345"),
             ("human_request", "audit_01234567890123456789012345678901"),
@@ -1802,9 +1800,7 @@ mod tests {
             let rejection =
                 validate_trust_promotion_evidence("invalid_clsxxxxx", source_type, source_id)
                     .err()
-                    .ok_or_else(|| {
-                        format!("expected unknown class rejection for source `{source_type}`")
-                    })?;
+                    .ok_or("expected unknown class rejection")?;
             assert_eq!(rejection.reason, "unknown_trust_class");
         }
 
