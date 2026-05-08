@@ -265,6 +265,7 @@ impl DbConnection {
                     .map_err(|source| DbError::sqlmodel(DbOperation::OpenSchemaOnly, source))?
             }
         };
+        configure_file_busy_timeout(&inner, &config.location, config.mode)?;
         configure_file_durability_pragmas(&inner, &config.location, config.mode)?;
         enable_foreign_key_enforcement(&inner)?;
 
@@ -763,6 +764,23 @@ fn enable_foreign_key_enforcement(inner: &FrankenConnection) -> Result<()> {
         .map_err(|source| DbError::sqlmodel(DbOperation::EnableForeignKeys, source))
 }
 
+fn configure_file_busy_timeout(
+    inner: &FrankenConnection,
+    location: &DatabaseLocation,
+    mode: DatabaseOpenMode,
+) -> Result<()> {
+    if !matches!(
+        (location, mode),
+        (DatabaseLocation::File(_), DatabaseOpenMode::ReadWrite)
+    ) {
+        return Ok(());
+    }
+
+    inner
+        .execute_raw("PRAGMA busy_timeout = 0")
+        .map_err(|source| DbError::sqlmodel(DbOperation::ConfigureBusyTimeout, source))
+}
+
 fn configure_file_durability_pragmas(
     inner: &FrankenConnection,
     location: &DatabaseLocation,
@@ -847,6 +865,7 @@ fn database_open_error_is_retryable(error: &DbError) -> bool {
         operation,
         DbOperation::OpenReadWrite
             | DbOperation::OpenSchemaOnly
+            | DbOperation::ConfigureBusyTimeout
             | DbOperation::ConfigureDurabilityPragmas
             | DbOperation::EnableForeignKeys
     ) {
@@ -1286,6 +1305,7 @@ pub enum DbOperation {
     OpenMemory,
     OpenReadWrite,
     OpenSchemaOnly,
+    ConfigureBusyTimeout,
     ConfigureDurabilityPragmas,
     EnableForeignKeys,
     Query,
@@ -1309,6 +1329,7 @@ impl fmt::Display for DbOperation {
             Self::OpenMemory => f.write_str("memory open"),
             Self::OpenReadWrite => f.write_str("read-write open"),
             Self::OpenSchemaOnly => f.write_str("schema-only open"),
+            Self::ConfigureBusyTimeout => f.write_str("busy timeout configure"),
             Self::ConfigureDurabilityPragmas => f.write_str("durability pragma configure"),
             Self::EnableForeignKeys => f.write_str("foreign key enforcement enable"),
             Self::Query => f.write_str("query"),
@@ -13185,6 +13206,14 @@ mod tests {
             &synchronous_is_normal,
             &true,
             "file database synchronous mode is NORMAL",
+        )?;
+
+        let busy_timeout_rows = connection.query("PRAGMA busy_timeout", &[])?;
+        let busy_timeout = first_value(&busy_timeout_rows, 0, "busy_timeout pragma")?;
+        ensure_equal(
+            &busy_timeout.as_i64(),
+            &Some(0),
+            "file database busy timeout returns contention immediately",
         )?;
 
         connection.close()?;
