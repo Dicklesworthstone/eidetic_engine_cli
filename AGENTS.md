@@ -183,10 +183,17 @@ For complete readiness-gate verification, run the central orchestrator:
 
 This runs all gates in the correct order with per-stage exit codes and durations:
 1. Forbidden dependency check (`./scripts/check-forbidden-deps.sh`)
-2. Unit, contract, and golden tests (`cargo test --workspace --all-targets`)
-3. Basic E2E (`./scripts/e2e_test.sh`)
-4. Advanced E2E (`./scripts/e2e_advanced.sh`)
-5. Boundary migration E2E (`./scripts/e2e_boundary_migration.sh`)
+2. Closure linter (`./scripts/closure-lint.sh --audit --json`)
+3. Verification drift guard (`./scripts/verification-drift-guard.sh --json`)
+4. Vision coverage (`./scripts/vision-coverage.sh --json`)
+5. Unit, contract, and golden tests (`cargo test --workspace --lib --bins --tests --examples`)
+6. Basic E2E (`./scripts/e2e_test.sh`)
+7. Advanced E2E (`./scripts/e2e_advanced.sh`)
+8. Boundary migration E2E (`./scripts/e2e_boundary_migration.sh`)
+
+Criterion benchmarks are excluded from the normal test gate and run only through
+the explicit benchmark gate (`./scripts/verify.sh --include-bench` or
+`./scripts/bench.sh --check-regression`).
 
 The script fails fast on the first failing gate.
 

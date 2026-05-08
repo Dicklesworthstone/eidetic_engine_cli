@@ -9,6 +9,9 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+const NORMAL_CARGO_TEST_GATE: &str = "cargo test --workspace --lib --bins --tests --examples";
+const BENCH_INCLUDED_TEST_GATE: &str = "cargo test --workspace --all-targets";
+
 fn project_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
@@ -138,5 +141,57 @@ fn verify_sh_includes_drift_guard_gate() {
     assert!(
         verify_script.contains("Verification Drift Guard"),
         "verify.sh should name the drift guard stage"
+    );
+}
+
+#[test]
+fn normal_verify_test_gate_excludes_criterion_benches() {
+    let verify_script =
+        fs::read_to_string(project_root().join("scripts/verify.sh")).expect("read verify.sh");
+
+    assert!(
+        verify_script.contains(NORMAL_CARGO_TEST_GATE),
+        "verify.sh should use the non-benchmark cargo test gate: {NORMAL_CARGO_TEST_GATE}"
+    );
+    assert!(
+        !verify_script.contains(BENCH_INCLUDED_TEST_GATE),
+        "verify.sh normal test gate must not use `{BENCH_INCLUDED_TEST_GATE}`; benches belong behind --include-bench"
+    );
+    assert!(
+        verify_script.contains("--include-bench") && verify_script.contains("./scripts/bench.sh"),
+        "verify.sh should preserve an explicit benchmark gate"
+    );
+}
+
+#[test]
+fn ci_workflow_uses_normal_non_benchmark_test_gate() {
+    let ci_workflow =
+        fs::read_to_string(project_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
+
+    assert!(
+        ci_workflow.contains(NORMAL_CARGO_TEST_GATE),
+        "CI should run the same non-benchmark test gate as verify.sh"
+    );
+    assert!(
+        !ci_workflow.contains(BENCH_INCLUDED_TEST_GATE),
+        "CI's normal Tests step must not run `{BENCH_INCLUDED_TEST_GATE}`"
+    );
+}
+
+#[test]
+fn agent_docs_match_normal_non_benchmark_test_gate() {
+    let agent_docs = fs::read_to_string(project_root().join("AGENTS.md")).expect("read AGENTS.md");
+
+    assert!(
+        agent_docs.contains(NORMAL_CARGO_TEST_GATE),
+        "AGENTS.md should document the central verifier's non-benchmark test gate"
+    );
+    assert!(
+        !agent_docs.contains(BENCH_INCLUDED_TEST_GATE),
+        "AGENTS.md should not document `{BENCH_INCLUDED_TEST_GATE}` as the normal verify test gate"
+    );
+    assert!(
+        agent_docs.contains("--include-bench") && agent_docs.contains("./scripts/bench.sh"),
+        "AGENTS.md should point benchmark verification at the explicit benchmark gate"
     );
 }

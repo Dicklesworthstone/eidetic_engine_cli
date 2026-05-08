@@ -41,7 +41,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Tests
-        run: cargo test --workspace --all-targets
+        run: cargo test --workspace --lib --bins --tests --examples
 
       - name: MCP parity tests
         run: cargo test --workspace --features mcp --test mcp_parity
