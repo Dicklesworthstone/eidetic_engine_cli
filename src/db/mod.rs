@@ -10,6 +10,7 @@ use std::time::Duration;
 use chrono::{DateTime, SecondsFormat, Utc};
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, flock};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sqlmodel_core::{IsolationLevel, Row, Value};
 use sqlmodel_frankensqlite::FrankenConnection;
@@ -11403,10 +11404,10 @@ pub struct CreateTaskEpisodeInput {
 fn stored_task_episode_from_row(row: &Row) -> Result<StoredTaskEpisode> {
     let memory_ids_json = required_text(row, 4, DbOperation::Query, "retrieved_memory_ids")?;
     let retrieved_memory_ids: Vec<String> =
-        serde_json::from_str(memory_ids_json).unwrap_or_default();
+        decode_task_episode_json(memory_ids_json, "retrieved_memory_ids")?;
 
     let actions_json = required_text(row, 6, DbOperation::Query, "actions")?;
-    let actions: Vec<StoredEpisodeAction> = serde_json::from_str(actions_json).unwrap_or_default();
+    let actions: Vec<StoredEpisodeAction> = decode_task_episode_json(actions_json, "actions")?;
 
     Ok(StoredTaskEpisode {
         id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
@@ -11424,6 +11425,16 @@ fn stored_task_episode_from_row(row: &Row) -> Result<StoredTaskEpisode> {
         agent: optional_text(row, 12)?.map(str::to_string),
         episode_hash: optional_text(row, 13)?.map(str::to_string),
         created_at: required_text(row, 14, DbOperation::Query, "created_at")?.to_string(),
+    })
+}
+
+fn decode_task_episode_json<T>(raw: &str, field: &'static str) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_str(raw).map_err(|error| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: format!("task_episodes.{field} contains malformed or incompatible JSON: {error}"),
     })
 }
 
@@ -11972,9 +11983,10 @@ mod tests {
     use sqlmodel_core::{Row, Value};
 
     use super::{
-        CreateArtifactInput, CreateArtifactLinkInput, CreateWorkspaceInput, DatabaseConfig,
-        DatabaseLocation, DatabaseOpenMode, DbConnection, DbError, DbOperation,
-        MIGRATION_TABLE_NAME, Migration, MigrationRecord, MigrationTableColumn, subsystem_name,
+        CreateArtifactInput, CreateArtifactLinkInput, CreateTaskEpisodeInput, CreateWorkspaceInput,
+        DatabaseConfig, DatabaseLocation, DatabaseOpenMode, DbConnection, DbError, DbOperation,
+        MIGRATION_TABLE_NAME, Migration, MigrationRecord, MigrationTableColumn,
+        StoredEpisodeAction, subsystem_name,
     };
     use crate::models::{
         EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose,
@@ -12100,6 +12112,86 @@ mod tests {
             }
             other => Err(TestFailure::new(format!(
                 "{context}: expected MigrationDrift, got {other:?}"
+            ))),
+        }
+    }
+
+    fn task_episode_input() -> CreateTaskEpisodeInput {
+        CreateTaskEpisodeInput {
+            workspace_id: None,
+            session_id: None,
+            task_input: "replay task episode".to_string(),
+            retrieved_memory_ids: vec!["mem_01234567890123456789012345".to_string()],
+            context_pack_id: None,
+            actions: vec![StoredEpisodeAction {
+                action_type: "tool_call".to_string(),
+                target_id: Some("tool-runner".to_string()),
+                details: Some("{}".to_string()),
+                timestamp: "2026-05-08T10:00:00Z".to_string(),
+            }],
+            outcome: "success".to_string(),
+            outcome_details: Some("episode completed".to_string()),
+            started_at: "2026-05-08T09:59:00Z".to_string(),
+            ended_at: Some("2026-05-08T10:00:00Z".to_string()),
+            duration_ms: Some(60_000),
+            agent: Some("agent-json-decoder-test".to_string()),
+            episode_hash: None,
+        }
+    }
+
+    fn corrupt_task_episode_json_column(
+        connection: &DbConnection,
+        episode_id: &str,
+        column: &str,
+        stored_json: &str,
+    ) -> TestResult {
+        let sql = match column {
+            "retrieved_memory_ids" => {
+                "UPDATE task_episodes SET retrieved_memory_ids = ?1 WHERE id = ?2"
+            }
+            "actions" => "UPDATE task_episodes SET actions = ?1 WHERE id = ?2",
+            other => {
+                return Err(TestFailure::new(format!(
+                    "unsupported task episode JSON column `{other}`"
+                )));
+            }
+        };
+
+        connection.execute_for(
+            DbOperation::Execute,
+            sql,
+            &[
+                Value::Text(stored_json.to_string()),
+                Value::Text(episode_id.to_string()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn ensure_task_episode_json_malformed<T>(result: super::Result<T>, field: &str) -> TestResult {
+        let error = match result {
+            Ok(_) => {
+                return Err(TestFailure::new(format!(
+                    "{field}: expected malformed task episode JSON error"
+                )));
+            }
+            Err(error) => error,
+        };
+
+        match error {
+            DbError::MalformedRow { operation, message } => {
+                ensure_equal(&operation, &DbOperation::Query, "malformed JSON operation")?;
+                ensure(
+                    message.contains(field),
+                    format!("malformed JSON message must name {field}: {message}"),
+                )?;
+                ensure(
+                    message.contains("malformed or incompatible JSON"),
+                    format!("malformed JSON message must explain decode failure: {message}"),
+                )
+            }
+            other => Err(TestFailure::new(format!(
+                "{field}: expected MalformedRow, got {other:?}"
             ))),
         }
     }
@@ -12902,6 +12994,40 @@ mod tests {
             &second.skipped().to_vec(),
             &migration_versions(),
             "second run skips all migrations",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn task_episode_get_rejects_incompatible_retrieved_memory_ids_json() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let episode_id = "ep_123456789012345678901234567";
+        connection.insert_task_episode(episode_id, &task_episode_input())?;
+        corrupt_task_episode_json_column(&connection, episode_id, "retrieved_memory_ids", "{}")?;
+
+        ensure_task_episode_json_malformed(
+            connection.get_task_episode(episode_id),
+            "retrieved_memory_ids",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn task_episode_list_rejects_incompatible_actions_json() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let episode_id = "ep_223456789012345678901234567";
+        connection.insert_task_episode(episode_id, &task_episode_input())?;
+        corrupt_task_episode_json_column(&connection, episode_id, "actions", "{}")?;
+
+        ensure_task_episode_json_malformed(
+            connection.list_task_episodes(None, None, 10),
+            "actions",
         )?;
 
         connection.close()?;
