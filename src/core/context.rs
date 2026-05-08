@@ -1090,13 +1090,8 @@ fn candidates_from_search_with_metrics(
     let memory_ids_refs: Vec<&str> = memory_ids.iter().map(|s| s.as_str()).collect();
 
     // Phase 2: Batch load all memories and tags.
-    let memories = connection
-        .get_memories_batch(&memory_ids_refs)
-        .unwrap_or_default();
+    let (memories, tags_map) = load_candidate_batch_maps(connection, &memory_ids_refs, degraded);
     metrics.memory_batch_reads = usize::from(!memory_ids_refs.is_empty());
-    let tags_map = connection
-        .get_memory_tags_batch(&memory_ids_refs)
-        .unwrap_or_default();
     metrics.tag_batch_reads = usize::from(!memory_ids_refs.is_empty());
 
     // Phase 3: Build candidates from preloaded data.
@@ -1149,6 +1144,49 @@ fn candidates_from_search_with_metrics(
         }
     }
     (candidates, metrics)
+}
+
+fn load_candidate_batch_maps(
+    connection: &DbConnection,
+    memory_ids: &[&str],
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> (
+    BTreeMap<String, StoredMemory>,
+    BTreeMap<String, Vec<String>>,
+) {
+    if memory_ids.is_empty() {
+        return (BTreeMap::new(), BTreeMap::new());
+    }
+
+    let memories = match connection.get_memories_batch(memory_ids) {
+        Ok(memories) => memories,
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_candidate_memory_batch_unavailable",
+                ContextResponseSeverity::Medium,
+                format!("Context candidate memories could not be batch-loaded: {error}"),
+                Some("ee status --json".to_string()),
+            );
+            BTreeMap::new()
+        }
+    };
+
+    let tags_map = match connection.get_memory_tags_batch(memory_ids) {
+        Ok(tags_map) => tags_map,
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_candidate_tags_batch_unavailable",
+                ContextResponseSeverity::Medium,
+                format!("Context candidate memory tags could not be batch-loaded: {error}"),
+                Some("ee status --json".to_string()),
+            );
+            BTreeMap::new()
+        }
+    };
+
+    (memories, tags_map)
 }
 
 fn candidate_from_hit_preloaded(
@@ -1586,8 +1624,9 @@ mod tests {
         FocusItem, FocusState, MemoryId, ProvenanceUri, TrustClass, UnitScore, WorkspaceId,
     };
     use crate::pack::{
-        ContextPackProfile, ContextRequest, ContextRequestInput, PackCandidate, PackCandidateInput,
-        PackProvenance, PackSection, TokenBudget, assemble_draft_with_profile,
+        ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponseSeverity,
+        PackCandidate, PackCandidateInput, PackProvenance, PackSection, TokenBudget,
+        assemble_draft_with_profile,
     };
 
     fn workspace_at(root: &str) -> WorkspaceLocation {
@@ -1600,6 +1639,73 @@ mod tests {
             RequestBudget::unbounded(),
             caps,
         )
+    }
+
+    #[test]
+    fn candidate_batch_db_failures_are_reported_before_candidate_skips() -> Result<(), String> {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(70));
+        let search_report = SearchReport {
+            status: SearchStatus::Success,
+            query: "prepare release".to_string(),
+            requested_limit: 1,
+            results: vec![SearchHit {
+                doc_id: memory_id.to_string(),
+                score: 0.91,
+                source: ScoreSource::Lexical,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: Some(0.91),
+                rerank_score: None,
+                metadata: None,
+                explanation: None,
+            }],
+            elapsed_ms: 0.0,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+        };
+        let mut degraded = Vec::new();
+
+        let (candidates, metrics) =
+            super::candidates_from_search_with_metrics(&connection, &search_report, &mut degraded);
+
+        assert!(candidates.is_empty());
+        assert_eq!(metrics.search_hits, 1);
+        assert_eq!(metrics.resolved_memory_ids, 1);
+        assert_eq!(metrics.unique_memory_ids, 1);
+        assert_eq!(metrics.memory_batch_reads, 1);
+        assert_eq!(metrics.tag_batch_reads, 1);
+        assert_eq!(metrics.converted_candidates, 0);
+        assert_eq!(metrics.skipped_candidates, 1);
+
+        let codes: BTreeSet<&str> = degraded.iter().map(|entry| entry.code.as_str()).collect();
+        assert!(
+            codes.contains("context_candidate_memory_batch_unavailable"),
+            "{degraded:#?}"
+        );
+        assert!(
+            codes.contains("context_candidate_tags_batch_unavailable"),
+            "{degraded:#?}"
+        );
+        assert!(codes.contains("context_candidate_skipped"), "{degraded:#?}");
+        assert!(degraded.iter().any(|entry| {
+            entry.code == "context_candidate_memory_batch_unavailable"
+                && entry.severity == ContextResponseSeverity::Medium
+                && entry.repair.as_deref() == Some("ee status --json")
+                && entry
+                    .message
+                    .contains("Context candidate memories could not be batch-loaded")
+        }));
+        assert!(degraded.iter().any(|entry| {
+            entry.code == "context_candidate_tags_batch_unavailable"
+                && entry.severity == ContextResponseSeverity::Medium
+                && entry.repair.as_deref() == Some("ee status --json")
+                && entry
+                    .message
+                    .contains("Context candidate memory tags could not be batch-loaded")
+        }));
+
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]
