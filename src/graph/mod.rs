@@ -1400,6 +1400,7 @@ struct GraphSnapshotWriteOwner<'a> {
     conn: &'a DbConnection,
     lock_id: AdvisoryLockId,
     holder_id: String,
+    ttl_secs: u64,
 }
 
 impl Drop for GraphSnapshotWriteOwner<'_> {
@@ -1425,6 +1426,8 @@ impl Drop for GraphSnapshotWriteOwner<'_> {
                 resource_type = self.lock_id.resource_type(),
                 workspace_id = self.lock_id.resource_id(),
                 holder_id = self.holder_id.as_str(),
+                lock_ttl_secs = self.ttl_secs,
+                recovery = "the advisory lock is expiring; retry after the TTL or inspect ee_advisory_locks",
                 error = %error,
                 "graph snapshot write lock release failed after retries"
             );
@@ -1497,6 +1500,7 @@ fn acquire_graph_snapshot_write_owner<'a>(
                     conn,
                     lock_id,
                     holder_id,
+                    ttl_secs: GRAPH_SNAPSHOT_WRITE_LOCK_TTL_SECS,
                 });
             }
             Ok(AcquireLockResult::AlreadyHeld {
@@ -5598,6 +5602,40 @@ mod tests {
                 ));
             }
         }
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn graph_snapshot_write_owner_uses_expiring_lock() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        let lock_id = AdvisoryLockId::workspace(WORKSPACE_ID);
+
+        let owner = graph_result(super::acquire_graph_snapshot_write_owner(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+        let held = connection
+            .is_lock_held(&lock_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "graph snapshot lock should be held".to_owned())?;
+
+        assert_eq!(held.holder_id, owner.holder_id);
+        assert_eq!(owner.ttl_secs, super::GRAPH_SNAPSHOT_WRITE_LOCK_TTL_SECS);
+        assert!(
+            held.expires_at.is_some(),
+            "graph snapshot locks must expire if Drop release fails"
+        );
+
+        drop(owner);
+
+        assert!(
+            connection
+                .is_lock_held(&lock_id)
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            "graph snapshot lock should release normally on Drop"
+        );
 
         connection.close().map_err(|error| error.to_string())
     }
