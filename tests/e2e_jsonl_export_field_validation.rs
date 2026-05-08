@@ -168,11 +168,21 @@ fn import_jsonl_rejects_blank_memory_id_with_issue_code() -> TestResult {
     // 3. Attempt import - should report rejection with issue codes
     let (exit_code, parsed, stderr) = run_ee(
         &workspace,
-        &["import", "jsonl", "--source", path_arg(&jsonl_path)?, "--dry-run"],
+        &[
+            "import",
+            "jsonl",
+            "--source",
+            path_arg(&jsonl_path)?,
+            "--dry-run",
+        ],
     )?;
 
     // 4. Assert proper response envelope
-    ensure_equal(&exit_code, &EXIT_SUCCESS, "rejected import still returns parseable report")?;
+    ensure_equal(
+        &exit_code,
+        &EXIT_SUCCESS,
+        "rejected import still returns parseable report",
+    )?;
     ensure(
         stderr.is_empty(),
         format!("JSON mode must keep stderr empty, got: {stderr}"),
@@ -199,9 +209,9 @@ fn import_jsonl_rejects_blank_memory_id_with_issue_code() -> TestResult {
         .and_then(Value::as_array)
         .ok_or_else(|| format!("import must expose issues array: {parsed}"))?;
     ensure(
-        issues.iter().any(|issue| {
-            issue.get("severity").and_then(Value::as_str) == Some("error")
-        }),
+        issues
+            .iter()
+            .any(|issue| issue.get("severity").and_then(Value::as_str) == Some("error")),
         format!("import must report error-severity issue for blank memory_id: {issues:?}"),
     )?;
 
@@ -225,11 +235,21 @@ fn import_jsonl_rejects_blank_content_with_issue_code() -> TestResult {
     // 3. Attempt import
     let (exit_code, parsed, stderr) = run_ee(
         &workspace,
-        &["import", "jsonl", "--source", path_arg(&jsonl_path)?, "--dry-run"],
+        &[
+            "import",
+            "jsonl",
+            "--source",
+            path_arg(&jsonl_path)?,
+            "--dry-run",
+        ],
     )?;
 
     // 4. Assert proper response envelope
-    ensure_equal(&exit_code, &EXIT_SUCCESS, "rejected import still returns parseable report")?;
+    ensure_equal(
+        &exit_code,
+        &EXIT_SUCCESS,
+        "rejected import still returns parseable report",
+    )?;
     ensure(stderr.is_empty(), "stderr must be empty in JSON mode")?;
     ensure_equal(
         &parsed.pointer("/data/status"),
