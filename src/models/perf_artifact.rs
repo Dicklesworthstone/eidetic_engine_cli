@@ -222,13 +222,13 @@ impl fmt::Display for SummaryDegradationCode {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DegradationSeverity {
+pub enum ArtifactDegradationSeverity {
     Low,
     Medium,
     High,
 }
 
-impl DegradationSeverity {
+impl ArtifactDegradationSeverity {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -239,7 +239,7 @@ impl DegradationSeverity {
     }
 }
 
-impl fmt::Display for DegradationSeverity {
+impl fmt::Display for ArtifactDegradationSeverity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
@@ -249,7 +249,7 @@ impl fmt::Display for DegradationSeverity {
 #[serde(rename_all = "camelCase")]
 pub struct SummaryDegradation {
     pub code: SummaryDegradationCode,
-    pub severity: DegradationSeverity,
+    pub severity: ArtifactDegradationSeverity,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -264,7 +264,7 @@ impl SummaryDegradation {
     pub fn missing_metric(metric_name: &str, artifact_id: Option<&str>) -> Self {
         Self {
             code: SummaryDegradationCode::MissingMetric,
-            severity: DegradationSeverity::Medium,
+            severity: ArtifactDegradationSeverity::Medium,
             artifact_id: artifact_id.map(String::from),
             field_path: Some(format!("metrics.{metric_name}")),
             message: format!("Metric `{metric_name}` is not available in source artifact."),
@@ -276,7 +276,7 @@ impl SummaryDegradation {
     pub fn tampered_hash(artifact_id: &str, declared: &str, observed: &str) -> Self {
         Self {
             code: SummaryDegradationCode::TamperedHash,
-            severity: DegradationSeverity::High,
+            severity: ArtifactDegradationSeverity::High,
             artifact_id: Some(artifact_id.to_owned()),
             field_path: Some("contentHash".to_owned()),
             message: format!(
@@ -290,7 +290,7 @@ impl SummaryDegradation {
     pub fn stale_schema(schema: &str, artifact_id: Option<&str>) -> Self {
         Self {
             code: SummaryDegradationCode::StaleSchemaVersion,
-            severity: DegradationSeverity::Medium,
+            severity: ArtifactDegradationSeverity::Medium,
             artifact_id: artifact_id.map(String::from),
             field_path: Some("schema".to_owned()),
             message: format!(
@@ -304,7 +304,7 @@ impl SummaryDegradation {
     pub fn redaction_uncertain(artifact_id: Option<&str>, field_path: Option<&str>) -> Self {
         Self {
             code: SummaryDegradationCode::RedactionUncertain,
-            severity: DegradationSeverity::High,
+            severity: ArtifactDegradationSeverity::High,
             artifact_id: artifact_id.map(String::from),
             field_path: field_path.map(String::from),
             message:
@@ -321,7 +321,7 @@ impl SummaryDegradation {
     pub fn unsupported_kind(kind: &str) -> Self {
         Self {
             code: SummaryDegradationCode::UnsupportedArtifactKind,
-            severity: DegradationSeverity::High,
+            severity: ArtifactDegradationSeverity::High,
             artifact_id: None,
             field_path: Some("artifactKind".to_owned()),
             message: format!("Artifact kind `{kind}` is not supported for summarization."),
@@ -498,7 +498,7 @@ impl ArtifactSummary {
     pub fn has_critical_degradation(&self) -> bool {
         self.degraded
             .iter()
-            .any(|d| d.severity == DegradationSeverity::High)
+            .any(|d| d.severity == ArtifactDegradationSeverity::High)
     }
 }
 
@@ -527,7 +527,7 @@ impl DegradedSummary {
             artifact_id: artifact_id.into(),
             degraded: vec![SummaryDegradation {
                 code: SummaryDegradationCode::MalformedSource,
-                severity: DegradationSeverity::High,
+                severity: ArtifactDegradationSeverity::High,
                 artifact_id: None,
                 field_path: None,
                 message: message.into(),
@@ -543,7 +543,7 @@ impl DegradedSummary {
             artifact_id: artifact_id.into(),
             degraded: vec![SummaryDegradation {
                 code: SummaryDegradationCode::SourceUnavailable,
-                severity: DegradationSeverity::High,
+                severity: ArtifactDegradationSeverity::High,
                 artifact_id: None,
                 field_path: Some("sourcePath".to_owned()),
                 message: format!("Source artifact at `{path}` could not be read."),
@@ -703,8 +703,14 @@ mod tests {
         ));
 
         assert_eq!(summary.degraded.len(), 3);
-        assert_eq!(summary.degraded[0].severity, DegradationSeverity::High);
-        assert_eq!(summary.degraded[1].severity, DegradationSeverity::Medium);
+        assert_eq!(
+            summary.degraded[0].severity,
+            ArtifactDegradationSeverity::High
+        );
+        assert_eq!(
+            summary.degraded[1].severity,
+            ArtifactDegradationSeverity::Medium
+        );
     }
 
     #[test]

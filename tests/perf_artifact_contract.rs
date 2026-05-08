@@ -201,9 +201,9 @@ fn missing_optional_fields_stay_absent_from_summary_json() {
     let summary = ArtifactSummary::new("minimal", ArtifactKind::ProfileEvidence, "ee.profile.v1");
     let json = serde_json::to_string(&summary).unwrap();
 
-    assert!(!json.contains("sourcePath"));
-    assert!(!json.contains("contentHash"));
-    assert!(!json.contains("profile"));
+    assert!(!json.contains("\"sourcePath\""));
+    assert!(!json.contains("\"contentHash\""));
+    assert!(!json.contains("\"profile\":"));
 }
 
 #[test]

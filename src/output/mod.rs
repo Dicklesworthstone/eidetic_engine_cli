@@ -4717,6 +4717,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: crate::models::causal_schema_catalog_json,
         },
         SchemaEntry {
+            id: crate::models::PERF_SCHEMA_CATALOG_V1,
+            version: "1",
+            description: "Performance artifact summaries and metric schemas for regression forensics",
+            category: "domain",
+            definition: crate::models::perf_schema_catalog_json,
+        },
+        SchemaEntry {
             id: MAINTENANCE_RUN_SCHEMA_V1,
             version: "1",
             description: "Maintenance job run response data",

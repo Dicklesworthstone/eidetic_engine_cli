@@ -1,8 +1,8 @@
 use std::future::Future;
 
 use crate::models::{
-    ERROR_SCHEMA_V1, INSTALL_CHECK_SCHEMA_V1, INSTALL_PLAN_SCHEMA_V1, RESPONSE_SCHEMA_V1,
-    UPDATE_PLAN_SCHEMA_V1,
+    ARTIFACT_SUMMARY_SCHEMA_V1, ERROR_SCHEMA_V1, INSTALL_CHECK_SCHEMA_V1, INSTALL_PLAN_SCHEMA_V1,
+    RESPONSE_SCHEMA_V1, UPDATE_PLAN_SCHEMA_V1,
 };
 
 pub mod agent_detect;
@@ -199,10 +199,7 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
         ),
         SupportedSchema::new("runtime_profile", profile::RUNTIME_PROFILE_SCHEMA_V1),
         SupportedSchema::new("update_plan", UPDATE_PLAN_SCHEMA_V1),
-        SupportedSchema::new(
-            "artifact_summary",
-            perf_forensics::ARTIFACT_SUMMARY_SCHEMA_V1,
-        ),
+        SupportedSchema::new("artifact_summary", ARTIFACT_SUMMARY_SCHEMA_V1),
         SupportedSchema::new("compare_result", perf_forensics::COMPARE_RESULT_SCHEMA_V1),
     ]
 }

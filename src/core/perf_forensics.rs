@@ -7,13 +7,21 @@
 //! The compare surface is read-only and does not mutate memory, indexes, profiles,
 //! caches, or beads state.
 
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const ARTIFACT_SUMMARY_SCHEMA_V1: &str = "ee.perf.artifact_summary.v1";
 pub const COMPARE_RESULT_SCHEMA_V1: &str = "ee.perf.compare.v1";
+
+const ARTIFACT_SUMMARY_SCHEMA: &str = "ee.perf.artifact_summary.v1";
+
+fn default_artifact_summary_schema() -> &'static str {
+    ARTIFACT_SUMMARY_SCHEMA
+}
+
+fn default_compare_result_schema() -> &'static str {
+    COMPARE_RESULT_SCHEMA_V1
+}
 
 /// Artifact kinds supported by the perf forensics compare surface.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -61,6 +69,7 @@ impl ArtifactKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactSummary {
+    #[serde(skip_deserializing, default = "default_artifact_summary_schema")]
     pub schema: &'static str,
     pub artifact_id: String,
     pub artifact_kind: ArtifactKind,
@@ -81,7 +90,7 @@ impl ArtifactSummary {
     #[must_use]
     pub fn new(artifact_id: impl Into<String>, artifact_kind: ArtifactKind) -> Self {
         Self {
-            schema: ARTIFACT_SUMMARY_SCHEMA_V1,
+            schema: ARTIFACT_SUMMARY_SCHEMA,
             artifact_id: artifact_id.into(),
             artifact_kind,
             source_schema: None,
@@ -293,18 +302,16 @@ impl Severity {
 }
 
 /// Subsystem owner taxonomy for regression hints.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubsystemOwner {
-    Retrieval,
-    Packing,
-    Storage,
-    Indexing,
+    Search,
+    Pack,
+    Db,
     Cache,
-    WriteOwner,
+    WriteSpool,
     Profile,
-    Support,
-    Runtime,
+    HostPressure,
     Unknown,
 }
 
@@ -312,15 +319,13 @@ impl SubsystemOwner {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Retrieval => "retrieval",
-            Self::Packing => "packing",
-            Self::Storage => "storage",
-            Self::Indexing => "indexing",
+            Self::Search => "search",
+            Self::Pack => "pack",
+            Self::Db => "db",
             Self::Cache => "cache",
-            Self::WriteOwner => "write_owner",
+            Self::WriteSpool => "write_spool",
             Self::Profile => "profile",
-            Self::Support => "support",
-            Self::Runtime => "runtime",
+            Self::HostPressure => "host_pressure",
             Self::Unknown => "unknown",
         }
     }
@@ -329,23 +334,23 @@ impl SubsystemOwner {
     pub fn infer_from_metric(metric_name: &str) -> Self {
         let lower = metric_name.to_lowercase();
         if lower.contains("search") || lower.contains("query") || lower.contains("candidate") {
-            Self::Retrieval
+            Self::Search
         } else if lower.contains("pack") || lower.contains("token") || lower.contains("context") {
-            Self::Packing
+            Self::Pack
         } else if lower.contains("db") || lower.contains("storage") || lower.contains("migration") {
-            Self::Storage
-        } else if lower.contains("index") || lower.contains("rebuild") {
-            Self::Indexing
+            Self::Db
         } else if lower.contains("cache") || lower.contains("hotset") || lower.contains("prewarm") {
             Self::Cache
         } else if lower.contains("write") || lower.contains("spool") || lower.contains("queue") {
-            Self::WriteOwner
+            Self::WriteSpool
         } else if lower.contains("profile") || lower.contains("budget") {
             Self::Profile
-        } else if lower.contains("bundle") || lower.contains("support") {
-            Self::Support
-        } else if lower.contains("runtime") || lower.contains("cancel") || lower.contains("async") {
-            Self::Runtime
+        } else if lower.contains("rss")
+            || lower.contains("memory")
+            || lower.contains("cpu")
+            || lower.contains("load")
+        {
+            Self::HostPressure
         } else {
             Self::Unknown
         }
@@ -528,6 +533,40 @@ fn classify_delta_severity(delta_percent: Option<f64>, volatility: &Volatility) 
     }
 }
 
+fn metric_higher_is_better(metric_name: &str) -> bool {
+    let lower = metric_name.to_lowercase();
+    lower.contains("hit_rate")
+        || lower.contains("success_rate")
+        || lower.contains("cache_hit")
+        || lower.contains("precision")
+        || lower.contains("recall")
+        || lower.contains("throughput")
+}
+
+fn delta_is_regression(delta: &MetricDelta) -> bool {
+    if delta.severity < Severity::Medium {
+        return false;
+    }
+
+    if metric_higher_is_better(&delta.metric) {
+        delta.direction == DeltaDirection::Decreased
+    } else {
+        delta.direction == DeltaDirection::Increased
+    }
+}
+
+fn delta_is_improvement(delta: &MetricDelta) -> bool {
+    if delta.severity < Severity::Medium {
+        return false;
+    }
+
+    if metric_higher_is_better(&delta.metric) {
+        delta.direction == DeltaDirection::Increased
+    } else {
+        delta.direction == DeltaDirection::Decreased
+    }
+}
+
 /// Direction of a metric change.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -573,6 +612,7 @@ pub enum ArtifactSide {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompareReport {
+    #[serde(skip_deserializing, default = "default_compare_result_schema")]
     pub schema: &'static str,
     pub artifacts: CompareArtifacts,
     pub summary: CompareSummary,
@@ -609,6 +649,36 @@ pub fn compare_artifacts(baseline: &ArtifactSummary, candidate: &ArtifactSummary
     let mut degraded = Vec::new();
     let mut owner_evidence: BTreeMap<SubsystemOwner, Vec<String>> = BTreeMap::new();
 
+    // Check schema compatibility
+    if baseline.schema != ARTIFACT_SUMMARY_SCHEMA {
+        degraded.push(CompareDegradation {
+            code: "unsupported_schema".to_string(),
+            severity: Severity::High,
+            artifact_side: ArtifactSide::Baseline,
+            affected_field: Some("schema".to_string()),
+            message: format!(
+                "Baseline artifact uses unsupported schema {}",
+                baseline.schema
+            ),
+            repair: Some("Normalize the baseline artifact with the current ee version".to_string()),
+        });
+    }
+    if candidate.schema != ARTIFACT_SUMMARY_SCHEMA {
+        degraded.push(CompareDegradation {
+            code: "unsupported_schema".to_string(),
+            severity: Severity::High,
+            artifact_side: ArtifactSide::Candidate,
+            affected_field: Some("schema".to_string()),
+            message: format!(
+                "Candidate artifact uses unsupported schema {}",
+                candidate.schema
+            ),
+            repair: Some(
+                "Normalize the candidate artifact with the current ee version".to_string(),
+            ),
+        });
+    }
+
     // Check for hash tampering
     if baseline.hash_mismatch() {
         degraded.push(CompareDegradation {
@@ -641,6 +711,20 @@ pub fn compare_artifacts(baseline: &ArtifactSummary, candidate: &ArtifactSummary
                 affected_field: Some("profile".to_string()),
                 message: format!("Profile mismatch: baseline={bp}, candidate={cp}"),
                 repair: Some("Compare artifacts from the same profile".to_string()),
+            });
+        }
+    }
+
+    // Check for fixture-tier mismatch
+    if let (Some(bt), Some(ct)) = (&baseline.fixture_tier, &candidate.fixture_tier) {
+        if bt != ct {
+            degraded.push(CompareDegradation {
+                code: "fixture_tier_mismatch".to_string(),
+                severity: Severity::Medium,
+                artifact_side: ArtifactSide::Both,
+                affected_field: Some("fixtureTier".to_string()),
+                message: format!("Fixture tier mismatch: baseline={bt}, candidate={ct}"),
+                repair: Some("Compare artifacts from the same fixture tier".to_string()),
             });
         }
     }
@@ -682,8 +766,31 @@ pub fn compare_artifacts(baseline: &ArtifactSummary, candidate: &ArtifactSummary
         let c_val = candidate.metrics.get(metric);
         let delta = MetricDelta::from_values(metric, b_val, c_val);
 
+        if matches!(
+            delta.direction,
+            DeltaDirection::Missing | DeltaDirection::Added
+        ) {
+            degraded.push(CompareDegradation {
+                code: "metric_missing".to_string(),
+                severity: Severity::Medium,
+                artifact_side: if delta.direction == DeltaDirection::Missing {
+                    ArtifactSide::Candidate
+                } else {
+                    ArtifactSide::Baseline
+                },
+                affected_field: Some(delta.metric.clone()),
+                message: format!(
+                    "Metric {} is missing on one side of the comparison",
+                    delta.metric
+                ),
+                repair: Some(
+                    "Compare artifacts produced by the same fixture and command family".to_string(),
+                ),
+            });
+        }
+
         // Collect evidence for owner hints
-        if delta.severity >= Severity::Medium {
+        if delta_is_regression(&delta) || delta_is_improvement(&delta) {
             let evidence = format!(
                 "{}: {} -> {} ({:+.1}%)",
                 metric,
@@ -720,14 +827,8 @@ pub fn compare_artifacts(baseline: &ArtifactSummary, candidate: &ArtifactSummary
     });
 
     // Compute summary stats
-    let regression_count = deltas
-        .iter()
-        .filter(|d| d.direction == DeltaDirection::Increased && d.severity >= Severity::Medium)
-        .count();
-    let improvement_count = deltas
-        .iter()
-        .filter(|d| d.direction == DeltaDirection::Decreased && d.severity >= Severity::Medium)
-        .count();
+    let regression_count = deltas.iter().filter(|d| delta_is_regression(d)).count();
+    let improvement_count = deltas.iter().filter(|d| delta_is_improvement(d)).count();
     let worst_severity = deltas
         .iter()
         .map(|d| d.severity)
@@ -777,17 +878,18 @@ pub fn compare_artifacts(baseline: &ArtifactSummary, candidate: &ArtifactSummary
             evidence,
         })
         .collect();
-    owner_hints.sort_by(|a, b| b.confidence.cmp(&a.confidence));
+    owner_hints.sort_by(|a, b| {
+        b.confidence
+            .cmp(&a.confidence)
+            .then_with(|| a.owner.cmp(&b.owner))
+    });
 
     // Build next commands
     let mut next_commands = Vec::new();
     if result == CompareResult::Regressed {
         next_commands.push("ee doctor --json".to_string());
-        if owner_hints
-            .iter()
-            .any(|h| h.owner == SubsystemOwner::Indexing)
-        {
-            next_commands.push("ee index status --json".to_string());
+        if owner_hints.iter().any(|h| h.owner == SubsystemOwner::Db) {
+            next_commands.push("ee status --json".to_string());
         }
         if owner_hints
             .iter()
@@ -844,19 +946,19 @@ mod tests {
     fn subsystem_owner_inference() {
         assert_eq!(
             SubsystemOwner::infer_from_metric("search_elapsed_ms"),
-            SubsystemOwner::Retrieval
+            SubsystemOwner::Search
         );
         assert_eq!(
             SubsystemOwner::infer_from_metric("pack_tokens"),
-            SubsystemOwner::Packing
+            SubsystemOwner::Pack
         );
         assert_eq!(
             SubsystemOwner::infer_from_metric("db_generation"),
-            SubsystemOwner::Storage
+            SubsystemOwner::Db
         );
         assert_eq!(
-            SubsystemOwner::infer_from_metric("index_rebuild_ms"),
-            SubsystemOwner::Indexing
+            SubsystemOwner::infer_from_metric("rss_bytes"),
+            SubsystemOwner::HostPressure
         );
         assert_eq!(
             SubsystemOwner::infer_from_metric("cache_hit_rate"),
@@ -864,7 +966,7 @@ mod tests {
         );
         assert_eq!(
             SubsystemOwner::infer_from_metric("write_queue_depth"),
-            SubsystemOwner::WriteOwner
+            SubsystemOwner::WriteSpool
         );
         assert_eq!(
             SubsystemOwner::infer_from_metric("profile_selected"),
@@ -940,6 +1042,9 @@ mod tests {
                 .iter()
                 .any(|d| d.metric == "memory_mb" && d.direction == DeltaDirection::Missing)
         );
+        assert!(report.degraded.iter().any(
+            |d| d.code == "metric_missing" && d.affected_field.as_deref() == Some("memory_mb")
+        ));
     }
 
     #[test]
@@ -954,6 +1059,100 @@ mod tests {
 
         assert!(report.degraded.iter().any(|d| d.code == "profile_mismatch"));
         assert!(report.summary.confidence < Confidence::High);
+    }
+
+    #[test]
+    fn compare_with_fixture_tier_mismatch() {
+        let mut baseline = ArtifactSummary::new("baseline", ArtifactKind::BenchmarkReport);
+        baseline.fixture_tier = Some("smoke".to_string());
+
+        let mut candidate = ArtifactSummary::new("candidate", ArtifactKind::BenchmarkReport);
+        candidate.fixture_tier = Some("stress".to_string());
+
+        let report = compare_artifacts(&baseline, &candidate);
+
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|d| d.code == "fixture_tier_mismatch")
+        );
+        assert!(report.summary.confidence < Confidence::High);
+    }
+
+    #[test]
+    fn compare_with_unsupported_schema() {
+        let mut baseline = ArtifactSummary::new("baseline", ArtifactKind::BenchmarkReport);
+        baseline.schema = "ee.perf.artifact_summary.v0";
+
+        let candidate = ArtifactSummary::new("candidate", ArtifactKind::BenchmarkReport);
+        let report = compare_artifacts(&baseline, &candidate);
+
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|d| d.code == "unsupported_schema")
+        );
+        assert_eq!(report.summary.confidence, Confidence::Low);
+    }
+
+    #[test]
+    fn compare_cache_hit_rate_drop_is_regression() {
+        let baseline = ArtifactSummary::new("baseline", ArtifactKind::CacheReport)
+            .with_metric("cache_hit_rate", MetricValue::stable(0.95));
+
+        let candidate = ArtifactSummary::new("candidate", ArtifactKind::CacheReport)
+            .with_metric("cache_hit_rate", MetricValue::stable(0.40));
+
+        let report = compare_artifacts(&baseline, &candidate);
+
+        assert_eq!(report.summary.result, CompareResult::Regressed);
+        assert_eq!(report.summary.regression_count, 1);
+        assert!(
+            report
+                .owner_hints
+                .iter()
+                .any(|hint| hint.owner == SubsystemOwner::Cache)
+        );
+    }
+
+    #[test]
+    fn compare_write_queue_depth_regression_points_to_write_spool() {
+        let baseline = ArtifactSummary::new("baseline", ArtifactKind::WriteQueueReport)
+            .with_metric("write_queue_depth", MetricValue::stable(2.0));
+
+        let candidate = ArtifactSummary::new("candidate", ArtifactKind::WriteQueueReport)
+            .with_metric("write_queue_depth", MetricValue::stable(30.0));
+
+        let report = compare_artifacts(&baseline, &candidate);
+
+        assert_eq!(report.summary.result, CompareResult::Regressed);
+        assert!(
+            report
+                .owner_hints
+                .iter()
+                .any(|hint| hint.owner == SubsystemOwner::WriteSpool)
+        );
+    }
+
+    #[test]
+    fn compare_memory_regression_points_to_host_pressure() {
+        let baseline = ArtifactSummary::new("baseline", ArtifactKind::BenchmarkReport)
+            .with_metric("rss_bytes", MetricValue::resource(1024.0, "bytes"));
+
+        let candidate = ArtifactSummary::new("candidate", ArtifactKind::BenchmarkReport)
+            .with_metric("rss_bytes", MetricValue::resource(4096.0, "bytes"));
+
+        let report = compare_artifacts(&baseline, &candidate);
+
+        assert_eq!(report.summary.result, CompareResult::Regressed);
+        assert!(
+            report
+                .owner_hints
+                .iter()
+                .any(|hint| hint.owner == SubsystemOwner::HostPressure)
+        );
     }
 
     #[test]

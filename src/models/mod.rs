@@ -167,7 +167,7 @@ pub use mutation::{
     ParseMutationActionTypeError, PlannedAction,
 };
 pub use perf_artifact::{
-    ARTIFACT_SUMMARY_SCHEMA_V1, ArtifactKind, ArtifactSummary, DegradationSeverity,
+    ARTIFACT_SUMMARY_SCHEMA_V1, ArtifactDegradationSeverity, ArtifactKind, ArtifactSummary,
     DegradedSummary, MetricValue, MetricValueKind, PERF_METRIC_SCHEMA_V1, PERF_SCHEMA_CATALOG_V1,
     ParseArtifactKindError, PerfSchemaCatalog, PerfSchemaEntry, ProfileReference, ProvenanceEntry,
     RedactionPosture, SummaryDegradation, SummaryDegradationCode, perf_schema_catalog,
