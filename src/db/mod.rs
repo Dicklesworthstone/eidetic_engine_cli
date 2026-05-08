@@ -312,7 +312,13 @@ impl DbConnection {
 
     /// Begin a transaction with the specified isolation level.
     /// For SQLite, uses DEFERRED (default), IMMEDIATE, or EXCLUSIVE.
-    pub fn begin_transaction(&self, isolation: IsolationLevel) -> Result<()> {
+    /// Begin a transaction with the specified isolation level.
+    ///
+    /// # Warning
+    /// For file-backed databases, manually managing transactions with `begin_transaction`,
+    /// `commit`, and `rollback` does NOT hold the write-owner lock across the transaction.
+    /// Prefer `with_transaction` or `with_write_transaction` for safe transactional writes.
+    pub(crate) fn begin_transaction(&self, isolation: IsolationLevel) -> Result<()> {
         let sql = match isolation {
             IsolationLevel::ReadUncommitted | IsolationLevel::ReadCommitted => "BEGIN DEFERRED",
             IsolationLevel::RepeatableRead => "BEGIN IMMEDIATE",
@@ -322,17 +328,29 @@ impl DbConnection {
     }
 
     /// Begin a transaction with the default isolation level (DEFERRED).
-    pub fn begin(&self) -> Result<()> {
+    ///
+    /// # Warning
+    /// For file-backed databases, manually managing transactions does NOT hold the
+    /// write-owner lock. Prefer `with_transaction` for safe transactional writes.
+    pub(crate) fn begin(&self) -> Result<()> {
         self.execute_raw_for(DbOperation::BeginTransaction, "BEGIN DEFERRED")
     }
 
     /// Commit the current transaction.
-    pub fn commit(&self) -> Result<()> {
+    ///
+    /// # Warning
+    /// For file-backed databases, manually managing transactions does NOT hold the
+    /// write-owner lock. Prefer `with_transaction` for safe transactional writes.
+    pub(crate) fn commit(&self) -> Result<()> {
         self.execute_raw_for(DbOperation::CommitTransaction, "COMMIT")
     }
 
     /// Rollback the current transaction.
-    pub fn rollback(&self) -> Result<()> {
+    ///
+    /// # Warning
+    /// For file-backed databases, manually managing transactions does NOT hold the
+    /// write-owner lock. Prefer `with_transaction` for safe transactional writes.
+    pub(crate) fn rollback(&self) -> Result<()> {
         self.execute_raw_for(DbOperation::RollbackTransaction, "ROLLBACK")
     }
 
@@ -723,7 +741,7 @@ impl DbConnection {
 
     fn execute_raw_for(&self, operation: DbOperation, sql: &str) -> Result<()> {
         if matches!(self.location, DatabaseLocation::File(_)) {
-            return retry_sqlite_contention(|| {
+            return retry_sqlite_contention(operation, || {
                 let _write_owner = lock_file_write_owner_gate(&self.location)?;
                 self.inner
                     .execute_raw(sql)
@@ -738,7 +756,7 @@ impl DbConnection {
 
     fn execute_for(&self, operation: DbOperation, sql: &str, params: &[Value]) -> Result<u64> {
         if matches!(self.location, DatabaseLocation::File(_)) {
-            return retry_sqlite_contention(|| {
+            return retry_sqlite_contention(operation, || {
                 let _write_owner = lock_file_write_owner_gate(&self.location)?;
                 self.inner
                     .execute_sync(sql, params)
@@ -752,6 +770,14 @@ impl DbConnection {
     }
 
     fn query_for(&self, operation: DbOperation, sql: &str, params: &[Value]) -> Result<Vec<Row>> {
+        if matches!(self.location, DatabaseLocation::File(_)) {
+            return retry_sqlite_contention(operation, || {
+                self.inner
+                    .query_sync(sql, params)
+                    .map_err(|source| DbError::sqlmodel(operation, source))
+            });
+        }
+
         self.inner
             .query_sync(sql, params)
             .map_err(|source| DbError::sqlmodel(operation, source))
@@ -805,7 +831,10 @@ fn configure_file_durability_pragmas(
 const FILE_DATABASE_OPEN_MAX_ATTEMPTS: usize = 8;
 const SQLITE_CONTENTION_MAX_ATTEMPTS: usize = 16;
 
-fn retry_sqlite_contention<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
+fn retry_sqlite_contention<T>(
+    retry_operation: DbOperation,
+    mut operation: impl FnMut() -> Result<T>,
+) -> Result<T> {
     let mut last_retryable_error = None;
 
     for attempt in 0..SQLITE_CONTENTION_MAX_ATTEMPTS {
@@ -824,7 +853,7 @@ fn retry_sqlite_contention<T>(mut operation: impl FnMut() -> Result<T>) -> Resul
     match last_retryable_error {
         Some(error) => Err(error),
         None => Err(DbError::MalformedRow {
-            operation: DbOperation::Execute,
+            operation: retry_operation,
             message: "SQLite contention retry loop exhausted without a retryable error".to_string(),
         }),
     }
@@ -6644,18 +6673,7 @@ impl DbConnection {
         id: &str,
         input: &AuditedFeedbackEventInput,
     ) -> Result<String> {
-        self.begin()?;
-
-        match self.insert_feedback_event_audited_inner(id, input) {
-            Ok(audit_id) => {
-                self.commit()?;
-                Ok(audit_id)
-            }
-            Err(err) => {
-                let _ = self.rollback();
-                Err(err)
-            }
-        }
+        self.with_transaction(|| self.insert_feedback_event_audited_inner(id, input))
     }
 
     fn insert_feedback_event_audited_inner(
@@ -8412,18 +8430,7 @@ impl DbConnection {
         memory_id: &str,
         input: &ApplyMemoryScoreUpdateInput,
     ) -> Result<Option<String>> {
-        self.begin()?;
-
-        match self.apply_memory_score_update_audited_inner(memory_id, input) {
-            Ok(audit_id) => {
-                self.commit()?;
-                Ok(audit_id)
-            }
-            Err(err) => {
-                let _ = self.rollback();
-                Err(err)
-            }
-        }
+        self.with_transaction(|| self.apply_memory_score_update_audited_inner(memory_id, input))
     }
 
     fn apply_memory_score_update_audited_inner(
@@ -8496,23 +8503,14 @@ impl DbConnection {
         actor: &str,
         closed_at: &str,
     ) -> Result<Vec<WorkflowMemoryPromotion>> {
-        self.begin()?;
-
-        match self.promote_workflow_working_memories_audited_inner(
-            workspace_id,
-            workflow_id,
-            actor,
-            closed_at,
-        ) {
-            Ok(promotions) => {
-                self.commit()?;
-                Ok(promotions)
-            }
-            Err(err) => {
-                let _ = self.rollback();
-                Err(err)
-            }
-        }
+        self.with_transaction(|| {
+            self.promote_workflow_working_memories_audited_inner(
+                workspace_id,
+                workflow_id,
+                actor,
+                closed_at,
+            )
+        })
     }
 
     fn promote_workflow_working_memories_audited_inner(
@@ -9152,18 +9150,7 @@ impl DbConnection {
         memory_id: &str,
         input: &AuditedMemoryInput,
     ) -> Result<String> {
-        self.begin()?;
-
-        match self.insert_memory_audited_inner(memory_id, input) {
-            Ok(audit_id) => {
-                self.commit()?;
-                Ok(audit_id)
-            }
-            Err(err) => {
-                let _ = self.rollback();
-                Err(err)
-            }
-        }
+        self.with_transaction(|| self.insert_memory_audited_inner(memory_id, input))
     }
 
     fn insert_memory_audited_inner(
@@ -9207,18 +9194,9 @@ impl DbConnection {
         actor: Option<&str>,
         reason: Option<&str>,
     ) -> Result<Option<String>> {
-        self.begin()?;
-
-        match self.tombstone_memory_audited_inner(memory_id, workspace_id, actor, reason) {
-            Ok(result) => {
-                self.commit()?;
-                Ok(result)
-            }
-            Err(err) => {
-                let _ = self.rollback();
-                Err(err)
-            }
-        }
+        self.with_transaction(|| {
+            self.tombstone_memory_audited_inner(memory_id, workspace_id, actor, reason)
+        })
     }
 
     fn tombstone_memory_audited_inner(
@@ -9259,18 +9237,9 @@ impl DbConnection {
         tags: &[String],
         actor: Option<&str>,
     ) -> Result<String> {
-        self.begin()?;
-
-        match self.add_memory_tags_audited_inner(memory_id, workspace_id, tags, actor) {
-            Ok(audit_id) => {
-                self.commit()?;
-                Ok(audit_id)
-            }
-            Err(err) => {
-                let _ = self.rollback();
-                Err(err)
-            }
-        }
+        self.with_transaction(|| {
+            self.add_memory_tags_audited_inner(memory_id, workspace_id, tags, actor)
+        })
     }
 
     fn add_memory_tags_audited_inner(
@@ -9308,18 +9277,9 @@ impl DbConnection {
         tags: &[String],
         actor: Option<&str>,
     ) -> Result<String> {
-        self.begin()?;
-
-        match self.remove_memory_tags_audited_inner(memory_id, workspace_id, tags, actor) {
-            Ok(audit_id) => {
-                self.commit()?;
-                Ok(audit_id)
-            }
-            Err(err) => {
-                let _ = self.rollback();
-                Err(err)
-            }
-        }
+        self.with_transaction(|| {
+            self.remove_memory_tags_audited_inner(memory_id, workspace_id, tags, actor)
+        })
     }
 
     fn remove_memory_tags_audited_inner(
@@ -10947,7 +10907,7 @@ pub mod concurrent_writer_contract {
 impl DbConnection {
     /// Ensure the advisory locks table exists.
     pub fn ensure_advisory_locks_table(&self) -> Result<()> {
-        retry_sqlite_contention(|| {
+        retry_sqlite_contention(DbOperation::EnsureMigrationTable, || {
             self.execute_raw_for(
                 DbOperation::EnsureMigrationTable,
                 concurrent_writer_contract::LOCK_TABLE_DDL,
@@ -12475,6 +12435,56 @@ mod tests {
             "permanent open error should surface unchanged",
         )?;
         ensure_equal(&attempts, &1, "permanent error attempts")
+    }
+
+    #[test]
+    fn sqlite_contention_retry_succeeds_after_query_lock_errors() -> TestResult {
+        let mut attempts = 0;
+        let value = super::retry_sqlite_contention(DbOperation::Query, || {
+            attempts += 1;
+            if attempts < 3 {
+                Err(DbError::sqlmodel(
+                    DbOperation::Query,
+                    sqlmodel_query_error(
+                        sqlmodel_core::error::QueryErrorKind::Database,
+                        "database is locked",
+                    ),
+                ))
+            } else {
+                Ok(attempts)
+            }
+        })?;
+
+        ensure_equal(&value, &3, "query retry value")?;
+        ensure_equal(&attempts, &3, "query retry attempts")
+    }
+
+    #[test]
+    fn sqlite_contention_retry_stops_on_permanent_query_error() -> TestResult {
+        let mut attempts = 0;
+        let result: super::Result<usize> =
+            super::retry_sqlite_contention(DbOperation::Query, || {
+                attempts += 1;
+                Err(DbError::sqlmodel(
+                    DbOperation::Query,
+                    sqlmodel_query_error(
+                        sqlmodel_core::error::QueryErrorKind::Syntax,
+                        "syntax error near SELECT",
+                    ),
+                ))
+            });
+
+        ensure(
+            matches!(
+                result,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::Query,
+                    ..
+                })
+            ),
+            "permanent query error should surface unchanged",
+        )?;
+        ensure_equal(&attempts, &1, "permanent query error attempts")
     }
 
     #[test]
@@ -19172,5 +19182,53 @@ mod tests {
             results.push(result);
         }
         Ok(results)
+    }
+
+    #[test]
+    fn with_transaction_holds_write_owner_throughout() -> TestResult {
+        // EE-07mq regression test: verify with_transaction holds the file write-owner
+        // lock from BEGIN through commit/rollback, preventing concurrent writer contention.
+        let test_dir =
+            std::env::temp_dir().join(format!("ee_write_owner_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).map_err(TestFailure::new)?;
+        let db_path = test_dir.join("test.db");
+
+        let config = DatabaseConfig::from_path(&db_path);
+        let conn = DbConnection::open(config).map_err(TestFailure::new)?;
+        conn.migrate().map_err(TestFailure::new)?;
+
+        // Run a transaction that does multiple operations
+        let result = conn.with_transaction(|| {
+            // These operations should all be protected by the same write owner
+            conn.execute_for(
+                DbOperation::Execute,
+                "CREATE TABLE test_owner (id INTEGER PRIMARY KEY, value TEXT)",
+                &[],
+            )?;
+            conn.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO test_owner (id, value) VALUES (1, 'first')",
+                &[],
+            )?;
+            conn.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO test_owner (id, value) VALUES (2, 'second')",
+                &[],
+            )?;
+            Ok(())
+        });
+
+        result.map_err(TestFailure::new)?;
+
+        // Verify all rows were committed
+        let rows = conn
+            .query("SELECT COUNT(*) FROM test_owner", &[])
+            .map_err(TestFailure::new)?;
+        let count = rows.first().and_then(|r| r.get::<i64>(0).ok()).unwrap_or(0);
+
+        std::fs::remove_dir_all(&test_dir).ok();
+
+        ensure(count, 2i64, "both rows committed atomically")
     }
 }
