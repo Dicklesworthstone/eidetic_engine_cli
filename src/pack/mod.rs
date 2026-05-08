@@ -2555,9 +2555,11 @@ impl RateDistortionReport {
     pub fn with_candidates(mut self, included: u32, omitted: u32) -> Self {
         self.included_candidates = included;
         self.omitted_candidates = omitted;
-        if included + omitted > 0 {
-            self.quality_score = included as f64 / (included + omitted) as f64;
-            self.distortion = omitted as f64 / (included + omitted) as f64;
+        let total_candidates = u64::from(included) + u64::from(omitted);
+        if total_candidates > 0 {
+            let total_candidates = total_candidates as f64;
+            self.quality_score = f64::from(included) / total_candidates;
+            self.distortion = f64::from(omitted) / total_candidates;
         }
         self
     }
@@ -6261,6 +6263,36 @@ mod tests {
         ensure(
             (report.distortion - 0.3333).abs() < 0.001,
             format!("expected distortion ~0.333, got {}", report.distortion),
+        )
+    }
+
+    #[test]
+    fn rate_distortion_candidate_count_arithmetic_is_total() -> TestResult {
+        let report = RateDistortionReport::new(1, 1).with_candidates(u32::MAX, 1);
+        ensure(
+            report.included_candidates == u32::MAX,
+            format!(
+                "expected u32::MAX included, got {}",
+                report.included_candidates
+            ),
+        )?;
+        ensure(
+            report.omitted_candidates == 1,
+            format!(
+                "expected one omitted candidate, got {}",
+                report.omitted_candidates
+            ),
+        )?;
+        ensure(
+            report.quality_score.is_finite() && report.distortion.is_finite(),
+            "candidate ratios must remain finite for arbitrary u32 counts",
+        )?;
+        ensure(
+            (report.quality_score + report.distortion - 1.0).abs() < f64::EPSILON,
+            format!(
+                "quality + distortion should equal 1.0, got {} + {}",
+                report.quality_score, report.distortion
+            ),
         )
     }
 
