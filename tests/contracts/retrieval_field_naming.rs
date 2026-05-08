@@ -8,6 +8,7 @@
 //! - No snake_case fields appear in context/search/why machine output
 //! - Field naming is stable across commands
 
+use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
 use ee::core::search::{RetrievalMetrics, ScoreSource, SearchHit, SearchReport, SearchStatus};
 use serde_json::Value;
 
@@ -19,6 +20,10 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     } else {
         Err(message.into())
     }
+}
+
+fn test_runtime_profile() -> RuntimeProfileReport {
+    RuntimeProfileReport::for_profile(OperatingProfile::Workstation, "test_fixture")
 }
 
 fn contains_snake_case_key(value: &Value, path: &str) -> Option<String> {
@@ -66,6 +71,7 @@ fn search_report_data_json_uses_camel_case_fields() -> TestResult {
         elapsed_ms: 12.5,
         errors: Vec::new(),
         degraded: Vec::new(),
+        runtime_profile: test_runtime_profile(),
     };
 
     let json = report.data_json();
@@ -206,6 +212,7 @@ fn search_hit_fields_are_camel_case_when_populated() -> TestResult {
         elapsed_ms: 3.0,
         errors: Vec::new(),
         degraded: Vec::new(),
+        runtime_profile: test_runtime_profile(),
     };
 
     let json = report.data_json();
@@ -287,6 +294,7 @@ fn field_naming_contract_is_stable() -> TestResult {
         elapsed_ms: 1.0,
         errors: Vec::new(),
         degraded: Vec::new(),
+        runtime_profile: test_runtime_profile(),
     };
 
     let json = report.data_json();
@@ -368,6 +376,7 @@ fn optional_hit_fields_absent_when_none() -> TestResult {
         elapsed_ms: 1.0,
         errors: Vec::new(),
         degraded: Vec::new(),
+        runtime_profile: test_runtime_profile(),
     };
 
     let json = report.data_json();

@@ -30,6 +30,7 @@ use std::time::Instant;
 use crate::config::WorkspaceLocation;
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
+use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
     SearchOptions, SearchReport, SearchStatus, elapsed_timing_json, performance_redaction_json,
@@ -363,9 +364,10 @@ pub fn run_context_pack_with_performance(
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
     let total_start = Instant::now();
     let mut trace = ContextPerformanceTrace::default();
+    let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
 
     let request_start = Instant::now();
-    let request = ContextRequest::new(ContextRequestInput {
+    let mut request = ContextRequest::new(ContextRequestInput {
         query: options.query.clone(),
         profile: options.profile,
         max_tokens: options.max_tokens,
@@ -373,6 +375,20 @@ pub fn run_context_pack_with_performance(
         sections: Vec::new(),
     })
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    let (effective_max_tokens, tokens_capped) =
+        runtime_profile.cap_pack_max_tokens(request.budget.max_tokens());
+    let (effective_candidate_pool, candidate_pool_capped) =
+        runtime_profile.cap_pack_candidate_pool(request.candidate_pool);
+    if tokens_capped || candidate_pool_capped {
+        request = ContextRequest::new(ContextRequestInput {
+            query: request.query.clone(),
+            profile: Some(request.profile),
+            max_tokens: Some(effective_max_tokens),
+            candidate_pool: Some(effective_candidate_pool),
+            sections: Vec::new(),
+        })
+        .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    }
     trace.record_elapsed("requestValidate", request_start);
 
     let database_path = options
@@ -393,6 +409,18 @@ pub fn run_context_pack_with_performance(
     trace.record_elapsed("dbOpen", db_open_start);
 
     let mut degraded = Vec::new();
+    if tokens_capped || candidate_pool_capped {
+        push_degradation(
+            &mut degraded,
+            "context_profile_budget_capped",
+            ContextResponseSeverity::Low,
+            format!(
+                "Context request budget was capped by the active {} operating profile.",
+                runtime_profile.active_profile.as_str()
+            ),
+            Some("ee profile config plan --json".to_string()),
+        );
+    }
 
     let search_start = Instant::now();
     let mut search_report = match run_search(&SearchOptions {
@@ -405,9 +433,11 @@ pub fn run_context_pack_with_performance(
         explain: false,
     }) {
         Ok(report) => report,
-        Err(SearchError::NoIndex) => {
-            missing_index_search_report(&request.query, request.candidate_pool)
-        }
+        Err(SearchError::NoIndex) => missing_index_search_report(
+            &request.query,
+            request.candidate_pool,
+            runtime_profile.clone(),
+        ),
         Err(error) => return Err(ContextPackError::Search(error)),
     };
     trace.index_status_checks = trace.index_status_checks.saturating_add(1);
@@ -583,6 +613,7 @@ fn context_performance_json(
                 "profile": request.profile.as_str(),
                 "filtersApplied": !options.filters.is_empty(),
             },
+            "profileRuntime": search_report.runtime_profile.data_json(),
             "dbReads": context_db_reads_json(trace),
             "search": context_search_json(search_report, options.speed),
             "candidates": candidate_resolution_json(trace),
@@ -714,7 +745,11 @@ fn search_degradation_summary_json(
     })
 }
 
-fn missing_index_search_report(query: &str, limit: u32) -> SearchReport {
+fn missing_index_search_report(
+    query: &str,
+    limit: u32,
+    runtime_profile: RuntimeProfileReport,
+) -> SearchReport {
     SearchReport {
         status: SearchStatus::IndexNotFound,
         query: query.to_owned(),
@@ -729,6 +764,7 @@ fn missing_index_search_report(query: &str, limit: u32) -> SearchReport {
                 .to_owned(),
             repair: Some("ee index rebuild --workspace .".to_owned()),
         }],
+        runtime_profile,
     }
 }
 
@@ -1616,6 +1652,7 @@ mod tests {
     };
     use crate::config::WorkspaceLocation;
     use crate::core::budget::RequestBudget;
+    use crate::core::profile::{OperatingProfile, RuntimeProfileReport};
     use crate::core::search::{
         PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchHit, SearchReport, SearchStatus,
     };
@@ -1641,6 +1678,10 @@ mod tests {
         )
     }
 
+    fn test_runtime_profile() -> RuntimeProfileReport {
+        RuntimeProfileReport::for_profile(OperatingProfile::Workstation, "test_fixture")
+    }
+
     #[test]
     fn candidate_batch_db_failures_are_reported_before_candidate_skips() -> Result<(), String> {
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
@@ -1663,6 +1704,7 @@ mod tests {
             elapsed_ms: 0.0,
             errors: Vec::new(),
             degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
         };
         let mut degraded = Vec::new();
 
@@ -1787,6 +1829,7 @@ mod tests {
             elapsed_ms: 3.4,
             errors: Vec::new(),
             degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
         };
         let options = super::ContextPackOptions {
             workspace_path: PathBuf::from("/tmp/ee-explain"),

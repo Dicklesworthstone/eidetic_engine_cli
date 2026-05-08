@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use super::index::{
     IndexHealth, IndexStatusError, IndexStatusOptions, IndexStatusReport, get_index_status,
 };
+use super::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::search::{
     Embedder, HashEmbedder, SpeedMode, TwoTierConfig, TwoTierIndex, TwoTierSearcher,
 };
@@ -60,9 +61,14 @@ impl SearchOptions {
             .unwrap_or_else(|| self.workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR))
     }
 
+    #[cfg(test)]
     fn two_tier_config(&self) -> TwoTierConfig {
+        self.two_tier_config_for_limit(self.limit)
+    }
+
+    fn two_tier_config_for_limit(&self, limit: u32) -> TwoTierConfig {
         let mut config = TwoTierConfig::default();
-        let requested = usize::try_from(self.limit).unwrap_or(usize::MAX).max(1);
+        let requested = usize::try_from(limit).unwrap_or(usize::MAX).max(1);
         let speed_candidate_multiplier = self.speed.candidate_limit().div_ceil(requested);
         config.candidate_multiplier = config.candidate_multiplier.max(speed_candidate_multiplier);
         config.fast_only = !self.speed.uses_embeddings();
@@ -81,6 +87,7 @@ pub struct SearchReport {
     pub elapsed_ms: f64,
     pub errors: Vec<String>,
     pub degraded: Vec<SearchDegradation>,
+    pub runtime_profile: RuntimeProfileReport,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -208,6 +215,18 @@ impl SearchDegradation {
                 "Search index failed integrity checks; results may be incomplete or unavailable until the index is rebuilt.{detail}"
             ),
             repair: Some("ee index rebuild --workspace .".to_string()),
+        }
+    }
+
+    #[must_use]
+    fn profile_search_limit_capped(requested: u32, effective: u32, profile: &str) -> Self {
+        Self {
+            code: "profile_search_limit_capped".to_string(),
+            severity: "low".to_string(),
+            message: format!(
+                "Search candidate limit {requested} was capped to {effective} by the active {profile} operating profile."
+            ),
+            repair: Some("ee profile config plan --json".to_string()),
         }
     }
 
@@ -419,6 +438,7 @@ impl SearchReport {
             "resultCount": self.results.len(),
             "elapsedMs": self.elapsed_ms,
             "metrics": self.retrieval_metrics().data_json(),
+            "profileRuntime": self.runtime_profile.data_json(),
             "errors": self.errors,
             "degraded": self.degraded.iter().map(SearchDegradation::data_json).collect::<Vec<_>>(),
         })
@@ -454,6 +474,7 @@ impl SearchReport {
                 "usesEmbeddings": speed.uses_embeddings(),
                 "scoreExplanationsRequested": score_explanations_requested,
             },
+            "profileRuntime": self.runtime_profile.data_json(),
             "dbReads": {
                 "indexStatusChecks": 1,
                 "memoryReads": 0,
@@ -872,18 +893,27 @@ impl ScoreExplanation {
 pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> {
     let start = Instant::now();
     let index_dir = options.resolve_index_dir();
+    let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
+    let (effective_limit, limit_capped) = runtime_profile.cap_search_limit(options.limit);
 
     if !index_dir.exists() {
         return Err(SearchError::NoIndex);
     }
 
-    let degraded = search_degradations(options, &index_dir);
+    let mut degraded = search_degradations(options, &index_dir);
+    if limit_capped {
+        degraded.push(SearchDegradation::profile_search_limit_capped(
+            options.limit,
+            effective_limit,
+            runtime_profile.active_profile.as_str(),
+        ));
+    }
 
     let search_result = search_sync(
         &index_dir,
         &options.query,
-        options.limit as usize,
-        options.two_tier_config(),
+        effective_limit as usize,
+        options.two_tier_config_for_limit(effective_limit),
         options.explain,
     );
 
@@ -905,6 +935,7 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
                 elapsed_ms,
                 errors,
                 degraded,
+                runtime_profile,
             })
         }
         Err(e) => {
@@ -924,6 +955,7 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
                 elapsed_ms,
                 errors: vec![e],
                 degraded,
+                runtime_profile,
             })
         }
     }
@@ -1101,6 +1133,13 @@ mod tests {
         ))
     }
 
+    fn test_runtime_profile() -> RuntimeProfileReport {
+        RuntimeProfileReport::for_profile(
+            super::super::profile::OperatingProfile::Workstation,
+            "test_fixture",
+        )
+    }
+
     #[test]
     fn search_status_as_str_is_stable() {
         assert_eq!(SearchStatus::Success.as_str(), "success");
@@ -1129,6 +1168,7 @@ mod tests {
             elapsed_ms: 12.3,
             errors: Vec::new(),
             degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
         };
 
         let json = report.data_json();
@@ -1166,6 +1206,7 @@ mod tests {
             elapsed_ms: 12.3,
             errors: Vec::new(),
             degraded: vec![SearchDegradation::stale_index(Some(12), Some(9))],
+            runtime_profile: test_runtime_profile(),
         };
 
         let json = report.performance_explain_json(SpeedMode::Instant, false);
@@ -1370,6 +1411,7 @@ mod tests {
             elapsed_ms: 5.2,
             errors: Vec::new(),
             degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
         };
 
         let json = report.data_json();
@@ -1412,6 +1454,7 @@ mod tests {
             elapsed_ms: 1.0,
             errors: Vec::new(),
             degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
         };
 
         let json = report.data_json();
@@ -1456,6 +1499,7 @@ mod tests {
             elapsed_ms: 1.0,
             errors: Vec::new(),
             degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
         };
 
         let json = report.data_json();
@@ -1505,6 +1549,7 @@ mod tests {
             elapsed_ms: 2.345_678_9,
             errors: vec!["semantic tier unavailable".to_string()],
             degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
         };
 
         let metrics = report.retrieval_metrics();
@@ -1547,6 +1592,7 @@ mod tests {
             elapsed_ms: 0.0,
             errors: Vec::new(),
             degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
         };
 
         let json = report.data_json();
@@ -1666,6 +1712,7 @@ mod tests {
             elapsed_ms: 2.0,
             errors: Vec::new(),
             degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
         };
 
         let json = report.data_json();
@@ -1719,6 +1766,7 @@ mod tests {
             elapsed_ms: 1.5,
             errors: Vec::new(),
             degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
         };
 
         let summary = report.human_summary();

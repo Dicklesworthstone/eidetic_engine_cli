@@ -22002,6 +22002,10 @@ mod tests {
             elapsed_ms: 12.34,
             errors: Vec::new(),
             degraded: Vec::new(),
+            runtime_profile: crate::core::profile::RuntimeProfileReport::for_profile(
+                crate::core::profile::OperatingProfile::Workstation,
+                "test_fixture",
+            ),
         }
     }
 

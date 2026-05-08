@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::db::{
     AcquireLockResult, AdvisoryLockId, CreateSearchIndexJobInput, DbConnection, DbError,
     SearchIndexJobType, StoredSearchIndexJob,
@@ -169,6 +170,7 @@ pub struct IndexRebuildReport {
     pub elapsed_ms: f64,
     pub dry_run: bool,
     pub errors: Vec<String>,
+    pub runtime_profile: RuntimeProfileReport,
 }
 
 #[derive(Clone, Debug)]
@@ -211,6 +213,7 @@ pub struct IndexReembedReport {
     pub dry_run: bool,
     pub idempotency_key: String,
     pub errors: Vec<String>,
+    pub runtime_profile: RuntimeProfileReport,
 }
 
 #[derive(Clone, Debug)]
@@ -285,6 +288,7 @@ pub struct IndexProcessingReport {
     pub job_limit: Option<u32>,
     pub elapsed_ms: f64,
     pub jobs: Vec<IndexProcessingJobReport>,
+    pub runtime_profile: RuntimeProfileReport,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -408,6 +412,7 @@ impl IndexRebuildReport {
             "index_dir": self.index_dir.to_string_lossy(),
             "elapsed_ms": self.elapsed_ms,
             "dry_run": self.dry_run,
+            "profileRuntime": self.runtime_profile.data_json(),
             "errors": self.errors,
         })
     }
@@ -487,6 +492,7 @@ impl IndexReembedReport {
             "elapsed_ms": self.elapsed_ms,
             "dry_run": self.dry_run,
             "idempotency_key": self.idempotency_key,
+            "profileRuntime": self.runtime_profile.data_json(),
             "errors": self.errors,
         })
     }
@@ -557,6 +563,7 @@ impl IndexProcessingReport {
             "dry_run": self.dry_run,
             "job_limit": self.job_limit,
             "elapsed_ms": self.elapsed_ms,
+            "profileRuntime": self.runtime_profile.data_json(),
             "jobs": self
                 .jobs
                 .iter()
@@ -679,6 +686,7 @@ pub fn rebuild_index(
     let start = Instant::now();
     let database_path = options.resolve_database_path();
     let index_dir = options.resolve_index_dir();
+    let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
 
     let db = DbConnection::open_file(&database_path)?;
     let (_, _, db_generation) = get_db_stats(&db)?;
@@ -711,6 +719,7 @@ pub fn rebuild_index(
             elapsed_ms,
             dry_run: true,
             errors: Vec::new(),
+            runtime_profile,
         });
     }
 
@@ -726,6 +735,7 @@ pub fn rebuild_index(
             elapsed_ms,
             dry_run: false,
             errors: Vec::new(),
+            runtime_profile,
         });
     }
 
@@ -771,6 +781,7 @@ pub fn rebuild_index(
                         .iter()
                         .map(|(id, e)| format!("{id}: {e}"))
                         .collect(),
+                    runtime_profile: runtime_profile.clone(),
                 })
             }
             Err(e) => Ok(IndexRebuildReport {
@@ -783,6 +794,7 @@ pub fn rebuild_index(
                 elapsed_ms,
                 dry_run: false,
                 errors: vec![e],
+                runtime_profile: runtime_profile.clone(),
             }),
         }
     })();
@@ -797,6 +809,7 @@ pub fn reembed_index(
     let start = Instant::now();
     let database_path = options.resolve_database_path();
     let index_dir = options.resolve_index_dir();
+    let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
 
     let db = DbConnection::open_file(&database_path)?;
     let workspace_id = get_default_workspace_id(&db)?;
@@ -841,6 +854,7 @@ pub fn reembed_index(
             dry_run: true,
             idempotency_key,
             errors: Vec::new(),
+            runtime_profile,
         });
     }
 
@@ -879,6 +893,7 @@ pub fn reembed_index(
             dry_run: false,
             idempotency_key,
             errors: Vec::new(),
+            runtime_profile,
         });
     }
 
@@ -927,6 +942,7 @@ pub fn reembed_index(
                         .iter()
                         .map(|(id, e)| format!("{id}: {e}"))
                         .collect(),
+                    runtime_profile: runtime_profile.clone(),
                 })
             }
             Err(error) => {
@@ -955,6 +971,7 @@ pub fn reembed_index(
                     dry_run: false,
                     idempotency_key,
                     errors,
+                    runtime_profile: runtime_profile.clone(),
                 })
             }
         }
@@ -970,10 +987,13 @@ pub fn process_index_jobs(
     let start = Instant::now();
     let database_path = options.resolve_database_path();
     let index_dir = options.resolve_index_dir();
+    let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
+    let (effective_job_limit, _job_limit_capped) =
+        runtime_profile.cap_index_job_limit(options.job_limit);
 
     let db = DbConnection::open_file(&database_path)?;
     let workspace_id = get_default_workspace_id(&db)?;
-    let pending_jobs = db.list_pending_search_index_jobs(&workspace_id, options.job_limit)?;
+    let pending_jobs = db.list_pending_search_index_jobs(&workspace_id, effective_job_limit)?;
     let pending_count = u32::try_from(pending_jobs.len()).map_err(|_| {
         IndexRebuildError::Index("Pending search index job count exceeds u32".to_owned())
     })?;
@@ -1004,9 +1024,10 @@ pub fn process_index_jobs(
             completed_jobs: 0,
             failed_jobs: 0,
             dry_run: true,
-            job_limit: options.job_limit,
+            job_limit: effective_job_limit,
             elapsed_ms,
             jobs,
+            runtime_profile,
         });
     }
 
@@ -1022,9 +1043,10 @@ pub fn process_index_jobs(
             completed_jobs: 0,
             failed_jobs: 0,
             dry_run: false,
-            job_limit: options.job_limit,
+            job_limit: effective_job_limit,
             elapsed_ms,
             jobs: Vec::new(),
+            runtime_profile,
         });
     }
 
@@ -1060,9 +1082,10 @@ pub fn process_index_jobs(
         completed_jobs,
         failed_jobs,
         dry_run: false,
-        job_limit: options.job_limit,
+        job_limit: effective_job_limit,
         elapsed_ms,
         jobs,
+        runtime_profile,
     })
 }
 
@@ -2014,8 +2037,13 @@ fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::profile::OperatingProfile;
 
     type TestResult = Result<(), String>;
+
+    fn test_runtime_profile() -> RuntimeProfileReport {
+        RuntimeProfileReport::for_profile(OperatingProfile::Workstation, "test_fixture")
+    }
 
     fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
         if condition {
@@ -2184,6 +2212,7 @@ mod tests {
             elapsed_ms: 123.4,
             dry_run: false,
             errors: Vec::new(),
+            runtime_profile: test_runtime_profile(),
         };
 
         let json = report.data_json();
@@ -2270,6 +2299,7 @@ mod tests {
             dry_run: false,
             idempotency_key: "blake3:test".to_owned(),
             errors: Vec::new(),
+            runtime_profile: test_runtime_profile(),
         };
 
         let json = report.data_json();
