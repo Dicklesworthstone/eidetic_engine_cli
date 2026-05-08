@@ -10896,15 +10896,33 @@ where
         filters: options,
     };
 
-    if cli.wants_json() {
-        let json = report.data_json();
-        let _ = stdout.write_all(json.to_string().as_bytes());
-        let _ = stdout.write_all(b"\n");
-    } else {
-        let _ = stdout.write_all(report.human_summary().as_bytes());
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => {
+            let json = recorder_events_list_response_json(&report);
+            write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = recorder_events_list_response_json(&report);
+            write_stdout(stdout, &(json + "\n"))
+        }
     }
+}
 
-    ProcessExitCode::Success
+fn recorder_events_list_response_json(
+    report: &crate::core::recorder::RecorderEventsListReport,
+) -> String {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": report.data_json(),
+    })
+    .to_string()
 }
 
 // ============================================================================
@@ -21393,6 +21411,99 @@ mod tests {
             "init workspace JSON stdout present",
         )?;
         Ok(workspace)
+    }
+
+    #[test]
+    fn recorder_events_list_json_uses_response_envelope() -> TestResult {
+        let workspace = init_cli_workspace("recorder-events-envelope")?;
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            workspace.as_str(),
+            "--json",
+            "recorder",
+            "events",
+            "list",
+        ]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "recorder events list JSON exit",
+        )?;
+        ensure(stderr.is_empty(), "recorder events list JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V1),
+            "recorder events list response schema",
+        )?;
+        ensure_equal(
+            &value["success"],
+            &serde_json::json!(true),
+            "recorder events list success",
+        )?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!(crate::core::recorder::RECORDER_EVENTS_LIST_SCHEMA_V1),
+            "recorder events list data schema",
+        )?;
+        ensure_equal(
+            &value["data"]["command"],
+            &serde_json::json!("recorder events list"),
+            "recorder events list data command",
+        )?;
+        ensure(
+            value.get("events").is_none(),
+            "recorder events list must not expose command data at top level",
+        )
+    }
+
+    #[test]
+    fn recorder_events_list_legacy_schema_uses_v0_response_envelope() -> TestResult {
+        let workspace = init_cli_workspace("recorder-events-legacy-envelope")?;
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            workspace.as_str(),
+            "--legacy-schema",
+            "--json",
+            "recorder",
+            "events",
+            "list",
+        ]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "recorder events list legacy JSON exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "recorder events list legacy JSON stderr clean",
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V0),
+            "recorder events list legacy response schema",
+        )?;
+        ensure_equal(
+            &value["ok"],
+            &serde_json::json!(true),
+            "recorder events list legacy ok",
+        )?;
+        ensure_equal(
+            &value["result"]["schema"],
+            &serde_json::json!(crate::core::recorder::RECORDER_EVENTS_LIST_SCHEMA_V1),
+            "recorder events list legacy result schema",
+        )?;
+        ensure(
+            value.get("data").is_none(),
+            "v0 recorder events list must use result instead of data",
+        )
     }
 
     fn propose_cli_procedure(prefix: &str) -> Result<(String, String), String> {
