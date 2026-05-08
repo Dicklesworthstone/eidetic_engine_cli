@@ -1649,6 +1649,8 @@ pub fn run_stdio_server() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config as ProptestConfig, TestCaseError};
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::PathBuf;
@@ -1698,6 +1700,32 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    fn uri_component_strategy() -> impl Strategy<Value = String> {
+        prop::collection::vec(
+            prop::sample::select(vec![
+                'a', 'b', 'z', 'A', 'Z', '0', '9', ' ', '+', '%', '&', '=', '/', '?', '.', '-',
+                '_', '~', ':', '@',
+            ]),
+            1..64,
+        )
+        .prop_map(|chars| chars.into_iter().collect())
+    }
+
+    fn percent_encode_component(value: &str) -> String {
+        let mut encoded = String::with_capacity(value.len());
+        for byte in value.as_bytes() {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                encoded.push(char::from(*byte));
+            } else {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                encoded.push('%');
+                encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+                encoded.push(char::from(HEX[usize::from(byte & 0x0F)]));
+            }
+        }
+        encoded
     }
 
     #[test]
@@ -1763,6 +1791,40 @@ mod tests {
         )?;
         assert!(args.is_empty());
         Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn resource_context_query_uri_decodes_cli_arguments(
+            query in uri_component_strategy(),
+            workspace in uri_component_strategy(),
+            profile in prop::sample::select(vec!["compact", "balanced", "thorough", "submodular"]),
+        ) {
+            let uri = format!(
+                "ee://context-packs/by-query?query={}&workspace={}&profile={}",
+                percent_encode_component(&query),
+                percent_encode_component(&workspace),
+                profile,
+            );
+            let cli_args = build_cli_args_for_resource(&uri).map_err(TestCaseError::fail)?;
+            let args = os_args_to_strings(cli_args).map_err(TestCaseError::fail)?;
+
+            prop_assert_eq!(
+                args,
+                vec![
+                    "ee".to_string(),
+                    "--json".to_string(),
+                    "--workspace".to_string(),
+                    workspace,
+                    "context".to_string(),
+                    query,
+                    "--profile".to_string(),
+                    profile.to_string(),
+                ]
+            );
+        }
     }
 
     #[test]
