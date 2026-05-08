@@ -1,0 +1,1 @@
+ℹ Scan size after ignores: 8MB (limit 1000MB)

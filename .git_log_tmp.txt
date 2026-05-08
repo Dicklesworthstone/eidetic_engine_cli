@@ -1,0 +1,120 @@
+b5e2526 fix: reject symlinked certificate payloads
+ab8b76a fix: reject symlinked claim artifacts
+494c405 fix(bench): align curate_candidates fixture trust class with CHECK constraint
+a48d4e4 fix: reject symlinked rehearsal workspace entries
+12ebd67 test(policy): check in shrunken secret-redaction proptest seeds
+9aceaa0 fix: reject symlinked side-path parents on backup restore
+d978b00 fix: reject special hook targets
+8038fe2 fix: reject symlinked hook directory parents
+365e813 fix: harden release artifact verification
+baa6000 fix: reject symlinked backup artifacts
+21d9b9e fix: reject symlinked demo artifact evidence
+fe8c096 fix: retry transient file database open contention
+43f070e fix: use os randomness for workspace salt
+3073541 fix: harden installer archive extraction tempdir
+2561124 fix: harden cass probing and rehearsal sandbox execution
+65f548c feat: add playbook rule extraction (eidetic_engine_cli-ivkj)
+719ec29 test: stabilize golden and boundary contracts
+a69c12c feat(maintenance): expose memory decay job
+e3118fd test(memory): cover workflow auto-link JSON output
+562792d feat(memory): Hebbian remember-time auto-link with --no-auto-link opt-out
+1682072 chore(beads): close 22 review findings, file 4 missing-feature beads
+613eff3 docs(skills): tighten DB-scraping wording, add response/error contract notes
+3fc2b56 docs: refresh mechanical boundary inventory for 161 CLI command paths
+6cce56a test: realign usr003 why pointers to camelCase, smoke source_id to fb_ format
+a231cd4 test(cass): additive search fields are forward-compatible; type drift still fails
+0f120c7 fix(output/markdown): escape tilde to neutralize GFM strikethrough
+5d923b9 fix(models/decision): reject whitespace-only outcome, nanosecond decided_at
+57bd597 fix(pack): surface serialization failures as ee.error.v1 instead of empty {}
+009d2ad fix(policy): JWT redaction in O(n) instead of O(n²) on long inputs
+313ac37 feat(curate): escape-aware inline-code lexing, TTL hardening, trauma guard
+079e6a2 fix(hooks): reject symlink hook paths and plan multi-hook writes atomically
+e26b2f9 fix(graph): refresh entire snapshot inside the write transaction
+603d4d4 fix(steward): dry-run no-mutate, skip helpful feedback, bound daemon limits
+ec33df3 feat(cli): ee workflow close, --workflow flag on remember, --since on cass import
+0ad02bf feat(cass): ee import cass --since <duration> filter for time-windowed imports
+1765dbd feat(memory): workflow lifecycle groups for ee remember + ee workflow close
+043370a fix(db): V029 workflow_id, schema-only opens, advisory-lock hardening, BLAKE3 checksums
+9e50478 deps: promote tracing to a direct workspace dependency
+5e62fb6 fix(graph): preserve graph error causes
+6529996 fix(steward): cancel decay sweep before mutation
+356acfd fix(cass): drop HOME-derived auto-discovery, walk ancestor chain on Path source
+99414ed fix(cass): replace deny_unknown_fields with forward-compat policy (eidetic_engine_cli-w4gg)
+f8b15b3 fix(policy): redact escaped quotes in quoted secrets
+aace56e fix(effect): audit rationale trace writes
+83fb892 test(curate): tighten field-perturbation proptest regex to reject whitespace-only reasons
+e1a7f06 test(effect): allow daemon option-mode synthetic commands in manifest contract
+cb67a84 chore(beads): file 11 review findings from concurrent reality-check sweep
+412c031 test(curate): pin proptest regression seed for candidate_embedding_text
+47f1966 chore(beads): close redactor proptest, file nine new review findings
+d1ac82d chore(beads): close sw6i policy redaction test
+8e690b6 test: remap degraded_honesty UNSATISFIED_DEGRADED_MODE_EXIT from 7 to 6
+755a6ae fix(curate): split embedding_fields_strategy into head/tail tuples for proptest
+417faf4 docs(curate): erratum for e02ba67 — full determinism test suite landed there
+e02ba67 chore(curate): import candidate_embedding_text symbol into the test mod
+6f02af4 chore(beads): file four newly-discovered review findings
+43eba49 chore(beads): pick up curate determinism test claim from concurrent agent
+caeb72c test(smoke): defensively extract docId before comparing in cass real-robot search
+3706e0b test(policy): narrow api_key proptest case to the assignment form
+13e1c77 chore(beads): close three to_json regression issues fixed in this push
+046624f test(policy): proptest secret redactor across pre/post-context permutations
+b1462d1 test(curate): pin ProtectedRuleStatus and FeedbackHealthSummary to_json escaping
+79c92b0 test(golden): catch up remaining status, agent-detect, and TOON goldens
+f81855c test: catch up three contract suites to the degraded-mode exit-code = 6 policy
+2427e23 test(causal,learn): realign contract suite to evidence-ledger abstain semantics
+beb9055 style(pack): rustfmt reflow on Unicode test bodies
+10aa784 fix(graph): tune snapshot lock retry, retry release on drop, pin proptest seed
+0b70784 fix(curate): use serde_json for to_json methods to ensure proper escaping (eidetic_engine_cli-dkuo)
+45f28df chore(beads): sync transitions paired with this push's hardening work
+524c9b3 test(golden): realign fixtures with subsystem readiness, error envelope, and field naming
+1f8f7e8 fix(curate): emit QuarantinedFeedback JSON via serde, escape special chars
+cc98409 fix(graph): take a workspace-scoped advisory write lock around snapshot persist
+978dd7e fix(hooks): make ee-managed hook reinstall truly idempotent (NoChange path)
+3eaf622 test(cass): structured contract requirements matrix and outcome stream test
+8af4788 fix(cass): give import its own invocation surface that refuses PATH fallback
+4a9fba2 test(pack): cover Unicode edge cases for token estimation (eidetic_engine_cli-57vk)
+e76ceb9 chore(beads): sync task status updates
+0322a4e test(graph): avoid panic in snapshot enrichment assertion
+d70acc4 fix(pack): use serde_json for SectionBudgetReport::to_json (eidetic_engine_cli-tof3)
+4ebd838 fix(graph): pin feature enrichment to graph snapshots
+c2ae3ad test(conformance): add CLI exit code conformance harness (eidetic_engine_cli-pe6o)
+8d6484a fix(pack): use serde_json for RateDistortionReport::to_json (eidetic_engine_cli-zudw)
+1d5739f test: strengthen deterministic search JSON golden (lp4p.4)
+fa73839 feat(decision): add try_build + auto-fill decided_at (eidetic_engine_cli-qnm7)
+01fba4f chore: annotate UBS false-positives on filter and delimiter comparisons
+5e70fad fix(graph): allocate snapshot version inside the write transaction
+53c82fe test(conformance): add ee why memory explanation conformance (eidetic_engine_cli-lp4p.8)
+b0030ed chore: sync beads - close eidetic_engine_cli-lp4p.9
+ea5b402 test(golden): add curate review dry-run conformance test
+8edf414 chore(beads): sync status transitions paired with this push's test work
+1b7347e chore: sync beads for lp4p.7
+a1e0123 test(golden): pin ee curate accept --dry-run preview-without-mutation contract
+e599784 test: add deterministic search golden
+552b30f test: align exit-code expectations with degraded/policy contract realignment
+ffeb016 chore(policy): synthesize secret-shaped test fixtures at runtime
+74224eb feat(economy): surface missing/unmigrated storage as UnsatisfiedDegradedMode
+4fc8bd8 feat(recorder): refuse non-dry-run import with typed dry_run_required error
+0050176 chore: sync beads - close eidetic_engine_cli-lp4p.5
+fe9a878 test(golden): add context markdown provenance hash stability and artifact logging test
+f789baf test(e2e): add CLI loop integration test (eidetic_engine_cli-lp4p.3)
+2adc7be chore: sync beads
+034714d fix: pin graph snapshot source links
+f4c8127 fix: report hook install filesystem failures
+3540d97 test: add status conformance e2e
+ea80f3c chore(beads): close 5 STUB beads with implementation scope notes
+56b710b chore(beads): file 5 STUB beads for ee.query.v1 filters not wired to pack
+727a771 chore: sync beads
+5b733a1 feat(policy): add Stripe and GCP secret scanners per §22
+0944149 chore: more epic closures
+8e927d4 chore: bulk epic closure - all children verified complete
+f6acfa5 chore(beads): mark six epics closed after their child beads completed
+a1ba0c7 chore: small clippy/test-discipline cleanups across renderers, tests, and config
+0566757 fix(output, pack): tighten Unicode token estimation and Markdown query escape
+fef6f3b fix(curate): bounds-safe specificity phrase helpers, modernize redaction asserts
+f28ced6 fix(core/outcome): char-safe slicing in stable_short_hash, seed real session for reject path
+bdab856 fix(db/locks): nanosecond-precision RFC3339, retry on transient errors, V028 migration
+342d7c6 fix(core/index): emit snake_case field names in index report JSON
+7d9be2f chore: sync beads
+b421c22 fix(cass): queue imported sessions for indexing
+83cb590 fix(cass): validate absolute-path binaries' permissions before spawn
+3369cd9 chore: sync beads
