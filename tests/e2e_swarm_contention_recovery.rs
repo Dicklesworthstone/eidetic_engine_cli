@@ -648,13 +648,18 @@ where
 }
 
 fn ee_binary_path() -> PathBuf {
-    let cargo_target = env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".to_owned());
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    PathBuf::from(cargo_target).join(profile).join("ee")
+    if let Some(binary) = env::var_os("EE_BINARY") {
+        let path = PathBuf::from(binary);
+        return if path.is_absolute() {
+            path
+        } else {
+            env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(path)
+        };
+    }
+
+    PathBuf::from(env!("CARGO_BIN_EXE_ee"))
 }
 
 fn verify_db_integrity(workspace: &Path) -> Result<bool, String> {
