@@ -1019,8 +1019,10 @@ mod tests {
                 "\"created_at\":\"   \"",
             );
 
-        let error =
-            parse_jsonl_header(&header_line).expect_err("blank created_at must reject header");
+        let error = match parse_jsonl_header(&header_line) {
+            Ok(_) => return Err("blank created_at must reject header".to_string()),
+            Err(error) => error,
+        };
         ensure(
             error,
             JsonlHeaderParseError::InvalidHeader {

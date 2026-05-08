@@ -293,18 +293,13 @@ impl CassInvocation {
             collect_finished_pipe_reader(&mut stdout_thread, &mut stdout_bytes)?;
             collect_finished_pipe_reader(&mut stderr_thread, &mut stderr_bytes)?;
 
-            if child_status.is_some() && stdout_bytes.is_some() && stderr_bytes.is_some() {
-                let status = child_status
-                    .take()
-                    .expect("child status checked before timeout success");
+            if let Some((status, stdout_bytes, stderr_bytes)) =
+                take_completed_subprocess(&mut child_status, &mut stdout_bytes, &mut stderr_bytes)
+            {
                 return Ok(CassOutcome::new(
                     self.clone(),
-                    stdout_bytes
-                        .take()
-                        .expect("stdout bytes checked before timeout success"),
-                    stderr_bytes
-                        .take()
-                        .expect("stderr bytes checked before timeout success"),
+                    stdout_bytes,
+                    stderr_bytes,
                     status.code(),
                     started.elapsed(),
                     false,
@@ -331,14 +326,16 @@ impl CassInvocation {
                     &mut stdout_bytes,
                     &mut stderr_bytes,
                 )?;
+                let Some(status) = child_status.take() else {
+                    return Err(CassError::Io {
+                        message: "cass subprocess status was unavailable after timeout".to_owned(),
+                    });
+                };
                 return Ok(CassOutcome::new(
                     self.clone(),
                     stdout_bytes,
                     stderr_bytes,
-                    child_status
-                        .take()
-                        .expect("child status is set before timeout outcome")
-                        .code(),
+                    status.code(),
                     started.elapsed(),
                     true,
                 ));
@@ -437,6 +434,26 @@ fn join_pipe_reader(
     }
 }
 
+fn take_completed_subprocess(
+    child_status: &mut Option<ExitStatus>,
+    stdout_bytes: &mut Option<Vec<u8>>,
+    stderr_bytes: &mut Option<Vec<u8>>,
+) -> Option<(ExitStatus, Vec<u8>, Vec<u8>)> {
+    match (
+        child_status.take(),
+        stdout_bytes.take(),
+        stderr_bytes.take(),
+    ) {
+        (Some(status), Some(stdout), Some(stderr)) => Some((status, stdout, stderr)),
+        (status, stdout, stderr) => {
+            *child_status = status;
+            *stdout_bytes = stdout;
+            *stderr_bytes = stderr;
+            None
+        }
+    }
+}
+
 fn collect_finished_pipe_reader(
     handle: &mut Option<thread::JoinHandle<Result<Vec<u8>, std::io::Error>>>,
     bytes: &mut Option<Vec<u8>>,
@@ -448,10 +465,9 @@ fn collect_finished_pipe_reader(
         return Ok(());
     };
     if reader.is_finished() {
-        let reader = handle
-            .take()
-            .expect("pipe reader exists after is_finished check");
-        *bytes = Some(join_pipe_reader(reader)?);
+        if let Some(reader) = handle.take() {
+            *bytes = Some(join_pipe_reader(reader)?);
+        }
     }
     Ok(())
 }
