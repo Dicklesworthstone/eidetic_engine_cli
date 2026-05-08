@@ -99,12 +99,8 @@ fn perf_compare_regression_detected() -> TestResult {
     assert_response_envelope(&json, "regression comparison")?;
     assert_stderr_empty(&output, "regression comparison")?;
 
-    let data = json
-        .get("data")
-        .ok_or("missing data field")?;
-    let report = data
-        .get("report")
-        .ok_or("missing data.report field")?;
+    let data = json.get("data").ok_or("missing data field")?;
+    let report = data.get("report").ok_or("missing data.report field")?;
     let summary = report
         .get("summary")
         .ok_or("missing data.report.summary field")?;
@@ -240,8 +236,8 @@ fn perf_compare_json_stdout_contains_only_machine_data() -> TestResult {
         "--json",
     ])?;
 
-    let stdout = String::from_utf8(output.stdout.clone())
-        .map_err(|e| format!("stdout not UTF-8: {e}"))?;
+    let stdout =
+        String::from_utf8(output.stdout.clone()).map_err(|e| format!("stdout not UTF-8: {e}"))?;
 
     ensure(
         !stdout.contains("warning:"),
@@ -256,13 +252,10 @@ fn perf_compare_json_stdout_contains_only_machine_data() -> TestResult {
         "stdout should not contain diagnostic notes",
     )?;
 
-    let json: serde_json::Value = serde_json::from_str(&stdout)
-        .map_err(|e| format!("stdout is not valid JSON: {e}"))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).map_err(|e| format!("stdout is not valid JSON: {e}"))?;
 
-    ensure(
-        json.is_object(),
-        "stdout should be a JSON object",
-    )
+    ensure(json.is_object(), "stdout should be a JSON object")
 }
 
 #[test]
