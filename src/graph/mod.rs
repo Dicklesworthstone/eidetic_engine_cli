@@ -1895,7 +1895,6 @@ fn graph_snapshot_metrics_json(
         .map_err(|error| GraphError::json("serialize graph snapshot metrics", error))
 }
 
-#[cfg(feature = "graph")]
 fn graph_snapshot_content_hash(metrics_json: &str) -> String {
     format!("blake3:{}", blake3::hash(metrics_json.as_bytes()).to_hex())
 }
@@ -2763,13 +2762,10 @@ impl SnapshotValidationReport {
 }
 
 /// Validate a graph snapshot against current state.
-#[cfg(feature = "graph")]
 pub fn validate_snapshot(
     conn: &crate::db::DbConnection,
     options: &SnapshotValidationOptions,
 ) -> GraphResult<SnapshotValidationReport> {
-    use crate::db::GraphSnapshotStatus;
-
     let snapshot = conn
         .get_latest_graph_snapshot(&options.workspace_id, options.graph_type)
         .map_err(|error| GraphError::storage("inspect latest graph snapshot", error))?;
@@ -2840,15 +2836,6 @@ pub fn validate_snapshot(
         hash_verified,
         repair_hint,
     })
-}
-
-/// Validate a graph snapshot (stub when graph feature is disabled).
-#[cfg(not(feature = "graph"))]
-pub fn validate_snapshot(
-    _conn: &crate::db::DbConnection,
-    options: &SnapshotValidationOptions,
-) -> GraphResult<SnapshotValidationReport> {
-    Ok(SnapshotValidationReport::not_found(options))
 }
 
 // ============================================================================
@@ -5927,6 +5914,44 @@ mod tests {
                 .as_deref()
                 .is_some_and(|hint| hint.contains("centrality-refresh"))
         );
+    }
+
+    #[test]
+    fn validate_snapshot_reads_persisted_snapshot_in_default_build() -> TestResult {
+        use crate::db::GraphSnapshotType;
+        let connection = open_snapshot_db()?;
+        let metrics_json = r#"{"nodes":[],"edges":[]}"#;
+        let content_hash = super::graph_snapshot_content_hash(metrics_json);
+        insert_graph_snapshot_with_hash(
+            &connection,
+            "gsnap_0000000000000000000000230",
+            metrics_json,
+            2,
+            &content_hash,
+        )?;
+
+        let report = graph_result(super::validate_snapshot(
+            &connection,
+            &super::SnapshotValidationOptions {
+                workspace_id: WORKSPACE_ID.to_string(),
+                graph_type: GraphSnapshotType::MemoryLinks,
+                current_generation: 7,
+                expected_schema_version: super::GRAPH_EXPORT_SCHEMA_V1.to_string(),
+                verify_hash: true,
+            },
+        ))?;
+
+        assert_eq!(report.result, super::SnapshotValidationResult::Valid);
+        assert_eq!(
+            report.snapshot_id.as_deref(),
+            Some("gsnap_0000000000000000000000230")
+        );
+        assert_eq!(report.snapshot_version, Some(2));
+        assert_eq!(report.snapshot_generation, Some(7));
+        assert_eq!(report.hash_verified, Some(true));
+        assert!(report.is_usable());
+
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[cfg(feature = "graph")]
