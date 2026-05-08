@@ -985,6 +985,14 @@ impl EffectManifest {
             CommandEffect::read_only("model list", "List model registry entries"),
             CommandEffect::read_only("model status", "Inspect model registry status"),
             CommandEffect::read_only("outcome quarantine list", "List feedback quarantine rows"),
+            CommandEffect::read_only(
+                "perf budget check",
+                "Check normalized performance artifact budget posture",
+            ),
+            CommandEffect::read_only(
+                "perf compare",
+                "Compare normalized performance artifact summaries",
+            ),
             CommandEffect::read_only("plan recipe list", "List static plan recipes"),
             CommandEffect::read_only("plan recipe show", "Show static plan recipe"),
             CommandEffect::read_only(

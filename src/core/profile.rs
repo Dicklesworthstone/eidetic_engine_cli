@@ -14,9 +14,12 @@ use std::str::FromStr;
 use serde::{Serialize, Serializer};
 use toml_edit::{DocumentMut, Item};
 
+use crate::models::{ArtifactSummary, MetricValueKind};
+
 pub const HOST_PROFILE_PROBE_SCHEMA_V1: &str = "ee.profile.probe.v1";
 pub const PROFILE_CONFIG_PLAN_SCHEMA_V1: &str = "ee.profile.config.plan.v1";
 pub const RUNTIME_PROFILE_SCHEMA_V1: &str = "ee.profile.runtime.v1";
+pub const PROFILE_BUDGET_CONFORMANCE_SCHEMA_V1: &str = "ee.profile.budget_conformance.v1";
 
 const TOOL_NAMES: [&str; 7] = ["cargo", "rustfmt", "clippy", "br", "bv", "rch", "gh"];
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -964,6 +967,424 @@ pub fn runtime_profile_for_workspace(workspace_root: &Path) -> RuntimeProfileRep
         let probe = HostResourceProbeReport::gather_for_workspace(workspace_root);
         let selection = recommend_operating_profile(&probe);
         RuntimeProfileReport::for_profile(selection.effective, "host_probe")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileBudgetConformanceStatus {
+    Passed,
+    Degraded,
+    Failed,
+}
+
+impl ProfileBudgetConformanceStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Degraded => "degraded",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileBudgetConformanceSeverity {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileBudgetConformanceReport {
+    pub schema: &'static str,
+    pub side_effect_free: bool,
+    pub requested_profile: OperatingProfile,
+    pub advertised_profile: Option<OperatingProfile>,
+    pub effective_profile: OperatingProfile,
+    pub explicit_overrides: Vec<String>,
+    pub artifact: ProfileBudgetArtifactSummary,
+    pub status: ProfileBudgetConformanceStatus,
+    pub checks: Vec<ProfileBudgetConformanceCheck>,
+    pub degraded: Vec<ProfileBudgetConformanceDegradation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileBudgetArtifactSummary {
+    pub artifact_id: String,
+    pub source_schema: String,
+    pub observed_profile: Option<String>,
+    pub metric_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileBudgetConformanceCheck {
+    pub field: String,
+    pub owner: String,
+    pub expected: Option<String>,
+    pub observed: Option<String>,
+    pub status: ProfileBudgetConformanceStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileBudgetConformanceDegradation {
+    pub code: String,
+    pub severity: ProfileBudgetConformanceSeverity,
+    pub owner: String,
+    pub field: String,
+    pub message: String,
+    pub repair: Option<String>,
+}
+
+impl ProfileBudgetConformanceDegradation {
+    fn new(
+        code: impl Into<String>,
+        severity: ProfileBudgetConformanceSeverity,
+        owner: impl Into<String>,
+        field: impl Into<String>,
+        message: impl Into<String>,
+        repair: Option<String>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            severity,
+            owner: owner.into(),
+            field: field.into(),
+            message: message.into(),
+            repair,
+        }
+    }
+}
+
+#[must_use]
+pub fn check_profile_budget_artifact_conformance(
+    advertised_profile: Option<OperatingProfile>,
+    effective_profile: OperatingProfile,
+    explicit_overrides: &[String],
+    artifact: &ArtifactSummary,
+    observed_verification_recipe: Option<&str>,
+) -> ProfileBudgetConformanceReport {
+    let budgets = ProfileBudgets::for_profile(effective_profile);
+    let mut checks = Vec::new();
+    let mut degraded = Vec::new();
+    let explicit_overrides = stable_overrides(explicit_overrides);
+
+    match advertised_profile {
+        Some(advertised) if advertised != effective_profile => {
+            degraded.push(ProfileBudgetConformanceDegradation::new(
+                "advertised_profile_mismatch",
+                ProfileBudgetConformanceSeverity::Medium,
+                "profile",
+                "profile.advertised",
+                format!(
+                    "Advertised profile `{}` differs from effective profile `{}`.",
+                    advertised.as_str(),
+                    effective_profile.as_str()
+                ),
+                Some(
+                    "Use the effective profile in generated artifacts or document an override."
+                        .to_owned(),
+                ),
+            ));
+        }
+        None => {
+            degraded.push(ProfileBudgetConformanceDegradation::new(
+                "advertised_profile_missing",
+                ProfileBudgetConformanceSeverity::Medium,
+                "profile",
+                "profile.advertised",
+                "No advertised profile was provided for conformance comparison.",
+                Some(
+                    "Include the advertised profile alongside the effective runtime profile."
+                        .to_owned(),
+                ),
+            ));
+        }
+        _ => {}
+    }
+
+    match artifact
+        .profile
+        .as_ref()
+        .map(|profile| profile.profile_name.as_str())
+    {
+        Some(observed) if observed != effective_profile.as_str() => {
+            degraded.push(ProfileBudgetConformanceDegradation::new(
+                "artifact_profile_mismatch",
+                ProfileBudgetConformanceSeverity::High,
+                "profile",
+                "artifact.profile.profileName",
+                format!(
+                    "Artifact profile `{observed}` differs from effective profile `{}`.",
+                    effective_profile.as_str()
+                ),
+                Some("Regenerate the artifact under the effective profile or compare against its declared profile.".to_owned()),
+            ));
+        }
+        None => {
+            degraded.push(ProfileBudgetConformanceDegradation::new(
+                "profile_provenance_missing",
+                ProfileBudgetConformanceSeverity::Medium,
+                "profile",
+                "artifact.profile",
+                "Artifact does not include profile provenance.",
+                Some("Regenerate the artifact with profile evidence enabled.".to_owned()),
+            ));
+        }
+        _ => {}
+    }
+
+    push_u64_budget_check(
+        &mut checks,
+        &mut degraded,
+        &explicit_overrides,
+        artifact,
+        "profile.budgets.search_candidate_limit",
+        "search",
+        budgets.search.candidate_limit,
+    );
+    push_u64_budget_check(
+        &mut checks,
+        &mut degraded,
+        &explicit_overrides,
+        artifact,
+        "profile.budgets.pack_max_tokens",
+        "pack",
+        budgets.pack.max_tokens,
+    );
+    push_u64_budget_check(
+        &mut checks,
+        &mut degraded,
+        &explicit_overrides,
+        artifact,
+        "profile.budgets.cache_memory_cap_mb",
+        "cache",
+        budgets.cache.memory_cap_mb,
+    );
+    push_u64_budget_check(
+        &mut checks,
+        &mut degraded,
+        &explicit_overrides,
+        artifact,
+        "profile.budgets.write_spool_batch_cap",
+        "write_spool",
+        budgets.write_spool.batch_cap,
+    );
+    push_string_budget_check(
+        &mut checks,
+        &mut degraded,
+        &explicit_overrides,
+        "profile.budgets.verification_recipe",
+        "profile",
+        budgets.verification.recipe,
+        observed_verification_recipe,
+    );
+
+    degraded.sort_by(|a, b| {
+        severity_rank(b.severity)
+            .cmp(&severity_rank(a.severity))
+            .then_with(|| a.code.cmp(&b.code))
+            .then_with(|| a.field.cmp(&b.field))
+    });
+
+    let status = if checks
+        .iter()
+        .any(|check| check.status == ProfileBudgetConformanceStatus::Failed)
+        || degraded
+            .iter()
+            .any(|d| d.severity == ProfileBudgetConformanceSeverity::High)
+    {
+        ProfileBudgetConformanceStatus::Failed
+    } else if checks
+        .iter()
+        .any(|check| check.status == ProfileBudgetConformanceStatus::Degraded)
+        || !degraded.is_empty()
+    {
+        ProfileBudgetConformanceStatus::Degraded
+    } else {
+        ProfileBudgetConformanceStatus::Passed
+    };
+
+    ProfileBudgetConformanceReport {
+        schema: PROFILE_BUDGET_CONFORMANCE_SCHEMA_V1,
+        side_effect_free: true,
+        requested_profile: effective_profile,
+        advertised_profile,
+        effective_profile,
+        explicit_overrides,
+        artifact: ProfileBudgetArtifactSummary {
+            artifact_id: artifact.artifact_id.clone(),
+            source_schema: artifact.source_schema.clone(),
+            observed_profile: artifact
+                .profile
+                .as_ref()
+                .map(|profile| profile.profile_name.clone()),
+            metric_count: artifact.metrics.len(),
+        },
+        status,
+        checks,
+        degraded,
+    }
+}
+
+fn stable_overrides(explicit_overrides: &[String]) -> Vec<String> {
+    let mut overrides = explicit_overrides.to_vec();
+    overrides.sort();
+    overrides.dedup();
+    overrides
+}
+
+fn push_u64_budget_check(
+    checks: &mut Vec<ProfileBudgetConformanceCheck>,
+    degraded: &mut Vec<ProfileBudgetConformanceDegradation>,
+    explicit_overrides: &[String],
+    artifact: &ArtifactSummary,
+    field: &'static str,
+    owner: &'static str,
+    expected: u64,
+) {
+    let observed = artifact_metric_u64(artifact, field);
+    push_budget_check(
+        checks,
+        degraded,
+        explicit_overrides,
+        field,
+        owner,
+        expected.to_string(),
+        observed.map(|value| value.to_string()),
+    );
+}
+
+fn push_string_budget_check(
+    checks: &mut Vec<ProfileBudgetConformanceCheck>,
+    degraded: &mut Vec<ProfileBudgetConformanceDegradation>,
+    explicit_overrides: &[String],
+    field: &'static str,
+    owner: &'static str,
+    expected: &'static str,
+    observed: Option<&str>,
+) {
+    push_budget_check(
+        checks,
+        degraded,
+        explicit_overrides,
+        field,
+        owner,
+        expected.to_owned(),
+        observed.map(ToOwned::to_owned),
+    );
+}
+
+fn push_budget_check(
+    checks: &mut Vec<ProfileBudgetConformanceCheck>,
+    degraded: &mut Vec<ProfileBudgetConformanceDegradation>,
+    explicit_overrides: &[String],
+    field: &'static str,
+    owner: &'static str,
+    expected: String,
+    observed: Option<String>,
+) {
+    let override_present = explicit_overrides.iter().any(|value| value == field);
+    let status = match observed.as_deref() {
+        Some(value) if value == expected => ProfileBudgetConformanceStatus::Passed,
+        Some(_) if override_present => ProfileBudgetConformanceStatus::Degraded,
+        Some(_) => ProfileBudgetConformanceStatus::Failed,
+        None => ProfileBudgetConformanceStatus::Degraded,
+    };
+
+    if status != ProfileBudgetConformanceStatus::Passed {
+        degraded.push(profile_budget_degradation(
+            field,
+            owner,
+            &expected,
+            observed.as_deref(),
+            override_present,
+        ));
+    }
+
+    checks.push(ProfileBudgetConformanceCheck {
+        field: field.to_owned(),
+        owner: owner.to_owned(),
+        expected: Some(expected),
+        observed,
+        status,
+    });
+}
+
+fn profile_budget_degradation(
+    field: &'static str,
+    owner: &'static str,
+    expected: &str,
+    observed: Option<&str>,
+    override_present: bool,
+) -> ProfileBudgetConformanceDegradation {
+    match observed {
+        None => ProfileBudgetConformanceDegradation::new(
+            "observed_budget_missing",
+            ProfileBudgetConformanceSeverity::Medium,
+            owner,
+            field,
+            format!("Observed budget field `{field}` is missing from the artifact."),
+            Some("Regenerate the artifact with profile budget metrics enabled.".to_owned()),
+        ),
+        Some(value) if override_present => ProfileBudgetConformanceDegradation::new(
+            "explicit_override_observed",
+            ProfileBudgetConformanceSeverity::Low,
+            owner,
+            field,
+            format!(
+                "Observed budget field `{field}` has explicit override value `{value}` instead of profile value `{expected}`."
+            ),
+            Some("Keep the override if intentional, otherwise remove it and regenerate the artifact.".to_owned()),
+        ),
+        Some(value) => {
+            let code = numeric_budget_mismatch_code(expected, value);
+            ProfileBudgetConformanceDegradation::new(
+                code,
+                ProfileBudgetConformanceSeverity::High,
+                owner,
+                field,
+                format!(
+                    "Observed budget field `{field}` has value `{value}` but profile expects `{expected}`."
+                ),
+                Some("Regenerate the artifact under the effective profile or correct the profile budget wiring.".to_owned()),
+            )
+        }
+    }
+}
+
+fn numeric_budget_mismatch_code(expected: &str, observed: &str) -> &'static str {
+    match (expected.parse::<u64>(), observed.parse::<u64>()) {
+        (Ok(expected), Ok(observed)) if observed > expected => "observed_budget_above_profile",
+        (Ok(expected), Ok(observed)) if observed < expected => "observed_budget_below_profile",
+        _ => "observed_budget_mismatch",
+    }
+}
+
+fn artifact_metric_u64(artifact: &ArtifactSummary, field: &str) -> Option<u64> {
+    let metric = artifact.metrics.get(field)?;
+    if metric.kind != MetricValueKind::Measured {
+        return None;
+    }
+    let value = metric.value?;
+    if value.is_finite() && value >= 0.0 && value.fract() == 0.0 {
+        Some(value as u64)
+    } else {
+        None
+    }
+}
+
+fn severity_rank(severity: ProfileBudgetConformanceSeverity) -> u8 {
+    match severity {
+        ProfileBudgetConformanceSeverity::Low => 0,
+        ProfileBudgetConformanceSeverity::Medium => 1,
+        ProfileBudgetConformanceSeverity::High => 2,
     }
 }
 

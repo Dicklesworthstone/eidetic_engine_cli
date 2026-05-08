@@ -7,7 +7,12 @@
 
 use ee::core::profile::{
     CpuProbe, EnvironmentProbe, HOST_PROFILE_PROBE_SCHEMA_V1, HostResourceProbeReport, MemoryProbe,
-    OperatingProfile, ProfileBudgets, WorkspaceProbe, recommend_operating_profile,
+    OperatingProfile, PROFILE_BUDGET_CONFORMANCE_SCHEMA_V1, ProfileBudgetConformanceStatus,
+    ProfileBudgets, WorkspaceProbe, check_profile_budget_artifact_conformance,
+    recommend_operating_profile,
+};
+use ee::models::{
+    ArtifactKind, ArtifactSummary, MetricValue, ProfileReference, SummaryDegradation,
 };
 use proptest::prelude::*;
 
@@ -65,6 +70,40 @@ fn synthetic_probe(
         environment: synthetic_environment_probe(),
         degraded: Vec::new(),
     }
+}
+
+fn profile_artifact(profile: OperatingProfile) -> ArtifactSummary {
+    let budgets = ProfileBudgets::for_profile(profile);
+    let mut artifact = ArtifactSummary::new(
+        format!("profile-{}", profile.as_str()),
+        ArtifactKind::ProfileEvidence,
+        "ee.profile.runtime.v1",
+    )
+    .with_profile(ProfileReference {
+        profile_name: profile.as_str().to_owned(),
+        confidence: Some("high".to_owned()),
+        override_source: None,
+    })
+    .with_command_family("profile");
+
+    artifact.add_metric(
+        "profile.budgets.search_candidate_limit",
+        MetricValue::measured(budgets.search.candidate_limit as f64, "count"),
+    );
+    artifact.add_metric(
+        "profile.budgets.pack_max_tokens",
+        MetricValue::measured(budgets.pack.max_tokens as f64, "tokens"),
+    );
+    artifact.add_metric(
+        "profile.budgets.cache_memory_cap_mb",
+        MetricValue::measured(budgets.cache.memory_cap_mb as f64, "mb"),
+    );
+    artifact.add_metric(
+        "profile.budgets.write_spool_batch_cap",
+        MetricValue::measured(budgets.write_spool.batch_cap as f64, "records"),
+    );
+
+    artifact
 }
 
 proptest! {
@@ -214,6 +253,183 @@ proptest! {
             "minimal resources should default to constrained"
         );
     }
+}
+
+#[test]
+fn profile_budget_conformance_passes_for_all_profiles() {
+    for profile in [
+        OperatingProfile::Constrained,
+        OperatingProfile::Portable,
+        OperatingProfile::Workstation,
+        OperatingProfile::Swarm,
+    ] {
+        let artifact = profile_artifact(profile);
+        let report = check_profile_budget_artifact_conformance(
+            Some(profile),
+            profile,
+            &[],
+            &artifact,
+            Some(ProfileBudgets::for_profile(profile).verification.recipe),
+        );
+
+        assert_eq!(report.schema, PROFILE_BUDGET_CONFORMANCE_SCHEMA_V1);
+        assert!(report.side_effect_free);
+        assert_eq!(report.status, ProfileBudgetConformanceStatus::Passed);
+        assert!(report.degraded.is_empty(), "{profile:?} should pass");
+        assert_eq!(report.checks.len(), 5);
+    }
+}
+
+#[test]
+fn profile_budget_conformance_reports_candidate_limit_too_high() {
+    let profile = OperatingProfile::Portable;
+    let mut artifact = profile_artifact(profile);
+    artifact.add_metric(
+        "profile.budgets.search_candidate_limit",
+        MetricValue::measured(
+            (ProfileBudgets::for_profile(profile).search.candidate_limit + 1) as f64,
+            "count",
+        ),
+    );
+
+    let report = check_profile_budget_artifact_conformance(
+        Some(profile),
+        profile,
+        &[],
+        &artifact,
+        Some(ProfileBudgets::for_profile(profile).verification.recipe),
+    );
+
+    assert_eq!(report.status, ProfileBudgetConformanceStatus::Failed);
+    assert!(report.degraded.iter().any(|d| {
+        d.code == "observed_budget_above_profile"
+            && d.owner == "search"
+            && d.field == "profile.budgets.search_candidate_limit"
+    }));
+}
+
+#[test]
+fn profile_budget_conformance_reports_pack_token_cap_too_low() {
+    let profile = OperatingProfile::Workstation;
+    let mut artifact = profile_artifact(profile);
+    artifact.add_metric(
+        "profile.budgets.pack_max_tokens",
+        MetricValue::measured(
+            (ProfileBudgets::for_profile(profile).pack.max_tokens - 1) as f64,
+            "tokens",
+        ),
+    );
+
+    let report = check_profile_budget_artifact_conformance(
+        Some(profile),
+        profile,
+        &[],
+        &artifact,
+        Some(ProfileBudgets::for_profile(profile).verification.recipe),
+    );
+
+    assert_eq!(report.status, ProfileBudgetConformanceStatus::Failed);
+    assert!(report.degraded.iter().any(|d| {
+        d.code == "observed_budget_below_profile"
+            && d.owner == "pack"
+            && d.field == "profile.budgets.pack_max_tokens"
+    }));
+}
+
+#[test]
+fn profile_budget_conformance_reports_cache_write_and_recipe_mismatches() {
+    let profile = OperatingProfile::Swarm;
+    let mut artifact = profile_artifact(profile);
+    artifact.add_metric(
+        "profile.budgets.cache_memory_cap_mb",
+        MetricValue::measured(1.0, "mb"),
+    );
+    artifact.add_metric(
+        "profile.budgets.write_spool_batch_cap",
+        MetricValue::measured(1.0, "records"),
+    );
+
+    let report = check_profile_budget_artifact_conformance(
+        Some(profile),
+        profile,
+        &[],
+        &artifact,
+        Some("quick"),
+    );
+
+    assert_eq!(report.status, ProfileBudgetConformanceStatus::Failed);
+    for (owner, field) in [
+        ("cache", "profile.budgets.cache_memory_cap_mb"),
+        ("write_spool", "profile.budgets.write_spool_batch_cap"),
+        ("profile", "profile.budgets.verification_recipe"),
+    ] {
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|d| d.owner == owner && d.field == field),
+            "missing conformance degradation for {field}"
+        );
+    }
+}
+
+#[test]
+fn profile_budget_conformance_distinguishes_explicit_overrides() {
+    let profile = OperatingProfile::Constrained;
+    let mut artifact = profile_artifact(profile);
+    artifact.add_metric(
+        "profile.budgets.search_candidate_limit",
+        MetricValue::measured(999.0, "count"),
+    );
+    let overrides = vec!["profile.budgets.search_candidate_limit".to_owned()];
+
+    let report = check_profile_budget_artifact_conformance(
+        Some(profile),
+        profile,
+        &overrides,
+        &artifact,
+        Some(ProfileBudgets::for_profile(profile).verification.recipe),
+    );
+
+    assert_eq!(report.status, ProfileBudgetConformanceStatus::Degraded);
+    assert!(report.degraded.iter().any(|d| {
+        d.code == "explicit_override_observed"
+            && d.owner == "search"
+            && d.field == "profile.budgets.search_candidate_limit"
+    }));
+}
+
+#[test]
+fn profile_budget_conformance_reports_missing_profile_provenance() {
+    let profile = OperatingProfile::Portable;
+    let mut artifact = profile_artifact(profile);
+    artifact.profile = None;
+    artifact.add_degradation(SummaryDegradation::missing_metric(
+        "profile.budgets.cache_memory_cap_mb",
+        Some(&artifact.artifact_id),
+    ));
+    artifact
+        .metrics
+        .remove("profile.budgets.cache_memory_cap_mb");
+
+    let report = check_profile_budget_artifact_conformance(
+        Some(profile),
+        profile,
+        &[],
+        &artifact,
+        Some(ProfileBudgets::for_profile(profile).verification.recipe),
+    );
+
+    assert_eq!(report.status, ProfileBudgetConformanceStatus::Degraded);
+    assert!(
+        report
+            .degraded
+            .iter()
+            .any(|d| { d.code == "profile_provenance_missing" && d.field == "artifact.profile" })
+    );
+    assert!(report.degraded.iter().any(|d| {
+        d.code == "observed_budget_missing" && d.field == "profile.budgets.cache_memory_cap_mb"
+    }));
 }
 
 #[test]

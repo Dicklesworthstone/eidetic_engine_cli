@@ -1,0 +1,27 @@
+{
+  "schema": "ee.perf.artifact_summary.v1",
+  "artifactId": "candidate-unchanged-001",
+  "artifactKind": "benchmark_report",
+  "sourceSchema": "ee.bench.smoke.v1",
+  "sourcePath": "redacted/candidate.json",
+  "contentHash": "abc123unchanged",
+  "observedHash": "abc123unchanged",
+  "profile": {"profileName": "workstation", "confidence": "high"},
+  "fixtureTier": "smoke",
+  "commandFamily": "pack",
+  "metrics": {
+    "elapsed_ms": {
+      "kind": "measured",
+      "value": 100.0,
+      "unit": "ms"
+    },
+    "rss_bytes": {
+      "kind": "measured",
+      "value": 10485760.0,
+      "unit": "bytes"
+    }
+  },
+  "degraded": [],
+  "redaction": "clean",
+  "provenance": []
+}

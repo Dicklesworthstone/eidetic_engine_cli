@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Command;
 
 const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
-const NORMALIZED_CLI_COMMAND_COUNT: usize = 186;
+const NORMALIZED_CLI_COMMAND_COUNT: usize = 188;
 const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
     "daemon background",
     "daemon foreground decay_sweep",
@@ -252,6 +252,34 @@ fn effect_manifest_includes_status_as_read_only() -> TestResult {
         "status is read_only",
     )?;
     ensure(status.is_safe_mid_task(), true, "status is safe mid-task")
+}
+
+#[test]
+fn effect_manifest_includes_perf_commands_as_read_only() -> TestResult {
+    use ee::core::effect::{EffectClass, EffectManifest, SideEffectClass};
+
+    let manifest = EffectManifest::build();
+    for command in ["perf compare", "perf budget check"] {
+        let effect = manifest
+            .get(command)
+            .ok_or_else(|| format!("{command} not in manifest"))?;
+        ensure(
+            effect.default_effect,
+            EffectClass::ReadOnly,
+            &format!("{command} is read_only"),
+        )?;
+        ensure(
+            effect.mutation_contract.side_effect_class,
+            SideEffectClass::ReadOnly,
+            &format!("{command} side effect class"),
+        )?;
+        ensure(
+            effect.is_safe_mid_task(),
+            true,
+            &format!("{command} is safe mid-task"),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]

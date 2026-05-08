@@ -108,6 +108,10 @@ use crate::core::outcome::{
     OutcomeQuarantineReviewReport, OutcomeRecordOptions, list_feedback_quarantine, record_outcome,
     review_feedback_quarantine,
 };
+use crate::core::perf_forensics::{
+    BUDGET_CHECK_SCHEMA_V1, BudgetCheckReport, COMPARE_RESULT_SCHEMA_V1, CompareReport,
+    check_perf_budget_report, compare_artifact_summary_files,
+};
 use crate::core::preflight::{
     CloseOptions as PreflightCloseOptions, RunOptions as PreflightRunOptions,
     ShowOptions as PreflightShowOptions, TripwireSource as PreflightTripwireSource,
@@ -441,6 +445,9 @@ pub enum Command {
     OutcomeQuarantine(OutcomeQuarantineCommand),
     /// Build a context pack from an explicit query document.
     Pack(PackArgs),
+    /// Compare normalized performance artifacts without mutating state.
+    #[command(subcommand)]
+    Perf(PerfCommand),
     /// Run, show, or close preflight risk assessments.
     #[command(subcommand)]
     Preflight(PreflightCommand),
@@ -2813,6 +2820,47 @@ pub struct PlaybookExtractArgs {
     /// Actor recorded in audit metadata.
     #[arg(long, value_name = "ACTOR")]
     pub actor: Option<String>,
+}
+
+/// Subcommands for `ee perf`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum PerfCommand {
+    /// Compare two normalized performance artifact summaries.
+    Compare(PerfCompareArgs),
+    /// Check performance budget posture for one normalized report.
+    #[command(subcommand)]
+    Budget(PerfBudgetCommand),
+}
+
+/// Subcommands for `ee perf budget`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum PerfBudgetCommand {
+    /// Check a normalized performance report against a named profile.
+    Check(PerfBudgetCheckArgs),
+}
+
+/// Arguments for `ee perf compare`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct PerfCompareArgs {
+    /// Baseline normalized artifact summary JSON.
+    #[arg(long, value_name = "PATH")]
+    pub baseline: PathBuf,
+
+    /// Candidate normalized artifact summary JSON.
+    #[arg(long, value_name = "PATH")]
+    pub candidate: PathBuf,
+}
+
+/// Arguments for `ee perf budget check`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct PerfBudgetCheckArgs {
+    /// Runtime/profile budget name expected by the report.
+    #[arg(long, value_name = "PROFILE")]
+    pub profile: String,
+
+    /// Normalized performance artifact summary JSON.
+    #[arg(long, value_name = "PATH")]
+    pub report: PathBuf,
 }
 
 /// Subcommands for `ee profile`.
@@ -5780,6 +5828,7 @@ where
             handle_outcome_quarantine_release(&cli, args, stdout, stderr)
         }
         Some(Command::Pack(ref args)) => handle_pack(&cli, args, stdout, stderr),
+        Some(Command::Perf(ref perf_cmd)) => handle_perf_command(&cli, perf_cmd, stdout, stderr),
         Some(Command::Preflight(PreflightCommand::Run(ref args))) => {
             handle_preflight_run(&cli, args, stdout, stderr)
         }
@@ -9623,6 +9672,266 @@ where
         | output::Renderer::Hook => {
             write_stdout(stdout, &(output::render_plan_recommend_json(report) + "\n"))
         }
+    }
+}
+
+fn handle_perf_command<W, E>(
+    cli: &Cli,
+    command: &PerfCommand,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match command {
+        PerfCommand::Compare(args) => handle_perf_compare(cli, args, stdout, stderr),
+        PerfCommand::Budget(PerfBudgetCommand::Check(args)) => {
+            handle_perf_budget_check(cli, args, stdout, stderr)
+        }
+    }
+}
+
+fn handle_perf_compare<W, E>(
+    cli: &Cli,
+    args: &PerfCompareArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match compare_artifact_summary_files(&args.baseline, &args.candidate) {
+        Ok(report) => write_perf_compare_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_perf_budget_check<W, E>(
+    cli: &Cli,
+    args: &PerfBudgetCheckArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match check_perf_budget_report(&args.profile, &args.report) {
+        Ok(report) => write_perf_budget_check_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_perf_compare_report<W>(
+    cli: &Cli,
+    report: &CompareReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_perf_compare_human(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&perf_response_json(
+                "perf compare",
+                COMPARE_RESULT_SCHEMA_V1,
+                report,
+            )) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(perf_response_json("perf compare", COMPARE_RESULT_SCHEMA_V1, report) + "\n"),
+        ),
+    }
+}
+
+fn write_perf_budget_check_report<W>(
+    cli: &Cli,
+    report: &BudgetCheckReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_perf_budget_check_human(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&perf_response_json(
+                "perf budget check",
+                BUDGET_CHECK_SCHEMA_V1,
+                report,
+            )) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(perf_response_json("perf budget check", BUDGET_CHECK_SCHEMA_V1, report) + "\n"),
+        ),
+    }
+}
+
+fn perf_response_json<T>(
+    command_path: &'static str,
+    output_schema: &'static str,
+    report: &T,
+) -> String
+where
+    T: serde::Serialize,
+{
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "command": command_path,
+            "schema": output_schema,
+            "effect": perf_effect_json(command_path),
+            "report": perf_report_value(report),
+        }
+    })
+    .to_string()
+}
+
+fn perf_report_value<T>(report: &T) -> serde_json::Value
+where
+    T: serde::Serialize,
+{
+    serde_json::to_value(report).unwrap_or_else(|error| {
+        serde_json::json!({
+            "serializationError": error.to_string(),
+        })
+    })
+}
+
+fn perf_effect_json(command_path: &str) -> serde_json::Value {
+    let manifest = crate::core::effect::EffectManifest::build();
+    manifest.get(command_path).map_or_else(
+        || {
+            serde_json::json!({
+                "commandPath": command_path,
+                "defaultEffect": "unknown",
+                "sideEffectClass": "unknown",
+            })
+        },
+        |effect| {
+            serde_json::json!({
+                "commandPath": effect.command_path,
+                "defaultEffect": effect.default_effect.as_str(),
+                "sideEffectClass": effect.mutation_contract.side_effect_class.as_str(),
+                "idempotency": effect.idempotency.as_str(),
+                "dbGenerationEffect": effect.mutation_contract.db_generation_effect,
+                "indexGenerationEffect": effect.mutation_contract.index_generation_effect,
+                "requiresAudit": effect.requires_audit,
+                "writeSurfaces": {
+                    "dbTables": effect.write_surfaces.db_tables,
+                    "derivedPaths": effect.write_surfaces.derived_paths,
+                    "workspaceFiles": effect.write_surfaces.workspace_files,
+                }
+            })
+        },
+    )
+}
+
+fn render_perf_compare_human(report: &CompareReport) -> String {
+    let mut out = format!(
+        "Perf compare: {}\n  Confidence: {}\n  Worst severity: {}\n  Deltas: {} (regressions {}, improvements {})\n",
+        report.summary.result.as_str(),
+        report.summary.confidence.as_str(),
+        report.summary.worst_severity.as_str(),
+        report.summary.delta_count,
+        report.summary.regression_count,
+        report.summary.improvement_count
+    );
+    for delta in report.deltas.iter().take(3) {
+        out.push_str(&format!(
+            "  - {}: {:?} severity={}\n",
+            delta.metric,
+            delta.direction,
+            delta.severity.as_str()
+        ));
+    }
+    append_perf_degradation_summary(&mut out, &report.degraded);
+    append_perf_next_commands(&mut out, &report.next_commands);
+    out
+}
+
+fn render_perf_budget_check_human(report: &BudgetCheckReport) -> String {
+    let mut out = format!(
+        "Perf budget check: {}\n  Profile: requested={} artifact={}\n  Confidence: {}\n  Comparable metrics: {}\n",
+        report.summary.result.as_str(),
+        report.requested_profile,
+        report.artifact.profile.as_deref().unwrap_or("missing"),
+        report.summary.confidence.as_str(),
+        report.summary.comparable_metric_count
+    );
+    append_perf_budget_degradation_summary(&mut out, &report.degraded);
+    append_perf_next_commands(&mut out, &report.next_commands);
+    out
+}
+
+fn append_perf_degradation_summary(
+    out: &mut String,
+    degradations: &[crate::core::perf_forensics::CompareDegradation],
+) {
+    if degradations.is_empty() {
+        return;
+    }
+    out.push_str("  Degraded:\n");
+    for degradation in degradations.iter().take(3) {
+        out.push_str(&format!(
+            "  - {} ({})",
+            degradation.code,
+            degradation.severity.as_str()
+        ));
+        if let Some(repair) = degradation.repair.as_deref() {
+            out.push_str(&format!(" repair={repair}"));
+        }
+        out.push('\n');
+    }
+}
+
+fn append_perf_budget_degradation_summary(
+    out: &mut String,
+    degradations: &[crate::core::perf_forensics::BudgetCheckDegradation],
+) {
+    if degradations.is_empty() {
+        return;
+    }
+    out.push_str("  Degraded:\n");
+    for degradation in degradations.iter().take(3) {
+        out.push_str(&format!(
+            "  - {} ({})",
+            degradation.code,
+            degradation.severity.as_str()
+        ));
+        if let Some(repair) = degradation.repair.as_deref() {
+            out.push_str(&format!(" repair={repair}"));
+        }
+        out.push('\n');
+    }
+}
+
+fn append_perf_next_commands(out: &mut String, next_commands: &[String]) {
+    if next_commands.is_empty() {
+        return;
+    }
+    out.push_str("Next:\n");
+    for command in next_commands.iter().take(3) {
+        out.push_str(&format!("  {command}\n"));
     }
 }
 
@@ -20519,6 +20828,7 @@ const COMMAND_NAMES: &[&str] = &[
     "outcome",
     "outcome-quarantine",
     "pack",
+    "perf",
     "plan",
     "playbook",
     "preflight",
@@ -20606,6 +20916,8 @@ const MEMORY_SUBCOMMANDS: &[&str] = &["list", "show", "history"];
 const MCP_SUBCOMMANDS: &[&str] = &["manifest"];
 const MODEL_SUBCOMMANDS: &[&str] = &["status", "list"];
 const OUTCOME_QUARANTINE_SUBCOMMANDS: &[&str] = &["list", "release"];
+const PERF_SUBCOMMANDS: &[&str] = &["compare", "budget"];
+const PERF_BUDGET_SUBCOMMANDS: &[&str] = &["check"];
 const PLAN_SUBCOMMANDS: &[&str] = &["goal", "recipe", "explain"];
 const PLAN_RECIPE_SUBCOMMANDS: &[&str] = &["list", "show"];
 const PLAYBOOK_SUBCOMMANDS: &[&str] = &["extract"];
@@ -20851,6 +21163,12 @@ impl NormalizedInvocation {
                     }
                 },
                 Command::Pack(_) => "pack".to_string(),
+                Command::Perf(perf) => match perf {
+                    PerfCommand::Compare(_) => "perf compare".to_string(),
+                    PerfCommand::Budget(PerfBudgetCommand::Check(_)) => {
+                        "perf budget check".to_string()
+                    }
+                },
                 Command::Preflight(preflight) => match preflight {
                     PreflightCommand::Run(_) => "preflight run".to_string(),
                     PreflightCommand::Show(_) => "preflight show".to_string(),
@@ -21064,6 +21382,8 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "mcp" => Some(MCP_SUBCOMMANDS),
         "model" => Some(MODEL_SUBCOMMANDS),
         "outcome-quarantine" => Some(OUTCOME_QUARANTINE_SUBCOMMANDS),
+        "perf" => Some(PERF_SUBCOMMANDS),
+        "perf budget" => Some(PERF_BUDGET_SUBCOMMANDS),
         "plan" => Some(PLAN_SUBCOMMANDS),
         "plan recipe" => Some(PLAN_RECIPE_SUBCOMMANDS),
         "playbook" => Some(PLAYBOOK_SUBCOMMANDS),

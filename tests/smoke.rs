@@ -115,6 +115,231 @@ fn write_json_artifact(path: &Path, value: &serde_json::Value) -> TestResult {
 }
 
 #[cfg(unix)]
+fn perf_artifact_summary_fixture(
+    artifact_id: &str,
+    profile: &str,
+    elapsed_ms: f64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "ee.perf.artifact_summary.v1",
+        "artifactId": artifact_id,
+        "artifactKind": "benchmark_report",
+        "sourceSchema": "ee.benchmark.report.synthetic.v1",
+        "contentHash": format!("hash-{artifact_id}"),
+        "observedHash": format!("hash-{artifact_id}"),
+        "profile": {
+            "profileName": profile,
+            "confidence": "synthetic"
+        },
+        "fixtureTier": "smoke",
+        "commandFamily": "search",
+        "metrics": {
+            "elapsed_ms": {
+                "kind": "measured",
+                "value": elapsed_ms,
+                "unit": "ms"
+            },
+            "cache_hit_rate": {
+                "kind": "measured",
+                "value": 0.9,
+                "unit": "ratio"
+            }
+        },
+        "degraded": [],
+        "redaction": "clean",
+        "provenance": [
+            {
+                "field": "metrics.elapsed_ms",
+                "sourcePath": "synthetic-fixture",
+                "sourceLine": 1
+            }
+        ]
+    })
+}
+
+#[test]
+#[cfg(unix)]
+fn perf_compare_json_success_is_read_only_and_stdout_only() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let baseline_path = temp.path().join("baseline.json");
+    let candidate_path = temp.path().join("candidate.json");
+    write_json_artifact(
+        &baseline_path,
+        &perf_artifact_summary_fixture("baseline", "workstation", 100.0),
+    )?;
+    write_json_artifact(
+        &candidate_path,
+        &perf_artifact_summary_fixture("candidate", "workstation", 250.0),
+    )?;
+
+    let baseline_arg = baseline_path.to_string_lossy().to_string();
+    let candidate_arg = candidate_path.to_string_lossy().to_string();
+    let output = run_ee(&[
+        "--json",
+        "perf",
+        "compare",
+        "--baseline",
+        &baseline_arg,
+        "--candidate",
+        &candidate_arg,
+    ])?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    ensure(
+        output.status.success(),
+        format!("perf compare should succeed; stderr: {stderr}"),
+    )?;
+    ensure(
+        output.stderr.is_empty(),
+        "perf compare stderr must be empty",
+    )?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    ensure_no_ansi(&stdout, "perf compare stdout")?;
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("perf compare stdout must be valid JSON: {error}"))?;
+
+    ensure_equal(
+        &parsed["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "perf compare response schema",
+    )?;
+    ensure_equal(&parsed["success"], &serde_json::json!(true), "success")?;
+    ensure_equal(
+        &parsed["data"]["command"],
+        &serde_json::json!("perf compare"),
+        "command",
+    )?;
+    ensure_equal(
+        &parsed["data"]["effect"]["defaultEffect"],
+        &serde_json::json!("read_only"),
+        "effect class",
+    )?;
+    ensure_equal(
+        &parsed["data"]["effect"]["sideEffectClass"],
+        &serde_json::json!("class=read_only"),
+        "side effect class",
+    )?;
+    ensure_equal(
+        &parsed["data"]["report"]["schema"],
+        &serde_json::json!("ee.perf.compare.v1"),
+        "compare report schema",
+    )?;
+    ensure_equal(
+        &parsed["data"]["report"]["summary"]["result"],
+        &serde_json::json!("regressed"),
+        "compare result",
+    )?;
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn perf_compare_malformed_json_returns_machine_error_on_stdout() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let baseline_path = temp.path().join("baseline.json");
+    let candidate_path = temp.path().join("candidate.json");
+    fs::write(&baseline_path, "{not json\n").map_err(|error| error.to_string())?;
+    write_json_artifact(
+        &candidate_path,
+        &perf_artifact_summary_fixture("candidate", "workstation", 100.0),
+    )?;
+
+    let baseline_arg = baseline_path.to_string_lossy().to_string();
+    let candidate_arg = candidate_path.to_string_lossy().to_string();
+    let output = run_ee(&[
+        "--json",
+        "perf",
+        "compare",
+        "--baseline",
+        &baseline_arg,
+        "--candidate",
+        &candidate_arg,
+    ])?;
+    ensure(!output.status.success(), "perf compare should fail")?;
+    ensure(
+        output.stderr.is_empty(),
+        "perf compare JSON error stderr must be empty",
+    )?;
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("perf compare error stdout must be valid JSON: {error}"))?;
+    ensure_equal(
+        &parsed["schema"],
+        &serde_json::json!("ee.error.v1"),
+        "error schema",
+    )?;
+    ensure_equal(
+        &parsed["error"]["code"],
+        &serde_json::json!("usage"),
+        "error code",
+    )?;
+    ensure(
+        parsed["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("Malformed perf artifact summary JSON")),
+        "error message should identify malformed perf artifact JSON",
+    )?;
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn perf_budget_check_profile_mismatch_degrades_but_stays_read_only() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let report_path = temp.path().join("report.json");
+    write_json_artifact(
+        &report_path,
+        &perf_artifact_summary_fixture("candidate", "workstation", 100.0),
+    )?;
+
+    let report_arg = report_path.to_string_lossy().to_string();
+    let output = run_ee(&[
+        "--json",
+        "perf",
+        "budget",
+        "check",
+        "--profile",
+        "swarm",
+        "--report",
+        &report_arg,
+    ])?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    ensure(
+        output.status.success(),
+        format!("perf budget check should succeed; stderr: {stderr}"),
+    )?;
+    ensure(
+        output.stderr.is_empty(),
+        "perf budget check stderr must be empty",
+    )?;
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("perf budget check stdout must be valid JSON: {error}"))?;
+    ensure_equal(
+        &parsed["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "response schema",
+    )?;
+    ensure_equal(
+        &parsed["data"]["command"],
+        &serde_json::json!("perf budget check"),
+        "command",
+    )?;
+    ensure_equal(
+        &parsed["data"]["effect"]["defaultEffect"],
+        &serde_json::json!("read_only"),
+        "effect class",
+    )?;
+    let degradations = parsed["data"]["report"]["degraded"]
+        .as_array()
+        .ok_or_else(|| "budget check degraded must be an array".to_string())?;
+    ensure(
+        degradations
+            .iter()
+            .any(|degradation| degradation["code"] == serde_json::json!("profile_mismatch")),
+        "budget check should report profile_mismatch degradation",
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
 fn run_ee_logged(
     scenario: &str,
     args: &[&str],

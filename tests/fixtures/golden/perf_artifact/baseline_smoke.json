@@ -1,0 +1,27 @@
+{
+  "schema": "ee.perf.artifact_summary.v1",
+  "artifactId": "baseline-smoke-001",
+  "artifactKind": "benchmark_report",
+  "sourceSchema": "ee.bench.smoke.v1",
+  "sourcePath": "redacted/baseline.json",
+  "contentHash": "abc123baseline",
+  "observedHash": "abc123baseline",
+  "profile": {"profileName": "workstation", "confidence": "high"},
+  "fixtureTier": "smoke",
+  "commandFamily": "pack",
+  "metrics": {
+    "elapsed_ms": {
+      "kind": "measured",
+      "value": 100.0,
+      "unit": "ms"
+    },
+    "rss_bytes": {
+      "kind": "measured",
+      "value": 10485760.0,
+      "unit": "bytes"
+    }
+  },
+  "degraded": [],
+  "redaction": "clean",
+  "provenance": []
+}

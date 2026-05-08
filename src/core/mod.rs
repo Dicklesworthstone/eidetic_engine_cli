@@ -201,6 +201,7 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
         SupportedSchema::new("update_plan", UPDATE_PLAN_SCHEMA_V1),
         SupportedSchema::new("artifact_summary", ARTIFACT_SUMMARY_SCHEMA_V1),
         SupportedSchema::new("compare_result", perf_forensics::COMPARE_RESULT_SCHEMA_V1),
+        SupportedSchema::new("budget_check", perf_forensics::BUDGET_CHECK_SCHEMA_V1),
     ]
 }
 

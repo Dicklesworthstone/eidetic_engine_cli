@@ -8,15 +8,20 @@
 //! caches, or beads state.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::models::{self, DomainError};
+
 pub const COMPARE_RESULT_SCHEMA_V1: &str = "ee.perf.compare.v1";
+pub const BUDGET_CHECK_SCHEMA_V1: &str = "ee.perf.budget_check.v1";
 
 const ARTIFACT_SUMMARY_SCHEMA: &str = "ee.perf.artifact_summary.v1";
 
-fn default_artifact_summary_schema() -> &'static str {
-    ARTIFACT_SUMMARY_SCHEMA
+fn default_artifact_summary_schema() -> String {
+    ARTIFACT_SUMMARY_SCHEMA.to_owned()
 }
 
 fn default_compare_result_schema() -> &'static str {
@@ -69,8 +74,8 @@ impl ArtifactKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactSummary {
-    #[serde(skip_deserializing, default = "default_artifact_summary_schema")]
-    pub schema: &'static str,
+    #[serde(default = "default_artifact_summary_schema")]
+    pub schema: String,
     pub artifact_id: String,
     pub artifact_kind: ArtifactKind,
     pub source_schema: Option<String>,
@@ -90,7 +95,7 @@ impl ArtifactSummary {
     #[must_use]
     pub fn new(artifact_id: impl Into<String>, artifact_kind: ArtifactKind) -> Self {
         Self {
-            schema: ARTIFACT_SUMMARY_SCHEMA,
+            schema: ARTIFACT_SUMMARY_SCHEMA.to_owned(),
             artifact_id: artifact_id.into(),
             artifact_kind,
             source_schema: None,
@@ -642,6 +647,438 @@ pub struct CompareSummary {
     pub improvement_count: usize,
 }
 
+/// Budget-check result classification for a normalized performance artifact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetCheckResult {
+    Passed,
+    Degraded,
+    Failed,
+    Inconclusive,
+}
+
+impl BudgetCheckResult {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Degraded => "degraded",
+            Self::Failed => "failed",
+            Self::Inconclusive => "inconclusive",
+        }
+    }
+}
+
+/// Single-artifact posture returned by `ee perf budget check`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetCheckReport {
+    #[serde(skip_deserializing, default = "default_budget_check_schema")]
+    pub schema: &'static str,
+    pub requested_profile: String,
+    pub artifact: BudgetCheckArtifact,
+    pub summary: BudgetCheckSummary,
+    pub degraded: Vec<BudgetCheckDegradation>,
+    pub next_commands: Vec<String>,
+}
+
+fn default_budget_check_schema() -> &'static str {
+    BUDGET_CHECK_SCHEMA_V1
+}
+
+/// Redaction-safe artifact identity for budget-check output.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetCheckArtifact {
+    pub artifact_id: String,
+    pub artifact_kind: ArtifactKind,
+    pub source_schema: String,
+    pub profile: Option<String>,
+    pub fixture_tier: Option<String>,
+    pub command_family: Option<String>,
+}
+
+/// Budget-check summary metrics.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetCheckSummary {
+    pub result: BudgetCheckResult,
+    pub confidence: Confidence,
+    pub worst_severity: Severity,
+    pub comparable_metric_count: usize,
+    pub missing_metric_count: usize,
+}
+
+/// Degradation record for budget-check output.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetCheckDegradation {
+    pub code: String,
+    pub severity: Severity,
+    pub affected_field: Option<String>,
+    pub message: String,
+    pub repair: Option<String>,
+}
+
+impl BudgetCheckDegradation {
+    #[must_use]
+    pub fn profile_mismatch(requested: &str, observed: &str) -> Self {
+        Self {
+            code: "profile_mismatch".to_owned(),
+            severity: Severity::Medium,
+            affected_field: Some("profile".to_owned()),
+            message: format!("Profile mismatch: requested={requested}, artifact={observed}"),
+            repair: Some("Re-run with the artifact profile or regenerate the report.".to_owned()),
+        }
+    }
+
+    #[must_use]
+    pub fn missing_profile(requested: &str) -> Self {
+        Self {
+            code: "profile_missing".to_owned(),
+            severity: Severity::Medium,
+            affected_field: Some("profile".to_owned()),
+            message: format!("Artifact does not declare requested profile `{requested}`."),
+            repair: Some("Regenerate the artifact with profile evidence enabled.".to_owned()),
+        }
+    }
+
+    #[must_use]
+    pub fn missing_metrics() -> Self {
+        Self {
+            code: "missing_metric".to_owned(),
+            severity: Severity::Medium,
+            affected_field: Some("metrics".to_owned()),
+            message: "Artifact does not contain comparable measured metrics.".to_owned(),
+            repair: Some(
+                "Regenerate the artifact with performance metric collection enabled.".to_owned(),
+            ),
+        }
+    }
+}
+
+/// Load a normalized perf artifact summary from a JSON file.
+pub fn read_perf_artifact_summary(path: &Path) -> Result<models::ArtifactSummary, DomainError> {
+    validate_perf_artifact_path(path)?;
+    let body = fs::read_to_string(path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Could not read perf artifact summary {}: {error}",
+            path.display()
+        ),
+        repair: Some("Verify the file is readable and retry.".to_owned()),
+    })?;
+    serde_json::from_str(&body).map_err(|error| DomainError::Usage {
+        message: format!("Malformed perf artifact summary JSON: {error}"),
+        repair: Some("Re-run with an ee.perf.artifact_summary.v1 JSON file.".to_owned()),
+    })
+}
+
+fn validate_perf_artifact_path(path: &Path) -> Result<(), DomainError> {
+    let metadata = fs::metadata(path).map_err(|_| DomainError::NotFound {
+        resource: "perf artifact summary".to_owned(),
+        id: path.display().to_string(),
+        repair: Some("Pass a readable ee.perf.artifact_summary.v1 JSON file.".to_owned()),
+    })?;
+    if !metadata.is_file() {
+        return Err(DomainError::Usage {
+            message: format!("Unsupported perf artifact path: {}", path.display()),
+            repair: Some("Pass a JSON file, not a directory or special file.".to_owned()),
+        });
+    }
+    if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+        return Err(DomainError::Usage {
+            message: format!("Unsupported perf artifact extension: {}", path.display()),
+            repair: Some("Use a .json normalized perf artifact summary.".to_owned()),
+        });
+    }
+    Ok(())
+}
+
+/// Compare normalized artifact summary files without mutating durable state.
+pub fn compare_artifact_summary_files(
+    baseline_path: &Path,
+    candidate_path: &Path,
+) -> Result<CompareReport, DomainError> {
+    let baseline = read_perf_artifact_summary(baseline_path)?;
+    let candidate = read_perf_artifact_summary(candidate_path)?;
+    Ok(compare_normalized_artifacts(&baseline, &candidate))
+}
+
+/// Compare canonical `models::ArtifactSummary` records through the compare core.
+#[must_use]
+pub fn compare_normalized_artifacts(
+    baseline: &models::ArtifactSummary,
+    candidate: &models::ArtifactSummary,
+) -> CompareReport {
+    let baseline = normalize_artifact_summary(baseline);
+    let candidate = normalize_artifact_summary(candidate);
+    compare_artifacts(&baseline, &candidate)
+}
+
+/// Check the profile and degradation posture of a normalized perf artifact file.
+pub fn check_perf_budget_report(
+    profile: &str,
+    report_path: &Path,
+) -> Result<BudgetCheckReport, DomainError> {
+    let profile = profile.trim();
+    if profile.is_empty() {
+        return Err(DomainError::Usage {
+            message: "Performance budget profile must not be empty.".to_owned(),
+            repair: Some("Pass --profile <name> with a non-empty profile.".to_owned()),
+        });
+    }
+    let artifact = read_perf_artifact_summary(report_path)?;
+    Ok(check_perf_budget_summary(profile, &artifact))
+}
+
+/// Check the profile and degradation posture of a canonical artifact summary.
+#[must_use]
+pub fn check_perf_budget_summary(
+    requested_profile: &str,
+    artifact: &models::ArtifactSummary,
+) -> BudgetCheckReport {
+    let normalized = normalize_artifact_summary(artifact);
+    let observed_profile = normalized.profile.clone();
+    let mut degraded: Vec<BudgetCheckDegradation> = normalized
+        .degraded
+        .iter()
+        .map(summary_degradation_to_budget)
+        .collect();
+
+    match observed_profile.as_deref() {
+        Some(profile) if profile != requested_profile => {
+            degraded.push(BudgetCheckDegradation::profile_mismatch(
+                requested_profile,
+                profile,
+            ));
+        }
+        None => degraded.push(BudgetCheckDegradation::missing_profile(requested_profile)),
+        _ => {}
+    }
+
+    if normalized.metrics.is_empty() {
+        degraded.push(BudgetCheckDegradation::missing_metrics());
+    }
+
+    degraded.sort_by(|a, b| {
+        b.severity
+            .cmp(&a.severity)
+            .then_with(|| a.code.cmp(&b.code))
+            .then_with(|| a.affected_field.cmp(&b.affected_field))
+    });
+
+    let worst_severity = degraded
+        .iter()
+        .map(|degradation| degradation.severity)
+        .max()
+        .unwrap_or(Severity::Low);
+    let missing_metric_count = degraded
+        .iter()
+        .filter(|degradation| degradation.code == "missing_metric")
+        .count();
+    let result = if degraded.iter().any(|d| d.code == "tampered_hash") {
+        BudgetCheckResult::Inconclusive
+    } else if degraded.iter().any(|d| d.severity >= Severity::High) {
+        BudgetCheckResult::Failed
+    } else if degraded.is_empty() {
+        BudgetCheckResult::Passed
+    } else {
+        BudgetCheckResult::Degraded
+    };
+    let confidence = if degraded.iter().any(|d| d.severity >= Severity::High) {
+        Confidence::Low
+    } else if degraded.iter().any(|d| d.severity >= Severity::Medium) {
+        Confidence::Medium
+    } else {
+        Confidence::High
+    };
+    let mut next_commands = Vec::new();
+    if result != BudgetCheckResult::Passed {
+        next_commands.push(
+            "ee perf compare --baseline <baseline.json> --candidate <candidate.json> --json"
+                .to_owned(),
+        );
+        next_commands.push("ee profile config plan --json".to_owned());
+    }
+
+    BudgetCheckReport {
+        schema: BUDGET_CHECK_SCHEMA_V1,
+        requested_profile: requested_profile.to_owned(),
+        artifact: BudgetCheckArtifact {
+            artifact_id: normalized.artifact_id,
+            artifact_kind: normalized.artifact_kind,
+            source_schema: normalized.source_schema.unwrap_or_default(),
+            profile: observed_profile,
+            fixture_tier: normalized.fixture_tier,
+            command_family: normalized.command_family,
+        },
+        summary: BudgetCheckSummary {
+            result,
+            confidence,
+            worst_severity,
+            comparable_metric_count: normalized.metrics.len(),
+            missing_metric_count,
+        },
+        degraded,
+        next_commands,
+    }
+}
+
+fn normalize_artifact_summary(summary: &models::ArtifactSummary) -> ArtifactSummary {
+    let mut normalized = ArtifactSummary {
+        schema: summary.schema.clone(),
+        artifact_id: summary.artifact_id.clone(),
+        artifact_kind: convert_artifact_kind(summary.artifact_kind),
+        source_schema: Some(summary.source_schema.clone()),
+        source_path: summary.source_path.clone(),
+        content_hash: summary.content_hash.clone(),
+        observed_hash: summary.observed_hash.clone(),
+        profile: summary
+            .profile
+            .as_ref()
+            .map(|profile| profile.profile_name.clone()),
+        fixture_tier: summary.fixture_tier.clone(),
+        command_family: summary.command_family.clone(),
+        metrics: BTreeMap::new(),
+        degraded: summary
+            .degraded
+            .iter()
+            .map(convert_summary_degradation)
+            .collect(),
+        redaction: convert_redaction(summary.redaction),
+        provenance: summary
+            .provenance
+            .iter()
+            .map(convert_provenance_entry)
+            .collect(),
+    };
+
+    for (name, metric) in &summary.metrics {
+        if metric.kind == models::MetricValueKind::Measured {
+            if let Some(value) = metric.value {
+                normalized.metrics.insert(
+                    name.clone(),
+                    MetricValue {
+                        value,
+                        unit: metric.unit.clone(),
+                        volatility: infer_metric_volatility(name, metric.unit.as_deref()),
+                        source_field: Some(format!("metrics.{name}")),
+                    },
+                );
+            } else {
+                normalized
+                    .degraded
+                    .push(SummaryDegradation::missing_metric(name));
+            }
+        } else {
+            normalized
+                .degraded
+                .push(SummaryDegradation::missing_metric(name));
+        }
+    }
+
+    if summary.redaction == models::RedactionPosture::Uncertain {
+        normalized
+            .degraded
+            .push(SummaryDegradation::redaction_uncertain("*"));
+    }
+
+    normalized
+}
+
+fn convert_artifact_kind(kind: models::ArtifactKind) -> ArtifactKind {
+    match kind {
+        models::ArtifactKind::BenchmarkReport => ArtifactKind::BenchmarkReport,
+        models::ArtifactKind::SupportBundleManifest => ArtifactKind::SupportBundleManifest,
+        models::ArtifactKind::ExplainPerformanceReport => ArtifactKind::ExplainPerformanceReport,
+        models::ArtifactKind::ProfileEvidence => ArtifactKind::ProfileEvidence,
+        models::ArtifactKind::CacheReport => ArtifactKind::CacheReport,
+        models::ArtifactKind::WriteQueueReport => ArtifactKind::WriteQueueReport,
+        models::ArtifactKind::SwarmContentionReport => ArtifactKind::SwarmContentionReport,
+    }
+}
+
+fn convert_summary_degradation(degradation: &models::SummaryDegradation) -> SummaryDegradation {
+    SummaryDegradation {
+        code: degradation.code.as_str().to_owned(),
+        severity: convert_artifact_severity(degradation.severity),
+        message: degradation.message.clone(),
+        affected_field: degradation.field_path.clone(),
+        repair: degradation.repair.clone(),
+    }
+}
+
+fn summary_degradation_to_budget(degradation: &SummaryDegradation) -> BudgetCheckDegradation {
+    BudgetCheckDegradation {
+        code: degradation.code.clone(),
+        severity: degradation.severity,
+        affected_field: degradation.affected_field.clone(),
+        message: degradation.message.clone(),
+        repair: degradation.repair.clone(),
+    }
+}
+
+fn convert_artifact_severity(severity: models::ArtifactDegradationSeverity) -> Severity {
+    match severity {
+        models::ArtifactDegradationSeverity::Low => Severity::Low,
+        models::ArtifactDegradationSeverity::Medium => Severity::Medium,
+        models::ArtifactDegradationSeverity::High => Severity::High,
+    }
+}
+
+fn convert_redaction(redaction: models::RedactionPosture) -> RedactionPosture {
+    match redaction {
+        models::RedactionPosture::Clean => RedactionPosture::default(),
+        models::RedactionPosture::Redacted => RedactionPosture {
+            applied: true,
+            uncertain_fields: Vec::new(),
+            secret_indicators: 0,
+        },
+        models::RedactionPosture::Uncertain => RedactionPosture {
+            applied: true,
+            uncertain_fields: vec!["*".to_owned()],
+            secret_indicators: 0,
+        },
+    }
+}
+
+fn convert_provenance_entry(entry: &models::ProvenanceEntry) -> ProvenanceEntry {
+    let source = entry.source_line.map_or_else(
+        || entry.source_path.clone(),
+        |line| format!("{}:{line}", entry.source_path),
+    );
+    ProvenanceEntry {
+        field: entry.field.clone(),
+        source,
+        confidence: None,
+    }
+}
+
+fn infer_metric_volatility(name: &str, unit: Option<&str>) -> Volatility {
+    let lower_name = name.to_lowercase();
+    let lower_unit = unit.unwrap_or_default().to_lowercase();
+    if lower_name.contains("elapsed")
+        || lower_name.contains("duration")
+        || lower_name.contains("latency")
+        || lower_name.contains("time")
+        || matches!(
+            lower_unit.as_str(),
+            "ms" | "s" | "sec" | "second" | "seconds"
+        )
+    {
+        Volatility::Timing
+    } else if lower_name.contains("rss")
+        || lower_name.contains("memory")
+        || lower_name.contains("cpu")
+        || lower_name.contains("load")
+        || matches!(lower_unit.as_str(), "byte" | "bytes" | "kb" | "mb" | "gb")
+    {
+        Volatility::Resource
+    } else {
+        Volatility::Stable
+    }
+}
+
 /// Compare two artifact summaries deterministically.
 #[must_use]
 pub fn compare_artifacts(baseline: &ArtifactSummary, candidate: &ArtifactSummary) -> CompareReport {
@@ -1084,7 +1521,7 @@ mod tests {
     #[test]
     fn compare_with_unsupported_schema() {
         let mut baseline = ArtifactSummary::new("baseline", ArtifactKind::BenchmarkReport);
-        baseline.schema = "ee.perf.artifact_summary.v0";
+        baseline.schema = "ee.perf.artifact_summary.v0".to_owned();
 
         let candidate = ArtifactSummary::new("candidate", ArtifactKind::BenchmarkReport);
         let report = compare_artifacts(&baseline, &candidate);
