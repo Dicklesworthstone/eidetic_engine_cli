@@ -461,6 +461,13 @@ impl WhyReport {
         self
     }
 
+    /// Add multiple non-fatal degradation notices to the report.
+    #[must_use]
+    pub fn with_degradations(mut self, degraded: Vec<WhyDegradation>) -> Self {
+        self.degraded.extend(degraded);
+        self
+    }
+
     /// Add contradiction metadata to the report (EE-263).
     #[must_use]
     pub fn with_contradictions(mut self, contradictions: Vec<ContradictionMetadata>) -> Self {
@@ -559,13 +566,26 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
     };
 
     // Fetch contradiction feedback events (EE-263)
-    let contradictions = fetch_contradictions(&conn, memory_id);
+    let contradiction_fetch = fetch_contradictions(&conn, memory_id);
 
     // Fetch memory links (EE-LINK-USAGE-001)
-    let links = fetch_links(&conn, memory_id);
+    let link_fetch = fetch_links(&conn, memory_id);
 
     // Fetch rationale traces (EE-RATIONALE-TRACE-001)
-    let rationale_traces = fetch_rationale_traces(&conn, &memory.workspace_id, memory_id);
+    let rationale_trace_fetch = fetch_rationale_traces(&conn, &memory.workspace_id, memory_id);
+    let mut evidence_degradations = Vec::new();
+    if let Some(degradation) = contradiction_fetch.degradation {
+        evidence_degradations.push(degradation);
+    }
+    if let Some(degradation) = link_fetch.degradation {
+        evidence_degradations.push(degradation);
+    }
+    if let Some(degradation) = rationale_trace_fetch.degradation {
+        evidence_degradations.push(degradation);
+    }
+    let contradictions = contradiction_fetch.items;
+    let links = link_fetch.items;
+    let rationale_traces = rationale_trace_fetch.items;
 
     let validity = memory_validity(&memory.valid_from, &memory.valid_to);
     let graph_retrieval = build_graph_retrieval_explanation(
@@ -619,6 +639,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
                     links,
                     rationale_traces,
                     graph_retrieval,
+                    degraded: evidence_degradations,
                 },
             );
             return report.with_degradation(WhyDegradation {
@@ -643,6 +664,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
             links,
             rationale_traces,
             graph_retrieval,
+            degraded: evidence_degradations,
         },
     )
 }
@@ -836,6 +858,7 @@ struct ReportSelectionInputs {
     links: Vec<MemoryLinkSummary>,
     rationale_traces: Vec<RationaleTraceSummary>,
     graph_retrieval: GraphRetrievalExplanation,
+    degraded: Vec<WhyDegradation>,
 }
 
 fn build_report(
@@ -863,6 +886,7 @@ fn build_report(
         .with_links(selection_inputs.links)
         .with_graph_retrieval(selection_inputs.graph_retrieval)
         .with_rationale_traces(selection_inputs.rationale_traces)
+        .with_degradations(selection_inputs.degraded)
 }
 
 fn build_graph_retrieval_explanation(
@@ -1185,64 +1209,107 @@ fn required_f32(row: &Row, index: usize, column: &str) -> Result<f32, String> {
         .ok_or_else(|| format!("Pack selection column {column} was missing or not numeric"))
 }
 
+struct WhyEvidenceFetch<T> {
+    items: Vec<T>,
+    degradation: Option<WhyDegradation>,
+}
+
+impl<T> WhyEvidenceFetch<T> {
+    fn available(items: Vec<T>) -> Self {
+        Self {
+            items,
+            degradation: None,
+        }
+    }
+
+    fn unavailable(code: &'static str, label: &str, error: impl std::fmt::Display) -> Self {
+        Self {
+            items: Vec::new(),
+            degradation: Some(WhyDegradation {
+                code,
+                severity: "medium",
+                message: format!(
+                    "Could not read {label} for this memory; the evidence is omitted instead of treated as absent. Error: {error}"
+                ),
+                repair: Some("ee db migrate".to_owned()),
+            }),
+        }
+    }
+}
+
 /// Fetch contradiction feedback events for a memory (EE-263).
-fn fetch_contradictions(conn: &DbConnection, memory_id: &str) -> Vec<ContradictionMetadata> {
+fn fetch_contradictions(
+    conn: &DbConnection,
+    memory_id: &str,
+) -> WhyEvidenceFetch<ContradictionMetadata> {
     let events = match conn.list_feedback_events_for_target("memory", memory_id) {
         Ok(e) => e,
-        Err(_) => return Vec::new(),
+        Err(error) => {
+            return WhyEvidenceFetch::unavailable(
+                "why_contradictions_unavailable",
+                "contradiction feedback events",
+                error,
+            );
+        }
     };
 
-    events
-        .into_iter()
-        .filter(|e| e.signal == "contradiction")
-        .map(|e| ContradictionMetadata {
-            event_id: e.id,
-            weight: e.weight,
-            source_type: e.source_type,
-            reason: e.reason,
-            created_at: e.created_at,
-            applied: e.applied_at.is_some(),
-        })
-        .collect()
+    WhyEvidenceFetch::available(
+        events
+            .into_iter()
+            .filter(|e| e.signal == "contradiction")
+            .map(|e| ContradictionMetadata {
+                event_id: e.id,
+                weight: e.weight,
+                source_type: e.source_type,
+                reason: e.reason,
+                created_at: e.created_at,
+                applied: e.applied_at.is_some(),
+            })
+            .collect(),
+    )
 }
 
 /// Fetch memory links for a memory (EE-LINK-USAGE-001).
-fn fetch_links(conn: &DbConnection, memory_id: &str) -> Vec<MemoryLinkSummary> {
+fn fetch_links(conn: &DbConnection, memory_id: &str) -> WhyEvidenceFetch<MemoryLinkSummary> {
     let stored_links = match conn.list_memory_links_for_memory(memory_id, None) {
         Ok(links) => links,
-        Err(_) => return Vec::new(),
+        Err(error) => {
+            return WhyEvidenceFetch::unavailable("why_links_unavailable", "memory links", error);
+        }
     };
 
-    stored_links
-        .into_iter()
-        .map(|link| {
-            let direction = if !link.directed {
-                "undirected".to_string()
-            } else if link.src_memory_id == memory_id {
-                "outgoing".to_string()
-            } else {
-                "incoming".to_string()
-            };
+    WhyEvidenceFetch::available(
+        stored_links
+            .into_iter()
+            .map(|link| {
+                let direction = if !link.directed {
+                    "undirected".to_string()
+                } else if link.src_memory_id == memory_id {
+                    "outgoing".to_string()
+                } else {
+                    "incoming".to_string()
+                };
 
-            let linked_memory_id = if link.src_memory_id == memory_id {
-                link.dst_memory_id.clone()
-            } else {
-                link.src_memory_id.clone()
-            };
+                let linked_memory_id = if link.src_memory_id == memory_id {
+                    link.dst_memory_id.clone()
+                } else {
+                    link.src_memory_id.clone()
+                };
 
-            MemoryLinkSummary {
-                link_id: link.id,
-                linked_memory_id,
-                relation: link.relation,
-                direction,
-                confidence: link.confidence,
-                weight: link.weight,
-                evidence_count: link.evidence_count,
-                source: link.source,
-                created_at: link.created_at,
-            }
-        })
-        .collect()
+                MemoryLinkSummary {
+                    link_id: link.id,
+                    linked_memory_id,
+                    relation: link.relation,
+                    direction,
+                    confidence: link.confidence,
+                    weight: link.weight,
+                    evidence_count: link.evidence_count,
+                    source: link.source,
+                    created_at: link.created_at,
+                }
+            })
+            .collect(),
+    )
 }
 
 /// Fetch rationale traces linked to a memory (EE-RATIONALE-TRACE-001).
@@ -1250,16 +1317,24 @@ fn fetch_rationale_traces(
     conn: &DbConnection,
     workspace_id: &str,
     memory_id: &str,
-) -> Vec<RationaleTraceSummary> {
+) -> WhyEvidenceFetch<RationaleTraceSummary> {
     let stored = match conn.list_rationale_traces_for_target(workspace_id, "memory", memory_id) {
         Ok(traces) => traces,
-        Err(_) => return Vec::new(),
+        Err(error) => {
+            return WhyEvidenceFetch::unavailable(
+                "why_rationale_traces_unavailable",
+                "rationale traces",
+                error,
+            );
+        }
     };
 
-    stored
-        .into_iter()
-        .filter_map(|s| RationaleTraceSummary::from_trace(&s.trace))
-        .collect()
+    WhyEvidenceFetch::available(
+        stored
+            .into_iter()
+            .filter_map(|s| RationaleTraceSummary::from_trace(&s.trace))
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -1427,6 +1502,7 @@ mod tests {
                     &[],
                     &[],
                 ),
+                degraded: Vec::new(),
             },
         );
 
@@ -1541,6 +1617,102 @@ mod tests {
             report.links.is_empty(),
             true,
             "links should be empty by default",
+        )
+    }
+
+    #[test]
+    fn why_evidence_fetchers_report_query_failures_as_degradations() -> TestResult {
+        let conn = DbConnection::open_memory().map_err(|error| error.to_string())?;
+
+        let contradictions = fetch_contradictions(&conn, "mem_missing_schema");
+        ensure(
+            contradictions.items.is_empty(),
+            true,
+            "failed contradiction query has no items",
+        )?;
+        let contradiction_degradation = contradictions
+            .degradation
+            .ok_or_else(|| "missing contradiction query degradation".to_string())?;
+        ensure(
+            contradiction_degradation.code,
+            "why_contradictions_unavailable",
+            "contradiction degradation code",
+        )?;
+
+        let links = fetch_links(&conn, "mem_missing_schema");
+        ensure(
+            links.items.is_empty(),
+            true,
+            "failed link query has no items",
+        )?;
+        let link_degradation = links
+            .degradation
+            .ok_or_else(|| "missing link query degradation".to_string())?;
+        ensure(
+            link_degradation.code,
+            "why_links_unavailable",
+            "link degradation code",
+        )?;
+
+        let rationale = fetch_rationale_traces(&conn, "wsp_missing_schema", "mem_missing_schema");
+        ensure(
+            rationale.items.is_empty(),
+            true,
+            "failed rationale trace query has no items",
+        )?;
+        let rationale_degradation = rationale
+            .degradation
+            .ok_or_else(|| "missing rationale trace query degradation".to_string())?;
+        ensure(
+            rationale_degradation.code,
+            "why_rationale_traces_unavailable",
+            "rationale trace degradation code",
+        )?;
+
+        ensure(
+            contradiction_degradation.severity,
+            "medium",
+            "contradiction severity",
+        )?;
+        ensure(link_degradation.severity, "medium", "link severity")?;
+        ensure(
+            rationale_degradation.severity,
+            "medium",
+            "rationale severity",
+        )
+    }
+
+    #[test]
+    fn why_evidence_fetchers_keep_true_empty_evidence_undegraded() -> TestResult {
+        let conn = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        conn.migrate().map_err(|error| error.to_string())?;
+
+        let contradictions = fetch_contradictions(&conn, "mem_no_evidence");
+        ensure(
+            contradictions.items.is_empty(),
+            true,
+            "empty contradiction items",
+        )?;
+        ensure(
+            contradictions.degradation.is_none(),
+            true,
+            "empty contradiction evidence is not degraded",
+        )?;
+
+        let links = fetch_links(&conn, "mem_no_evidence");
+        ensure(links.items.is_empty(), true, "empty link items")?;
+        ensure(
+            links.degradation.is_none(),
+            true,
+            "empty links are not degraded",
+        )?;
+
+        let rationale = fetch_rationale_traces(&conn, "wsp_no_evidence", "mem_no_evidence");
+        ensure(rationale.items.is_empty(), true, "empty rationale items")?;
+        ensure(
+            rationale.degradation.is_none(),
+            true,
+            "empty rationale traces are not degraded",
         )
     }
 
