@@ -103,6 +103,11 @@ pub struct CassSessionInfo {
     pub token_count: Option<u32>,
     /// Content hash for deduplication.
     pub content_hash: Option<String>,
+    /// CASS metadata fields that were missing or unusable when this session
+    /// record was parsed.
+    pub missing_metadata: Vec<String>,
+    /// How `content_hash` was obtained, for provenance and degraded imports.
+    pub content_hash_source: Option<String>,
 }
 
 impl CassSessionInfo {
@@ -118,6 +123,8 @@ impl CassSessionInfo {
             message_count: None,
             token_count: None,
             content_hash: None,
+            missing_metadata: Vec::new(),
+            content_hash_source: None,
         }
     }
 
@@ -139,6 +146,7 @@ impl CassSessionInfo {
     #[must_use]
     pub fn with_content_hash(mut self, hash: impl Into<String>) -> Self {
         self.content_hash = Some(hash.into());
+        self.content_hash_source = Some("provided".to_owned());
         self
     }
 }

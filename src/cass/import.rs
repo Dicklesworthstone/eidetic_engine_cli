@@ -76,6 +76,7 @@ pub struct ImportedCassSession {
     pub status: ImportSessionStatus,
     pub spans_imported: u32,
     pub message_count: Option<u32>,
+    pub missing_metadata: Vec<String>,
 }
 
 /// Stable per-session status string.
@@ -146,6 +147,7 @@ impl CassImportReport {
                     "status": session.status.as_str(),
                     "spansImported": session.spans_imported,
                     "messageCount": session.message_count,
+                    "missingMetadata": session.missing_metadata,
                 })
             }).collect::<Vec<_>>(),
         })
@@ -362,6 +364,7 @@ pub fn import_cass_sessions(
                     status: ImportSessionStatus::Skipped,
                     spans_imported: 0,
                     message_count: session.message_count,
+                    missing_metadata: session.missing_metadata,
                 });
                 continue;
             }
@@ -383,6 +386,7 @@ pub fn import_cass_sessions(
                         status: ImportSessionStatus::Skipped,
                         spans_imported: 0,
                         message_count: session.message_count,
+                        missing_metadata: session.missing_metadata,
                     });
                     continue;
                 }
@@ -406,6 +410,7 @@ pub fn import_cass_sessions(
                         status: ImportSessionStatus::Imported,
                         spans_imported: session_spans,
                         message_count: session.message_count,
+                        missing_metadata: session.missing_metadata,
                     });
                 }
             }
@@ -768,19 +773,17 @@ fn parse_sessions_json(input: &[u8]) -> Result<Vec<CassSessionInfo>, CassImportE
             .or_else(|| item.get("modified"))
             .and_then(JsonValue::as_str)
             .map(str::to_string);
-        session.message_count = item
-            .get("message_count")
-            .and_then(JsonValue::as_u64)
-            .and_then(|value| u32::try_from(value).ok());
-        session.token_count = item
-            .get("token_count")
-            .and_then(JsonValue::as_u64)
-            .and_then(|value| u32::try_from(value).ok());
-        session.content_hash = item
-            .get("content_hash")
-            .and_then(JsonValue::as_str)
-            .map(str::to_string)
-            .or_else(|| Some(content_hash_for_session(item, &path)));
+        session.message_count = optional_u32(item, "message_count", "sessions")?;
+        session.token_count = optional_u32(item, "token_count", "sessions")?;
+        if session.message_count.is_none() {
+            push_missing_metadata(&mut session.missing_metadata, "message_count");
+        }
+        let content_hash = content_hash_for_session(item, &path);
+        session.content_hash = Some(content_hash.value);
+        session.content_hash_source = Some(content_hash.source);
+        for field in content_hash.missing_metadata {
+            push_missing_metadata(&mut session.missing_metadata, field);
+        }
         parsed.push(session);
     }
     Ok(parsed)
@@ -797,7 +800,12 @@ fn parse_legacy_search_hits_as_sessions(
         let created_at = hit.get("created_at").and_then(JsonValue::as_i64);
         let entry = sessions.entry(path.clone()).or_insert_with(|| {
             let mut session = CassSessionInfo::new(path.clone());
-            session.content_hash = Some(content_hash_for_session(hit, &path));
+            let content_hash = content_hash_for_session(hit, &path);
+            session.content_hash = Some(content_hash.value);
+            session.content_hash_source = Some(content_hash.source);
+            for field in content_hash.missing_metadata {
+                push_missing_metadata(&mut session.missing_metadata, field);
+            }
             (session, None, None)
         });
         if let Some(agent) = hit.get("agent").and_then(JsonValue::as_str) {
@@ -831,6 +839,23 @@ fn parse_legacy_search_hits_as_sessions(
         parsed.push(session);
     }
     Ok(parsed)
+}
+
+fn optional_u32(
+    item: &JsonValue,
+    field: &'static str,
+    source: &'static str,
+) -> Result<Option<u32>, CassImportError> {
+    let Some(value) = item.get(field) else {
+        return Ok(None);
+    };
+    let Some(value) = value.as_u64().and_then(|value| u32::try_from(value).ok()) else {
+        return Err(CassImportError::InvalidJson {
+            source,
+            message: format!("{field} must be a non-negative integer within u32 range"),
+        });
+    };
+    Ok(Some(value))
 }
 
 fn millis_to_rfc3339(value: i64) -> Option<String> {
@@ -980,6 +1005,7 @@ fn dry_run_report(
                 status: ImportSessionStatus::WouldImport,
                 spans_imported: 0,
                 message_count: session.message_count,
+                missing_metadata: session.missing_metadata,
             })
             .collect(),
     }
@@ -1093,6 +1119,26 @@ fn error_code(error: &CassImportError) -> &'static str {
 }
 
 fn session_input(workspace_id: &str, session: &CassSessionInfo) -> CreateSessionInput {
+    let mut missing_metadata = session.missing_metadata.clone();
+    if session.message_count.is_none() {
+        push_missing_metadata(&mut missing_metadata, "message_count");
+    }
+    let (content_hash, content_hash_source) = match session.content_hash.as_deref() {
+        Some(hash) if !hash.trim().is_empty() => (
+            hash.to_owned(),
+            session.content_hash_source.as_deref().unwrap_or("provided"),
+        ),
+        Some(_) | None => {
+            push_missing_metadata(&mut missing_metadata, "content_hash");
+            (
+                blake3_hex(&format!(
+                    "cass-session-missing-content-hash-v1\n{}",
+                    session.source_path
+                )),
+                "derived_from_path_missing_content_hash",
+            )
+        }
+    };
     CreateSessionInput {
         workspace_id: workspace_id.to_string(),
         cass_session_id: session.source_path.clone(),
@@ -1101,16 +1147,16 @@ fn session_input(workspace_id: &str, session: &CassSessionInfo) -> CreateSession
         model: None,
         started_at: session.started_at.clone(),
         ended_at: session.ended_at.clone(),
-        message_count: session.message_count.unwrap_or_default(),
+        message_count: session.message_count.unwrap_or(0),
         token_count: session.token_count,
-        content_hash: session
-            .content_hash
-            .clone()
-            .unwrap_or_else(|| blake3_hex(&session.source_path)),
+        content_hash,
         metadata_json: Some(
             json!({
                 "schema": CASS_SESSION_SCHEMA_V1,
                 "workspaceDir": session.workspace_dir,
+                "missingCassMetadata": missing_metadata,
+                "messageCountObserved": session.message_count.is_some(),
+                "contentHashSource": content_hash_source,
             })
             .to_string(),
         ),
@@ -1186,16 +1232,56 @@ fn required_string(
         })
 }
 
-fn content_hash_for_session(item: &JsonValue, path: &str) -> String {
-    let modified = item
-        .get("modified")
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SessionContentHash {
+    value: String,
+    source: String,
+    missing_metadata: Vec<&'static str>,
+}
+
+fn content_hash_for_session(item: &JsonValue, path: &str) -> SessionContentHash {
+    if let Some(content_hash) = item
+        .get("content_hash")
         .and_then(JsonValue::as_str)
-        .unwrap_or_default();
-    let size = item
-        .get("size_bytes")
-        .and_then(JsonValue::as_u64)
-        .unwrap_or_default();
-    blake3_hex(&format!("{path}\n{modified}\n{size}"))
+        .filter(|hash| !hash.trim().is_empty())
+    {
+        return SessionContentHash {
+            value: content_hash.to_owned(),
+            source: "provided".to_owned(),
+            missing_metadata: Vec::new(),
+        };
+    }
+
+    let modified = item.get("modified").and_then(JsonValue::as_str);
+    let size = item.get("size_bytes").and_then(JsonValue::as_u64);
+    let mut missing_metadata = vec!["content_hash"];
+    if modified.is_none() {
+        missing_metadata.push("modified");
+    }
+    if size.is_none() {
+        missing_metadata.push("size_bytes");
+    }
+
+    let source = if missing_metadata.len() == 1 {
+        "derived_from_path_modified_size"
+    } else {
+        "derived_from_path_with_missing_metadata"
+    };
+    SessionContentHash {
+        value: blake3_hex(&format!(
+            "cass-session-fallback-v1\npath={path}\nmodified={}\nsize_bytes={}",
+            modified.unwrap_or("<missing>"),
+            size.map_or_else(|| "<missing>".to_owned(), |value| value.to_string())
+        )),
+        source: source.to_owned(),
+        missing_metadata,
+    }
+}
+
+fn push_missing_metadata(fields: &mut Vec<String>, field: &'static str) {
+    if !fields.iter().any(|existing| existing == field) {
+        fields.push(field.to_owned());
+    }
 }
 
 fn database_path(options: &CassImportOptions) -> PathBuf {
@@ -1487,8 +1573,10 @@ mod tests {
               "workspace": "/tmp/project",
               "agent": "codex",
               "modified": "2026-04-30T00:00:00Z",
+              "size_bytes": 4096,
               "message_count": 12,
-              "token_count": 345
+              "token_count": 345,
+              "content_hash": "cass-content-hash"
             }
           ]
         }"#;
@@ -1506,7 +1594,140 @@ mod tests {
             "workspace",
         )?;
         ensure_equal(&first.message_count, &Some(12), "message_count")?;
-        ensure(first.content_hash.is_some(), "content hash filled")
+        ensure_equal(
+            &first.content_hash.as_deref(),
+            &Some("cass-content-hash"),
+            "content hash",
+        )?;
+        ensure_equal(
+            &first.content_hash_source.as_deref(),
+            &Some("provided"),
+            "content hash source",
+        )?;
+        ensure_equal(
+            &first.missing_metadata,
+            &Vec::<String>::new(),
+            "missing metadata",
+        )
+    }
+
+    #[test]
+    fn missing_cass_session_metadata_is_observable() -> TestResult {
+        let input = br#"{
+          "sessions": [
+            {
+              "path": "/tmp/session.jsonl",
+              "workspace": "/tmp/project",
+              "agent": "codex"
+            }
+          ]
+        }"#;
+
+        let sessions = parse_sessions_json(input).map_err(|error| error.to_string())?;
+        ensure_equal(&sessions.len(), &1, "session count")?;
+        let first = sessions
+            .first()
+            .ok_or_else(|| "missing parsed session".to_string())?;
+        let expected_missing = vec![
+            "message_count".to_string(),
+            "content_hash".to_string(),
+            "modified".to_string(),
+            "size_bytes".to_string(),
+        ];
+        ensure_equal(&first.message_count, &None::<u32>, "missing message count")?;
+        ensure_equal(
+            &first.missing_metadata,
+            &expected_missing,
+            "missing metadata",
+        )?;
+        ensure_equal(
+            &first.content_hash_source.as_deref(),
+            &Some("derived_from_path_with_missing_metadata"),
+            "content hash source",
+        )?;
+
+        let input = session_input("wsp_abc", first);
+        ensure_equal(&input.message_count, &0, "stored message count fallback")?;
+        let metadata = input
+            .metadata_json
+            .as_ref()
+            .ok_or_else(|| "session metadata json should be present".to_string())
+            .and_then(|metadata| {
+                serde_json::from_str::<JsonValue>(metadata).map_err(|error| error.to_string())
+            })?;
+        ensure_equal(
+            &metadata["missingCassMetadata"],
+            &json!(expected_missing),
+            "stored missing metadata",
+        )?;
+        ensure_equal(
+            &metadata["messageCountObserved"],
+            &json!(false),
+            "message count observed",
+        )?;
+        ensure_equal(
+            &metadata["contentHashSource"],
+            &json!("derived_from_path_with_missing_metadata"),
+            "stored content hash source",
+        )?;
+
+        let report = dry_run_report(
+            PathBuf::from("/tmp/project"),
+            "cass://x".to_string(),
+            None,
+            sessions,
+        );
+        let json = report.data_json();
+        ensure_equal(
+            &json["sessions"][0]["missingMetadata"],
+            &json!(expected_missing),
+            "reported missing metadata",
+        )
+    }
+
+    #[test]
+    fn parse_sessions_rejects_malformed_required_metadata() -> TestResult {
+        let input = br#"{
+          "sessions": [
+            {
+              "path": 123,
+              "workspace": "/tmp/project",
+              "agent": "codex"
+            }
+          ]
+        }"#;
+
+        let error = match parse_sessions_json(input) {
+            Ok(_) => return Err("malformed path should fail".to_string()),
+            Err(error) => error.to_string(),
+        };
+        ensure(
+            error.contains("missing non-empty path"),
+            format!("error should mention path requirement, got {error}"),
+        )
+    }
+
+    #[test]
+    fn parse_sessions_rejects_malformed_numeric_metadata() -> TestResult {
+        let input = br#"{
+          "sessions": [
+            {
+              "path": "/tmp/session.jsonl",
+              "workspace": "/tmp/project",
+              "agent": "codex",
+              "message_count": "twelve"
+            }
+          ]
+        }"#;
+
+        let error = match parse_sessions_json(input) {
+            Ok(_) => return Err("malformed message_count should fail".to_string()),
+            Err(error) => error.to_string(),
+        };
+        ensure(
+            error.contains("message_count must be a non-negative integer within u32 range"),
+            format!("error should mention malformed message_count, got {error}"),
+        )
     }
 
     #[test]
@@ -1726,6 +1947,7 @@ mod tests {
                 status: ImportSessionStatus::Imported,
                 spans_imported: 2,
                 message_count: Some(3),
+                missing_metadata: Vec::new(),
             }],
         };
 
