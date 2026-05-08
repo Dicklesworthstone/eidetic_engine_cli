@@ -77,8 +77,8 @@ use crate::core::handoff::{
 };
 use crate::core::health::HealthReport;
 use crate::core::index::{
-    IndexRebuildOptions, IndexReembedOptions, IndexStatusOptions, get_index_status, rebuild_index,
-    reembed_index,
+    INDEX_PUBLISH_LOCK_CONTENTION_CODE, IndexRebuildError, IndexRebuildOptions,
+    IndexReembedOptions, IndexStatusOptions, get_index_status, rebuild_index, reembed_index,
 };
 use crate::core::init::{InitOptions, init_workspace};
 use crate::core::install::{
@@ -8088,6 +8088,45 @@ where
     }
 }
 
+fn write_index_rebuild_error<W, E>(
+    error: &IndexRebuildError,
+    wants_json: bool,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if wants_json && let IndexRebuildError::LockContention(contention) = error {
+        let json = serde_json::json!({
+            "schema": crate::models::ERROR_SCHEMA_V1,
+            "error": {
+                "code": INDEX_PUBLISH_LOCK_CONTENTION_CODE,
+                "message": error.to_string(),
+                "severity": "medium",
+                "repair": error.repair_hint(),
+                "details": {
+                    "lockId": &contention.lock_id,
+                    "holderId": &contention.holder_id,
+                    "acquiredAt": &contention.acquired_at,
+                    "attempts": contention.attempts,
+                    "waitedMs": contention.waited_ms,
+                }
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+        return ProcessExitCode::SearchIndex;
+    }
+
+    let domain_error = DomainError::SearchIndex {
+        message: error.to_string(),
+        repair: error.repair_hint().map(str::to_string),
+    };
+    write_domain_error(&domain_error, wants_json, stdout, stderr)
+}
+
 fn handle_index_rebuild<W, E>(
     cli: &Cli,
     args: &IndexRebuildArgs,
@@ -8133,13 +8172,7 @@ where
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
         },
-        Err(error) => {
-            let domain_error = DomainError::SearchIndex {
-                message: error.to_string(),
-                repair: error.repair_hint().map(str::to_string),
-            };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
-        }
+        Err(error) => write_index_rebuild_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
 
@@ -8188,13 +8221,7 @@ where
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
         },
-        Err(error) => {
-            let domain_error = DomainError::SearchIndex {
-                message: error.to_string(),
-                repair: error.repair_hint().map(str::to_string),
-            };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
-        }
+        Err(error) => write_index_rebuild_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
 
@@ -21214,8 +21241,9 @@ mod tests {
         FieldsLevel, FocusCommand, GraphCommand, ImportCommand, JobCommand, LearnCommand,
         LearnExperimentCommand, MaintenanceCommand, MemoryCommand, OutcomeQuarantineCommand,
         OutputFormat, PlaybookCommand, RuleCommand, ShadowMode, SituationCommand, TaskFrameCommand,
-        TaskFrameSubgoalCommand, WorkflowCommand, run,
+        TaskFrameSubgoalCommand, WorkflowCommand, run, write_index_rebuild_error,
     };
+    use crate::core::index::IndexRebuildError;
     use crate::core::search::{
         ScoreExplanation, ScoreFactor, ScoreSource, SearchHit, SearchReport, SearchStatus,
     };
@@ -26035,6 +26063,47 @@ mod tests {
             }
             _ => Err("expected Search command".to_string()),
         }
+    }
+
+    #[test]
+    fn index_rebuild_lock_contention_json_uses_stable_error_code() -> TestResult {
+        let error =
+            IndexRebuildError::LockContention(crate::core::index::IndexPublishLockContention {
+                lock_id: "index:wsp_lockretry000000000000000000".to_owned(),
+                holder_id: "agent_existing".to_owned(),
+                acquired_at: "2026-05-08T12:00:00Z".to_owned(),
+                attempts: 3,
+                waited_ms: 0,
+            });
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = write_index_rebuild_error(&error, true, &mut stdout, &mut stderr);
+
+        let stdout = String::from_utf8(stdout).map_err(|error| error.to_string())?;
+        let stderr = String::from_utf8(stderr).map_err(|error| error.to_string())?;
+        ensure_equal(&exit, &ProcessExitCode::SearchIndex, "contention exit")?;
+        ensure_contains(
+            &stdout,
+            "\"schema\":\"ee.error.v1\"",
+            "contention error schema",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"code\":\"index_publish_lock_contention\"",
+            "contention error code",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"lockId\":\"index:wsp_lockretry000000000000000000\"",
+            "contention lock id",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"holderId\":\"agent_existing\"",
+            "contention holder id",
+        )?;
+        ensure(stderr.is_empty(), "contention json stderr must be empty")
     }
 
     #[test]

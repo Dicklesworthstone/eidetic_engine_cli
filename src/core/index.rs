@@ -20,6 +20,7 @@ const INDEX_RETAINED_SUFFIX: &str = ".previous";
 /// Lock TTL for index publish operations (5 minutes).
 const INDEX_PUBLISH_LOCK_TTL_SECS: u64 = 300;
 const INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS: usize = 200;
+pub const INDEX_PUBLISH_LOCK_CONTENTION_CODE: &str = "index_publish_lock_contention";
 
 /// Generate a unique holder ID for advisory locks.
 fn generate_index_holder_id() -> String {
@@ -37,13 +38,34 @@ fn acquire_index_publish_lock(
     workspace_id: &str,
     holder_id: &str,
 ) -> Result<(), IndexRebuildError> {
+    acquire_index_publish_lock_with_retry(
+        db,
+        workspace_id,
+        holder_id,
+        INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS,
+        index_publish_lock_retry_delay,
+    )
+}
+
+fn acquire_index_publish_lock_with_retry<F>(
+    db: &DbConnection,
+    workspace_id: &str,
+    holder_id: &str,
+    attempts: usize,
+    retry_delay: F,
+) -> Result<(), IndexRebuildError>
+where
+    F: Fn(usize) -> Duration,
+{
     if let Err(error) = db.ensure_advisory_locks_table() {
         return Err(IndexRebuildError::Database(error));
     }
 
     let lock_id = AdvisoryLockId::index(workspace_id);
+    let attempts = attempts.max(1);
+    let mut waited = Duration::ZERO;
     let mut last_holder = None;
-    for attempt in 0..INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS {
+    for attempt in 0..attempts {
         match db.acquire_advisory_lock(
             &lock_id,
             holder_id,
@@ -55,9 +77,25 @@ fn acquire_index_publish_lock(
                 holder_id: other,
                 acquired_at,
             } => {
-                last_holder = Some((other, acquired_at));
-                if attempt + 1 < INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS {
-                    std::thread::sleep(index_publish_lock_retry_delay(attempt));
+                last_holder = Some((other.clone(), acquired_at.clone()));
+                if attempt + 1 < attempts {
+                    let delay = retry_delay(attempt);
+                    waited += delay;
+                    if (attempt + 1) % 10 == 0 {
+                        tracing::info!(
+                            target: "ee::index",
+                            attempt = attempt + 1,
+                            attempts,
+                            holder_id = %other,
+                            acquired_at = %acquired_at,
+                            retry_delay_ms = delay.as_millis(),
+                            waited_ms = duration_millis_saturating(waited),
+                            "waiting for index publish lock"
+                        );
+                    }
+                    if !delay.is_zero() {
+                        std::thread::sleep(delay);
+                    }
                 }
             }
         }
@@ -69,10 +107,15 @@ fn acquire_index_publish_lock(
             "<unknown acquisition time>".to_owned(),
         )
     });
-    Err(IndexRebuildError::Index(format!(
-        "Index publish lock held by {other} since {acquired_at}. \
-         Another index operation may be in progress."
-    )))
+    Err(IndexRebuildError::LockContention(
+        IndexPublishLockContention {
+            lock_id: lock_id.canonical_key(),
+            holder_id: other,
+            acquired_at,
+            attempts,
+            waited_ms: duration_millis_saturating(waited),
+        },
+    ))
 }
 
 fn index_publish_lock_retry_delay(attempt: usize) -> Duration {
@@ -81,6 +124,10 @@ fn index_publish_lock_retry_delay(attempt: usize) -> Duration {
 
     let multiplier = 1_u64 << attempt.min(4);
     Duration::from_millis(BASE_DELAY_MS.saturating_mul(multiplier).min(MAX_DELAY_MS))
+}
+
+fn duration_millis_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Release the index publish lock (best-effort, errors are logged but not propagated).
@@ -554,9 +601,19 @@ impl IndexProcessingReport {
 }
 
 #[derive(Debug)]
+pub struct IndexPublishLockContention {
+    pub lock_id: String,
+    pub holder_id: String,
+    pub acquired_at: String,
+    pub attempts: usize,
+    pub waited_ms: u64,
+}
+
+#[derive(Debug)]
 pub enum IndexRebuildError {
     Database(DbError),
     Index(String),
+    LockContention(IndexPublishLockContention),
     NoWorkspace,
 }
 
@@ -566,7 +623,18 @@ impl IndexRebuildError {
         match self {
             Self::Database(_) => Some("ee doctor --fix-plan --json"),
             Self::Index(_) => Some("Check index directory permissions"),
+            Self::LockContention(_) => Some(
+                "Wait for the active index operation to finish, then retry. Use `ee index status --workspace . --json` to inspect index state.",
+            ),
             Self::NoWorkspace => Some("ee init --workspace ."),
+        }
+    }
+
+    #[must_use]
+    pub const fn stable_code(&self) -> Option<&'static str> {
+        match self {
+            Self::LockContention(_) => Some(INDEX_PUBLISH_LOCK_CONTENTION_CODE),
+            Self::Database(_) | Self::Index(_) | Self::NoWorkspace => None,
         }
     }
 }
@@ -576,6 +644,15 @@ impl std::fmt::Display for IndexRebuildError {
         match self {
             Self::Database(e) => write!(f, "Database error: {e}"),
             Self::Index(e) => write!(f, "Index error: {e}"),
+            Self::LockContention(contention) => write!(
+                f,
+                "Index publish lock contention: lock {} held by {} since {}; exhausted {} attempts after {}ms",
+                contention.lock_id,
+                contention.holder_id,
+                contention.acquired_at,
+                contention.attempts,
+                contention.waited_ms
+            ),
             Self::NoWorkspace => write!(f, "No workspace found"),
         }
     }
@@ -1946,6 +2023,70 @@ mod tests {
         } else {
             Err(message.into())
         }
+    }
+
+    #[test]
+    fn index_publish_lock_retry_delay_uses_bounded_backoff() {
+        assert_eq!(index_publish_lock_retry_delay(0), Duration::from_millis(5));
+        assert_eq!(index_publish_lock_retry_delay(1), Duration::from_millis(10));
+        assert_eq!(index_publish_lock_retry_delay(4), Duration::from_millis(50));
+        assert_eq!(
+            index_publish_lock_retry_delay(100),
+            Duration::from_millis(50)
+        );
+    }
+
+    #[test]
+    fn index_publish_lock_exhaustion_reports_stable_contention() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+
+        let workspace_id = "wsp_lockretry000000000000000000";
+        let lock_id = AdvisoryLockId::index(workspace_id);
+        let first_lock = connection
+            .acquire_advisory_lock(&lock_id, "agent_existing", Some(300), Some("test lock"))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            matches!(
+                first_lock,
+                AcquireLockResult::Acquired(_) | AcquireLockResult::Expired { .. }
+            ),
+            "first lock must be acquired",
+        )?;
+
+        let error = match acquire_index_publish_lock_with_retry(
+            &connection,
+            workspace_id,
+            "agent_waiting",
+            3,
+            |_| Duration::ZERO,
+        ) {
+            Ok(_) => panic!("held lock should exhaust retries"),
+            Err(e) => e,
+        };
+
+        ensure(
+            error.stable_code() == Some(INDEX_PUBLISH_LOCK_CONTENTION_CODE),
+            "contention error must expose stable code",
+        )?;
+
+        let IndexRebuildError::LockContention(contention) = error else {
+            return Err("expected lock contention error".to_owned());
+        };
+        ensure(
+            contention.lock_id == lock_id.canonical_key(),
+            "contention lock id",
+        )?;
+        ensure(
+            contention.holder_id == "agent_existing",
+            "contention holder id",
+        )?;
+        ensure(contention.attempts == 3, "contention attempts")?;
+        ensure(contention.waited_ms == 0, "contention waited milliseconds")?;
+        ensure(
+            !contention.acquired_at.is_empty(),
+            "contention acquired_at timestamp",
+        )
     }
 
     fn unique_test_dir(label: &str) -> PathBuf {
