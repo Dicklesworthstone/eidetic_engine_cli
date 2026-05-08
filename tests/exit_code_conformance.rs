@@ -70,6 +70,61 @@ fn stderr_text(output: &Output) -> Result<&str, String> {
     std::str::from_utf8(&output.stderr).map_err(|error| format!("stderr was not UTF-8: {error}"))
 }
 
+fn assert_json_error_contract(
+    output: &Output,
+    expected_exit: i32,
+    expected_code: &str,
+    artifact_name: &str,
+) -> TestResult {
+    persist_artifact(artifact_name, output);
+    ensure_equal(
+        &output.status.code(),
+        &Some(expected_exit),
+        "JSON error exit code",
+    )?;
+    ensure(
+        stderr_text(output)?.is_empty(),
+        "JSON error diagnostics must not leak to stderr",
+    )?;
+
+    let json = stdout_json(output)?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.error.v1"),
+        "error schema",
+    )?;
+    ensure(
+        json.get("success").is_none(),
+        "ee.error.v1 must not include success flag",
+    )?;
+
+    let error = json
+        .get("error")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("error field must be an object")?;
+    ensure_equal(
+        &error.get("code").and_then(serde_json::Value::as_str),
+        &Some(expected_code),
+        "error code",
+    )?;
+    for field in ["message", "severity", "repair"] {
+        ensure(
+            error
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
+            format!("error.{field} must be a string"),
+        )?;
+    }
+    ensure(
+        error
+            .get("details")
+            .and_then(serde_json::Value::as_object)
+            .is_some(),
+        "error.details must be an object",
+    )
+}
+
 fn artifact_dir() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("exit_code_conformance_artifacts");
     let _ = fs::create_dir_all(&dir);
@@ -634,49 +689,78 @@ fn error_responses_use_ee_error_v1_schema() -> TestResult {
 #[test]
 fn json_errors_follow_documented_contract_and_keep_stderr_clean() -> TestResult {
     let output = run_ee(&["procedure", "promote", "proc_test", "--json"])?;
-    persist_artifact("error_contract_full", &output);
+    assert_json_error_contract(&output, EXIT_USAGE, "not_found", "error_contract_full")
+}
 
-    ensure_equal(
-        &output.status.code(),
-        &Some(EXIT_USAGE),
-        "procedure promote missing target exit code",
-    )?;
-    ensure(
-        stderr_text(&output)?.is_empty(),
-        "JSON error diagnostics must not leak to stderr",
-    )?;
+#[test]
+fn json_error_contract_is_consistent_across_error_classes() -> TestResult {
+    struct JsonErrorCase {
+        name: &'static str,
+        args: Vec<String>,
+        expected_exit: i32,
+        expected_code: &'static str,
+    }
 
-    let json = stdout_json(&output)?;
-    ensure_equal(
-        &json["schema"],
-        &serde_json::json!("ee.error.v1"),
-        "error schema",
-    )?;
-    ensure(
-        json.get("success").is_none(),
-        "ee.error.v1 must not include success flag",
-    )?;
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let missing_workspace = tempdir.path().join("missing-workspace");
+    let missing_workspace = missing_workspace.to_string_lossy().to_string();
+    let missing_import = tempdir.path().join("missing-import.jsonl");
+    let missing_import = missing_import.to_string_lossy().to_string();
+    let cases = vec![
+        JsonErrorCase {
+            name: "configuration",
+            args: vec![
+                "--workspace".into(),
+                missing_workspace,
+                "workspace".into(),
+                "alias".into(),
+                "--as".into(),
+                "missing".into(),
+                "--dry-run".into(),
+                "--json".into(),
+            ],
+            expected_exit: EXIT_CONFIG,
+            expected_code: "configuration",
+        },
+        JsonErrorCase {
+            name: "import",
+            args: vec![
+                "import".into(),
+                "jsonl".into(),
+                "--source".into(),
+                missing_import,
+                "--json".into(),
+            ],
+            expected_exit: EXIT_IMPORT,
+            expected_code: "import",
+        },
+        JsonErrorCase {
+            name: "policy_denied",
+            args: vec![
+                "learn".into(),
+                "experiment".into(),
+                "run".into(),
+                "--id".into(),
+                "exp_test".into(),
+                "--json".into(),
+            ],
+            expected_exit: EXIT_POLICY_DENIED,
+            expected_code: "policy_denied",
+        },
+    ];
 
-    let error = json
-        .get("error")
-        .and_then(serde_json::Value::as_object)
-        .ok_or("error field must be an object")?;
-    for field in ["code", "message", "severity", "repair"] {
-        ensure(
-            error
-                .get(field)
-                .and_then(serde_json::Value::as_str)
-                .is_some(),
-            format!("error.{field} must be a string"),
+    for case in cases {
+        let args = case.args.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = run_ee(&args)?;
+        assert_json_error_contract(
+            &output,
+            case.expected_exit,
+            case.expected_code,
+            &format!("error_contract_{}", case.name),
         )?;
     }
-    ensure(
-        error
-            .get("details")
-            .and_then(serde_json::Value::as_object)
-            .is_some(),
-        "error.details must be an object",
-    )
+
+    Ok(())
 }
 
 #[test]
