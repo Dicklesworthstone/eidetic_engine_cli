@@ -842,6 +842,41 @@ fn json_error_contract_is_consistent_across_error_classes() -> TestResult {
 }
 
 #[test]
+fn json_usage_errors_from_unknown_subcommands_keep_machine_contract() -> TestResult {
+    struct UnknownCommandCase {
+        name: &'static str,
+        args: &'static [&'static str],
+    }
+
+    let cases = [
+        UnknownCommandCase {
+            name: "top_level",
+            args: &["--json", "statis"],
+        },
+        UnknownCommandCase {
+            name: "backup_nested",
+            args: &["backup", "restor", "--json"],
+        },
+        UnknownCommandCase {
+            name: "learn_experiment_nested",
+            args: &["learn", "experiment", "rn", "--json"],
+        },
+    ];
+
+    for case in cases {
+        let output = run_ee(case.args)?;
+        assert_json_error_contract(
+            &output,
+            EXIT_USAGE,
+            "usage",
+            &format!("error_contract_unknown_subcommand_{}", case.name),
+        )?;
+    }
+
+    Ok(())
+}
+
+#[test]
 fn degraded_responses_include_repair_guidance() -> TestResult {
     let output = run_ee(&["preflight", "run", "deploy production migration", "--json"])?;
     persist_artifact("degraded_repair", &output);
