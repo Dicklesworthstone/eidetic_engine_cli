@@ -2906,7 +2906,7 @@ fn robot_global_selects_machine_output() -> TestResult {
 }
 
 #[test]
-fn procedure_export_skill_capsule_json_degrades_until_store_exists() -> TestResult {
+fn procedure_export_skill_capsule_json_reports_missing_procedure() -> TestResult {
     let output = run_ee(&[
         "--json",
         "procedure",
@@ -2920,8 +2920,8 @@ fn procedure_export_skill_capsule_json_degrades_until_store_exists() -> TestResu
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     ensure(
-        output.status.code() == Some(6),
-        format!("procedure export should degrade until stored procedures exist; stderr: {stderr}"),
+        output.status.code() == Some(1),
+        format!("procedure export should report missing procedure; stderr: {stderr}"),
     )?;
     ensure(
         stderr.is_empty(),
@@ -2929,38 +2929,39 @@ fn procedure_export_skill_capsule_json_degrades_until_store_exists() -> TestResu
     )?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.response.v1\"",
-        "procedure export response schema",
+        "{\"schema\":\"ee.error.v1\"",
+        "procedure export error schema",
     )?;
     let value: serde_json::Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("procedure export stdout must be JSON: {error}"))?;
-    ensure_equal(&value["success"], &serde_json::json!(false), "success flag")?;
     ensure_equal(
-        &value["data"]["command"],
-        &serde_json::json!("procedure export"),
-        "procedure command",
+        &value["error"]["code"],
+        &serde_json::json!("not_found"),
+        "procedure error code",
     )?;
     ensure_equal(
-        &value["data"]["code"],
-        &serde_json::json!("procedure_store_unavailable"),
-        "procedure degraded code",
-    )?;
-    ensure_equal(
-        &value["data"]["repair"],
-        &serde_json::json!("ee status --json"),
+        &value["error"]["repair"],
+        &serde_json::json!("create or import a procedure record before using this command"),
         "procedure repair",
     )?;
+    ensure_equal(
+        &value["error"]["details"]["resource"],
+        &serde_json::json!("procedure"),
+        "procedure error resource",
+    )?;
+    ensure_equal(
+        &value["error"]["details"]["id"],
+        &serde_json::json!("proc_smoke"),
+        "procedure error id",
+    )?;
     ensure(
-        value["data"].get("format").is_none()
-            && value["data"].get("installMode").is_none()
-            && value["data"].get("content").is_none()
-            && value["data"].get("contentHash").is_none(),
-        "procedure export degraded response must not emit render-only capsule artifact fields",
+        !stdout.contains("contentHash") && !stdout.contains("installMode"),
+        "procedure export missing-record response must not emit render-only capsule artifact fields",
     )
 }
 
 #[test]
-fn procedure_promote_dry_run_json_degrades_until_audited_promotion_exists() -> TestResult {
+fn procedure_promote_dry_run_json_reports_missing_procedure() -> TestResult {
     let output = run_ee(&[
         "--json",
         "procedure",
@@ -2975,8 +2976,8 @@ fn procedure_promote_dry_run_json_degrades_until_audited_promotion_exists() -> T
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     ensure(
-        output.status.code() == Some(6),
-        format!("procedure promote should degrade until stored procedures exist; stderr: {stderr}"),
+        output.status.code() == Some(1),
+        format!("procedure promote should report missing procedure; stderr: {stderr}"),
     )?;
     ensure(
         stderr.is_empty(),
@@ -2984,33 +2985,34 @@ fn procedure_promote_dry_run_json_degrades_until_audited_promotion_exists() -> T
     )?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.response.v1\"",
-        "procedure promote response schema",
+        "{\"schema\":\"ee.error.v1\"",
+        "procedure promote error schema",
     )?;
     let value: serde_json::Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("procedure promote stdout must be JSON: {error}"))?;
-    ensure_equal(&value["success"], &serde_json::json!(false), "success flag")?;
     ensure_equal(
-        &value["data"]["command"],
-        &serde_json::json!("procedure promote"),
-        "procedure command",
+        &value["error"]["code"],
+        &serde_json::json!("not_found"),
+        "procedure error code",
     )?;
     ensure_equal(
-        &value["data"]["code"],
-        &serde_json::json!("procedure_store_unavailable"),
-        "procedure degraded code",
-    )?;
-    ensure_equal(
-        &value["data"]["repair"],
-        &serde_json::json!("ee status --json"),
+        &value["error"]["repair"],
+        &serde_json::json!("create or import a procedure record before using this command"),
         "procedure repair",
     )?;
+    ensure_equal(
+        &value["error"]["details"]["resource"],
+        &serde_json::json!("procedure"),
+        "procedure error resource",
+    )?;
+    ensure_equal(
+        &value["error"]["details"]["id"],
+        &serde_json::json!("proc_smoke"),
+        "procedure error id",
+    )?;
     ensure(
-        value["data"].get("dryRun").is_none()
-            && value["data"].get("curation").is_none()
-            && value["data"].get("audit").is_none()
-            && value["data"].get("plannedEffects").is_none(),
-        "procedure promote degraded response must not emit planned curation or audit claims",
+        !stdout.contains("plannedEffects") && !stdout.contains("\"curation\""),
+        "procedure promote missing-record response must not emit planned curation or audit claims",
     )
 }
 
@@ -3431,13 +3433,51 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
             &envs,
         )?;
         ensure(
-            !import_run.output.status.success(),
-            "ee import cass should fail when real CASS sessions cannot satisfy its robot contract",
-        )?;
-        ensure(
             import_run.dossier_dir.join("first-failure.md").exists(),
-            "degraded import should retain first-failure artifact",
+            "CASS import probe fallback should retain first-failure artifact",
         )?;
+        let import_stdout = String::from_utf8_lossy(&import_run.output.stdout);
+        let import_stderr = String::from_utf8_lossy(&import_run.output.stderr);
+        ensure(
+            import_run.output.stderr.is_empty(),
+            format!("ee import cass fallback stderr must stay clean: {import_stderr}"),
+        )?;
+        ensure_no_ansi(&import_stdout, "ee import cass fallback stdout")?;
+        let import_json: serde_json::Value = serde_json::from_slice(&import_run.output.stdout)
+            .map_err(|error| format!("ee import cass fallback stdout must be JSON: {error}"))?;
+        if import_run.output.status.success() {
+            ensure_equal(
+                &import_json["schema"],
+                &serde_json::json!("ee.response.v1"),
+                "CASS import fallback response schema",
+            )?;
+            ensure_equal(
+                &import_json["success"],
+                &serde_json::json!(true),
+                "CASS import fallback success flag",
+            )?;
+            ensure_equal(
+                &import_json["data"]["command"],
+                &serde_json::json!("import cass"),
+                "CASS import fallback command",
+            )?;
+            ensure_equal(
+                &import_json["data"]["status"],
+                &serde_json::json!("completed"),
+                "CASS import fallback status",
+            )?;
+        } else {
+            ensure_equal(
+                &import_json["schema"],
+                &serde_json::json!("ee.error.v1"),
+                "CASS import fallback error schema",
+            )?;
+            ensure_equal(
+                &import_json["error"]["code"],
+                &serde_json::json!("import"),
+                "CASS import fallback error code",
+            )?;
+        }
         return Ok(());
     }
     let cass_sessions_json = parse_logged_external_json(&cass_sessions, "real cass sessions")?;
@@ -4402,47 +4442,41 @@ fn artifact_registry_registers_indexes_exports_and_supports_context() -> TestRes
     ])?;
     let support_stderr = String::from_utf8_lossy(&support.stderr);
     ensure(
-        support.status.code() == Some(6),
-        format!(
-            "support bundle should degrade until redacted archive materialization exists; stderr: {support_stderr}"
-        ),
+        support.status.success(),
+        format!("support bundle dry-run should succeed; stderr: {support_stderr}"),
     )?;
     ensure(support.stderr.is_empty(), "support bundle stderr clean")?;
+    let support_stdout = String::from_utf8_lossy(&support.stdout);
     let support_json: serde_json::Value = serde_json::from_slice(&support.stdout)
         .map_err(|error| format!("support stdout must be JSON: {error}"))?;
     ensure_equal(
         &support_json["success"],
-        &serde_json::json!(false),
+        &serde_json::json!(true),
         "support success flag",
     )?;
     ensure_equal(
-        &support_json["data"]["command"],
-        &serde_json::json!("support bundle"),
-        "support command",
+        &support_json["data"]["schema"],
+        &serde_json::json!("ee.support_bundle.v1"),
+        "support bundle schema",
     )?;
     ensure_equal(
-        &support_json["data"]["code"],
-        &serde_json::json!("support_bundle_unavailable"),
-        "support degraded code",
+        &support_json["data"]["dryRun"],
+        &serde_json::json!(true),
+        "support dry-run flag",
     )?;
     ensure_equal(
-        &support_json["data"]["repair"],
-        &serde_json::json!("ee diag integrity --json"),
-        "support repair",
+        &support_json["data"]["outputPath"],
+        &serde_json::Value::Null,
+        "support dry-run output path",
     )?;
     ensure(
-        support_json["data"]
-            .get("artifact_registry_count")
-            .is_none()
-            && support_json["data"]
-                .get("artifact_registry_included")
-                .is_none()
-            && support_json["data"].get("files_collected").is_none()
-            && support_json["data"].get("bundle_path").is_none(),
-        "support bundle degraded response must not emit archive collection fields",
+        support_json["data"]["filesCollected"]
+            .as_array()
+            .is_some_and(|files| files.iter().any(|file| file == "manifest.json")),
+        "support bundle dry-run should plan a manifest artifact",
     )?;
     ensure(
-        !String::from_utf8_lossy(&support.stdout).contains("redaction-fixture"),
+        !support_stdout.contains("redaction-fixture"),
         "support bundle dry-run output must omit raw secret value",
     )
 }
@@ -4802,24 +4836,29 @@ fn expanded_memory_substrate_composition_logged_e2e_scenario() -> TestResult {
     command_dossiers.push(("support-bundle", support.dossier_dir.clone()));
     let support_stderr = String::from_utf8_lossy(&support.output.stderr);
     ensure(
-        support.output.status.code() == Some(6),
-        format!("lp4p2 support bundle should degrade; stderr: {support_stderr}"),
+        support.output.status.success(),
+        format!("lp4p2 support bundle dry-run should succeed; stderr: {support_stderr}"),
     )?;
     ensure(
         support.output.stderr.is_empty(),
         "lp4p2 support bundle stderr clean",
     )?;
-    let support_json: serde_json::Value = serde_json::from_slice(&support.output.stdout)
-        .map_err(|error| format!("lp4p2 support stdout must be JSON: {error}"))?;
+    let support_json = parse_logged_response(&support, "lp4p2 support bundle dry-run")?;
     ensure_equal(
-        &support_json["success"],
-        &serde_json::json!(false),
-        "lp4p2 support degraded success flag",
+        &support_json["data"]["schema"],
+        &serde_json::json!("ee.support_bundle.v1"),
+        "lp4p2 support bundle schema",
     )?;
     ensure_equal(
-        &support_json["data"]["code"],
-        &serde_json::json!("support_bundle_unavailable"),
-        "lp4p2 support degraded code",
+        &support_json["data"]["dryRun"],
+        &serde_json::json!(true),
+        "lp4p2 support dry-run flag",
+    )?;
+    ensure(
+        support_json["data"]["filesCollected"]
+            .as_array()
+            .is_some_and(|files| files.iter().any(|file| file == "manifest.json")),
+        "lp4p2 support bundle dry-run should plan a manifest artifact",
     )?;
 
     let required_dossier_files = [
@@ -7444,9 +7483,15 @@ fn mcp_manifest_json_real_binary_smoke() -> TestResult {
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
-fn daemon_foreground_once_json_degrades_before_simulated_jobs_run() -> TestResult {
+fn daemon_foreground_once_json_runs_real_health_job_in_isolated_workspace() -> TestResult {
+    let workspace = unique_artifact_dir("daemon-foreground-smoke")?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
     let output = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
         "--json",
         "daemon",
         "--foreground",
@@ -7460,10 +7505,8 @@ fn daemon_foreground_once_json_degrades_before_simulated_jobs_run() -> TestResul
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     ensure(
-        output.status.code() == Some(6),
-        format!(
-            "daemon foreground should report degraded mode before simulated jobs run; stderr: {stderr}"
-        ),
+        output.status.success(),
+        format!("daemon foreground should run one health-check tick; stderr: {stderr}"),
     )?;
     ensure(output.stderr.is_empty(), "daemon stderr must be empty")?;
     ensure_no_ansi(&stdout, "daemon stdout")?;
@@ -7475,36 +7518,42 @@ fn daemon_foreground_once_json_degrades_before_simulated_jobs_run() -> TestResul
         &serde_json::json!("ee.response.v1"),
         "response schema",
     )?;
-    ensure_equal(&parsed["success"], &serde_json::json!(false), "success")?;
+    ensure_equal(&parsed["success"], &serde_json::json!(true), "success")?;
     ensure_equal(
-        &parsed["data"]["command"],
-        &serde_json::json!("daemon foreground"),
-        "daemon command",
+        &parsed["data"]["schema"],
+        &serde_json::json!("ee.steward.daemon_foreground.v1"),
+        "daemon foreground schema",
     )?;
     ensure_equal(
-        &parsed["data"]["code"],
-        &serde_json::json!("daemon_jobs_unavailable"),
-        "daemon degraded code",
+        &parsed["data"]["supervisor"],
+        &serde_json::json!("asupersync_foreground"),
+        "daemon supervisor",
     )?;
     ensure_equal(
-        &parsed["data"]["repair"],
-        &serde_json::json!("ee status --json"),
-        "daemon repair",
-    )?;
-    ensure_equal(
-        &parsed["data"]["followUpBead"],
-        &serde_json::json!("eidetic_engine_cli-5g6d"),
-        "daemon follow-up bead",
+        &parsed["data"]["summary"]["tickCount"],
+        &serde_json::json!(1),
+        "daemon tick count",
     )?;
     ensure(
-        parsed["data"].get("schema").is_none()
-            && parsed["data"].get("summary").is_none()
-            && parsed["data"].get("jobTypes").is_none()
-            && parsed["data"].get("ticks").is_none(),
-        "daemon degraded response must not emit scheduler schema, ticks, or job types",
+        parsed["data"]["jobTypes"]
+            .as_array()
+            .is_some_and(|jobs| jobs.iter().any(|job| job == "health_check")),
+        "daemon foreground should report the health_check job type",
     )?;
     ensure(
-        !stdout.contains("health_check") && !stdout.contains("itemsProcessed"),
-        "daemon degraded stdout must not claim simulated work",
+        parsed["data"]["ticks"]
+            .as_array()
+            .is_some_and(|ticks| ticks.len() == 1),
+        "daemon foreground should report one tick",
+    )?;
+    ensure(
+        parsed["data"]["ticks"][0]["runner"]["results"]
+            .as_array()
+            .is_some_and(|results| {
+                results.iter().any(|result| {
+                    result["jobType"] == "health_check" && result["outcome"] == "success"
+                })
+            }),
+        "daemon foreground should run the health_check job successfully",
     )
 }

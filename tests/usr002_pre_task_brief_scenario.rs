@@ -672,19 +672,23 @@ fn pre_task_briefing_scenario_produces_actionable_context_with_logged_artifacts(
     )?;
     command_dossiers.push(preflight.dossier_dir.clone());
     ensure(
-        !preflight.output.status.success(),
-        "preflight run should degrade until persisted evidence matching is available",
+        preflight.output.status.success(),
+        "preflight run should complete with an honest blocked preflight result",
     )?;
     assert_json_machine_stdout(&preflight.output, "preflight run")?;
     let preflight_json = parse_json_stdout(&preflight.output, "preflight run")?;
     ensure(
         preflight_json["schema"] == json!("ee.response.v1")
-            && preflight_json["data"]["code"] == json!("preflight_evidence_unavailable"),
+            && preflight_json["data"]["cleared"] == json!(false)
+            && preflight_json["data"]["degraded"][0]["code"]
+                == json!("preflight_evidence_unavailable"),
         "preflight run should report unavailable evidence matching",
     )?;
     ensure(
-        preflight_json["data"]["evidenceIds"] == json!([])
-            && preflight_json["data"]["followUpBead"] == json!("eidetic_engine_cli-bijm"),
+        preflight_json["data"]["evidence_ids"] == json!([])
+            && preflight_json["data"]["top_risks"] == json!([])
+            && preflight_json["data"]["next_action"]
+                == json!("collect_preflight_evidence_or_use_risk_review_skill"),
         "preflight run should not claim risk evidence",
     )?;
 
