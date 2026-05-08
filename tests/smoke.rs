@@ -6498,6 +6498,31 @@ fn pack_query_file_invalid_filter_operator_uses_stable_machine_error() -> TestRe
 
 #[cfg(unix)]
 #[test]
+fn pack_query_file_invalid_filter_value_uses_stable_machine_error() -> TestResult {
+    let workspace = unique_artifact_dir("pack-invalid-filter-value")?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let query_file = workspace.join("invalid-filter-value.eeq.json");
+    fs::write(
+        &query_file,
+        r#"{
+          "version": "ee.query.v1",
+          "query": {"text": "prepare release"},
+          "filters": {"metadata.flag": {"exists": "false"}}
+        }"#,
+    )
+    .map_err(|error| error.to_string())?;
+    let query_file_arg = query_file.to_string_lossy().into_owned();
+
+    ensure_pack_query_file_machine_error(
+        "pack-invalid-filter-value-run",
+        query_file_arg.as_str(),
+        "ERR_INVALID_FILTER_VALUE",
+        "invalid filter value",
+    )
+}
+
+#[cfg(unix)]
+#[test]
 fn pack_query_file_invalid_timestamp_uses_stable_machine_error() -> TestResult {
     let workspace = unique_artifact_dir("pack-invalid-timestamp")?;
     fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;

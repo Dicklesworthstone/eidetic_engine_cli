@@ -148,8 +148,9 @@ use crate::models::preflight::{
 use crate::models::{
     CertificateKind, CertificateStatus, DEMO_FILE_SCHEMA_V1, DEMO_RUN_RESULT_SCHEMA_V1, DemoEntry,
     DemoFile, DemoId, DemoStatus, DomainError, ExperimentOutcomeStatus, ExperimentSafetyBoundary,
-    InstallOperation, LearningObservationSignal, OutputVerification, ProcessExitCode,
-    QUERY_SCHEMA_V1, RedactionLevel, is_valid_demo_artifact_path, parse_demo_file_yaml,
+    FilterOperator, InstallOperation, LearningObservationSignal, OutputVerification,
+    ProcessExitCode, QUERY_SCHEMA_V1, RedactionLevel, is_valid_demo_artifact_path,
+    parse_demo_file_yaml,
 };
 use crate::output;
 use crate::pack::{
@@ -13724,6 +13725,7 @@ enum QueryFileErrorCode {
     UnknownVersion,
     EmptyQuery,
     InvalidOperator,
+    InvalidFilterValue,
     InvalidTimestamp,
     UnsafePath,
     UnsupportedFeature,
@@ -13740,6 +13742,7 @@ impl QueryFileErrorCode {
             Self::UnknownVersion => "ERR_UNKNOWN_VERSION",
             Self::EmptyQuery => "ERR_EMPTY_QUERY",
             Self::InvalidOperator => "ERR_INVALID_OPERATOR",
+            Self::InvalidFilterValue => "ERR_INVALID_FILTER_VALUE",
             Self::InvalidTimestamp => "ERR_INVALID_TIMESTAMP",
             Self::UnsafePath => "ERR_UNSAFE_PATH",
             Self::UnsupportedFeature => "ERR_UNSUPPORTED_FEATURE",
@@ -14122,7 +14125,7 @@ fn validate_filters(value: &serde_json::Value) -> Result<(), QueryFileError> {
                 Some("Use supported operators such as eq, in, gte, or exists.".to_string()),
             )
         })?;
-        for operator in predicate.keys() {
+        for (operator, filter_value) in predicate {
             if !QUERY_FILE_FILTER_OPERATORS.contains(&operator.as_str()) {
                 return Err(QueryFileError::new(
                     QueryFileErrorCode::InvalidOperator,
@@ -14131,6 +14134,29 @@ fn validate_filters(value: &serde_json::Value) -> Result<(), QueryFileError> {
                         "Use one of: {}.",
                         QUERY_FILE_FILTER_OPERATORS.join(", ")
                     )),
+                ));
+            }
+            let parsed_operator = FilterOperator::parse_name(operator).ok_or_else(|| {
+                QueryFileError::new(
+                    QueryFileErrorCode::InvalidOperator,
+                    format!("Invalid filter operator '{operator}' for field '{field}'."),
+                    Some(format!(
+                        "Use one of: {}.",
+                        QUERY_FILE_FILTER_OPERATORS.join(", ")
+                    )),
+                )
+            })?;
+            if !parsed_operator.accepts_json_value(filter_value) {
+                return Err(QueryFileError::new(
+                    QueryFileErrorCode::InvalidFilterValue,
+                    format!(
+                        "Invalid value for filter '{field}.{operator}': expected {}.",
+                        parsed_operator.expected_json_value()
+                    ),
+                    Some(
+                        "Use typed ee.query.v1 filter values; exists requires true or false."
+                            .to_string(),
+                    ),
                 ));
             }
         }
@@ -25963,6 +25989,31 @@ mod tests {
             &error.code,
             &super::QueryFileErrorCode::InvalidOperator,
             "invalid operator error code",
+        )
+    }
+
+    #[test]
+    fn query_file_document_rejects_invalid_filter_value() -> TestResult {
+        let error = match super::parse_query_document(
+            r#"{
+              "version": "ee.query.v1",
+              "query": {"text": "release"},
+              "filters": {"metadata.flag": {"exists": "false"}}
+            }"#,
+        ) {
+            Ok(_) => return Err("mistyped exists filter value should fail".into()),
+            Err(error) => error,
+        };
+
+        ensure_equal(
+            &error.code,
+            &super::QueryFileErrorCode::InvalidFilterValue,
+            "invalid filter value error code",
+        )?;
+        ensure_contains(
+            &error.message,
+            "metadata.flag.exists",
+            "invalid filter value path",
         )
     }
 

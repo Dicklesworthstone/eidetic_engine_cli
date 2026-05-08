@@ -48,10 +48,10 @@ impl FilterPredicate {
     #[must_use]
     pub fn matches(&self, actual: Option<&serde_json::Value>) -> bool {
         match self.operator {
-            FilterOperator::Exists => {
-                let should_exist = self.value.as_bool().unwrap_or(true);
-                actual.is_some() == should_exist
-            }
+            FilterOperator::Exists => self
+                .value
+                .as_bool()
+                .is_some_and(|should_exist| actual.is_some() == should_exist),
             FilterOperator::Eq => actual.is_some_and(|v| self.value.equals(v)),
             FilterOperator::Neq => !actual.is_some_and(|v| self.value.equals(v)),
             FilterOperator::In => actual.is_some_and(|v| self.value.contains(v)),
@@ -104,6 +104,40 @@ impl FilterOperator {
             _ => None,
         }
     }
+
+    #[must_use]
+    pub fn accepts_json_value(self, value: &serde_json::Value) -> bool {
+        match self {
+            Self::Eq | Self::Neq => is_scalar_filter_value(value),
+            Self::In | Self::NotIn => value
+                .as_array()
+                .is_some_and(|items| items.iter().all(is_scalar_filter_value)),
+            Self::Gt | Self::Gte | Self::Lt | Self::Lte => value.is_number() || value.is_string(),
+            Self::Exists => value.is_boolean(),
+            Self::StartsWith | Self::EndsWith | Self::Contains => value.is_string(),
+        }
+    }
+
+    #[must_use]
+    pub const fn expected_json_value(self) -> &'static str {
+        match self {
+            Self::Eq | Self::Neq => "a scalar value",
+            Self::In | Self::NotIn => "a list of scalar values",
+            Self::Gt | Self::Gte | Self::Lt | Self::Lte => "a number or string",
+            Self::Exists => "a boolean",
+            Self::StartsWith | Self::EndsWith | Self::Contains => "a string",
+        }
+    }
+}
+
+fn is_scalar_filter_value(value: &serde_json::Value) -> bool {
+    matches!(
+        value,
+        serde_json::Value::String(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Null
+    )
 }
 
 /// A filter value that can be compared against JSON values.
@@ -254,6 +288,9 @@ pub fn parse_filters(value: &serde_json::Value) -> Option<QueryFilters> {
 
         for (operator_str, value) in pred_object {
             let operator = FilterOperator::parse_name(operator_str)?;
+            if !operator.accepts_json_value(value) {
+                return None;
+            }
             let filter_value = FilterValue::from_json(value);
             filter_predicates.push(FilterPredicate {
                 operator,
@@ -983,6 +1020,57 @@ mod tests {
         ensure(
             !filters.matches(Some(&metadata)),
             "missing field should not match",
+        )
+    }
+
+    #[test]
+    fn filter_exists_false_checks_absence() -> TestResult {
+        let filters = parse_test_filters(serde_json::json!({
+            "validated_at": {"exists": false}
+        }))?;
+
+        let metadata = serde_json::json!({"level": "procedural"});
+        ensure(
+            filters.matches(Some(&metadata)),
+            "missing field should match exists false",
+        )?;
+
+        let metadata = serde_json::json!({"validated_at": "2026-05-04T12:00:00Z"});
+        ensure(
+            !filters.matches(Some(&metadata)),
+            "present field should not match exists false",
+        )
+    }
+
+    #[test]
+    fn filter_parser_rejects_mistyped_operator_values() -> TestResult {
+        ensure(
+            parse_filters(&serde_json::json!({
+                "validated_at": {"exists": "false"}
+            }))
+            .is_none(),
+            "exists must be a typed boolean",
+        )?;
+        ensure(
+            parse_filters(&serde_json::json!({
+                "kind": {"in": "rule"}
+            }))
+            .is_none(),
+            "in must be a list",
+        )?;
+        ensure(
+            parse_filters(&serde_json::json!({
+                "confidence": {"gte": {"min": 0.8}}
+            }))
+            .is_none(),
+            "comparison operators must be scalar comparable values",
+        )?;
+        ensure(
+            parse_filters(&serde_json::json!({
+                "content": {"contains": false}
+            }))
+            .is_none(),
+            "string operators must receive strings",
         )
     }
 
