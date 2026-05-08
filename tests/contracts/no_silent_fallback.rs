@@ -108,12 +108,11 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "eidetic_engine_cli-sos5.3",
         "Demo file reads should not render missing or unreadable expected output as empty content.",
     ),
-    must_fix(
+    allowed(
         "NSF-MODELS-JSONL-BUILDERS",
         "src/models/jsonl.rs",
-        "unwrap_or_default()",
-        "eidetic_engine_cli-sos5.4",
-        "JSONL export builders default required IDs, timestamps, content, and schema fields to empty values.",
+        "ExportRecordBuildError",
+        "JSONL export builders reject missing required IDs, timestamps, content, and schema fields with ExportRecordBuildError.",
     ),
     must_fix(
         "NSF-CURATE-CERTIFICATE-BUILDER",

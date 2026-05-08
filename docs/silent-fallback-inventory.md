@@ -34,30 +34,17 @@ Each finding is classified for triage.
 
 ---
 
-## Category 2: JSONL Import Model Defaults (FOLLOWUP)
+## Category 2: JSONL Import Model Defaults (RESOLVED)
 
 ### src/models/jsonl.rs
 
-These defaults convert missing optional fields to empty strings during JSONL import.
-Machine-facing IDs defaulting to empty string can corrupt downstream lookups.
+Resolved by `ExportRecordBuildError`: JSONL export builders now reject missing
+or blank required IDs, timestamps, content, schema metadata, and size fields
+instead of manufacturing empty strings or zero sizes. Optional display and
+metadata fields remain optional.
 
-| Line | Field | Severity | Issue |
-|------|-------|----------|-------|
-| 670 | `created_at: self.created_at.unwrap_or_default()` | FOLLOWUP | Timestamp defaults to epoch |
-| 676 | `ee_version: self.ee_version.unwrap_or_default()` | SAFE | Version metadata, optional |
-| 678 | `export_id: self.export_id.unwrap_or_default()` | FOLLOWUP | Empty export_id breaks provenance |
-| 790 | `export_id: self.export_id.unwrap_or_default()` | FOLLOWUP | Same (footer) |
-| 791 | `completed_at: self.completed_at.unwrap_or_default()` | FOLLOWUP | Missing completion timestamp |
-| 962 | `memory_id: self.memory_id.unwrap_or_default()` | **MUST-FIX** | Empty memory_id corrupts storage |
-| 963 | `workspace_id: self.workspace_id.unwrap_or_default()` | **MUST-FIX** | Empty workspace_id orphans record |
-| 964 | `level: self.level.unwrap_or_default()` | FOLLOWUP | Defaults to first enum variant |
-| 965 | `kind: self.kind.unwrap_or_default()` | FOLLOWUP | Defaults to first enum variant |
-| 966 | `content: self.content.unwrap_or_default()` | FOLLOWUP | Empty content is semantically valid |
-| 970 | `created_at: self.created_at.unwrap_or_default()` | FOLLOWUP | Same as 670 |
-| 1141 | `artifact_id: self.artifact_id.unwrap_or_default()` | FOLLOWUP | Empty artifact_id |
-| 1142 | `workspace_id: self.workspace_id.unwrap_or_default()` | FOLLOWUP | Same as 963 |
-
-**Linked bead:** eidetic_engine_cli-sos5.4
+**Regression:** `models::jsonl::tests::export_record_builders_reject_missing_required_fields`.
+**Linked bead:** eidetic_engine_cli-sos5.4.
 
 ---
 
