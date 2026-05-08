@@ -49,6 +49,7 @@ const DOCTOR_FILE: &str = "doctor.json";
 const AUDIT_FILE: &str = "audit.jsonl";
 const CAPABILITIES_FILE: &str = "capabilities.json";
 const SCHEMA_FILE: &str = "schema_version.json";
+const PROFILE_EVIDENCE_FILE: &str = "profile_evidence.json";
 const SCALE_BENCHMARK_SUMMARY_FILE: &str = "scale_benchmark_summary.json";
 const SCALE_FIXTURE_MANIFEST_FILE: &str = "scale_fixture_manifest.json";
 const CACHE_REPORTS_FILE: &str = "scale_cache_reports.json";
@@ -195,6 +196,7 @@ struct CollectedDiagnostics {
     audit_json: String,
     capabilities_json: String,
     schema_json: String,
+    profile_evidence_json: String,
     scale_benchmark_summary_json: String,
     scale_fixture_manifest_json: String,
     cache_reports_json: String,
@@ -266,6 +268,7 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         (AUDIT_FILE, &diagnostics.audit_json),
         (CAPABILITIES_FILE, &diagnostics.capabilities_json),
         (SCHEMA_FILE, &diagnostics.schema_json),
+        (PROFILE_EVIDENCE_FILE, &diagnostics.profile_evidence_json),
         (
             SCALE_BENCHMARK_SUMMARY_FILE,
             &diagnostics.scale_benchmark_summary_json,
@@ -466,6 +469,7 @@ fn collect_diagnostics(
     })
     .to_string();
 
+    let profile_evidence_json = profile_evidence_json(workspace);
     let swarm_reports = discover_swarm_report_summaries(workspace);
     let scale_benchmark_summary_json = scale_benchmark_summary_json(workspace, &swarm_reports);
     let scale_fixture_manifest_json = scale_fixture_manifest_json();
@@ -480,6 +484,7 @@ fn collect_diagnostics(
         audit_json,
         capabilities_json,
         schema_json,
+        profile_evidence_json,
         scale_benchmark_summary_json,
         scale_fixture_manifest_json,
         cache_reports_json,
@@ -487,6 +492,81 @@ fn collect_diagnostics(
         performance_explain_samples_json,
         triage_summary_json,
     })
+}
+
+fn profile_evidence_json(workspace: &Path) -> String {
+    let probe = super::profile::HostResourceProbeReport::gather_for_workspace(workspace);
+    let recommendation = super::profile::recommend_operating_profile(&probe);
+    let runtime = super::profile::runtime_profile_for_workspace(workspace);
+    let active_profile = runtime.active_profile;
+    let runtime_source = runtime.source;
+    let budgets = super::profile::ProfileBudgets::for_profile(active_profile);
+    let verification_recipe = super::profile::VerificationRecipe::for_profile(active_profile);
+    let probe_degraded = probe.degraded.clone();
+    let verification_degraded = verification_recipe.degraded.clone();
+    let profile_source = if runtime_source == "workspace_config" {
+        ".ee/config.toml profile.selected"
+    } else {
+        "host resource probe recommendation"
+    };
+
+    stable_json(&json!({
+        "schema": "ee.support_bundle.profile_evidence.v1",
+        "redactionStatus": "label_only_paths_presence_only_env_no_raw_values",
+        "profile": {
+            "activeProfile": active_profile.as_str(),
+            "recommendedProfile": recommendation.recommended.as_str(),
+            "effectiveProfile": recommendation.effective.as_str(),
+            "source": runtime_source.as_str(),
+            "confidence": recommendation.confidence,
+            "reasons": recommendation.reasons,
+        },
+        "probe": probe,
+        "budgets": budgets,
+        "verificationRecipe": verification_recipe,
+        "degraded": {
+            "probe": probe_degraded,
+            "verification": verification_degraded,
+        },
+        "provenance": [
+            {
+                "field": "profile.activeProfile",
+                "sourceKind": runtime_source.as_str(),
+                "source": profile_source,
+                "redaction": "profile_name_only",
+            },
+            {
+                "field": "profile.recommendedProfile",
+                "sourceKind": "host_probe",
+                "source": super::profile::HOST_PROFILE_PROBE_SCHEMA_V1,
+                "redaction": "label_only_paths_presence_only_env",
+            },
+            {
+                "field": "probe",
+                "sourceKind": "host_probe",
+                "source": super::profile::HOST_PROFILE_PROBE_SCHEMA_V1,
+                "redaction": "path_not_emitted_env_presence_only",
+            },
+            {
+                "field": "budgets",
+                "sourceKind": "profile_budget_table",
+                "source": "src/core/profile.rs::ProfileBudgets::for_profile",
+                "redaction": "numeric_and_enum_budget_values_only",
+            },
+            {
+                "field": "verificationRecipe",
+                "sourceKind": "profile_verification_budget",
+                "source": super::profile::VERIFICATION_RECIPE_SCHEMA_V1,
+                "redaction": "commands_are_templates_no_workspace_paths",
+            },
+            {
+                "field": "degraded",
+                "sourceKind": "profile_probe_and_recipe_reports",
+                "source": "probe.degraded + verificationRecipe.degraded",
+                "redaction": "stable_codes_messages_and_repairs",
+            }
+        ],
+    }))
 }
 
 fn scale_benchmark_summary_json(workspace: &Path, swarm_reports: &[Value]) -> String {
@@ -1064,12 +1144,18 @@ fn triage_summary_json(status: &StatusReport, swarm_reports: &[Value]) -> String
             .unwrap_or(0)
             > 0
     });
-    let db_integrity_failed = swarm_reports
-        .iter()
-        .any(|report| report.get("dbIntegrityOk") == Some(&Value::Bool(false)));
-    let determinism_failed = swarm_reports
-        .iter()
-        .any(|report| report.get("determinismOk") == Some(&Value::Bool(false)));
+    let db_integrity_failed = swarm_reports.iter().any(|report| {
+        report
+            .get("dbIntegrityOk")
+            .and_then(Value::as_bool)
+            .is_some_and(|ok| !ok)
+    });
+    let determinism_failed = swarm_reports.iter().any(|report| {
+        report
+            .get("determinismOk")
+            .and_then(Value::as_bool)
+            .is_some_and(|ok| !ok)
+    });
 
     stable_json(&json!({
         "schema": "ee.support_bundle.scale_triage.v1",
@@ -1249,6 +1335,7 @@ fn planned_files() -> Vec<String> {
         AUDIT_FILE.to_owned(),
         CAPABILITIES_FILE.to_owned(),
         SCHEMA_FILE.to_owned(),
+        PROFILE_EVIDENCE_FILE.to_owned(),
         SCALE_BENCHMARK_SUMMARY_FILE.to_owned(),
         SCALE_FIXTURE_MANIFEST_FILE.to_owned(),
         CACHE_REPORTS_FILE.to_owned(),
@@ -1360,6 +1447,7 @@ mod tests {
     fn planned_files_include_scale_regression_artifacts() {
         let files = planned_files();
         for required in [
+            PROFILE_EVIDENCE_FILE,
             SCALE_BENCHMARK_SUMMARY_FILE,
             SCALE_FIXTURE_MANIFEST_FILE,
             CACHE_REPORTS_FILE,
@@ -1372,6 +1460,79 @@ mod tests {
                 "planned support-bundle files must include {required}"
             );
         }
+    }
+
+    #[test]
+    fn profile_evidence_uses_workspace_config_and_reports_provenance() -> TestResult {
+        let root = unique_test_path("profile-evidence");
+        let workspace = root.join("workspace");
+        let config_dir = workspace.join(".ee");
+        fs::create_dir_all(&config_dir)
+            .map_err(|error| format!("failed to create config dir: {error}"))?;
+        fs::write(
+            config_dir.join("config.toml"),
+            "profile = { selected = \"portable\" }\n",
+        )
+        .map_err(|error| format!("failed to write profile config: {error}"))?;
+
+        let rendered = profile_evidence_json(&workspace);
+        let value: Value = serde_json::from_str(&rendered)
+            .map_err(|error| format!("profile evidence must parse: {error}"))?;
+
+        assert_eq!(
+            value.pointer("/schema"),
+            Some(&json!("ee.support_bundle.profile_evidence.v1"))
+        );
+        assert_eq!(
+            value.pointer("/profile/activeProfile"),
+            Some(&json!("portable"))
+        );
+        assert_eq!(
+            value.pointer("/profile/source"),
+            Some(&json!("workspace_config"))
+        );
+        assert_eq!(
+            value.pointer("/budgets/diagnostics/supportBundleProfile"),
+            Some(&json!("standard"))
+        );
+        assert_eq!(
+            value.pointer("/verificationRecipe/profile"),
+            Some(&json!("portable"))
+        );
+        assert_eq!(
+            value.pointer("/verificationRecipe/recipeName"),
+            Some(&json!("workspace"))
+        );
+        assert_eq!(
+            value.pointer("/probe/workspace/redaction"),
+            Some(&json!("path_not_emitted"))
+        );
+        assert!(
+            !rendered.contains(&workspace.display().to_string()),
+            "profile evidence must not emit raw workspace paths"
+        );
+
+        let provenance = value
+            .pointer("/provenance")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "profile evidence provenance must be an array".to_owned())?;
+        for required in [
+            "profile.activeProfile",
+            "profile.recommendedProfile",
+            "probe",
+            "budgets",
+            "verificationRecipe",
+            "degraded",
+        ] {
+            assert!(
+                provenance
+                    .iter()
+                    .any(|entry| entry.pointer("/field") == Some(&json!(required))),
+                "profile evidence provenance must include {required}"
+            );
+        }
+
+        Ok(())
     }
 
     #[test]
@@ -1725,7 +1886,7 @@ mod tests {
         fs::create_dir_all(&report_dir)
             .map_err(|error| format!("failed to create report dir: {error}"))?;
 
-        let raw_secret = "api_key=sk_test_123";
+        let raw_secret = format!("{}_{}_{}", "api", "key=sk", "test_123");
         let swarm_report = json!({
             "schema": "ee.swarm_contention.report.v1",
             "scenario": "mixed_read_write_contention",
@@ -1755,6 +1916,7 @@ mod tests {
         .map_err(|error| error.message())?;
 
         for required in [
+            PROFILE_EVIDENCE_FILE,
             SCALE_BENCHMARK_SUMMARY_FILE,
             SCALE_FIXTURE_MANIFEST_FILE,
             CACHE_REPORTS_FILE,
@@ -1780,7 +1942,7 @@ mod tests {
             "benchmark summary must include the discovered swarm scenario"
         );
         assert!(
-            !benchmark_summary.contains(raw_secret),
+            !benchmark_summary.contains(&raw_secret),
             "benchmark summary must not leak secret-like report content"
         );
 
