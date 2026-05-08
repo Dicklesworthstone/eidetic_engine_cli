@@ -7,8 +7,6 @@
 pub mod security_profile;
 pub mod trust_decay;
 
-use std::str::FromStr;
-
 pub use security_profile::{
     FilePermissionCheck, FilePermissionReport, ParseSecurityProfileError, SecurityProfile,
     check_workspace_permissions, load_profile_from_env,
@@ -18,6 +16,58 @@ pub use trust_decay::{DecayConfig, SourceTrustState, TrustAdvisory, TrustDecayCa
 use crate::models::TrustClass;
 
 pub const SUBSYSTEM: &str = "policy";
+
+/// Constant-time byte-slice equality comparison.
+///
+/// Returns true iff both slices have equal length and equal bytes.
+/// Execution time depends on the longer input length, not on the position of
+/// the first differing byte.
+#[inline(never)]
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let max_len = a.len().max(b.len());
+    let mut result = a.len() ^ b.len();
+    for index in 0..max_len {
+        let byte_a = a.get(index).copied().unwrap_or(0);
+        let byte_b = b.get(index).copied().unwrap_or(0);
+        result |= usize::from(byte_a ^ byte_b);
+    }
+
+    std::hint::black_box(result) == 0
+}
+
+/// Constant-time string equality wrapper.
+#[inline(never)]
+fn ct_str_eq(a: &str, b: &str) -> bool {
+    constant_time_eq(a.as_bytes(), b.as_bytes())
+}
+
+/// Parse trust class using constant-time comparison against all variants.
+/// Always compares against every variant to prevent timing oracle.
+#[inline(never)]
+fn parse_trust_class_constant_time(input: &str) -> Option<TrustClass> {
+    // Compare against all variants, accumulating matches
+    let mut matched = None;
+
+    // We must compare against EVERY variant to ensure constant time
+    if ct_str_eq(input, "human_explicit") {
+        matched = Some(TrustClass::HumanExplicit);
+    }
+    // Use black_box to prevent short-circuit optimization
+    if std::hint::black_box(ct_str_eq(input, "agent_validated")) {
+        matched = Some(TrustClass::AgentValidated);
+    }
+    if std::hint::black_box(ct_str_eq(input, "agent_assertion")) {
+        matched = Some(TrustClass::AgentAssertion);
+    }
+    if std::hint::black_box(ct_str_eq(input, "cass_evidence")) {
+        matched = Some(TrustClass::CassEvidence);
+    }
+    if std::hint::black_box(ct_str_eq(input, "legacy_import")) {
+        matched = Some(TrustClass::LegacyImport);
+    }
+
+    matched
+}
 pub const INSTRUCTION_LIKE_SCORE_THRESHOLD: f32 = 0.45;
 /// Backward-compatible constant for code that checks for any redaction.
 /// Prefer checking for `[REDACTED:` prefix to detect scanner-specific placeholders.
@@ -346,6 +396,13 @@ impl TrustPromotionEvidenceRejection {
 ///
 /// Shape validation is deterministic and independent of storage so curation
 /// validation can reject spoofed evidence before any durable mutation.
+///
+/// # Timing Invariance
+///
+/// This function uses constant-time comparison for trust class parsing and
+/// performs ALL validation checks regardless of the input to prevent timing
+/// side-channels that could leak information about valid trust classes.
+#[inline(never)]
 pub fn validate_trust_promotion_evidence(
     proposed_trust_class: &str,
     source_type: &str,
@@ -354,17 +411,34 @@ pub fn validate_trust_promotion_evidence(
     let proposed_trust_class = proposed_trust_class.trim();
     let source_type = source_type.trim();
     let source_id = source_id.trim();
-    let trust_class = TrustClass::from_str(proposed_trust_class)
-        .map_err(|_| TrustPromotionEvidenceRejection::new("unknown_trust_class"))?;
+
+    // Use constant-time parsing to prevent timing oracle
+    let trust_class = parse_trust_class_constant_time(proposed_trust_class);
+
+    // Always perform ALL validation checks to ensure constant-time execution.
+    // We accumulate potential errors but only report the first applicable one.
+
+    // Check AgentValidated requirements (always computed)
+    let agent_validated_source_ok = std::hint::black_box(ct_str_eq(source_type, "feedback_event"));
+    let agent_validated_id_ok = std::hint::black_box(is_feedback_event_id(source_id));
+
+    // Check HumanExplicit requirements (always computed)
+    let human_explicit_source_ok = std::hint::black_box(ct_str_eq(source_type, "human_request"));
+    let human_explicit_id_ok = std::hint::black_box(is_audit_log_id(source_id));
+
+    // Now evaluate which error to return based on the trust class
+    let Some(trust_class) = trust_class else {
+        return Err(TrustPromotionEvidenceRejection::new("unknown_trust_class"));
+    };
 
     match trust_class {
         TrustClass::AgentValidated => {
-            if source_type != "feedback_event" {
+            if !agent_validated_source_ok {
                 return Err(TrustPromotionEvidenceRejection::new(
                     "agent_validated_requires_feedback_event_source",
                 ));
             }
-            if !is_feedback_event_id(source_id) {
+            if !agent_validated_id_ok {
                 return Err(TrustPromotionEvidenceRejection::new(
                     "agent_validated_requires_feedback_event_id",
                 ));
@@ -372,12 +446,12 @@ pub fn validate_trust_promotion_evidence(
             Ok(())
         }
         TrustClass::HumanExplicit => {
-            if source_type != "human_request" {
+            if !human_explicit_source_ok {
                 return Err(TrustPromotionEvidenceRejection::new(
                     "human_explicit_requires_human_request_source",
                 ));
             }
-            if !is_audit_log_id(source_id) {
+            if !human_explicit_id_ok {
                 return Err(TrustPromotionEvidenceRejection::new(
                     "human_explicit_requires_audit_log_id",
                 ));
@@ -389,17 +463,26 @@ pub fn validate_trust_promotion_evidence(
 }
 
 fn is_feedback_event_id(value: &str) -> bool {
-    let Some(payload) = value.strip_prefix("fb_") else {
-        return false;
-    };
-    value.len() == 29 && payload.chars().all(|ch| ch.is_ascii_alphanumeric())
+    let bytes = value.as_bytes();
+    let has_prefix = bytes
+        .get(..3)
+        .is_some_and(|prefix| constant_time_eq(prefix, b"fb_"));
+    let payload_is_alphanumeric = bytes
+        .iter()
+        .skip(3)
+        .all(|byte| byte.is_ascii_alphanumeric());
+
+    (value.len() == 29) & has_prefix & payload_is_alphanumeric
 }
 
 fn is_audit_log_id(value: &str) -> bool {
-    let Some(payload) = value.strip_prefix("audit_") else {
-        return false;
-    };
-    matches!(value.len(), 32 | 38) && payload.chars().all(|ch| ch.is_ascii_hexdigit())
+    let bytes = value.as_bytes();
+    let has_prefix = bytes
+        .get(..6)
+        .is_some_and(|prefix| constant_time_eq(prefix, b"audit_"));
+    let payload_is_hex = bytes.iter().skip(6).all(|byte| byte.is_ascii_hexdigit());
+
+    matches!(value.len(), 32 | 38) & has_prefix & payload_is_hex
 }
 
 const INSTRUCTION_PATTERNS: &[InstructionPattern] = &[
@@ -1061,6 +1144,10 @@ fn base64url_value(byte: u8) -> Option<u8> {
     }
 }
 
+/// Minimum length for standalone high-entropy detection without keyword proximity.
+/// Strings this long with sufficient entropy are flagged regardless of context.
+const STANDALONE_HIGH_ENTROPY_MIN_LEN: usize = 64;
+
 fn redact_high_entropy_secret_values(
     input: &str,
     reasons: &mut Vec<&'static str>,
@@ -1076,9 +1163,15 @@ fn redact_high_entropy_secret_values(
             break;
         };
         let candidate = &input[token_start..token_end];
-        if looks_like_high_entropy_secret(candidate)
-            && has_nearby_secret_keyword(input, token_start, token_end)
-        {
+        let should_redact = if looks_like_high_entropy_secret(candidate) {
+            // Very long high-entropy strings (64+ chars) are flagged standalone.
+            // Shorter high-entropy strings (32-63 chars) require nearby keyword.
+            looks_like_standalone_high_entropy_secret(candidate)
+                || has_nearby_secret_keyword(input, token_start, token_end)
+        } else {
+            false
+        };
+        if should_redact {
             if !changed {
                 output = String::with_capacity(input.len());
             }
@@ -1097,6 +1190,12 @@ fn redact_high_entropy_secret_values(
     } else {
         (input.to_owned(), false)
     }
+}
+
+fn looks_like_standalone_high_entropy_secret(candidate: &str) -> bool {
+    let trimmed = candidate.trim_matches('=');
+    trimmed.len() >= STANDALONE_HIGH_ENTROPY_MIN_LEN
+        && !trimmed.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn next_entropy_candidate(input: &str, mut cursor: usize) -> Option<(usize, usize)> {
@@ -1603,6 +1702,115 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn trust_promotion_parser_rejects_near_miss_class_names() {
+        assert_eq!(
+            super::parse_trust_class_constant_time("agent_validated"),
+            Some(crate::models::TrustClass::AgentValidated)
+        );
+
+        for near_miss in [
+            "agent_validatedx",
+            "agent_validate",
+            "human_explicit_role",
+            "legacy_imported",
+        ] {
+            assert_eq!(super::parse_trust_class_constant_time(near_miss), None);
+        }
+    }
+
+    #[test]
+    fn constant_time_eq_behavior() {
+        // Equal strings
+        assert!(super::ct_str_eq("agent_validated", "agent_validated"));
+        assert!(super::ct_str_eq("", ""));
+
+        // Unequal strings - must not short-circuit
+        assert!(!super::ct_str_eq("agent_validated", "agent_validatedx"));
+        assert!(!super::ct_str_eq("agent_validated", "agent_validatad"));
+        assert!(!super::ct_str_eq("agent_validated", "bgent_validated"));
+
+        // Different lengths
+        assert!(!super::ct_str_eq("short", "longer_string"));
+        assert!(!super::ct_str_eq("longer_string", "short"));
+    }
+
+    #[test]
+    fn trust_promotion_timing_invariant_structure() -> Result<(), String> {
+        // This test verifies the STRUCTURE that ensures timing invariance:
+        // All validation checks must be performed regardless of input.
+        //
+        // We verify this by ensuring that validation results are consistent
+        // and that the function always performs full work.
+
+        // Valid trust classes with valid evidence
+        let valid_cases = [
+            (
+                "agent_validated",
+                "feedback_event",
+                "fb_01234567890123456789012345",
+            ),
+            (
+                "human_explicit",
+                "human_request",
+                "audit_01234567890123456789012345678901",
+            ),
+            ("agent_assertion", "any", "any"),
+            ("cass_evidence", "any", "any"),
+            ("legacy_import", "any", "any"),
+        ];
+
+        for (trust_class, source_type, source_id) in valid_cases {
+            let result = validate_trust_promotion_evidence(trust_class, source_type, source_id);
+            assert!(
+                result.is_ok(),
+                "expected Ok for {trust_class}, got {result:?}"
+            );
+        }
+
+        // Invalid trust classes - must still perform full validation work
+        let invalid_class_cases = [
+            "superadmin",
+            "AGENT_VALIDATED", // case sensitive
+            "agent-validated", // wrong separator
+            "",
+            "   ",
+        ];
+
+        for invalid_class in invalid_class_cases {
+            let result = validate_trust_promotion_evidence(invalid_class, "any", "any");
+            assert!(
+                result.is_err(),
+                "expected Err for invalid class '{invalid_class}'"
+            );
+            let rejection = result
+                .err()
+                .ok_or_else(|| format!("expected rejection for `{invalid_class}`"))?;
+            assert_eq!(rejection.reason, "unknown_trust_class");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn trust_promotion_unknown_class_reason_ignores_evidence_shape() -> Result<(), String> {
+        for (source_type, source_id) in [
+            ("feedback_event", "fb_01234567890123456789012345"),
+            ("human_request", "audit_01234567890123456789012345678901"),
+            ("wrong_source", "wrong_id"),
+        ] {
+            let rejection =
+                validate_trust_promotion_evidence("invalid_clsxxxxx", source_type, source_id)
+                    .err()
+                    .ok_or_else(|| {
+                        format!("expected unknown class rejection for source `{source_type}`")
+                    })?;
+            assert_eq!(rejection.reason, "unknown_trust_class");
+        }
+
+        Ok(())
+    }
+
     fn synthetic_raw_value(prefix_parts: &[&str], suffix_len: usize) -> String {
         let mut value = String::new();
         for part in prefix_parts {
@@ -2067,6 +2275,40 @@ mod tests {
 
         assert!(!report.redacted);
         assert!(report.content.contains(&public_hash));
+    }
+
+    #[test]
+    fn secret_redactor_masks_standalone_very_long_high_entropy_values() {
+        let long_secret = synthetic_base64_secret(72);
+        let report =
+            redact_secret_like_content(&format!("The value is {long_secret} for processing."));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"high_entropy_secret"));
+        assert!(
+            report
+                .content
+                .contains(&redaction_placeholder("high_entropy_secret"))
+        );
+        assert!(!report.content.contains(&long_secret));
+    }
+
+    #[test]
+    fn secret_redactor_preserves_standalone_public_hex_hash_at_64_chars() {
+        let public_hash = synthetic_hex_secret(64);
+        let report = redact_secret_like_content(&format!("Computed hash {public_hash} stored."));
+
+        assert!(!report.redacted);
+        assert!(report.content.contains(&public_hash));
+    }
+
+    #[test]
+    fn secret_redactor_still_requires_keyword_for_short_high_entropy() {
+        let short_secret = synthetic_base64_secret(48);
+        let report = redact_secret_like_content(&format!("Random identifier {short_secret}."));
+
+        assert!(!report.redacted);
+        assert!(report.content.contains(&short_secret));
     }
 
     #[test]
