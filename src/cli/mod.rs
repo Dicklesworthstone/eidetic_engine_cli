@@ -14341,6 +14341,13 @@ struct QueryFileRequest {
     filters: crate::models::QueryFilters,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct QueryFileBudget {
+    max_tokens: Option<u32>,
+    candidate_pool: Option<u32>,
+    max_results: Option<u32>,
+}
+
 type QueryOutputControls = (
     Option<ContextPackProfile>,
     Option<output::Renderer>,
@@ -14512,7 +14519,7 @@ fn parse_query_document(content: &str) -> Result<QueryFileRequest, QueryFileErro
 
     let query = query_text_from_document(object)?;
     let workspace_path = optional_path_field(object, "workspace")?;
-    let (max_tokens, candidate_pool, max_results) = budget_from_document(object)?;
+    let budget = budget_from_document(object)?;
     let speed = speed_from_document(object)?;
     let (profile, renderer, mut output_degraded) = output_from_document(object)?;
     degraded.append(&mut output_degraded);
@@ -14522,9 +14529,9 @@ fn parse_query_document(content: &str) -> Result<QueryFileRequest, QueryFileErro
         workspace_path,
         query,
         profile,
-        max_tokens,
-        candidate_pool,
-        max_results,
+        max_tokens: budget.max_tokens,
+        candidate_pool: budget.candidate_pool,
+        max_results: budget.max_results,
         speed,
         renderer,
         degraded,
@@ -14851,9 +14858,9 @@ fn optional_path_field(
 
 fn budget_from_document(
     object: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(Option<u32>, Option<u32>, Option<u32>), QueryFileError> {
+) -> Result<QueryFileBudget, QueryFileError> {
     let Some(budget) = object.get("budget") else {
-        return Ok((None, None, None));
+        return Ok(QueryFileBudget::default());
     };
     let budget = budget.as_object().ok_or_else(|| {
         QueryFileError::new(
@@ -14865,7 +14872,11 @@ fn budget_from_document(
     let max_tokens = optional_positive_u32(budget, "maxTokens")?;
     let candidate_pool = optional_positive_u32(budget, "candidatePool")?;
     let max_results = optional_positive_u32(budget, "maxResults")?;
-    Ok((max_tokens, candidate_pool, max_results))
+    Ok(QueryFileBudget {
+        max_tokens,
+        candidate_pool,
+        max_results,
+    })
 }
 
 fn speed_from_document(
@@ -28822,11 +28833,10 @@ mod tests {
         let object = doc
             .as_object()
             .ok_or_else(|| "test fixture must be an object".to_string())?;
-        let (max_tokens, candidate_pool, max_results) =
-            super::budget_from_document(object).map_err(|e| e.message)?;
-        ensure_equal(&max_tokens, &Some(4000), "maxTokens")?;
-        ensure_equal(&candidate_pool, &Some(100), "candidatePool")?;
-        ensure_equal(&max_results, &Some(25), "maxResults")
+        let budget = super::budget_from_document(object).map_err(|e| e.message)?;
+        ensure_equal(&budget.max_tokens, &Some(4000), "maxTokens")?;
+        ensure_equal(&budget.candidate_pool, &Some(100), "candidatePool")?;
+        ensure_equal(&budget.max_results, &Some(25), "maxResults")
     }
 
     #[test]
@@ -28840,10 +28850,13 @@ mod tests {
         let object = doc
             .as_object()
             .ok_or_else(|| "test fixture must be an object".to_string())?;
-        let (max_tokens, _, max_results) =
-            super::budget_from_document(object).map_err(|e| e.message)?;
-        ensure_equal(&max_tokens, &Some(8000), "maxTokens")?;
-        ensure_equal(&max_results, &None, "maxResults should be None when absent")
+        let budget = super::budget_from_document(object).map_err(|e| e.message)?;
+        ensure_equal(&budget.max_tokens, &Some(8000), "maxTokens")?;
+        ensure_equal(
+            &budget.max_results,
+            &None,
+            "maxResults should be None when absent",
+        )
     }
 
     #[test]
