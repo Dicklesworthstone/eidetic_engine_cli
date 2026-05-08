@@ -9,7 +9,7 @@ use ee::db::{
 };
 use ee::models::WorkspaceId;
 use insta::assert_json_snapshot;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
 
@@ -428,6 +428,81 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
     )?;
     assert_json_snapshot!("profile_config_plan_json_contract", profile_config_plan);
 
+    let missing_config_apply = run_profile_json_command(
+        &fixture,
+        vec![
+            "--json".to_string(),
+            "--workspace".to_string(),
+            fixture.workspace_arg(),
+            "profile".to_string(),
+            "config".to_string(),
+            "apply".to_string(),
+            "--dry-run".to_string(),
+            "--profile".to_string(),
+            "portable".to_string(),
+        ],
+    )?;
+    ensure_profile_apply_dry_run_shape(&missing_config_apply, false, true)?;
+
+    let applied_config = run_profile_json_command(
+        &fixture,
+        vec![
+            "--json".to_string(),
+            "--workspace".to_string(),
+            fixture.workspace_arg(),
+            "profile".to_string(),
+            "config".to_string(),
+            "apply".to_string(),
+            "--profile".to_string(),
+            "portable".to_string(),
+        ],
+    )?;
+    ensure_json_bool(&applied_config, "/data/applied", true)?;
+
+    let existing_config_apply = run_profile_json_command(
+        &fixture,
+        vec![
+            "--json".to_string(),
+            "--workspace".to_string(),
+            fixture.workspace_arg(),
+            "profile".to_string(),
+            "config".to_string(),
+            "apply".to_string(),
+            "--dry-run".to_string(),
+            "--profile".to_string(),
+            "portable".to_string(),
+        ],
+    )?;
+    ensure_profile_apply_dry_run_shape(&existing_config_apply, true, false)?;
+
+    let profile_config_apply = json!({
+        "missingConfigDryRun": missing_config_apply,
+        "existingConfigDryRun": existing_config_apply,
+    });
+    assert_json_snapshot!("profile_config_apply_json_contract", profile_config_apply);
+
+    Ok(())
+}
+
+fn ensure_profile_apply_dry_run_shape(
+    value: &Value,
+    expected_config_exists: bool,
+    expected_would_write: bool,
+) -> TestResult {
+    ensure_json_bool(value, "/data/dryRun", true)?;
+    ensure_json_bool(value, "/data/applied", false)?;
+    ensure_json_bool(value, "/data/configExists", expected_config_exists)?;
+    ensure_json_bool(value, "/data/wouldWrite", expected_would_write)
+}
+
+fn ensure_json_bool(value: &Value, pointer: &str, expected: bool) -> TestResult {
+    let actual = value
+        .pointer(pointer)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| format!("missing boolean field {pointer}"))?;
+    if actual != expected {
+        return Err(format!("expected {pointer} to be {expected}, got {actual}"));
+    }
     Ok(())
 }
 
