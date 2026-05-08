@@ -281,6 +281,18 @@ pub struct ContextPackOptions {
     pub max_tokens: Option<u32>,
     pub candidate_pool: Option<u32>,
     pub max_results: Option<u32>,
+    pub pagination: Option<ContextPagination>,
+}
+
+/// Pagination state for context pack execution.
+#[derive(Clone, Debug, Default)]
+pub struct ContextPagination {
+    /// Page size limit.
+    pub limit: u32,
+    /// Offset from decoded cursor (0 for first page).
+    pub offset: u32,
+    /// Query shape hash for cursor validation.
+    pub query_hash: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -656,6 +668,8 @@ pub fn run_context_pack_with_performance(
             );
         }
     }
+
+    let _pagination_info = apply_pagination(&mut candidates, &options.pagination, &mut degraded);
 
     let pack_start = Instant::now();
     let budget = match options.max_tokens {
@@ -1070,6 +1084,93 @@ fn memory_fallback_metadata(memory: &StoredMemory) -> serde_json::Value {
 
 const fn plural_suffix(count: usize) -> &'static str {
     if count == 1 { "" } else { "es" }
+}
+
+/// Pagination info returned after applying pagination to candidates.
+#[derive(Clone, Debug, Default)]
+pub struct PaginationInfo {
+    /// Whether pagination was applied.
+    pub applied: bool,
+    /// Offset used for this page.
+    pub offset: u32,
+    /// Page size limit.
+    pub limit: u32,
+    /// Number of items in this page.
+    pub page_size: u32,
+    /// Whether there are more results after this page.
+    pub has_more: bool,
+    /// Next cursor token (if has_more is true).
+    pub next_cursor: Option<String>,
+}
+
+fn apply_pagination(
+    candidates: &mut Vec<PackCandidate>,
+    pagination: &Option<ContextPagination>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> PaginationInfo {
+    let Some(pagination) = pagination else {
+        return PaginationInfo::default();
+    };
+
+    let total = candidates.len();
+    let offset = pagination.offset as usize;
+    let limit = pagination.limit as usize;
+
+    if offset >= total {
+        candidates.clear();
+        return PaginationInfo {
+            applied: true,
+            offset: pagination.offset,
+            limit: pagination.limit,
+            page_size: 0,
+            has_more: false,
+            next_cursor: None,
+        };
+    }
+
+    let remaining = total.saturating_sub(offset);
+    let page_size = remaining.min(limit);
+    let has_more = remaining > limit;
+
+    *candidates = candidates
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .cloned()
+        .collect();
+
+    let next_cursor = if has_more {
+        let next_offset = offset + limit;
+        let cursor = crate::models::PaginationCursor {
+            offset: u32::try_from(next_offset).unwrap_or(u32::MAX),
+            query_hash: pagination.query_hash.clone(),
+        };
+        Some(cursor.encode())
+    } else {
+        None
+    };
+
+    if offset > 0 || has_more {
+        push_degradation(
+            degraded,
+            "context_pagination_applied",
+            ContextResponseSeverity::Low,
+            format!(
+                "Pagination applied: showing {} of {} candidates (offset {}).",
+                page_size, total, offset
+            ),
+            None,
+        );
+    }
+
+    PaginationInfo {
+        applied: true,
+        offset: pagination.offset,
+        limit: pagination.limit,
+        page_size: u32::try_from(page_size).unwrap_or(u32::MAX),
+        has_more,
+        next_cursor,
+    }
 }
 
 fn persist_pack_record(
@@ -1972,9 +2073,10 @@ mod tests {
     }
 
     fn query_time(raw: &str) -> chrono::DateTime<chrono::Utc> {
-        chrono::DateTime::parse_from_rfc3339(raw)
-            .expect("test timestamp is RFC3339")
-            .with_timezone(&chrono::Utc)
+        match chrono::DateTime::parse_from_rfc3339(raw) {
+            Ok(timestamp) => timestamp.with_timezone(&chrono::Utc),
+            Err(error) => panic!("test timestamp {raw:?} must be RFC3339: {error}"),
+        }
     }
 
     fn stored_memory_with_time(
@@ -2296,6 +2398,7 @@ mod tests {
             max_tokens: Some(60),
             candidate_pool: Some(2),
             max_results: None,
+            pagination: None,
         };
         let trace = ContextPerformanceTrace {
             db_open_count: 1,
@@ -2403,6 +2506,7 @@ mod tests {
             max_tokens: Some(400),
             candidate_pool: Some(10),
             max_results: None,
+            pagination: None,
         })
         .map_err(|error| error.to_string())?;
 

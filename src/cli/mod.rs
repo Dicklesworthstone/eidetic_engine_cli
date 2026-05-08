@@ -14185,6 +14185,10 @@ fn context_error_to_domain(error: &ContextPackError) -> DomainError {
             message: message.clone(),
             repair: error.repair_hint().map(str::to_string),
         },
+        ContextPackError::PolicyDenied(message) => DomainError::PolicyDenied {
+            message: message.clone(),
+            repair: Some("Use redaction.policy=respect or remove redaction bypass.".to_string()),
+        },
     }
 }
 
@@ -14220,6 +14224,7 @@ where
         max_tokens: Some(args.max_tokens),
         candidate_pool: Some(args.candidate_pool),
         max_results: None,
+        pagination: None,
         filters: crate::models::QueryFilters::default(),
     };
 
@@ -14289,6 +14294,7 @@ enum QueryFileErrorCode {
     ZeroBudget,
     MissingFile,
     InvalidFile,
+    InvalidCursor,
 }
 
 impl QueryFileErrorCode {
@@ -14306,6 +14312,7 @@ impl QueryFileErrorCode {
             Self::ZeroBudget => "ERR_ZERO_BUDGET",
             Self::MissingFile => "ERR_QUERY_FILE_NOT_FOUND",
             Self::InvalidFile => "ERR_INVALID_QUERY_FILE",
+            Self::InvalidCursor => "ERR_INVALID_CURSOR",
         }
     }
 }
@@ -14339,6 +14346,7 @@ struct QueryFileRequest {
     renderer: Option<output::Renderer>,
     degraded: Vec<ContextResponseDegradation>,
     filters: crate::models::QueryFilters,
+    pagination: crate::models::QueryPagination,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -14384,6 +14392,50 @@ where
         .clone()
         .or_else(|| request.workspace_path.take())
         .unwrap_or_else(|| PathBuf::from("."));
+
+    let pagination = if request.pagination.is_empty() {
+        None
+    } else {
+        let query_hash = crate::models::compute_query_shape_hash(&request.query, &request.filters);
+        let offset = match &request.pagination.cursor {
+            Some(cursor_token) => match crate::models::PaginationCursor::decode(cursor_token) {
+                Ok(cursor) => {
+                    if cursor.query_hash != query_hash {
+                        let error = QueryFileError::new(
+                            QueryFileErrorCode::InvalidCursor,
+                            "Pagination cursor was generated for a different query shape.",
+                            Some(
+                                "Remove the cursor to start from the first page, or use the \
+                                     same query that generated the cursor."
+                                    .to_string(),
+                            ),
+                        );
+                        return write_query_file_error(&error, cli.wants_json(), stdout, stderr);
+                    }
+                    cursor.offset
+                }
+                Err(err) => {
+                    let error = QueryFileError::new(
+                        QueryFileErrorCode::InvalidCursor,
+                        format!("Invalid pagination cursor: {err}"),
+                        Some(
+                            "Remove the cursor to start from the first page, or use a valid \
+                                 cursor from a previous response."
+                                .to_string(),
+                        ),
+                    );
+                    return write_query_file_error(&error, cli.wants_json(), stdout, stderr);
+                }
+            },
+            None => 0,
+        };
+        Some(crate::core::context::ContextPagination {
+            limit: request.pagination.effective_limit(),
+            offset,
+            query_hash,
+        })
+    };
+
     let options = ContextPackOptions {
         workspace_path,
         database_path: args.database.clone(),
@@ -14395,6 +14447,7 @@ where
         max_tokens: args.max_tokens.or(request.max_tokens),
         candidate_pool: args.candidate_pool.or(request.candidate_pool),
         max_results: request.max_results,
+        pagination,
     };
     let renderer = effective_pack_renderer(cli, request.renderer);
 
@@ -14523,7 +14576,8 @@ fn parse_query_document(content: &str) -> Result<QueryFileRequest, QueryFileErro
     let speed = speed_from_document(object)?;
     let (profile, renderer, mut output_degraded) = output_from_document(object)?;
     degraded.append(&mut output_degraded);
-    let filters = extract_query_filters(object);
+    let filters = extract_query_filters(object)?;
+    let pagination = pagination_from_document(object);
 
     Ok(QueryFileRequest {
         workspace_path,
@@ -14536,7 +14590,17 @@ fn parse_query_document(content: &str) -> Result<QueryFileRequest, QueryFileErro
         renderer,
         degraded,
         filters,
+        pagination,
     })
+}
+
+fn pagination_from_document(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> crate::models::QueryPagination {
+    object
+        .get("pagination")
+        .map(crate::models::parse_pagination)
+        .unwrap_or_default()
 }
 
 fn unknown_field_degradations(
@@ -14590,8 +14654,6 @@ fn validate_query_version(
 fn validate_unsupported_query_features(
     object: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), QueryFileError> {
-    validate_temporal_fields(object)?;
-
     // Validate filter syntax (filters are now wired into pack execution)
     if let Some(filters) = object.get("filters") {
         validate_filters(filters)?;
@@ -14601,27 +14663,27 @@ fn validate_unsupported_query_features(
         validate_tags_object(tags)?;
     }
 
-    for feature in [
-        "time",
-        "asOf",
-        "temporalValidity",
-        "trust",
-        "redaction",
-        "graph",
-        "pagination",
-    ] {
-        if object.contains_key(feature) {
-            return Err(QueryFileError::new(
-                QueryFileErrorCode::UnsupportedFeature,
-                format!(
-                    "ee.query.v1 field '{feature}' is recognized but not yet supported by ee pack."
-                ),
-                Some(
-                    "Remove the field or use ee search/context flags that already support it."
-                        .to_string(),
-                ),
-            ));
-        }
+    if object.contains_key("graph") {
+        return Err(QueryFileError::new(
+            QueryFileErrorCode::UnsupportedFeature,
+            "ee.query.v1 field 'graph' is recognized but not yet supported by ee pack.".to_string(),
+            Some(
+                "Remove the field or use ee search/context flags that already support it."
+                    .to_string(),
+            ),
+        ));
+    }
+
+    if let Some(pagination) = object.get("pagination") {
+        validate_pagination_object(pagination)?;
+    }
+
+    if let Some(trust) = object.get("trust") {
+        validate_trust_object(trust)?;
+    }
+
+    if let Some(redaction) = object.get("redaction") {
+        validate_redaction_object(redaction)?;
     }
 
     Ok(())
@@ -14629,7 +14691,7 @@ fn validate_unsupported_query_features(
 
 fn extract_query_filters(
     object: &serde_json::Map<String, serde_json::Value>,
-) -> crate::models::QueryFilters {
+) -> Result<crate::models::QueryFilters, QueryFileError> {
     let mut filters = object
         .get("filters")
         .and_then(crate::models::parse_filters)
@@ -14639,7 +14701,17 @@ fn extract_query_filters(
         filters.tags = crate::models::parse_tags(tags_value);
     }
 
-    filters
+    if let Some(trust_value) = object.get("trust") {
+        filters.trust = crate::models::parse_trust(trust_value);
+    }
+
+    if let Some(redaction_value) = object.get("redaction") {
+        filters.redaction = crate::models::parse_redaction(redaction_value);
+    }
+
+    filters.temporal = temporal_filters_from_document(object)?;
+
+    Ok(filters)
 }
 
 fn validate_tags_object(value: &serde_json::Value) -> Result<(), QueryFileError> {
@@ -14680,40 +14752,331 @@ fn validate_tags_object(value: &serde_json::Value) -> Result<(), QueryFileError>
     Ok(())
 }
 
-fn validate_temporal_fields(
-    object: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(), QueryFileError> {
-    for field in ["time", "asOf", "temporalValidity"] {
-        let Some(value) = object.get(field) else {
-            continue;
-        };
-        validate_temporal_value(field, value)?;
+fn validate_trust_object(value: &serde_json::Value) -> Result<(), QueryFileError> {
+    let Some(object) = value.as_object() else {
+        return Err(QueryFileError::new(
+            QueryFileErrorCode::MalformedJson,
+            "trust must be an object with minClass, excludeClasses, or requirePosture.",
+            Some(
+                "Use trust: { minClass: \"human_explicit\", excludeClasses: [...], requirePosture: \"authoritative\" }."
+                    .to_string(),
+            ),
+        ));
+    };
+
+    let valid_trust_classes = [
+        "human_explicit",
+        "agent_validated",
+        "agent_assertion",
+        "cass_evidence",
+        "legacy_import",
+    ];
+    let valid_postures = ["authoritative", "provisional", "untrusted"];
+
+    for key in object.keys() {
+        if !["minClass", "excludeClasses", "requirePosture"].contains(&key.as_str()) {
+            return Err(QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                format!(
+                    "Unknown trust field '{key}'. Expected minClass, excludeClasses, or requirePosture."
+                ),
+                Some(
+                    "Use only minClass, excludeClasses, or requirePosture inside trust."
+                        .to_string(),
+                ),
+            ));
+        }
     }
+
+    if let Some(min_class) = object.get("minClass") {
+        let value = min_class.as_str().ok_or_else(|| {
+            QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                "trust.minClass must be a string.",
+                Some("Use trust.minClass: \"human_explicit\".".to_string()),
+            )
+        })?;
+        if !valid_trust_classes.contains(&value) {
+            return Err(QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                format!("Unknown trust class '{value}'."),
+                Some(format!("Use one of: {}.", valid_trust_classes.join(", "))),
+            ));
+        }
+    }
+
+    if let Some(exclude) = object.get("excludeClasses") {
+        let arr = exclude.as_array().ok_or_else(|| {
+            QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                "trust.excludeClasses must be an array of strings.",
+                Some("Use trust.excludeClasses: [\"agent_inferred\"].".to_string()),
+            )
+        })?;
+        for item in arr {
+            let value = item.as_str().ok_or_else(|| {
+                QueryFileError::new(
+                    QueryFileErrorCode::MalformedJson,
+                    "trust.excludeClasses array elements must be strings.",
+                    Some("Use trust.excludeClasses: [\"legacy_import\"].".to_string()),
+                )
+            })?;
+            if !valid_trust_classes.contains(&value) {
+                return Err(QueryFileError::new(
+                    QueryFileErrorCode::MalformedJson,
+                    format!("Unknown trust class '{value}' in excludeClasses."),
+                    Some(format!("Use one of: {}.", valid_trust_classes.join(", "))),
+                ));
+            }
+        }
+    }
+
+    if let Some(posture) = object.get("requirePosture") {
+        let value = posture.as_str().ok_or_else(|| {
+            QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                "trust.requirePosture must be a string.",
+                Some("Use trust.requirePosture: \"authoritative\".".to_string()),
+            )
+        })?;
+        if !valid_postures.contains(&value) {
+            return Err(QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                format!("Unknown trust posture '{value}'."),
+                Some(format!("Use one of: {}.", valid_postures.join(", "))),
+            ));
+        }
+    }
+
     Ok(())
 }
 
-fn validate_temporal_value(field: &str, value: &serde_json::Value) -> Result<(), QueryFileError> {
-    match value {
-        serde_json::Value::String(raw) => validate_rfc3339_timestamp(field, raw),
-        serde_json::Value::Object(object) => {
-            for (key, nested) in object {
-                if nested.is_string() {
-                    validate_temporal_value(&format!("{field}.{key}"), nested)?;
-                }
-            }
-            Ok(())
+fn validate_redaction_object(value: &serde_json::Value) -> Result<(), QueryFileError> {
+    let Some(object) = value.as_object() else {
+        return Err(QueryFileError::new(
+            QueryFileErrorCode::MalformedJson,
+            "redaction must be an object with policy or allowCategories.",
+            Some("Use redaction: { policy: \"respect\", allowCategories: [...] }.".to_string()),
+        ));
+    };
+
+    for key in object.keys() {
+        if !["policy", "allowCategories"].contains(&key.as_str()) {
+            return Err(QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                format!("Unknown redaction field '{key}'. Expected policy or allowCategories."),
+                Some("Use only policy or allowCategories inside redaction.".to_string()),
+            ));
         }
-        _ => Err(QueryFileError::new(
-            QueryFileErrorCode::InvalidTimestamp,
-            format!("{field} must be an RFC 3339 timestamp string or timestamp object."),
-            Some("Use timestamps such as 2026-05-01T00:00:00Z.".to_string()),
-        )),
     }
+
+    if let Some(policy) = object.get("policy") {
+        let value = policy.as_str().ok_or_else(|| {
+            QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                "redaction.policy must be a string.",
+                Some("Use redaction.policy: \"respect\" or \"bypass\".".to_string()),
+            )
+        })?;
+        if !["respect", "bypass"].contains(&value) {
+            return Err(QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                format!("Unknown redaction policy '{value}'."),
+                Some("Use \"respect\" or \"bypass\".".to_string()),
+            ));
+        }
+    }
+
+    if let Some(allow) = object.get("allowCategories") {
+        let arr = allow.as_array().ok_or_else(|| {
+            QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                "redaction.allowCategories must be an array of strings.",
+                Some("Use redaction.allowCategories: [\"internal\"].".to_string()),
+            )
+        })?;
+        for item in arr {
+            if !item.is_string() {
+                return Err(QueryFileError::new(
+                    QueryFileErrorCode::MalformedJson,
+                    "redaction.allowCategories array elements must be strings.",
+                    Some("Use redaction.allowCategories: [\"internal\"].".to_string()),
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
-fn validate_rfc3339_timestamp(field: &str, raw: &str) -> Result<(), QueryFileError> {
+fn validate_pagination_object(value: &serde_json::Value) -> Result<(), QueryFileError> {
+    let Some(object) = value.as_object() else {
+        return Err(QueryFileError::new(
+            QueryFileErrorCode::MalformedJson,
+            "pagination must be an object with limit and/or cursor.",
+            Some("Use pagination: { limit: 25, cursor: \"...\" }.".to_string()),
+        ));
+    };
+
+    for key in object.keys() {
+        if !["limit", "cursor"].contains(&key.as_str()) {
+            return Err(QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                format!("Unknown pagination field '{key}'. Expected limit or cursor."),
+                Some("Use only limit or cursor inside pagination.".to_string()),
+            ));
+        }
+    }
+
+    if let Some(limit) = object.get("limit") {
+        let value = limit.as_u64().ok_or_else(|| {
+            QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                "pagination.limit must be a positive integer.",
+                Some("Use pagination.limit: 25.".to_string()),
+            )
+        })?;
+        if value == 0 {
+            return Err(QueryFileError::new(
+                QueryFileErrorCode::ZeroBudget,
+                "pagination.limit cannot be zero.",
+                Some("Use a positive integer for pagination.limit.".to_string()),
+            ));
+        }
+        if value > 200 {
+            return Err(QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                format!("pagination.limit {value} exceeds maximum of 200."),
+                Some("Use pagination.limit <= 200.".to_string()),
+            ));
+        }
+    }
+
+    if let Some(cursor) = object.get("cursor") {
+        if !cursor.is_string() {
+            return Err(QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                "pagination.cursor must be a string.",
+                Some(
+                    "Use pagination.cursor: \"eyJ...\" (opaque token from previous response)."
+                        .to_string(),
+                ),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn temporal_filters_from_document(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<crate::models::QueryTemporalFilters, QueryFileError> {
+    let mut filters = crate::models::QueryTemporalFilters::default();
+
+    if let Some(time) = object.get("time") {
+        let time = time.as_object().ok_or_else(|| {
+            QueryFileError::new(
+                QueryFileErrorCode::InvalidTimestamp,
+                "time must be an object with after and/or before timestamps.",
+                Some("Use time: { \"after\": \"2026-05-01T00:00:00Z\" }.".to_string()),
+            )
+        })?;
+        for key in time.keys() {
+            if !matches!(key.as_str(), "after" | "before") {
+                return Err(QueryFileError::new(
+                    QueryFileErrorCode::UnsupportedFeature,
+                    format!("Unsupported time field '{key}'. Expected after or before."),
+                    Some("Use only time.after and time.before.".to_string()),
+                ));
+            }
+        }
+        filters.after = optional_query_timestamp(time, "time.after", "after")?;
+        filters.before = optional_query_timestamp(time, "time.before", "before")?;
+    }
+
+    if let Some(as_of) = object.get("asOf") {
+        filters.as_of = Some(parse_query_timestamp_value("asOf", as_of)?);
+    }
+
+    if let Some(validity) = object.get("temporalValidity") {
+        let validity = validity.as_object().ok_or_else(|| {
+            QueryFileError::new(
+                QueryFileErrorCode::UnsupportedFeature,
+                "temporalValidity must be an object.",
+                Some(
+                    "Use temporalValidity: { \"posture\": \"strict\", \"referenceTime\": \"2026-05-01T00:00:00Z\" }."
+                        .to_string(),
+                ),
+            )
+        })?;
+        for key in validity.keys() {
+            if !matches!(key.as_str(), "posture" | "referenceTime") {
+                return Err(QueryFileError::new(
+                    QueryFileErrorCode::UnsupportedFeature,
+                    format!(
+                        "Unsupported temporalValidity field '{key}'. Expected posture or referenceTime."
+                    ),
+                    Some(
+                        "Use temporalValidity.posture and temporalValidity.referenceTime."
+                            .to_string(),
+                    ),
+                ));
+            }
+        }
+        let posture = match validity.get("posture") {
+            Some(value) => {
+                let raw = value.as_str().ok_or_else(|| {
+                    QueryFileError::new(
+                        QueryFileErrorCode::UnsupportedFeature,
+                        "temporalValidity.posture must be a string.",
+                        Some("Use strict, relaxed, or ignore.".to_string()),
+                    )
+                })?;
+                crate::models::QueryTemporalValidityPosture::parse(raw).ok_or_else(|| {
+                    QueryFileError::new(
+                        QueryFileErrorCode::UnsupportedFeature,
+                        format!("Unsupported temporalValidity.posture '{raw}'."),
+                        Some("Use strict, relaxed, or ignore.".to_string()),
+                    )
+                })?
+            }
+            None => crate::models::QueryTemporalValidityPosture::Relaxed,
+        };
+        let reference_time =
+            optional_query_timestamp(validity, "temporalValidity.referenceTime", "referenceTime")?;
+        filters.validity = Some(crate::models::QueryTemporalValidity {
+            posture,
+            reference_time,
+        });
+    }
+
+    Ok(filters)
+}
+
+fn optional_query_timestamp(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    key: &str,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, QueryFileError> {
+    object
+        .get(key)
+        .map(|value| parse_query_timestamp_value(field, value))
+        .transpose()
+}
+
+fn parse_query_timestamp_value(
+    field: &str,
+    value: &serde_json::Value,
+) -> Result<chrono::DateTime<chrono::Utc>, QueryFileError> {
+    let raw = value.as_str().ok_or_else(|| {
+        QueryFileError::new(
+            QueryFileErrorCode::InvalidTimestamp,
+            format!("{field} must be an RFC 3339 timestamp string."),
+            Some("Use timestamps such as 2026-05-01T00:00:00Z.".to_string()),
+        )
+    })?;
     chrono::DateTime::parse_from_rfc3339(raw)
-        .map(|_| ())
+        .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
         .map_err(|error| {
             QueryFileError::new(
                 QueryFileErrorCode::InvalidTimestamp,
@@ -26715,6 +27078,109 @@ mod tests {
             &error.code,
             &super::QueryFileErrorCode::InvalidTimestamp,
             "invalid timestamp error code",
+        )
+    }
+
+    #[test]
+    fn query_file_document_parses_temporal_filters() -> TestResult {
+        let request = super::parse_query_document(
+            r#"{
+              "version": "ee.query.v1",
+              "query": {"text": "release"},
+              "time": {
+                "after": "2026-04-01T00:00:00Z",
+                "before": "2026-04-30T23:59:59Z"
+              },
+              "asOf": "2026-04-15T12:00:00Z",
+              "temporalValidity": {
+                "posture": "strict",
+                "referenceTime": "2026-04-20T00:00:00Z"
+              }
+            }"#,
+        )
+        .map_err(|error| error.message)?;
+
+        ensure_equal(
+            &request.filters.temporal.after,
+            &Some(
+                chrono::DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+                    .expect("test timestamp")
+                    .with_timezone(&chrono::Utc),
+            ),
+            "time.after",
+        )?;
+        ensure_equal(
+            &request.filters.temporal.before,
+            &Some(
+                chrono::DateTime::parse_from_rfc3339("2026-04-30T23:59:59Z")
+                    .expect("test timestamp")
+                    .with_timezone(&chrono::Utc),
+            ),
+            "time.before",
+        )?;
+        ensure_equal(
+            &request.filters.temporal.as_of,
+            &Some(
+                chrono::DateTime::parse_from_rfc3339("2026-04-15T12:00:00Z")
+                    .expect("test timestamp")
+                    .with_timezone(&chrono::Utc),
+            ),
+            "asOf",
+        )?;
+        let validity = request
+            .filters
+            .temporal
+            .validity
+            .as_ref()
+            .ok_or_else(|| "temporalValidity should parse".to_string())?;
+        ensure_equal(
+            &validity.posture,
+            &crate::models::QueryTemporalValidityPosture::Strict,
+            "temporalValidity.posture",
+        )?;
+        ensure_equal(
+            &validity.reference_time,
+            &Some(
+                chrono::DateTime::parse_from_rfc3339("2026-04-20T00:00:00Z")
+                    .expect("test timestamp")
+                    .with_timezone(&chrono::Utc),
+            ),
+            "temporalValidity.referenceTime",
+        )
+    }
+
+    #[test]
+    fn query_file_document_rejects_unknown_temporal_fields() -> TestResult {
+        let error = match super::parse_query_document(
+            r#"{
+              "version": "ee.query.v1",
+              "query": {"text": "release"},
+              "time": {"since": "2026-04-01T00:00:00Z"}
+            }"#,
+        ) {
+            Ok(_) => return Err("unknown temporal field should fail".into()),
+            Err(error) => error,
+        };
+        ensure_equal(
+            &error.code,
+            &super::QueryFileErrorCode::UnsupportedFeature,
+            "unknown temporal field error code",
+        )?;
+
+        let error = match super::parse_query_document(
+            r#"{
+              "version": "ee.query.v1",
+              "query": {"text": "release"},
+              "temporalValidity": {"posture": "strictish"}
+            }"#,
+        ) {
+            Ok(_) => return Err("unknown temporalValidity posture should fail".into()),
+            Err(error) => error,
+        };
+        ensure_equal(
+            &error.code,
+            &super::QueryFileErrorCode::UnsupportedFeature,
+            "unknown temporalValidity posture error code",
         )
     }
 

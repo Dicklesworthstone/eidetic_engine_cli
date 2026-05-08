@@ -46,7 +46,7 @@ The `version` field is required. Unknown versions return `ERR_UNKNOWN_VERSION`.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `query.text` | string | (required) | Natural language query for retrieval |
-| `query.mode` | enum | `"hybrid"` | `"hybrid"`, `"lexical"`, `"semantic"`, `"exact"` |
+| `query.mode` | enum | `"hybrid"` | `"hybrid"`; other modes are recognized but not wired through pack execution |
 
 **Validation**: Empty `query.text` returns `ERR_EMPTY_QUERY`.
 
@@ -136,8 +136,8 @@ Boolean predicates on memory metadata fields.
 
 ## Temporal Filters
 
-> **Status: Not Implemented** — Temporal fields (`time`, `asOf`, `temporalValidity`) are
-> recognized but return `ERR_UNSUPPORTED_FEATURE`. Use CLI flags: `ee context --after 2026-04-01`.
+> **Status: Implemented** — Temporal fields are applied during pack candidate
+> resolution after matching memory rows have been loaded from the database.
 
 ### Time Window
 
@@ -152,8 +152,8 @@ Boolean predicates on memory metadata fields.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `time.after` | ISO 8601 | Memories created after this timestamp |
-| `time.before` | ISO 8601 | Memories created before this timestamp |
+| `time.after` | ISO 8601 | Memories created at or after this timestamp |
+| `time.before` | ISO 8601 | Memories created at or before this timestamp |
 
 ### As-Of Query
 
@@ -165,7 +165,7 @@ Boolean predicates on memory metadata fields.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `asOf` | ISO 8601 | Point-in-time snapshot (excludes later updates) |
+| `asOf` | ISO 8601 | Point-in-time snapshot; excludes memories created or updated after this timestamp |
 
 **Validation**: Invalid timestamp returns `ERR_INVALID_TIMESTAMP`.
 
@@ -182,15 +182,17 @@ Boolean predicates on memory metadata fields.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `temporalValidity.posture` | enum | `"relaxed"` | `"strict"` (exclude expired), `"relaxed"` (include with warning), `"ignore"` |
-| `temporalValidity.referenceTime` | ISO 8601 | now | Time to evaluate validity against |
+| `temporalValidity.posture` | enum | `"relaxed"` | `"strict"` excludes expired or future-valid memories, `"relaxed"` includes them with a degradation, `"ignore"` bypasses validity filtering |
+| `temporalValidity.referenceTime` | ISO 8601 | `asOf`, otherwise now | Time to evaluate `valid_from`/`valid_to` against |
 
 ---
 
 ## Trust and Redaction Filters
 
-> **Status: Not Implemented** — Trust and redaction fields are recognized but return
-> `ERR_UNSUPPORTED_FEATURE`. Use CLI flags: `ee context --trust-class human_explicit`.
+> **Status: Partially Implemented** — Trust filters are applied during pack
+> candidate resolution. `redaction.policy: "respect"` is accepted; `"bypass"`
+> is denied with a policy error. Redaction category allow-lists are validated
+> but not yet used as selection filters.
 
 ```json
 {
@@ -416,7 +418,7 @@ Equivalent CLI flags remain available for ad hoc commands:
 }
 ```
 
-### ⚠️ Time/As-Of Query (not implemented)
+### Time/As-Of Query (working)
 
 ```json
 {
@@ -428,8 +430,6 @@ Equivalent CLI flags remain available for ad hoc commands:
   "asOf": "2026-04-15T12:00:00Z"
 }
 ```
-
-Use CLI instead: `ee context "API changes" --after 2026-04-01`
 
 ### ⚠️ Graph Neighborhood Hints (not implemented)
 
@@ -445,7 +445,7 @@ Use CLI instead: `ee context "API changes" --after 2026-04-01`
 }
 ```
 
-### ⚠️ Trust Filters (not implemented)
+### Trust Filters (working)
 
 ```json
 {
@@ -459,8 +459,6 @@ Use CLI instead: `ee context "API changes" --after 2026-04-01`
   }
 }
 ```
-
-Use CLI instead: `ee context "security policy" --trust-class human_explicit --fields full`
 
 ### Evaluation Scenario
 
@@ -496,13 +494,13 @@ The following shows the full schema, but most fields will error. A working subse
     "level": {"in": ["procedural", "episodic"]},
     "confidence": {"gte": 0.7}
   },
-  "time": {                           // ⚠️ Not implemented
+  "time": {                           // Implemented
     "after": "2026-04-01T00:00:00Z"
   },
-  "temporalValidity": {               // ⚠️ Not implemented
+  "temporalValidity": {               // Implemented
     "posture": "strict"
   },
-  "trust": {                          // ⚠️ Not implemented
+  "trust": {                          // Implemented
     "minClass": "human_explicit"
   },
   "graph": {                          // ⚠️ Not implemented
@@ -567,15 +565,15 @@ This schema **does not**:
 | Feature | Status | Notes |
 |---------|--------|-------|
 | `query.text` | **Implemented** | Core text search |
-| `query.mode` | **Implemented** | hybrid, lexical, semantic, exact |
+| `query.mode` | Partial | hybrid accepted; lexical, semantic, and exact return `ERR_UNSUPPORTED_FEATURE` |
 | `workspace` | **Implemented** | Workspace path resolution |
 | `tags.*` | **Implemented** | require, requireAny, exclude |
 | `filters.*` | **Implemented** | eq, neq, in, notIn, gte, lte, exists operators |
-| `time.*` | Not Implemented | Use `--after`/`--before` CLI flags |
-| `asOf` | Not Implemented | Point-in-time queries planned |
-| `temporalValidity` | Not Implemented | EE-TEMPORAL-VALIDITY-001 |
-| `trust.*` | Not Implemented | Use `--trust-class` CLI flag |
-| `redaction.*` | Not Implemented | Use `--redaction-policy` CLI flag |
+| `time.*` | **Implemented** | Inclusive created-at window filtering |
+| `asOf` | **Implemented** | Excludes memories created or updated after the snapshot timestamp |
+| `temporalValidity` | **Implemented** | strict, relaxed, and ignore postures over `valid_from`/`valid_to` |
+| `trust.*` | **Implemented** | minClass, excludeClasses, requirePosture candidate filtering |
+| `redaction.*` | Partial | `respect` accepted, `bypass` policy denied; category allow-list filtering pending |
 | `graph.*` | Not Implemented | Graph traversal hints planned |
 | `budget.maxTokens` | **Implemented** | Token budget for context pack |
 | `budget.candidatePool` | **Implemented** | Candidate pool size |
@@ -584,7 +582,7 @@ This schema **does not**:
 | `output.format` | **Implemented** | json, markdown, toon, human, jsonl, compact, hook |
 | `output.fields` | Validated | Projection controlled by `--fields` CLI flag |
 | `output.explain` | **Implemented** | Accepted; JSON packs already include selection certificates and per-item `why` |
-| `pagination.*` | Not Implemented | Use `--offset`/`--limit` CLI flags |
+| `pagination.*` | **Implemented** | Cursor-based pagination with deterministic ordering |
 | `eval.*` | **Implemented** | Evaluation labels captured in output |
 
 ---
@@ -596,13 +594,14 @@ This schema **does not**:
 These fields are recognized and validated but not wired through to pack/search execution:
 
 - [x] **tags.require, tags.requireAny, tags.exclude** — Memory tag filtering
-- [ ] **time.after, time.before** — Wire to temporal window filtering
-- [ ] **asOf** — Point-in-time snapshot queries
-- [ ] **temporalValidity** — Valid-from/valid-to support (EE-TEMPORAL-VALIDITY-001)
-- [ ] **trust.minClass, trust.excludeClasses** — Wire to trust class filtering
-- [ ] **redaction.policy** — Wire to redaction policy enforcement
+- [x] **time.after, time.before** — Wire to temporal window filtering
+- [x] **asOf** — Point-in-time snapshot queries
+- [x] **temporalValidity** — Valid-from/valid-to support (EE-TEMPORAL-VALIDITY-001)
+- [x] **trust.minClass, trust.excludeClasses** — Wire to trust class filtering
+- [x] **redaction.policy** — Accept respect and policy-deny bypass
+- [ ] **redaction.allowCategories** — Wire category allow-list filtering
 - [ ] **graph.seedMemories, graph.traversal, graph.maxHops** — Wire to graph traversal
-- [ ] **pagination.cursor, pagination.limit** — Cursor-based pagination
+- [x] **pagination.cursor, pagination.limit** — Cursor-based pagination
 - [x] **budget.maxResults** — Candidate admission limit
 - [x] **output.explain** — Explanation metadata is observable in JSON responses
 

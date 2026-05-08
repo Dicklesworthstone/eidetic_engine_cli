@@ -1238,6 +1238,139 @@ pub fn parse_redaction(value: &serde_json::Value) -> RedactionFilters {
     }
 }
 
+/// Pagination controls from ee.query.v1 pagination object.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QueryPagination {
+    /// Page size limit.
+    pub limit: Option<u32>,
+    /// Opaque cursor from previous response.
+    pub cursor: Option<String>,
+}
+
+impl QueryPagination {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.limit.is_none() && self.cursor.is_none()
+    }
+
+    /// Effective page size (default 50, max 200).
+    #[must_use]
+    pub fn effective_limit(&self) -> u32 {
+        self.limit.unwrap_or(50).min(200)
+    }
+}
+
+/// Decoded cursor state for pagination.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PaginationCursor {
+    /// Offset into the result set.
+    pub offset: u32,
+    /// Hash of query shape for stale cursor detection.
+    pub query_hash: String,
+}
+
+impl PaginationCursor {
+    /// Encode cursor to opaque base64 token.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        let json = serde_json::json!({
+            "o": self.offset,
+            "h": self.query_hash,
+        });
+        base64_encode(json.to_string().as_bytes())
+    }
+
+    /// Decode cursor from opaque base64 token.
+    pub fn decode(token: &str) -> Result<Self, PaginationCursorError> {
+        let bytes = base64_decode(token).map_err(|_| PaginationCursorError::MalformedBase64)?;
+        let text = String::from_utf8(bytes).map_err(|_| PaginationCursorError::MalformedBase64)?;
+        let value: serde_json::Value =
+            serde_json::from_str(&text).map_err(|_| PaginationCursorError::MalformedJson)?;
+        let obj = value
+            .as_object()
+            .ok_or(PaginationCursorError::MalformedJson)?;
+        let offset = obj
+            .get("o")
+            .and_then(|v| v.as_u64())
+            .ok_or(PaginationCursorError::MissingOffset)?;
+        let query_hash = obj
+            .get("h")
+            .and_then(|v| v.as_str())
+            .ok_or(PaginationCursorError::MissingQueryHash)?
+            .to_string();
+        Ok(Self {
+            offset: u32::try_from(offset).unwrap_or(u32::MAX),
+            query_hash,
+        })
+    }
+}
+
+/// Error decoding a pagination cursor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PaginationCursorError {
+    MalformedBase64,
+    MalformedJson,
+    MissingOffset,
+    MissingQueryHash,
+    QueryShapeMismatch,
+}
+
+impl std::fmt::Display for PaginationCursorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MalformedBase64 => f.write_str("cursor is not valid base64"),
+            Self::MalformedJson => f.write_str("cursor does not contain valid JSON"),
+            Self::MissingOffset => f.write_str("cursor missing offset field"),
+            Self::MissingQueryHash => f.write_str("cursor missing query hash field"),
+            Self::QueryShapeMismatch => {
+                f.write_str("cursor was generated for a different query shape")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PaginationCursorError {}
+
+/// Compute deterministic hash of query shape for cursor scoping.
+#[must_use]
+pub fn compute_query_shape_hash(query: &str, filters: &QueryFilters) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    query.hash(&mut hasher);
+    format!("{:?}", filters).hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Parse pagination from an ee.query.v1 pagination object.
+#[must_use]
+pub fn parse_pagination(value: &serde_json::Value) -> QueryPagination {
+    let Some(object) = value.as_object() else {
+        return QueryPagination::default();
+    };
+
+    let limit = object
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u32::try_from(n).ok());
+
+    let cursor = object
+        .get("cursor")
+        .and_then(serde_json::Value::as_str)
+        .map(String::from);
+
+    QueryPagination { limit, cursor }
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(data)
+}
+
+fn base64_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(input)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1743,6 +1876,87 @@ mod tests {
         ensure(
             posture_for_trust_class("unknown_class") == "advisory",
             "unknown class should default to advisory",
+        )
+    }
+
+    #[test]
+    fn pagination_empty_is_default() -> TestResult {
+        let pagination = QueryPagination::default();
+        ensure(
+            pagination.is_empty(),
+            "default QueryPagination should be empty",
+        )?;
+        ensure(
+            pagination.effective_limit() == 50,
+            "default limit should be 50",
+        )
+    }
+
+    #[test]
+    fn pagination_limit_capped_at_200() -> TestResult {
+        let pagination = QueryPagination {
+            limit: Some(500),
+            cursor: None,
+        };
+        ensure(
+            pagination.effective_limit() == 200,
+            "limit should be capped at 200",
+        )
+    }
+
+    #[test]
+    fn pagination_cursor_roundtrip() -> TestResult {
+        let cursor = PaginationCursor {
+            offset: 42,
+            query_hash: "abc123def456".to_string(),
+        };
+        let encoded = cursor.encode();
+        let decoded =
+            PaginationCursor::decode(&encoded).map_err(|e| format!("decode failed: {e}"))?;
+        ensure(decoded.offset == 42, "offset should survive roundtrip")?;
+        ensure(
+            decoded.query_hash == "abc123def456",
+            "query_hash should survive roundtrip",
+        )
+    }
+
+    #[test]
+    fn pagination_cursor_rejects_malformed() -> TestResult {
+        ensure(
+            PaginationCursor::decode("not-base64!!!").is_err(),
+            "should reject invalid base64",
+        )?;
+        ensure(
+            PaginationCursor::decode("bm90LWpzb24").is_err(),
+            "should reject non-JSON (base64 of 'not-json')",
+        )
+    }
+
+    #[test]
+    fn parse_pagination_from_json() -> TestResult {
+        let json = serde_json::json!({
+            "limit": 25,
+            "cursor": "eyJvIjoxMCwiaCI6InRlc3QifQ"
+        });
+        let pagination = parse_pagination(&json);
+        ensure(pagination.limit == Some(25), "should parse limit")?;
+        ensure(
+            pagination.cursor.as_deref() == Some("eyJvIjoxMCwiaCI6InRlc3QifQ"),
+            "should parse cursor",
+        )
+    }
+
+    #[test]
+    fn compute_query_shape_hash_deterministic() -> TestResult {
+        let filters = QueryFilters::default();
+        let hash1 = compute_query_shape_hash("test query", &filters);
+        let hash2 = compute_query_shape_hash("test query", &filters);
+        ensure(hash1 == hash2, "same input should produce same hash")?;
+
+        let hash3 = compute_query_shape_hash("different query", &filters);
+        ensure(
+            hash1 != hash3,
+            "different query should produce different hash",
         )
     }
 }
