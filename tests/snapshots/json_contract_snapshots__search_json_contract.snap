@@ -1,5 +1,6 @@
 ---
 source: tests/json_contract_snapshots.rs
+assertion_line: 378
 expression: search
 ---
 {
@@ -51,6 +52,48 @@ expression: search
         "rerankScoreCount": 0,
         "metadataCount": 0,
         "explanationCount": 0
+      }
+    },
+    "profileRuntime": {
+      "schema": "ee.profile.runtime.v1",
+      "activeProfile": "swarm",
+      "source": "host_probe",
+      "budgets": {
+        "search": {
+          "candidateLimit": 240,
+          "concurrentIndexReaders": 8,
+          "staleIndexTolerance": "repair_hint"
+        },
+        "pack": {
+          "maxTokens": 8000,
+          "maxCandidateMemories": 160,
+          "explanationVerbosity": "full"
+        },
+        "cache": {
+          "memoryCapMb": 2048,
+          "entryCap": 8192,
+          "hotsetPrewarmLimit": 512
+        },
+        "writeSpool": {
+          "queueCap": 8192,
+          "batchCap": 256,
+          "retryBudget": 12
+        },
+        "steward": {
+          "maintenanceWindowMs": 0,
+          "graphRefreshBudget": 4096,
+          "daemonPrewarm": true
+        },
+        "verification": {
+          "recipe": "full",
+          "targetDirPosture": "isolated",
+          "timeoutClass": "extended",
+          "heavyStrategy": "rch_default"
+        },
+        "diagnostics": {
+          "supportBundleProfile": "full",
+          "redaction": "policy_applied"
+        }
       }
     },
     "errors": [],

@@ -413,5 +413,116 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
     )?;
     assert_json_snapshot!("context_json_contract", context);
 
+    // Profile config plan contract - dry-run mode produces stable JSON showing
+    // selected profile, budgets, planned TOML edits, and host probe summary.
+    let profile_config_plan = run_profile_json_command(
+        &fixture,
+        vec![
+            "--json".to_string(),
+            "--workspace".to_string(),
+            fixture.workspace_arg(),
+            "profile".to_string(),
+            "config".to_string(),
+            "plan".to_string(),
+        ],
+    )?;
+    assert_json_snapshot!("profile_config_plan_json_contract", profile_config_plan);
+
     Ok(())
+}
+
+/// Run a profile command and scrub host-specific values that vary between machines.
+fn run_profile_json_command(
+    fixture: &JsonContractFixture,
+    args: Vec<String>,
+) -> Result<Value, String> {
+    let output = run_ee(&args)?;
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("stdout was not UTF-8 for ee {}: {error}", args.join(" ")))?;
+    let stderr = String::from_utf8(output.stderr)
+        .map_err(|error| format!("stderr was not UTF-8 for ee {}: {error}", args.join(" ")))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "ee {} failed with status {:?}; stderr: {stderr}; stdout: {stdout}",
+            args.join(" "),
+            output.status.code()
+        ));
+    }
+    if !stderr.is_empty() {
+        return Err(format!(
+            "ee {} must keep JSON diagnostics out of stderr, got: {stderr:?}",
+            args.join(" ")
+        ));
+    }
+    if !stdout.ends_with('\n') {
+        return Err(format!(
+            "ee {} stdout must be newline-terminated JSON, got: {stdout:?}",
+            args.join(" ")
+        ));
+    }
+
+    let mut value: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("ee {} stdout must be JSON: {error}", args.join(" ")))?;
+    scrub_json_contract(&mut value, fixture);
+    scrub_profile_host_specific(&mut value);
+    Ok(value)
+}
+
+/// Scrub host-specific values from profile probe output that vary between machines.
+fn scrub_profile_host_specific(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object.iter_mut() {
+                scrub_profile_host_specific(child);
+                // Scrub memory/CPU values that vary by host
+                if (key == "logicalCores" || key == "physicalCores") && child.is_number() {
+                    *child = serde_json::json!(0);
+                }
+                if (key == "totalBytes" || key == "availableBytes" || key == "cgroupLimitBytes")
+                    && child.is_number()
+                {
+                    *child = serde_json::json!(0);
+                }
+                // Scrub profile recommendation that depends on host resources
+                if (key == "recommended" || key == "effective") && child.is_string() {
+                    *child = Value::String("[PROFILE]".to_string());
+                }
+                // Scrub budget values that scale with profile
+                if is_profile_budget_key(key) && child.is_number() {
+                    *child = serde_json::json!(0);
+                }
+                // Scrub reasons array which contains host-specific text
+                if key == "reasons" {
+                    if let Value::Array(_) = child {
+                        *child = Value::Array(vec![Value::String("[HOST_REASON]".to_string())]);
+                    }
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                scrub_profile_host_specific(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_profile_budget_key(key: &str) -> bool {
+    matches!(
+        key,
+        "candidateLimit"
+            | "concurrentIndexReaders"
+            | "maxTokens"
+            | "maxCandidateMemories"
+            | "memoryCapMb"
+            | "entryCap"
+            | "hotsetPrewarmLimit"
+            | "queueCap"
+            | "batchCap"
+            | "retryBudget"
+            | "maintenanceWindowMs"
+            | "graphRefreshBudget"
+    )
 }

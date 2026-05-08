@@ -1,0 +1,340 @@
+---
+source: tests/json_contract_snapshots.rs
+assertion_line: 429
+expression: profile_config_plan
+---
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "schema": "ee.profile.config.plan.v1",
+    "command": "profile config plan",
+    "dryRun": true,
+    "configPath": "[WORKSPACE]/.ee/config.toml",
+    "pathRedaction": "operator_requested_config_path",
+    "configExists": false,
+    "profile": {
+      "recommended": "[PROFILE]",
+      "effective": "[PROFILE]",
+      "confidence": "high",
+      "reasons": [
+        "[HOST_REASON]"
+      ]
+    },
+    "budgets": {
+      "search": {
+        "candidateLimit": 0,
+        "concurrentIndexReaders": 0,
+        "staleIndexTolerance": "repair_hint"
+      },
+      "pack": {
+        "maxTokens": 0,
+        "maxCandidateMemories": 0,
+        "explanationVerbosity": "full"
+      },
+      "cache": {
+        "memoryCapMb": 0,
+        "entryCap": 0,
+        "hotsetPrewarmLimit": 0
+      },
+      "writeSpool": {
+        "queueCap": 0,
+        "batchCap": 0,
+        "retryBudget": 0
+      },
+      "steward": {
+        "maintenanceWindowMs": 0,
+        "graphRefreshBudget": 0,
+        "daemonPrewarm": true
+      },
+      "verification": {
+        "recipe": "full",
+        "targetDirPosture": "isolated",
+        "timeoutClass": "extended",
+        "heavyStrategy": "rch_default"
+      },
+      "diagnostics": {
+        "supportBundleProfile": "full",
+        "redaction": "policy_applied"
+      }
+    },
+    "overrides": [],
+    "edits": [
+      {
+        "key": "profile.selected",
+        "before": null,
+        "after": "swarm",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.search_candidate_limit",
+        "before": null,
+        "after": "240",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.search_concurrent_index_readers",
+        "before": null,
+        "after": "8",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.search_stale_index_tolerance",
+        "before": null,
+        "after": "repair_hint",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.pack_max_tokens",
+        "before": null,
+        "after": "8000",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.pack_max_candidate_memories",
+        "before": null,
+        "after": "160",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.pack_explanation_verbosity",
+        "before": null,
+        "after": "full",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.cache_memory_cap_mb",
+        "before": null,
+        "after": "2048",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.cache_entry_cap",
+        "before": null,
+        "after": "8192",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.cache_hotset_prewarm_limit",
+        "before": null,
+        "after": "512",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.write_spool_queue_cap",
+        "before": null,
+        "after": "8192",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.write_spool_batch_cap",
+        "before": null,
+        "after": "256",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.write_spool_retry_budget",
+        "before": null,
+        "after": "12",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.steward_maintenance_window_ms",
+        "before": null,
+        "after": "5000",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.steward_graph_refresh_budget",
+        "before": null,
+        "after": "4096",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.steward_daemon_prewarm",
+        "before": null,
+        "after": "true",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.verification_recipe",
+        "before": null,
+        "after": "full",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.verification_target_dir_posture",
+        "before": null,
+        "after": "isolated",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.verification_timeout_class",
+        "before": null,
+        "after": "extended",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.verification_heavy_strategy",
+        "before": null,
+        "after": "rch_default",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.diagnostics_support_bundle_profile",
+        "before": null,
+        "after": "full",
+        "status": "planned"
+      },
+      {
+        "key": "profile.budgets.diagnostics_redaction",
+        "before": null,
+        "after": "policy_applied",
+        "status": "planned"
+      }
+    ],
+    "conflicts": [],
+    "wouldWrite": true,
+    "applied": false,
+    "repair": "Review plannedToml, then run `ee profile config apply` without `--dry-run`.",
+    "plannedToml": "profile = { selected = \"swarm\", budgets = { search_candidate_limit = 240, search_concurrent_index_readers = 8, search_stale_index_tolerance = \"repair_hint\", pack_max_tokens = 8000, pack_max_candidate_memories = 160, pack_explanation_verbosity = \"full\", cache_memory_cap_mb = 2048, cache_entry_cap = 8192, cache_hotset_prewarm_limit = 512, write_spool_queue_cap = 8192, write_spool_batch_cap = 256, write_spool_retry_budget = 12, steward_maintenance_window_ms = 5000, steward_graph_refresh_budget = 4096, steward_daemon_prewarm = true, verification_recipe = \"full\", verification_target_dir_posture = \"isolated\", verification_timeout_class = \"extended\", verification_heavy_strategy = \"rch_default\", diagnostics_support_bundle_profile = \"full\", diagnostics_redaction = \"policy_applied\" } }\n",
+    "probe": {
+      "schema": "ee.profile.probe.v1",
+      "sideEffectFree": true,
+      "redaction": "label_only_paths_presence_only_env",
+      "complete": true,
+      "workspace": {
+        "label": "workspace",
+        "initialized": true,
+        "redaction": "path_not_emitted"
+      },
+      "cpu": {
+        "logicalCores": 0,
+        "physicalCores": null,
+        "source": "std_thread_available_parallelism"
+      },
+      "memory": {
+        "totalBytes": 0,
+        "availableBytes": 0,
+        "cgroupLimitBytes": null,
+        "source": "proc_meminfo"
+      },
+      "paths": [
+        {
+          "label": "workspace",
+          "role": "workspace_root",
+          "exists": true,
+          "nearestExistingAncestor": false,
+          "sameFilesystemAsWorkspace": true,
+          "totalBytes": 0,
+          "availableBytes": 0,
+          "redaction": "path_not_emitted"
+        },
+        {
+          "label": "ee_state",
+          "role": "workspace_state_dir",
+          "exists": true,
+          "nearestExistingAncestor": false,
+          "sameFilesystemAsWorkspace": true,
+          "totalBytes": 0,
+          "availableBytes": 0,
+          "redaction": "path_not_emitted"
+        },
+        {
+          "label": "database",
+          "role": "frankensqlite_database",
+          "exists": true,
+          "nearestExistingAncestor": false,
+          "sameFilesystemAsWorkspace": true,
+          "totalBytes": 0,
+          "availableBytes": 0,
+          "redaction": "path_not_emitted"
+        },
+        {
+          "label": "index",
+          "role": "frankensearch_index",
+          "exists": true,
+          "nearestExistingAncestor": false,
+          "sameFilesystemAsWorkspace": true,
+          "totalBytes": 0,
+          "availableBytes": 0,
+          "redaction": "path_not_emitted"
+        },
+        {
+          "label": "cache",
+          "role": "derived_cache",
+          "exists": false,
+          "nearestExistingAncestor": true,
+          "sameFilesystemAsWorkspace": true,
+          "totalBytes": 0,
+          "availableBytes": 0,
+          "redaction": "path_not_emitted"
+        },
+        {
+          "label": "temp",
+          "role": "temporary_directory",
+          "exists": true,
+          "nearestExistingAncestor": false,
+          "sameFilesystemAsWorkspace": true,
+          "totalBytes": 0,
+          "availableBytes": 0,
+          "redaction": "path_not_emitted"
+        },
+        {
+          "label": "cargo_target",
+          "role": "build_cache_directory",
+          "exists": true,
+          "nearestExistingAncestor": false,
+          "sameFilesystemAsWorkspace": true,
+          "totalBytes": 0,
+          "availableBytes": 0,
+          "redaction": "path_not_emitted"
+        }
+      ],
+      "tools": [
+        {
+          "name": "cargo",
+          "available": true,
+          "source": "path_lookup_presence_only"
+        },
+        {
+          "name": "rustfmt",
+          "available": true,
+          "source": "path_lookup_presence_only"
+        },
+        {
+          "name": "clippy",
+          "available": false,
+          "source": "path_lookup_presence_only"
+        },
+        {
+          "name": "br",
+          "available": true,
+          "source": "path_lookup_presence_only"
+        },
+        {
+          "name": "bv",
+          "available": true,
+          "source": "path_lookup_presence_only"
+        },
+        {
+          "name": "rch",
+          "available": true,
+          "source": "path_lookup_presence_only"
+        },
+        {
+          "name": "gh",
+          "available": true,
+          "source": "path_lookup_presence_only"
+        }
+      ],
+      "environment": {
+        "tmpdirConfigured": true,
+        "cargoTargetDirConfigured": true,
+        "rchHintConfigured": false,
+        "redaction": "presence_only"
+      },
+      "degraded": []
+    }
+  }
+}
