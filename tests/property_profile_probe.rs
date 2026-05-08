@@ -195,46 +195,109 @@ proptest! {
         let workstation = ProfileBudgets::for_profile(OperatingProfile::Workstation);
         let swarm = ProfileBudgets::for_profile(OperatingProfile::Swarm);
 
-        // Search budgets should scale up
-        prop_assert!(
-            constrained.search.candidate_limit <= portable.search.candidate_limit,
-            "search candidate_limit must be monotonic"
-        );
-        prop_assert!(
-            portable.search.candidate_limit <= workstation.search.candidate_limit,
-            "search candidate_limit must be monotonic"
-        );
-        prop_assert!(
-            workstation.search.candidate_limit <= swarm.search.candidate_limit,
-            "search candidate_limit must be monotonic"
-        );
+        macro_rules! assert_monotonic_budget {
+            ($constrained:expr, $portable:expr, $workstation:expr, $swarm:expr, $field:literal) => {{
+                prop_assert!(
+                    $constrained <= $portable,
+                    "{} must be monotonic from constrained to portable",
+                    $field
+                );
+                prop_assert!(
+                    $portable <= $workstation,
+                    "{} must be monotonic from portable to workstation",
+                    $field
+                );
+                prop_assert!(
+                    $workstation <= $swarm,
+                    "{} must be monotonic from workstation to swarm",
+                    $field
+                );
+            }};
+        }
 
-        // Pack budgets should scale up
-        prop_assert!(
-            constrained.pack.max_tokens <= portable.pack.max_tokens,
-            "pack max_tokens must be monotonic"
+        assert_monotonic_budget!(
+            constrained.search.candidate_limit,
+            portable.search.candidate_limit,
+            workstation.search.candidate_limit,
+            swarm.search.candidate_limit,
+            "search.candidate_limit"
         );
-        prop_assert!(
-            portable.pack.max_tokens <= workstation.pack.max_tokens,
-            "pack max_tokens must be monotonic"
+        assert_monotonic_budget!(
+            constrained.search.concurrent_index_readers,
+            portable.search.concurrent_index_readers,
+            workstation.search.concurrent_index_readers,
+            swarm.search.concurrent_index_readers,
+            "search.concurrent_index_readers"
         );
-        prop_assert!(
-            workstation.pack.max_tokens <= swarm.pack.max_tokens,
-            "pack max_tokens must be monotonic"
+        assert_monotonic_budget!(
+            constrained.pack.max_tokens,
+            portable.pack.max_tokens,
+            workstation.pack.max_tokens,
+            swarm.pack.max_tokens,
+            "pack.max_tokens"
         );
-
-        // Cache budgets should scale up
-        prop_assert!(
-            constrained.cache.memory_cap_mb <= portable.cache.memory_cap_mb,
-            "cache memory_cap_mb must be monotonic"
+        assert_monotonic_budget!(
+            constrained.pack.max_candidate_memories,
+            portable.pack.max_candidate_memories,
+            workstation.pack.max_candidate_memories,
+            swarm.pack.max_candidate_memories,
+            "pack.max_candidate_memories"
         );
-        prop_assert!(
-            portable.cache.memory_cap_mb <= workstation.cache.memory_cap_mb,
-            "cache memory_cap_mb must be monotonic"
+        assert_monotonic_budget!(
+            constrained.cache.memory_cap_mb,
+            portable.cache.memory_cap_mb,
+            workstation.cache.memory_cap_mb,
+            swarm.cache.memory_cap_mb,
+            "cache.memory_cap_mb"
         );
-        prop_assert!(
-            workstation.cache.memory_cap_mb <= swarm.cache.memory_cap_mb,
-            "cache memory_cap_mb must be monotonic"
+        assert_monotonic_budget!(
+            constrained.cache.entry_cap,
+            portable.cache.entry_cap,
+            workstation.cache.entry_cap,
+            swarm.cache.entry_cap,
+            "cache.entry_cap"
+        );
+        assert_monotonic_budget!(
+            constrained.cache.hotset_prewarm_limit,
+            portable.cache.hotset_prewarm_limit,
+            workstation.cache.hotset_prewarm_limit,
+            swarm.cache.hotset_prewarm_limit,
+            "cache.hotset_prewarm_limit"
+        );
+        assert_monotonic_budget!(
+            constrained.write_spool.queue_cap,
+            portable.write_spool.queue_cap,
+            workstation.write_spool.queue_cap,
+            swarm.write_spool.queue_cap,
+            "write_spool.queue_cap"
+        );
+        assert_monotonic_budget!(
+            constrained.write_spool.batch_cap,
+            portable.write_spool.batch_cap,
+            workstation.write_spool.batch_cap,
+            swarm.write_spool.batch_cap,
+            "write_spool.batch_cap"
+        );
+        assert_monotonic_budget!(
+            constrained.write_spool.retry_budget,
+            portable.write_spool.retry_budget,
+            workstation.write_spool.retry_budget,
+            swarm.write_spool.retry_budget,
+            "write_spool.retry_budget"
+        );
+        assert_monotonic_budget!(
+            constrained.steward.maintenance_window_ms,
+            portable.steward.maintenance_window_ms,
+            workstation.steward.maintenance_window_ms,
+            swarm.steward.maintenance_window_ms,
+            "steward.maintenance_window_ms"
+        );
+        assert_monotonic_budget!(
+            constrained.steward.graph_refresh_budget,
+            portable.steward.graph_refresh_budget,
+            workstation.steward.graph_refresh_budget,
+            swarm.steward.graph_refresh_budget,
+            "steward.graph_refresh_budget"
         );
     }
 

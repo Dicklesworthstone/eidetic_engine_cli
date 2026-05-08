@@ -98,12 +98,17 @@ when both the CPU and memory thresholds for that tier are met.
 | Budget | `constrained` | `portable` | `workstation` | `swarm` | Coverage |
 |--------|---------------|------------|---------------|---------|----------|
 | `search.candidate_limit` | 48 | 96 | 160 | 240 | Property and inline monotonic tests |
-| `search.concurrent_index_readers` | 1 | 2 | 4 | 8 | JSON snapshots; conformance artifacts |
+| `search.concurrent_index_readers` | 1 | 2 | 4 | 8 | Property monotonic test; JSON snapshots |
 | `pack.max_tokens` | 3000 | 4500 | 6000 | 8000 | Property and inline monotonic tests |
-| `pack.max_candidate_memories` | 24 | 48 | 96 | 160 | JSON snapshots; conformance artifacts |
+| `pack.max_candidate_memories` | 24 | 48 | 96 | 160 | Property monotonic test; JSON snapshots |
 | `cache.memory_cap_mb` | 128 | 512 | 1024 | 2048 | Property and inline monotonic tests |
-| `cache.entry_cap` | 512 | 1024 | 4096 | 8192 | JSON snapshots; positivity test |
-| `write_spool.batch_cap` | 32 | 64 | 128 | 256 | Budget conformance check coverage |
+| `cache.entry_cap` | 512 | 1024 | 4096 | 8192 | Property monotonic test; positivity test |
+| `cache.hotset_prewarm_limit` | 0 | 64 | 256 | 512 | Property monotonic test; JSON snapshots |
+| `write_spool.queue_cap` | 512 | 1024 | 4096 | 8192 | Property monotonic test; positivity test |
+| `write_spool.batch_cap` | 32 | 64 | 128 | 256 | Property monotonic test; budget conformance check coverage |
+| `write_spool.retry_budget` | 3 | 5 | 8 | 12 | Property monotonic test |
+| `steward.maintenance_window_ms` | 500 | 1000 | 2000 | 5000 | Property monotonic test |
+| `steward.graph_refresh_budget` | 128 | 256 | 1024 | 4096 | Property monotonic test |
 | `verification.recipe` | `quick` | `workspace` | `workspace` | `full` | Verification recipe unit tests |
 | `verification.heavy_strategy` | `manual` | `rch_preferred` | `rch_preferred` | `rch_default` | Verification recipe unit tests |
 
@@ -183,4 +188,3 @@ TMPDIR=/data/tmp CARGO_TARGET_DIR=/data/tmp/ee-profile-target rch exec -- cargo 
 | ID | Clause | Status |
 |----|--------|--------|
 | SH-01 | SHOULD add direct tests that `memory.cgroupLimitBytes` constrains recommendation when it differs from total/available memory, if that becomes implemented behavior. | Not a current MUST; recommendation does not use cgroup limits today. |
-| SH-02 | SHOULD extend monotonic property tests to every numeric budget field, including write-spool queue cap, retry budget, steward windows, and graph refresh budget. | Partially covered by snapshots, positivity checks, and conformance artifacts. |
