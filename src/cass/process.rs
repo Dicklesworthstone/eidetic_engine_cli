@@ -285,7 +285,13 @@ impl CassInvocation {
 
             let elapsed = started.elapsed();
             if elapsed >= timeout {
-                let _ = child.kill();
+                if let Err(kill_error) = child.kill() {
+                    if kill_error.kind() != std::io::ErrorKind::InvalidInput {
+                        tracing::debug!(
+                            "cass subprocess kill failed (child may have already exited): {kill_error}"
+                        );
+                    }
+                }
                 let status = child.wait().map_err(CassError::from)?;
                 let stdout_bytes = join_pipe_reader(stdout_thread)?;
                 let stderr_bytes = join_pipe_reader(stderr_thread)?;
