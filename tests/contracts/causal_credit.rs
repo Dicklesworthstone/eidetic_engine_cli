@@ -8,7 +8,7 @@ use ee::core::causal::{
     CompareOptions, EstimateOptions, PromotePlanOptions, TraceOptions, compare_causal_evidence,
     estimate_causal_uplift, promote_causal_plan, trace_causal_chains,
 };
-use ee::models::causal::{CAUSAL_TRACE_SCHEMA_V1, PromotionAction, PromotionPlanStatus};
+use ee::models::causal::{CAUSAL_TRACE_SCHEMA_V1, PromotionAction};
 use serde_json::{Value as JsonValue, json};
 use std::env;
 use std::fs;
@@ -234,25 +234,14 @@ fn causal_promote_plan_dry_run_matches_fixture() -> TestResult {
             .with_experiment_proposals()
             .dry_run(),
     );
-    ensure(!report.is_empty(), "promote plan should include one plan")?;
+    ensure(
+        report.is_empty(),
+        "promote helper must not create a plan without persisted causal evidence",
+    )?;
     ensure(report.dry_run, "promote plan should run in dry-run mode")?;
     ensure(
-        report.plans.iter().all(|plan| plan.dry_run_first),
-        "all plans must require dry-run before any mutation",
-    )?;
-    ensure(
-        report
-            .plans
-            .iter()
-            .all(|plan| plan.status == PromotionPlanStatus::DryRunReady),
-        "dry-run plans must remain dry_run_ready",
-    )?;
-    ensure(
-        report
-            .plans
-            .iter()
-            .all(|plan| plan.action == PromotionAction::Hold),
-        "dry-run plans must hold without supported causal evidence",
+        report.curation_candidate_ids.is_empty(),
+        "dry run must not create curation candidate ids",
     )?;
 
     let payload = report.data_json();
@@ -298,21 +287,17 @@ fn causal_underpowered_estimate_routes_to_review_not_promotion() -> TestResult {
             .dry_run(),
     );
 
-    ensure(!report.is_empty(), "expected one underpowered plan")?;
     ensure(
-        report
-            .plans
-            .iter()
-            .all(|plan| plan.action == PromotionAction::Hold),
-        "underpowered correlational estimates must hold instead of promote",
+        report.is_empty(),
+        "underpowered helper must not create a plan without persisted causal evidence",
     )?;
     ensure(
         report
             .recommendations
             .review_recommendations
             .iter()
-            .any(|recommendation| recommendation.contains("underpowered")),
-        "underpowered plan should route to review",
+            .any(|recommendation| recommendation.contains("evidence collection")),
+        "underpowered report should route to evidence collection",
     )?;
     ensure(
         !report.recommendations.experiment_proposals.is_empty(),
@@ -337,17 +322,9 @@ fn causal_audit_confounded_matches_fixture_and_no_mutation_policy() -> TestResul
             .with_action(PromotionAction::Demote)
             .with_revalidation(),
     );
-    ensure(!report.is_empty(), "expected one confounded plan")?;
     ensure(
-        report.plans.iter().all(|plan| plan.dry_run_first),
-        "confounded plans must keep dry-run-first enforcement",
-    )?;
-    ensure(
-        report
-            .plans
-            .iter()
-            .all(|plan| plan.status == PromotionPlanStatus::Proposed),
-        "non-dry-run report must stay proposed and never auto-apply",
+        report.is_empty(),
+        "confounded helper must not create a plan without persisted causal evidence",
     )?;
     ensure(
         report
@@ -357,11 +334,8 @@ fn causal_audit_confounded_matches_fixture_and_no_mutation_policy() -> TestResul
         "confounded report should recommend dry-run boundary",
     )?;
     ensure(
-        report
-            .plans
-            .iter()
-            .all(|plan| plan.blocking_confounder_ids.is_empty()),
-        "confounder IDs must not be fabricated without persisted evidence",
+        report.curation_candidate_ids.is_empty(),
+        "curation candidates must not be created without persisted causal evidence",
     )?;
 
     let payload = json!({

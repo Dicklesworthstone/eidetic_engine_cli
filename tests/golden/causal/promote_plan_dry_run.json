@@ -1,25 +1,7 @@
 {
   "schema": "ee.causal.promote_plan.v1",
   "command": "causal promote-plan",
-  "plans": [
-    {
-      "schema": "ee.causal.promotion_plan.v1",
-      "planId": "plan-mem_fixture_001",
-      "artifactId": "mem_fixture_001",
-      "action": "hold",
-      "status": "dry_run_ready",
-      "evidenceStrength": "exposure_only",
-      "minimumUplift": 0.05,
-      "estimatedUplift": 0.0,
-      "requiredEvidenceIds": [],
-      "blockingConfounderIds": [],
-      "dryRunFirst": true,
-      "auditIds": [
-        "audit-review-only-mem_fixture_001"
-      ],
-      "createdAt": "TIMESTAMP"
-    }
-  ],
+  "plans": [],
   "curationCandidateIds": [],
   "recommendations": {
     "revalidation": [
@@ -32,7 +14,7 @@
       "Design an explicit experiment for `mem_fixture_001` and persist treatment, baseline, outcome, and confounder evidence before re-running causal promotion review."
     ],
     "reviewRecommendations": [
-      "Route `mem_fixture_001` to review only; sample size 0 and `exposure_only` evidence are underpowered for promotion, demotion, or rerouting."
+      "Route `mem_fixture_001` to evidence collection; no persisted causal chain supports promotion, demotion, or rerouting."
     ],
     "safetyGuards": [
       "Safety-critical warnings remain pinned and are never randomized away for evidence collection."
@@ -68,9 +50,9 @@
     }
   },
   "summary": {
-    "totalPlans": 1,
+    "totalPlans": 0,
     "promoteCount": 0,
-    "holdCount": 1,
+    "holdCount": 0,
     "demoteCount": 0,
     "methodUsed": "replay"
   },

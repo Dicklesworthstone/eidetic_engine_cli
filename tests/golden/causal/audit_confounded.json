@@ -3,16 +3,10 @@
   "command": "causal promote-plan",
   "methodUsed": "naive",
   "dryRun": false,
-  "planStatuses": [
-    "proposed"
-  ],
-  "dryRunFirst": [
-    true
-  ],
+  "planStatuses": [],
+  "dryRunFirst": [],
   "blockingConfounderIds": [],
-  "auditIds": [
-    "audit-review-only-mem_confounded_001"
-  ],
+  "auditIds": [],
   "degradations": [
     {
       "code": "dry_run_recommended",
@@ -39,7 +33,7 @@
       "Design an explicit experiment for `mem_confounded_001` and persist treatment, baseline, outcome, and confounder evidence before re-running causal promotion review."
     ],
     "reviewRecommendations": [
-      "Route `mem_confounded_001` to review only; sample size 0 and `exposure_only` evidence are underpowered for promotion, demotion, or rerouting."
+      "Route `mem_confounded_001` to evidence collection; no persisted causal chain supports promotion, demotion, or rerouting."
     ],
     "safetyGuards": [
       "Safety-critical warnings remain pinned and are never randomized away for evidence collection."

@@ -2616,6 +2616,61 @@ impl PromotePlanReport {
 
 #[must_use]
 pub fn promote_causal_plan(options: &PromotePlanOptions) -> PromotePlanReport {
+    let mut report = empty_promote_plan_report(options);
+
+    if !options.has_any_filter() {
+        report.degradations.push(trace_degradation(
+            "no_filters",
+            "No causal chain, artifact, decision, or estimate ID provided; cannot produce promotion plan.",
+            "warning",
+        ));
+        return report;
+    }
+
+    report
+        .degradations
+        .push(causal_sample_underpowered("causal promote-plan"));
+    if let Some(action) = options.action
+        && action != PromotionAction::Hold
+    {
+        report.degradations.push(trace_degradation(
+            "action_override_not_actionable",
+            format!(
+                "Requested action `{}` is recorded as review input only; underpowered evidence cannot promote, demote, archive, or quarantine.",
+                action.as_str()
+            ),
+            "warning",
+        ));
+    }
+
+    report.recommendations =
+        evidence_required_recommendations(options, target_label_from_options(options));
+    report
+}
+
+fn empty_promote_plan_report(options: &PromotePlanOptions) -> PromotePlanReport {
+    let (filters_applied, degradations, method_used) = promote_plan_metadata(options);
+    PromotePlanReport {
+        schema: CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
+        plans: Vec::new(),
+        curation_candidate_ids: Vec::new(),
+        recommendations: PromotePlanRecommendations::default(),
+        downstream_effects: project_downstream_effects(
+            PromotionAction::Hold,
+            CausalEvidenceStrength::ExposureOnly,
+            0.0,
+            options.dry_run,
+        ),
+        filters_applied,
+        degradations,
+        method_used,
+        dry_run: options.dry_run,
+    }
+}
+
+fn promote_plan_metadata(
+    options: &PromotePlanOptions,
+) -> (Vec<String>, Vec<TraceDegradation>, String) {
     let mut filters_applied = Vec::new();
     let mut degradations = Vec::new();
 
@@ -2637,8 +2692,6 @@ pub fn promote_causal_plan(options: &PromotePlanOptions) -> PromotePlanReport {
         .clone()
         .unwrap_or_else(|| "replay".to_string());
     let method_used = normalize_method(&requested_method, &mut degradations);
-    let evidence_strength = CausalEvidenceStrength::ExposureOnly;
-    let estimated_uplift = 0.0;
 
     if !options.dry_run {
         degradations.push(trace_degradation(
@@ -2648,81 +2701,55 @@ pub fn promote_causal_plan(options: &PromotePlanOptions) -> PromotePlanReport {
         ));
     }
 
-    if !options.has_any_filter() {
-        degradations.push(trace_degradation(
-            "no_filters",
-            "No artifact, decision, or estimate ID provided; cannot produce plan.",
-            "warning",
-        ));
-        return PromotePlanReport {
-            schema: CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
-            plans: Vec::new(),
-            curation_candidate_ids: Vec::new(),
-            recommendations: PromotePlanRecommendations::default(),
-            downstream_effects: project_downstream_effects(
-                PromotionAction::Hold,
-                evidence_strength,
-                estimated_uplift,
-                options.dry_run,
-            ),
-            filters_applied,
-            degradations,
-            method_used,
-            dry_run: options.dry_run,
-        };
-    }
+    (filters_applied, degradations, method_used)
+}
 
-    degradations.push(causal_sample_underpowered("causal promote-plan"));
-    if let Some(action) = options.action
-        && action != PromotionAction::Hold
-    {
-        degradations.push(trace_degradation(
-            "action_override_not_actionable",
-            format!(
-                "Requested action `{}` is recorded as review input only; underpowered evidence cannot promote, demote, archive, or quarantine.",
-                action.as_str()
-            ),
-            "warning",
-        ));
-    }
-
-    let artifact_id = options
+fn target_label_from_options(options: &PromotePlanOptions) -> String {
+    options
         .artifact_id
-        .clone()
-        .or_else(|| {
-            options
-                .estimate_id
-                .as_ref()
-                .map(|id| format!("artifact-from-{id}"))
-        })
-        .or_else(|| {
-            options
-                .decision_id
-                .as_ref()
-                .map(|id| format!("artifact-for-{id}"))
-        })
-        .unwrap_or_else(|| "artifact-unknown".to_string());
+        .as_deref()
+        .or(options.decision_id.as_deref())
+        .or(options.estimate_id.as_deref())
+        .or(options.chain_id.as_deref())
+        .unwrap_or("causal evidence")
+        .to_owned()
+}
 
-    let action = PromotionAction::Hold;
-    let downstream_effects =
-        project_downstream_effects(action, evidence_strength, estimated_uplift, options.dry_run);
+fn evidence_required_recommendations(
+    options: &PromotePlanOptions,
+    target_label: String,
+) -> PromotePlanRecommendations {
+    let mut recommendations = PromotePlanRecommendations::default();
+    recommendations.safety_guards.push(
+        "Safety-critical warnings remain pinned and are never randomized away for evidence collection."
+            .to_string(),
+    );
+    if options.include_revalidation {
+        recommendations.revalidation_steps.push(format!(
+            "Collect persisted exposure, baseline, outcome, and confounder evidence for `{target_label}` before any causal estimate."
+        ));
+    }
+    if options.include_narrower_routing {
+        recommendations.narrower_routing_steps.push(format!(
+            "Review routing scope for `{target_label}` manually; this report does not reroute memory."
+        ));
+    }
+    recommendations.review_recommendations.push(format!(
+        "Route `{target_label}` to evidence collection; no persisted causal chain supports promotion, demotion, or rerouting."
+    ));
+    recommendations.experiment_proposals.push(format!(
+        "Design an explicit experiment for `{target_label}` and persist treatment, baseline, outcome, and confounder evidence before re-running causal promotion review."
+    ));
+    recommendations
+}
 
-    let plan = PromotionPlan::new(
-        format!("plan-{artifact_id}"),
-        artifact_id.clone(),
-        action,
-        chrono::Utc::now().to_rfc3339(),
-    )
-    .with_status(if options.dry_run {
-        PromotionPlanStatus::DryRunReady
-    } else {
-        PromotionPlanStatus::Proposed
-    })
-    .with_evidence_strength(evidence_strength)
-    .with_minimum_uplift(options.minimum_uplift)
-    .with_estimated_uplift(estimated_uplift)
-    .with_audit_id(format!("audit-review-only-{artifact_id}"));
-
+fn chain_recommendations(
+    options: &PromotePlanOptions,
+    chain: &CausalChain,
+    artifact_id: &str,
+    evidence_strength: CausalEvidenceStrength,
+    action: PromotionAction,
+) -> PromotePlanRecommendations {
     let mut recommendations = PromotePlanRecommendations::default();
     recommendations.safety_guards.push(
         "Safety-critical warnings remain pinned and are never randomized away for evidence collection."
@@ -2730,36 +2757,40 @@ pub fn promote_causal_plan(options: &PromotePlanOptions) -> PromotePlanReport {
     );
     if options.include_revalidation || action == PromotionAction::Hold {
         recommendations.revalidation_steps.push(format!(
-            "Collect persisted exposure, baseline, outcome, and confounder evidence for `{artifact_id}` before any causal estimate."
+            "Revalidate `{artifact_id}` against causal chain `{}` before applying any durable rule or routing change.",
+            chain.chain_id
         ));
     }
     if options.include_narrower_routing {
         recommendations.narrower_routing_steps.push(format!(
-            "Review routing scope for `{artifact_id}` manually; this report does not reroute memory."
+            "Constrain routing for `{artifact_id}` to evidence URI(s): {}.",
+            chain.evidence_uris.join(", ")
         ));
     }
-    recommendations.review_recommendations.push(format!(
-        "Route `{artifact_id}` to review only; sample size 0 and `exposure_only` evidence are underpowered for promotion, demotion, or rerouting."
-    ));
+    if action == PromotionAction::Promote {
+        recommendations.review_recommendations.push(format!(
+            "Review promotion candidate `{artifact_id}` from causal chain `{}` before applying it.",
+            chain.chain_id
+        ));
+    } else {
+        recommendations.review_recommendations.push(format!(
+            "Hold `{artifact_id}` until causal chain `{}` clears the configured uplift and evidence thresholds.",
+            chain.chain_id
+        ));
+    }
     if options.include_experiment_proposals
-        || evidence_strength == CausalEvidenceStrength::ExposureOnly
+        || !matches!(
+            evidence_strength,
+            CausalEvidenceStrength::ExperimentSupported | CausalEvidenceStrength::ReplaySupported
+        )
     {
         recommendations.experiment_proposals.push(format!(
-            "Design an explicit experiment for `{artifact_id}` and persist treatment, baseline, outcome, and confounder evidence before re-running causal promotion review."
+            "Add replay or experiment evidence for causal chain `{}` before raising confidence beyond {}.",
+            chain.chain_id,
+            evidence_strength.as_str()
         ));
     }
-
-    PromotePlanReport {
-        schema: CAUSAL_PROMOTE_PLAN_SCHEMA_V1,
-        plans: vec![plan],
-        curation_candidate_ids: Vec::new(),
-        recommendations,
-        downstream_effects,
-        filters_applied,
-        degradations,
-        method_used,
-        dry_run: options.dry_run,
-    }
+    recommendations
 }
 
 /// Route one verified causal chain into the curation queue as a plan-recipe proposal.
@@ -2768,10 +2799,7 @@ pub fn promote_causal_chain_from_store(
     workspace_id: &str,
     options: &PromotePlanOptions,
 ) -> Result<PromotePlanReport, DomainError> {
-    let mut report = promote_causal_plan(options);
-    report
-        .degradations
-        .retain(|degradation| degradation.code != "causal_sample_underpowered");
+    let mut report = empty_promote_plan_report(options);
 
     let Some(chain_id) = options.chain_id.as_deref() else {
         report.degradations.push(trace_degradation(
@@ -2781,10 +2809,6 @@ pub fn promote_causal_chain_from_store(
         ));
         return Ok(report);
     };
-    if options.dry_run {
-        return Ok(report);
-    }
-
     let Some(chain) = find_causal_chain_by_id(conn, workspace_id, chain_id, 32)? else {
         report.degradations.push(trace_degradation(
             "causal_chain_not_found",
@@ -2798,8 +2822,10 @@ pub fn promote_causal_chain_from_store(
     let evidence_strength = causal_evidence_strength(&chain.edges);
     let estimated_uplift = rounded_causal_metric(chain.contribution_estimate);
     let action = if estimated_uplift >= options.minimum_uplift
-        && evidence_strength != CausalEvidenceStrength::ExposureOnly
-    {
+        && matches!(
+            evidence_strength,
+            CausalEvidenceStrength::ExperimentSupported | CausalEvidenceStrength::ReplaySupported
+        ) {
         PromotionAction::Promote
     } else {
         PromotionAction::Hold
@@ -2818,13 +2844,15 @@ pub fn promote_causal_chain_from_store(
         chain.evidence_uris.len()
     );
 
-    if conn
-        .get_curation_candidate(workspace_id, &candidate_id)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to check causal curation candidate: {error}"),
-            repair: Some("ee curate candidates --all --json".to_owned()),
-        })?
-        .is_none()
+    if action == PromotionAction::Promote
+        && !options.dry_run
+        && conn
+            .get_curation_candidate(workspace_id, &candidate_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to check causal curation candidate: {error}"),
+                repair: Some("ee curate candidates --all --json".to_owned()),
+            })?
+            .is_none()
     {
         ensure_target_memory_exists(conn, workspace_id, &artifact_id)?;
         conn.insert_curation_candidate(
@@ -2851,16 +2879,30 @@ pub fn promote_causal_chain_from_store(
         })?;
     }
 
-    let plan = PromotionPlan::new(format!("plan-{chain_id}"), artifact_id, action, created_at)
-        .with_status(PromotionPlanStatus::Proposed)
-        .with_evidence_strength(evidence_strength)
-        .with_minimum_uplift(options.minimum_uplift)
-        .with_estimated_uplift(estimated_uplift)
-        .with_required_evidence(chain_id)
-        .with_audit_id(candidate_id.clone());
+    let plan_status = if options.dry_run {
+        PromotionPlanStatus::DryRunReady
+    } else {
+        PromotionPlanStatus::Proposed
+    };
+    let plan = PromotionPlan::new(
+        format!("plan-{chain_id}"),
+        artifact_id.clone(),
+        action,
+        created_at,
+    )
+    .with_status(plan_status)
+    .with_evidence_strength(evidence_strength)
+    .with_minimum_uplift(options.minimum_uplift)
+    .with_estimated_uplift(estimated_uplift)
+    .with_required_evidence(chain_id)
+    .with_audit_id(candidate_id.clone());
 
     report.plans = vec![plan];
-    report.curation_candidate_ids = vec![candidate_id];
+    if !options.dry_run && action == PromotionAction::Promote {
+        report.curation_candidate_ids = vec![candidate_id];
+    }
+    report.recommendations =
+        chain_recommendations(options, &chain, &artifact_id, evidence_strength, action);
     report.downstream_effects =
         project_downstream_effects(action, evidence_strength, estimated_uplift, options.dry_run);
     Ok(report)
@@ -3287,7 +3329,13 @@ mod tests {
     #[test]
     fn promote_plan_from_store_creates_curation_candidate() -> Result<(), String> {
         let fixture = CausalStoreFixture::new()?;
-        fixture.insert_edge("cev_020", &fixture.failure, &fixture.root, 0.75)?;
+        fixture.insert_edge_with_method(
+            "cev_020",
+            &fixture.failure,
+            &fixture.root,
+            0.75,
+            CausalEvidenceMethod::GraphInferred,
+        )?;
         let trace = trace_causal_chains_from_store(
             &fixture.connection,
             &fixture.workspace_id,
@@ -3304,6 +3352,14 @@ mod tests {
         .map_err(|error| error.message())?;
 
         assert_eq!(report.curation_candidate_ids.len(), 1);
+        assert_eq!(report.plans.len(), 1);
+        assert_eq!(report.plans[0].artifact_id, fixture.root);
+        assert_eq!(report.plans[0].action, PromotionAction::Promote);
+        assert_eq!(
+            report.plans[0].evidence_strength,
+            CausalEvidenceStrength::ReplaySupported
+        );
+        assert_eq!(report.plans[0].estimated_uplift, 0.75);
         let candidates = fixture
             .connection
             .list_curation_candidates(
@@ -3315,6 +3371,45 @@ mod tests {
             .map_err(|error| error.to_string())?;
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].id, report.curation_candidate_ids[0]);
+        Ok(())
+    }
+
+    #[test]
+    fn promote_plan_from_store_dry_run_uses_persisted_chain_without_candidate() -> Result<(), String>
+    {
+        let fixture = CausalStoreFixture::new()?;
+        fixture.insert_edge_with_method(
+            "cev_021",
+            &fixture.failure,
+            &fixture.root,
+            0.75,
+            CausalEvidenceMethod::GraphInferred,
+        )?;
+        let trace = trace_causal_chains_from_store(
+            &fixture.connection,
+            &fixture.workspace_id,
+            &TraceOptions::new().with_memory_id(&fixture.failure),
+        )
+        .map_err(|error| error.message())?;
+        let chain_id = trace.chains[0].chain_id.clone();
+
+        let report = promote_causal_chain_from_store(
+            &fixture.connection,
+            &fixture.workspace_id,
+            &PromotePlanOptions::new().with_chain_id(chain_id).dry_run(),
+        )
+        .map_err(|error| error.message())?;
+
+        assert!(report.curation_candidate_ids.is_empty());
+        assert_eq!(report.plans.len(), 1);
+        assert_eq!(report.plans[0].artifact_id, fixture.root);
+        assert_eq!(report.plans[0].status, PromotionPlanStatus::DryRunReady);
+        assert_eq!(report.plans[0].estimated_uplift, 0.75);
+        let candidates = fixture
+            .connection
+            .list_curation_candidates(&fixture.workspace_id, None, None, None)
+            .map_err(|error| error.to_string())?;
+        assert!(candidates.is_empty());
         Ok(())
     }
 
@@ -3420,11 +3515,29 @@ mod tests {
             candidate_cause_id: &str,
             score: f64,
         ) -> Result<(), String> {
+            self.insert_edge_with_method(
+                edge_id,
+                failure_id,
+                candidate_cause_id,
+                score,
+                CausalEvidenceMethod::Manual,
+            )
+        }
+
+        fn insert_edge_with_method(
+            &self,
+            edge_id: &str,
+            failure_id: &str,
+            candidate_cause_id: &str,
+            score: f64,
+            method: CausalEvidenceMethod,
+        ) -> Result<(), String> {
             self.connection
                 .execute_raw(&format!(
                     "INSERT INTO causal_evidence (id, workspace_id, failure_id, candidate_cause_id, contribution_score, evidence_uris_json, computed_at, method)
-                     VALUES ('{edge_id}', '{}', '{failure_id}', '{candidate_cause_id}', {score}, '[\"agent-mail://causal-fixture/{edge_id}\"]', '2026-05-06T00:00:00Z', 'manual')",
-                    self.workspace_id
+                     VALUES ('{edge_id}', '{}', '{failure_id}', '{candidate_cause_id}', {score}, '[\"agent-mail://causal-fixture/{edge_id}\"]', '2026-05-06T00:00:00Z', '{}')",
+                    self.workspace_id,
+                    method.as_str()
                 ))
                 .map_err(|error| error.to_string())
         }
@@ -3787,17 +3900,23 @@ mod tests {
     }
 
     #[test]
-    fn promote_plan_dry_run_returns_dry_run_ready_plan() {
+    fn promote_plan_without_store_does_not_fabricate_dry_run_plan() {
         let report = promote_causal_plan(
             &PromotePlanOptions::new()
                 .with_artifact_id("mem-001")
                 .dry_run(),
         );
 
-        assert!(!report.is_empty());
+        assert!(report.is_empty());
         assert!(report.dry_run);
-        assert_eq!(report.plans[0].status, PromotionPlanStatus::DryRunReady);
-        assert!(report.plans[0].dry_run_first);
+        assert!(report.curation_candidate_ids.is_empty());
+        assert!(
+            report
+                .degradations
+                .iter()
+                .any(|degradation| degradation.code == "causal_sample_underpowered")
+        );
+        assert!(!report.data_json().to_string().contains("artifact-from-"));
     }
 
     #[test]
@@ -3827,9 +3946,7 @@ mod tests {
                 .dry_run(),
         );
 
-        // With underpowered evidence, action is Hold regardless of override
-        assert_eq!(report.plans[0].action, PromotionAction::Hold);
-        // But the override is recorded as a degradation
+        assert!(report.is_empty());
         assert!(
             report
                 .degradations
@@ -3872,6 +3989,7 @@ mod tests {
         );
         let downstream = &report.downstream_effects;
 
+        assert!(report.is_empty());
         assert_eq!(downstream.schema, CAUSAL_DOWNSTREAM_EFFECTS_SCHEMA_V1);
         // Without evidence, no priority delta
         assert_eq!(downstream.economy_score.priority_delta, 0);
@@ -3901,6 +4019,6 @@ mod tests {
         let summary = report.human_summary();
 
         assert!(summary.contains("Causal Promotion Plan"));
-        assert!(summary.contains("Plans generated:"));
+        assert!(summary.contains("Plans generated: 0"));
     }
 }

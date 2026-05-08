@@ -220,7 +220,7 @@ fn insert_causal_fixture_edge(
     connection
         .execute_raw(&format!(
             "INSERT INTO causal_evidence (id, workspace_id, failure_id, candidate_cause_id, contribution_score, evidence_uris_json, computed_at, method)
-             VALUES ('{edge_id}', '{workspace_id}', '{failure_id}', '{candidate_cause_id}', {score}, '[\"agent-mail://causal-contract/{edge_id}\"]', '2026-05-06T00:00:00Z', 'manual')"
+             VALUES ('{edge_id}', '{workspace_id}', '{failure_id}', '{candidate_cause_id}', {score}, '[\"agent-mail://causal-contract/{edge_id}\"]', '2026-05-06T00:00:00Z', 'graph-inferred')"
         ))
         .map_err(|error| error.to_string())
 }
@@ -983,26 +983,26 @@ fn promote_plan_report_has_correct_schema() -> TestResult {
 }
 
 #[test]
-fn promote_plan_dry_run_produces_plan_with_action() -> TestResult {
+fn promote_plan_dry_run_without_store_does_not_fabricate_artifact_plan() -> TestResult {
     let options = PromotePlanOptions::new()
         .with_artifact_id("mem-001")
         .with_method("experiment")
         .dry_run();
     let report = promote_causal_plan(&options);
     ensure(
-        !report.is_empty(),
-        "promote-plan should produce at least one plan",
+        report.is_empty(),
+        "promote-plan must not fabricate a plan without persisted causal evidence",
     )?;
 
-    let plans = report.data_json().get("plans").cloned().unwrap_or_default();
+    let json = report.data_json();
+    let plans = json.get("plans").cloned().unwrap_or_default();
     ensure(
-        plans.as_array().is_some_and(|entries| {
-            entries
-                .first()
-                .and_then(|entry| entry.get("action"))
-                .is_some()
-        }),
-        "first plan should include action field",
+        plans.as_array().is_some_and(Vec::is_empty),
+        "plans array should be empty",
+    )?;
+    ensure(
+        !json.to_string().contains("artifact-from-"),
+        "promote-plan must not synthesize artifact IDs",
     )?;
     Ok(())
 }
