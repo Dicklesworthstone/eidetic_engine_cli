@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::db::{DbConnection, StoredFeedbackEvent, StoredMemory};
+use crate::db::{
+    DbConnection, StoredFeedbackEvent, StoredMemory, StoredProcedure, StoredProcedureEvent,
+};
 use crate::models::DomainError;
 use crate::models::WorkspaceId;
 use crate::models::economy::{
@@ -841,6 +843,8 @@ fn economy_ranking_state_hash(artifacts: &[EconomyArtifactMetric]) -> String {
 struct EconomyWorkspaceMetrics {
     workspace_id: String,
     active_artifacts: Vec<EconomyArtifactMetric>,
+    active_procedure_count: u32,
+    fallback_procedures: u32,
     tombstoned_count: u32,
 }
 
@@ -919,6 +923,11 @@ fn load_memory_economy_metrics(
     let all_memories = connection
         .list_memories(&workspace_id, None, true)
         .map_err(economy_metrics_unavailable)?;
+    let procedures = connection
+        .list_procedure_records(&workspace_id, None, u32::MAX)
+        .map_err(economy_metrics_unavailable)?;
+    let (active_procedure_count, fallback_procedures) =
+        procedure_reserve_counts(&connection, &procedures)?;
     let tombstoned_count = u32::try_from(
         all_memories
             .iter()
@@ -944,8 +953,77 @@ fn load_memory_economy_metrics(
     Ok(EconomyWorkspaceMetrics {
         workspace_id,
         active_artifacts,
+        active_procedure_count,
+        fallback_procedures,
         tombstoned_count,
     })
+}
+
+fn procedure_reserve_counts(
+    connection: &DbConnection,
+    procedures: &[StoredProcedure],
+) -> Result<(u32, u32), DomainError> {
+    let mut active_count = 0u32;
+    let mut fallback_count = 0u32;
+
+    for procedure in procedures {
+        if procedure.maturity == "retired" || procedure.retired_at.is_some() {
+            continue;
+        }
+
+        active_count = active_count.saturating_add(1);
+        let events = connection
+            .list_procedure_events(&procedure.id)
+            .map_err(economy_metrics_unavailable)?;
+        if procedure_has_fallback_evidence(procedure, &events) {
+            fallback_count = fallback_count.saturating_add(1);
+        }
+    }
+
+    Ok((active_count, fallback_count))
+}
+
+fn procedure_has_fallback_evidence(
+    procedure: &StoredProcedure,
+    events: &[StoredProcedureEvent],
+) -> bool {
+    text_has_fallback_marker(&procedure.name)
+        || text_has_fallback_marker(&procedure.body)
+        || procedure
+            .evidence_uris
+            .iter()
+            .any(|evidence| text_has_fallback_marker(evidence))
+        || events.iter().any(procedure_event_has_fallback_evidence)
+}
+
+fn procedure_event_has_fallback_evidence(event: &StoredProcedureEvent) -> bool {
+    text_has_fallback_marker(&event.event_type)
+        || event
+            .reason
+            .as_deref()
+            .is_some_and(text_has_fallback_marker)
+        || event
+            .evidence_uris
+            .iter()
+            .any(|evidence| text_has_fallback_marker(evidence))
+}
+
+fn text_has_fallback_marker(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    [
+        "fallback",
+        "degradation",
+        "degraded",
+        "recovery",
+        "rollback",
+        "contingency",
+        "tail-risk",
+        "tail_risk",
+        "risk-reserve",
+        "safety-critical",
+    ]
+    .iter()
+    .any(|marker| value.contains(marker))
 }
 
 fn economy_metrics_unavailable(error: impl fmt::Display) -> DomainError {
@@ -1232,11 +1310,15 @@ fn tail_risk_reserves_from_metrics(metrics: &EconomyWorkspaceMetrics) -> TailRis
             .count(),
     )
     .unwrap_or(u32::MAX);
-    let fallback_procedures = 0;
-    let degradation_coverage = if metrics.active_artifacts.is_empty() {
+    let fallback_procedures = metrics.fallback_procedures;
+    let covered_artifacts = critical_memories.saturating_add(fallback_procedures);
+    let eligible_artifacts = u32::try_from(metrics.active_artifacts.len())
+        .unwrap_or(u32::MAX)
+        .saturating_add(metrics.active_procedure_count);
+    let degradation_coverage = if eligible_artifacts == 0 {
         0.0
     } else {
-        round_metric(f64::from(critical_memories) / metrics.active_artifacts.len() as f64)
+        round_metric(f64::from(covered_artifacts) / f64::from(eligible_artifacts))
     };
 
     TailRiskReserves {
@@ -1328,7 +1410,10 @@ fn stable_workspace_id(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{CreateFeedbackEventInput, CreateMemoryInput, CreateWorkspaceInput};
+    use crate::db::{
+        CreateFeedbackEventInput, CreateMemoryInput, CreateProcedureEventInput,
+        CreateProcedureInput, CreateWorkspaceInput,
+    };
 
     type TestResult = Result<(), String>;
 
@@ -1427,6 +1512,67 @@ mod tests {
                     session_id: Some("session_economy".to_owned()),
                 },
             )
+            .map_err(|error| error.to_string())
+    }
+
+    fn add_procedure(
+        fixture: &EconomyFixture,
+        id: &str,
+        name: &str,
+        body: &str,
+        evidence_uris: &[&str],
+    ) -> TestResult {
+        let connection = connection(fixture)?;
+        connection
+            .insert_procedure(
+                id,
+                &CreateProcedureInput {
+                    workspace_id: fixture.workspace_id.clone(),
+                    name: name.to_owned(),
+                    body: body.to_owned(),
+                    level: "procedural".to_owned(),
+                    maturity: "validated".to_owned(),
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.9,
+                    evidence_uris: evidence_uris
+                        .iter()
+                        .map(|evidence| (*evidence).to_owned())
+                        .collect(),
+                    created_at: Some("2026-05-08T00:00:00Z".to_owned()),
+                },
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn add_procedure_event(
+        fixture: &EconomyFixture,
+        id: &str,
+        procedure_id: &str,
+        reason: &str,
+        evidence_uris: &[&str],
+    ) -> TestResult {
+        let connection = connection(fixture)?;
+        connection
+            .insert_procedure_event(
+                id,
+                &CreateProcedureEventInput {
+                    workspace_id: fixture.workspace_id.clone(),
+                    procedure_id: procedure_id.to_owned(),
+                    event_type: "promoted".to_owned(),
+                    from_maturity: Some("provisional".to_owned()),
+                    to_maturity: Some("validated".to_owned()),
+                    reason: Some(reason.to_owned()),
+                    evidence_uris: evidence_uris
+                        .iter()
+                        .map(|evidence| (*evidence).to_owned())
+                        .collect(),
+                    actor: Some("economy-test".to_owned()),
+                    created_at: Some("2026-05-08T00:01:00Z".to_owned()),
+                },
+            )
+            .map(|_| ())
             .map_err(|error| error.to_string())
     }
 
@@ -1600,6 +1746,59 @@ mod tests {
         assert_eq!(plan.recommendations[0].action, "reserve_review");
         assert_eq!(plan.recommendations[0].estimated_token_savings, 0);
         assert!(!plan.recommendations[0].action.contains("retire"));
+        Ok(())
+    }
+
+    #[test]
+    fn tail_risk_report_counts_persisted_fallback_procedure_evidence() -> TestResult {
+        let fixture = fixture()?;
+        add_memory(
+            &fixture,
+            "mem_00000000000000000000000014",
+            "Keep release rollback safeguards available.",
+            0.9,
+            0.9,
+            &["tail-risk"],
+        )?;
+        add_procedure(
+            &fixture,
+            "proc_fallback_evidence",
+            "Release fallback procedure",
+            "Use the rollback checklist when the release gate fails.",
+            &["ee:fallback:release-gate"],
+        )?;
+        add_procedure(
+            &fixture,
+            "proc_event_evidence",
+            "Release validation procedure",
+            "Run normal release validation before tagging.",
+            &[],
+        )?;
+        add_procedure_event(
+            &fixture,
+            "pevt_event_fallback_evidence",
+            "proc_event_evidence",
+            "Validated by fallback recovery drill",
+            &["ee:procedure:fallback-drill"],
+        )?;
+        add_procedure(
+            &fixture,
+            "proc_normal_evidence",
+            "Formatting procedure",
+            "Run cargo fmt before release.",
+            &["ee:procedure:formatting"],
+        )?;
+
+        let report =
+            generate_economy_report(&report_options(&fixture)).map_err(|error| error.message())?;
+        let reserves = report
+            .tail_risk_reserves
+            .as_ref()
+            .ok_or_else(|| "reserves should be included".to_owned())?;
+
+        assert_eq!(reserves.critical_memories, 1);
+        assert_eq!(reserves.fallback_procedures, 2);
+        assert_eq!(reserves.degradation_coverage, 0.75);
         Ok(())
     }
 
