@@ -1,0 +1,188 @@
+---
+source: tests/perf_compare_golden.rs
+expression: report
+---
+{
+  "schema": "ee.perf.compare.v1",
+  "artifacts": {
+    "baseline": {
+      "schema": "ee.perf.artifact_summary.v1",
+      "artifactId": "baseline-bench-001",
+      "artifactKind": "benchmark_report",
+      "sourceSchema": null,
+      "sourcePath": null,
+      "contentHash": null,
+      "observedHash": null,
+      "profile": null,
+      "fixtureTier": "smoke",
+      "commandFamily": null,
+      "metrics": {
+        "cache_hit_rate": {
+          "value": 0.85,
+          "unit": null,
+          "volatility": "stable",
+          "sourceField": null
+        },
+        "candidate_count": {
+          "value": 50.0,
+          "unit": null,
+          "volatility": "stable",
+          "sourceField": null
+        },
+        "memory_rss_mb": {
+          "value": 256.0,
+          "unit": "MB",
+          "volatility": "resource",
+          "sourceField": null
+        },
+        "pack_tokens": {
+          "value": 4000.0,
+          "unit": null,
+          "volatility": "stable",
+          "sourceField": null
+        },
+        "search_elapsed_ms": {
+          "value": 100.0,
+          "unit": "ms",
+          "volatility": "timing",
+          "sourceField": null
+        }
+      },
+      "degraded": [],
+      "redaction": {
+        "applied": false,
+        "uncertainFields": [],
+        "secretIndicators": 0
+      },
+      "provenance": []
+    },
+    "candidate": {
+      "schema": "ee.perf.artifact_summary.v1",
+      "artifactId": "candidate-bench-001",
+      "artifactKind": "benchmark_report",
+      "sourceSchema": null,
+      "sourcePath": null,
+      "contentHash": null,
+      "observedHash": null,
+      "profile": null,
+      "fixtureTier": "stress",
+      "commandFamily": null,
+      "metrics": {
+        "cache_hit_rate": {
+          "value": 0.85,
+          "unit": null,
+          "volatility": "stable",
+          "sourceField": null
+        },
+        "candidate_count": {
+          "value": 50.0,
+          "unit": null,
+          "volatility": "stable",
+          "sourceField": null
+        },
+        "memory_rss_mb": {
+          "value": 258.0,
+          "unit": "MB",
+          "volatility": "resource",
+          "sourceField": null
+        },
+        "pack_tokens": {
+          "value": 4000.0,
+          "unit": null,
+          "volatility": "stable",
+          "sourceField": null
+        },
+        "search_elapsed_ms": {
+          "value": 102.0,
+          "unit": "ms",
+          "volatility": "timing",
+          "sourceField": null
+        }
+      },
+      "degraded": [],
+      "redaction": {
+        "applied": false,
+        "uncertainFields": [],
+        "secretIndicators": 0
+      },
+      "provenance": []
+    }
+  },
+  "summary": {
+    "result": "unchanged",
+    "confidence": "medium",
+    "worstSeverity": "medium",
+    "deltaCount": 5,
+    "regressionCount": 0,
+    "improvementCount": 0
+  },
+  "deltas": [
+    {
+      "metric": "cache_hit_rate",
+      "baselineValue": 0.85,
+      "candidateValue": 0.85,
+      "delta": 0.0,
+      "deltaPercent": 0.0,
+      "direction": "unchanged",
+      "severity": "low",
+      "ownerHint": "cache",
+      "volatility": "stable"
+    },
+    {
+      "metric": "candidate_count",
+      "baselineValue": 50.0,
+      "candidateValue": 50.0,
+      "delta": 0.0,
+      "deltaPercent": 0.0,
+      "direction": "unchanged",
+      "severity": "low",
+      "ownerHint": "search",
+      "volatility": "stable"
+    },
+    {
+      "metric": "memory_rss_mb",
+      "baselineValue": 256.0,
+      "candidateValue": 258.0,
+      "delta": 2.0,
+      "deltaPercent": 0.78125,
+      "direction": "increased",
+      "severity": "low",
+      "ownerHint": "host_pressure",
+      "volatility": "resource"
+    },
+    {
+      "metric": "pack_tokens",
+      "baselineValue": 4000.0,
+      "candidateValue": 4000.0,
+      "delta": 0.0,
+      "deltaPercent": 0.0,
+      "direction": "unchanged",
+      "severity": "low",
+      "ownerHint": "pack",
+      "volatility": "stable"
+    },
+    {
+      "metric": "search_elapsed_ms",
+      "baselineValue": 100.0,
+      "candidateValue": 102.0,
+      "delta": 2.0,
+      "deltaPercent": 2.0,
+      "direction": "increased",
+      "severity": "low",
+      "ownerHint": "search",
+      "volatility": "timing"
+    }
+  ],
+  "ownerHints": [],
+  "degraded": [
+    {
+      "code": "fixture_tier_mismatch",
+      "severity": "medium",
+      "artifactSide": "both",
+      "affectedField": "fixtureTier",
+      "message": "Fixture tier mismatch: baseline=smoke, candidate=stress",
+      "repair": "Compare artifacts from the same fixture tier"
+    }
+  ],
+  "nextCommands": []
+}

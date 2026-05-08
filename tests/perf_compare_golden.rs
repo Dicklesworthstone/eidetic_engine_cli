@@ -3,9 +3,18 @@
 //! These tests freeze the JSON contract for compare reports using synthetic
 //! fixtures. All timing values use fixed synthetic values (not live measurements)
 //! so diffs are deterministic.
+//!
+//! Update workflow: run this test with `INSTA_UPDATE=always`, review every
+//! `tests/snapshots/perf_compare_golden__*.snap` diff, then commit only the
+//! accepted `.snap` files with the test change.
 
 use ee::core::perf_forensics::{
-    ArtifactKind, ArtifactSummary, CompareResult, MetricValue, compare_artifacts,
+    ArtifactKind, ArtifactSide, ArtifactSummary, CompareResult, MetricValue, RedactionPosture,
+    Severity, SummaryDegradation, check_perf_budget_summary, compare_artifacts,
+};
+use ee::models::{
+    ArtifactKind as ModelArtifactKind, ArtifactSummary as ModelArtifactSummary,
+    MetricValue as ModelMetricValue, ProfileReference,
 };
 use insta::assert_json_snapshot;
 
@@ -73,6 +82,34 @@ fn benchmark_candidate_missing_metric() -> ArtifactSummary {
         // cache_hit_rate missing
         // memory_rss_mb missing
         .with_metric("candidate_count", MetricValue::stable(50.0))
+}
+
+fn benchmark_baseline_smoke_tier() -> ArtifactSummary {
+    let mut summary = benchmark_baseline();
+    summary.fixture_tier = Some("smoke".to_string());
+    summary
+}
+
+fn benchmark_candidate_stress_tier() -> ArtifactSummary {
+    let mut summary = benchmark_candidate_unchanged();
+    summary.fixture_tier = Some("stress".to_string());
+    summary
+}
+
+fn benchmark_candidate_redaction_uncertain() -> ArtifactSummary {
+    let mut summary = benchmark_candidate_unchanged()
+        .with_degradation(SummaryDegradation::redaction_uncertain("request.query"));
+    summary.redaction = RedactionPosture {
+        applied: true,
+        uncertain_fields: vec!["request.query".to_string()],
+        secret_indicators: 2,
+    };
+    summary
+}
+
+fn benchmark_candidate_unsupported_artifact() -> ArtifactSummary {
+    benchmark_candidate_unchanged()
+        .with_degradation(SummaryDegradation::unsupported_kind("legacy_profiler_dump"))
 }
 
 fn profile_baseline() -> ArtifactSummary {
@@ -148,6 +185,25 @@ fn write_queue_regression() -> ArtifactSummary {
         .with_metric("backpressure_events", MetricValue::stable(12.0)) // backpressure hit
 }
 
+fn budget_artifact_workstation() -> ModelArtifactSummary {
+    let mut artifact = ModelArtifactSummary::new(
+        "budget-candidate-workstation",
+        ModelArtifactKind::BenchmarkReport,
+        "ee.benchmark.report.v1",
+    )
+    .with_profile(ProfileReference {
+        profile_name: "workstation".to_string(),
+        confidence: Some("high".to_string()),
+        override_source: None,
+    })
+    .with_fixture_tier("smoke")
+    .with_command_family("perf-compare");
+    artifact.add_metric("search_elapsed_ms", ModelMetricValue::measured(96.0, "ms"));
+    artifact.add_metric("pack_tokens", ModelMetricValue::measured(3800.0, "tokens"));
+    artifact.add_metric("cache_hit_rate", ModelMetricValue::measured(0.86, "ratio"));
+    artifact
+}
+
 #[test]
 fn perf_compare_unchanged_golden() {
     let baseline = benchmark_baseline();
@@ -204,8 +260,54 @@ fn perf_compare_missing_metric_golden() {
     let candidate = benchmark_candidate_missing_metric();
     let report = compare_artifacts(&baseline, &candidate);
 
-    // Missing metrics cause inconclusive or unchanged depending on impl
+    assert!(report.degraded.iter().any(|d| d.code == "metric_missing"));
     assert_json_snapshot!("perf_compare_missing_metric", report);
+}
+
+#[test]
+fn perf_compare_fixture_tier_mismatch_golden() {
+    let baseline = benchmark_baseline_smoke_tier();
+    let candidate = benchmark_candidate_stress_tier();
+    let report = compare_artifacts(&baseline, &candidate);
+
+    assert!(
+        report.degraded.iter().any(|d| {
+            d.code == "fixture_tier_mismatch" && d.artifact_side == ArtifactSide::Both
+        })
+    );
+    assert_json_snapshot!("perf_compare_fixture_tier_mismatch", report);
+}
+
+#[test]
+fn perf_compare_unsupported_artifact_golden() {
+    let baseline = benchmark_baseline();
+    let candidate = benchmark_candidate_unsupported_artifact();
+    let report = compare_artifacts(&baseline, &candidate);
+
+    assert!(report.degraded.iter().any(|d| {
+        d.code == "unsupported_artifact_kind"
+            && d.severity == Severity::High
+            && d.artifact_side == ArtifactSide::Candidate
+    }));
+    assert_json_snapshot!("perf_compare_unsupported_artifact", report);
+}
+
+#[test]
+fn perf_compare_redaction_uncertainty_golden() {
+    let synthetic_secret = "sk_live_deterministic_fixture_secret";
+    let baseline = benchmark_baseline();
+    let candidate = benchmark_candidate_redaction_uncertain();
+    let report = compare_artifacts(&baseline, &candidate);
+    let json = serde_json::to_string(&report).expect("compare report should serialize");
+
+    assert!(report.degraded.iter().any(|d| {
+        d.code == "redaction_uncertain" && d.artifact_side == ArtifactSide::Candidate
+    }));
+    assert!(
+        !json.contains(synthetic_secret),
+        "raw synthetic secret must never appear in golden compare output"
+    );
+    assert_json_snapshot!("perf_compare_redaction_uncertainty", report);
 }
 
 #[test]
@@ -245,4 +347,15 @@ fn perf_compare_write_queue_regression_golden() {
             .any(|h| { h.owner == ee::core::perf_forensics::SubsystemOwner::WriteSpool })
     );
     assert_json_snapshot!("perf_compare_write_queue_regression", report);
+}
+
+#[test]
+fn perf_budget_check_workstation_golden() {
+    let report = check_perf_budget_summary("workstation", &budget_artifact_workstation());
+
+    assert_eq!(
+        report.summary.result,
+        ee::core::perf_forensics::BudgetCheckResult::Passed
+    );
+    assert_json_snapshot!("perf_budget_check_workstation", report);
 }

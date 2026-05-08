@@ -1,0 +1,202 @@
+---
+source: tests/perf_compare_golden.rs
+assertion_line: 198
+expression: report
+---
+{
+  "schema": "ee.perf.compare.v1",
+  "artifacts": {
+    "baseline": {
+      "schema": "ee.perf.artifact_summary.v1",
+      "artifactId": "baseline-bench-001",
+      "artifactKind": "benchmark_report",
+      "sourceSchema": null,
+      "sourcePath": null,
+      "contentHash": null,
+      "observedHash": null,
+      "profile": null,
+      "fixtureTier": null,
+      "commandFamily": null,
+      "metrics": {
+        "cache_hit_rate": {
+          "value": 0.85,
+          "unit": null,
+          "volatility": "stable",
+          "sourceField": null
+        },
+        "candidate_count": {
+          "value": 50.0,
+          "unit": null,
+          "volatility": "stable",
+          "sourceField": null
+        },
+        "memory_rss_mb": {
+          "value": 256.0,
+          "unit": "MB",
+          "volatility": "resource",
+          "sourceField": null
+        },
+        "pack_tokens": {
+          "value": 4000.0,
+          "unit": null,
+          "volatility": "stable",
+          "sourceField": null
+        },
+        "search_elapsed_ms": {
+          "value": 100.0,
+          "unit": "ms",
+          "volatility": "timing",
+          "sourceField": null
+        }
+      },
+      "degraded": [],
+      "redaction": {
+        "applied": false,
+        "uncertainFields": [],
+        "secretIndicators": 0
+      },
+      "provenance": []
+    },
+    "candidate": {
+      "schema": "ee.perf.artifact_summary.v1",
+      "artifactId": "candidate-bench-improved",
+      "artifactKind": "benchmark_report",
+      "sourceSchema": null,
+      "sourcePath": null,
+      "contentHash": null,
+      "observedHash": null,
+      "profile": null,
+      "fixtureTier": null,
+      "commandFamily": null,
+      "metrics": {
+        "cache_hit_rate": {
+          "value": 0.92,
+          "unit": null,
+          "volatility": "stable",
+          "sourceField": null
+        },
+        "candidate_count": {
+          "value": 50.0,
+          "unit": null,
+          "volatility": "stable",
+          "sourceField": null
+        },
+        "memory_rss_mb": {
+          "value": 200.0,
+          "unit": "MB",
+          "volatility": "resource",
+          "sourceField": null
+        },
+        "pack_tokens": {
+          "value": 3500.0,
+          "unit": null,
+          "volatility": "stable",
+          "sourceField": null
+        },
+        "search_elapsed_ms": {
+          "value": 40.0,
+          "unit": "ms",
+          "volatility": "timing",
+          "sourceField": null
+        }
+      },
+      "degraded": [],
+      "redaction": {
+        "applied": false,
+        "uncertainFields": [],
+        "secretIndicators": 0
+      },
+      "provenance": []
+    }
+  },
+  "summary": {
+    "result": "improved",
+    "confidence": "high",
+    "worstSeverity": "medium",
+    "deltaCount": 5,
+    "regressionCount": 0,
+    "improvementCount": 3
+  },
+  "deltas": [
+    {
+      "metric": "cache_hit_rate",
+      "baselineValue": 0.85,
+      "candidateValue": 0.92,
+      "delta": 0.07000000000000006,
+      "deltaPercent": 8.235294117647067,
+      "direction": "increased",
+      "severity": "medium",
+      "ownerHint": "cache",
+      "volatility": "stable"
+    },
+    {
+      "metric": "pack_tokens",
+      "baselineValue": 4000.0,
+      "candidateValue": 3500.0,
+      "delta": -500.0,
+      "deltaPercent": -12.5,
+      "direction": "decreased",
+      "severity": "medium",
+      "ownerHint": "pack",
+      "volatility": "stable"
+    },
+    {
+      "metric": "search_elapsed_ms",
+      "baselineValue": 100.0,
+      "candidateValue": 40.0,
+      "delta": -60.0,
+      "deltaPercent": -60.0,
+      "direction": "decreased",
+      "severity": "medium",
+      "ownerHint": "search",
+      "volatility": "timing"
+    },
+    {
+      "metric": "candidate_count",
+      "baselineValue": 50.0,
+      "candidateValue": 50.0,
+      "delta": 0.0,
+      "deltaPercent": 0.0,
+      "direction": "unchanged",
+      "severity": "low",
+      "ownerHint": "search",
+      "volatility": "stable"
+    },
+    {
+      "metric": "memory_rss_mb",
+      "baselineValue": 256.0,
+      "candidateValue": 200.0,
+      "delta": -56.0,
+      "deltaPercent": -21.875,
+      "direction": "decreased",
+      "severity": "low",
+      "ownerHint": "host_pressure",
+      "volatility": "resource"
+    }
+  ],
+  "ownerHints": [
+    {
+      "owner": "search",
+      "confidence": "low",
+      "evidence": [
+        "search_elapsed_ms: 100.00 -> 40.00 (-60.0%)"
+      ]
+    },
+    {
+      "owner": "pack",
+      "confidence": "low",
+      "evidence": [
+        "pack_tokens: 4000.00 -> 3500.00 (-12.5%)"
+      ]
+    },
+    {
+      "owner": "cache",
+      "confidence": "low",
+      "evidence": [
+        "cache_hit_rate: 0.85 -> 0.92 (+8.2%)"
+      ]
+    }
+  ],
+  "degraded": [],
+  "nextCommands": []
+}

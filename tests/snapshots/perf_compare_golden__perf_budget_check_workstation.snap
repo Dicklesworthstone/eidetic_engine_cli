@@ -1,0 +1,25 @@
+---
+source: tests/perf_compare_golden.rs
+expression: report
+---
+{
+  "schema": "ee.perf.budget_check.v1",
+  "requestedProfile": "workstation",
+  "artifact": {
+    "artifactId": "budget-candidate-workstation",
+    "artifactKind": "benchmark_report",
+    "sourceSchema": "ee.benchmark.report.v1",
+    "profile": "workstation",
+    "fixtureTier": "smoke",
+    "commandFamily": "perf-compare"
+  },
+  "summary": {
+    "result": "passed",
+    "confidence": "high",
+    "worstSeverity": "low",
+    "comparableMetricCount": 3,
+    "missingMetricCount": 0
+  },
+  "degraded": [],
+  "nextCommands": []
+}
