@@ -1,14 +1,46 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-use super::index::{IndexHealth, IndexStatusOptions, get_index_status};
+use super::index::{
+    IndexHealth, IndexStatusError, IndexStatusOptions, IndexStatusReport, get_index_status,
+};
 use crate::search::{
     Embedder, HashEmbedder, SpeedMode, TwoTierConfig, TwoTierIndex, TwoTierSearcher,
 };
 
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";
 pub const PERFORMANCE_EXPLAIN_SCHEMA_V1: &str = "ee.explain.performance.v1";
+const INDEX_STATUS_CACHE_TTL: Duration = Duration::from_secs(1);
+
+static SEARCH_INDEX_STATUS_CACHE: OnceLock<Mutex<HashMap<IndexStatusCacheKey, CachedIndexStatus>>> =
+    OnceLock::new();
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct IndexStatusCacheKey {
+    database_path: PathBuf,
+    index_dir: PathBuf,
+}
+
+impl IndexStatusCacheKey {
+    fn from_search_options(options: &SearchOptions, index_dir: &Path) -> Self {
+        let database_path = options
+            .database_path
+            .clone()
+            .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
+        Self {
+            database_path,
+            index_dir: index_dir.to_path_buf(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CachedIndexStatus {
+    checked_at: Instant,
+    report: IndexStatusReport,
+}
 
 #[derive(Clone, Debug)]
 pub struct SearchOptions {
@@ -898,13 +930,7 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
 }
 
 fn search_degradations(options: &SearchOptions, index_dir: &Path) -> Vec<SearchDegradation> {
-    let status_options = IndexStatusOptions {
-        workspace_path: options.workspace_path.clone(),
-        database_path: options.database_path.clone(),
-        index_dir: Some(index_dir.to_path_buf()),
-    };
-
-    let Ok(index_status) = get_index_status(&status_options) else {
+    let Ok(index_status) = cached_index_status_for_search(options, index_dir) else {
         return Vec::new();
     };
 
@@ -921,6 +947,43 @@ fn search_degradations(options: &SearchOptions, index_dir: &Path) -> Vec<SearchD
     }
 }
 
+fn cached_index_status_for_search(
+    options: &SearchOptions,
+    index_dir: &Path,
+) -> Result<IndexStatusReport, IndexStatusError> {
+    let cache_key = IndexStatusCacheKey::from_search_options(options, index_dir);
+    let now = Instant::now();
+    let cache = SEARCH_INDEX_STATUS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Ok(mut guard) = cache.lock() {
+        guard.retain(|_, cached| now.duration_since(cached.checked_at) <= INDEX_STATUS_CACHE_TTL);
+        if let Some(cached) = guard.get(&cache_key) {
+            return Ok(cached.report.clone());
+        }
+    }
+
+    let status_options = IndexStatusOptions {
+        workspace_path: options.workspace_path.clone(),
+        database_path: options.database_path.clone(),
+        index_dir: Some(index_dir.to_path_buf()),
+    };
+
+    let index_status = get_index_status(&status_options)?;
+
+    if let Ok(mut guard) = cache.lock() {
+        guard.retain(|_, cached| now.duration_since(cached.checked_at) <= INDEX_STATUS_CACHE_TTL);
+        guard.insert(
+            cache_key,
+            CachedIndexStatus {
+                checked_at: now,
+                report: index_status.clone(),
+            },
+        );
+    }
+
+    Ok(index_status)
+}
+
 fn search_sync(
     index_dir: &Path,
     query: &str,
@@ -928,8 +991,6 @@ fn search_sync(
     config: TwoTierConfig,
     explain: bool,
 ) -> Result<(Vec<SearchHit>, Vec<String>), String> {
-    use std::sync::Mutex;
-
     let index_dir_owned = index_dir.to_path_buf();
     let query_owned = query.to_string();
     #[allow(clippy::type_complexity)]
@@ -1172,6 +1233,34 @@ mod tests {
         assert_eq!(degraded[0].severity, "high");
         assert!(degraded[0].message.contains("Last check error"));
         assert!(degraded[0].message.contains("meta.json"));
+        Ok(())
+    }
+
+    #[test]
+    fn search_degradations_reuse_index_status_within_ttl() -> TestResult {
+        let workspace = unique_test_dir("cached-index-status");
+        let index_dir = workspace.join("index");
+        std::fs::create_dir_all(&index_dir).map_err(|error| error.to_string())?;
+        let options = SearchOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(workspace.join("missing.db")),
+            index_dir: Some(index_dir.clone()),
+            query: "format before release".to_string(),
+            limit: 10,
+            speed: SpeedMode::Default,
+            explain: false,
+        };
+
+        let degraded = search_degradations(&options, &index_dir);
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "index_missing");
+
+        std::fs::write(index_dir.join("meta.json"), "{ not-json")
+            .map_err(|error| error.to_string())?;
+        let cached_degraded = search_degradations(&options, &index_dir);
+
+        assert_eq!(cached_degraded.len(), 1);
+        assert_eq!(cached_degraded[0].code, "index_missing");
         Ok(())
     }
 

@@ -18232,7 +18232,10 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
 
-    let latest_runs = latest_demo_audit_by_id(cli).unwrap_or_default();
+    let (latest_runs, run_ledger_error) = match latest_demo_audit_by_id(cli) {
+        Ok(runs) => (runs, None),
+        Err(error) => (BTreeMap::new(), Some(error.to_string())),
+    };
     let demos = manifest
         .demos
         .iter()
@@ -18259,21 +18262,25 @@ where
         .collect::<Vec<_>>();
 
     if cli.wants_json() {
+        let mut data = serde_json::json!({
+            "schema": DEMO_LIST_SCHEMA_V1,
+            "command": "demo list",
+            "manifestSchema": DEMO_FILE_SCHEMA_V1,
+            "manifestPath": manifest_path.display().to_string(),
+            "demoCount": manifest.demo_count(),
+            "filteredCount": demos.len(),
+            "runLedgerAvailable": run_ledger_error.is_none(),
+            "demos": demos,
+            "sideEffectClass": DEMO_LIST_SIDE_EFFECT,
+            "auditSemantics": "read-only; no audit record persisted"
+        });
+        if let Some(error) = &run_ledger_error {
+            data["runLedgerError"] = serde_json::json!(error);
+        }
         let json = serde_json::json!({
             "schema": crate::models::RESPONSE_SCHEMA_V1,
             "success": true,
-            "data": {
-                "schema": DEMO_LIST_SCHEMA_V1,
-                "command": "demo list",
-                "manifestSchema": DEMO_FILE_SCHEMA_V1,
-                "manifestPath": manifest_path.display().to_string(),
-                "demoCount": manifest.demo_count(),
-                "filteredCount": demos.len(),
-                "runLedgerAvailable": !latest_runs.is_empty(),
-                "demos": demos,
-                "sideEffectClass": DEMO_LIST_SIDE_EFFECT,
-                "auditSemantics": "read-only; no audit record persisted"
-            }
+            "data": data
         });
         return write_stdout(stdout, &(json.to_string() + "\n"));
     }

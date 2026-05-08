@@ -443,11 +443,14 @@ fn export_record_redaction_covers_all_record_types() -> TestResult {
         return Err("expected agent variant".into());
     }
 
-    let tag = ExportRecord::Tag(ExportTagRecord::new(
-        "mem-test-001234567890",
-        "sensitive-tag",
-        "2026-05-03T00:00:00Z",
-    ));
+    let tag = ExportRecord::Tag(
+        ExportTagRecord::builder()
+            .memory_id("mem-test-001234567890")
+            .tag("sensitive-tag")
+            .created_at("2026-05-03T00:00:00Z")
+            .build()
+            .expect("tag has required fields"),
+    );
 
     if let ExportRecord::Tag(t) = redact_record(tag, RedactionLevel::Full) {
         ensure(

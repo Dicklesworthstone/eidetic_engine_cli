@@ -364,6 +364,30 @@ pub enum DomainError {
     },
 }
 
+impl std::fmt::Display for DomainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Usage { message, .. } => write!(f, "usage error: {message}"),
+            Self::Configuration { message, .. } => write!(f, "configuration error: {message}"),
+            Self::Storage { message, .. } => write!(f, "storage error: {message}"),
+            Self::SearchIndex { message, .. } => write!(f, "search index error: {message}"),
+            Self::Graph { message, .. } => write!(f, "graph error: {message}"),
+            Self::Import { message, .. } => write!(f, "import error: {message}"),
+            Self::NotFound { resource, id, .. } => write!(f, "{resource} not found: {id}"),
+            Self::UnsatisfiedDegradedMode { message, .. } => {
+                write!(f, "unsatisfied degraded mode: {message}")
+            }
+            Self::PolicyDenied { message, .. } => write!(f, "policy denied: {message}"),
+            Self::MigrationRequired { message, .. } => {
+                write!(f, "migration required: {message}")
+            }
+            Self::MigrationDrift { message, .. } => write!(f, "migration drift: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for DomainError {}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DomainErrorSeverity {
     Low,

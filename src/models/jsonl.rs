@@ -1360,17 +1360,49 @@ pub struct ExportTagRecord {
 
 impl ExportTagRecord {
     #[must_use]
-    pub fn new(
-        memory_id: impl Into<String>,
-        tag: impl Into<String>,
-        created_at: impl Into<String>,
-    ) -> Self {
-        Self {
+    pub fn builder() -> ExportTagRecordBuilder {
+        ExportTagRecordBuilder::default()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ExportTagRecordBuilder {
+    memory_id: Option<String>,
+    tag: Option<String>,
+    created_at: Option<String>,
+}
+
+impl ExportTagRecordBuilder {
+    #[must_use]
+    pub fn memory_id(mut self, memory_id: impl Into<String>) -> Self {
+        self.memory_id = Some(memory_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn tag(mut self, tag: impl Into<String>) -> Self {
+        self.tag = Some(tag.into());
+        self
+    }
+
+    #[must_use]
+    pub fn created_at(mut self, created_at: impl Into<String>) -> Self {
+        self.created_at = Some(created_at.into());
+        self
+    }
+
+    /// Build the tag export record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a required machine-facing field is missing or blank.
+    pub fn build(self) -> Result<ExportTagRecord, ExportRecordBuildError> {
+        Ok(ExportTagRecord {
             schema: EXPORT_TAG_SCHEMA_V1.to_owned(),
-            memory_id: memory_id.into(),
-            tag: tag.into(),
-            created_at: created_at.into(),
-        }
+            memory_id: required_string(ExportRecordType::Tag, "memory_id", self.memory_id)?,
+            tag: required_string(ExportRecordType::Tag, "tag", self.tag)?,
+            created_at: required_string(ExportRecordType::Tag, "created_at", self.created_at)?,
+        })
     }
 }
 
@@ -1976,8 +2008,13 @@ mod tests {
     }
 
     #[test]
-    fn export_tag_record_new() {
-        let tag = ExportTagRecord::new("mem-001", "important", "2026-04-30T12:00:00Z");
+    fn export_tag_record_builder() {
+        let tag = ExportTagRecord::builder()
+            .memory_id("mem-001")
+            .tag("important")
+            .created_at("2026-04-30T12:00:00Z")
+            .build()
+            .expect("tag has required fields");
         assert_eq!(tag.schema, EXPORT_TAG_SCHEMA_V1);
         assert_eq!(tag.memory_id, "mem-001");
         assert_eq!(tag.tag, "important");
@@ -2101,6 +2138,25 @@ mod tests {
             ExportRecordType::Link,
             "target_memory_id",
             "link missing target_memory_id",
+        )?;
+        ensure_build_error(
+            ExportTagRecord::builder()
+                .memory_id("mem-001")
+                .created_at("2026-04-30T12:00:00Z")
+                .build(),
+            ExportRecordType::Tag,
+            "tag",
+            "tag record missing tag",
+        )?;
+        ensure_build_error(
+            ExportTagRecord::builder()
+                .memory_id("   ")
+                .tag("important")
+                .created_at("2026-04-30T12:00:00Z")
+                .build(),
+            ExportRecordType::Tag,
+            "memory_id",
+            "tag record blank memory_id",
         )?;
         ensure_build_error(
             ExportAuditRecord::builder()
@@ -2274,11 +2330,12 @@ mod tests {
             "link round-trip",
         )?;
         ensure_json_round_trip(
-            &ExportTagRecord::new(
-                "mem_01234567890123456789012345",
-                "release",
-                "2026-04-30T12:03:00Z",
-            ),
+            &ExportTagRecord::builder()
+                .memory_id("mem_01234567890123456789012345")
+                .tag("release")
+                .created_at("2026-04-30T12:03:00Z")
+                .build()
+                .expect("tag has required fields"),
             "tag round-trip",
         )?;
         ensure_json_round_trip(
@@ -2403,11 +2460,14 @@ mod tests {
                     .build()
                     .expect("artifact has required fields"),
             ),
-            ExportRecord::Tag(ExportTagRecord::new(
-                "mem_01234567890123456789012345",
-                "release",
-                "2026-04-30T12:03:00Z",
-            )),
+            ExportRecord::Tag(
+                ExportTagRecord::builder()
+                    .memory_id("mem_01234567890123456789012345")
+                    .tag("release")
+                    .created_at("2026-04-30T12:03:00Z")
+                    .build()
+                    .expect("tag has required fields"),
+            ),
             ExportRecord::Link(
                 ExportLinkRecord::builder()
                     .link_id("lnk_01234567890123456789012345")

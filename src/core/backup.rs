@@ -1390,7 +1390,9 @@ fn render_records(
                         .map_err(export_build_error("build backup memory record"))?,
                 )
                 .map_err(io_error("write backup memory record"))?;
-            for tag in memory_tags(data, memory) {
+            for tag in memory_tags(data, memory)
+                .map_err(export_build_error("build backup tag record"))?
+            {
                 exporter
                     .write_tag(tag)
                     .map_err(io_error("write backup tag record"))?;
@@ -1445,12 +1447,21 @@ fn memory_record(memory: &StoredMemory) -> Result<ExportMemoryRecord, ExportReco
     builder.build()
 }
 
-fn memory_tags(data: &BackupExportData, memory: &StoredMemory) -> Vec<ExportTagRecord> {
+fn memory_tags(
+    data: &BackupExportData,
+    memory: &StoredMemory,
+) -> Result<Vec<ExportTagRecord>, ExportRecordBuildError> {
     data.tags_by_memory
         .get(&memory.id)
         .into_iter()
         .flat_map(|tags| tags.iter())
-        .map(|tag| ExportTagRecord::new(memory.id.clone(), tag.clone(), memory.created_at.clone()))
+        .map(|tag| {
+            ExportTagRecord::builder()
+                .memory_id(memory.id.clone())
+                .tag(tag.clone())
+                .created_at(memory.created_at.clone())
+                .build()
+        })
         .collect()
 }
 

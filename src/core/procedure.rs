@@ -1827,12 +1827,28 @@ fn inspect_persisted_claim_evidence(
 ) -> Option<VerificationSourceResult> {
     let store = match open_procedure_store(&options.workspace) {
         Ok(Some(store)) => store,
-        Ok(None) | Err(_) => return None,
+        Ok(None) => return None,
+        Err(error) => {
+            return Some(persisted_source_storage_failure(
+                source_id,
+                "claim_evidence",
+                "failed to open procedure store for claim evidence",
+                error,
+            ));
+        }
     };
     let evidence_id = source_id.strip_prefix("evidence://").unwrap_or(source_id);
     let evidence = match store.connection.get_evidence_span(evidence_id) {
         Ok(Some(evidence)) => evidence,
-        Ok(None) | Err(_) => return None,
+        Ok(None) => return None,
+        Err(error) => {
+            return Some(persisted_source_storage_failure(
+                source_id,
+                "claim_evidence",
+                "failed to load persisted evidence span",
+                storage_error("failed to load persisted evidence span")(error),
+            ));
+        }
     };
     let result =
         if evidence.workspace_id == store.workspace_id && !evidence.excerpt.trim().is_empty() {
@@ -1872,11 +1888,27 @@ fn inspect_persisted_recorder_run(
 ) -> Option<VerificationSourceResult> {
     let store = match open_procedure_store(&options.workspace) {
         Ok(Some(store)) => store,
-        Ok(None) | Err(_) => return None,
+        Ok(None) => return None,
+        Err(error) => {
+            return Some(persisted_source_storage_failure(
+                source_id,
+                "recorder_run",
+                "failed to open procedure store for recorder run",
+                error,
+            ));
+        }
     };
     let run = match store.connection.get_recorder_run(source_id) {
         Ok(Some(run)) => run,
-        Ok(None) | Err(_) => return None,
+        Ok(None) => return None,
+        Err(error) => {
+            return Some(persisted_source_storage_failure(
+                source_id,
+                "recorder_run",
+                "failed to load persisted recorder run",
+                storage_error("failed to load persisted recorder run")(error),
+            ));
+        }
     };
     let workspace_matches = run
         .workspace_id
@@ -1933,6 +1965,28 @@ fn inspect_persisted_recorder_run(
             },
         ],
     ))
+}
+
+fn persisted_source_storage_failure(
+    source_id: &str,
+    source_kind: &str,
+    context: &str,
+    error: DomainError,
+) -> VerificationSourceResult {
+    let repair = error.repair().unwrap_or("ee doctor --json");
+    verification_source_result(
+        source_id,
+        source_kind,
+        "failed",
+        Some(format!("{context}: {}. Next: {repair}", error.message())),
+        vec![StepVerificationResult {
+            step_id: format!("{source_kind}_{source_id}_storage"),
+            sequence: 1,
+            result: "failed".to_owned(),
+            expected: Some(format!("persisted {source_kind} source is readable")),
+            actual: Some(format!("{} ({})", error.message(), error.code())),
+        }],
+    )
 }
 
 fn inspect_verification_json_file(
@@ -3809,6 +3863,149 @@ mod tests {
         assert_eq!(report.overall_result, "passed");
         assert_eq!(report.pass_count, 1);
         assert_eq!(report.sources_checked[0].source_kind, "claim_evidence");
+        Ok(())
+    }
+
+    #[test]
+    fn verify_missing_persisted_sources_remain_missing() -> TestResult {
+        let workspace = procedure_store_workspace()?;
+
+        let claim_report = verify_procedure(&ProcedureVerifyOptions {
+            workspace: workspace.clone(),
+            procedure_id: "proc_test".to_owned(),
+            source_kind: Some("claim_evidence".to_owned()),
+            source_ids: vec!["ev_61234567890123456789054321".to_owned()],
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(claim_report.overall_result, "failed");
+        assert_eq!(
+            claim_report.sources_checked[0].message.as_deref(),
+            Some("named claim evidence was not found in persisted evidence spans")
+        );
+        assert!(claim_report.sources_checked[0].step_results.is_empty());
+
+        let recorder_report = verify_procedure(&ProcedureVerifyOptions {
+            workspace,
+            procedure_id: "proc_test".to_owned(),
+            source_kind: Some("recorder_run".to_owned()),
+            source_ids: vec!["run_verify_missing_001".to_owned()],
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(recorder_report.overall_result, "failed");
+        assert_eq!(
+            recorder_report.sources_checked[0].message.as_deref(),
+            Some("named recorder run was not found in persisted recorder runs")
+        );
+        assert!(recorder_report.sources_checked[0].step_results.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn verify_persisted_claim_evidence_query_error_is_failed_source() -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let (connection, workspace_id) = procedure_store_connection(&workspace)?;
+        connection
+            .insert_evidence_span(
+                "ev_61234567890123456789067890",
+                &CreateEvidenceSpanInput {
+                    workspace_id,
+                    session_id: "sess_verify_claim_query_error".to_owned(),
+                    memory_id: None,
+                    cass_span_id: "span_verify_claim_query_error".to_owned(),
+                    span_kind: "summary".to_owned(),
+                    start_line: 1,
+                    end_line: 2,
+                    start_byte: None,
+                    end_byte: None,
+                    role: Some("assistant".to_owned()),
+                    excerpt: "Evidence exists before the table is made unreadable.".to_owned(),
+                    content_hash: "blake3:claimqueryerror".to_owned(),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw("ALTER TABLE evidence_spans RENAME TO evidence_spans_unreadable")
+            .map_err(|error| error.to_string())?;
+
+        let report = verify_procedure(&ProcedureVerifyOptions {
+            workspace,
+            procedure_id: "proc_test".to_owned(),
+            source_kind: Some("claim_evidence".to_owned()),
+            source_ids: vec!["ev_61234567890123456789067890".to_owned()],
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.overall_result, "failed");
+        assert_eq!(report.fail_count, 1);
+        let source = &report.sources_checked[0];
+        assert_eq!(source.source_kind, "claim_evidence");
+        let message = source.message.as_deref().unwrap_or_default();
+        assert!(message.contains("failed to load persisted evidence span"));
+        assert!(!message.contains("not found"));
+        assert_eq!(source.step_results.len(), 1);
+        assert_eq!(
+            source.step_results[0].expected.as_deref(),
+            Some("persisted claim_evidence source is readable")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn verify_persisted_recorder_run_query_error_is_failed_source() -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let (connection, workspace_id) = procedure_store_connection(&workspace)?;
+        connection
+            .insert_recorder_run(
+                "run_verify_query_error_001",
+                &CreateRecorderRunInput {
+                    workspace_id: Some(workspace_id),
+                    agent_id: "agent_verify".to_owned(),
+                    session_id: Some("sess_verify_query_error".to_owned()),
+                    source_type: "synthetic".to_owned(),
+                    source_id: Some("fixture://procedure-verify-query-error".to_owned()),
+                    status: "completed".to_owned(),
+                    started_at: "2026-05-01T00:00:00Z".to_owned(),
+                    ended_at: Some("2026-05-01T00:01:00Z".to_owned()),
+                    event_count: 2,
+                    redacted_count: 0,
+                    payload_bytes: 128,
+                    chain_complete: true,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw("ALTER TABLE recorder_runs RENAME TO recorder_runs_unreadable")
+            .map_err(|error| error.to_string())?;
+
+        let report = verify_procedure(&ProcedureVerifyOptions {
+            workspace,
+            procedure_id: "proc_test".to_owned(),
+            source_kind: Some("recorder_run".to_owned()),
+            source_ids: vec!["run_verify_query_error_001".to_owned()],
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.overall_result, "failed");
+        assert_eq!(report.fail_count, 1);
+        let source = &report.sources_checked[0];
+        assert_eq!(source.source_kind, "recorder_run");
+        let message = source.message.as_deref().unwrap_or_default();
+        assert!(message.contains("failed to load persisted recorder run"));
+        assert!(!message.contains("not found"));
+        assert_eq!(source.step_results.len(), 1);
+        assert_eq!(
+            source.step_results[0].expected.as_deref(),
+            Some("persisted recorder_run source is readable")
+        );
         Ok(())
     }
 
