@@ -635,13 +635,25 @@ impl RiskReserve {
     /// Calculate available token budget.
     #[must_use]
     pub fn available_tokens(&self) -> u32 {
-        ((1.0 - self.utilization) * self.token_budget as f64) as u32
+        (self.available_fraction() * f64::from(self.token_budget)) as u32
     }
 
     /// Calculate available memory slots.
     #[must_use]
     pub fn available_slots(&self) -> u32 {
-        ((1.0 - self.utilization) * self.memory_slots as f64) as u32
+        (self.available_fraction() * f64::from(self.memory_slots)) as u32
+    }
+
+    fn available_fraction(&self) -> f64 {
+        let utilization = if self.utilization.is_finite() {
+            self.utilization.clamp(0.0, 1.0)
+        } else if self.utilization.is_sign_negative() {
+            0.0
+        } else {
+            1.0
+        };
+
+        1.0 - utilization
     }
 
     /// Reserve capacity for a risk.
@@ -2700,6 +2712,31 @@ mod tests {
 
         reserve.release(400, 4);
         assert!(!reserve.is_depleted());
+    }
+
+    #[test]
+    fn risk_reserve_available_capacity_saturates_invalid_utilization() -> TestResult {
+        let mut reserve = RiskReserve::new(1000, 10);
+
+        reserve.utilization = 1.01;
+        ensure(reserve.available_tokens(), 0, "overfull tokens")?;
+        ensure(reserve.available_slots(), 0, "overfull slots")?;
+
+        reserve.utilization = -0.25;
+        ensure(reserve.available_tokens(), 1000, "negative tokens")?;
+        ensure(reserve.available_slots(), 10, "negative slots")?;
+
+        reserve.utilization = f64::INFINITY;
+        ensure(reserve.available_tokens(), 0, "infinite tokens")?;
+        ensure(reserve.available_slots(), 0, "infinite slots")?;
+
+        reserve.utilization = f64::NEG_INFINITY;
+        ensure(reserve.available_tokens(), 1000, "negative infinite tokens")?;
+        ensure(reserve.available_slots(), 10, "negative infinite slots")?;
+
+        reserve.utilization = f64::NAN;
+        ensure(reserve.available_tokens(), 0, "nan tokens")?;
+        ensure(reserve.available_slots(), 0, "nan slots")
     }
 
     #[test]
