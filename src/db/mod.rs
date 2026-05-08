@@ -233,6 +233,15 @@ impl DbConnection {
     }
 
     fn open_once(config: DatabaseConfig) -> Result<Self> {
+        let _open_write_owner = if matches!(
+            (&config.location, config.mode),
+            (DatabaseLocation::File(_), DatabaseOpenMode::ReadWrite)
+        ) {
+            Some(lock_file_write_owner_gate(&config.location)?)
+        } else {
+            None
+        };
+
         let inner = match (&config.location, config.mode) {
             (DatabaseLocation::Memory, DatabaseOpenMode::ReadWrite) => {
                 FrankenConnection::open_memory()
