@@ -125,6 +125,35 @@ fn assert_json_error_contract(
     )
 }
 
+fn assert_json_success_stdout_contract(
+    output: &Output,
+    expected_exit: i32,
+    artifact_name: &str,
+) -> TestResult {
+    persist_artifact(artifact_name, output);
+    ensure_equal(
+        &output.status.code(),
+        &Some(expected_exit),
+        "JSON success exit code",
+    )?;
+    ensure(
+        stderr_text(output)?.is_empty(),
+        "successful JSON diagnostics must not leak to stderr",
+    )?;
+
+    let json = stdout_json(output)?;
+    ensure(
+        json.as_object().is_some(),
+        "successful JSON stdout must be an object",
+    )?;
+    ensure(
+        json.get("schema")
+            .and_then(serde_json::Value::as_str)
+            .is_some(),
+        "successful JSON stdout must include a schema string",
+    )
+}
+
 fn artifact_dir() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("exit_code_conformance_artifacts");
     let _ = fs::create_dir_all(&dir);
@@ -482,6 +511,55 @@ fn exit_0_on_causal_dry_run_after_init() -> TestResult {
     persist_artifact("exit_0_causal_dry_run", &output);
 
     ensure_equal(&output.status.code(), &Some(0), "causal dry-run exit code")
+}
+
+#[test]
+fn successful_json_commands_emit_stdout_only_parseable_objects() -> TestResult {
+    struct JsonSuccessCase {
+        name: &'static str,
+        args: &'static [&'static str],
+    }
+
+    let cases = [
+        JsonSuccessCase {
+            name: "status",
+            args: &["status", "--json"],
+        },
+        JsonSuccessCase {
+            name: "procedure_list",
+            args: &["procedure", "list", "--json"],
+        },
+        JsonSuccessCase {
+            name: "recorder_dry_run",
+            args: &[
+                "recorder",
+                "start",
+                "--agent-id",
+                "test",
+                "--dry-run",
+                "--json",
+            ],
+        },
+        JsonSuccessCase {
+            name: "preflight_degraded_success",
+            args: &["preflight", "run", "deploy production migration", "--json"],
+        },
+        JsonSuccessCase {
+            name: "economy_report",
+            args: &["economy", "report", "--json"],
+        },
+    ];
+
+    for case in cases {
+        let output = run_ee(case.args)?;
+        assert_json_success_stdout_contract(
+            &output,
+            EXIT_SUCCESS,
+            &format!("json_success_stdout_{}", case.name),
+        )?;
+    }
+
+    Ok(())
 }
 
 // ============================================================================
