@@ -850,9 +850,7 @@ mod tests {
         use std::io;
         use std::thread;
 
-        let handle = thread::spawn(|| {
-            Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe broke"))
-        });
+        let handle = thread::spawn(|| Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe broke")));
         let result = join_pipe_reader(handle);
         let err = match result {
             Ok(_) => panic!("expected join_pipe_reader to return Err for read failure"),
