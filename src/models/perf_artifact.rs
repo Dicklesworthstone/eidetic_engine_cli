@@ -643,6 +643,7 @@ fn push_json_string(output: &mut String, value: &str) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

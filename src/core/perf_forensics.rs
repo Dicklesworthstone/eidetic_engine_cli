@@ -51,7 +51,7 @@ impl ArtifactKind {
     }
 
     #[must_use]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "benchmark_report" => Some(Self::BenchmarkReport),
             "support_bundle_manifest" => Some(Self::SupportBundleManifest),
@@ -922,6 +922,7 @@ pub fn compare_artifacts(baseline: &ArtifactSummary, candidate: &ArtifactSummary
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -937,7 +938,7 @@ mod tests {
             ArtifactKind::SwarmContentionReport,
         ] {
             let s = kind.as_str();
-            let parsed = ArtifactKind::from_str(s).expect("should parse");
+            let parsed = ArtifactKind::parse(s).expect("should parse");
             assert_eq!(kind, parsed);
         }
     }
