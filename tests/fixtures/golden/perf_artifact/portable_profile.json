@@ -1,0 +1,37 @@
+{
+  "schema": "ee.perf.artifact_summary.v1",
+  "artifactId": "portable-001",
+  "artifactKind": "benchmark_report",
+  "sourceSchema": "ee.bench.smoke.v1",
+  "sourcePath": "redacted/portable.json",
+  "contentHash": "portable123",
+  "observedHash": "portable123",
+  "profile": {"profileName": "portable", "confidence": "high"},
+  "fixtureTier": "smoke",
+  "commandFamily": "pack",
+  "metrics": {
+    "elapsed_ms": {
+      "kind": "measured",
+      "value": 75.0,
+      "unit": "ms"
+    },
+    "search_candidate_limit": {
+      "kind": "measured",
+      "value": 120.0,
+      "unit": "count"
+    },
+    "pack_max_tokens": {
+      "kind": "measured",
+      "value": 4000.0,
+      "unit": "tokens"
+    },
+    "cache_memory_cap_mb": {
+      "kind": "measured",
+      "value": 128.0,
+      "unit": "mb"
+    }
+  },
+  "degraded": [],
+  "redaction": "clean",
+  "provenance": []
+}

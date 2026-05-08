@@ -1,0 +1,37 @@
+{
+  "schema": "ee.perf.artifact_summary.v1",
+  "artifactId": "swarm-001",
+  "artifactKind": "benchmark_report",
+  "sourceSchema": "ee.bench.smoke.v1",
+  "sourcePath": "redacted/swarm.json",
+  "contentHash": "swarm123",
+  "observedHash": "swarm123",
+  "profile": {"profileName": "swarm", "confidence": "high"},
+  "fixtureTier": "smoke",
+  "commandFamily": "pack",
+  "metrics": {
+    "elapsed_ms": {
+      "kind": "measured",
+      "value": 25.0,
+      "unit": "ms"
+    },
+    "search_candidate_limit": {
+      "kind": "measured",
+      "value": 240.0,
+      "unit": "count"
+    },
+    "pack_max_tokens": {
+      "kind": "measured",
+      "value": 8000.0,
+      "unit": "tokens"
+    },
+    "cache_memory_cap_mb": {
+      "kind": "measured",
+      "value": 512.0,
+      "unit": "mb"
+    }
+  },
+  "degraded": [],
+  "redaction": "clean",
+  "provenance": []
+}
