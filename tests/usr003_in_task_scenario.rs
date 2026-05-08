@@ -574,8 +574,8 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
         repair_actions.push(command);
     }
 
-    // 09. tripwire list (--include-disarmed) - remains conservative until
-    //     persisted tripwire rules replace generated fixtures.
+    // 09. tripwire list (--include-disarmed) reads the persisted store and
+    //     returns an empty report without inventing sample tripwires.
     let tripwire_list = run_logged_json_step(
         &scenario_dir,
         "09_tripwire_list",
@@ -588,26 +588,27 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
             "list",
             "--include-disarmed",
         ],
-        "fx.tripwire_unavailable.v1",
-        "ee.response.v1",
+        "fx.tripwire_empty_store.v1",
+        "ee.tripwire.list.v1",
         None,
     )?;
     command_dossiers.push(tripwire_list.dossier_dir.clone());
     ensure(
-        !tripwire_list.output.status.success(),
-        "tripwire list should degrade until persisted tripwire rules are available",
+        tripwire_list.output.status.success(),
+        "tripwire list should succeed against an empty persisted store",
     )?;
     assert_json_machine_stdout(&tripwire_list.output, "tripwire list")?;
     let tripwire_list_json = parse_json_stdout(&tripwire_list.output, "tripwire list")?;
     ensure(
-        tripwire_list_json["schema"] == json!("ee.response.v1")
-            && tripwire_list_json["data"]["code"] == json!("tripwire_store_unavailable"),
-        "tripwire list degraded schema/code",
+        tripwire_list_json["schema"] == json!("ee.tripwire.list.v1")
+            && tripwire_list_json["tripwires"] == json!([])
+            && tripwire_list_json["total_count"] == json!(0),
+        "tripwire list empty persisted-store schema",
     )?;
     let tripwire_ids = Vec::<String>::new();
 
-    // 10. tripwire check tw_004 --dry-run - also degrades rather than
-    //     evaluating generated sample tripwires as if they were persisted.
+    // 10. tripwire check tw_004 --dry-run reports a concrete not_found result
+    //     rather than evaluating generated sample tripwires as if persisted.
     let tripwire_check = run_logged_json_step(
         &scenario_dir,
         "10_tripwire_check",
@@ -623,25 +624,27 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
             "success",
             "--dry-run",
         ],
-        "fx.tripwire_unavailable.v1",
-        "ee.response.v1",
+        "fx.tripwire_empty_store.v1",
+        "ee.tripwire.check.v1",
         None,
     )?;
     command_dossiers.push(tripwire_check.dossier_dir.clone());
     ensure(
-        !tripwire_check.output.status.success(),
-        "tripwire check should degrade until explicit event payloads are available",
+        tripwire_check.output.status.success(),
+        "tripwire check should return a not_found persisted-store result",
     )?;
     assert_json_machine_stdout(&tripwire_check.output, "tripwire check")?;
     let tripwire_check_json = parse_json_stdout(&tripwire_check.output, "tripwire check")?;
     ensure(
-        tripwire_check_json["schema"] == json!("ee.response.v1")
-            && tripwire_check_json["data"]["code"] == json!("tripwire_store_unavailable")
-            && tripwire_check_json["data"]["evidenceIds"] == json!([]),
-        "tripwire check degraded schema/code/evidence",
+        tripwire_check_json["schema"] == json!("ee.tripwire.check.v1")
+            && tripwire_check_json["result"] == json!("not_found")
+            && tripwire_check_json["should_halt"] == json!(false)
+            && tripwire_check_json["dry_run"] == json!(true)
+            && tripwire_check_json["degraded"][0]["code"] == json!("tripwire_inputs_incomplete"),
+        "tripwire check not_found schema and degraded explanation",
     )?;
 
-    // Re-check tw_004 to assert unavailable output is deterministic and still
+    // Re-check tw_004 to assert not_found output is deterministic and still
     // does not claim a persisted rule evaluation.
     let tripwire_check_replay = run_logged_json_step(
         &scenario_dir,
@@ -658,20 +661,20 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
             "success",
             "--dry-run",
         ],
-        "fx.tripwire_unavailable.v1",
-        "ee.response.v1",
+        "fx.tripwire_empty_store.v1",
+        "ee.tripwire.check.v1",
         None,
     )?;
     command_dossiers.push(tripwire_check_replay.dossier_dir.clone());
     ensure(
-        !tripwire_check_replay.output.status.success(),
-        "tripwire check replay should degrade",
+        tripwire_check_replay.output.status.success(),
+        "tripwire check replay should return not_found",
     )?;
     let replay_json = parse_json_stdout(&tripwire_check_replay.output, "tripwire check replay")?;
     ensure(
-        replay_json["data"]["code"] == tripwire_check_json["data"]["code"]
-            && replay_json["data"]["followUpBead"] == tripwire_check_json["data"]["followUpBead"],
-        "tripwire check degradation must be deterministic across dry-run replays",
+        replay_json["result"] == tripwire_check_json["result"]
+            && replay_json["degraded"][0]["code"] == tripwire_check_json["degraded"][0]["code"],
+        "tripwire check not_found result must be deterministic across dry-run replays",
     )?;
 
     // Scenario summary - records selected memory IDs, alternatives, degradation
@@ -729,8 +732,8 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
             "tripwireEvidence": {
                 "listedIds": tripwire_ids,
                 "checkedTripwireId": "tw_004",
-                "degradedCode": tripwire_check_json["data"]["code"],
-                "shouldHalt": JsonValue::Null,
+                "degradedCode": tripwire_check_json["degraded"][0]["code"],
+                "shouldHalt": tripwire_check_json["should_halt"],
                 "feedbackEvaluation": JsonValue::Null,
                 "durableMutation": false,
                 "evidencePreserved": false,
