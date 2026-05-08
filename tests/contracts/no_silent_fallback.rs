@@ -266,6 +266,24 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "CLI workspace fallback is the existing documented relative-workspace behavior; it does not convert parsed machine data to success.",
     ),
     allowed(
+        "NSF-CLI-EVAL-NO-EXPECTATIONS",
+        "src/cli/mod.rs",
+        "query_expectations.is_empty()",
+        "An eval fixture with no expected query matches has no retrieval queries to run; index and search failures still propagate once queries exist.",
+    ),
+    allowed(
+        "NSF-CLI-REHEARSE-NO-COMMANDS",
+        "src/cli/mod.rs",
+        "(None, None) => return Ok(Vec::new())",
+        "Omitting both rehearsal command sources intentionally plans no commands; unreadable files and malformed JSON still return DomainError.",
+    ),
+    allowed(
+        "NSF-CLI-MAINTENANCE-NO-HISTORY",
+        "src/cli/mod.rs",
+        "if !path.exists()",
+        "A missing maintenance history JSONL file means no recorded jobs yet; read and parse errors on an existing file still fail.",
+    ),
+    allowed(
         "NSF-CLI-QUERY-FILTERS",
         "src/cli/mod.rs",
         "parse_filters",
@@ -288,6 +306,18 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/core/context.rs",
         "tags_map.get",
         "A memory with no tag rows has an explicit empty tag set.",
+    ),
+    allowed(
+        "NSF-CORE-CLAIMS-NO-EVIDENCE",
+        "src/core/claims.rs",
+        "let Some(raw_evidence) = raw_evidence else",
+        "Claims without an evidence field deliberately have an empty evidence list; malformed evidence entries still return ClaimParseError.",
+    ),
+    allowed(
+        "NSF-CORE-CLAIMS-NULL-EVIDENCE",
+        "src/core/claims.rs",
+        "YamlValue::Null => Ok(Vec::new())",
+        "A YAML null evidence field is treated as explicitly empty evidence, while non-null malformed evidence is rejected.",
     ),
     allowed(
         "NSF-CORE-DOCTOR-OPTIONAL-REPAIR",
@@ -338,6 +368,30 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "Imported memories without tag records have an explicit empty tag set.",
     ),
     allowed(
+        "NSF-CORE-MEMORY-AUTO-LINK-DISABLED",
+        "src/core/memory.rs",
+        "if !enabled",
+        "Disabled remember auto-linking intentionally creates no links before any repository query is attempted.",
+    ),
+    allowed(
+        "NSF-CORE-MEMORY-AUTO-LINK-NO-WORKFLOW",
+        "src/core/memory.rs",
+        "let Some(workflow_id) = workflow_id else",
+        "Remember auto-linking without a workflow ID has no workflow neighborhood to query; repository errors after a workflow is present still propagate.",
+    ),
+    allowed(
+        "NSF-CORE-MEMORY-SUGGEST-LINKS-NO-TAGS",
+        "src/core/memory.rs",
+        "if tags.is_empty()",
+        "Tag-based link suggestions require at least one tag; missing tags are an explicit no-input case.",
+    ),
+    allowed(
+        "NSF-CORE-MEMORY-SUGGEST-LINKS-NO-MATCHES",
+        "src/core/memory.rs",
+        "if matches.is_empty()",
+        "A successful tag lookup with no candidate memories is an explicit empty suggestion set; lookup failures still return DomainError.",
+    ),
+    allowed(
         "NSF-CORE-LAB-OPTIONAL-FIELDS",
         "src/core/lab.rs",
         "as_deref().unwrap_or_default()",
@@ -362,10 +416,28 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "Recorder CASS line classification maps missing type/role to a conservative message event.",
     ),
     allowed(
+        "NSF-CORE-RECORDER-IMPORT-NO-INPUT",
+        "src/core/recorder.rs",
+        "let Some(input) = options.input_json.as_deref() else",
+        "Recorder import with no inline CASS view input is an explicit empty future-connector plan; invalid provided JSON returns recorder_import_invalid_json.",
+    ),
+    allowed(
         "NSF-CORE-REPRO-MISSING-HASH",
         "src/core/repro.rs",
         "expected_artifacts",
         "A missing expected hash is paired with a failed verification result, not a successful empty hash.",
+    ),
+    allowed(
+        "NSF-CORE-PREFLIGHT-GUARD-NO-RULES",
+        "src/core/preflight_guard.rs",
+        "let Some(rules_item) = document.get(\"rules\") else",
+        "A workspace guard file without a rules table has no rules to enforce; malformed rules tables still return DomainError.",
+    ),
+    allowed(
+        "NSF-CORE-PROCEDURE-NO-STORE",
+        "src/core/procedure.rs",
+        "let Some(store) = open_procedure_store(workspace)? else",
+        "A workspace without a procedure store has no procedures yet; store open errors still propagate through DomainError.",
     ),
     allowed(
         "NSF-CORE-SEARCH-OPTIONAL-DETAIL",
@@ -374,10 +446,28 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "Absent index-check detail appends no extra sentence while preserving the high-severity corruption signal.",
     ),
     allowed(
+        "NSF-MODELS-QUERY-MISSING-ARRAY-FILTER",
+        "src/models/query.rs",
+        "Result<Vec<String>, EqlQueryError>",
+        "Missing optional EQL array filters are deliberate empty filter sets; present non-array or empty-string values still return EqlQueryError.",
+    ),
+    allowed(
         "NSF-DB-FEEDBACK-SIGNAL",
         "src/db/mod.rs",
         "optional_text(row, 0)?.unwrap_or_default()",
         "Missing feedback signal maps to no positive/negative bucket and does not create a successful signal.",
+    ),
+    allowed(
+        "NSF-SERVE-DAEMON-DRY-RUN-ROWS",
+        "src/serve.rs",
+        "report.dry_run || run_id == \"dry-run\"",
+        "A dry-run foreground daemon report intentionally produces no durable daemon job rows.",
+    ),
+    allowed(
+        "NSF-SERVE-DAEMON-MISSING-TABLE",
+        "src/serve.rs",
+        "if !table_path.exists()",
+        "A missing daemon job JSONL table means no daemon jobs have been recorded; existing-table read and parse errors still fail.",
     ),
     allowed(
         "NSF-MODELS-DEMO-OPTIONALS",
@@ -409,6 +499,7 @@ const MANUAL_FINDINGS: &[ManualFinding] = &[ManualFinding {
 
 const REQUIRED_SURFACE_FILES: &[&str] = &[
     "src/cass/process.rs",
+    "src/db/mod.rs",
     "src/output/mod.rs",
     "src/hooks/installer.rs",
     "src/models/jsonl.rs",
@@ -564,6 +655,22 @@ fn no_silent_fallback_guard_rejects_new_unclassified_renderer_default() -> TestR
     }
 }
 
+#[test]
+fn no_silent_fallback_guard_rejects_new_unclassified_empty_vec() -> TestResult {
+    let synthetic = SourceFinding {
+        file: "src/db/new_repository.rs".to_owned(),
+        line: 42,
+        text: "return Ok(Vec::new());".to_owned(),
+        context: "return Ok(Vec::new());".to_owned(),
+    };
+
+    if classify_finding(&synthetic).is_none() {
+        Ok(())
+    } else {
+        Err("synthetic unclassified empty-vector fallback was unexpectedly allowlisted".to_owned())
+    }
+}
+
 fn classify_finding(finding: &SourceFinding) -> Option<&'static InventoryRule> {
     INVENTORY_RULES
         .iter()
@@ -669,6 +776,7 @@ fn brace_delta(line: &str) -> i32 {
 fn is_high_risk_line(line: &str) -> bool {
     let trimmed = line.trim();
     trimmed.contains(".unwrap_or_default()")
+        || trimmed.contains("Ok(Vec::new())")
         || (trimmed.starts_with("let _ =") && trimmed.contains("read_to_end"))
         || trimmed.contains("join().unwrap_or_default()")
 }

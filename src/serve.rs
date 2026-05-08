@@ -567,4 +567,34 @@ mod tests {
             "running flag",
         )
     }
+
+    #[test]
+    fn daemon_job_rows_distinguish_missing_table_from_malformed_table() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let table_path = daemon_job_table_path(temp.path());
+
+        let missing_rows = load_daemon_job_rows(temp.path())?;
+        ensure(missing_rows.len(), 0, "missing table rows")?;
+        ensure(table_path.exists(), false, "missing table remains absent")?;
+
+        let parent = table_path
+            .parent()
+            .ok_or_else(|| format!("missing parent for {}", table_path.display()))?;
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        fs::write(&table_path, "not-json\n").map_err(|error| error.to_string())?;
+
+        let error = match load_daemon_job_rows(temp.path()) {
+            Ok(rows) => {
+                return Err(format!(
+                    "malformed daemon job table should fail, got {rows:?}"
+                ));
+            }
+            Err(error) => error,
+        };
+        ensure(
+            error.contains("Failed to parse daemon job row 1"),
+            true,
+            "malformed table parse error",
+        )
+    }
 }
