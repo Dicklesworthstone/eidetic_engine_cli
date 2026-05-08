@@ -894,7 +894,10 @@ fn sqlmodel_error_is_transient_sqlite_contention(error: &sqlmodel_core::Error) -
 
 fn sqlite_contention_message_is_retryable(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
-    message.contains("database is busy") || message.contains("snapshot conflict")
+    message.contains("database is busy")
+        || message.contains("database is locked")
+        || message.contains("database table is locked")
+        || message.contains("snapshot conflict")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10914,18 +10917,20 @@ pub mod concurrent_writer_contract {
 impl DbConnection {
     /// Ensure the advisory locks table exists.
     pub fn ensure_advisory_locks_table(&self) -> Result<()> {
-        self.execute_raw_for(
-            DbOperation::EnsureMigrationTable,
-            concurrent_writer_contract::LOCK_TABLE_DDL,
-        )?;
-        self.execute_raw_for(
-            DbOperation::EnsureMigrationTable,
-            concurrent_writer_contract::LOCK_HOLDER_INDEX_DDL,
-        )?;
-        self.execute_raw_for(
-            DbOperation::EnsureMigrationTable,
-            concurrent_writer_contract::LOCK_EXPIRY_INDEX_DDL,
-        )
+        retry_sqlite_contention(|| {
+            self.execute_raw_for(
+                DbOperation::EnsureMigrationTable,
+                concurrent_writer_contract::LOCK_TABLE_DDL,
+            )?;
+            self.execute_raw_for(
+                DbOperation::EnsureMigrationTable,
+                concurrent_writer_contract::LOCK_HOLDER_INDEX_DDL,
+            )?;
+            self.execute_raw_for(
+                DbOperation::EnsureMigrationTable,
+                concurrent_writer_contract::LOCK_EXPIRY_INDEX_DDL,
+            )
+        })
     }
 
     /// Attempt to acquire an advisory lock.
