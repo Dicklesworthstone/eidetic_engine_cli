@@ -1,13 +1,9 @@
 //! Optional science analytics module (EE-171).
 //!
 //! This module provides offline statistical metrics, clustering diagnostics,
-//! and deterministic diagram exports for evaluation and diagnostics. It is
-//! gated behind the `science-analytics` feature flag to avoid bloating the
-//! default agent loop with heavy dependencies.
-//!
-//! When the feature is disabled, the module exposes only stub types and
-//! `is_available()` returning `false`. This allows callers to degrade
-//! gracefully without compile-time feature checks everywhere.
+//! and deterministic diagram exports for evaluation and diagnostics. The
+//! default build includes lightweight deterministic metrics; the
+//! `science-analytics` feature flag is retained for future heavier backends.
 //!
 //! # Feature Flag
 //!
@@ -31,13 +27,10 @@ use std::path::{Path, PathBuf};
 /// Science analytics subsystem identifier.
 pub const SUBSYSTEM: &str = "science";
 
-/// Check if science analytics is available at runtime.
-///
-/// Returns `true` when the `science-analytics` feature is enabled,
-/// `false` otherwise. This allows callers to degrade gracefully.
+/// Check if deterministic science analytics are available at runtime.
 #[must_use]
 pub const fn is_available() -> bool {
-    cfg!(feature = "science-analytics")
+    true
 }
 
 /// Science analytics availability status for JSON output.
@@ -70,11 +63,7 @@ impl ScienceStatus {
 /// Get the current science analytics status.
 #[must_use]
 pub const fn status() -> ScienceStatus {
-    if cfg!(feature = "science-analytics") {
-        ScienceStatus::Available
-    } else {
-        ScienceStatus::NotCompiled
-    }
+    ScienceStatus::Available
 }
 
 /// Degradation code for science analytics unavailable.
@@ -1297,12 +1286,8 @@ fn science_next_actions(status: ScienceStatus) -> Vec<&'static str> {
     }
 }
 
-#[cfg(feature = "science-analytics")]
 mod enabled {
-    //! Science analytics implementation when feature is enabled.
-    //!
-    //! This submodule contains the actual implementations that depend on
-    //! science/numerical crates. It is only compiled when the feature is on.
+    //! Lightweight deterministic science analytics implementation.
 
     use std::collections::BTreeMap;
 
@@ -1556,60 +1541,7 @@ mod enabled {
     }
 }
 
-#[cfg(feature = "science-analytics")]
 pub use enabled::*;
-
-#[cfg(not(feature = "science-analytics"))]
-mod disabled {
-    //! Stub types when science-analytics feature is disabled.
-    //!
-    //! These stubs allow code to compile and degrade gracefully without
-    //! compile-time feature checks scattered throughout the codebase.
-
-    /// Stub evaluation metrics when feature is disabled.
-    #[derive(Clone, Debug, Default)]
-    pub struct EvaluationMetrics {
-        pub precision: Option<f64>,
-        pub recall: Option<f64>,
-        pub f1_score: Option<f64>,
-    }
-
-    impl EvaluationMetrics {
-        #[must_use]
-        pub fn compute(_predictions: &[bool], _ground_truth: &[bool]) -> Self {
-            Self::default()
-        }
-    }
-
-    /// Stub clustering diagnostics when feature is disabled.
-    #[derive(Clone, Debug, Default)]
-    pub struct ClusteringDiagnostics {
-        pub cluster_count: usize,
-        pub silhouette_score: Option<f64>,
-    }
-
-    impl ClusteringDiagnostics {
-        #[must_use]
-        pub fn compute(_embeddings: &[Vec<f32>]) -> Self {
-            Self::default()
-        }
-
-        #[must_use]
-        pub fn data_json(&self) -> serde_json::Value {
-            serde_json::json!({
-                "schema": super::CLUSTERING_DIAGNOSTICS_SCHEMA_V1,
-                "status": "not_compiled",
-                "available": false,
-                "degradationCode": super::DEGRADATION_CODE_NOT_COMPILED,
-                "clusterCount": self.cluster_count,
-                "silhouetteScore": self.silhouette_score,
-            })
-        }
-    }
-}
-
-#[cfg(not(feature = "science-analytics"))]
-pub use disabled::*;
 
 #[cfg(test)]
 mod tests {
@@ -1644,7 +1576,6 @@ mod tests {
             .ok_or_else(|| format!("missing capability {name}"))
     }
 
-    #[cfg(feature = "science-analytics")]
     fn seed_clustering_workspace() -> Result<(tempfile::TempDir, PathBuf), String> {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path().canonicalize().map_err(|error| {
@@ -1677,15 +1608,15 @@ mod tests {
 
         for (id, content) in [
             (
-                "mem_cluster000000000000000000001",
+                "mem_00000000000000000000000011",
                 "Run cargo fmt --check before release verification.",
             ),
             (
-                "mem_cluster000000000000000000002",
+                "mem_00000000000000000000000012",
                 "Run cargo clippy --all-targets before release verification.",
             ),
             (
-                "mem_cluster000000000000000000003",
+                "mem_00000000000000000000000013",
                 "Inspect search index freshness before release verification.",
             ),
         ] {
@@ -1702,7 +1633,7 @@ mod tests {
                         utility: 0.8,
                         importance: 0.7,
                         provenance_uri: Some("test://science/clustering".to_string()),
-                        trust_class: "test".to_string(),
+                        trust_class: "agent_assertion".to_string(),
                         trust_subclass: None,
                         tags: vec!["release".to_string()],
                         valid_from: None,
@@ -1714,20 +1645,20 @@ mod tests {
 
         for (id, target_memory_id, created_at, proposed_content) in [
             (
-                "curate_cluster000000000000000001",
-                "mem_cluster000000000000000000001",
+                "curate_00000000000000000000000011",
+                "mem_00000000000000000000000011",
                 "2026-05-04T12:03:00Z",
                 "Always run cargo fmt --check before release.",
             ),
             (
-                "curate_cluster000000000000000002",
-                "mem_cluster000000000000000000002",
+                "curate_00000000000000000000000012",
+                "mem_00000000000000000000000012",
                 "2026-05-04T12:02:00Z",
                 "Always run cargo clippy before release.",
             ),
             (
-                "curate_cluster000000000000000003",
-                "mem_cluster000000000000000000003",
+                "curate_00000000000000000000000013",
+                "mem_00000000000000000000000013",
                 "2026-05-04T12:01:00Z",
                 "Check search index freshness before release.",
             ),
@@ -1741,8 +1672,8 @@ mod tests {
                         target_memory_id: target_memory_id.to_string(),
                         proposed_content: Some(proposed_content.to_string()),
                         proposed_confidence: Some(0.88),
-                        proposed_trust_class: Some("validated".to_string()),
-                        source_type: "science_test".to_string(),
+                        proposed_trust_class: Some("agent_assertion".to_string()),
+                        source_type: "rule_engine".to_string(),
                         source_id: Some("cluster-fixture".to_string()),
                         reason: format!("Candidate {id} repeats release verification guidance."),
                         confidence: 0.82,
@@ -1756,15 +1687,15 @@ mod tests {
 
         connection
             .insert_curation_candidate(
-                "curate_cluster000000000000000004",
+                "curate_00000000000000000000000014",
                 &crate::db::CreateCurationCandidateInput {
                     workspace_id,
                     candidate_type: "promote".to_string(),
-                    target_memory_id: "mem_cluster000000000000000000001".to_string(),
+                    target_memory_id: "mem_00000000000000000000000011".to_string(),
                     proposed_content: Some("Promote the release formatting rule.".to_string()),
                     proposed_confidence: Some(0.95),
-                    proposed_trust_class: Some("validated".to_string()),
-                    source_type: "science_test".to_string(),
+                    proposed_trust_class: Some("agent_assertion".to_string()),
+                    source_type: "rule_engine".to_string(),
                     source_id: Some("cluster-fixture".to_string()),
                     reason: "Filter fixture for non-consolidation candidates.".to_string(),
                     confidence: 0.91,
@@ -1778,7 +1709,6 @@ mod tests {
         Ok((tempdir, workspace_path))
     }
 
-    #[cfg(feature = "science-analytics")]
     fn ensure_close(actual: Option<f64>, expected: f64, ctx: &str) -> TestResult {
         match actual {
             Some(actual) if (actual - expected).abs() <= 1.0e-12 => Ok(()),
@@ -1794,22 +1724,12 @@ mod tests {
 
     #[test]
     fn status_returns_consistent_value() -> TestResult {
-        let s = status();
-        if cfg!(feature = "science-analytics") {
-            ensure(s, ScienceStatus::Available, "status when enabled")
-        } else {
-            ensure(s, ScienceStatus::NotCompiled, "status when disabled")
-        }
+        ensure(status(), ScienceStatus::Available, "science status")
     }
 
     #[test]
-    fn is_available_matches_feature_flag() -> TestResult {
-        let available = is_available();
-        if cfg!(feature = "science-analytics") {
-            ensure(available, true, "is_available when enabled")
-        } else {
-            ensure(available, false, "is_available when disabled")
-        }
+    fn is_available_for_default_metrics() -> TestResult {
+        ensure(is_available(), true, "default science availability")
     }
 
     #[test]
@@ -1989,11 +1909,7 @@ mod tests {
             cfg!(feature = "science-analytics"),
             "science feature enabled",
         )?;
-        ensure(
-            report.available,
-            cfg!(feature = "science-analytics"),
-            "science report availability",
-        )?;
+        ensure(report.available, true, "science report availability")?;
         ensure(report.capabilities.len(), 2, "science capability count")?;
         ensure(
             capability(&report, "clustering_diagnostics")?.required_feature,
@@ -2063,29 +1979,20 @@ mod tests {
 
     #[cfg(not(feature = "science-analytics"))]
     #[test]
-    fn science_status_report_degrades_without_feature() -> TestResult {
+    fn science_status_report_is_available_without_feature() -> TestResult {
         let report = ScienceStatusReport::current();
-        ensure(report.status, ScienceStatus::NotCompiled, "status")?;
-        ensure(report.degradations.len(), 1, "degradation count")?;
-        ensure(
-            report.degradations.iter().map(|entry| entry.code).collect(),
-            vec![DEGRADATION_CODE_NOT_COMPILED],
-            "degradation codes",
-        )?;
+        ensure(report.status, ScienceStatus::Available, "status")?;
+        ensure(report.degradations.is_empty(), true, "degradations empty")?;
+        ensure(report.next_actions.is_empty(), true, "next actions empty")?;
         ensure(
             capability(&report, "clustering_diagnostics")?.state,
-            ScienceCapabilityState::Degraded,
-            "clustering degraded",
+            ScienceCapabilityState::Available,
+            "clustering available",
         )?;
         ensure(
             capability(&report, "evaluation_metrics")?.state,
-            ScienceCapabilityState::Degraded,
-            "metrics degraded",
-        )?;
-        ensure(
-            report.next_actions,
-            vec!["Rebuild ee with --features science-analytics."],
-            "next actions",
+            ScienceCapabilityState::Available,
+            "metrics available",
         )
     }
 
@@ -2176,11 +2083,11 @@ mod tests {
 
     #[cfg(not(feature = "science-analytics"))]
     #[test]
-    fn evaluation_metrics_compute_degrades_when_science_is_not_compiled() -> TestResult {
+    fn evaluation_metrics_compute_in_default_build() -> TestResult {
         let metrics = EvaluationMetrics::compute(&[true, false, true], &[true, true, false]);
-        ensure(metrics.precision, None, "precision remains unavailable")?;
-        ensure(metrics.recall, None, "recall remains unavailable")?;
-        ensure(metrics.f1_score, None, "f1 remains unavailable")
+        ensure_close(metrics.precision, 0.5, "precision")?;
+        ensure_close(metrics.recall, 0.5, "recall")?;
+        ensure_close(metrics.f1_score, 0.5, "f1")
     }
 
     #[cfg(not(feature = "science-analytics"))]
@@ -2193,7 +2100,6 @@ mod tests {
         )
     }
 
-    #[cfg(feature = "science-analytics")]
     #[test]
     fn science_metric_reference_parity_balanced_case() -> TestResult {
         let metrics = EvaluationMetrics::compute(
@@ -2206,7 +2112,6 @@ mod tests {
         ensure_close(metrics.f1_score, 2.0 / 3.0, "f1 parity")
     }
 
-    #[cfg(feature = "science-analytics")]
     #[test]
     fn science_metric_reference_parity_perfect_case() -> TestResult {
         let metrics = EvaluationMetrics::compute(&[true, false, true], &[true, false, true]);
@@ -2216,7 +2121,6 @@ mod tests {
         ensure_close(metrics.f1_score, 1.0, "f1 perfect")
     }
 
-    #[cfg(feature = "science-analytics")]
     #[test]
     fn science_metric_reference_parity_handles_empty_and_mismatched_inputs() -> TestResult {
         let empty = EvaluationMetrics::compute(&[], &[]);
@@ -2230,7 +2134,6 @@ mod tests {
         ensure(mismatched.f1_score, None, "mismatched f1")
     }
 
-    #[cfg(feature = "science-analytics")]
     #[test]
     fn science_metric_reference_parity_handles_undefined_denominators() -> TestResult {
         let no_positive_predictions =
@@ -2274,7 +2177,7 @@ mod tests {
 
     #[cfg(not(feature = "science-analytics"))]
     #[test]
-    fn clustering_diagnostics_compute_degrades_when_science_is_not_compiled() -> TestResult {
+    fn clustering_diagnostics_compute_in_default_build() -> TestResult {
         let diag = ClusteringDiagnostics::compute(&[
             vec![1.0, 0.0],
             vec![0.99, 0.1],
@@ -2282,11 +2185,12 @@ mod tests {
             vec![-0.99, -0.1],
         ]);
 
-        ensure(diag.cluster_count, 0, "cluster count remains unavailable")?;
+        ensure(diag.cluster_count, 2, "cluster count")?;
         ensure(
-            diag.silhouette_score,
-            None,
-            "silhouette remains unavailable",
+            diag.silhouette_score
+                .is_some_and(|score| score > 0.9 && score <= 1.0),
+            true,
+            "silhouette score",
         )?;
         let json = diag.data_json();
         ensure_json_str(
@@ -2295,14 +2199,12 @@ mod tests {
             "clustering diagnostics schema",
         )?;
         ensure_json_str(
-            json.get("degradationCode")
-                .and_then(serde_json::Value::as_str),
-            DEGRADATION_CODE_NOT_COMPILED,
-            "clustering diagnostics degradation code",
+            json.get("status").and_then(serde_json::Value::as_str),
+            "computed",
+            "clustering diagnostics status",
         )
     }
 
-    #[cfg(feature = "science-analytics")]
     #[test]
     fn analyze_clustering_retrieves_candidate_embeddings() -> TestResult {
         let (_tempdir, workspace_path) = seed_clustering_workspace()?;
@@ -2337,7 +2239,6 @@ mod tests {
         )
     }
 
-    #[cfg(feature = "science-analytics")]
     #[test]
     fn clustering_diagnostics_reference_parity_two_clear_clusters() -> TestResult {
         let diag = ClusteringDiagnostics::compute(&[
@@ -2365,7 +2266,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "science-analytics")]
     #[test]
     fn clustering_diagnostics_reference_parity_single_cluster_has_no_silhouette() -> TestResult {
         let diag =
@@ -2379,7 +2279,6 @@ mod tests {
         )
     }
 
-    #[cfg(feature = "science-analytics")]
     #[test]
     fn clustering_diagnostics_rejects_invalid_embeddings() -> TestResult {
         let empty = ClusteringDiagnostics::compute(&[]);
@@ -2396,7 +2295,6 @@ mod tests {
         ensure(zero_vector.cluster_count, 0, "zero-vector cluster count")
     }
 
-    #[cfg(feature = "science-analytics")]
     #[test]
     fn clustering_diagnostics_are_deterministic_under_input_order() -> TestResult {
         let first = ClusteringDiagnostics::compute(&[

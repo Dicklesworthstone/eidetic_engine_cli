@@ -1437,7 +1437,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "science-analytics")]
     fn ensure_close(actual: Option<f64>, expected: f64, ctx: &str) -> TestResult {
         match actual {
             Some(actual) if (actual - expected).abs() <= 1.0e-12 => Ok(()),
@@ -1720,7 +1719,7 @@ mod tests {
 
     #[cfg(not(feature = "science-analytics"))]
     #[test]
-    fn evaluation_report_science_metrics_degrade_without_feature() -> TestResult {
+    fn evaluation_report_science_metrics_compute_without_feature() -> TestResult {
         let mut report = EvaluationReport::new();
         report.add_result(ScenarioValidationResult {
             scenario_id: "passing".to_string(),
@@ -1734,22 +1733,17 @@ mod tests {
         let metrics = science_metrics(&report)?;
         ensure(
             metrics.status,
-            crate::science::ScienceStatus::NotCompiled,
+            crate::science::ScienceStatus::Available,
             "science status",
         )?;
-        ensure(metrics.available, false, "science available")?;
-        ensure(
-            metrics.degradation_code,
-            Some(crate::science::DEGRADATION_CODE_NOT_COMPILED),
-            "degradation code",
-        )?;
+        ensure(metrics.available, true, "science available")?;
+        ensure(metrics.degradation_code, None, "degradation code")?;
         ensure(metrics.scenarios_evaluated, 1, "scenario count")?;
-        ensure(metrics.precision, None, "precision degraded")?;
-        ensure(metrics.recall, None, "recall degraded")?;
-        ensure(metrics.f1_score, None, "f1 degraded")
+        ensure_close(metrics.precision, 1.0, "precision")?;
+        ensure_close(metrics.recall, 1.0, "recall")?;
+        ensure_close(metrics.f1_score, 1.0, "f1")
     }
 
-    #[cfg(feature = "science-analytics")]
     #[test]
     fn evaluation_report_science_metrics_compute_from_results() -> TestResult {
         let mut report = EvaluationReport::new();
@@ -1794,7 +1788,6 @@ mod tests {
         ensure_close(metrics.f1_score, 0.8, "f1")
     }
 
-    #[cfg(feature = "science-analytics")]
     #[test]
     fn evaluation_report_science_metrics_reference_parity_all_pass() -> TestResult {
         let mut report = EvaluationReport::new();
@@ -1816,7 +1809,6 @@ mod tests {
         ensure_close(metrics.f1_score, 1.0, "all-pass f1")
     }
 
-    #[cfg(feature = "science-analytics")]
     #[test]
     fn evaluation_report_science_metrics_reference_parity_all_fail() -> TestResult {
         let mut report = EvaluationReport::new();
