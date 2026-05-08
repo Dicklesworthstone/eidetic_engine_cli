@@ -14663,15 +14663,8 @@ fn validate_unsupported_query_features(
         validate_tags_object(tags)?;
     }
 
-    if object.contains_key("graph") {
-        return Err(QueryFileError::new(
-            QueryFileErrorCode::UnsupportedFeature,
-            "ee.query.v1 field 'graph' is recognized but not yet supported by ee pack.".to_string(),
-            Some(
-                "Remove the field or use ee search/context flags that already support it."
-                    .to_string(),
-            ),
-        ));
+    if let Some(graph) = object.get("graph") {
+        validate_graph_object(graph)?;
     }
 
     if let Some(pagination) = object.get("pagination") {
@@ -14710,8 +14703,205 @@ fn extract_query_filters(
     }
 
     filters.temporal = temporal_filters_from_document(object)?;
+    filters.graph = graph_hints_from_document(object)?;
 
     Ok(filters)
+}
+
+fn validate_graph_object(value: &serde_json::Value) -> Result<(), QueryFileError> {
+    let Some(object) = value.as_object() else {
+        return Err(QueryFileError::new(
+            QueryFileErrorCode::MalformedJson,
+            "graph must be an object with seedMemories, traversal, maxHops, linkTypes, or includeOrphans.",
+            Some(
+                "Use graph: { seedMemories: [\"mem_...\"], traversal: \"bidirectional\", maxHops: 1 }."
+                    .to_string(),
+            ),
+        ));
+    };
+
+    for key in object.keys() {
+        if ![
+            "seedMemories",
+            "traversal",
+            "maxHops",
+            "linkTypes",
+            "includeOrphans",
+        ]
+        .contains(&key.as_str())
+        {
+            return Err(QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                format!(
+                    "Unknown graph field '{key}'. Expected seedMemories, traversal, maxHops, linkTypes, or includeOrphans."
+                ),
+                Some("Use only documented ee.query.v1 graph hint fields inside graph.".to_string()),
+            ));
+        }
+    }
+
+    if let Some(seeds) = object.get("seedMemories") {
+        let arr = seeds.as_array().ok_or_else(|| {
+            QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                "graph.seedMemories must be an array of memory ID strings.",
+                Some("Use graph.seedMemories: [\"mem_...\"]".to_string()),
+            )
+        })?;
+        for item in arr {
+            let seed = item.as_str().ok_or_else(|| {
+                QueryFileError::new(
+                    QueryFileErrorCode::MalformedJson,
+                    "graph.seedMemories array elements must be strings.",
+                    Some("Use graph.seedMemories: [\"mem_...\"]".to_string()),
+                )
+            })?;
+            if seed.trim().is_empty() {
+                return Err(QueryFileError::new(
+                    QueryFileErrorCode::MalformedJson,
+                    "graph.seedMemories entries cannot be empty.",
+                    Some("Remove empty graph seed values.".to_string()),
+                ));
+            }
+        }
+    }
+
+    if let Some(traversal) = object.get("traversal") {
+        let raw = traversal.as_str().ok_or_else(|| {
+            QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                "graph.traversal must be a string.",
+                Some("Use outbound, inbound, or bidirectional.".to_string()),
+            )
+        })?;
+        if crate::models::QueryGraphTraversal::parse(raw).is_none() {
+            return Err(QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                format!("Unsupported graph.traversal '{raw}'."),
+                Some("Use outbound, inbound, or bidirectional.".to_string()),
+            ));
+        }
+    }
+
+    if let Some(max_hops) = object.get("maxHops") {
+        let value = max_hops.as_u64().ok_or_else(|| {
+            QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                "graph.maxHops must be a non-negative integer.",
+                Some("Use graph.maxHops: 1.".to_string()),
+            )
+        })?;
+        if value > 8 {
+            return Err(QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                format!("graph.maxHops {value} exceeds the bounded maximum of 8."),
+                Some("Use graph.maxHops <= 8 to keep query-file expansion bounded.".to_string()),
+            ));
+        }
+    }
+
+    if let Some(link_types) = object.get("linkTypes") {
+        let arr = link_types.as_array().ok_or_else(|| {
+            QueryFileError::new(
+                QueryFileErrorCode::MalformedJson,
+                "graph.linkTypes must be an array of memory link relation strings.",
+                Some("Use graph.linkTypes: [\"supports\", \"related\"].".to_string()),
+            )
+        })?;
+        for item in arr {
+            let relation = item.as_str().ok_or_else(|| {
+                QueryFileError::new(
+                    QueryFileErrorCode::MalformedJson,
+                    "graph.linkTypes array elements must be strings.",
+                    Some("Use graph.linkTypes: [\"supports\", \"related\"].".to_string()),
+                )
+            })?;
+            if crate::db::MemoryLinkRelation::parse(relation).is_none() {
+                return Err(QueryFileError::new(
+                    QueryFileErrorCode::MalformedJson,
+                    format!("Unknown graph.linkTypes relation '{relation}'."),
+                    Some(
+                        "Use one of: supports, contradicts, derived_from, supersedes, related, co_tag, co_mention."
+                            .to_string(),
+                    ),
+                ));
+            }
+        }
+    }
+
+    if let Some(include_orphans) = object.get("includeOrphans")
+        && !include_orphans.is_boolean()
+    {
+        return Err(QueryFileError::new(
+            QueryFileErrorCode::MalformedJson,
+            "graph.includeOrphans must be a boolean.",
+            Some("Use graph.includeOrphans: true or false.".to_string()),
+        ));
+    }
+
+    Ok(())
+}
+
+fn graph_hints_from_document(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<crate::models::QueryGraphHints, QueryFileError> {
+    let Some(graph) = object.get("graph") else {
+        return Ok(crate::models::QueryGraphHints::default());
+    };
+    let graph = graph.as_object().ok_or_else(|| {
+        QueryFileError::new(
+            QueryFileErrorCode::MalformedJson,
+            "graph must be an object.",
+            Some("Use graph: { seedMemories: [\"mem_...\"] }.".to_string()),
+        )
+    })?;
+
+    let seed_memories = graph
+        .get("seedMemories")
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    let traversal = graph
+        .get("traversal")
+        .and_then(serde_json::Value::as_str)
+        .and_then(crate::models::QueryGraphTraversal::parse)
+        .unwrap_or_default();
+    let max_hops = graph
+        .get("maxHops")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(1)
+        .min(8);
+    let link_types = graph
+        .get("linkTypes")
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    let include_orphans = graph
+        .get("includeOrphans")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+
+    Ok(crate::models::QueryGraphHints {
+        enabled: true,
+        seed_memories,
+        traversal,
+        max_hops,
+        link_types,
+        include_orphans,
+    })
 }
 
 fn validate_tags_object(value: &serde_json::Value) -> Result<(), QueryFileError> {

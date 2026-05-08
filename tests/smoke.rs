@@ -6923,35 +6923,29 @@ fn pack_query_file_invalid_timestamp_uses_stable_machine_error() -> TestResult {
 
 #[cfg(unix)]
 #[test]
-fn pack_query_file_unsupported_recognized_fields_use_stable_machine_error() -> TestResult {
-    let cases = [(
-        "graph",
+fn pack_query_file_invalid_graph_field_uses_stable_machine_error() -> TestResult {
+    let workspace = unique_artifact_dir("pack-invalid-graph")?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let query_file = workspace.join("invalid-graph.eeq.json");
+    fs::write(
+        &query_file,
         r#"{
           "version": "ee.query.v1",
           "query": {"text": "prepare release"},
           "graph": {
-            "seedMemories": ["mem_00000000000000000000000001"],
-            "maxHops": 1
+            "depth": 1
           }
         }"#,
-    )];
+    )
+    .map_err(|error| error.to_string())?;
+    let query_file_arg = query_file.to_string_lossy().into_owned();
 
-    for (field, query_document) in cases {
-        let workspace = unique_artifact_dir(&format!("pack-unsupported-{field}"))?;
-        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
-        let query_file = workspace.join(format!("unsupported-{field}.eeq.json"));
-        fs::write(&query_file, query_document).map_err(|error| error.to_string())?;
-        let query_file_arg = query_file.to_string_lossy().into_owned();
-
-        ensure_pack_query_file_machine_error(
-            &format!("pack-unsupported-{field}-run"),
-            query_file_arg.as_str(),
-            "ERR_UNSUPPORTED_FEATURE",
-            &format!("unsupported {field} query-file field"),
-        )?;
-    }
-
-    Ok(())
+    ensure_pack_query_file_machine_error(
+        "pack-invalid-graph-run",
+        query_file_arg.as_str(),
+        "ERR_MALFORMED_JSON",
+        "invalid graph query-file field",
+    )
 }
 
 #[cfg(unix)]

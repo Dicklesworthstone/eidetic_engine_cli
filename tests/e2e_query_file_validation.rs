@@ -7,7 +7,12 @@
 
 use std::fmt::Debug;
 use std::fs;
+use std::path::Path;
 use std::process::{Command, Output};
+
+use ee::db::{
+    CreateMemoryInput, CreateMemoryLinkInput, DbConnection, MemoryLinkRelation, MemoryLinkSource,
+};
 
 type TestResult = Result<(), String>;
 
@@ -99,6 +104,33 @@ fn degraded_codes(json: &serde_json::Value) -> Vec<&str> {
         .flatten()
         .filter_map(|entry| entry["code"].as_str())
         .collect()
+}
+
+fn remember_graph_memory(workspace: &str, content: &str) -> Result<String, String> {
+    let output = run_ee(&[
+        "--workspace",
+        workspace,
+        "--json",
+        "remember",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        content,
+    ])?;
+    ensure_equal(
+        &output.status.code(),
+        &Some(EXIT_SUCCESS),
+        "remember graph memory exit code",
+    )?;
+    assert_stderr_empty(&output, "remember graph memory")?;
+    let json = stdout_json(&output)?;
+    json["data"]["public_id"]
+        .as_str()
+        .or_else(|| json["data"]["memory_id"].as_str())
+        .or_else(|| json["data"]["id"].as_str())
+        .map(str::to_string)
+        .ok_or_else(|| format!("remember response missing memory id: {json}"))
 }
 
 #[test]
@@ -413,7 +445,7 @@ fn query_file_with_strict_temporal_validity_filters_future_and_expired_memories(
 }
 
 #[test]
-fn query_file_with_unsupported_graph_field_returns_error() -> TestResult {
+fn query_file_with_unknown_graph_field_returns_malformed_error() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let workspace = tempdir.path().to_string_lossy().to_string();
 
@@ -425,7 +457,7 @@ fn query_file_with_unsupported_graph_field_returns_error() -> TestResult {
         "init exit code",
     )?;
 
-    // Create query file with unsupported 'graph' field
+    // Create query file with an unknown graph subfield.
     let query_file = tempdir.path().join("query.json");
     let query_content = r#"{
         "version": "ee.query.v1",
@@ -445,12 +477,125 @@ fn query_file_with_unsupported_graph_field_returns_error() -> TestResult {
 
     ensure(
         output.status.code() != Some(EXIT_SUCCESS),
-        "unsupported graph field should produce non-zero exit code",
+        "unknown graph field should produce non-zero exit code",
     )?;
 
     let json = stdout_json(&output)?;
-    assert_error_envelope(&json, "ERR_UNSUPPORTED_FEATURE", "graph field")?;
+    assert_error_envelope(&json, "ERR_MALFORMED_JSON", "graph field")?;
     assert_stderr_empty(&output, "graph field")
+}
+
+#[test]
+fn query_file_with_graph_seed_hint_succeeds() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    let init_output = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(
+        &init_output.status.code(),
+        &Some(EXIT_SUCCESS),
+        "init exit code",
+    )?;
+    assert_stderr_empty(&init_output, "init")?;
+
+    let seed = remember_graph_memory(&workspace, "graph seed query anchor")?;
+
+    let database_path = Path::new(&workspace).join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+    let workspace_row = connection
+        .get_workspace_by_path(&workspace)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "graph seed query workspace row missing".to_string())?;
+    let neighbor = "mem_00000000000000000000000301".to_string();
+    connection
+        .insert_memory(
+            &neighbor,
+            &CreateMemoryInput {
+                workspace_id: workspace_row.id,
+                level: "semantic".to_string(),
+                kind: "fact".to_string(),
+                content: "linked neighbor selected only by edge".to_string(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.82,
+                importance: 0.7,
+                provenance_uri: Some("file://docs/query-schema.md#L221".to_string()),
+                trust_class: "agent_validated".to_string(),
+                trust_subclass: Some("query-file-validation".to_string()),
+                valid_from: None,
+                valid_to: None,
+                tags: vec!["graph".to_string()],
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .insert_memory_link(
+            "link_00000000000000000000000301",
+            &CreateMemoryLinkInput {
+                src_memory_id: seed.clone(),
+                dst_memory_id: neighbor,
+                relation: MemoryLinkRelation::Supports,
+                weight: 0.9,
+                confidence: 0.86,
+                directed: true,
+                evidence_count: 1,
+                last_reinforced_at: Some("2026-05-08T00:00:00Z".to_string()),
+                source: MemoryLinkSource::Agent,
+                created_by: Some("query-file-validation".to_string()),
+                metadata_json: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    connection.close().map_err(|error| error.to_string())?;
+
+    let query_file = tempdir.path().join("query.json");
+    let query_content = format!(
+        r#"{{
+            "version": "ee.query.v1",
+            "query": {{"text": "graph seed query"}},
+            "graph": {{
+                "seedMemories": ["{seed}"],
+                "traversal": "outbound",
+                "maxHops": 1,
+                "linkTypes": ["supports"],
+                "includeOrphans": false
+            }}
+        }}"#
+    );
+    fs::write(&query_file, query_content).map_err(|e| e.to_string())?;
+
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "pack",
+        "--query-file",
+        &query_file.to_string_lossy(),
+        "--json",
+    ])?;
+
+    ensure_equal(
+        &output.status.code(),
+        &Some(EXIT_SUCCESS),
+        "graph seed query exit code",
+    )?;
+    let json = stdout_json(&output)?;
+    assert_response_envelope(&json, "graph seed query")?;
+    let items = json["data"]["pack"]["items"]
+        .as_array()
+        .ok_or_else(|| "graph seed query: missing pack items".to_string())?;
+    ensure(
+        items.iter().any(|item| {
+            item["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("linked neighbor selected only by edge"))
+        }),
+        "graph seed query: linked neighbor should be selected",
+    )?;
+    ensure(
+        degraded_codes(&json).contains(&"context_graph_snapshot_missing"),
+        "graph seed query: missing graph snapshot should be reported",
+    )?;
+    assert_stderr_empty(&output, "graph seed query")
 }
 
 #[test]

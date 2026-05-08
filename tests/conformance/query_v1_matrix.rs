@@ -7,7 +7,13 @@
 
 use std::fmt::Debug;
 use std::fs;
+use std::path::Path;
 use std::process::{Command, Output};
+
+use ee::db::{
+    CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection,
+    MemoryLinkRelation, MemoryLinkSource,
+};
 
 type TestResult = Result<(), String>;
 
@@ -167,6 +173,150 @@ fn write_query_file(tempdir: &tempfile::TempDir, content: &str) -> Result<String
     let query_file = tempdir.path().join("query.json");
     fs::write(&query_file, content).map_err(|e| e.to_string())?;
     Ok(query_file.to_string_lossy().to_string())
+}
+
+fn remember_graph_memory(workspace: &str, content: &str) -> Result<String, String> {
+    let output = run_ee(&[
+        "--workspace",
+        workspace,
+        "--json",
+        "remember",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        content,
+    ])?;
+    ensure_equal(
+        &output.status.code(),
+        &Some(EXIT_SUCCESS),
+        &format!("remember graph memory '{content}'"),
+    )?;
+    assert_stderr_empty(&output, "remember graph memory")?;
+    let json = stdout_json(&output)?;
+    json["data"]["public_id"]
+        .as_str()
+        .or_else(|| json["data"]["memory_id"].as_str())
+        .or_else(|| json["data"]["id"].as_str())
+        .map(str::to_string)
+        .ok_or_else(|| format!("remember response missing memory id: {json}"))
+}
+
+fn setup_workspace_with_graph()
+-> Result<(tempfile::TempDir, String, String, String, String, String), String> {
+    let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    let init_output = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(
+        &init_output.status.code(),
+        &Some(EXIT_SUCCESS),
+        "graph init exit code",
+    )?;
+    assert_stderr_empty(&init_output, "graph init")?;
+
+    let seed = remember_graph_memory(&workspace, "graph traversal anchor release root")?;
+    let orphan = remember_graph_memory(&workspace, "graph traversal orphan memory unrelated")?;
+
+    let database_path = Path::new(&workspace).join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+    let workspace_row = connection
+        .get_workspace_by_path(&workspace)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "graph workspace row missing".to_string())?;
+    let outbound = "mem_00000000000000000000000201".to_string();
+    let inbound = "mem_00000000000000000000000202".to_string();
+    connection
+        .insert_memory(
+            &outbound,
+            &CreateMemoryInput {
+                workspace_id: workspace_row.id.clone(),
+                level: "semantic".to_string(),
+                kind: "fact".to_string(),
+                content: "outbound expansion only".to_string(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.8,
+                importance: 0.7,
+                provenance_uri: Some("file://docs/query-schema.md#L221".to_string()),
+                trust_class: "agent_validated".to_string(),
+                trust_subclass: Some("query-v1-matrix".to_string()),
+                valid_from: None,
+                valid_to: None,
+                tags: vec!["graph".to_string()],
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .insert_memory(
+            &inbound,
+            &CreateMemoryInput {
+                workspace_id: workspace_row.id,
+                level: "semantic".to_string(),
+                kind: "fact".to_string(),
+                content: "inbound expansion only".to_string(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.8,
+                importance: 0.7,
+                provenance_uri: Some("file://docs/query-schema.md#L221".to_string()),
+                trust_class: "agent_validated".to_string(),
+                trust_subclass: Some("query-v1-matrix".to_string()),
+                valid_from: None,
+                valid_to: None,
+                tags: vec!["graph".to_string()],
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .insert_memory_link(
+            "link_00000000000000000000000201",
+            &CreateMemoryLinkInput {
+                src_memory_id: seed.clone(),
+                dst_memory_id: outbound.clone(),
+                relation: MemoryLinkRelation::Supports,
+                weight: 0.91,
+                confidence: 0.88,
+                directed: true,
+                evidence_count: 2,
+                last_reinforced_at: Some("2026-05-08T00:00:00Z".to_string()),
+                source: MemoryLinkSource::Agent,
+                created_by: Some("query-v1-matrix".to_string()),
+                metadata_json: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .insert_memory_link(
+            "link_00000000000000000000000202",
+            &CreateMemoryLinkInput {
+                src_memory_id: inbound.clone(),
+                dst_memory_id: seed.clone(),
+                relation: MemoryLinkRelation::Related,
+                weight: 0.82,
+                confidence: 0.79,
+                directed: true,
+                evidence_count: 1,
+                last_reinforced_at: Some("2026-05-08T00:00:00Z".to_string()),
+                source: MemoryLinkSource::Agent,
+                created_by: Some("query-v1-matrix".to_string()),
+                metadata_json: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    connection.close().map_err(|error| error.to_string())?;
+
+    Ok((tempdir, workspace, seed, outbound, inbound, orphan))
+}
+
+fn pack_item_contents(json: &serde_json::Value, context: &str) -> Result<Vec<String>, String> {
+    let items = json["data"]["pack"]["items"]
+        .as_array()
+        .ok_or_else(|| format!("{context}: missing pack items"))?;
+    Ok(items
+        .iter()
+        .filter_map(|item| item["content"].as_str().map(str::to_string))
+        .collect())
 }
 
 // ============================================================================
@@ -673,20 +823,24 @@ fn matrix_redaction_respect_succeeds() -> TestResult {
     assert_stderr_empty(&output, "redaction")
 }
 
-// ============================================================================
-// SECTION 4: Unimplemented Features (ERR_UNSUPPORTED_FEATURE)
-// ============================================================================
-
 #[test]
-fn matrix_unsupported_graph() -> TestResult {
-    let (tempdir, workspace) = setup_workspace_with_memories()?;
+fn matrix_graph_traversal_hints_expand_seed_neighborhood() -> TestResult {
+    let (tempdir, workspace, seed, _outbound, _inbound, _orphan) = setup_workspace_with_graph()?;
     let query_file = write_query_file(
         &tempdir,
-        r#"{
-            "version": "ee.query.v1",
-            "query": {"text": "release"},
-            "graph": {"seedMemories": ["mem_abc"], "maxHops": 2}
-        }"#,
+        &format!(
+            r#"{{
+                "version": "ee.query.v1",
+                "query": {{"text": "graph traversal anchor"}},
+                "graph": {{
+                    "seedMemories": ["{seed}"],
+                    "traversal": "outbound",
+                    "maxHops": 1,
+                    "linkTypes": ["supports"],
+                    "includeOrphans": false
+                }}
+            }}"#
+        ),
     )?;
 
     let output = run_ee(&[
@@ -698,13 +852,261 @@ fn matrix_unsupported_graph() -> TestResult {
         "--json",
     ])?;
 
+    ensure_equal(&output.status.code(), &Some(EXIT_SUCCESS), "graph outbound")?;
+    let json = stdout_json(&output)?;
+    assert_response_envelope(&json, "graph outbound")?;
+    let contents = pack_item_contents(&json, "graph outbound")?;
     ensure(
-        output.status.code() != Some(EXIT_SUCCESS),
-        "graph should fail",
+        contents
+            .iter()
+            .any(|content| content.contains("graph traversal anchor")),
+        "graph outbound: seed memory should be retained",
+    )?;
+    ensure(
+        contents
+            .iter()
+            .any(|content| content.contains("outbound expansion only")),
+        "graph outbound: outbound neighbor should be expanded",
+    )?;
+    ensure(
+        contents
+            .iter()
+            .all(|content| !content.contains("inbound expansion only")),
+        "graph outbound: inbound neighbor should be excluded",
+    )?;
+    ensure(
+        contents
+            .iter()
+            .all(|content| !content.contains("orphan memory unrelated")),
+        "graph outbound: orphan memory should be excluded",
+    )?;
+    ensure(
+        degraded_codes(&json).contains(&"context_graph_snapshot_missing"),
+        "graph outbound: missing graph snapshot should be reported",
+    )?;
+    assert_stderr_empty(&output, "graph outbound")
+}
+
+#[test]
+fn matrix_graph_traversal_direction_and_orphan_handling() -> TestResult {
+    let (tempdir, workspace, seed, _outbound, _inbound, _orphan) = setup_workspace_with_graph()?;
+    let inbound_query = write_query_file(
+        &tempdir,
+        &format!(
+            r#"{{
+                "version": "ee.query.v1",
+                "query": {{"text": "graph traversal anchor"}},
+                "graph": {{
+                    "seedMemories": ["{seed}"],
+                    "traversal": "inbound",
+                    "maxHops": 1,
+                    "linkTypes": ["related"],
+                    "includeOrphans": false
+                }}
+            }}"#
+        ),
+    )?;
+
+    let inbound_output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "pack",
+        "--query-file",
+        &inbound_query,
+        "--json",
+    ])?;
+    ensure_equal(
+        &inbound_output.status.code(),
+        &Some(EXIT_SUCCESS),
+        "graph inbound",
+    )?;
+    let inbound_json = stdout_json(&inbound_output)?;
+    assert_response_envelope(&inbound_json, "graph inbound")?;
+    let inbound_contents = pack_item_contents(&inbound_json, "graph inbound")?;
+    ensure(
+        inbound_contents
+            .iter()
+            .any(|content| content.contains("inbound expansion only")),
+        "graph inbound: inbound neighbor should be expanded",
+    )?;
+    ensure(
+        inbound_contents
+            .iter()
+            .all(|content| !content.contains("outbound expansion only")),
+        "graph inbound: outbound neighbor should be excluded by traversal",
+    )?;
+    assert_stderr_empty(&inbound_output, "graph inbound")?;
+
+    let bidirectional_query = write_query_file(
+        &tempdir,
+        &format!(
+            r#"{{
+                "version": "ee.query.v1",
+                "query": {{"text": "graph traversal anchor"}},
+                "graph": {{
+                    "seedMemories": ["{seed}"],
+                    "traversal": "bidirectional",
+                    "maxHops": 1,
+                    "linkTypes": ["supports", "related"],
+                    "includeOrphans": false
+                }}
+            }}"#
+        ),
+    )?;
+
+    let bidirectional_output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "pack",
+        "--query-file",
+        &bidirectional_query,
+        "--json",
+    ])?;
+    ensure_equal(
+        &bidirectional_output.status.code(),
+        &Some(EXIT_SUCCESS),
+        "graph bidirectional",
+    )?;
+    let bidirectional_json = stdout_json(&bidirectional_output)?;
+    assert_response_envelope(&bidirectional_json, "graph bidirectional")?;
+    let bidirectional_contents = pack_item_contents(&bidirectional_json, "graph bidirectional")?;
+    ensure(
+        bidirectional_contents
+            .iter()
+            .any(|content| content.contains("outbound expansion only")),
+        "graph bidirectional: outbound neighbor should be expanded",
+    )?;
+    ensure(
+        bidirectional_contents
+            .iter()
+            .any(|content| content.contains("inbound expansion only")),
+        "graph bidirectional: inbound neighbor should be expanded",
+    )?;
+    ensure(
+        bidirectional_contents
+            .iter()
+            .all(|content| !content.contains("orphan memory unrelated")),
+        "graph bidirectional: orphan memory should be excluded",
+    )?;
+    ensure(
+        degraded_codes(&bidirectional_json).contains(&"context_graph_orphans_filtered"),
+        "graph bidirectional: orphan filtering should be reported",
+    )?;
+    assert_stderr_empty(&bidirectional_output, "graph bidirectional")
+}
+
+#[test]
+fn matrix_graph_hints_do_not_expand_cross_workspace_links() -> TestResult {
+    let (tempdir, workspace, seed, _outbound, _inbound, _orphan) = setup_workspace_with_graph()?;
+
+    let database_path = Path::new(&workspace).join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+    let other_workspace_id = "wsp_11111111111111111111111111";
+    let cross_memory = "mem_00000000000000000000000203";
+    connection
+        .insert_workspace(
+            other_workspace_id,
+            &CreateWorkspaceInput {
+                path: tempdir
+                    .path()
+                    .join("other-workspace")
+                    .to_string_lossy()
+                    .to_string(),
+                name: Some("other-workspace".to_string()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .insert_memory(
+            cross_memory,
+            &CreateMemoryInput {
+                workspace_id: other_workspace_id.to_string(),
+                level: "semantic".to_string(),
+                kind: "fact".to_string(),
+                content: "cross workspace neighbor must not leak".to_string(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.8,
+                importance: 0.7,
+                provenance_uri: Some("file://docs/query-schema.md#L221".to_string()),
+                trust_class: "agent_validated".to_string(),
+                trust_subclass: Some("query-v1-matrix".to_string()),
+                valid_from: None,
+                valid_to: None,
+                tags: vec!["graph".to_string()],
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .insert_memory_link(
+            "link_00000000000000000000000203",
+            &CreateMemoryLinkInput {
+                src_memory_id: seed.clone(),
+                dst_memory_id: cross_memory.to_string(),
+                relation: MemoryLinkRelation::Supports,
+                weight: 0.93,
+                confidence: 0.9,
+                directed: true,
+                evidence_count: 1,
+                last_reinforced_at: Some("2026-05-08T00:00:00Z".to_string()),
+                source: MemoryLinkSource::Agent,
+                created_by: Some("query-v1-matrix".to_string()),
+                metadata_json: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    connection.close().map_err(|error| error.to_string())?;
+
+    let query_file = write_query_file(
+        &tempdir,
+        &format!(
+            r#"{{
+                "version": "ee.query.v1",
+                "query": {{"text": "graph traversal anchor"}},
+                "graph": {{
+                    "seedMemories": ["{seed}"],
+                    "traversal": "outbound",
+                    "maxHops": 1,
+                    "linkTypes": ["supports"],
+                    "includeOrphans": false
+                }}
+            }}"#
+        ),
+    )?;
+
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "pack",
+        "--query-file",
+        &query_file,
+        "--json",
+    ])?;
+    ensure_equal(
+        &output.status.code(),
+        &Some(EXIT_SUCCESS),
+        "graph cross-workspace",
     )?;
     let json = stdout_json(&output)?;
-    assert_error_envelope(&json, "ERR_UNSUPPORTED_FEATURE", "graph")?;
-    assert_stderr_empty(&output, "graph")
+    assert_response_envelope(&json, "graph cross-workspace")?;
+    let contents = pack_item_contents(&json, "graph cross-workspace")?;
+    ensure(
+        contents
+            .iter()
+            .any(|content| content.contains("outbound expansion only")),
+        "graph cross-workspace: active-workspace neighbor should still be expanded",
+    )?;
+    ensure(
+        contents
+            .iter()
+            .all(|content| !content.contains("cross workspace neighbor")),
+        "graph cross-workspace: cross-workspace neighbor must not be emitted",
+    )?;
+    ensure(
+        degraded_codes(&json).contains(&"context_graph_workspace_filtered"),
+        "graph cross-workspace: scope filtering should be reported",
+    )?;
+    assert_stderr_empty(&output, "graph cross-workspace")
 }
 
 // ============================================================================
@@ -732,7 +1134,11 @@ fn matrix_pagination_limit() -> TestResult {
         "--json",
     ])?;
 
-    ensure_equal(&output.status.code(), &Some(EXIT_SUCCESS), "pagination limit")?;
+    ensure_equal(
+        &output.status.code(),
+        &Some(EXIT_SUCCESS),
+        "pagination limit",
+    )?;
     let json = stdout_json(&output)?;
     assert_response_envelope(&json, "pagination limit")?;
     assert_stderr_empty(&output, "pagination limit")
@@ -759,7 +1165,11 @@ fn matrix_pagination_cursor_first_page() -> TestResult {
         "--json",
     ])?;
 
-    ensure_equal(&output.status.code(), &Some(EXIT_SUCCESS), "pagination first page")?;
+    ensure_equal(
+        &output.status.code(),
+        &Some(EXIT_SUCCESS),
+        "pagination first page",
+    )?;
     let json = stdout_json(&output)?;
     assert_response_envelope(&json, "pagination first page")?;
     assert_stderr_empty(&output, "pagination first page")

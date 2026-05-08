@@ -11,6 +11,7 @@ pub struct QueryFilters {
     pub temporal: QueryTemporalFilters,
     pub trust: TrustFilters,
     pub redaction: RedactionFilters,
+    pub graph: QueryGraphHints,
 }
 
 impl QueryFilters {
@@ -21,6 +22,7 @@ impl QueryFilters {
             && self.temporal.is_empty()
             && self.trust.is_empty()
             && self.redaction.is_empty()
+            && self.graph.is_empty()
     }
 
     /// Check if a metadata value matches all filters.
@@ -66,6 +68,67 @@ pub enum QueryTemporalValidityPosture {
     #[default]
     Relaxed,
     Ignore,
+}
+
+/// Graph traversal hints from an ee.query.v1 graph object.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QueryGraphHints {
+    pub enabled: bool,
+    pub seed_memories: Vec<String>,
+    pub traversal: QueryGraphTraversal,
+    pub max_hops: u32,
+    pub link_types: Vec<String>,
+    pub include_orphans: bool,
+}
+
+impl Default for QueryGraphHints {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            seed_memories: Vec::new(),
+            traversal: QueryGraphTraversal::Bidirectional,
+            max_hops: 1,
+            link_types: Vec::new(),
+            include_orphans: true,
+        }
+    }
+}
+
+impl QueryGraphHints {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        !self.enabled
+    }
+}
+
+/// Direction for ee.query.v1 graph expansion hints.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum QueryGraphTraversal {
+    Outbound,
+    Inbound,
+    #[default]
+    Bidirectional,
+}
+
+impl QueryGraphTraversal {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Outbound => "outbound",
+            Self::Inbound => "inbound",
+            Self::Bidirectional => "bidirectional",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "outbound" => Some(Self::Outbound),
+            "inbound" => Some(Self::Inbound),
+            "bidirectional" => Some(Self::Bidirectional),
+            _ => None,
+        }
+    }
 }
 
 impl QueryTemporalValidityPosture {
@@ -377,6 +440,7 @@ pub fn parse_filters(value: &serde_json::Value) -> Option<QueryFilters> {
         temporal: QueryTemporalFilters::default(),
         trust: TrustFilters::default(),
         redaction: RedactionFilters::default(),
+        graph: QueryGraphHints::default(),
     })
 }
 
@@ -555,6 +619,7 @@ impl EqlQuery {
             temporal: QueryTemporalFilters::default(),
             trust: TrustFilters::default(),
             redaction: RedactionFilters::default(),
+            graph: QueryGraphHints::default(),
         }
     }
 

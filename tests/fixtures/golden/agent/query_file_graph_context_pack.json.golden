@@ -1,0 +1,257 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "command": "context",
+    "request": {
+      "query": "graph anchor release",
+      "profile": "compact",
+      "maxTokens": 4000,
+      "candidatePool": 10,
+      "maxResults": 2,
+      "sections": [
+        "procedural_rules",
+        "decisions",
+        "failures",
+        "evidence",
+        "artifacts"
+      ]
+    },
+    "pack": {
+      "query": "graph anchor release",
+      "hash": "blake3:a44d86028c0cf4a45ec343cd89f0e880cb708ec4022f5c26ac7264bca4d631af",
+      "budget": {
+        "maxTokens": 4000,
+        "usedTokens": 14
+      },
+      "advisoryBanner": {
+        "status": "degraded",
+        "summary": "Context includes 2 degraded signals; validate advisory memory and repair degraded sources before relying on this pack.",
+        "authoritativeCount": 2,
+        "advisoryCount": 0,
+        "legacyCount": 0,
+        "degradationCount": 2,
+        "notes": [
+          {
+            "code": "degraded_context",
+            "severity": "low",
+            "message": "2 degraded context signals present; inspect degraded[] repairs before relying on omitted or fallback sources.",
+            "memoryIds": [],
+            "action": "inspect_degraded_repairs"
+          }
+        ]
+      },
+      "quality": {
+        "itemCount": 2,
+        "omittedCount": 0,
+        "usedTokens": 14,
+        "maxTokens": 4000,
+        "budgetUtilization": 0.0035,
+        "averageRelevance": 0.95,
+        "averageUtility": 0.78,
+        "provenanceSourceCount": 2,
+        "provenanceSourcesPerItem": 1.0,
+        "provenanceComplete": true,
+        "sections": [
+          {
+            "section": "procedural_rules",
+            "itemCount": 1,
+            "usedTokens": 7
+          },
+          {
+            "section": "decisions",
+            "itemCount": 0,
+            "usedTokens": 0
+          },
+          {
+            "section": "failures",
+            "itemCount": 0,
+            "usedTokens": 0
+          },
+          {
+            "section": "evidence",
+            "itemCount": 0,
+            "usedTokens": 0
+          },
+          {
+            "section": "artifacts",
+            "itemCount": 1,
+            "usedTokens": 7
+          }
+        ],
+        "omissions": {
+          "tokenBudgetExceeded": 0,
+          "redundantCandidates": 0
+        }
+      },
+      "selectionCertificate": {
+        "profile": "compact",
+        "objective": "mmr_redundancy",
+        "algorithm": "deterministic_greedy_mmr",
+        "guarantee": "deterministic redundancy-controlled greedy ranking; no submodular guarantee claimed",
+        "guaranteeStatus": "conditional",
+        "guaranteeEvidence": {
+          "status": "conditional",
+          "certificateId": null,
+          "identityValid": true,
+          "summary": "deterministic redundancy-controlled greedy ranking; no submodular guarantee claimed"
+        },
+        "candidateCount": 2,
+        "selectedCount": 2,
+        "omittedCount": 0,
+        "budgetLimit": 4000,
+        "budgetUsed": 14,
+        "totalObjectiveValue": 1.425,
+        "monotone": false,
+        "submodular": false,
+        "selectedItems": [
+          {
+            "rank": 1,
+            "memoryId": "mem_00000000000000000000000101",
+            "tokenCost": 7,
+            "feasible": true
+          },
+          {
+            "rank": 2,
+            "memoryId": "mem_00000000000000000000000102",
+            "tokenCost": 7,
+            "feasible": true
+          }
+        ],
+        "rejectedFrontier": [],
+        "steps": [
+          {
+            "rank": 1,
+            "memoryId": "mem_00000000000000000000000101",
+            "marginalGain": 0.735,
+            "objectiveValue": 0.735,
+            "tokenCost": 7,
+            "feasible": true,
+            "coveredFeatures": [
+              "section:artifacts",
+              "diversity:semantic:fact:graph",
+              "memory:mem_00000000000000000000000101"
+            ]
+          },
+          {
+            "rank": 2,
+            "memoryId": "mem_00000000000000000000000102",
+            "marginalGain": 0.69,
+            "objectiveValue": 1.425,
+            "tokenCost": 7,
+            "feasible": true,
+            "coveredFeatures": [
+              "section:procedural_rules",
+              "diversity:procedural:rule:graph",
+              "memory:mem_00000000000000000000000102"
+            ]
+          }
+        ]
+      },
+      "items": [
+        {
+          "rank": 1,
+          "memoryId": "mem_00000000000000000000000101",
+          "section": "artifacts",
+          "content": "Graph anchor memory for release planning.",
+          "estimatedTokens": 7,
+          "scores": {
+            "relevance": 0.98,
+            "utility": 0.72
+          },
+          "trust": {
+            "class": "agent_validated",
+            "subclass": "golden-fixture",
+            "posture": "authoritative"
+          },
+          "provenance": [
+            {
+              "uri": "file://docs/query-schema.md#L221",
+              "scheme": "file",
+              "label": "docs/query-schema.md:L221",
+              "locator": "L221",
+              "note": "Memory mem_00000000000000000000000101 selected for context pack"
+            }
+          ],
+          "why": "Deterministic retrieval explanation for query `graph anchor release`: source=memory search_source=semantic_fast; score_components=[relevance=unit_score(search_hit.score) with search_hit.score=0.4714, utility=unit_score(memory.utility) with memory.utility=0.7200]; formula=unit_score(field)=clamp(field, 0.0, 1.0) for finite fields, otherwise 0.0; inputs are stored memory/link fields and the explicit search hit, not agent reasoning. Graph query-file hint boosted this memory: seed=mem_00000000000000000000000101, depth=0, traversal=outbound, relation=seed.",
+          "diversityKey": "semantic:fact:graph"
+        },
+        {
+          "rank": 2,
+          "memoryId": "mem_00000000000000000000000102",
+          "section": "procedural_rules",
+          "content": "Neighbor selected only through supports edge.",
+          "estimatedTokens": 7,
+          "scores": {
+            "relevance": 0.92,
+            "utility": 0.84
+          },
+          "trust": {
+            "class": "agent_validated",
+            "subclass": "golden-fixture",
+            "posture": "authoritative"
+          },
+          "provenance": [
+            {
+              "uri": "file://docs/query-schema.md#L230",
+              "scheme": "file",
+              "label": "docs/query-schema.md:L230",
+              "locator": "L230",
+              "note": "Memory mem_00000000000000000000000102 selected for context pack"
+            }
+          ],
+          "why": "Deterministic retrieval explanation for query `graph anchor release`: source=memory search_source=semantic_fast; score_components=[relevance=unit_score(search_hit.score) with search_hit.score=0.0000, utility=unit_score(memory.utility) with memory.utility=0.8400]; formula=unit_score(field)=clamp(field, 0.0, 1.0) for finite fields, otherwise 0.0; inputs are stored memory/link fields and the explicit search hit, not agent reasoning. Graph query-file hint boosted this memory: seed=mem_00000000000000000000000101, depth=1, traversal=outbound, relation=supports.",
+          "diversityKey": "procedural:rule:graph"
+        }
+      ],
+      "omitted": [],
+      "provenanceFooter": {
+        "memoryCount": 2,
+        "sourceCount": 2,
+        "schemes": [
+          "file"
+        ],
+        "entries": [
+          {
+            "rank": 1,
+            "memoryId": "mem_00000000000000000000000101",
+            "sourceIndex": 1,
+            "source": {
+              "uri": "file://docs/query-schema.md#L221",
+              "scheme": "file",
+              "label": "docs/query-schema.md:L221",
+              "locator": "L221",
+              "note": "Memory mem_00000000000000000000000101 selected for context pack"
+            }
+          },
+          {
+            "rank": 2,
+            "memoryId": "mem_00000000000000000000000102",
+            "sourceIndex": 1,
+            "source": {
+              "uri": "file://docs/query-schema.md#L230",
+              "scheme": "file",
+              "label": "docs/query-schema.md:L230",
+              "locator": "L230",
+              "note": "Memory mem_00000000000000000000000102 selected for context pack"
+            }
+          }
+        ]
+      }
+    },
+    "degraded": [
+      {
+        "code": "context_graph_snapshot_missing",
+        "severity": "low",
+        "message": "No persisted graph snapshot exists; query-file traversal used source-of-truth memory_links without centrality boosts.",
+        "repair": "ee graph centrality-refresh"
+      },
+      {
+        "code": "query_output_explain_already_included",
+        "severity": "low",
+        "message": "output.explain was accepted; JSON context packs already include selection certificates and per-item why explanations.",
+        "repair": "Inspect data.pack.selectionCertificate and data.pack.items[].why."
+      }
+    ]
+  }
+}

@@ -222,8 +222,10 @@ Boolean predicates on memory metadata fields.
 
 ## Graph and Neighborhood Hints
 
-> **Status: Not Implemented** — Graph fields are recognized but return `ERR_UNSUPPORTED_FEATURE`.
-> Graph traversal hints are planned for a future release.
+> **Status: Implemented** — Graph fields are accepted as bounded context-pack
+> ranking and expansion hints. Missing or stale graph snapshots degrade
+> honestly while retrieval continues from the source-of-truth `memory_links`
+> table.
 
 ```json
 {
@@ -241,11 +243,19 @@ Boolean predicates on memory metadata fields.
 |-------|------|---------|-------------|
 | `graph.seedMemories` | string[] | - | Start traversal from these memory IDs |
 | `graph.traversal` | enum | `"bidirectional"` | `"outbound"`, `"inbound"`, `"bidirectional"` |
-| `graph.maxHops` | int | 1 | Maximum link traversal depth |
-| `graph.linkTypes` | string[] | all | Only traverse these link types |
+| `graph.maxHops` | int | 1 | Maximum link traversal depth; bounded to `0..=8` |
+| `graph.linkTypes` | string[] | all | Only traverse these relation types: `supports`, `contradicts`, `derived_from`, `supersedes`, `related`, `co_tag`, `co_mention` |
 | `graph.includeOrphans` | bool | true | Include memories with no links |
 
-**Behavior**: Graph hints are **ranking/expansion hints**, not strict filters. They influence which memories are considered and how they score, but do not silently exclude memories unless `includeOrphans: false` is explicitly set.
+**Behavior**: Graph hints are **ranking/expansion hints**, not strict filters.
+Seed memories and bounded neighbors are boosted or added to the candidate pool.
+Traversal uses deterministic ordering and relation filtering. Lexical retrieval
+is preserved when graph snapshots are missing or stale; the response includes
+degraded codes such as `context_graph_snapshot_missing` or
+`context_graph_snapshot_not_current`. Memories outside the graph neighborhood
+are excluded only when `includeOrphans: false` is explicitly set. Seeds and
+linked neighbors outside the active workspace scope are ignored and reported via
+`context_graph_seed_out_of_scope` or `context_graph_workspace_filtered`.
 
 ---
 
@@ -431,7 +441,7 @@ Equivalent CLI flags remain available for ad hoc commands:
 }
 ```
 
-### ⚠️ Graph Neighborhood Hints (not implemented)
+### Graph Neighborhood Hints (working)
 
 ```json
 {
@@ -503,11 +513,11 @@ The following shows the full schema, but most fields will error. A working subse
   "trust": {                          // Implemented
     "minClass": "human_explicit"
   },
-  "graph": {                          // ⚠️ Not implemented
+  "graph": {                          // Implemented
     "traversal": "bidirectional",
     "maxHops": 1
   },
-  "budget": {                         // ✓ Implemented (except maxResults)
+  "budget": {                         // ✓ Implemented
     "maxTokens": 4000,
     "candidatePool": 200
   },
@@ -574,7 +584,7 @@ This schema **does not**:
 | `temporalValidity` | **Implemented** | strict, relaxed, and ignore postures over `valid_from`/`valid_to` |
 | `trust.*` | **Implemented** | minClass, excludeClasses, requirePosture candidate filtering |
 | `redaction.*` | Partial | `respect` accepted, `bypass` policy denied; category allow-list filtering pending |
-| `graph.*` | Not Implemented | Graph traversal hints planned |
+| `graph.*` | **Implemented** | seedMemories, traversal, bounded maxHops, linkTypes, includeOrphans |
 | `budget.maxTokens` | **Implemented** | Token budget for context pack |
 | `budget.candidatePool` | **Implemented** | Candidate pool size |
 | `budget.maxResults` | **Implemented** | Caps candidates admitted to pack assembly |
@@ -600,7 +610,7 @@ These fields are recognized and validated but not wired through to pack/search e
 - [x] **trust.minClass, trust.excludeClasses** — Wire to trust class filtering
 - [x] **redaction.policy** — Accept respect and policy-deny bypass
 - [ ] **redaction.allowCategories** — Wire category allow-list filtering
-- [ ] **graph.seedMemories, graph.traversal, graph.maxHops** — Wire to graph traversal
+- [x] **graph.seedMemories, graph.traversal, graph.maxHops** — Bounded graph traversal and ranking hints
 - [x] **pagination.cursor, pagination.limit** — Cursor-based pagination
 - [x] **budget.maxResults** — Candidate admission limit
 - [x] **output.explain** — Explanation metadata is observable in JSON responses

@@ -136,7 +136,8 @@ mod tests {
     };
     use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
     use ee::db::{
-        CreateCurationCandidateInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection,
+        CreateCurationCandidateInput, CreateMemoryInput, CreateMemoryLinkInput,
+        CreateWorkspaceInput, DbConnection, MemoryLinkRelation, MemoryLinkSource,
     };
     use ee::models::WorkspaceId;
     use std::path::Path;
@@ -358,6 +359,95 @@ mod tests {
         connection.close().map_err(|error| error.to_string())
     }
 
+    fn seed_graph_query_workspace(workspace: &Path, database: &Path) -> TestResult {
+        if let Some(parent) = database.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create database parent {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+
+        let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                "wsp_querygraph0000000000000001",
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("query-graph-contract".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000101",
+                &CreateMemoryInput {
+                    workspace_id: "wsp_querygraph0000000000000001".to_string(),
+                    level: "semantic".to_string(),
+                    kind: "fact".to_string(),
+                    content: "Graph anchor memory for release planning.".to_string(),
+                    workflow_id: None,
+                    confidence: 0.91,
+                    utility: 0.72,
+                    importance: 0.66,
+                    provenance_uri: Some("file://docs/query-schema.md#L221".to_string()),
+                    trust_class: "agent_validated".to_string(),
+                    trust_subclass: Some("golden-fixture".to_string()),
+                    valid_from: None,
+                    valid_to: None,
+                    tags: vec!["graph".to_string(), "release".to_string()],
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000102",
+                &CreateMemoryInput {
+                    workspace_id: "wsp_querygraph0000000000000001".to_string(),
+                    level: "procedural".to_string(),
+                    kind: "rule".to_string(),
+                    content: "Neighbor selected only through supports edge.".to_string(),
+                    workflow_id: None,
+                    confidence: 0.88,
+                    utility: 0.84,
+                    importance: 0.71,
+                    provenance_uri: Some("file://docs/query-schema.md#L230".to_string()),
+                    trust_class: "agent_validated".to_string(),
+                    trust_subclass: Some("golden-fixture".to_string()),
+                    valid_from: None,
+                    valid_to: None,
+                    tags: vec!["graph".to_string(), "release".to_string()],
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(
+                "UPDATE memories SET created_at = '2026-05-08T12:00:00+00:00', updated_at = '2026-05-08T12:00:00+00:00' WHERE id IN ('mem_00000000000000000000000101', 'mem_00000000000000000000000102')",
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory_link(
+                "link_00000000000000000000000101",
+                &CreateMemoryLinkInput {
+                    src_memory_id: "mem_00000000000000000000000101".to_string(),
+                    dst_memory_id: "mem_00000000000000000000000102".to_string(),
+                    relation: MemoryLinkRelation::Supports,
+                    weight: 0.93,
+                    confidence: 0.89,
+                    directed: true,
+                    evidence_count: 2,
+                    last_reinforced_at: Some("2026-05-08T12:01:00+00:00".to_string()),
+                    source: MemoryLinkSource::Agent,
+                    created_by: Some("golden-query-graph".to_string()),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
     fn seed_pack_selection(database: &Path) -> TestResult {
         let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
         connection
@@ -374,6 +464,15 @@ mod tests {
     }
 
     fn build_search_index(workspace: &Path, database: &Path, index_dir: &Path) -> TestResult {
+        build_search_index_expect(workspace, database, index_dir, 1)
+    }
+
+    fn build_search_index_expect(
+        workspace: &Path,
+        database: &Path,
+        index_dir: &Path,
+        expected_documents: u32,
+    ) -> TestResult {
         let report = rebuild_index(&IndexRebuildOptions {
             workspace_path: workspace.to_path_buf(),
             database_path: Some(database.to_path_buf()),
@@ -387,7 +486,11 @@ mod tests {
             &IndexRebuildStatus::Success,
             "index rebuild status",
         )?;
-        ensure_equal(&report.documents_total, &1, "indexed document count")
+        ensure_equal(
+            &report.documents_total,
+            &expected_documents,
+            "indexed document count",
+        )
     }
 
     #[test]
@@ -1104,6 +1207,89 @@ mod tests {
 
         let normalized = normalize_context_pack_json(&stdout);
         assert_golden("agent", "query_file_context_pack.json", &normalized)
+    }
+
+    #[test]
+    fn agent_pack_query_file_graph_hints_match_context_pack_golden() -> TestResult {
+        let artifact_dir = unique_artifact_dir("pack-query-file-graph")?;
+        let workspace = artifact_dir.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        fs::create_dir_all(&workspace).map_err(|error| {
+            format!(
+                "failed to create workspace {}: {error}",
+                workspace.display()
+            )
+        })?;
+
+        seed_graph_query_workspace(&workspace, &database)?;
+        build_search_index_expect(&workspace, &database, &index_dir, 2)?;
+        let query_file = workspace.join("graph.eeq.json");
+        fs::write(
+            &query_file,
+            r#"{
+              "version": "ee.query.v1",
+              "query": {"text": "graph anchor release", "mode": "hybrid"},
+              "graph": {
+                "seedMemories": ["mem_00000000000000000000000101"],
+                "traversal": "outbound",
+                "maxHops": 1,
+                "linkTypes": ["supports"],
+                "includeOrphans": false
+              },
+              "budget": {"maxTokens": 4000, "candidatePool": 10, "maxResults": 2},
+              "output": {"format": "json", "profile": "compact", "explain": true}
+            }"#,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("pack")
+            .arg("--query-file")
+            .arg(&query_file)
+            .arg("--database")
+            .arg(&database)
+            .arg("--index-dir")
+            .arg(&index_dir)
+            .output()
+            .map_err(|error| format!("failed to run ee pack graph query-file: {error}"))?;
+
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|error| format!("pack graph query-file stdout was not UTF-8: {error}"))?;
+        let stderr = String::from_utf8(output.stderr)
+            .map_err(|error| format!("pack graph query-file stderr was not UTF-8: {error}"))?;
+
+        ensure(
+            output.status.success(),
+            format!("pack graph query-file should succeed; stderr: {stderr}"),
+        )?;
+        ensure(
+            stderr.is_empty(),
+            format!("pack graph query-file stderr must be empty, got: {stderr:?}"),
+        )?;
+
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "pack graph query-file schema",
+        )?;
+        ensure_equal(
+            &value["data"]["pack"]["items"][0]["memoryId"],
+            &serde_json::json!("mem_00000000000000000000000101"),
+            "graph seed item rank",
+        )?;
+        ensure_equal(
+            &value["data"]["pack"]["items"][1]["memoryId"],
+            &serde_json::json!("mem_00000000000000000000000102"),
+            "graph neighbor item rank",
+        )?;
+
+        let normalized = normalize_context_pack_json(&stdout);
+        assert_golden("agent", "query_file_graph_context_pack.json", &normalized)
     }
 
     #[test]

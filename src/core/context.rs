@@ -328,6 +328,11 @@ struct CandidateResolutionMetrics {
     redaction_filtered_candidates: usize,
     temporal_filtered_candidates: usize,
     temporal_relaxed_candidates: usize,
+    graph_boosted_candidates: usize,
+    graph_expanded_candidates: usize,
+    graph_filtered_candidates: usize,
+    graph_missing_seeds: usize,
+    graph_traversed_edges: usize,
     converted_candidates: usize,
     skipped_candidates: usize,
 }
@@ -550,7 +555,7 @@ pub fn run_context_pack_with_performance(
 
     let candidate_start = Instant::now();
     let candidate_filter_input_count = search_report.results.len();
-    let (mut candidates, candidate_metrics) = candidates_from_search_with_metrics(
+    let (mut candidates, mut candidate_metrics) = candidates_from_search_with_metrics(
         &connection,
         &search_report,
         &options.filters,
@@ -618,6 +623,18 @@ pub fn run_context_pack_with_performance(
             ),
         );
     }
+    let graph_metrics = apply_graph_hints(
+        &connection,
+        &options.workspace_path,
+        &options.filters,
+        &mut candidates,
+        &mut degraded,
+    );
+    candidate_metrics.graph_boosted_candidates = graph_metrics.boosted_candidates;
+    candidate_metrics.graph_expanded_candidates = graph_metrics.expanded_candidates;
+    candidate_metrics.graph_filtered_candidates = graph_metrics.filtered_candidates;
+    candidate_metrics.graph_missing_seeds = graph_metrics.missing_seeds;
+    candidate_metrics.graph_traversed_edges = graph_metrics.traversed_edges;
     trace.candidate_resolution = candidate_metrics;
     trace.record_elapsed("candidateResolution", candidate_start);
 
@@ -645,6 +662,8 @@ pub fn run_context_pack_with_performance(
         ),
     }
     trace.record_elapsed("focusState", focus_start);
+
+    sort_context_candidates(&mut candidates);
 
     if let Some(max_results) = request.max_results {
         let max_results = max_results as usize;
@@ -811,6 +830,11 @@ fn candidate_resolution_json(trace: &ContextPerformanceTrace) -> serde_json::Val
         "redactionFilteredCandidates": metrics.redaction_filtered_candidates,
         "temporalFilteredCandidates": metrics.temporal_filtered_candidates,
         "temporalRelaxedCandidates": metrics.temporal_relaxed_candidates,
+        "graphBoostedCandidates": metrics.graph_boosted_candidates,
+        "graphExpandedCandidates": metrics.graph_expanded_candidates,
+        "graphFilteredCandidates": metrics.graph_filtered_candidates,
+        "graphMissingSeeds": metrics.graph_missing_seeds,
+        "graphTraversedEdges": metrics.graph_traversed_edges,
         "filteredBeforeResolution": trace.filtered_count,
         "filterInputCount": trace.filter_input_count,
         "focusStateHits": trace.focus_state_hits,
@@ -1002,22 +1026,8 @@ fn context_workspace_ids(
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Vec<String> {
     let mut ids = BTreeSet::new();
-    let mut path_keys = BTreeSet::new();
 
-    let absolute = if workspace_path.is_absolute() {
-        workspace_path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(workspace_path)
-    };
-    path_keys.insert(workspace_path.to_path_buf());
-    path_keys.insert(absolute.clone());
-    if let Ok(canonical) = absolute.canonicalize() {
-        path_keys.insert(canonical);
-    }
-
-    for path in path_keys {
+    for path in context_workspace_path_keys(workspace_path) {
         ids.insert(stable_context_workspace_id(&path));
         let path_string = path.to_string_lossy().into_owned();
         match connection.get_workspace_by_path(&path_string) {
@@ -1036,6 +1046,23 @@ fn context_workspace_ids(
     }
 
     ids.into_iter().collect()
+}
+
+fn context_workspace_path_keys(workspace_path: &Path) -> BTreeSet<PathBuf> {
+    let mut path_keys = BTreeSet::new();
+    let absolute = if workspace_path.is_absolute() {
+        workspace_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(workspace_path)
+    };
+    path_keys.insert(workspace_path.to_path_buf());
+    path_keys.insert(absolute.clone());
+    if let Ok(canonical) = absolute.canonicalize() {
+        path_keys.insert(canonical);
+    }
+    path_keys
 }
 
 fn stable_context_workspace_id(path: &Path) -> String {
@@ -1171,6 +1198,23 @@ fn apply_pagination(
         has_more,
         next_cursor,
     }
+}
+
+fn sort_context_candidates(candidates: &mut [PackCandidate]) {
+    candidates.sort_by(|left, right| {
+        right
+            .relevance
+            .into_inner()
+            .total_cmp(&left.relevance.into_inner())
+            .then_with(|| {
+                right
+                    .utility
+                    .into_inner()
+                    .total_cmp(&left.utility.into_inner())
+            })
+            .then_with(|| left.section.cmp(&right.section))
+            .then_with(|| left.memory_id.to_string().cmp(&right.memory_id.to_string()))
+    });
 }
 
 fn persist_pack_record(
@@ -1471,6 +1515,553 @@ fn candidates_from_search_with_metrics(
         }
     }
     (candidates, metrics)
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct GraphHintApplicationMetrics {
+    boosted_candidates: usize,
+    expanded_candidates: usize,
+    filtered_candidates: usize,
+    missing_seeds: usize,
+    traversed_edges: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GraphHintEvidence {
+    seed_memory_id: String,
+    depth: u32,
+    relation: Option<String>,
+    traversal: crate::models::QueryGraphTraversal,
+}
+
+fn apply_graph_hints(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    filters: &crate::models::QueryFilters,
+    candidates: &mut Vec<PackCandidate>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> GraphHintApplicationMetrics {
+    let graph = &filters.graph;
+    if graph.is_empty() {
+        return GraphHintApplicationMetrics::default();
+    }
+
+    let workspace_ids = graph_context_workspace_ids(connection, workspace_path, degraded);
+    push_graph_snapshot_posture(connection, &workspace_ids, degraded);
+
+    let mut metrics = GraphHintApplicationMetrics::default();
+    let (graph_nodes, traversed_edges, missing_seeds) =
+        graph_hint_nodes(connection, graph, &workspace_ids, degraded);
+    metrics.traversed_edges = traversed_edges;
+    metrics.missing_seeds = missing_seeds;
+
+    if graph_nodes.is_empty() {
+        push_degradation(
+            degraded,
+            "context_graph_no_candidates",
+            ContextResponseSeverity::Low,
+            "Graph hints produced no candidate memories.",
+            Some(
+                "Check graph.seedMemories or create memory links with related memories."
+                    .to_string(),
+            ),
+        );
+        if !graph.include_orphans {
+            let filtered = candidates.len();
+            candidates.clear();
+            metrics.filtered_candidates = filtered;
+        }
+        return metrics;
+    }
+
+    let graph_ids: BTreeSet<String> = graph_nodes.keys().cloned().collect();
+    for candidate in candidates.iter_mut() {
+        if let Some(evidence) = graph_nodes.get(&candidate.memory_id.to_string()) {
+            if boost_candidate_for_graph(candidate, evidence) {
+                metrics.boosted_candidates = metrics.boosted_candidates.saturating_add(1);
+            }
+        }
+    }
+
+    if !graph.include_orphans {
+        let before = candidates.len();
+        candidates.retain(|candidate| graph_ids.contains(&candidate.memory_id.to_string()));
+        let filtered = before.saturating_sub(candidates.len());
+        metrics.filtered_candidates = filtered;
+        if filtered > 0 {
+            let noun = if filtered == 1 {
+                "candidate"
+            } else {
+                "candidates"
+            };
+            push_degradation(
+                degraded,
+                "context_graph_orphans_filtered",
+                ContextResponseSeverity::Low,
+                format!("{filtered} context {noun} excluded because graph.includeOrphans=false."),
+                Some("Set graph.includeOrphans=true to keep lexical candidates outside the graph neighborhood.".to_string()),
+            );
+        }
+    }
+
+    let existing: BTreeSet<String> = candidates
+        .iter()
+        .map(|candidate| candidate.memory_id.to_string())
+        .collect();
+    let expansion_ids: Vec<String> = graph_nodes
+        .keys()
+        .filter(|memory_id| !existing.contains(*memory_id))
+        .cloned()
+        .collect();
+    if expansion_ids.is_empty() {
+        return metrics;
+    }
+
+    let expansion_refs: Vec<&str> = expansion_ids.iter().map(String::as_str).collect();
+    let (memories, tags_map) = load_candidate_batch_maps(connection, &expansion_refs, degraded);
+    for memory_id in expansion_ids {
+        let Some(memory) = memories.get(&memory_id) else {
+            metrics.missing_seeds = metrics.missing_seeds.saturating_add(1);
+            if graph_nodes
+                .get(&memory_id)
+                .is_some_and(|evidence| evidence.depth == 0)
+            {
+                push_degradation(
+                    degraded,
+                    "context_graph_seed_missing",
+                    ContextResponseSeverity::Low,
+                    format!("Graph seed memory {memory_id} was not found in the memory store."),
+                    Some(
+                        "Use graph.seedMemories values returned by ee remember/search/why."
+                            .to_string(),
+                    ),
+                );
+            }
+            continue;
+        };
+        if memory.tombstoned_at.is_some() {
+            continue;
+        }
+        if !workspace_ids.contains(&memory.workspace_id) {
+            metrics.filtered_candidates = metrics.filtered_candidates.saturating_add(1);
+            push_degradation(
+                degraded,
+                "context_graph_workspace_filtered",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Graph candidate {memory_id} belongs to workspace {}, outside the active workspace scope.",
+                    memory.workspace_id
+                ),
+                Some("Use graph.seedMemories from the active workspace.".to_string()),
+            );
+            continue;
+        }
+        let tags = tags_map.get(&memory_id).cloned().unwrap_or_default();
+        if !graph_memory_matches_filters(memory, &tags, filters) {
+            continue;
+        }
+        let Some(typed_memory_id) = MemoryId::from_str(&memory_id).ok() else {
+            continue;
+        };
+        let Some(evidence) = graph_nodes.get(&memory_id) else {
+            continue;
+        };
+        if let Some(candidate) =
+            graph_candidate_from_memory(memory, typed_memory_id, &tags, evidence, degraded)
+        {
+            metrics.expanded_candidates = metrics.expanded_candidates.saturating_add(1);
+            candidates.push(candidate);
+        }
+    }
+
+    if metrics.expanded_candidates > 0 {
+        push_degradation(
+            degraded,
+            "context_graph_expanded_candidates",
+            ContextResponseSeverity::Low,
+            format!(
+                "{} graph-neighborhood candidate{} added to the context candidate pool.",
+                metrics.expanded_candidates,
+                plural_suffix(metrics.expanded_candidates)
+            ),
+            None,
+        );
+    }
+
+    metrics
+}
+
+fn push_graph_snapshot_posture(
+    connection: &DbConnection,
+    workspace_ids: &BTreeSet<String>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) {
+    let mut stale_snapshot = None;
+    for workspace_id in workspace_ids {
+        match connection
+            .get_latest_graph_snapshot(workspace_id, crate::db::GraphSnapshotType::MemoryLinks)
+        {
+            Ok(Some(snapshot)) if snapshot.status == crate::db::GraphSnapshotStatus::Valid => {
+                return;
+            }
+            Ok(Some(snapshot)) => {
+                stale_snapshot.get_or_insert(snapshot);
+            }
+            Ok(None) => {}
+            Err(error) => push_degradation(
+                degraded,
+                "context_graph_snapshot_unavailable",
+                ContextResponseSeverity::Low,
+                format!("Graph snapshot posture could not be checked for {workspace_id}: {error}"),
+                Some("ee graph centrality-refresh".to_string()),
+            ),
+        }
+    }
+
+    if let Some(snapshot) = stale_snapshot {
+        push_degradation(
+            degraded,
+            "context_graph_snapshot_not_current",
+            ContextResponseSeverity::Low,
+            format!(
+                "Graph snapshot {} is {}; query-file traversal used source-of-truth memory_links instead of snapshot centrality.",
+                snapshot.id,
+                snapshot.status.as_str()
+            ),
+            Some("ee graph centrality-refresh".to_string()),
+        );
+    } else {
+        push_degradation(
+            degraded,
+            "context_graph_snapshot_missing",
+            ContextResponseSeverity::Low,
+            "No persisted graph snapshot exists; query-file traversal used source-of-truth memory_links without centrality boosts.",
+            Some("ee graph centrality-refresh".to_string()),
+        );
+    }
+}
+
+fn graph_context_workspace_ids(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> BTreeSet<String> {
+    let mut workspace_ids = BTreeSet::new();
+    for path in context_workspace_path_keys(workspace_path) {
+        workspace_ids.insert(stable_context_workspace_id(&path));
+        let path_string = path.to_string_lossy().into_owned();
+        match connection.get_workspace_by_path(&path_string) {
+            Ok(Some(workspace)) => {
+                workspace_ids.insert(workspace.id);
+            }
+            Ok(None) => {}
+            Err(error) => push_degradation(
+                degraded,
+                "context_graph_workspace_lookup_unavailable",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Graph snapshot posture could not resolve workspace path {}: {error}",
+                    path.display()
+                ),
+                Some("ee status --json".to_string()),
+            ),
+        }
+    }
+
+    workspace_ids
+}
+
+fn graph_hint_nodes(
+    connection: &DbConnection,
+    graph: &crate::models::QueryGraphHints,
+    workspace_ids: &BTreeSet<String>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> (BTreeMap<String, GraphHintEvidence>, usize, usize) {
+    let mut nodes = BTreeMap::new();
+    let mut frontier = BTreeSet::new();
+    let mut missing_seeds = 0_usize;
+    let mut valid_seeds = Vec::new();
+    for seed in &graph.seed_memories {
+        if MemoryId::from_str(seed).is_err() {
+            missing_seeds = missing_seeds.saturating_add(1);
+            push_degradation(
+                degraded,
+                "context_graph_seed_invalid",
+                ContextResponseSeverity::Low,
+                format!("Graph seed memory ID '{seed}' is not a valid memory ID."),
+                Some("Use full mem_<26-character> memory IDs in graph.seedMemories.".to_string()),
+            );
+            continue;
+        }
+        valid_seeds.push(seed.as_str());
+    }
+
+    let (seed_memories, _) = load_candidate_batch_maps(connection, &valid_seeds, degraded);
+    for seed in &graph.seed_memories {
+        if !valid_seeds.contains(&seed.as_str()) {
+            continue;
+        }
+        let Some(seed_memory) = seed_memories.get(seed) else {
+            missing_seeds = missing_seeds.saturating_add(1);
+            push_degradation(
+                degraded,
+                "context_graph_seed_missing",
+                ContextResponseSeverity::Low,
+                format!("Graph seed memory {seed} was not found in the memory store."),
+                Some(
+                    "Use graph.seedMemories values returned by ee remember/search/why.".to_string(),
+                ),
+            );
+            continue;
+        };
+        if !workspace_ids.contains(&seed_memory.workspace_id) {
+            push_degradation(
+                degraded,
+                "context_graph_seed_out_of_scope",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Graph seed memory {seed} belongs to workspace {}, outside the active workspace scope.",
+                    seed_memory.workspace_id
+                ),
+                Some("Use graph.seedMemories from the active workspace.".to_string()),
+            );
+            continue;
+        }
+        if seed_memory.tombstoned_at.is_some() {
+            continue;
+        }
+        nodes.insert(
+            seed.clone(),
+            GraphHintEvidence {
+                seed_memory_id: seed.clone(),
+                depth: 0,
+                relation: None,
+                traversal: graph.traversal,
+            },
+        );
+        frontier.insert(seed.clone());
+    }
+
+    let link_types: BTreeSet<String> = graph.link_types.iter().cloned().collect();
+    let direction = graph_neighborhood_direction(graph.traversal);
+    let mut traversed_edges = 0_usize;
+
+    for depth in 0..graph.max_hops {
+        if frontier.is_empty() {
+            break;
+        }
+        let mut pending_neighbors = BTreeMap::new();
+        for memory_id in &frontier {
+            let mut options = crate::graph::GraphNeighborhoodOptions::new(memory_id.clone());
+            options.direction = direction;
+            let report = match crate::graph::graph_neighborhood(connection, &options) {
+                Ok(report) => report,
+                Err(error) => {
+                    push_degradation(
+                        degraded,
+                        "context_graph_neighborhood_unavailable",
+                        ContextResponseSeverity::Low,
+                        format!("Graph neighborhood for {memory_id} could not be read: {error}"),
+                        Some("ee graph neighborhood <memory-id> --json".to_string()),
+                    );
+                    continue;
+                }
+            };
+            for edge in report.edges {
+                if !link_types.is_empty() && !link_types.contains(&edge.relation) {
+                    continue;
+                }
+                traversed_edges = traversed_edges.saturating_add(1);
+                if nodes.contains_key(&edge.neighbor_memory_id) {
+                    continue;
+                }
+                let seed_memory_id = nodes
+                    .get(memory_id)
+                    .map(|evidence| evidence.seed_memory_id.clone())
+                    .unwrap_or_else(|| memory_id.clone());
+                pending_neighbors
+                    .entry(edge.neighbor_memory_id.clone())
+                    .or_insert(GraphHintEvidence {
+                        seed_memory_id,
+                        depth: depth.saturating_add(1),
+                        relation: Some(edge.relation.clone()),
+                        traversal: graph.traversal,
+                    });
+            }
+        }
+
+        let pending_refs: Vec<&str> = pending_neighbors.keys().map(String::as_str).collect();
+        let (neighbor_memories, _) = load_candidate_batch_maps(connection, &pending_refs, degraded);
+        let mut next_frontier = BTreeSet::new();
+        for (neighbor_id, evidence) in pending_neighbors {
+            let Some(neighbor_memory) = neighbor_memories.get(&neighbor_id) else {
+                continue;
+            };
+            if neighbor_memory.tombstoned_at.is_some() {
+                continue;
+            }
+            if !workspace_ids.contains(&neighbor_memory.workspace_id) {
+                push_degradation(
+                    degraded,
+                    "context_graph_workspace_filtered",
+                    ContextResponseSeverity::Low,
+                    format!(
+                        "Graph neighbor {neighbor_id} belongs to workspace {}, outside the active workspace scope.",
+                        neighbor_memory.workspace_id
+                    ),
+                    Some("Use graph.seedMemories from the active workspace.".to_string()),
+                );
+                continue;
+            }
+            if nodes.insert(neighbor_id.clone(), evidence).is_none() {
+                next_frontier.insert(neighbor_id);
+            }
+        }
+        frontier = next_frontier;
+    }
+
+    (nodes, traversed_edges, missing_seeds)
+}
+
+fn graph_neighborhood_direction(
+    traversal: crate::models::QueryGraphTraversal,
+) -> crate::graph::GraphNeighborhoodDirection {
+    match traversal {
+        crate::models::QueryGraphTraversal::Outbound => {
+            crate::graph::GraphNeighborhoodDirection::Outgoing
+        }
+        crate::models::QueryGraphTraversal::Inbound => {
+            crate::graph::GraphNeighborhoodDirection::Incoming
+        }
+        crate::models::QueryGraphTraversal::Bidirectional => {
+            crate::graph::GraphNeighborhoodDirection::Both
+        }
+    }
+}
+
+fn boost_candidate_for_graph(candidate: &mut PackCandidate, evidence: &GraphHintEvidence) -> bool {
+    let current = candidate.relevance.into_inner();
+    let boost = match evidence.depth {
+        0 => 0.20,
+        1 => 0.14,
+        2 => 0.09,
+        _ => 0.05,
+    };
+    let floor = match evidence.depth {
+        0 => 0.98,
+        1 => 0.92,
+        2 => 0.86,
+        _ => 0.80,
+    };
+    let boosted = (current + boost).max(floor).min(1.0);
+    let Some(score) = unit_score(boosted) else {
+        return false;
+    };
+    if boosted <= current {
+        return false;
+    }
+    candidate.relevance = score;
+    candidate.why = format!(
+        "{} Graph query-file hint boosted this memory: seed={}, depth={}, traversal={}, relation={}.",
+        candidate.why,
+        evidence.seed_memory_id,
+        evidence.depth,
+        evidence.traversal.as_str(),
+        evidence.relation.as_deref().unwrap_or("seed")
+    );
+    true
+}
+
+fn graph_memory_matches_filters(
+    memory: &StoredMemory,
+    tags: &[String],
+    filters: &crate::models::QueryFilters,
+) -> bool {
+    if !filters.filters.is_empty() {
+        let metadata = memory_fallback_metadata(memory);
+        if !filters.matches(Some(&metadata)) {
+            return false;
+        }
+    }
+    if !filters.tags.is_empty() && !filters.matches_tags(tags) {
+        return false;
+    }
+    if !filters.temporal.is_empty()
+        && matches!(
+            temporal_memory_outcome(memory, &filters.temporal),
+            TemporalCandidateOutcome::Exclude
+        )
+    {
+        return false;
+    }
+    if !filters.trust.is_empty() {
+        let posture = posture_for_trust_class(&memory.trust_class);
+        if !filters.trust.matches(&memory.trust_class, posture) {
+            return false;
+        }
+    }
+    true
+}
+
+fn graph_candidate_from_memory(
+    memory: &StoredMemory,
+    memory_id: MemoryId,
+    tags: &[String],
+    evidence: &GraphHintEvidence,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Option<PackCandidate> {
+    let mut provenance = Vec::new();
+    if let Some(memory_provenance) = provenance_for_memory(memory, memory_id, degraded) {
+        provenance.push(memory_provenance);
+    }
+    if let Ok(seed_id) = MemoryId::from_str(&evidence.seed_memory_id)
+        && let Ok(graph_provenance) = PackProvenance::new(
+            ProvenanceUri::EeMemory(seed_id),
+            format!(
+                "Graph query-file hint reached {} from seed {} at depth {} via {} traversal.",
+                memory.id,
+                evidence.seed_memory_id,
+                evidence.depth,
+                evidence.traversal.as_str()
+            ),
+        )
+    {
+        provenance.push(graph_provenance);
+    }
+    let relevance = graph_expansion_relevance(evidence.depth)?;
+    let utility = unit_score(memory.utility)?;
+    let candidate = PackCandidate::new(PackCandidateInput {
+        memory_id,
+        section: section_for_memory(memory),
+        content: memory.content.clone(),
+        estimated_tokens: estimate_tokens_default(&memory.content),
+        relevance,
+        utility,
+        provenance,
+        why: format!(
+            "Selected by ee.query.v1 graph hint: seed={}, depth={}, traversal={}, relation={}.",
+            evidence.seed_memory_id,
+            evidence.depth,
+            evidence.traversal.as_str(),
+            evidence.relation.as_deref().unwrap_or("seed")
+        ),
+    })
+    .ok()?;
+    Some(
+        candidate
+            .with_diversity_key(diversity_key_for_memory(memory, tags))
+            .with_trust_signal(trust_signal_for_memory(memory, memory_id, degraded)),
+    )
+}
+
+fn graph_expansion_relevance(depth: u32) -> Option<UnitScore> {
+    let relevance = match depth {
+        0 => 0.96,
+        1 => 0.90,
+        2 => 0.84,
+        _ => 0.78,
+    };
+    unit_score(relevance)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

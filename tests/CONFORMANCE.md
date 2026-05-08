@@ -15,9 +15,9 @@ schema contracts defined in `docs/`.
 
 | Category | Count | Description |
 |----------|-------|-------------|
-| Implemented Features | 16 | Working features that should succeed |
-| Unimplemented Features | 2 | Features returning `ERR_UNSUPPORTED_FEATURE` |
-| Error Cases | 10 | Invalid inputs returning appropriate error codes |
+| Implemented Features | 21 | Working features that should succeed |
+| Unimplemented Features | 0 | Features returning `ERR_UNSUPPORTED_FEATURE` |
+| Error Cases | 11 | Invalid inputs returning appropriate error codes |
 | Combination Tests | 3 | Multiple features used together |
 | Determinism Tests | 1 | Same input produces identical output |
 | Edge Cases | 5 | Boundary conditions and Unicode handling |
@@ -42,13 +42,17 @@ schema contracts defined in `docs/`.
 | `matrix_temporal_validity_strict_succeeds` | temporalValidity | docs/query-schema.md:171-186 |
 | `matrix_trust_min_class_succeeds` | trust.minClass | docs/query-schema.md:192-217 |
 | `matrix_redaction_respect_succeeds` | redaction.policy=respect | docs/query-schema.md:192-217 |
+| `matrix_graph_traversal_hints_expand_seed_neighborhood` | graph traversal, linkTypes, includeOrphans | docs/query-schema.md:221-258 |
+| `matrix_graph_traversal_direction_and_orphan_handling` | inbound/outbound/bidirectional graph traversal | docs/query-schema.md:221-258 |
+| `matrix_graph_hints_do_not_expand_cross_workspace_links` | graph workspace scope filtering | docs/query-schema.md:221-258 |
+| `matrix_pagination_limit` | pagination.limit | docs/query-schema.md:299-318 |
+| `matrix_pagination_cursor_first_page` | pagination.cursor | docs/query-schema.md:299-318 |
 
 ### Unimplemented Features (ERR_UNSUPPORTED_FEATURE)
 
-| Test | Feature | Schema Reference | Blocking Bead |
-|------|---------|------------------|---------------|
-| `matrix_unsupported_graph` | graph | docs/query-schema.md:221-246 | eidetic_engine_cli-bzwu |
-| `matrix_unsupported_pagination` | pagination | docs/query-schema.md:294-313 | eidetic_engine_cli-4x80 |
+No `ee.query.v1` conformance tests currently assert `ERR_UNSUPPORTED_FEATURE` for
+recognized fields. Query modes other than `hybrid` still return
+`ERR_UNSUPPORTED_FEATURE` when requested directly.
 
 ### Error Cases
 
@@ -63,6 +67,8 @@ schema contracts defined in `docs/`.
 | `matrix_error_query_file_not_found` | ERR_QUERY_FILE_NOT_FOUND | Nonexistent file path |
 | `matrix_error_tags_wrong_type_array` | ERR_MALFORMED_JSON | tags as array (not object) |
 | `matrix_error_tags_wrong_type_string` | ERR_MALFORMED_JSON | tags as string (not object) |
+| `matrix_pagination_invalid_cursor` | ERR_MALFORMED_JSON | Invalid pagination cursor |
+| `matrix_pagination_zero_limit` | ERR_ZERO_BUDGET | pagination.limit = 0 |
 
 ### Determinism Guarantee
 
@@ -83,7 +89,7 @@ cargo test --test query_v1_matrix
 # Run specific section
 cargo test --test query_v1_matrix matrix_tags
 cargo test --test query_v1_matrix matrix_error
-cargo test --test query_v1_matrix matrix_unsupported
+cargo test --test query_v1_matrix matrix_graph
 
 # With output for debugging
 cargo test --test query_v1_matrix -- --nocapture
