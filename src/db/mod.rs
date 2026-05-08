@@ -19191,12 +19191,12 @@ mod tests {
         let test_dir =
             std::env::temp_dir().join(format!("ee_write_owner_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&test_dir);
-        std::fs::create_dir_all(&test_dir).map_err(TestFailure::new)?;
+        std::fs::create_dir_all(&test_dir).map_err(|error| TestFailure::new(error.to_string()))?;
         let db_path = test_dir.join("test.db");
 
-        let config = DatabaseConfig::from_path(&db_path);
-        let conn = DbConnection::open(config).map_err(TestFailure::new)?;
-        conn.migrate().map_err(TestFailure::new)?;
+        let config = DatabaseConfig::file(&db_path);
+        let conn = DbConnection::open(config).map_err(TestFailure::from)?;
+        conn.migrate().map_err(TestFailure::from)?;
 
         // Run a transaction that does multiple operations
         let result = conn.with_transaction(|| {
@@ -19219,16 +19219,20 @@ mod tests {
             Ok(())
         });
 
-        result.map_err(TestFailure::new)?;
+        result.map_err(TestFailure::from)?;
 
         // Verify all rows were committed
         let rows = conn
             .query("SELECT COUNT(*) FROM test_owner", &[])
-            .map_err(TestFailure::new)?;
-        let count = rows.first().and_then(|r| r.get::<i64>(0).ok()).unwrap_or(0);
+            .map_err(TestFailure::from)?;
+        let count = rows
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0);
 
         std::fs::remove_dir_all(&test_dir).ok();
 
-        ensure(count, 2i64, "both rows committed atomically")
+        ensure_equal(&count, &2i64, "both rows committed atomically")
     }
 }
