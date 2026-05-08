@@ -4,6 +4,7 @@
 //! fixtures covering various secret types, encodings, and structural contexts.
 
 use ee::eval::{RedactionClass, RedactionLeakDetector};
+use ee::policy::redact_secret_like_content;
 use proptest::prelude::*;
 use proptest::test_runner::Config as ProptestConfig;
 use serde::Deserialize;
@@ -82,6 +83,33 @@ fn detector_secret_case_strategy() -> impl Strategy<Value = (String, &'static st
     ]
 }
 
+fn redactor_secret_case_strategy() -> impl Strategy<Value = (String, Vec<String>)> {
+    let aws_secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string();
+    let jwt = [
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+        "eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+        "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+    ]
+    .join(".");
+    let pem = [
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "MIIEowIBAAKCAQEAredactionfuzzredactionfuzzredaction",
+        "-----END RSA PRIVATE KEY-----",
+    ]
+    .join("\n");
+    let anthropic = "sk-ant-api03-redactionfuzztokenredactionfuzztokenredactionfuzz".to_string();
+
+    prop_oneof![
+        Just((
+            format!("AWS_SECRET_ACCESS_KEY={aws_secret}"),
+            vec![aws_secret],
+        )),
+        Just((jwt.clone(), vec![jwt])),
+        Just((pem.clone(), vec![pem])),
+        Just((anthropic.clone(), vec![anthropic])),
+    ]
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
 
@@ -111,6 +139,55 @@ proptest! {
                 "matched text should be drawn from input: {leak:?}",
             );
             prop_assert!(!leak.context.is_empty(), "leak context should not be empty");
+        }
+    }
+
+    #[test]
+    fn policy_redactor_removes_detector_secret_shapes(
+        prefix in edge_context_strategy(512),
+        (secret, raw_values) in redactor_secret_case_strategy(),
+        suffix in edge_context_strategy(512),
+    ) {
+        let input = format!("{prefix} {secret} {suffix}");
+        let detector = RedactionLeakDetector::new();
+        let initial_secret_leaks =
+            detector.detect_leaks_in_classes(&input, &[RedactionClass::Secret]);
+
+        prop_assert!(
+            !initial_secret_leaks.is_empty(),
+            "generated input should be a detector-recognized secret shape: {input:?}",
+        );
+
+        let first = redact_secret_like_content(&input);
+        let second = redact_secret_like_content(&first.content);
+        let remaining_secret_leaks =
+            detector.detect_leaks_in_classes(&first.content, &[RedactionClass::Secret]);
+
+        prop_assert!(
+            first.redacted,
+            "policy redactor should report secret removal for {input:?}",
+        );
+        prop_assert_eq!(
+            &first.content,
+            &second.content,
+            "redacted content should be stable after a second pass",
+        );
+        prop_assert!(
+            remaining_secret_leaks.is_empty(),
+            "policy redactor output should not retain detector-recognized secret leaks: {remaining_secret_leaks:?} in {:?}",
+            first.content,
+        );
+
+        for raw in raw_values {
+            prop_assert!(
+                input.contains(&raw),
+                "test case must contain generated raw secret {raw:?}",
+            );
+            prop_assert!(
+                !first.content.contains(&raw),
+                "redacted output leaked raw secret {raw:?} in {:?}",
+                first.content,
+            );
         }
     }
 }
