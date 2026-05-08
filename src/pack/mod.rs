@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt;
 use std::sync::OnceLock;
 
@@ -1770,6 +1770,7 @@ fn assemble_facility_location_draft(
         .collect();
     let mut remaining_indices: Vec<usize> = (0..candidates.len()).collect();
     let mut current_coverages = vec![0.0_f32; candidates.len()];
+    let mut selector = FacilitySelectionQueue::new(&candidates, &current_coverages);
     let candidate_count = candidates.len();
 
     let quotas = SectionQuotas::for_profile(profile, budget.max_tokens());
@@ -1782,8 +1783,7 @@ fn assemble_facility_location_draft(
     let mut objective_value = 0.0_f32;
 
     while !remaining_indices.is_empty() {
-        let Some((candidate_index, marginal_gain)) = select_facility_candidate_index(
-            &remaining_indices,
+        let Some((profile_index, marginal_gain)) = selector.select(
             &candidates,
             &current_coverages,
             used_tokens,
@@ -1816,7 +1816,13 @@ fn assemble_facility_location_draft(
             break;
         }
 
-        let profile_index = remaining_indices.remove(candidate_index);
+        let Some(candidate_index) = remaining_indices
+            .iter()
+            .position(|&remaining_index| remaining_index == profile_index)
+        else {
+            continue;
+        };
+        remaining_indices.remove(candidate_index);
         let Some(profile) = candidates.get_mut(profile_index) else {
             continue;
         };
@@ -1830,6 +1836,7 @@ fn assemble_facility_location_draft(
             .ok_or(PackValidationError::CandidateRankOverflow)?;
         used_tokens = used_tokens.saturating_add(candidate.estimated_tokens);
         update_facility_coverages(&mut current_coverages, &candidates, profile_index);
+        selector.advance_round();
         objective_value = facility_location_value_from_coverages(&candidates, &current_coverages);
         let covered_features = certificate_features(&candidate);
         steps.push(PackSelectionStep {
@@ -1961,6 +1968,99 @@ impl From<PackCandidate> for FacilityCandidateProfile {
     }
 }
 
+#[derive(Clone, Debug)]
+struct FacilityQueueEntry {
+    profile_index: usize,
+    marginal_gain: f32,
+    gain_ratio: f32,
+    generation: u32,
+}
+
+impl PartialEq for FacilityQueueEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.profile_index == other.profile_index
+            && self.generation == other.generation
+            && self.marginal_gain.total_cmp(&other.marginal_gain) == Ordering::Equal
+            && self.gain_ratio.total_cmp(&other.gain_ratio) == Ordering::Equal
+    }
+}
+
+impl Eq for FacilityQueueEntry {}
+
+impl Ord for FacilityQueueEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.gain_ratio
+            .total_cmp(&other.gain_ratio)
+            .then_with(|| self.marginal_gain.total_cmp(&other.marginal_gain))
+            .then_with(|| other.profile_index.cmp(&self.profile_index))
+            .then_with(|| self.generation.cmp(&other.generation))
+    }
+}
+
+impl PartialOrd for FacilityQueueEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FacilitySelectionQueue {
+    heap: BinaryHeap<FacilityQueueEntry>,
+    generation: u32,
+}
+
+impl FacilitySelectionQueue {
+    fn new(universe: &[FacilityCandidateProfile], current_coverages: &[f32]) -> Self {
+        let mut heap = BinaryHeap::with_capacity(universe.len());
+        for profile_index in 0..universe.len() {
+            if let Some(entry) = facility_queue_entry(profile_index, universe, current_coverages, 0)
+            {
+                heap.push(entry);
+            }
+        }
+        Self {
+            heap,
+            generation: 0,
+        }
+    }
+
+    fn advance_round(&mut self) {
+        self.generation = self.generation.saturating_add(1);
+    }
+
+    fn select(
+        &mut self,
+        universe: &[FacilityCandidateProfile],
+        current_coverages: &[f32],
+        used_tokens: u32,
+        budget: TokenBudget,
+        quotas: &SectionQuotas,
+        items: &[PackDraftItem],
+    ) -> Option<(usize, f32)> {
+        while let Some(entry) = self.heap.pop() {
+            let profile_index = entry.profile_index;
+            let Some(profile) = universe.get(profile_index) else {
+                continue;
+            };
+            let Some(candidate) = profile.candidate.as_ref() else {
+                continue;
+            };
+            if !facility_candidate_is_feasible(candidate, used_tokens, budget, quotas, items) {
+                continue;
+            }
+            if entry.generation == self.generation {
+                return Some((profile_index, entry.marginal_gain));
+            }
+            if let Some(refreshed) =
+                facility_queue_entry(profile_index, universe, current_coverages, self.generation)
+            {
+                self.heap.push(refreshed);
+            }
+        }
+        None
+    }
+}
+
 fn select_next_candidate_index(
     candidates: &[MmrCandidate],
     selected: &[CandidateSignature],
@@ -2005,76 +2105,68 @@ fn max_selected_similarity(candidate: &CandidateSignature, selected: &[Candidate
         .fold(0.0_f32, f32::max)
 }
 
-fn select_facility_candidate_index(
-    remaining_indices: &[usize],
+fn facility_queue_entry(
+    profile_index: usize,
     universe: &[FacilityCandidateProfile],
     current_coverages: &[f32],
+    generation: u32,
+) -> Option<FacilityQueueEntry> {
+    let profile = universe.get(profile_index)?;
+    let candidate = profile.candidate.as_ref()?;
+    if candidate.estimated_tokens == 0 {
+        return None;
+    }
+    let marginal_gain = facility_marginal_gain(profile, universe, current_coverages);
+    Some(FacilityQueueEntry {
+        profile_index,
+        marginal_gain,
+        gain_ratio: marginal_gain / candidate.estimated_tokens as f32,
+        generation,
+    })
+}
+
+fn facility_candidate_is_feasible(
+    candidate: &PackCandidate,
     used_tokens: u32,
     budget: TokenBudget,
     quotas: &SectionQuotas,
     items: &[PackDraftItem],
-) -> Option<(usize, f32)> {
-    let remaining_budget = budget.max_tokens().saturating_sub(used_tokens);
-    let mut best: Option<(usize, usize, f32, f32)> = None;
-
-    for (candidate_index, &profile_index) in remaining_indices.iter().enumerate() {
-        let Some(profile) = universe.get(profile_index) else {
-            continue;
-        };
-        let Some(candidate) = profile.candidate.as_ref() else {
-            continue;
-        };
-        if candidate.estimated_tokens == 0 {
-            continue;
-        }
-        if candidate.estimated_tokens > remaining_budget {
-            continue;
-        }
-        let section_used: u32 = items
-            .iter()
-            .filter(|i| i.section == candidate.section)
-            .map(|i| i.estimated_tokens)
-            .sum();
-
-        if !quotas.has_room(candidate.section, section_used, candidate.estimated_tokens) {
-            continue;
-        }
-
-        let marginal_gain: f32 = universe
-            .iter()
-            .zip(current_coverages.iter())
-            .map(|(universe_profile, &current_coverage)| {
-                let candidate_sim =
-                    facility_signature_similarity(&universe_profile.signature, &profile.signature);
-                let new_coverage = current_coverage.max(candidate_sim);
-                let gain = new_coverage - current_coverage;
-                universe_profile.weight * gain
-            })
-            .sum();
-
-        let gain_ratio = marginal_gain / candidate.estimated_tokens as f32;
-        match best {
-            None => best = Some((candidate_index, profile_index, marginal_gain, gain_ratio)),
-            Some((_, best_profile_index, best_gain, best_ratio)) => {
-                let Some(best_candidate) = universe
-                    .get(best_profile_index)
-                    .and_then(|profile| profile.candidate.as_ref())
-                else {
-                    continue;
-                };
-                if gain_ratio
-                    .total_cmp(&best_ratio)
-                    .then_with(|| marginal_gain.total_cmp(&best_gain))
-                    .then_with(|| compare_candidates(best_candidate, candidate))
-                    == Ordering::Greater
-                {
-                    best = Some((candidate_index, profile_index, marginal_gain, gain_ratio));
-                }
-            }
-        }
+) -> bool {
+    if candidate.estimated_tokens == 0 {
+        return false;
     }
+    let remaining_budget = budget.max_tokens().saturating_sub(used_tokens);
+    if candidate.estimated_tokens > remaining_budget {
+        return false;
+    }
+    let section_used: u32 = items
+        .iter()
+        .filter(|item| item.section == candidate.section)
+        .map(|item| item.estimated_tokens)
+        .sum();
+    quotas.has_room(candidate.section, section_used, candidate.estimated_tokens)
+}
 
-    best.map(|(candidate_index, _, marginal_gain, _)| (candidate_index, marginal_gain))
+fn facility_marginal_gain(
+    profile: &FacilityCandidateProfile,
+    universe: &[FacilityCandidateProfile],
+    current_coverages: &[f32],
+) -> f32 {
+    #[cfg(test)]
+    FACILITY_MARGINAL_GAIN_EVALUATIONS
+        .with(|evaluations| evaluations.set(evaluations.get().saturating_add(1)));
+
+    universe
+        .iter()
+        .zip(current_coverages.iter())
+        .map(|(universe_profile, &current_coverage)| {
+            let candidate_sim =
+                facility_signature_similarity(&universe_profile.signature, &profile.signature);
+            let new_coverage = current_coverage.max(candidate_sim);
+            let gain = new_coverage - current_coverage;
+            universe_profile.weight * gain
+        })
+        .sum()
 }
 
 fn update_facility_coverages(
@@ -2195,6 +2287,7 @@ fn content_overlap_similarity_terms(
 #[cfg(test)]
 thread_local! {
     static NORMALIZED_TERMS_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FACILITY_MARGINAL_GAIN_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -2205,6 +2298,16 @@ fn reset_normalized_terms_call_count() {
 #[cfg(test)]
 fn normalized_terms_call_count() -> usize {
     NORMALIZED_TERMS_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_facility_marginal_gain_evaluation_count() {
+    FACILITY_MARGINAL_GAIN_EVALUATIONS.with(|evaluations| evaluations.set(0));
+}
+
+#[cfg(test)]
+fn facility_marginal_gain_evaluation_count() -> usize {
+    FACILITY_MARGINAL_GAIN_EVALUATIONS.with(std::cell::Cell::get)
 }
 
 fn normalized_terms(content: &str) -> BTreeSet<String> {
@@ -3118,6 +3221,7 @@ pub fn compute_rate_distortion(
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
+    use std::time::Instant;
 
     use proptest::prelude::*;
     use uuid::Uuid;
@@ -3328,6 +3432,125 @@ mod tests {
             why: format!("selected because memory {seed} matches the task"),
         })
         .map_err(|error| format!("test candidate rejected: {error:?}"))
+    }
+
+    fn facility_benchmark_candidates(count: usize) -> Result<Vec<PackCandidate>, String> {
+        (0..count)
+            .map(|index| {
+                let seed = (index as u128).saturating_add(1);
+                let relevance = 1.0 - ((index as f32) * 0.000_1);
+                candidate_with_content(
+                    seed,
+                    relevance.max(0.1),
+                    0.5,
+                    10,
+                    format!("facility unique token alpha{index} beta{index} gamma{index}"),
+                )
+            })
+            .collect()
+    }
+
+    fn exhaustive_facility_candidate_index(
+        remaining_indices: &[usize],
+        universe: &[super::FacilityCandidateProfile],
+        current_coverages: &[f32],
+        used_tokens: u32,
+        budget: TokenBudget,
+        quotas: &SectionQuotas,
+        items: &[super::PackDraftItem],
+    ) -> Option<(usize, f32)> {
+        let mut best: Option<(usize, usize, f32, f32)> = None;
+
+        for (candidate_index, &profile_index) in remaining_indices.iter().enumerate() {
+            let Some(profile) = universe.get(profile_index) else {
+                continue;
+            };
+            let Some(candidate) = profile.candidate.as_ref() else {
+                continue;
+            };
+            if !super::facility_candidate_is_feasible(candidate, used_tokens, budget, quotas, items)
+            {
+                continue;
+            }
+
+            let marginal_gain = super::facility_marginal_gain(profile, universe, current_coverages);
+            let gain_ratio = marginal_gain / candidate.estimated_tokens as f32;
+            match best {
+                None => best = Some((candidate_index, profile_index, marginal_gain, gain_ratio)),
+                Some((_, best_profile_index, best_gain, best_ratio)) => {
+                    let Some(best_candidate) = universe
+                        .get(best_profile_index)
+                        .and_then(|profile| profile.candidate.as_ref())
+                    else {
+                        continue;
+                    };
+                    if gain_ratio
+                        .total_cmp(&best_ratio)
+                        .then_with(|| marginal_gain.total_cmp(&best_gain))
+                        .then_with(|| super::compare_candidates(best_candidate, candidate))
+                        == std::cmp::Ordering::Greater
+                    {
+                        best = Some((candidate_index, profile_index, marginal_gain, gain_ratio));
+                    }
+                }
+            }
+        }
+
+        best.map(|(candidate_index, _, marginal_gain, _)| (candidate_index, marginal_gain))
+    }
+
+    fn run_exhaustive_facility_selection(
+        candidates: Vec<PackCandidate>,
+        budget: TokenBudget,
+    ) -> Result<Vec<MemoryId>, String> {
+        let mut candidates = candidates;
+        candidates.sort_by(super::compare_candidates);
+        let mut universe: Vec<super::FacilityCandidateProfile> = candidates
+            .into_iter()
+            .map(super::FacilityCandidateProfile::from)
+            .collect();
+        let mut remaining_indices: Vec<usize> = (0..universe.len()).collect();
+        let mut current_coverages = vec![0.0_f32; universe.len()];
+        let quotas =
+            SectionQuotas::for_profile(ContextPackProfile::Submodular, budget.max_tokens());
+        let mut used_tokens = 0_u32;
+        let mut rank = 1_u32;
+        let mut items = Vec::new();
+        let mut selected = Vec::new();
+
+        while !remaining_indices.is_empty() {
+            let Some((candidate_index, marginal_gain)) = exhaustive_facility_candidate_index(
+                &remaining_indices,
+                &universe,
+                &current_coverages,
+                used_tokens,
+                budget,
+                &quotas,
+                &items,
+            ) else {
+                break;
+            };
+            if marginal_gain <= super::FACILITY_LOCATION_EPSILON {
+                break;
+            }
+            let profile_index = remaining_indices.remove(candidate_index);
+            let Some(profile) = universe.get_mut(profile_index) else {
+                continue;
+            };
+            let Some(candidate) = profile.candidate.take() else {
+                continue;
+            };
+            let redactions = std::mem::take(&mut profile.redactions);
+            used_tokens = used_tokens.saturating_add(candidate.estimated_tokens);
+            selected.push(candidate.memory_id);
+            super::update_facility_coverages(&mut current_coverages, &universe, profile_index);
+            items.push(super::PackDraftItem::from_selected_candidate(
+                rank, candidate, redactions,
+            ));
+            rank = rank.saturating_add(1);
+        }
+
+        Ok(selected)
     }
 
     #[test]
@@ -5088,20 +5311,119 @@ mod tests {
         let quotas = super::SectionQuotas::for_profile(ContextPackProfile::Submodular, 100);
         let universe = vec![super::FacilityCandidateProfile::from(zero_token_candidate)];
         let current_coverages = vec![0.0_f32];
+        let mut selector = super::FacilitySelectionQueue::new(&universe, &current_coverages);
 
-        let selection = super::select_facility_candidate_index(
-            &[0],
-            &universe,
-            &current_coverages,
-            0,
-            budget,
-            &quotas,
-            &[],
-        );
+        let selection = selector.select(&universe, &current_coverages, 0, budget, &quotas, &[]);
         ensure(
             selection.is_none(),
             "selector should skip zero-token candidates instead of computing infinite gain ratios",
         )
+    }
+
+    #[test]
+    fn facility_location_lazy_queue_matches_exhaustive_selector() -> TestResult {
+        let budget =
+            TokenBudget::new(1_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let candidates = vec![
+            candidate_with_content(1, 0.95, 0.6, 10, "cargo fmt release formatting")?
+                .with_diversity_key("formatting"),
+            candidate_with_content(2, 0.94, 0.6, 10, "cargo clippy release linting")?
+                .with_diversity_key("linting"),
+            candidate_with_content(3, 0.70, 0.9, 10, "signed checksum release artifact")?
+                .with_diversity_key("artifact"),
+            candidate_with_content(4, 0.69, 0.9, 10, "signed checksum package artifact")?
+                .with_diversity_key("artifact"),
+            candidate_with_content(5, 0.65, 0.7, 10, "rollback note incident failure")?
+                .with_diversity_key("failure"),
+            candidate_with_content(6, 0.60, 0.7, 10, "handoff context provenance evidence")?
+                .with_diversity_key("evidence"),
+        ];
+
+        let expected = run_exhaustive_facility_selection(candidates.clone(), budget)?;
+        let draft = assemble_draft_with_profile(
+            ContextPackProfile::Submodular,
+            "prepare release",
+            budget,
+            candidates,
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+        let actual: Vec<MemoryId> = draft.items.iter().map(|item| item.memory_id).collect();
+
+        ensure_equal(
+            &actual,
+            &expected,
+            "lazy facility-location queue selection order",
+        )
+    }
+
+    #[test]
+    fn facility_location_lazy_queue_reduces_marginal_evaluations() -> TestResult {
+        let candidate_count = 32_usize;
+        let candidates = facility_benchmark_candidates(candidate_count)?;
+        let budget =
+            TokenBudget::new(10_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+        super::reset_facility_marginal_gain_evaluation_count();
+
+        let draft = assemble_draft_with_profile(
+            ContextPackProfile::Submodular,
+            "prepare release",
+            budget,
+            candidates,
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        ensure_equal(
+            &draft.items.len(),
+            &candidate_count,
+            "all benchmark candidates fit",
+        )?;
+        let lazy_evaluations = super::facility_marginal_gain_evaluation_count();
+        let exhaustive_evaluations = candidate_count
+            .checked_mul(candidate_count.saturating_add(1))
+            .and_then(|value| value.checked_div(2))
+            .ok_or_else(|| "exhaustive evaluation count overflowed".to_owned())?;
+        ensure(
+            lazy_evaluations < exhaustive_evaluations / 2,
+            format!(
+                "lazy selector should avoid full rescans: lazy={lazy_evaluations}, exhaustive={exhaustive_evaluations}"
+            ),
+        )
+    }
+
+    #[test]
+    #[ignore]
+    fn facility_location_lazy_queue_benchmarks_against_exhaustive_selector() -> TestResult {
+        let candidate_count = 128_usize;
+        let candidates = facility_benchmark_candidates(candidate_count)?;
+        let budget =
+            TokenBudget::new(20_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+
+        super::reset_facility_marginal_gain_evaluation_count();
+        let legacy_start = Instant::now();
+        let expected = run_exhaustive_facility_selection(candidates.clone(), budget)?;
+        let legacy_elapsed = legacy_start.elapsed();
+        let legacy_evaluations = super::facility_marginal_gain_evaluation_count();
+
+        super::reset_facility_marginal_gain_evaluation_count();
+        let lazy_start = Instant::now();
+        let draft = assemble_draft_with_profile(
+            ContextPackProfile::Submodular,
+            "prepare release",
+            budget,
+            candidates,
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+        let lazy_elapsed = lazy_start.elapsed();
+        let lazy_evaluations = super::facility_marginal_gain_evaluation_count();
+        let actual: Vec<MemoryId> = draft.items.iter().map(|item| item.memory_id).collect();
+
+        ensure_equal(&actual, &expected, "bench selection parity")?;
+        eprintln!(
+            "facility_location_lazy_queue_bench candidates={candidate_count} legacy_ms={:.3} lazy_ms={:.3} legacy_evaluations={legacy_evaluations} lazy_evaluations={lazy_evaluations}",
+            legacy_elapsed.as_secs_f64() * 1_000.0,
+            lazy_elapsed.as_secs_f64() * 1_000.0,
+        );
+        Ok(())
     }
 
     #[test]
