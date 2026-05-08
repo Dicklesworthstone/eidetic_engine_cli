@@ -293,12 +293,12 @@ fn perf_compare_unsupported_artifact_golden() {
 }
 
 #[test]
-fn perf_compare_redaction_uncertainty_golden() {
+fn perf_compare_redaction_uncertainty_golden() -> Result<(), serde_json::Error> {
     let synthetic_secret = "sk_live_deterministic_fixture_secret";
     let baseline = benchmark_baseline();
     let candidate = benchmark_candidate_redaction_uncertain();
     let report = compare_artifacts(&baseline, &candidate);
-    let json = serde_json::to_string(&report).expect("compare report should serialize");
+    let json = serde_json::to_string(&report)?;
 
     assert!(report.degraded.iter().any(|d| {
         d.code == "redaction_uncertain" && d.artifact_side == ArtifactSide::Candidate
@@ -308,6 +308,7 @@ fn perf_compare_redaction_uncertainty_golden() {
         "raw synthetic secret must never appear in golden compare output"
     );
     assert_json_snapshot!("perf_compare_redaction_uncertainty", report);
+    Ok(())
 }
 
 #[test]
