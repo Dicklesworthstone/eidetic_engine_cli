@@ -21,14 +21,20 @@
 use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use rustix::process::{Pid, Signal, kill_process_group};
 
 use super::error::CassError;
 
 const ALLOWLISTED_CASS_EXECUTABLE: &str = "cass";
+const TIMEOUT_PIPE_DRAIN_GRACE: Duration = Duration::from_millis(250);
 const TIMEOUT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const SPAWN_RETRY_ATTEMPTS: usize = 6;
 
@@ -247,8 +253,13 @@ impl CassInvocation {
         timeout: Duration,
     ) -> Result<CassOutcome, CassError> {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(unix)]
+        command.process_group(0);
+
         let mut child =
             retry_cass_spawn(|| command.spawn()).map_err(|error| cass_spawn_error(self, error))?;
+        #[cfg(unix)]
+        let child_group = Pid::from_child(&child);
 
         let mut stdout = child.stdout.take().ok_or_else(|| CassError::Io {
             message: "cass subprocess stdout pipe was not available".to_owned(),
@@ -269,14 +280,31 @@ impl CassInvocation {
             Ok(buf)
         });
 
+        let mut child_status: Option<ExitStatus> = None;
+        let mut stdout_thread = Some(stdout_thread);
+        let mut stderr_thread = Some(stderr_thread);
+        let mut stdout_bytes = None;
+        let mut stderr_bytes = None;
+
         loop {
-            if let Some(status) = child.try_wait().map_err(CassError::from)? {
-                let stdout_bytes = join_pipe_reader(stdout_thread)?;
-                let stderr_bytes = join_pipe_reader(stderr_thread)?;
+            if child_status.is_none() {
+                child_status = child.try_wait().map_err(CassError::from)?;
+            }
+            collect_finished_pipe_reader(&mut stdout_thread, &mut stdout_bytes)?;
+            collect_finished_pipe_reader(&mut stderr_thread, &mut stderr_bytes)?;
+
+            if child_status.is_some() && stdout_bytes.is_some() && stderr_bytes.is_some() {
+                let status = child_status
+                    .take()
+                    .expect("child status checked before timeout success");
                 return Ok(CassOutcome::new(
                     self.clone(),
-                    stdout_bytes,
-                    stderr_bytes,
+                    stdout_bytes
+                        .take()
+                        .expect("stdout bytes checked before timeout success"),
+                    stderr_bytes
+                        .take()
+                        .expect("stderr bytes checked before timeout success"),
                     status.code(),
                     started.elapsed(),
                     false,
@@ -285,21 +313,32 @@ impl CassInvocation {
 
             let elapsed = started.elapsed();
             if elapsed >= timeout {
-                if let Err(kill_error) = child.kill() {
-                    if kill_error.kind() != std::io::ErrorKind::InvalidInput {
-                        tracing::debug!(
-                            "cass subprocess kill failed (child may have already exited): {kill_error}"
-                        );
+                #[cfg(unix)]
+                terminate_cass_process_group(child_group);
+                if child_status.is_none() {
+                    if let Err(kill_error) = child.kill() {
+                        if kill_error.kind() != std::io::ErrorKind::InvalidInput {
+                            tracing::debug!(
+                                "cass subprocess kill failed (child may have already exited): {kill_error}"
+                            );
+                        }
                     }
+                    child_status = Some(child.wait().map_err(CassError::from)?);
                 }
-                let status = child.wait().map_err(CassError::from)?;
-                let stdout_bytes = join_pipe_reader(stdout_thread)?;
-                let stderr_bytes = join_pipe_reader(stderr_thread)?;
+                let (stdout_bytes, stderr_bytes) = drain_pipe_readers_after_timeout(
+                    &mut stdout_thread,
+                    &mut stderr_thread,
+                    &mut stdout_bytes,
+                    &mut stderr_bytes,
+                )?;
                 return Ok(CassOutcome::new(
                     self.clone(),
                     stdout_bytes,
                     stderr_bytes,
-                    status.code(),
+                    child_status
+                        .take()
+                        .expect("child status is set before timeout outcome")
+                        .code(),
                     started.elapsed(),
                     true,
                 ));
@@ -398,6 +437,67 @@ fn join_pipe_reader(
     }
 }
 
+fn collect_finished_pipe_reader(
+    handle: &mut Option<thread::JoinHandle<Result<Vec<u8>, std::io::Error>>>,
+    bytes: &mut Option<Vec<u8>>,
+) -> Result<(), CassError> {
+    if bytes.is_some() {
+        return Ok(());
+    }
+    let Some(reader) = handle else {
+        return Ok(());
+    };
+    if reader.is_finished() {
+        let reader = handle
+            .take()
+            .expect("pipe reader exists after is_finished check");
+        *bytes = Some(join_pipe_reader(reader)?);
+    }
+    Ok(())
+}
+
+fn drain_pipe_readers_after_timeout(
+    stdout_thread: &mut Option<thread::JoinHandle<Result<Vec<u8>, std::io::Error>>>,
+    stderr_thread: &mut Option<thread::JoinHandle<Result<Vec<u8>, std::io::Error>>>,
+    stdout_bytes: &mut Option<Vec<u8>>,
+    stderr_bytes: &mut Option<Vec<u8>>,
+) -> Result<(Vec<u8>, Vec<u8>), CassError> {
+    let deadline = Instant::now() + TIMEOUT_PIPE_DRAIN_GRACE;
+    loop {
+        collect_finished_pipe_reader(stdout_thread, stdout_bytes)?;
+        collect_finished_pipe_reader(stderr_thread, stderr_bytes)?;
+        if stdout_bytes.is_some() && stderr_bytes.is_some() {
+            break;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        thread::sleep((deadline - now).min(TIMEOUT_POLL_INTERVAL));
+    }
+
+    if stdout_bytes.is_none() && stdout_thread.take().is_some() {
+        tracing::debug!("cass subprocess stdout pipe reader did not drain after timeout");
+    }
+    if stderr_bytes.is_none() && stderr_thread.take().is_some() {
+        tracing::debug!("cass subprocess stderr pipe reader did not drain after timeout");
+    }
+
+    Ok((
+        stdout_bytes.take().unwrap_or_default(),
+        stderr_bytes.take().unwrap_or_default(),
+    ))
+}
+
+#[cfg(unix)]
+fn terminate_cass_process_group(child_group: Pid) {
+    if let Err(kill_error) = kill_process_group(child_group, Signal::KILL) {
+        tracing::debug!(
+            "cass subprocess process-group kill failed (group may have already exited): {kill_error}"
+        );
+    }
+}
+
 fn validate_absolute_cass_binary(path: &Path) -> Result<(), CassError> {
     let metadata = std::fs::metadata(path).map_err(|error| CassError::InvalidBinary {
         binary: path.to_path_buf(),
@@ -479,7 +579,11 @@ impl CassOutcome {
         elapsed: Duration,
         timed_out: bool,
     ) -> Self {
-        let class = CassExitClass::classify(exit_code, stdout.len());
+        let class = if timed_out {
+            CassExitClass::Failure
+        } else {
+            CassExitClass::classify(exit_code, stdout.len())
+        };
         Self {
             invocation,
             stdout,
@@ -600,7 +704,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
     #[cfg(unix)]
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     use super::{CASS_EXIT_DEGRADED, CASS_EXIT_OK, CassExitClass, CassInvocation, CassOutcome};
 
@@ -741,6 +845,34 @@ mod tests {
         assert!(outcome.timed_out());
         assert_eq!(outcome.class(), CassExitClass::Failure);
         assert!(outcome.elapsed() >= Duration::from_millis(20));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_times_out_when_descendant_keeps_pipe_open_after_parent_exit() -> Result<(), String> {
+        let dir = unique_test_dir("inherited-pipe-timeout")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let binary = dir.join("cass");
+        write_executable_script(
+            &binary,
+            "#!/bin/sh\n(sleep 5) &\nprintf '{\"sessions\":[]}\\n'\nexit 0\n",
+            0o755,
+        )?;
+
+        let inv = CassInvocation::new(binary, ["sessions", "--json"])
+            .with_timeout(Duration::from_millis(80));
+        let started = Instant::now();
+        let outcome = inv.run().map_err(|error| error.to_string())?;
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timed-out CASS subprocess must not block on inherited pipe handles",
+        );
+        assert!(outcome.timed_out());
+        assert_eq!(outcome.class(), CassExitClass::Failure);
+        assert_eq!(outcome.exit_code(), Some(CASS_EXIT_OK));
+        assert_eq!(outcome.stdout_utf8_lossy(), "{\"sessions\":[]}\n");
         Ok(())
     }
 
