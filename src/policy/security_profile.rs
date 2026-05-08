@@ -65,13 +65,17 @@ impl SecurityProfile {
         }
     }
 
-    /// Whether redaction is enforced in output.
+    /// Whether secret redaction is enforced in output.
+    ///
+    /// Even the permissive profile keeps redaction enabled. The profile relaxes
+    /// file-permission and import-source posture for local debugging, but it
+    /// must not turn context packs into secret-bearing output.
     #[must_use]
     pub const fn enforce_redaction(self) -> bool {
         match self {
             Self::Default => true,
             Self::Strict => true,
-            Self::Permissive => false,
+            Self::Permissive => true,
         }
     }
 
@@ -457,10 +461,10 @@ mod tests {
     }
 
     #[test]
-    fn permissive_profile_disables_enforcement() -> TestResult {
+    fn permissive_profile_keeps_redaction_but_relaxes_file_permissions() -> TestResult {
         let permissive = SecurityProfile::Permissive;
 
-        ensure(permissive.enforce_redaction(), false, "redaction")?;
+        ensure(permissive.enforce_redaction(), true, "redaction")?;
         ensure(permissive.enforce_file_permissions(), false, "file perms")
     }
 
