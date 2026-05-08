@@ -1,26 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
-#[cfg(any(feature = "graph", test))]
 use std::time::Duration;
 
-#[cfg(any(feature = "graph", test))]
 use crate::db::{AcquireLockResult, AdvisoryLockId, CreateGraphSnapshotInput, DbOperation};
 use crate::db::{
     DbConnection, DbError, GraphSnapshotStatus, GraphSnapshotType, StoredGraphSnapshot,
     StoredMemoryLink,
 };
-#[cfg(any(feature = "graph", test))]
 use crate::models::MemoryId;
 use crate::models::{CapabilityStatus, GRAPH_MODULE_SCHEMA_V1};
 
-#[cfg(feature = "graph")]
 pub use fnx_algorithms::{
     BetweennessCentralityResult, PageRankResult, betweenness_centrality_directed, pagerank_directed,
 };
-#[cfg(feature = "graph")]
 pub use fnx_classes::{AttrMap, Graph, digraph::DiGraph};
-#[cfg(feature = "graph")]
 use fnx_runtime::{CgseValue, CompatibilityMode};
 
 pub const SUBSYSTEM: &str = "graph";
@@ -177,7 +171,6 @@ impl Error for GraphError {
     }
 }
 
-#[cfg(feature = "graph")]
 static GRAPH_CAPABILITIES: [GraphCapability; 6] = [
     GraphCapability::ready(
         GraphCapabilityName::ModuleBoundary,
@@ -203,40 +196,6 @@ static GRAPH_CAPABILITIES: [GraphCapability; 6] = [
         GraphCapabilityName::CentralityMetrics,
         GraphSurface::Analytics,
         "PageRank and betweenness centrality metrics available.",
-    ),
-    GraphCapability::pending(
-        GraphCapabilityName::JsonGraph,
-        GraphSurface::Query,
-        "Expose graph metrics through stable JSON response envelope.",
-    ),
-];
-
-#[cfg(not(feature = "graph"))]
-static GRAPH_CAPABILITIES: [GraphCapability; 6] = [
-    GraphCapability::ready(
-        GraphCapabilityName::ModuleBoundary,
-        GraphSurface::Status,
-        "Graph module is present.",
-    ),
-    GraphCapability::pending(
-        GraphCapabilityName::FrankenNetworkXDependency,
-        GraphSurface::Projection,
-        "Add the franken_networkx dependency before graph projections.",
-    ),
-    GraphCapability::ready(
-        GraphCapabilityName::MemoryLinkTable,
-        GraphSurface::Storage,
-        "memory_links storage migration is available.",
-    ),
-    GraphCapability::pending(
-        GraphCapabilityName::ProjectionBuilder,
-        GraphSurface::Projection,
-        "Wire graph projection from memory links.",
-    ),
-    GraphCapability::pending(
-        GraphCapabilityName::CentralityMetrics,
-        GraphSurface::Analytics,
-        "Compute centrality metrics (PageRank, betweenness).",
     ),
     GraphCapability::pending(
         GraphCapabilityName::JsonGraph,
@@ -926,7 +885,6 @@ fn compare_autolink_candidates(
 // ---------------------------------------------------------------------------
 
 /// Result of building a memory graph projection.
-#[cfg(feature = "graph")]
 #[derive(Debug, Clone)]
 pub struct MemoryGraphProjection {
     /// The directed graph of memory relationships.
@@ -940,7 +898,6 @@ pub struct MemoryGraphProjection {
 }
 
 /// Options for building a memory graph.
-#[cfg(feature = "graph")]
 #[derive(Debug, Clone, Default)]
 pub struct ProjectionOptions {
     /// Maximum links to process (for testing/debugging).
@@ -956,7 +913,6 @@ pub struct ProjectionOptions {
 /// Each memory becomes a node. Each memory_link becomes a directed edge
 /// from src_memory_id to dst_memory_id, with weight and confidence as
 /// edge attributes.
-#[cfg(feature = "graph")]
 pub fn build_memory_graph(
     conn: &DbConnection,
     options: &ProjectionOptions,
@@ -965,7 +921,6 @@ pub fn build_memory_graph(
     build_memory_graph_from_links(&links)
 }
 
-#[cfg(feature = "graph")]
 fn build_memory_graph_from_links(links: &[StoredMemoryLink]) -> GraphResult<MemoryGraphProjection> {
     use std::time::Instant;
 
@@ -1027,7 +982,6 @@ fn build_memory_graph_from_links(links: &[StoredMemoryLink]) -> GraphResult<Memo
     })
 }
 
-#[cfg(feature = "graph")]
 fn graph_projection_links(
     conn: &DbConnection,
     options: &ProjectionOptions,
@@ -1041,7 +995,6 @@ fn graph_projection_links(
         .collect())
 }
 
-#[cfg(feature = "graph")]
 fn graph_link_matches_options(link: &StoredMemoryLink, options: &ProjectionOptions) -> bool {
     options
         .min_weight
@@ -1051,7 +1004,6 @@ fn graph_link_matches_options(link: &StoredMemoryLink, options: &ProjectionOptio
             .is_none_or(|min_confidence| link.confidence >= min_confidence)
 }
 
-#[cfg(feature = "graph")]
 fn add_projection_edge(
     graph: &mut DiGraph,
     src_memory_id: &str,
@@ -1067,14 +1019,12 @@ fn add_projection_edge(
 }
 
 /// Compute PageRank centrality on a memory graph projection.
-#[cfg(feature = "graph")]
 #[must_use]
 pub fn compute_pagerank(projection: &MemoryGraphProjection) -> PageRankResult {
     pagerank_directed(&projection.graph)
 }
 
 /// Compute betweenness centrality on a memory graph projection.
-#[cfg(feature = "graph")]
 #[must_use]
 pub fn compute_betweenness(projection: &MemoryGraphProjection) -> BetweennessCentralityResult {
     betweenness_centrality_directed(&projection.graph)
@@ -1086,13 +1036,11 @@ pub fn compute_betweenness(projection: &MemoryGraphProjection) -> BetweennessCen
 
 /// Schema for centrality refresh response envelope.
 pub const CENTRALITY_REFRESH_SCHEMA_V1: &str = "ee.graph.centrality_refresh.v1";
-#[cfg(any(feature = "graph", test))]
 const GRAPH_SNAPSHOT_WRITE_LOCK_TTL_SECS: u64 = 300;
-#[cfg(all(not(test), feature = "graph"))]
+#[cfg(not(test))]
 const GRAPH_SNAPSHOT_WRITE_LOCK_ATTEMPTS: usize = 128;
 #[cfg(test)]
 const GRAPH_SNAPSHOT_WRITE_LOCK_ATTEMPTS: usize = 16;
-#[cfg(any(feature = "graph", test))]
 const GRAPH_SNAPSHOT_WRITE_LOCK_REASON: &str = "graph snapshot write";
 
 /// Status of a centrality refresh operation.
@@ -1370,32 +1318,18 @@ pub fn refresh_graph_snapshot(
     workspace_id: &str,
     options: &CentralityRefreshOptions,
 ) -> GraphResult<GraphRefreshJobReport> {
-    #[cfg(not(feature = "graph"))]
-    {
+    if options.dry_run {
         let (centrality, _) = refresh_centrality_with_source_links(conn, options)?;
         Ok(GraphRefreshJobReport {
             centrality,
             workspace_id: workspace_id.to_owned(),
             snapshot: None,
         })
-    }
-
-    #[cfg(feature = "graph")]
-    {
-        if options.dry_run {
-            let (centrality, _) = refresh_centrality_with_source_links(conn, options)?;
-            Ok(GraphRefreshJobReport {
-                centrality,
-                workspace_id: workspace_id.to_owned(),
-                snapshot: None,
-            })
-        } else {
-            refresh_graph_snapshot_locked(conn, workspace_id, options)
-        }
+    } else {
+        refresh_graph_snapshot_locked(conn, workspace_id, options)
     }
 }
 
-#[cfg(feature = "graph")]
 fn refresh_graph_snapshot_locked(
     conn: &DbConnection,
     workspace_id: &str,
@@ -1408,7 +1342,6 @@ fn refresh_graph_snapshot_locked(
     })
 }
 
-#[cfg(feature = "graph")]
 fn refresh_graph_snapshot_in_transaction(
     conn: &DbConnection,
     workspace_id: &str,
@@ -1436,7 +1369,6 @@ fn refresh_graph_snapshot_in_transaction(
     Ok(report)
 }
 
-#[cfg(feature = "graph")]
 fn graph_snapshot_persistence_input(
     centrality: &CentralityRefreshReport,
     links: &[StoredMemoryLink],
@@ -1456,7 +1388,6 @@ fn graph_snapshot_persistence_input(
     })
 }
 
-#[cfg(any(feature = "graph", test))]
 struct GraphSnapshotPersistenceInput {
     node_count: u32,
     edge_count: u32,
@@ -1465,14 +1396,12 @@ struct GraphSnapshotPersistenceInput {
     source_generation: u32,
 }
 
-#[cfg(any(feature = "graph", test))]
 struct GraphSnapshotWriteOwner<'a> {
     conn: &'a DbConnection,
     lock_id: AdvisoryLockId,
     holder_id: String,
 }
 
-#[cfg(any(feature = "graph", test))]
 impl Drop for GraphSnapshotWriteOwner<'_> {
     fn drop(&mut self) {
         let mut last_error = None;
@@ -1516,7 +1445,6 @@ fn persist_graph_snapshot(
     })
 }
 
-#[cfg(any(feature = "graph", test))]
 fn with_graph_snapshot_transaction<T>(
     conn: &DbConnection,
     operation: &'static str,
@@ -1541,7 +1469,6 @@ fn with_graph_snapshot_transaction<T>(
     }
 }
 
-#[cfg(any(feature = "graph", test))]
 fn acquire_graph_snapshot_write_owner<'a>(
     conn: &'a DbConnection,
     workspace_id: &str,
@@ -1605,13 +1532,11 @@ fn acquire_graph_snapshot_write_owner<'a>(
     })
 }
 
-#[cfg(any(feature = "graph", test))]
 fn graph_snapshot_write_lock_backoff(attempt: usize) -> Duration {
     let shift = attempt.min(6);
     Duration::from_millis(5_u64.saturating_mul(1_u64 << shift))
 }
 
-#[cfg(any(feature = "graph", test))]
 fn generate_graph_snapshot_holder_id() -> String {
     format!(
         "ee-graph-snapshot-{}-{}",
@@ -1620,7 +1545,6 @@ fn generate_graph_snapshot_holder_id() -> String {
     )
 }
 
-#[cfg(any(feature = "graph", test))]
 fn persist_graph_snapshot_in_transaction(
     conn: &DbConnection,
     workspace_id: &str,
@@ -1661,7 +1585,6 @@ fn persist_graph_snapshot_in_transaction(
 ///
 /// This builds a fresh projection from memory_links, computes PageRank and
 /// betweenness centrality, and returns a report with all scores.
-#[cfg(feature = "graph")]
 pub fn refresh_centrality(
     conn: &DbConnection,
     options: &CentralityRefreshOptions,
@@ -1670,7 +1593,6 @@ pub fn refresh_centrality(
     Ok(centrality)
 }
 
-#[cfg(feature = "graph")]
 fn refresh_centrality_with_source_links(
     conn: &DbConnection,
     options: &CentralityRefreshOptions,
@@ -1685,7 +1607,6 @@ fn refresh_centrality_with_source_links(
     Ok((centrality, links))
 }
 
-#[cfg(feature = "graph")]
 fn refresh_centrality_from_links(
     links: &[StoredMemoryLink],
     dry_run: bool,
@@ -1792,39 +1713,6 @@ fn refresh_centrality_from_links(
     })
 }
 
-/// Refresh centrality metrics (stub when graph feature is disabled).
-#[cfg(not(feature = "graph"))]
-pub fn refresh_centrality(
-    _conn: &crate::db::DbConnection,
-    options: &CentralityRefreshOptions,
-) -> GraphResult<CentralityRefreshReport> {
-    let (centrality, _) = refresh_centrality_with_source_links(_conn, options)?;
-    Ok(centrality)
-}
-
-#[cfg(not(feature = "graph"))]
-fn refresh_centrality_with_source_links(
-    _conn: &crate::db::DbConnection,
-    options: &CentralityRefreshOptions,
-) -> GraphResult<(CentralityRefreshReport, Vec<StoredMemoryLink>)> {
-    Ok(CentralityRefreshReport {
-        version: env!("CARGO_PKG_VERSION"),
-        status: CentralityRefreshStatus::GraphFeatureDisabled,
-        dry_run: options.dry_run,
-        node_count: 0,
-        edge_count: 0,
-        projection_ms: 0.0,
-        pagerank_ms: 0.0,
-        betweenness_ms: 0.0,
-        total_ms: 0.0,
-        scores: vec![],
-        top_pagerank: vec![],
-        top_betweenness: vec![],
-    })
-    .map(|centrality| (centrality, Vec::new()))
-}
-
-#[cfg(feature = "graph")]
 fn graph_snapshot_metrics_json(
     centrality: &CentralityRefreshReport,
     links: &[StoredMemoryLink],
@@ -3707,7 +3595,7 @@ mod tests {
     const MEMORY_B: &str = "mem_00000000000000000000000012";
     const MEMORY_C: &str = "mem_00000000000000000000000013";
     const KARATE_SNAPSHOT_HASH: &str =
-        "blake3:8ba3ce7af8fad71c62945e735d6ebf46b1709368ecfbd80f528130391d90987d";
+        "blake3:398ec0ca05f94e01b1ddd6abf9a87fd7fde922c4764ab01736cb5ee5c19fa290";
     const KARATE_EDGE_PAIRS: &[(u8, u8)] = &[
         (1, 2),
         (1, 3),
@@ -3976,10 +3864,7 @@ mod tests {
                 .map(|capability| capability.status()),
             Some(CapabilityStatus::Ready)
         );
-        #[cfg(feature = "graph")]
         assert_eq!(readiness.missing_capabilities().count(), 1);
-        #[cfg(not(feature = "graph"))]
-        assert_eq!(readiness.missing_capabilities().count(), 4);
     }
 
     #[test]
@@ -4225,28 +4110,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(not(feature = "graph"))]
-    #[test]
-    fn missing_capabilities_keep_repair_metadata() {
-        let missing: Vec<_> = module_readiness().missing_capabilities().collect();
-
-        assert_eq!(
-            missing.first().map(|capability| capability.name()),
-            Some(GraphCapabilityName::FrankenNetworkXDependency)
-        );
-        assert_eq!(
-            missing.first().map(|capability| capability.surface()),
-            Some(GraphSurface::Projection)
-        );
-        assert!(
-            missing
-                .first()
-                .map(|capability| capability.repair().contains("franken_networkx"))
-                .unwrap_or(false)
-        );
-    }
-
-    #[cfg(feature = "graph")]
     #[test]
     fn missing_capabilities_keep_repair_metadata() {
         let missing: Vec<_> = module_readiness().missing_capabilities().collect();
@@ -4267,7 +4130,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "graph")]
     #[test]
     fn projection_builder_capabilities_ready() {
         let readiness = module_readiness();
@@ -4278,7 +4140,6 @@ mod tests {
         assert_eq!(cap.map(|c| c.status()), Some(CapabilityStatus::Ready));
     }
 
-    #[cfg(feature = "graph")]
     #[test]
     fn centrality_metrics_capabilities_ready() {
         let readiness = module_readiness();
@@ -4289,7 +4150,6 @@ mod tests {
         assert_eq!(cap.map(|c| c.status()), Some(CapabilityStatus::Ready));
     }
 
-    #[cfg(feature = "graph")]
     #[test]
     fn graph_feature_missing_count_is_one() {
         let readiness = module_readiness();
@@ -5562,10 +5422,101 @@ mod tests {
         connection.close().map_err(|error| error.to_string())
     }
 
+    #[test]
+    fn refresh_graph_snapshot_computes_and_persists_centrality_in_default_build() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000141",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000142",
+            MEMORY_B,
+            MEMORY_C,
+            true,
+            0.9,
+            0.9,
+        )?;
+
+        let report = graph_result(super::refresh_graph_snapshot(
+            &connection,
+            WORKSPACE_ID,
+            &super::CentralityRefreshOptions::default(),
+        ))?;
+
+        assert_eq!(
+            report.centrality.status,
+            super::CentralityRefreshStatus::Refreshed
+        );
+        assert_eq!(report.centrality.node_count, 3);
+        assert_eq!(report.centrality.edge_count, 2);
+        assert_eq!(report.centrality.scores.len(), 3);
+        assert!(
+            report
+                .centrality
+                .scores
+                .iter()
+                .any(|score| score.pagerank.is_finite() && score.pagerank > 0.0)
+        );
+        assert!(
+            report
+                .centrality
+                .scores
+                .iter()
+                .all(|score| score.betweenness.is_finite())
+        );
+
+        let snapshot = report
+            .snapshot
+            .as_ref()
+            .ok_or_else(|| "centrality refresh should persist a graph snapshot".to_owned())?;
+        assert_eq!(snapshot.status, GraphSnapshotStatus::Valid);
+
+        let stored = connection
+            .get_latest_graph_snapshot(WORKSPACE_ID, GraphSnapshotType::MemoryLinks)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "latest graph snapshot should be persisted".to_owned())?;
+        assert_eq!(stored.id, snapshot.id);
+        assert_eq!(stored.node_count, 3);
+        assert_eq!(stored.edge_count, 2);
+
+        let metrics: serde_json::Value = serde_json::from_str(&stored.metrics_json)
+            .map_err(|error| format!("stored metrics JSON should parse: {error}"))?;
+        assert_eq!(metrics["centrality"]["status"], "refreshed");
+        let nodes = metrics["nodes"]
+            .as_array()
+            .ok_or_else(|| "stored metrics should include node scores".to_owned())?;
+        assert_eq!(nodes.len(), 3);
+        assert!(nodes.iter().any(|node| {
+            node["memoryId"] == MEMORY_B
+                && node["pagerank"].as_f64().is_some()
+                && node["betweenness"].as_f64().is_some()
+        }));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
     #[cfg(feature = "graph")]
     #[test]
     fn refresh_graph_snapshot_acquires_write_lock_before_source_read() -> TestResult {
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection
+            .ensure_advisory_locks_table()
+            .map_err(|error| error.to_string())?;
+        connection
+            .acquire_advisory_lock(
+                &AdvisoryLockId::workspace(WORKSPACE_ID),
+                "test-holder",
+                Some(super::GRAPH_SNAPSHOT_WRITE_LOCK_TTL_SECS),
+                Some("test graph snapshot lock"),
+            )
+            .map_err(|error| error.to_string())?;
 
         let error = match super::refresh_graph_snapshot(
             &connection,
@@ -5577,12 +5528,13 @@ mod tests {
         };
 
         match error {
-            super::GraphError::Storage { operation, source } => {
-                assert_eq!(operation, "acquire graph snapshot write lock");
-                assert!(
-                    !source.to_string().contains("memory_links"),
-                    "source links were read before acquiring the snapshot write lock: {source}"
-                );
+            super::GraphError::SnapshotLockHeld {
+                holder_id,
+                acquired_at,
+                ..
+            } => {
+                assert_eq!(holder_id, "test-holder");
+                assert!(!acquired_at.is_empty());
             }
             other => {
                 return Err(format!(
@@ -5808,30 +5760,6 @@ mod tests {
         assert_eq!(
             report.centrality.status,
             super::CentralityRefreshStatus::DryRun
-        );
-        assert!(report.snapshot.is_none());
-        let stored = connection
-            .get_latest_graph_snapshot(WORKSPACE_ID, GraphSnapshotType::MemoryLinks)
-            .map_err(|error| error.to_string())?;
-        assert!(stored.is_none());
-
-        connection.close().map_err(|error| error.to_string())
-    }
-
-    #[cfg(not(feature = "graph"))]
-    #[test]
-    fn refresh_graph_snapshot_disabled_graph_does_not_persist_snapshot() -> TestResult {
-        let connection = open_projection_db()?;
-
-        let report = graph_result(super::refresh_graph_snapshot(
-            &connection,
-            WORKSPACE_ID,
-            &super::CentralityRefreshOptions::default(),
-        ))?;
-
-        assert_eq!(
-            report.centrality.status,
-            super::CentralityRefreshStatus::GraphFeatureDisabled
         );
         assert!(report.snapshot.is_none());
         let stored = connection

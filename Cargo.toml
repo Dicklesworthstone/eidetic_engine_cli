@@ -30,14 +30,14 @@ name = "ee"
 path = "src/main.rs"
 
 [features]
-default = ["fts5", "json", "embed-fast", "lexical-bm25"]
+default = ["fts5", "json", "embed-fast", "lexical-bm25", "graph"]
 fts5 = ["frankensearch/fts5"]
 json = []
 embed-fast = ["frankensearch/model2vec"]
 # Blocked: frankensearch/fastembed currently pulls reqwest/tokio/hyper/tower.
 # Do not expose an embed-quality feature until that tree is forbidden-dep clean.
 lexical-bm25 = ["frankensearch/lexical"]
-graph = ["dep:fnx-runtime", "dep:fnx-classes", "dep:fnx-algorithms"]
+graph = []
 mcp = []
 serve = []
 # Optional science analytics for evaluation and diagnostics (EE-171).
@@ -51,9 +51,9 @@ franken-agent-detection = { version = "0.1.3", path = "/data/projects/franken_ag
 chrono = { version = "0.4.44", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = { version = "4.6.1" }
-fnx-algorithms = { version = "0.1.0", path = "/data/projects/franken_networkx/crates/fnx-algorithms", optional = true }
-fnx-classes = { version = "0.1.0", path = "/data/projects/franken_networkx/crates/fnx-classes", optional = true }
-fnx-runtime = { version = "0.1.0", path = "/data/projects/franken_networkx/crates/fnx-runtime", default-features = false, features = ["asupersync-integration"], optional = true }
+fnx-algorithms = { version = "0.1.0", path = "/data/projects/franken_networkx/crates/fnx-algorithms" }
+fnx-classes = { version = "0.1.0", path = "/data/projects/franken_networkx/crates/fnx-classes" }
+fnx-runtime = { version = "0.1.0", path = "/data/projects/franken_networkx/crates/fnx-runtime", default-features = false, features = ["asupersync-integration"] }
 frankensearch = { version = "0.3.0", path = "/data/projects/frankensearch/frankensearch", default-features = false, features = ["hash", "storage"] }
 getrandom = { version = "0.3.4" }
 regex-lite = { version = "0.1" }
