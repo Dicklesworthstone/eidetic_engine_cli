@@ -4134,6 +4134,16 @@ pub fn render_install_plan_json(report: &InstallPlanReport) -> String {
     render_serialized_report_response(report, "InstallPlanReport")
 }
 
+fn render_serialized_report_json<T>(report: &T, report_name: &str) -> String
+where
+    T: Serialize,
+{
+    match serde_json::to_string(report) {
+        Ok(raw) => raw,
+        Err(error) => serialization_failure_error_json(report_name, &error),
+    }
+}
+
 fn render_serialized_report_response<T>(report: &T, report_name: &str) -> String
 where
     T: Serialize,
@@ -7163,8 +7173,7 @@ use crate::core::support_bundle::{BundleReport, InspectReport};
 
 #[must_use]
 pub fn render_support_bundle_json(report: &BundleReport) -> String {
-    let raw = serde_json::to_string(report).unwrap_or_default();
-    ResponseEnvelope::success().data_raw(&raw).finish()
+    render_serialized_report_response(report, "BundleReport")
 }
 
 #[must_use]
@@ -7205,8 +7214,7 @@ pub fn render_support_bundle_toon(report: &BundleReport) -> String {
 
 #[must_use]
 pub fn render_support_inspect_json(report: &InspectReport) -> String {
-    let raw = serde_json::to_string(report).unwrap_or_default();
-    ResponseEnvelope::success().data_raw(&raw).finish()
+    render_serialized_report_response(report, "InspectReport")
 }
 
 #[must_use]
@@ -7255,8 +7263,7 @@ use crate::core::economy::{
 
 #[must_use]
 pub fn render_economy_report_json(report: &EconomyReport) -> String {
-    let raw = serde_json::to_string(report).unwrap_or_default();
-    ResponseEnvelope::success().data_raw(&raw).finish()
+    render_serialized_report_response(report, "EconomyReport")
 }
 
 #[must_use]
@@ -7312,8 +7319,7 @@ pub fn render_economy_report_toon(report: &EconomyReport) -> String {
 
 #[must_use]
 pub fn render_economy_score_json(report: &EconomyScoreReport) -> String {
-    let raw = serde_json::to_string(report).unwrap_or_default();
-    ResponseEnvelope::success().data_raw(&raw).finish()
+    render_serialized_report_response(report, "EconomyScoreReport")
 }
 
 #[must_use]
@@ -7358,8 +7364,7 @@ pub fn render_economy_score_toon(report: &EconomyScoreReport) -> String {
 
 #[must_use]
 pub fn render_economy_simulation_json(report: &EconomySimulationReport) -> String {
-    let raw = serde_json::to_string(report).unwrap_or_default();
-    ResponseEnvelope::success().data_raw(&raw).finish()
+    render_serialized_report_response(report, "EconomySimulationReport")
 }
 
 #[must_use]
@@ -7405,8 +7410,7 @@ pub fn render_economy_simulation_toon(report: &EconomySimulationReport) -> Strin
 
 #[must_use]
 pub fn render_economy_prune_plan_json(report: &EconomyPrunePlan) -> String {
-    let raw = serde_json::to_string(report).unwrap_or_default();
-    ResponseEnvelope::success().data_raw(&raw).finish()
+    render_serialized_report_response(report, "EconomyPrunePlan")
 }
 
 #[must_use]
@@ -8144,7 +8148,7 @@ pub fn render_procedure_propose_toon(report: &ProcedureProposeReport) -> String 
 /// Render a procedure show report as JSON.
 #[must_use]
 pub fn render_procedure_show_json(report: &ProcedureShowReport) -> String {
-    serde_json::to_string(report).unwrap_or_default()
+    render_serialized_report_json(report, "ProcedureShowReport")
 }
 
 /// Render a procedure show report as human-readable text.
@@ -8195,7 +8199,7 @@ pub fn render_procedure_show_toon(report: &ProcedureShowReport) -> String {
 /// Render a procedure list report as JSON.
 #[must_use]
 pub fn render_procedure_list_json(report: &ProcedureListReport) -> String {
-    serde_json::to_string(report).unwrap_or_default()
+    render_serialized_report_json(report, "ProcedureListReport")
 }
 
 /// Render a procedure list report as human-readable text.

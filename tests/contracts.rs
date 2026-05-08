@@ -111,3 +111,6 @@ mod science_analytics;
 
 #[path = "contracts/retrieval_field_naming.rs"]
 mod retrieval_field_naming;
+
+#[path = "contracts/no_silent_fallback.rs"]
+mod no_silent_fallback;

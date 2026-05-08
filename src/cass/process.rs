@@ -259,20 +259,20 @@ impl CassInvocation {
 
         let stdout_thread = thread::spawn(move || {
             let mut buf = Vec::new();
-            let _ = std::io::Read::read_to_end(&mut stdout, &mut buf);
-            buf
+            std::io::Read::read_to_end(&mut stdout, &mut buf)?;
+            Ok(buf)
         });
 
         let stderr_thread = thread::spawn(move || {
             let mut buf = Vec::new();
-            let _ = std::io::Read::read_to_end(&mut stderr, &mut buf);
-            buf
+            std::io::Read::read_to_end(&mut stderr, &mut buf)?;
+            Ok(buf)
         });
 
         loop {
             if let Some(status) = child.try_wait().map_err(CassError::from)? {
-                let stdout_bytes = stdout_thread.join().unwrap_or_default();
-                let stderr_bytes = stderr_thread.join().unwrap_or_default();
+                let stdout_bytes = join_pipe_reader(stdout_thread)?;
+                let stderr_bytes = join_pipe_reader(stderr_thread)?;
                 return Ok(CassOutcome::new(
                     self.clone(),
                     stdout_bytes,
@@ -287,8 +287,8 @@ impl CassInvocation {
             if elapsed >= timeout {
                 let _ = child.kill();
                 let status = child.wait().map_err(CassError::from)?;
-                let stdout_bytes = stdout_thread.join().unwrap_or_default();
-                let stderr_bytes = stderr_thread.join().unwrap_or_default();
+                let stdout_bytes = join_pipe_reader(stdout_thread)?;
+                let stderr_bytes = join_pipe_reader(stderr_thread)?;
                 return Ok(CassOutcome::new(
                     self.clone(),
                     stdout_bytes,
@@ -376,6 +376,20 @@ fn cass_spawn_retry_delay(attempt: usize) -> Duration {
 
     let multiplier = 1_u64 << attempt.min(5);
     Duration::from_millis(BASE_DELAY_MS.saturating_mul(multiplier).min(MAX_DELAY_MS))
+}
+
+fn join_pipe_reader(
+    handle: thread::JoinHandle<Result<Vec<u8>, std::io::Error>>,
+) -> Result<Vec<u8>, CassError> {
+    match handle.join() {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(read_error)) => Err(CassError::Io {
+            message: format!("cass subprocess pipe read failed: {read_error}"),
+        }),
+        Err(_panic) => Err(CassError::Io {
+            message: "cass subprocess pipe reader thread panicked".to_owned(),
+        }),
+    }
 }
 
 fn validate_absolute_cass_binary(path: &Path) -> Result<(), CassError> {
@@ -808,5 +822,57 @@ mod tests {
             "absolute cass invocation must not execute PATH override binary",
         );
         Ok(())
+    }
+
+    #[test]
+    fn join_pipe_reader_returns_bytes_on_success() {
+        use super::join_pipe_reader;
+        use std::thread;
+
+        let handle = thread::spawn(|| Ok(b"hello".to_vec()));
+        let result = join_pipe_reader(handle);
+        let bytes = match result {
+            Ok(b) => b,
+            Err(e) => panic!("expected success but got: {e}"),
+        };
+        assert_eq!(bytes, b"hello");
+    }
+
+    #[test]
+    fn join_pipe_reader_surfaces_read_error() {
+        use super::join_pipe_reader;
+        use std::io;
+        use std::thread;
+
+        let handle = thread::spawn(|| {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe broke"))
+        });
+        let result = join_pipe_reader(handle);
+        let err = match result {
+            Ok(_) => panic!("expected join_pipe_reader to return Err for read failure"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind_str(), "io");
+        assert!(err.to_string().contains("pipe read failed"));
+        assert!(err.to_string().contains("pipe broke"));
+    }
+
+    #[test]
+    fn join_pipe_reader_surfaces_thread_panic() {
+        use super::join_pipe_reader;
+        use std::thread;
+
+        let handle: thread::JoinHandle<Result<Vec<u8>, std::io::Error>> =
+            thread::spawn(|| panic!("intentional test panic"));
+
+        std::thread::sleep(Duration::from_millis(10));
+
+        let result = join_pipe_reader(handle);
+        let err = match result {
+            Ok(_) => panic!("expected join_pipe_reader to return Err for thread panic"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind_str(), "io");
+        assert!(err.to_string().contains("panicked"));
     }
 }
