@@ -192,6 +192,11 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
             "profile_config_plan",
             profile::PROFILE_CONFIG_PLAN_SCHEMA_V1,
         ),
+        SupportedSchema::new(
+            "verification_recipe",
+            profile::VERIFICATION_RECIPE_SCHEMA_V1,
+        ),
+        SupportedSchema::new("runtime_profile", profile::RUNTIME_PROFILE_SCHEMA_V1),
         SupportedSchema::new("update_plan", UPDATE_PLAN_SCHEMA_V1),
     ]
 }

@@ -16,6 +16,7 @@ use toml_edit::{DocumentMut, Item};
 
 pub const HOST_PROFILE_PROBE_SCHEMA_V1: &str = "ee.profile.probe.v1";
 pub const PROFILE_CONFIG_PLAN_SCHEMA_V1: &str = "ee.profile.config.plan.v1";
+pub const RUNTIME_PROFILE_SCHEMA_V1: &str = "ee.profile.runtime.v1";
 
 const TOOL_NAMES: [&str; 7] = ["cargo", "rustfmt", "clippy", "br", "bv", "rch", "gh"];
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -386,6 +387,406 @@ pub struct VerificationProfileBudget {
     pub heavy_strategy: &'static str,
 }
 
+pub const VERIFICATION_RECIPE_SCHEMA_V1: &str = "ee.profile.verification_recipe.v1";
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationRecipe {
+    pub schema: &'static str,
+    pub profile: OperatingProfile,
+    pub recipe_name: &'static str,
+    pub gates_included: Vec<VerificationGate>,
+    pub gates_skipped: Vec<SkippedGate>,
+    pub rch_commands: Vec<RchCommand>,
+    pub cargo_commands: Vec<CargoCommand>,
+    pub target_dir_strategy: TargetDirStrategy,
+    pub timeout_seconds: u64,
+    pub degraded: Vec<VerificationDegradation>,
+}
+
+impl VerificationRecipe {
+    #[must_use]
+    pub fn for_profile(profile: OperatingProfile) -> Self {
+        let budgets = ProfileBudgets::for_profile(profile);
+        build_verification_recipe(profile, &budgets.verification)
+    }
+
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        !self.degraded.is_empty()
+    }
+
+    #[must_use]
+    pub fn skipped_heavy_gates(&self) -> Vec<&SkippedGate> {
+        self.gates_skipped
+            .iter()
+            .filter(|g| g.weight == "heavy")
+            .collect()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationGate {
+    CargoCheck,
+    CargoClippy,
+    CargoFmt,
+    CargoTest,
+    CargoTestDoc,
+    ForbiddenDeps,
+    GoldenSnapshots,
+    PropertyTests,
+    IntegrationTests,
+    E2eTests,
+}
+
+impl VerificationGate {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CargoCheck => "cargo_check",
+            Self::CargoClippy => "cargo_clippy",
+            Self::CargoFmt => "cargo_fmt",
+            Self::CargoTest => "cargo_test",
+            Self::CargoTestDoc => "cargo_test_doc",
+            Self::ForbiddenDeps => "forbidden_deps",
+            Self::GoldenSnapshots => "golden_snapshots",
+            Self::PropertyTests => "property_tests",
+            Self::IntegrationTests => "integration_tests",
+            Self::E2eTests => "e2e_tests",
+        }
+    }
+
+    #[must_use]
+    pub const fn weight(self) -> &'static str {
+        match self {
+            Self::CargoCheck | Self::CargoFmt => "light",
+            Self::CargoClippy | Self::CargoTestDoc | Self::ForbiddenDeps => "medium",
+            Self::CargoTest | Self::GoldenSnapshots => "standard",
+            Self::PropertyTests | Self::IntegrationTests | Self::E2eTests => "heavy",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedGate {
+    pub gate: VerificationGate,
+    pub weight: &'static str,
+    pub reason: &'static str,
+    pub manual_command: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RchCommand {
+    pub description: &'static str,
+    pub command: String,
+    pub timeout_seconds: u64,
+    pub requires_rch: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CargoCommand {
+    pub description: &'static str,
+    pub command: String,
+    pub timeout_seconds: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetDirStrategy {
+    pub posture: &'static str,
+    pub env_var: &'static str,
+    pub recommended_path: &'static str,
+    pub rationale: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationDegradation {
+    pub code: &'static str,
+    pub severity: &'static str,
+    pub message: String,
+    pub repair: &'static str,
+}
+
+fn build_verification_recipe(
+    profile: OperatingProfile,
+    budget: &VerificationProfileBudget,
+) -> VerificationRecipe {
+    let (gates_included, gates_skipped) =
+        partition_gates_for_recipe(budget.recipe, budget.heavy_strategy);
+    let timeout_seconds = timeout_for_class(budget.timeout_class);
+    let target_dir_strategy = target_dir_strategy_for_posture(budget.target_dir_posture);
+    let rch_commands = build_rch_commands(budget, &gates_included, timeout_seconds);
+    let cargo_commands = build_cargo_commands(&gates_included, timeout_seconds);
+    let degraded = collect_verification_degradations(budget, &gates_skipped);
+
+    VerificationRecipe {
+        schema: VERIFICATION_RECIPE_SCHEMA_V1,
+        profile,
+        recipe_name: budget.recipe,
+        gates_included,
+        gates_skipped,
+        rch_commands,
+        cargo_commands,
+        target_dir_strategy,
+        timeout_seconds,
+        degraded,
+    }
+}
+
+fn partition_gates_for_recipe(
+    recipe: &str,
+    heavy_strategy: &str,
+) -> (Vec<VerificationGate>, Vec<SkippedGate>) {
+    let mut included = Vec::new();
+    let mut skipped = Vec::new();
+
+    // Light gates always included
+    included.push(VerificationGate::CargoCheck);
+    included.push(VerificationGate::CargoFmt);
+
+    // Medium gates included for workspace+ recipes
+    if recipe != "quick" {
+        included.push(VerificationGate::CargoClippy);
+        included.push(VerificationGate::ForbiddenDeps);
+        included.push(VerificationGate::CargoTestDoc);
+    } else {
+        skipped.push(SkippedGate {
+            gate: VerificationGate::CargoClippy,
+            weight: "medium",
+            reason: "quick recipe excludes lint gates",
+            manual_command: "cargo clippy --all-targets -- -D warnings",
+        });
+        skipped.push(SkippedGate {
+            gate: VerificationGate::ForbiddenDeps,
+            weight: "medium",
+            reason: "quick recipe excludes forbidden deps check",
+            manual_command: "cargo test --test forbidden_deps",
+        });
+    }
+
+    // Standard gates included for workspace+ recipes
+    if recipe != "quick" {
+        included.push(VerificationGate::CargoTest);
+        included.push(VerificationGate::GoldenSnapshots);
+    } else {
+        skipped.push(SkippedGate {
+            gate: VerificationGate::CargoTest,
+            weight: "standard",
+            reason: "quick recipe excludes unit tests",
+            manual_command: "cargo test --lib",
+        });
+        skipped.push(SkippedGate {
+            gate: VerificationGate::GoldenSnapshots,
+            weight: "standard",
+            reason: "quick recipe excludes golden tests",
+            manual_command: "cargo test --test golden",
+        });
+    }
+
+    // Heavy gates depend on strategy
+    let heavy_gates = [
+        (
+            VerificationGate::PropertyTests,
+            "cargo test --test property",
+        ),
+        (
+            VerificationGate::IntegrationTests,
+            "cargo test --test integration",
+        ),
+        (VerificationGate::E2eTests, "cargo test --test '*_e2e'"),
+    ];
+
+    match (recipe, heavy_strategy) {
+        ("full", "rch_default") => {
+            for (gate, _) in heavy_gates {
+                included.push(gate);
+            }
+        }
+        (_, "rch_preferred") => {
+            // Include property tests, skip others
+            included.push(VerificationGate::PropertyTests);
+            skipped.push(SkippedGate {
+                gate: VerificationGate::IntegrationTests,
+                weight: "heavy",
+                reason: "rch_preferred defers integration tests to CI",
+                manual_command: "rch exec -- cargo test --test integration",
+            });
+            skipped.push(SkippedGate {
+                gate: VerificationGate::E2eTests,
+                weight: "heavy",
+                reason: "rch_preferred defers e2e tests to CI",
+                manual_command: "rch exec -- cargo test --test '*_e2e'",
+            });
+        }
+        _ => {
+            // manual or quick: skip all heavy gates
+            for (gate, cmd) in heavy_gates {
+                skipped.push(SkippedGate {
+                    gate,
+                    weight: "heavy",
+                    reason: "profile budget excludes heavy verification gates",
+                    manual_command: cmd,
+                });
+            }
+        }
+    }
+
+    (included, skipped)
+}
+
+fn timeout_for_class(timeout_class: &str) -> u64 {
+    match timeout_class {
+        "short" => 120,
+        "standard" => 300,
+        "extended" => 600,
+        _ => 300,
+    }
+}
+
+fn target_dir_strategy_for_posture(posture: &str) -> TargetDirStrategy {
+    match posture {
+        "shared" => TargetDirStrategy {
+            posture: "shared",
+            env_var: "CARGO_TARGET_DIR",
+            recommended_path: "target",
+            rationale: "Reuses default target directory to minimize disk usage on constrained hosts.",
+        },
+        _ => TargetDirStrategy {
+            posture: "isolated",
+            env_var: "CARGO_TARGET_DIR",
+            recommended_path: "/data/tmp/ee_target_$PANE",
+            rationale: "Isolated target directory prevents lock contention in swarm/parallel builds.",
+        },
+    }
+}
+
+fn build_rch_commands(
+    budget: &VerificationProfileBudget,
+    gates: &[VerificationGate],
+    timeout: u64,
+) -> Vec<RchCommand> {
+    let mut commands = Vec::new();
+    let use_rch = budget.heavy_strategy != "manual";
+
+    if gates.contains(&VerificationGate::CargoCheck) {
+        commands.push(RchCommand {
+            description: "Type check all targets",
+            command: format!(
+                "{}cargo check --all-targets",
+                if use_rch { "rch exec -- " } else { "" }
+            ),
+            timeout_seconds: timeout / 4,
+            requires_rch: use_rch,
+        });
+    }
+
+    if gates.contains(&VerificationGate::CargoClippy) {
+        commands.push(RchCommand {
+            description: "Lint with clippy (warnings as errors)",
+            command: format!(
+                "{}cargo clippy --all-targets -- -D warnings",
+                if use_rch { "rch exec -- " } else { "" }
+            ),
+            timeout_seconds: timeout / 3,
+            requires_rch: use_rch,
+        });
+    }
+
+    if gates.contains(&VerificationGate::CargoTest) {
+        commands.push(RchCommand {
+            description: "Run unit and integration tests",
+            command: format!(
+                "{}cargo test --workspace",
+                if use_rch { "rch exec -- " } else { "" }
+            ),
+            timeout_seconds: timeout,
+            requires_rch: use_rch,
+        });
+    }
+
+    if gates.contains(&VerificationGate::E2eTests) && budget.heavy_strategy == "rch_default" {
+        commands.push(RchCommand {
+            description: "Run E2E tests via RCH",
+            command: "rch exec -- cargo test --workspace --test '*_e2e'".to_string(),
+            timeout_seconds: timeout,
+            requires_rch: true,
+        });
+    }
+
+    commands
+}
+
+fn build_cargo_commands(gates: &[VerificationGate], timeout: u64) -> Vec<CargoCommand> {
+    let mut commands = Vec::new();
+
+    if gates.contains(&VerificationGate::CargoFmt) {
+        commands.push(CargoCommand {
+            description: "Check formatting",
+            command: "cargo fmt --check".to_string(),
+            timeout_seconds: 30,
+        });
+    }
+
+    if gates.contains(&VerificationGate::ForbiddenDeps) {
+        commands.push(CargoCommand {
+            description: "Verify no forbidden dependencies",
+            command: "cargo test --test forbidden_deps".to_string(),
+            timeout_seconds: timeout / 4,
+        });
+    }
+
+    if gates.contains(&VerificationGate::GoldenSnapshots) {
+        commands.push(CargoCommand {
+            description: "Verify golden snapshot tests",
+            command: "cargo test --test golden".to_string(),
+            timeout_seconds: timeout / 2,
+        });
+    }
+
+    commands
+}
+
+fn collect_verification_degradations(
+    budget: &VerificationProfileBudget,
+    skipped: &[SkippedGate],
+) -> Vec<VerificationDegradation> {
+    let mut degraded = Vec::new();
+
+    let heavy_skipped: Vec<_> = skipped.iter().filter(|s| s.weight == "heavy").collect();
+    if !heavy_skipped.is_empty() {
+        degraded.push(VerificationDegradation {
+            code: "heavy_gates_skipped",
+            severity: "info",
+            message: format!(
+                "{} heavy verification gate(s) skipped by profile: {}",
+                heavy_skipped.len(),
+                heavy_skipped
+                    .iter()
+                    .map(|s| s.gate.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            repair: "Run skipped gates manually or upgrade to a higher-resource profile.",
+        });
+    }
+
+    if budget.heavy_strategy == "manual" {
+        degraded.push(VerificationDegradation {
+            code: "manual_heavy_strategy",
+            severity: "warning",
+            message: "Heavy tests require manual invocation on this profile.".to_string(),
+            repair: "Use `rch exec -- cargo test` for heavy gates, or configure rch_preferred.",
+        });
+    }
+
+    degraded
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosticsProfileBudget {
@@ -497,6 +898,94 @@ impl std::error::Error for ProfileConfigError {
             Self::Parse { .. } => None,
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeProfileReport {
+    pub schema: &'static str,
+    pub active_profile: OperatingProfile,
+    pub source: String,
+    pub budgets: ProfileBudgets,
+}
+
+impl RuntimeProfileReport {
+    #[must_use]
+    pub fn for_profile(profile: OperatingProfile, source: impl Into<String>) -> Self {
+        Self {
+            schema: RUNTIME_PROFILE_SCHEMA_V1,
+            active_profile: profile,
+            source: source.into(),
+            budgets: ProfileBudgets::for_profile(profile),
+        }
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": self.schema,
+            "activeProfile": self.active_profile.as_str(),
+            "source": self.source,
+            "budgets": self.budgets,
+        })
+    }
+
+    #[must_use]
+    pub fn cap_search_limit(&self, requested: u32) -> (u32, bool) {
+        cap_u32(requested, self.budgets.search.candidate_limit)
+    }
+
+    #[must_use]
+    pub fn cap_pack_max_tokens(&self, requested: u32) -> (u32, bool) {
+        cap_u32(requested, self.budgets.pack.max_tokens)
+    }
+
+    #[must_use]
+    pub fn cap_pack_candidate_pool(&self, requested: u32) -> (u32, bool) {
+        cap_u32(requested, self.budgets.pack.max_candidate_memories)
+    }
+
+    #[must_use]
+    pub fn cap_index_job_limit(&self, requested: Option<u32>) -> (Option<u32>, bool) {
+        let cap = self.budgets.write_spool.batch_cap.min(u64::from(u32::MAX)) as u32;
+        match requested {
+            Some(value) if value > cap => (Some(cap), true),
+            Some(value) => (Some(value), false),
+            None => (Some(cap), true),
+        }
+    }
+}
+
+#[must_use]
+pub fn runtime_profile_for_workspace(workspace_root: &Path) -> RuntimeProfileReport {
+    if let Some(profile) = selected_profile_from_config(workspace_root) {
+        RuntimeProfileReport::for_profile(profile, "workspace_config")
+    } else {
+        let probe = HostResourceProbeReport::gather_for_workspace(workspace_root);
+        let selection = recommend_operating_profile(&probe);
+        RuntimeProfileReport::for_profile(selection.effective, "host_probe")
+    }
+}
+
+fn cap_u32(requested: u32, cap: u64) -> (u32, bool) {
+    let cap = cap.min(u64::from(u32::MAX)) as u32;
+    if requested > cap {
+        (cap, true)
+    } else {
+        (requested, false)
+    }
+}
+
+fn selected_profile_from_config(workspace_root: &Path) -> Option<OperatingProfile> {
+    let contents = fs::read_to_string(workspace_root.join(".ee").join("config.toml")).ok()?;
+    let document = contents.parse::<DocumentMut>().ok()?;
+    document
+        .as_table()
+        .get("profile")?
+        .get("selected")?
+        .as_str()?
+        .parse()
+        .ok()
 }
 
 #[must_use]
@@ -906,7 +1395,7 @@ fn planned_boolean(
 }
 
 fn item_for_path<'a>(document: &'a DocumentMut, path: &[&str]) -> Option<&'a Item> {
-    let mut item = document.as_table().get(*path.first()?)?;
+    let mut item = document.as_table().get(path.first()?)?;
     for key in &path[1..] {
         item = item.get(*key)?;
     }
@@ -1362,7 +1851,10 @@ mod tests {
         )
     }
 
-    fn probe_with_resources(logical_cores: Option<u32>, memory_gib: u64) -> HostResourceProbeReport {
+    fn probe_with_resources(
+        logical_cores: Option<u32>,
+        memory_gib: u64,
+    ) -> HostResourceProbeReport {
         HostResourceProbeReport {
             schema: HOST_PROFILE_PROBE_SCHEMA_V1,
             side_effect_free: true,
@@ -1402,7 +1894,11 @@ mod tests {
         let result = recommend_operating_profile(&probe);
 
         ensure(result.recommended, OperatingProfile::Swarm, "swarm profile")?;
-        ensure(result.effective, OperatingProfile::Swarm, "effective profile")?;
+        ensure(
+            result.effective,
+            OperatingProfile::Swarm,
+            "effective profile",
+        )?;
         ensure(result.confidence, "high", "high confidence with full probe")
     }
 
@@ -1411,8 +1907,16 @@ mod tests {
         let probe = probe_with_resources(Some(8), 24);
         let result = recommend_operating_profile(&probe);
 
-        ensure(result.recommended, OperatingProfile::Workstation, "workstation profile")?;
-        ensure(result.effective, OperatingProfile::Workstation, "effective profile")
+        ensure(
+            result.recommended,
+            OperatingProfile::Workstation,
+            "workstation profile",
+        )?;
+        ensure(
+            result.effective,
+            OperatingProfile::Workstation,
+            "effective profile",
+        )
     }
 
     #[test]
@@ -1420,8 +1924,16 @@ mod tests {
         let probe = probe_with_resources(Some(4), 12);
         let result = recommend_operating_profile(&probe);
 
-        ensure(result.recommended, OperatingProfile::Portable, "portable profile")?;
-        ensure(result.effective, OperatingProfile::Portable, "effective profile")
+        ensure(
+            result.recommended,
+            OperatingProfile::Portable,
+            "portable profile",
+        )?;
+        ensure(
+            result.effective,
+            OperatingProfile::Portable,
+            "effective profile",
+        )
     }
 
     #[test]
@@ -1429,8 +1941,16 @@ mod tests {
         let probe = probe_with_resources(Some(2), 4);
         let result = recommend_operating_profile(&probe);
 
-        ensure(result.recommended, OperatingProfile::Constrained, "constrained profile")?;
-        ensure(result.effective, OperatingProfile::Constrained, "effective profile")
+        ensure(
+            result.recommended,
+            OperatingProfile::Constrained,
+            "constrained profile",
+        )?;
+        ensure(
+            result.effective,
+            OperatingProfile::Constrained,
+            "effective profile",
+        )
     }
 
     #[test]
@@ -1438,8 +1958,16 @@ mod tests {
         let probe = probe_with_resources(None, 0);
         let result = recommend_operating_profile(&probe);
 
-        ensure(result.recommended, OperatingProfile::Constrained, "constrained fallback")?;
-        ensure(result.confidence, "medium", "medium confidence without probe data")
+        ensure(
+            result.recommended,
+            OperatingProfile::Constrained,
+            "constrained fallback",
+        )?;
+        ensure(
+            result.confidence,
+            "medium",
+            "medium confidence without probe data",
+        )
     }
 
     #[test]
@@ -1538,5 +2066,143 @@ mod tests {
             constrained.cache.memory_cap_mb < swarm.cache.memory_cap_mb,
             "swarm has larger cache than constrained",
         )
+    }
+
+    #[test]
+    fn verification_recipe_constrained_skips_heavy_gates() -> TestResult {
+        let recipe = VerificationRecipe::for_profile(OperatingProfile::Constrained);
+
+        ensure(recipe.recipe_name, "quick", "constrained uses quick recipe")?;
+        ensure_true(
+            recipe.gates_skipped.iter().any(|s| s.weight == "heavy"),
+            "constrained skips heavy gates",
+        )?;
+        ensure_true(
+            !recipe.skipped_heavy_gates().is_empty(),
+            "skipped_heavy_gates returns non-empty for constrained",
+        )?;
+        ensure_true(
+            recipe.is_degraded(),
+            "constrained verification is degraded due to skipped gates",
+        )?;
+        ensure(
+            recipe.target_dir_strategy.posture,
+            "shared",
+            "constrained uses shared target dir",
+        )
+    }
+
+    #[test]
+    fn verification_recipe_swarm_includes_all_gates() -> TestResult {
+        let recipe = VerificationRecipe::for_profile(OperatingProfile::Swarm);
+
+        ensure(recipe.recipe_name, "full", "swarm uses full recipe")?;
+        ensure_true(
+            recipe.gates_included.contains(&VerificationGate::E2eTests),
+            "swarm includes e2e tests",
+        )?;
+        ensure_true(
+            recipe
+                .gates_included
+                .contains(&VerificationGate::PropertyTests),
+            "swarm includes property tests",
+        )?;
+        ensure_true(
+            recipe.skipped_heavy_gates().is_empty(),
+            "swarm skips no heavy gates",
+        )?;
+        ensure(
+            recipe.target_dir_strategy.posture,
+            "isolated",
+            "swarm uses isolated target dir",
+        )
+    }
+
+    #[test]
+    fn verification_recipe_portable_prefers_rch() -> TestResult {
+        let recipe = VerificationRecipe::for_profile(OperatingProfile::Portable);
+
+        ensure(
+            recipe.recipe_name,
+            "workspace",
+            "portable uses workspace recipe",
+        )?;
+        ensure_true(
+            recipe.rch_commands.iter().any(|c| c.requires_rch),
+            "portable includes RCH commands",
+        )?;
+        ensure_true(
+            recipe.skipped_heavy_gates().len() == 2,
+            "portable skips integration and e2e tests",
+        )?;
+        ensure_true(
+            recipe
+                .gates_included
+                .contains(&VerificationGate::PropertyTests),
+            "portable includes property tests (rch_preferred)",
+        )
+    }
+
+    #[test]
+    fn verification_recipe_skipped_gates_have_manual_commands() -> TestResult {
+        let recipe = VerificationRecipe::for_profile(OperatingProfile::Constrained);
+
+        for skipped in &recipe.gates_skipped {
+            ensure_true(
+                !skipped.manual_command.is_empty(),
+                &format!("skipped gate {} has manual command", skipped.gate.as_str()),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn verification_recipe_timeout_scales_with_profile() -> TestResult {
+        let constrained = VerificationRecipe::for_profile(OperatingProfile::Constrained);
+        let workstation = VerificationRecipe::for_profile(OperatingProfile::Workstation);
+        let swarm = VerificationRecipe::for_profile(OperatingProfile::Swarm);
+
+        ensure_true(
+            constrained.timeout_seconds < workstation.timeout_seconds,
+            "workstation has longer timeout than constrained",
+        )?;
+        ensure_true(
+            workstation.timeout_seconds <= swarm.timeout_seconds,
+            "swarm has equal or longer timeout than workstation",
+        )
+    }
+
+    #[test]
+    fn verification_gate_weights_are_stable() -> TestResult {
+        ensure(
+            VerificationGate::CargoCheck.weight(),
+            "light",
+            "check is light",
+        )?;
+        ensure(
+            VerificationGate::CargoClippy.weight(),
+            "medium",
+            "clippy is medium",
+        )?;
+        ensure(
+            VerificationGate::CargoTest.weight(),
+            "standard",
+            "test is standard",
+        )?;
+        ensure(VerificationGate::E2eTests.weight(), "heavy", "e2e is heavy")
+    }
+
+    #[test]
+    fn verification_recipe_serializes_to_json() -> TestResult {
+        let recipe = VerificationRecipe::for_profile(OperatingProfile::Portable);
+        let json = serde_json::to_string(&recipe).map_err(|e| e.to_string())?;
+
+        ensure_true(
+            json.contains(VERIFICATION_RECIPE_SCHEMA_V1),
+            "JSON contains schema",
+        )?;
+        ensure_true(json.contains("gatesIncluded"), "JSON has camelCase fields")?;
+        ensure_true(json.contains("gatesSkipped"), "JSON has skipped gates")?;
+        ensure_true(json.contains("rchCommands"), "JSON has RCH commands")
     }
 }
