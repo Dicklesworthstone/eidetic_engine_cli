@@ -159,7 +159,10 @@ use crate::search::{
     CanonicalSearchDocument, DocumentSource, Embedder, EmbedderStack, HashEmbedder, IndexBuilder,
     SpeedMode,
 };
-use crate::steward::JobType;
+use crate::steward::{
+    JobType, MAINTENANCE_JOB_LIST_SCHEMA_V1, MAINTENANCE_JOB_ROW_SCHEMA_V1,
+    MAINTENANCE_JOB_SHOW_SCHEMA_V1, MAINTENANCE_RUN_SCHEMA_V1, MAINTENANCE_STATUS_SCHEMA_V1,
+};
 
 #[derive(Clone, Debug, Parser, PartialEq)]
 #[command(
@@ -19109,12 +19112,6 @@ where
         ProcessExitCode::UnsatisfiedDegradedMode
     }
 }
-
-const MAINTENANCE_RUN_SCHEMA_V1: &str = "ee.maintenance.run.v1";
-const MAINTENANCE_STATUS_SCHEMA_V1: &str = "ee.maintenance.status.v1";
-const MAINTENANCE_JOB_LIST_SCHEMA_V1: &str = "ee.maintenance.job_list.v1";
-const MAINTENANCE_JOB_SHOW_SCHEMA_V1: &str = "ee.maintenance.job_show.v1";
-const MAINTENANCE_JOB_ROW_SCHEMA_V1: &str = "ee.maintenance.job_row.v1";
 
 fn handle_job<W>(cli: &Cli, command: &JobCommand, stdout: &mut W) -> ProcessExitCode
 where

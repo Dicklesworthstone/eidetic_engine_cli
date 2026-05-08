@@ -66,6 +66,9 @@ The `version` field is required. Unknown versions return `ERR_UNKNOWN_VERSION`.
 
 ## Tag Filtering
 
+> **Status: Not Implemented** — Tag fields are recognized but return `ERR_UNSUPPORTED_FEATURE`.
+> Use CLI flags: `ee context --tags release,checklist` or `ee search --tags release`.
+
 ### Positive Tags (require)
 
 ```json
@@ -133,6 +136,9 @@ Boolean predicates on memory metadata fields.
 
 ## Temporal Filters
 
+> **Status: Not Implemented** — Temporal fields (`time`, `asOf`, `temporalValidity`) are
+> recognized but return `ERR_UNSUPPORTED_FEATURE`. Use CLI flags: `ee context --after 2026-04-01`.
+
 ### Time Window
 
 ```json
@@ -183,6 +189,9 @@ Boolean predicates on memory metadata fields.
 
 ## Trust and Redaction Filters
 
+> **Status: Not Implemented** — Trust and redaction fields are recognized but return
+> `ERR_UNSUPPORTED_FEATURE`. Use CLI flags: `ee context --trust-class human_explicit`.
+
 ```json
 {
   "trust": {
@@ -210,6 +219,9 @@ Boolean predicates on memory metadata fields.
 ---
 
 ## Graph and Neighborhood Hints
+
+> **Status: Not Implemented** — Graph fields are recognized but return `ERR_UNSUPPORTED_FEATURE`.
+> Graph traversal hints are planned for a future release.
 
 ```json
 {
@@ -252,10 +264,10 @@ Boolean predicates on memory metadata fields.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `output.profile` | enum | `"balanced"` | `"compact"`, `"balanced"`, `"wide"`, `"custom"` |
+| `output.profile` | enum | `"balanced"` | `"compact"`, `"balanced"`, `"thorough"`, `"submodular"` (`"custom"` not implemented) |
 | `output.format` | enum | `"json"` | Hint for renderer selection |
-| `output.fields` | enum | `"standard"` | `"minimal"`, `"summary"`, `"standard"`, `"full"` |
-| `output.explain` | bool | false | Include scoring/selection explanations |
+| `output.fields` | enum | `"standard"` | `"minimal"`, `"summary"`, `"standard"`, `"full"` (validated; projection controlled by `--fields` CLI flag) |
+| `output.explain` | bool | false | Include scoring/selection explanations (**not implemented**) |
 
 ### Budget and Limits
 
@@ -278,6 +290,9 @@ Boolean predicates on memory metadata fields.
 **Validation**: Zero values return `ERR_ZERO_BUDGET`.
 
 ### Pagination
+
+> **Status: Not Implemented** — Pagination fields are recognized but return `ERR_UNSUPPORTED_FEATURE`.
+> Use CLI flags: `ee search --limit 25 --offset 50`.
 
 ```json
 {
@@ -358,7 +373,10 @@ Fields that are recognized but not yet implemented return `ERR_UNSUPPORTED_FEATU
 
 ## Examples
 
-### Simple Text Query
+> **Note**: Examples marked with ⚠️ use fields that are not yet implemented and will return
+> `ERR_UNSUPPORTED_FEATURE`. Use the equivalent CLI flags shown in the Implementation Status table.
+
+### Simple Text Query (working)
 
 ```json
 {
@@ -367,7 +385,7 @@ Fields that are recognized but not yet implemented return `ERR_UNSUPPORTED_FEATU
 }
 ```
 
-### Tag Filtering
+### ⚠️ Tag Filtering (not implemented)
 
 ```json
 {
@@ -380,7 +398,9 @@ Fields that are recognized but not yet implemented return `ERR_UNSUPPORTED_FEATU
 }
 ```
 
-### Metadata Boolean Filters
+Use CLI instead: `ee context "deployment" --tags production --exclude-tags deprecated`
+
+### Metadata Boolean Filters (working)
 
 ```json
 {
@@ -393,7 +413,7 @@ Fields that are recognized but not yet implemented return `ERR_UNSUPPORTED_FEATU
 }
 ```
 
-### Time/As-Of Query
+### ⚠️ Time/As-Of Query (not implemented)
 
 ```json
 {
@@ -406,7 +426,9 @@ Fields that are recognized but not yet implemented return `ERR_UNSUPPORTED_FEATU
 }
 ```
 
-### Graph Neighborhood Hints
+Use CLI instead: `ee context "API changes" --after 2026-04-01`
+
+### ⚠️ Graph Neighborhood Hints (not implemented)
 
 ```json
 {
@@ -420,7 +442,7 @@ Fields that are recognized but not yet implemented return `ERR_UNSUPPORTED_FEATU
 }
 ```
 
-### Trust Filters with Explain
+### ⚠️ Trust Filters (not implemented)
 
 ```json
 {
@@ -430,11 +452,12 @@ Fields that are recognized but not yet implemented return `ERR_UNSUPPORTED_FEATU
     "minClass": "human_explicit"
   },
   "output": {
-    "explain": true,
     "fields": "full"
   }
 }
 ```
+
+Use CLI instead: `ee context "security policy" --trust-class human_explicit --fields full`
 
 ### Evaluation Scenario
 
@@ -450,7 +473,9 @@ Fields that are recognized but not yet implemented return `ERR_UNSUPPORTED_FEATU
 }
 ```
 
-### Full Composition
+### ⚠️ Full Composition (many fields not implemented)
+
+The following shows the full schema, but most fields will error. A working subset is shown below.
 
 ```json
 {
@@ -460,34 +485,58 @@ Fields that are recognized but not yet implemented return `ERR_UNSUPPORTED_FEATU
     "text": "prepare release",
     "mode": "hybrid"
   },
-  "tags": {
+  "tags": {                           // ⚠️ Not implemented
     "require": ["release"],
     "exclude": ["draft"]
+  },
+  "filters": {                        // ✓ Implemented
+    "level": {"in": ["procedural", "episodic"]},
+    "confidence": {"gte": 0.7}
+  },
+  "time": {                           // ⚠️ Not implemented
+    "after": "2026-04-01T00:00:00Z"
+  },
+  "temporalValidity": {               // ⚠️ Not implemented
+    "posture": "strict"
+  },
+  "trust": {                          // ⚠️ Not implemented
+    "minClass": "human_explicit"
+  },
+  "graph": {                          // ⚠️ Not implemented
+    "traversal": "bidirectional",
+    "maxHops": 1
+  },
+  "budget": {                         // ✓ Implemented (except maxResults)
+    "maxTokens": 4000,
+    "candidatePool": 200
+  },
+  "output": {                         // ✓ Partially implemented
+    "profile": "balanced",
+    "explain": true                   // ⚠️ Not implemented
+  }
+}
+```
+
+### Working Subset
+
+```json
+{
+  "version": "ee.query.v1",
+  "workspace": "/data/projects/myproject",
+  "query": {
+    "text": "prepare release",
+    "mode": "hybrid"
   },
   "filters": {
     "level": {"in": ["procedural", "episodic"]},
     "confidence": {"gte": 0.7}
-  },
-  "time": {
-    "after": "2026-04-01T00:00:00Z"
-  },
-  "temporalValidity": {
-    "posture": "strict"
-  },
-  "trust": {
-    "minClass": "human_explicit"
-  },
-  "graph": {
-    "traversal": "bidirectional",
-    "maxHops": 1
   },
   "budget": {
     "maxTokens": 4000,
     "candidatePool": 200
   },
   "output": {
-    "profile": "balanced",
-    "explain": true
+    "profile": "balanced"
   }
 }
 ```
@@ -508,27 +557,55 @@ This schema **does not**:
 
 ## Implementation Status
 
+> **Note**: Fields marked "Not Implemented" are recognized by the parser but rejected
+> at runtime with `ERR_UNSUPPORTED_FEATURE`. Use CLI flags for equivalent functionality
+> where available.
+
 | Feature | Status | Notes |
 |---------|--------|-------|
-| `query.text` | Implemented | Core text search |
-| `tags.*` | Implemented | Tag filtering |
-| `filters.*` | Partial | Basic operators only |
-| `time.*` | Implemented | Temporal filtering |
-| `asOf` | Planned | Point-in-time queries |
-| `temporalValidity` | Planned | EE-TEMPORAL-VALIDITY-001 |
-| `trust.*` | Partial | Basic trust filtering |
-| `graph.*` | Planned | Graph traversal hints |
-| `budget.*` | Implemented | Token budgets |
-| `output.*` | Implemented | Output control |
-| `pagination.*` | Partial | Basic pagination |
-| `eval.*` | Implemented | Evaluation labels |
+| `query.text` | **Implemented** | Core text search |
+| `query.mode` | **Implemented** | hybrid, lexical, semantic, exact |
+| `workspace` | **Implemented** | Workspace path resolution |
+| `tags.*` | Not Implemented | Use `--tags` CLI flag instead |
+| `filters.*` | **Implemented** | eq, neq, in, notIn, gte, lte, exists operators |
+| `time.*` | Not Implemented | Use `--after`/`--before` CLI flags |
+| `asOf` | Not Implemented | Point-in-time queries planned |
+| `temporalValidity` | Not Implemented | EE-TEMPORAL-VALIDITY-001 |
+| `trust.*` | Not Implemented | Use `--trust-class` CLI flag |
+| `redaction.*` | Not Implemented | Use `--redaction-policy` CLI flag |
+| `graph.*` | Not Implemented | Graph traversal hints planned |
+| `budget.maxTokens` | **Implemented** | Token budget for context pack |
+| `budget.candidatePool` | **Implemented** | Candidate pool size |
+| `budget.maxResults` | Not Implemented | Use `--limit` CLI flag |
+| `output.profile` | **Implemented** | compact, balanced, thorough, submodular |
+| `output.format` | **Implemented** | json, markdown, toon, human, jsonl, compact, hook |
+| `output.fields` | Validated | Projection controlled by `--fields` CLI flag |
+| `output.explain` | Not Implemented | Explanation output planned |
+| `pagination.*` | Not Implemented | Use `--offset`/`--limit` CLI flags |
+| `eval.*` | **Implemented** | Evaluation labels captured in output |
 
 ---
 
 ## Follow-Up TODOs
 
-- [ ] **EE-QUERY-FILE-001**: Implement `--query-file` CLI plumbing
-- [ ] **EE-TEMPORAL-VALIDITY-001**: Add `valid_from`/`valid_to` support
+### Wiring Query Fields to Execution
+
+These fields are recognized and validated but not wired through to pack/search execution:
+
+- [ ] **tags.require, tags.requireAny, tags.exclude** — Wire to memory tag filtering
+- [ ] **time.after, time.before** — Wire to temporal window filtering
+- [ ] **asOf** — Point-in-time snapshot queries
+- [ ] **temporalValidity** — Valid-from/valid-to support (EE-TEMPORAL-VALIDITY-001)
+- [ ] **trust.minClass, trust.excludeClasses** — Wire to trust class filtering
+- [ ] **redaction.policy** — Wire to redaction policy enforcement
+- [ ] **graph.seedMemories, graph.traversal, graph.maxHops** — Wire to graph traversal
+- [ ] **pagination.cursor, pagination.limit** — Cursor-based pagination
+- [ ] **budget.maxResults** — Result count limit
+- [ ] **output.explain** — Explanation output in responses
+
+### Infrastructure
+
+- [x] `--query-file` CLI plumbing (implemented)
 - [ ] Add JSON Schema export to `ee schema export ee.query.v1`
 - [ ] Add golden fixtures for query validation
 - [ ] Add property tests for query parsing

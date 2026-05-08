@@ -23,6 +23,7 @@ use crate::core::memory::{
 };
 use crate::core::outcome::{OutcomeQuarantineListReport, OutcomeQuarantineReviewReport};
 use crate::core::quarantine::{QuarantineDegradation, QuarantineEntry, QuarantineReport};
+use crate::core::recorder::RECORDER_EVENTS_LIST_SCHEMA_V1;
 use crate::core::rule::{
     PlaybookExtractReport, RULE_ADD_SCHEMA_V1, RULE_LIST_SCHEMA_V1, RULE_SHOW_SCHEMA_V1,
     RuleAddReport, RuleListReport, RuleProtectReport, RuleShowReport,
@@ -40,6 +41,10 @@ use crate::pack::{
     ContextResponse, PackAdvisoryBanner, PackAdvisoryNote, PackDraftItem, PackItemProvenance,
     PackOmissionMetrics, PackQualityMetrics, PackRejectedFrontierItem, PackSectionMetric,
     PackSelectedItem, PackSelectionCertificate, PackSelectionStep, RenderedPackProvenance,
+};
+use crate::steward::{
+    MAINTENANCE_JOB_LIST_SCHEMA_V1, MAINTENANCE_JOB_ROW_SCHEMA_V1, MAINTENANCE_JOB_SHOW_SCHEMA_V1,
+    MAINTENANCE_RUN_SCHEMA_V1, MAINTENANCE_STATUS_SCHEMA_V1,
 };
 
 pub mod jsonl_export;
@@ -4705,6 +4710,48 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             category: "domain",
             definition: crate::models::causal_schema_catalog_json,
         },
+        SchemaEntry {
+            id: MAINTENANCE_RUN_SCHEMA_V1,
+            version: "1",
+            description: "Maintenance job run response data",
+            category: "ops",
+            definition: maintenance_run_schema_definition,
+        },
+        SchemaEntry {
+            id: MAINTENANCE_STATUS_SCHEMA_V1,
+            version: "1",
+            description: "Maintenance job availability and history status data",
+            category: "ops",
+            definition: maintenance_status_schema_definition,
+        },
+        SchemaEntry {
+            id: MAINTENANCE_JOB_LIST_SCHEMA_V1,
+            version: "1",
+            description: "Maintenance job history list response data",
+            category: "ops",
+            definition: maintenance_job_list_schema_definition,
+        },
+        SchemaEntry {
+            id: MAINTENANCE_JOB_SHOW_SCHEMA_V1,
+            version: "1",
+            description: "Maintenance job history detail response data",
+            category: "ops",
+            definition: maintenance_job_show_schema_definition,
+        },
+        SchemaEntry {
+            id: MAINTENANCE_JOB_ROW_SCHEMA_V1,
+            version: "1",
+            description: "Persisted maintenance job history row data",
+            category: "ops",
+            definition: maintenance_job_row_schema_definition,
+        },
+        SchemaEntry {
+            id: RECORDER_EVENTS_LIST_SCHEMA_V1,
+            version: "1",
+            description: "Recorder events list response data",
+            category: "recorder",
+            definition: recorder_events_list_schema_definition,
+        },
     ]
 }
 
@@ -4938,6 +4985,203 @@ fn rule_show_schema_definition() -> String {
             "found": { "type": "boolean" },
             "rule": { "type": "object" },
             "degraded": { "type": "array", "items": { "type": "object" } }
+        }
+    })
+    .to_string()
+}
+
+fn maintenance_run_schema_definition() -> String {
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": MAINTENANCE_RUN_SCHEMA_V1,
+        "type": "object",
+        "required": [
+            "schema",
+            "command",
+            "requestedJob",
+            "workspace",
+            "dryRun",
+            "durableMutation",
+            "summary",
+            "job",
+            "history",
+            "results",
+            "degraded"
+        ],
+        "properties": {
+            "schema": { "const": MAINTENANCE_RUN_SCHEMA_V1 },
+            "command": { "type": "string" },
+            "requestedJob": { "type": "string" },
+            "workspace": { "type": "string" },
+            "dryRun": { "type": "boolean" },
+            "durableMutation": { "type": "boolean" },
+            "summary": { "type": "object" },
+            "job": { "type": ["object", "null"] },
+            "history": { "type": "object" },
+            "results": { "type": "array", "items": { "type": "object" } },
+            "degraded": { "type": "array", "items": { "type": "object" } }
+        }
+    })
+    .to_string()
+}
+
+fn maintenance_status_schema_definition() -> String {
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": MAINTENANCE_STATUS_SCHEMA_V1,
+        "type": "object",
+        "required": [
+            "schema",
+            "command",
+            "jobs",
+            "historyPath",
+            "next"
+        ],
+        "properties": {
+            "schema": { "const": MAINTENANCE_STATUS_SCHEMA_V1 },
+            "command": { "const": "maintenance status" },
+            "jobs": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": [
+                        "name",
+                        "available",
+                        "stewardJobType",
+                        "description",
+                        "run"
+                    ],
+                    "properties": {
+                        "name": { "type": "string" },
+                        "available": { "type": "boolean" },
+                        "stewardJobType": { "type": "string" },
+                        "description": { "type": "string" },
+                        "run": { "type": "string" }
+                    }
+                }
+            },
+            "historyPath": { "type": "string" },
+            "next": { "type": "string" }
+        }
+    })
+    .to_string()
+}
+
+fn maintenance_job_list_schema_definition() -> String {
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": MAINTENANCE_JOB_LIST_SCHEMA_V1,
+        "type": "object",
+        "required": [
+            "schema",
+            "command",
+            "jobs"
+        ],
+        "properties": {
+            "schema": { "const": MAINTENANCE_JOB_LIST_SCHEMA_V1 },
+            "command": { "const": "job list" },
+            "workspace": { "type": "string" },
+            "historyPath": { "type": "string" },
+            "filters": { "type": "object" },
+            "jobCount": { "type": "integer", "minimum": 0 },
+            "jobs": { "type": "array", "items": { "type": "object" } },
+            "code": { "type": "string" },
+            "message": { "type": "string" },
+            "repair": { "type": "string" }
+        }
+    })
+    .to_string()
+}
+
+fn maintenance_job_show_schema_definition() -> String {
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": MAINTENANCE_JOB_SHOW_SCHEMA_V1,
+        "type": "object",
+        "required": [
+            "schema",
+            "command"
+        ],
+        "properties": {
+            "schema": { "const": MAINTENANCE_JOB_SHOW_SCHEMA_V1 },
+            "command": { "const": "job show" },
+            "workspace": { "type": "string" },
+            "historyPath": { "type": "string" },
+            "job": { "type": ["object", "null"] },
+            "linkedAuditEntries": { "type": "array", "items": { "type": "object" } },
+            "code": { "type": "string" },
+            "message": { "type": "string" },
+            "repair": { "type": "string" }
+        }
+    })
+    .to_string()
+}
+
+fn maintenance_job_row_schema_definition() -> String {
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": MAINTENANCE_JOB_ROW_SCHEMA_V1,
+        "type": "object",
+        "required": [
+            "schema",
+            "id",
+            "jobType",
+            "requestedJob",
+            "command",
+            "workspace",
+            "recordedAt",
+            "completedAt",
+            "outcome",
+            "dryRun",
+            "durableMutation",
+            "linkedAuditEntries"
+        ],
+        "properties": {
+            "schema": { "const": MAINTENANCE_JOB_ROW_SCHEMA_V1 },
+            "id": { "type": "string" },
+            "runnerJobId": { "type": "string" },
+            "jobId": { "type": "string" },
+            "jobType": { "type": "string" },
+            "requestedJob": { "type": "string" },
+            "command": { "type": "string" },
+            "workspace": { "type": "string" },
+            "recordedAt": { "type": "string" },
+            "completedAt": { "type": "string" },
+            "outcome": { "type": "string" },
+            "rowsAffected": { "type": "integer", "minimum": 0 },
+            "itemsProcessed": { "type": "integer", "minimum": 0 },
+            "durationMs": { "type": "integer", "minimum": 0 },
+            "dryRun": { "type": "boolean" },
+            "durableMutation": { "type": "boolean" },
+            "error": { "type": ["string", "null"] },
+            "details": { "type": "object" },
+            "budgetUsed": { "type": "object" },
+            "linkedAuditEntries": { "type": "array", "items": { "type": "object" } }
+        }
+    })
+    .to_string()
+}
+
+fn recorder_events_list_schema_definition() -> String {
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": RECORDER_EVENTS_LIST_SCHEMA_V1,
+        "type": "object",
+        "required": [
+            "schema",
+            "command",
+            "count",
+            "totalCount",
+            "events",
+            "filters"
+        ],
+        "properties": {
+            "schema": { "const": RECORDER_EVENTS_LIST_SCHEMA_V1 },
+            "command": { "const": "recorder events list" },
+            "count": { "type": "integer", "minimum": 0 },
+            "totalCount": { "type": "integer", "minimum": 0 },
+            "events": { "type": "array", "items": { "type": "object" } },
+            "filters": { "type": "object" }
         }
     })
     .to_string()
@@ -11389,6 +11633,42 @@ mod tests {
             &listed_ids,
             "bulk schema export must match schema list order exactly once",
         )
+    }
+
+    #[test]
+    fn public_schema_registry_covers_sampled_emitted_payload_schemas() -> TestResult {
+        let emitted_schema_ids = [
+            crate::steward::MAINTENANCE_RUN_SCHEMA_V1,
+            crate::steward::MAINTENANCE_STATUS_SCHEMA_V1,
+            crate::steward::MAINTENANCE_JOB_LIST_SCHEMA_V1,
+            crate::steward::MAINTENANCE_JOB_SHOW_SCHEMA_V1,
+            crate::steward::MAINTENANCE_JOB_ROW_SCHEMA_V1,
+            crate::core::recorder::RECORDER_EVENTS_LIST_SCHEMA_V1,
+        ];
+
+        for schema_id in emitted_schema_ids {
+            ensure(
+                super::public_schemas()
+                    .iter()
+                    .any(|entry| entry.id == schema_id),
+                format!("public schema registry missing emitted schema {schema_id}"),
+            )?;
+
+            let export_json = render_schema_export_json(Some(schema_id));
+            let exported: serde_json::Value =
+                serde_json::from_str(&export_json).map_err(|error| error.to_string())?;
+            ensure(
+                exported.get("error").is_none(),
+                format!("emitted schema {schema_id} must export without schema_not_found"),
+            )?;
+            ensure_equal(
+                &exported.get("$id").and_then(serde_json::Value::as_str),
+                &Some(schema_id),
+                "exported emitted schema id",
+            )?;
+        }
+
+        Ok(())
     }
 
     #[test]

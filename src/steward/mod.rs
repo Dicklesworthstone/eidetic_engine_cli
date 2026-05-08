@@ -35,6 +35,22 @@ pub const JOB_LEDGER_SCHEMA_V1: &str = "ee.steward.job_ledger.v1";
 
 /// Schema identifier for individual job records.
 pub const JOB_RECORD_SCHEMA_V1: &str = "ee.steward.job.v1";
+
+/// Schema identifier for maintenance job run command payloads.
+pub const MAINTENANCE_RUN_SCHEMA_V1: &str = "ee.maintenance.run.v1";
+
+/// Schema identifier for maintenance status command payloads.
+pub const MAINTENANCE_STATUS_SCHEMA_V1: &str = "ee.maintenance.status.v1";
+
+/// Schema identifier for maintenance job list command payloads.
+pub const MAINTENANCE_JOB_LIST_SCHEMA_V1: &str = "ee.maintenance.job_list.v1";
+
+/// Schema identifier for maintenance job show command payloads.
+pub const MAINTENANCE_JOB_SHOW_SCHEMA_V1: &str = "ee.maintenance.job_show.v1";
+
+/// Schema identifier for persisted maintenance job history rows.
+pub const MAINTENANCE_JOB_ROW_SCHEMA_V1: &str = "ee.maintenance.job_row.v1";
+
 pub const MAINTENANCE_JOB_LOCK_SCHEMA_V1: &str = "ee.steward.maintenance_job_lock.v1";
 pub const MAINTENANCE_JOB_LOCK_BUSY_CODE: &str = "maintenance_job_lock_busy";
 

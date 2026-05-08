@@ -1776,6 +1776,7 @@ fn assemble_facility_location_draft(
     let quotas = SectionQuotas::for_profile(profile, budget.max_tokens());
 
     let mut used_tokens = 0_u32;
+    let mut section_usage = SectionTokenUsage::default();
     let mut next_rank = 1_u32;
     let mut items: Vec<PackDraftItem> = Vec::new();
     let mut omitted = Vec::new();
@@ -1789,7 +1790,7 @@ fn assemble_facility_location_draft(
             used_tokens,
             budget,
             &quotas,
-            &items,
+            &section_usage,
         ) else {
             omitted.extend(remaining_indices.drain(..).filter_map(|profile_index| {
                 let candidate = candidates.get(profile_index)?.candidate.as_ref()?;
@@ -1835,6 +1836,7 @@ fn assemble_facility_location_draft(
             .checked_add(1)
             .ok_or(PackValidationError::CandidateRankOverflow)?;
         used_tokens = used_tokens.saturating_add(candidate.estimated_tokens);
+        section_usage.add_candidate(&candidate);
         update_facility_coverages(&mut current_coverages, &candidates, profile_index);
         selector.advance_round();
         objective_value = facility_location_value_from_coverages(&candidates, &current_coverages);
@@ -2035,7 +2037,7 @@ impl FacilitySelectionQueue {
         used_tokens: u32,
         budget: TokenBudget,
         quotas: &SectionQuotas,
-        items: &[PackDraftItem],
+        section_usage: &SectionTokenUsage,
     ) -> Option<(usize, f32)> {
         while let Some(entry) = self.heap.pop() {
             let profile_index = entry.profile_index;
@@ -2045,7 +2047,13 @@ impl FacilitySelectionQueue {
             let Some(candidate) = profile.candidate.as_ref() else {
                 continue;
             };
-            if !facility_candidate_is_feasible(candidate, used_tokens, budget, quotas, items) {
+            if !facility_candidate_is_feasible(
+                candidate,
+                used_tokens,
+                budget,
+                quotas,
+                section_usage,
+            ) {
                 continue;
             }
             if entry.generation == self.generation {
@@ -2125,12 +2133,28 @@ fn facility_queue_entry(
     })
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SectionTokenUsage {
+    used: [u32; 5],
+}
+
+impl SectionTokenUsage {
+    fn tokens_for(self, section: PackSection) -> u32 {
+        self.used[section as usize]
+    }
+
+    fn add_candidate(&mut self, candidate: &PackCandidate) {
+        let used = &mut self.used[candidate.section as usize];
+        *used = used.saturating_add(candidate.estimated_tokens);
+    }
+}
+
 fn facility_candidate_is_feasible(
     candidate: &PackCandidate,
     used_tokens: u32,
     budget: TokenBudget,
     quotas: &SectionQuotas,
-    items: &[PackDraftItem],
+    section_usage: &SectionTokenUsage,
 ) -> bool {
     if candidate.estimated_tokens == 0 {
         return false;
@@ -2139,11 +2163,7 @@ fn facility_candidate_is_feasible(
     if candidate.estimated_tokens > remaining_budget {
         return false;
     }
-    let section_used: u32 = items
-        .iter()
-        .filter(|item| item.section == candidate.section)
-        .map(|item| item.estimated_tokens)
-        .sum();
+    let section_used = section_usage.tokens_for(candidate.section);
     quotas.has_room(candidate.section, section_used, candidate.estimated_tokens)
 }
 
@@ -3457,7 +3477,7 @@ mod tests {
         used_tokens: u32,
         budget: TokenBudget,
         quotas: &SectionQuotas,
-        items: &[super::PackDraftItem],
+        section_usage: &super::SectionTokenUsage,
     ) -> Option<(usize, f32)> {
         let mut best: Option<(usize, usize, f32, f32)> = None;
 
@@ -3468,8 +3488,13 @@ mod tests {
             let Some(candidate) = profile.candidate.as_ref() else {
                 continue;
             };
-            if !super::facility_candidate_is_feasible(candidate, used_tokens, budget, quotas, items)
-            {
+            if !super::facility_candidate_is_feasible(
+                candidate,
+                used_tokens,
+                budget,
+                quotas,
+                section_usage,
+            ) {
                 continue;
             }
 
@@ -3514,8 +3539,7 @@ mod tests {
         let quotas =
             SectionQuotas::for_profile(ContextPackProfile::Submodular, budget.max_tokens());
         let mut used_tokens = 0_u32;
-        let mut rank = 1_u32;
-        let mut items = Vec::new();
+        let mut section_usage = super::SectionTokenUsage::default();
         let mut selected = Vec::new();
 
         while !remaining_indices.is_empty() {
@@ -3526,7 +3550,7 @@ mod tests {
                 used_tokens,
                 budget,
                 &quotas,
-                &items,
+                &section_usage,
             ) else {
                 break;
             };
@@ -3540,14 +3564,10 @@ mod tests {
             let Some(candidate) = profile.candidate.take() else {
                 continue;
             };
-            let redactions = std::mem::take(&mut profile.redactions);
             used_tokens = used_tokens.saturating_add(candidate.estimated_tokens);
+            section_usage.add_candidate(&candidate);
             selected.push(candidate.memory_id);
             super::update_facility_coverages(&mut current_coverages, &universe, profile_index);
-            items.push(super::PackDraftItem::from_selected_candidate(
-                rank, candidate, redactions,
-            ));
-            rank = rank.saturating_add(1);
         }
 
         Ok(selected)
@@ -5313,10 +5333,77 @@ mod tests {
         let current_coverages = vec![0.0_f32];
         let mut selector = super::FacilitySelectionQueue::new(&universe, &current_coverages);
 
-        let selection = selector.select(&universe, &current_coverages, 0, budget, &quotas, &[]);
+        let selection = selector.select(
+            &universe,
+            &current_coverages,
+            0,
+            budget,
+            &quotas,
+            &super::SectionTokenUsage::default(),
+        );
         ensure(
             selection.is_none(),
             "selector should skip zero-token candidates instead of computing infinite gain ratios",
+        )
+    }
+
+    #[test]
+    fn facility_candidate_feasibility_uses_cached_section_usage() -> TestResult {
+        let selected = candidate_in_section(
+            1,
+            PackSection::ProceduralRules,
+            1.0,
+            0.5,
+            60,
+            "selected procedural release rule",
+        )?;
+        let blocked_same_section = candidate_in_section(
+            2,
+            PackSection::ProceduralRules,
+            0.9,
+            0.5,
+            50,
+            "second procedural release rule",
+        )?;
+        let allowed_other_section = candidate_in_section(
+            3,
+            PackSection::Evidence,
+            0.8,
+            0.5,
+            50,
+            "evidence release note",
+        )?;
+        let budget =
+            TokenBudget::new(1_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let quotas = SectionQuotas::new(
+            SectionQuota::capped(100),
+            SectionQuota::unlimited(),
+            SectionQuota::unlimited(),
+            SectionQuota::unlimited(),
+            SectionQuota::unlimited(),
+        );
+        let mut section_usage = super::SectionTokenUsage::default();
+        section_usage.add_candidate(&selected);
+
+        ensure(
+            !super::facility_candidate_is_feasible(
+                &blocked_same_section,
+                selected.estimated_tokens,
+                budget,
+                &quotas,
+                &section_usage,
+            ),
+            "cached same-section usage should enforce quota without scanning selected items",
+        )?;
+        ensure(
+            super::facility_candidate_is_feasible(
+                &allowed_other_section,
+                selected.estimated_tokens,
+                budget,
+                &quotas,
+                &section_usage,
+            ),
+            "cached usage for one section must not consume another section's quota",
         )
     }
 
@@ -5422,6 +5509,65 @@ mod tests {
             "facility_location_lazy_queue_bench candidates={candidate_count} legacy_ms={:.3} lazy_ms={:.3} legacy_evaluations={legacy_evaluations} lazy_evaluations={lazy_evaluations}",
             legacy_elapsed.as_secs_f64() * 1_000.0,
             lazy_elapsed.as_secs_f64() * 1_000.0,
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn facility_section_usage_cache_benchmarks_against_item_scan() -> TestResult {
+        let item_count = 256_u32;
+        let iterations = 100_000_u32;
+        let section = PackSection::ProceduralRules;
+        let mut items = Vec::new();
+        let mut section_usage = super::SectionTokenUsage::default();
+
+        for offset in 0..item_count {
+            let candidate = candidate_in_section(
+                u128::from(offset).saturating_add(1),
+                section,
+                0.9,
+                0.5,
+                10,
+                format!("cached section usage benchmark item {offset}"),
+            )?;
+            section_usage.add_candidate(&candidate);
+            items.push(super::PackDraftItem::from_selected_candidate(
+                offset.saturating_add(1),
+                candidate,
+                Vec::new(),
+            ));
+        }
+
+        let legacy_start = Instant::now();
+        let mut legacy_total = 0_u64;
+        for _ in 0..iterations {
+            let section_used: u32 = items
+                .iter()
+                .filter(|item| item.section == section)
+                .map(|item| item.estimated_tokens)
+                .sum();
+            legacy_total = legacy_total.saturating_add(u64::from(section_used));
+        }
+        let legacy_elapsed = legacy_start.elapsed();
+
+        let cached_start = Instant::now();
+        let mut cached_total = 0_u64;
+        for _ in 0..iterations {
+            cached_total =
+                cached_total.saturating_add(u64::from(section_usage.tokens_for(section)));
+        }
+        let cached_elapsed = cached_start.elapsed();
+
+        ensure_equal(
+            &cached_total,
+            &legacy_total,
+            "cached section usage must match legacy item scan",
+        )?;
+        eprintln!(
+            "facility_section_usage_cache_bench items={item_count} iterations={iterations} legacy_ms={:.3} cached_ms={:.3}",
+            legacy_elapsed.as_secs_f64() * 1_000.0,
+            cached_elapsed.as_secs_f64() * 1_000.0,
         );
         Ok(())
     }
