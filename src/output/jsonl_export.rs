@@ -732,7 +732,8 @@ mod tests {
             .kind("rule")
             .content(content)
             .created_at("2026-04-30T12:00:00Z")
-            .build();
+            .build()
+            .expect("memory has required fields");
 
         let redacted = redact_memory_record(record, RedactionLevel::Minimal);
 
@@ -752,7 +753,8 @@ mod tests {
             .content("normal content")
             .provenance_uri("/home/user/file.txt")
             .created_at("2026-04-30T12:00:00Z")
-            .build();
+            .build()
+            .expect("memory has required fields");
 
         let redacted = redact_memory_record(record, RedactionLevel::Standard);
 
@@ -773,7 +775,8 @@ mod tests {
             .created_at("2026-04-30T12:00:00Z")
             .ee_version("0.1.0")
             .export_id("test-export")
-            .build();
+            .build()
+            .expect("header has required fields");
 
         exporter.write_header(header).expect("write header");
 
@@ -793,7 +796,8 @@ mod tests {
             .kind("rule")
             .content("Test content")
             .created_at("2026-04-30T12:00:00Z")
-            .build();
+            .build()
+            .expect("memory has required fields");
 
         let memory_count = {
             let mut exporter =
@@ -826,7 +830,8 @@ mod tests {
             .snippet(secret_fixture.clone())
             .created_at("2026-04-30T12:00:00Z")
             .updated_at("2026-04-30T12:00:00Z")
-            .build();
+            .build()
+            .expect("artifact has required fields");
 
         let artifact_count = {
             let mut exporter =
@@ -856,7 +861,8 @@ mod tests {
             .kind("rule")
             .content("Test content")
             .created_at("2026-04-30T12:00:00Z")
-            .build();
+            .build()
+            .expect("memory has required fields");
 
         let memory_count = {
             let mut exporter =
@@ -883,7 +889,8 @@ mod tests {
             .kind("rule")
             .content("Sensitive content here")
             .created_at("2026-04-30T12:00:00Z")
-            .build();
+            .build()
+            .expect("memory has required fields");
 
         exporter.write_memory(memory).expect("write memory");
 
@@ -906,7 +913,8 @@ mod tests {
             .kind("rule")
             .content(secret_assignment("redaction-fixture"))
             .created_at("2026-04-30T12:00:00Z")
-            .build();
+            .build()
+            .expect("memory has required fields");
 
         exporter.write_memory(memory).expect("write memory");
 
@@ -924,7 +932,8 @@ mod tests {
             .created_at("2026-04-30T12:00:00Z")
             .ee_version("0.1.0")
             .export_id("test-export")
-            .build();
+            .build()
+            .expect("header has required fields");
         exporter.write_header(header).expect("write header");
 
         for i in 0..3 {
@@ -935,14 +944,16 @@ mod tests {
                 .kind("rule")
                 .content(format!("Content {i}"))
                 .created_at("2026-04-30T12:00:00Z")
-                .build();
+                .build()
+                .expect("memory has required fields");
             exporter.write_memory(memory).expect("write memory");
         }
 
         let footer = ExportFooter::builder()
             .export_id("test-export")
             .completed_at("2026-04-30T12:01:00Z")
-            .build();
+            .build()
+            .expect("footer has required fields");
         let stats = exporter.write_footer(footer).expect("write footer");
 
         assert_eq!(stats.memory_count, 3);
@@ -960,7 +971,8 @@ mod tests {
                 .kind("rule")
                 .content(content)
                 .created_at("2026-04-30T12:00:00Z")
-                .build(),
+                .build()
+                .expect("memory has required fields"),
         );
 
         let redacted = redact_record(memory, RedactionLevel::Minimal);

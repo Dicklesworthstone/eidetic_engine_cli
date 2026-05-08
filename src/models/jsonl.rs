@@ -327,6 +327,47 @@ impl FromStr for ExportRecordType {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExportRecordBuildError {
+    pub record_type: ExportRecordType,
+    pub field: &'static str,
+}
+
+impl fmt::Display for ExportRecordBuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "missing required non-empty field '{}' for {} export record",
+            self.field, self.record_type
+        )
+    }
+}
+
+impl std::error::Error for ExportRecordBuildError {}
+
+fn missing_required(record_type: ExportRecordType, field: &'static str) -> ExportRecordBuildError {
+    ExportRecordBuildError { record_type, field }
+}
+
+fn required_string(
+    record_type: ExportRecordType,
+    field: &'static str,
+    value: Option<String>,
+) -> Result<String, ExportRecordBuildError> {
+    match value {
+        Some(value) if !value.trim().is_empty() => Ok(value),
+        _ => Err(missing_required(record_type, field)),
+    }
+}
+
+fn required_u64(
+    record_type: ExportRecordType,
+    field: &'static str,
+    value: Option<u64>,
+) -> Result<u64, ExportRecordBuildError> {
+    value.ok_or_else(|| missing_required(record_type, field))
+}
+
 /// Redaction level for exported data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -662,26 +703,30 @@ impl ExportHeaderBuilder {
         self
     }
 
-    #[must_use]
-    pub fn build(self) -> ExportHeader {
-        ExportHeader {
+    /// Build the header record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a required machine-facing field is missing or blank.
+    pub fn build(self) -> Result<ExportHeader, ExportRecordBuildError> {
+        Ok(ExportHeader {
             schema: EXPORT_HEADER_SCHEMA_V1.to_owned(),
             format_version: EXPORT_FORMAT_VERSION,
-            created_at: self.created_at.unwrap_or_default(),
+            created_at: required_string(ExportRecordType::Header, "created_at", self.created_at)?,
             workspace_id: self.workspace_id,
             workspace_path: self.workspace_path,
             export_scope: self.export_scope,
             redaction_level: self.redaction_level,
             record_count: self.record_count,
-            ee_version: self.ee_version.unwrap_or_default(),
+            ee_version: required_string(ExportRecordType::Header, "ee_version", self.ee_version)?,
             hostname: self.hostname,
-            export_id: self.export_id.unwrap_or_default(),
+            export_id: required_string(ExportRecordType::Header, "export_id", self.export_id)?,
             import_source: self.import_source,
             trust_level: self.trust_level,
             checksum: self.checksum,
             signature: self.signature,
             source_schema_version: self.source_schema_version,
-        }
+        })
     }
 }
 
@@ -783,12 +828,20 @@ impl ExportFooterBuilder {
         self
     }
 
-    #[must_use]
-    pub fn build(self) -> ExportFooter {
-        ExportFooter {
+    /// Build the footer record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a required machine-facing field is missing or blank.
+    pub fn build(self) -> Result<ExportFooter, ExportRecordBuildError> {
+        Ok(ExportFooter {
             schema: EXPORT_FOOTER_SCHEMA_V1.to_owned(),
-            export_id: self.export_id.unwrap_or_default(),
-            completed_at: self.completed_at.unwrap_or_default(),
+            export_id: required_string(ExportRecordType::Footer, "export_id", self.export_id)?,
+            completed_at: required_string(
+                ExportRecordType::Footer,
+                "completed_at",
+                self.completed_at,
+            )?,
             total_records: self.total_records,
             memory_count: self.memory_count,
             link_count: self.link_count,
@@ -797,7 +850,7 @@ impl ExportFooterBuilder {
             checksum: self.checksum,
             success: self.success,
             error_message: self.error_message,
-        }
+        })
     }
 }
 
@@ -955,19 +1008,27 @@ impl ExportMemoryRecordBuilder {
         self
     }
 
-    #[must_use]
-    pub fn build(self) -> ExportMemoryRecord {
-        ExportMemoryRecord {
+    /// Build the memory export record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a required machine-facing field is missing or blank.
+    pub fn build(self) -> Result<ExportMemoryRecord, ExportRecordBuildError> {
+        Ok(ExportMemoryRecord {
             schema: EXPORT_MEMORY_SCHEMA_V1.to_owned(),
-            memory_id: self.memory_id.unwrap_or_default(),
-            workspace_id: self.workspace_id.unwrap_or_default(),
-            level: self.level.unwrap_or_default(),
-            kind: self.kind.unwrap_or_default(),
-            content: self.content.unwrap_or_default(),
+            memory_id: required_string(ExportRecordType::Memory, "memory_id", self.memory_id)?,
+            workspace_id: required_string(
+                ExportRecordType::Memory,
+                "workspace_id",
+                self.workspace_id,
+            )?,
+            level: required_string(ExportRecordType::Memory, "level", self.level)?,
+            kind: required_string(ExportRecordType::Memory, "kind", self.kind)?,
+            content: required_string(ExportRecordType::Memory, "content", self.content)?,
             importance: self.importance,
             confidence: self.confidence,
             utility: self.utility,
-            created_at: self.created_at.unwrap_or_default(),
+            created_at: required_string(ExportRecordType::Memory, "created_at", self.created_at)?,
             updated_at: self.updated_at,
             expires_at: self.expires_at,
             source_agent: self.source_agent,
@@ -976,7 +1037,7 @@ impl ExportMemoryRecordBuilder {
             supersedes: self.supersedes,
             redacted: self.redacted,
             redaction_reason: self.redaction_reason,
-        }
+        })
     }
 }
 
@@ -1134,28 +1195,56 @@ impl ExportArtifactRecordBuilder {
         self
     }
 
-    #[must_use]
-    pub fn build(self) -> ExportArtifactRecord {
-        ExportArtifactRecord {
+    /// Build the artifact export record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a required machine-facing field is missing or blank.
+    pub fn build(self) -> Result<ExportArtifactRecord, ExportRecordBuildError> {
+        Ok(ExportArtifactRecord {
             schema: EXPORT_ARTIFACT_SCHEMA_V1.to_owned(),
-            artifact_id: self.artifact_id.unwrap_or_default(),
-            workspace_id: self.workspace_id.unwrap_or_default(),
-            source_kind: self.source_kind.unwrap_or_default(),
-            artifact_type: self.artifact_type.unwrap_or_default(),
+            artifact_id: required_string(
+                ExportRecordType::Artifact,
+                "artifact_id",
+                self.artifact_id,
+            )?,
+            workspace_id: required_string(
+                ExportRecordType::Artifact,
+                "workspace_id",
+                self.workspace_id,
+            )?,
+            source_kind: required_string(
+                ExportRecordType::Artifact,
+                "source_kind",
+                self.source_kind,
+            )?,
+            artifact_type: required_string(
+                ExportRecordType::Artifact,
+                "artifact_type",
+                self.artifact_type,
+            )?,
             original_path: self.original_path,
             canonical_path: self.canonical_path,
             external_ref: self.external_ref,
-            content_hash: self.content_hash.unwrap_or_default(),
-            media_type: self.media_type.unwrap_or_default(),
-            size_bytes: self.size_bytes.unwrap_or_default(),
-            redaction_status: self.redaction_status.unwrap_or_default(),
+            content_hash: required_string(
+                ExportRecordType::Artifact,
+                "content_hash",
+                self.content_hash,
+            )?,
+            media_type: required_string(ExportRecordType::Artifact, "media_type", self.media_type)?,
+            size_bytes: required_u64(ExportRecordType::Artifact, "size_bytes", self.size_bytes)?,
+            redaction_status: required_string(
+                ExportRecordType::Artifact,
+                "redaction_status",
+                self.redaction_status,
+            )?,
             snippet: self.snippet,
             snippet_hash: self.snippet_hash,
             provenance_uri: self.provenance_uri,
             metadata: self.metadata,
-            created_at: self.created_at.unwrap_or_default(),
-            updated_at: self.updated_at.unwrap_or_default(),
-        }
+            created_at: required_string(ExportRecordType::Artifact, "created_at", self.created_at)?,
+            updated_at: required_string(ExportRecordType::Artifact, "updated_at", self.updated_at)?,
+        })
     }
 }
 
@@ -1233,18 +1322,30 @@ impl ExportLinkRecordBuilder {
         self
     }
 
-    #[must_use]
-    pub fn build(self) -> ExportLinkRecord {
-        ExportLinkRecord {
+    /// Build the link export record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a required machine-facing field is missing or blank.
+    pub fn build(self) -> Result<ExportLinkRecord, ExportRecordBuildError> {
+        Ok(ExportLinkRecord {
             schema: EXPORT_LINK_SCHEMA_V1.to_owned(),
-            link_id: self.link_id.unwrap_or_default(),
-            source_memory_id: self.source_memory_id.unwrap_or_default(),
-            target_memory_id: self.target_memory_id.unwrap_or_default(),
-            link_type: self.link_type.unwrap_or_default(),
+            link_id: required_string(ExportRecordType::Link, "link_id", self.link_id)?,
+            source_memory_id: required_string(
+                ExportRecordType::Link,
+                "source_memory_id",
+                self.source_memory_id,
+            )?,
+            target_memory_id: required_string(
+                ExportRecordType::Link,
+                "target_memory_id",
+                self.target_memory_id,
+            )?,
+            link_type: required_string(ExportRecordType::Link, "link_type", self.link_type)?,
             weight: self.weight,
-            created_at: self.created_at.unwrap_or_default(),
+            created_at: required_string(ExportRecordType::Link, "created_at", self.created_at)?,
             metadata: self.metadata,
-        }
+        })
     }
 }
 
@@ -1347,18 +1448,26 @@ impl ExportAuditRecordBuilder {
         self
     }
 
-    #[must_use]
-    pub fn build(self) -> ExportAuditRecord {
-        ExportAuditRecord {
+    /// Build the audit export record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a required machine-facing field is missing or blank.
+    pub fn build(self) -> Result<ExportAuditRecord, ExportRecordBuildError> {
+        Ok(ExportAuditRecord {
             schema: EXPORT_AUDIT_SCHEMA_V1.to_owned(),
-            audit_id: self.audit_id.unwrap_or_default(),
-            operation: self.operation.unwrap_or_default(),
-            target_type: self.target_type.unwrap_or_default(),
-            target_id: self.target_id.unwrap_or_default(),
-            performed_at: self.performed_at.unwrap_or_default(),
+            audit_id: required_string(ExportRecordType::Audit, "audit_id", self.audit_id)?,
+            operation: required_string(ExportRecordType::Audit, "operation", self.operation)?,
+            target_type: required_string(ExportRecordType::Audit, "target_type", self.target_type)?,
+            target_id: required_string(ExportRecordType::Audit, "target_id", self.target_id)?,
+            performed_at: required_string(
+                ExportRecordType::Audit,
+                "performed_at",
+                self.performed_at,
+            )?,
             performed_by: self.performed_by,
             details: self.details,
-        }
+        })
     }
 }
 
@@ -1420,16 +1529,28 @@ impl ExportWorkspaceRecordBuilder {
         self
     }
 
-    #[must_use]
-    pub fn build(self) -> ExportWorkspaceRecord {
-        ExportWorkspaceRecord {
+    /// Build the workspace export record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a required machine-facing field is missing or blank.
+    pub fn build(self) -> Result<ExportWorkspaceRecord, ExportRecordBuildError> {
+        Ok(ExportWorkspaceRecord {
             schema: EXPORT_WORKSPACE_SCHEMA_V1.to_owned(),
-            workspace_id: self.workspace_id.unwrap_or_default(),
-            path: self.path.unwrap_or_default(),
+            workspace_id: required_string(
+                ExportRecordType::Workspace,
+                "workspace_id",
+                self.workspace_id,
+            )?,
+            path: required_string(ExportRecordType::Workspace, "path", self.path)?,
             name: self.name,
-            created_at: self.created_at.unwrap_or_default(),
+            created_at: required_string(
+                ExportRecordType::Workspace,
+                "created_at",
+                self.created_at,
+            )?,
             last_accessed: self.last_accessed,
-        }
+        })
     }
 }
 
@@ -1499,17 +1620,21 @@ impl ExportAgentRecordBuilder {
         self
     }
 
-    #[must_use]
-    pub fn build(self) -> ExportAgentRecord {
-        ExportAgentRecord {
+    /// Build the agent export record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a required machine-facing field is missing or blank.
+    pub fn build(self) -> Result<ExportAgentRecord, ExportRecordBuildError> {
+        Ok(ExportAgentRecord {
             schema: EXPORT_AGENT_SCHEMA_V1.to_owned(),
-            agent_id: self.agent_id.unwrap_or_default(),
-            name: self.name.unwrap_or_default(),
+            agent_id: required_string(ExportRecordType::Agent, "agent_id", self.agent_id)?,
+            name: required_string(ExportRecordType::Agent, "name", self.name)?,
             program: self.program,
             model: self.model,
-            created_at: self.created_at.unwrap_or_default(),
+            created_at: required_string(ExportRecordType::Agent, "created_at", self.created_at)?,
             last_seen: self.last_seen,
-        }
+        })
     }
 }
 
@@ -1584,6 +1709,21 @@ mod tests {
         let parsed: T = serde_json::from_str(&json)
             .map_err(|error| format!("{ctx} must deserialize from JSON: {error}"))?;
         ensure(&parsed, value, ctx)
+    }
+
+    fn ensure_build_error<T: std::fmt::Debug>(
+        result: Result<T, ExportRecordBuildError>,
+        record_type: ExportRecordType,
+        field: &'static str,
+        ctx: &str,
+    ) -> TestResult {
+        let error = result.map(|_| ()).unwrap_err();
+        ensure(
+            error.record_type,
+            record_type,
+            &format!("{ctx} record type"),
+        )?;
+        ensure(error.field, field, &format!("{ctx} field"))
     }
 
     fn ensure_export_record_match(
@@ -1729,7 +1869,8 @@ mod tests {
             .record_count(42)
             .ee_version("0.1.0")
             .export_id("exp-001")
-            .build();
+            .build()
+            .expect("header has required fields");
 
         assert_eq!(header.schema, EXPORT_HEADER_SCHEMA_V1);
         assert_eq!(header.format_version, EXPORT_FORMAT_VERSION);
@@ -1754,7 +1895,8 @@ mod tests {
             .audit_count(5)
             .checksum("abc123")
             .success(true)
-            .build();
+            .build()
+            .expect("footer has required fields");
 
         assert_eq!(footer.schema, EXPORT_FOOTER_SCHEMA_V1);
         assert_eq!(footer.export_id, "exp-001");
@@ -1777,7 +1919,8 @@ mod tests {
             .created_at("2026-04-30T12:00:00Z")
             .source_agent("claude-code")
             .redacted(false)
-            .build();
+            .build()
+            .expect("memory has required fields");
 
         assert_eq!(memory.schema, EXPORT_MEMORY_SCHEMA_V1);
         assert_eq!(memory.memory_id, "mem-001");
@@ -1803,7 +1946,8 @@ mod tests {
             .snippet("build ok")
             .created_at("2026-04-30T12:00:00Z")
             .updated_at("2026-04-30T12:00:00Z")
-            .build();
+            .build()
+            .expect("artifact has required fields");
 
         assert_eq!(artifact.schema, EXPORT_ARTIFACT_SCHEMA_V1);
         assert_eq!(artifact.artifact_id, "art_01234567890123456789012345");
@@ -1822,7 +1966,8 @@ mod tests {
             .link_type("supports")
             .weight(0.7)
             .created_at("2026-04-30T12:00:00Z")
-            .build();
+            .build()
+            .expect("link has required fields");
 
         assert_eq!(link.schema, EXPORT_LINK_SCHEMA_V1);
         assert_eq!(link.link_id, "lnk-001");
@@ -1847,7 +1992,8 @@ mod tests {
             .target_id("mem-001")
             .performed_at("2026-04-30T12:00:00Z")
             .performed_by("claude-code")
-            .build();
+            .build()
+            .expect("audit has required fields");
 
         assert_eq!(audit.schema, EXPORT_AUDIT_SCHEMA_V1);
         assert_eq!(audit.audit_id, "aud-001");
@@ -1862,7 +2008,8 @@ mod tests {
             .path("/home/user/project")
             .name("My Project")
             .created_at("2026-04-30T12:00:00Z")
-            .build();
+            .build()
+            .expect("workspace has required fields");
 
         assert_eq!(workspace.schema, EXPORT_WORKSPACE_SCHEMA_V1);
         assert_eq!(workspace.workspace_id, "ws-123");
@@ -1878,7 +2025,8 @@ mod tests {
             .program("Claude Code")
             .model("claude-opus-4-5-20251101")
             .created_at("2026-04-30T12:00:00Z")
-            .build();
+            .build()
+            .expect("agent has required fields");
 
         assert_eq!(agent.schema, EXPORT_AGENT_SCHEMA_V1);
         assert_eq!(agent.agent_id, "agt-001");
@@ -1887,20 +2035,156 @@ mod tests {
     }
 
     #[test]
+    fn export_record_builders_reject_missing_required_fields() -> TestResult {
+        ensure_build_error(
+            ExportHeader::builder()
+                .ee_version("0.1.0")
+                .export_id("exp-001")
+                .build(),
+            ExportRecordType::Header,
+            "created_at",
+            "header missing created_at",
+        )?;
+        ensure_build_error(
+            ExportHeader::builder()
+                .created_at("   ")
+                .ee_version("0.1.0")
+                .export_id("exp-001")
+                .build(),
+            ExportRecordType::Header,
+            "created_at",
+            "header blank created_at",
+        )?;
+        ensure_build_error(
+            ExportFooter::builder()
+                .completed_at("2026-04-30T12:00:00Z")
+                .build(),
+            ExportRecordType::Footer,
+            "export_id",
+            "footer missing export_id",
+        )?;
+        ensure_build_error(
+            ExportMemoryRecord::builder()
+                .memory_id("mem-001")
+                .workspace_id("ws-123")
+                .level("procedural")
+                .kind("rule")
+                .created_at("2026-04-30T12:00:00Z")
+                .build(),
+            ExportRecordType::Memory,
+            "content",
+            "memory missing content",
+        )?;
+        ensure_build_error(
+            ExportArtifactRecord::builder()
+                .artifact_id("art-001")
+                .workspace_id("ws-123")
+                .source_kind("file")
+                .artifact_type("log")
+                .content_hash("blake3:abc123")
+                .media_type("text/plain")
+                .redaction_status("checked")
+                .created_at("2026-04-30T12:00:00Z")
+                .updated_at("2026-04-30T12:00:00Z")
+                .build(),
+            ExportRecordType::Artifact,
+            "size_bytes",
+            "artifact missing size_bytes",
+        )?;
+        ensure_build_error(
+            ExportLinkRecord::builder()
+                .link_id("lnk-001")
+                .source_memory_id("mem-001")
+                .link_type("supports")
+                .created_at("2026-04-30T12:00:00Z")
+                .build(),
+            ExportRecordType::Link,
+            "target_memory_id",
+            "link missing target_memory_id",
+        )?;
+        ensure_build_error(
+            ExportAuditRecord::builder()
+                .audit_id("aud-001")
+                .operation("create")
+                .target_id("mem-001")
+                .performed_at("2026-04-30T12:00:00Z")
+                .build(),
+            ExportRecordType::Audit,
+            "target_type",
+            "audit missing target_type",
+        )?;
+        ensure_build_error(
+            ExportWorkspaceRecord::builder()
+                .workspace_id("ws-123")
+                .created_at("2026-04-30T12:00:00Z")
+                .build(),
+            ExportRecordType::Workspace,
+            "path",
+            "workspace missing path",
+        )?;
+        ensure_build_error(
+            ExportAgentRecord::builder()
+                .agent_id("agt-001")
+                .created_at("2026-04-30T12:00:00Z")
+                .build(),
+            ExportRecordType::Agent,
+            "name",
+            "agent missing name",
+        )
+    }
+
+    #[test]
     fn export_record_union_type_detection() {
-        let header = ExportRecord::Header(ExportHeader::builder().build());
+        let header = ExportRecord::Header(
+            ExportHeader::builder()
+                .created_at("2026-04-30T12:00:00Z")
+                .ee_version("0.1.0")
+                .export_id("exp-union")
+                .build()
+                .expect("header has required fields"),
+        );
         assert_eq!(header.record_type(), ExportRecordType::Header);
         assert_eq!(header.schema(), EXPORT_HEADER_SCHEMA_V1);
 
-        let memory = ExportRecord::Memory(ExportMemoryRecord::builder().build());
+        let memory = ExportRecord::Memory(
+            ExportMemoryRecord::builder()
+                .memory_id("mem-union")
+                .workspace_id("ws-union")
+                .level("procedural")
+                .kind("rule")
+                .content("Union memory")
+                .created_at("2026-04-30T12:00:00Z")
+                .build()
+                .expect("memory has required fields"),
+        );
         assert_eq!(memory.record_type(), ExportRecordType::Memory);
         assert_eq!(memory.schema(), EXPORT_MEMORY_SCHEMA_V1);
 
-        let artifact = ExportRecord::Artifact(ExportArtifactRecord::builder().build());
+        let artifact = ExportRecord::Artifact(
+            ExportArtifactRecord::builder()
+                .artifact_id("art-union")
+                .workspace_id("ws-union")
+                .source_kind("file")
+                .artifact_type("log")
+                .content_hash("blake3:union")
+                .media_type("text/plain")
+                .size_bytes(0)
+                .redaction_status("checked")
+                .created_at("2026-04-30T12:00:00Z")
+                .updated_at("2026-04-30T12:00:00Z")
+                .build()
+                .expect("artifact has required fields"),
+        );
         assert_eq!(artifact.record_type(), ExportRecordType::Artifact);
         assert_eq!(artifact.schema(), EXPORT_ARTIFACT_SCHEMA_V1);
 
-        let footer = ExportRecord::Footer(ExportFooter::builder().build());
+        let footer = ExportRecord::Footer(
+            ExportFooter::builder()
+                .export_id("exp-union")
+                .completed_at("2026-04-30T12:00:00Z")
+                .build()
+                .expect("footer has required fields"),
+        );
         assert_eq!(footer.record_type(), ExportRecordType::Footer);
         assert_eq!(footer.schema(), EXPORT_FOOTER_SCHEMA_V1);
     }
@@ -1923,7 +2207,8 @@ mod tests {
                 .checksum("blake3:export")
                 .signature("sigstore:fixture")
                 .source_schema_version("ee.export.v1")
-                .build(),
+                .build()
+                .expect("header has required fields"),
             "header round-trip",
         )?;
         ensure_json_round_trip(
@@ -1945,7 +2230,8 @@ mod tests {
                 .superseded_by("mem_00334567890123456789012345")
                 .redacted(true)
                 .redaction_reason("standard_export")
-                .build(),
+                .build()
+                .expect("memory has required fields"),
             "memory round-trip",
         )?;
         ensure_json_round_trip(
@@ -1970,7 +2256,8 @@ mod tests {
                 .metadata(serde_json::json!({"title":"build log"}))
                 .created_at("2026-04-30T12:01:00Z")
                 .updated_at("2026-04-30T12:01:00Z")
-                .build(),
+                .build()
+                .expect("artifact has required fields"),
             "artifact round-trip",
         )?;
         ensure_json_round_trip(
@@ -1982,7 +2269,8 @@ mod tests {
                 .weight(0.75)
                 .created_at("2026-04-30T12:02:00Z")
                 .metadata(serde_json::json!({"reason":"round_trip"}))
-                .build(),
+                .build()
+                .expect("link has required fields"),
             "link round-trip",
         )?;
         ensure_json_round_trip(
@@ -2002,7 +2290,8 @@ mod tests {
                 .performed_at("2026-04-30T12:04:00Z")
                 .performed_by("NobleCardinal")
                 .details(serde_json::json!({"records":6}))
-                .build(),
+                .build()
+                .expect("audit has required fields"),
             "audit round-trip",
         )?;
         ensure_json_round_trip(
@@ -2012,7 +2301,8 @@ mod tests {
                 .name("Round Trip")
                 .created_at("2026-04-30T11:00:00Z")
                 .last_accessed("2026-04-30T12:05:00Z")
-                .build(),
+                .build()
+                .expect("workspace has required fields"),
             "workspace round-trip",
         )?;
         ensure_json_round_trip(
@@ -2023,7 +2313,8 @@ mod tests {
                 .model("gpt-5")
                 .created_at("2026-04-30T11:30:00Z")
                 .last_seen("2026-04-30T12:06:00Z")
-                .build(),
+                .build()
+                .expect("agent has required fields"),
             "agent round-trip",
         )?;
         ensure_json_round_trip(
@@ -2037,7 +2328,8 @@ mod tests {
                 .audit_count(1)
                 .checksum("blake3:footer")
                 .success(true)
-                .build(),
+                .build()
+                .expect("footer has required fields"),
             "footer round-trip",
         )
     }
@@ -2056,7 +2348,8 @@ mod tests {
                     .export_id("exp-jsonl-round-trip")
                     .import_source(ImportSource::Native)
                     .trust_level(TrustLevel::Validated)
-                    .build(),
+                    .build()
+                    .expect("header has required fields"),
             ),
             ExportRecord::Workspace(
                 ExportWorkspaceRecord::builder()
@@ -2064,7 +2357,8 @@ mod tests {
                     .path("/workspace/project")
                     .name("Round Trip")
                     .created_at("2026-04-30T11:00:00Z")
-                    .build(),
+                    .build()
+                    .expect("workspace has required fields"),
             ),
             ExportRecord::Agent(
                 ExportAgentRecord::builder()
@@ -2073,7 +2367,8 @@ mod tests {
                     .program("codex-cli")
                     .model("gpt-5")
                     .created_at("2026-04-30T11:30:00Z")
-                    .build(),
+                    .build()
+                    .expect("agent has required fields"),
             ),
             ExportRecord::Memory(
                 ExportMemoryRecord::builder()
@@ -2085,7 +2380,8 @@ mod tests {
                     .created_at("2026-04-30T12:00:00Z")
                     .source_agent("NobleCardinal")
                     .redacted(false)
-                    .build(),
+                    .build()
+                    .expect("memory has required fields"),
             ),
             ExportRecord::Artifact(
                 ExportArtifactRecord::builder()
@@ -2104,7 +2400,8 @@ mod tests {
                     .snippet("cargo fmt passed")
                     .created_at("2026-04-30T12:01:00Z")
                     .updated_at("2026-04-30T12:01:00Z")
-                    .build(),
+                    .build()
+                    .expect("artifact has required fields"),
             ),
             ExportRecord::Tag(ExportTagRecord::new(
                 "mem_01234567890123456789012345",
@@ -2119,7 +2416,8 @@ mod tests {
                     .link_type("supports")
                     .weight(0.75)
                     .created_at("2026-04-30T12:02:00Z")
-                    .build(),
+                    .build()
+                    .expect("link has required fields"),
             ),
             ExportRecord::Audit(
                 ExportAuditRecord::builder()
@@ -2129,7 +2427,8 @@ mod tests {
                     .target_id("mem_01234567890123456789012345")
                     .performed_at("2026-04-30T12:04:00Z")
                     .performed_by("NobleCardinal")
-                    .build(),
+                    .build()
+                    .expect("audit has required fields"),
             ),
             ExportRecord::Footer(
                 ExportFooter::builder()
@@ -2141,7 +2440,8 @@ mod tests {
                     .tag_count(1)
                     .audit_count(1)
                     .success(true)
-                    .build(),
+                    .build()
+                    .expect("footer has required fields"),
             ),
         ];
         let jsonl = records
@@ -2170,7 +2470,8 @@ mod tests {
             .created_at("2026-04-30T12:00:00Z")
             .ee_version("0.1.0")
             .export_id("test-export")
-            .build();
+            .build()
+            .expect("header has required fields");
 
         let json = serde_json::to_string(&header).expect("serialize");
         assert!(json.contains(r#""schema":"ee.export.header.v1""#));
@@ -2337,11 +2638,14 @@ mod tests {
     fn export_header_with_trust_metadata() {
         let header = ExportHeader::builder()
             .created_at("2026-04-30T12:00:00Z")
+            .ee_version("0.1.0")
+            .export_id("trust-metadata")
             .import_source(ImportSource::CassImport)
             .trust_level(TrustLevel::Validated)
             .checksum("abc123")
             .source_schema_version("cass.session.v1")
-            .build();
+            .build()
+            .expect("header has required fields");
 
         assert_eq!(header.import_source, ImportSource::CassImport);
         assert_eq!(header.trust_level, TrustLevel::Validated);
@@ -2354,7 +2658,12 @@ mod tests {
 
     #[test]
     fn export_header_defaults_to_native_untrusted() {
-        let header = ExportHeader::builder().build();
+        let header = ExportHeader::builder()
+            .created_at("2026-04-30T12:00:00Z")
+            .ee_version("0.1.0")
+            .export_id("native-untrusted")
+            .build()
+            .expect("header has required fields");
 
         assert_eq!(header.import_source, ImportSource::Native);
         assert_eq!(header.trust_level, TrustLevel::Untrusted);
@@ -2365,9 +2674,13 @@ mod tests {
     #[test]
     fn export_header_serializes_trust_metadata() {
         let header = ExportHeader::builder()
+            .created_at("2026-04-30T12:00:00Z")
+            .ee_version("0.1.0")
+            .export_id("quarantined-header")
             .import_source(ImportSource::LegacyScan)
             .trust_level(TrustLevel::Quarantined)
-            .build();
+            .build()
+            .expect("header has required fields");
 
         let json = serde_json::to_string(&header).expect("serialize");
         assert!(json.contains(r#""import_source":"legacy_scan""#));
