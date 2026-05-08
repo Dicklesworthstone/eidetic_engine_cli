@@ -964,7 +964,7 @@ fn redact_jwt_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (String, b
             .bytes()
             .filter(|&byte| byte == b'.') // ubs:ignore - delimiter comparison, not secret equality.
             .count();
-        if dot_count == 2 && jwt_candidate.len() >= 32 {
+        if dot_count == 2 && jwt_candidate.len() >= 32 && is_valid_jwt_candidate(jwt_candidate) {
             if !changed {
                 output = String::with_capacity(input.len());
             }
@@ -989,6 +989,76 @@ fn redact_jwt_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (String, b
 
 fn is_jwt_segment_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')
+}
+
+fn is_valid_jwt_candidate(candidate: &str) -> bool {
+    let mut segments = candidate.split('.');
+    let (Some(header), Some(claims), Some(signature), None) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return false;
+    };
+
+    if header.is_empty() || claims.is_empty() || signature.is_empty() {
+        return false;
+    }
+
+    let Some(header_bytes) = decode_base64url_segment(header) else {
+        return false;
+    };
+    if decode_base64url_segment(claims).is_none() || decode_base64url_segment(signature).is_none() {
+        return false;
+    }
+
+    let Ok(header_json) = serde_json::from_slice::<serde_json::Value>(&header_bytes) else {
+        return false;
+    };
+
+    header_json
+        .get("alg")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|alg| !alg.trim().is_empty())
+}
+
+fn decode_base64url_segment(segment: &str) -> Option<Vec<u8>> {
+    if segment.is_empty() || segment.len() % 4 == 1 {
+        return None;
+    }
+
+    let mut decoded = Vec::with_capacity(segment.len() * 3 / 4);
+    let mut accumulator = 0_u32;
+    let mut bits = 0_u8;
+
+    for byte in segment.bytes() {
+        accumulator = (accumulator << 6) | u32::from(base64url_value(byte)?);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            let next_byte = u8::try_from((accumulator >> bits) & 0xff).ok()?;
+            decoded.push(next_byte);
+            accumulator &= if bits == 0 { 0 } else { (1_u32 << bits) - 1 };
+        }
+    }
+
+    if bits > 0 && accumulator != 0 {
+        return None;
+    }
+
+    Some(decoded)
+}
+
+fn base64url_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'-' => Some(62),
+        b'_' => Some(63),
+        _ => None,
+    }
 }
 
 fn redact_high_entropy_secret_values(
@@ -1662,8 +1732,12 @@ mod tests {
                 },
             ),
             (context(), token_suffix_strategy(18, 80), context()).prop_map(
-                |(prefix, suffix, suffix_context)| {
-                    let raw = format!("eyJ{suffix}.eyJ{suffix}.sig{suffix}");
+                |(prefix, _suffix, suffix_context)| {
+                    let raw = [
+                        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+                        "eyJzdWIiOiJlZGdlLWNhc2UifQ",
+                        "c2lnbmF0dXJl",
+                    ].join(".");
                     SecretRedactionCase {
                         input: format!("{prefix} {raw} {suffix_context}"),
                         raw_values: vec![raw],
@@ -2029,7 +2103,7 @@ mod tests {
         let jwt = [
             "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
             "eyJzdWIiOiIxMjM0NTY3ODkwIn0",
-            "Rq8IjqberX03cRIZHg7v0Rq8IjqberX03cRIZHg7v0",
+            "c2lnbmF0dXJl",
         ]
         .join(".");
         input.push_str(&jwt);
@@ -2105,5 +2179,32 @@ mod tests {
 
         assert!(!report.redacted);
         assert!(report.content.contains(not_jwt));
+    }
+
+    #[test]
+    fn secret_redactor_skips_eyj_text_with_two_dots() {
+        let not_jwt = "eyJust-a-normal-sentence.with.two-dots-and-enough-length-to-look-like-token";
+        let report = redact_secret_like_content(not_jwt);
+
+        assert!(!report.redacted);
+        assert!(report.content.contains(not_jwt));
+    }
+
+    #[test]
+    fn secret_redactor_skips_base64_json_without_jwt_alg_header() {
+        let not_jwt = ["eyJub3QiOiJqd3QifQ", "eyJzdWIiOiIxMjMifQ", "c2lnbmF0dXJl"].join(".");
+        let report = redact_secret_like_content(&not_jwt);
+
+        assert!(!report.redacted);
+        assert!(report.content.contains(&not_jwt));
+    }
+
+    #[test]
+    fn secret_redactor_skips_jwt_with_invalid_base64url_segment() {
+        let not_jwt = ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxMjMifQ", "abcde"].join(".");
+        let report = redact_secret_like_content(&not_jwt);
+
+        assert!(!report.redacted);
+        assert!(report.content.contains(&not_jwt));
     }
 }
