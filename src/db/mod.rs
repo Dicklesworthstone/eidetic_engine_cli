@@ -341,12 +341,7 @@ impl DbConnection {
     where
         F: FnOnce() -> Result<T>,
     {
-        let _write_owner = match self.location {
-            DatabaseLocation::Memory => None,
-            DatabaseLocation::File(_) => Some(lock_file_write_owner_gate(&self.location)?),
-        };
-
-        self.begin_write_transaction()?;
+        let _write_owner = self.begin_write_transaction()?;
         match f() {
             Ok(result) => {
                 self.commit()?;
@@ -359,18 +354,23 @@ impl DbConnection {
         }
     }
 
-    fn begin_write_transaction(&self) -> Result<()> {
+    fn begin_write_transaction(&self) -> Result<Option<FileWriteOwnerGuard>> {
         match self.location {
-            DatabaseLocation::Memory => self.begin(),
+            DatabaseLocation::Memory => {
+                self.begin()?;
+                Ok(None)
+            }
             DatabaseLocation::File(_) => {
                 const MAX_ATTEMPTS: usize = 16;
                 let mut last_retryable_error = None;
 
                 for attempt in 0..MAX_ATTEMPTS {
+                    let write_owner = lock_file_write_owner_gate(&self.location)?;
                     match self.begin_transaction(IsolationLevel::RepeatableRead) {
-                        Ok(()) => return Ok(()),
+                        Ok(()) => return Ok(Some(write_owner)),
                         Err(error) if db_error_is_transient_sqlite_contention(&error) => {
                             last_retryable_error = Some(error);
+                            drop(write_owner);
                             if attempt + 1 < MAX_ATTEMPTS {
                                 std::thread::sleep(advisory_lock_retry_delay(attempt));
                             }
