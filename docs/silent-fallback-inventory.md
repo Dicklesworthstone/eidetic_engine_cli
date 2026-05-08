@@ -1,6 +1,7 @@
 # Silent Fallback Inventory (sos5.1)
 
 Generated: 2026-05-08
+Last updated: 2026-05-08 (eidetic_engine_cli-08rn: tag/temporal/trust/redaction filters)
 
 This document inventories production code locations where `unwrap_or_default`, ignored
 `Result`s, or serialization fallbacks could hide data corruption or I/O failures.
@@ -223,18 +224,83 @@ Most are for human display or logging. Listed for completeness.
 
 ---
 
+## Category 15: Query-File Filter Arrays (SAFE)
+
+### src/models/query.rs
+
+Tag, trust, and redaction filter arrays default to empty Vec when absent. Empty arrays
+mean "no filtering", which is the correct semantic for optional query-file controls.
+
+| Line | Pattern | Severity | Reason |
+|------|---------|----------|--------|
+| 1057 | `require` tags array `.unwrap_or_default()` | SAFE | Empty array = no require filter |
+| 1068 | `requireAny` tags array `.unwrap_or_default()` | SAFE | Empty array = no requireAny filter |
+| 1079 | `exclude` tags array `.unwrap_or_default()` | SAFE | Empty array = no exclude filter |
+| 1176 | `excludeClasses` trust array `.unwrap_or_default()` | SAFE | Empty array = no class exclusions |
+| 1233 | `allowCategories` redaction array `.unwrap_or_default()` | SAFE | Empty array = default category policy |
+
+**Rationale:** Query-file filter arrays are explicitly optional per `docs/query-schema.md`.
+Absent arrays produce no-op filters, which is correct behavior. Non-array types are
+rejected earlier with `ERR_MALFORMED_JSON`.
+
+---
+
+## Category 16: Context Tags Lookup (SAFE)
+
+### src/core/context.rs
+
+| Line | Pattern | Severity | Reason |
+|------|---------|----------|--------|
+| 1368 | `tags_map.get(&memory_key).cloned().unwrap_or_default()` | SAFE | Missing tags = empty Vec |
+| 1630 | `tags_map.get(&memory.id).cloned().unwrap_or_default()` | SAFE | Same pattern |
+
+**Rationale:** Memory may have no tags. Empty Vec is correct for untagged memories.
+
+---
+
+## Category 17: Perf Forensics Metadata (SAFE)
+
+### src/core/perf_forensics.rs
+
+| Line | Pattern | Severity | Reason |
+|------|---------|----------|--------|
+| 910 | `normalized.source_schema.unwrap_or_default()` | SAFE | Optional schema metadata for display |
+| 1059 | `unit.unwrap_or_default().to_lowercase()` | SAFE | Missing unit = no unit-based inference |
+
+**Rationale:** Source schema and unit are optional metadata. Missing values produce
+empty strings which are semantically valid (no schema specified, no unit inference).
+
+---
+
+## Category 18: CASS Process Take (extends Category 1)
+
+### src/cass/process.rs
+
+| Line | Pattern | Severity | Issue |
+|------|---------|----------|-------|
+| 503 | `stdout_bytes.take().unwrap_or_default()` | **MUST-FIX** | Option::take on captured bytes hides None |
+| 504 | `stderr_bytes.take().unwrap_or_default()` | **MUST-FIX** | Same as 503 |
+
+**Linked bead:** eidetic_engine_cli-sos5.2 (same as Category 1)
+
+---
+
 ## Summary
 
 | Category | MUST-FIX | FOLLOWUP | SAFE/DISPLAY |
 |----------|----------|----------|--------------|
 | CASS subprocess | 6 | 0 | 0 |
+| CASS process take | 2 | 0 | 0 |
 | JSONL models | 2 | 11 | 0 |
 | Hooks installer | 2 | 0 | 0 |
 | Output module | 0 | 8 | 0 |
 | CLI module | 0 | 2 | 14 |
 | Core modules | 0 | 0 | 41+ |
+| Query-file filters | 0 | 0 | 5 |
+| Context tags lookup | 0 | 0 | 2 |
+| Perf forensics metadata | 0 | 0 | 2 |
 | Other models | 0 | 6 | 8 |
-| **Total** | **10** | **27** | **63+** |
+| **Total** | **12** | **27** | **72+** |
 
 ---
 
@@ -265,3 +331,16 @@ The following patterns are **explicitly allowed** and should not trigger future 
 4. **Optional metadata fields** in builder patterns
    - Reason: Semantically optional (description, version info)
    - Scope: Explicitly marked Optional<T> fields with default impls
+
+5. **Query-file filter arrays** with `unwrap_or_default()`
+   - Reason: Absent arrays produce no-op filters (correct semantic)
+   - Scope: `tags.require`, `tags.requireAny`, `tags.exclude`, `trust.excludeClasses`, `redaction.allowCategories`
+   - Added: 2026-05-08 (eidetic_engine_cli-08rn)
+
+6. **Context tags map lookups** with `unwrap_or_default()`
+   - Reason: Missing tags = empty Vec is semantically correct
+   - Scope: `tags_map.get().cloned().unwrap_or_default()` in context assembly
+
+7. **Perf forensics optional metadata** with `unwrap_or_default()`
+   - Reason: Optional schema/unit metadata for display and inference
+   - Scope: `source_schema`, `unit` fields in perf_forensics.rs
