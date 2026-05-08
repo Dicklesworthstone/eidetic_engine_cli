@@ -8,7 +8,7 @@
 #![cfg(feature = "graph")]
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -144,7 +144,7 @@ fn seed_graph_workspace() -> Result<(PathBuf, Vec<String>), String> {
     Ok((workspace, memory_ids))
 }
 
-fn run_graph_command(workspace: &PathBuf, subcommand: &str) -> Result<String, String> {
+fn run_graph_command(workspace: &Path, subcommand: &str) -> Result<String, String> {
     let workspace_arg = workspace
         .to_str()
         .ok_or_else(|| "workspace path must be UTF-8".to_string())?;

@@ -1501,29 +1501,36 @@ mod tests {
     }
 
     #[test]
-    fn trust_promotion_rejects_unknown_trust_class() {
-        let rejection =
-            validate_trust_promotion_evidence("superadmin", "any_source", "any_id").unwrap_err();
+    fn trust_promotion_rejects_unknown_trust_class() -> Result<(), String> {
+        let rejection = validate_trust_promotion_evidence("superadmin", "any_source", "any_id")
+            .err()
+            .ok_or_else(|| "unknown trust class must be rejected".to_owned())?;
 
         assert_eq!(rejection.code, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE);
         assert_eq!(rejection.reason, "unknown_trust_class");
+        Ok(())
     }
 
     #[test]
-    fn trust_promotion_rejects_empty_trust_class() {
-        let rejection = validate_trust_promotion_evidence("", "any_source", "any_id").unwrap_err();
+    fn trust_promotion_rejects_empty_trust_class() -> Result<(), String> {
+        let rejection = validate_trust_promotion_evidence("", "any_source", "any_id")
+            .err()
+            .ok_or_else(|| "empty trust class must be rejected".to_owned())?;
 
         assert_eq!(rejection.code, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE);
         assert_eq!(rejection.reason, "unknown_trust_class");
+        Ok(())
     }
 
     #[test]
-    fn trust_promotion_rejects_whitespace_only_trust_class() {
-        let rejection =
-            validate_trust_promotion_evidence("   ", "any_source", "any_id").unwrap_err();
+    fn trust_promotion_rejects_whitespace_only_trust_class() -> Result<(), String> {
+        let rejection = validate_trust_promotion_evidence("   ", "any_source", "any_id")
+            .err()
+            .ok_or_else(|| "whitespace-only trust class must be rejected".to_owned())?;
 
         assert_eq!(rejection.code, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE);
         assert_eq!(rejection.reason, "unknown_trust_class");
+        Ok(())
     }
 
     fn synthetic_raw_value(prefix_parts: &[&str], suffix_len: usize) -> String {
