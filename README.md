@@ -50,7 +50,7 @@ It returns a Markdown pack of project release rules, prior release incidents fro
 | **CASS session import** | Mines your existing `cass` corpus (Claude Code, Codex, Cursor, Gemini, ChatGPT) for evidence |
 | **Context profiles** | `compact`, `balanced`, `thorough`, and `submodular` quota/objective mixes |
 | **Local-first** | No cloud. No paid LLM APIs required. Embeddings run locally through Frankensearch |
-| **Stable JSON contract** | Every machine-facing command emits versioned JSON with `schema` field and `data_hash` |
+| **Stable JSON contract** | Every machine-facing command emits versioned JSON with `schema` field for parsing and validation |
 | **Deterministic** | Same DB + indexes + config + query → identical pack hash |
 | **Cancellation correct** | Built on Asupersync, so every long operation respects `&Cx`, budgets, and `Outcome` |
 | **CLI first, daemon optional** | Every essential workflow runs as a one-shot. No background process required |
@@ -857,21 +857,14 @@ No. The steward proposes; you approve. Every promotion, consolidation, replaceme
 
 | Doc | Purpose |
 |---|---|
-| [`docs/storage.md`](docs/storage.md) | DB layout, migrations, backup |
 | [`docs/query-schema.md`](docs/query-schema.md) | EQL-inspired request schema for `ee pack` |
-| [`docs/context-packs.md`](docs/context-packs.md) | Packing algorithm and output contracts |
-| [`docs/cass-integration.md`](docs/cass-integration.md) | Import contracts and provenance model |
-| [`docs/scoring.md`](docs/scoring.md) | Confidence, utility, decay, maturity |
-| [`docs/graph.md`](docs/graph.md) | Graph model, algorithms, witness format |
-| [`docs/integration.md`](docs/integration.md) | Codex, Claude Code, shell usage |
-| [`docs/privacy.md`](docs/privacy.md) | Redaction, secret handling, remote-model policy |
-| [`docs/diagnostics.md`](docs/diagnostics.md) | `status`, `doctor`, degradation codes, repair plans |
-| [`docs/evaluation.md`](docs/evaluation.md) | Eval fixtures, retrieval metrics, pack quality gates |
-| [`docs/agent-outcome-scenarios.md`](docs/agent-outcome-scenarios.md) | North-star agent journey matrix and acceptance scenarios |
-| [`docs/dependency-contracts.md`](docs/dependency-contracts.md) | Asupersync / SQLModel / FrankenSQLite / CASS / Frankensearch / FrankenNetworkX integration contracts |
 | [`docs/trust-model.md`](docs/trust-model.md) | Memory advisory priority, trust classes, prompt-injection defenses |
-| [`docs/schema-evolution.md`](docs/schema-evolution.md) | Versioned JSON contracts, JSONL headers, index manifests |
-| [`docs/legacy-eidetic-import.md`](docs/legacy-eidetic-import.md) | Old Eidetic Engine artifact mapping |
+| [`docs/agent-outcome-scenarios.md`](docs/agent-outcome-scenarios.md) | North-star agent journey matrix and acceptance scenarios |
+| [`docs/dependency-contract-matrix.md`](docs/dependency-contract-matrix.md) | Franken-stack integration contracts and version pins |
+| [`docs/testing-strategy.md`](docs/testing-strategy.md) | Test categories, verification gates, golden test structure |
+| [`docs/command_classification.md`](docs/command_classification.md) | Command effect taxonomy and read/write classification |
+| [`docs/migration-guide.md`](docs/migration-guide.md) | DB schema migrations and upgrade paths |
+| [`docs/toon-output.md`](docs/toon-output.md) | TOON (Text-Only Object Notation) output format |
 | [`docs/adr/`](docs/adr/) | Architectural decision records |
 
 ---

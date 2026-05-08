@@ -41,8 +41,10 @@ src/
 └── output/              # JSON/Markdown/TOON formatters
 
 tests/
-├── golden/              # Golden snap files for surface contracts
+├── golden/              # Surface contract snapshots (*.snap)
+├── snapshots/           # JSON contract snapshots (insta)
 ├── fixtures/            # Test fixtures (eval scenarios, etc.)
+│   └── golden/          # Command/schema golden artifacts (143 files)
 └── *.rs                 # Integration and E2E tests
 ```
 
@@ -61,7 +63,12 @@ tests/
 - `frankensearch` — hybrid BM25 + vector search
 - `fnx-*` — graph analytics
 
-**Golden snaps** in `tests/golden/*.snap` document surface contracts. The closure-lint script requires these for implements-surface beads.
+**Golden snaps** document surface contracts across three locations:
+- `tests/golden/*.snap` — command output and schema contracts
+- `tests/snapshots/*.snap` — JSON contract snapshots (context, search, why, status, doctor)
+- `tests/fixtures/golden/**/*.golden` — command/schema golden artifacts (143 files)
+
+The closure-lint script requires these for implements-surface beads.
 
 **Effect declarations** in `src/core/effect.rs` classify commands as `read_only`, `durable_write`, or `degraded_unavailable`.
 
@@ -70,7 +77,7 @@ tests/
 ## Testing
 
 - Unit tests: inline `#[cfg(test)]` modules
-- Golden tests: `tests/golden.rs` + `tests/golden/*.snap`
+- Golden tests: `tests/golden.rs`, `tests/golden/*.snap`, `tests/snapshots/*.snap`, `tests/fixtures/golden/**`
 - E2E: `tests/*_e2e.rs` and `scripts/e2e_*.sh`
 - Property tests: `proptest` in `tests/property_*.rs`
 - Forbidden deps: `tests/forbidden_deps.rs`
