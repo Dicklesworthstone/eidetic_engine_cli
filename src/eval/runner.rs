@@ -1020,6 +1020,297 @@ pub fn compute_data_hash(report: &EvalRunReport) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+/// Schema version for pack-quality comparison report.
+pub const PACK_QUALITY_REPORT_SCHEMA_V1: &str = "ee.eval.pack_quality_report.v1";
+
+/// Deterministic verdict for a pack-quality comparison.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackQualityVerdict {
+    /// All expectations matched exactly.
+    Within,
+    /// Minor deviations within tolerance (e.g., rank order differs but all IDs present).
+    Drift,
+    /// Critical expectations failed (e.g., critical memory omitted, forbidden leak).
+    Regression,
+    /// Could not evaluate due to missing data or infrastructure.
+    Inconclusive,
+}
+
+impl PackQualityVerdict {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Within => "within",
+            Self::Drift => "drift",
+            Self::Regression => "regression",
+            Self::Inconclusive => "inconclusive",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_passing(self) -> bool {
+        matches!(self, Self::Within | Self::Drift)
+    }
+}
+
+/// Result of comparing one pack-quality case.
+#[derive(Clone, Debug, Serialize)]
+pub struct PackQualityComparison {
+    pub case_id: String,
+    pub scenario_id: String,
+    pub verdict: PackQualityVerdict,
+    pub expected_selected_ids: Vec<String>,
+    pub actual_selected_ids: Vec<String>,
+    pub missing_expected_ids: Vec<String>,
+    pub unexpected_ids: Vec<String>,
+    pub critical_omitted_ids: Vec<String>,
+    pub omitted_critical_found: Vec<String>,
+    pub provenance_density: f64,
+    pub min_provenance_density: f64,
+    pub provenance_density_passed: bool,
+    pub expected_degradation_codes: Vec<String>,
+    pub actual_degradation_codes: Vec<String>,
+    pub unexpected_degradation_codes: Vec<String>,
+    pub forbidden_redaction_leaks: Vec<String>,
+    pub actual_redaction_leaks: Vec<String>,
+    pub token_budget_max: u32,
+    pub actual_tokens_used: u32,
+    pub token_budget_passed: bool,
+    pub failure_reasons: Vec<String>,
+}
+
+/// Aggregate pack-quality report for all cases in a fixture.
+#[derive(Clone, Debug, Serialize)]
+pub struct PackQualityReport {
+    pub schema: &'static str,
+    pub fixture_id: String,
+    pub aggregate_verdict: PackQualityVerdict,
+    pub cases_total: usize,
+    pub cases_within: usize,
+    pub cases_drift: usize,
+    pub cases_regression: usize,
+    pub cases_inconclusive: usize,
+    pub comparisons: Vec<PackQualityComparison>,
+}
+
+impl PackQualityReport {
+    #[must_use]
+    pub fn new(fixture_id: String) -> Self {
+        Self {
+            schema: PACK_QUALITY_REPORT_SCHEMA_V1,
+            fixture_id,
+            aggregate_verdict: PackQualityVerdict::Within,
+            cases_total: 0,
+            cases_within: 0,
+            cases_drift: 0,
+            cases_regression: 0,
+            cases_inconclusive: 0,
+            comparisons: Vec::new(),
+        }
+    }
+
+    pub fn add_comparison(&mut self, comparison: PackQualityComparison) {
+        match comparison.verdict {
+            PackQualityVerdict::Within => self.cases_within += 1,
+            PackQualityVerdict::Drift => self.cases_drift += 1,
+            PackQualityVerdict::Regression => self.cases_regression += 1,
+            PackQualityVerdict::Inconclusive => self.cases_inconclusive += 1,
+        }
+        self.cases_total += 1;
+        self.comparisons.push(comparison);
+        self.recompute_aggregate();
+    }
+
+    fn recompute_aggregate(&mut self) {
+        if self.cases_regression > 0 {
+            self.aggregate_verdict = PackQualityVerdict::Regression;
+        } else if self.cases_inconclusive > 0 {
+            self.aggregate_verdict = PackQualityVerdict::Inconclusive;
+        } else if self.cases_drift > 0 {
+            self.aggregate_verdict = PackQualityVerdict::Drift;
+        } else {
+            self.aggregate_verdict = PackQualityVerdict::Within;
+        }
+    }
+}
+
+/// Input for comparing pack quality against expectations.
+#[derive(Clone, Debug)]
+pub struct PackQualityActual {
+    pub selected_memory_ids: Vec<String>,
+    pub degradation_codes: Vec<String>,
+    pub redaction_leaks: Vec<String>,
+    pub tokens_used: u32,
+    pub provenance_density: f64,
+}
+
+/// Compare actual pack output against a single pack-quality case expectation.
+///
+/// Returns a deterministic verdict: within, drift, or regression.
+#[must_use]
+pub fn compare_pack_quality(
+    case: &PackQualityCase,
+    actual: &PackQualityActual,
+) -> PackQualityComparison {
+    let expected_set: HashSet<_> = case.expected_selected_memory_ids.iter().collect();
+    let actual_set: HashSet<_> = actual.selected_memory_ids.iter().collect();
+    let critical_set: HashSet<_> = case.critical_omitted_memory_ids.iter().collect();
+
+    let missing_expected: Vec<_> = case
+        .expected_selected_memory_ids
+        .iter()
+        .filter(|id| !actual_set.contains(id))
+        .cloned()
+        .collect();
+
+    let unexpected: Vec<_> = actual
+        .selected_memory_ids
+        .iter()
+        .filter(|id| !expected_set.contains(id))
+        .cloned()
+        .collect();
+
+    let omitted_critical_found: Vec<_> = actual
+        .selected_memory_ids
+        .iter()
+        .filter(|id| critical_set.contains(id))
+        .cloned()
+        .collect();
+
+    let provenance_density_passed = actual.provenance_density >= case.min_provenance_density;
+
+    let allowed_degradation_set: HashSet<_> = case.allowed_degradation_codes.iter().collect();
+    let unexpected_degradation: Vec<_> = actual
+        .degradation_codes
+        .iter()
+        .filter(|code| !allowed_degradation_set.contains(code))
+        .cloned()
+        .collect();
+
+    let forbidden_leak_set: HashSet<_> = case.forbidden_redaction_leaks.iter().collect();
+    let actual_leaks: Vec<_> = actual
+        .redaction_leaks
+        .iter()
+        .filter(|leak| forbidden_leak_set.contains(leak))
+        .cloned()
+        .collect();
+
+    let token_budget_passed = actual.tokens_used <= case.token_budget.expected_used_tokens_max;
+
+    let mut failure_reasons = Vec::new();
+
+    if !omitted_critical_found.is_empty() {
+        failure_reasons.push(format!(
+            "Critical omitted memory found in pack: {:?}",
+            omitted_critical_found
+        ));
+    }
+
+    if !actual_leaks.is_empty() {
+        failure_reasons.push(format!("Forbidden redaction leaks: {:?}", actual_leaks));
+    }
+
+    if !missing_expected.is_empty() {
+        failure_reasons.push(format!("Missing expected memories: {:?}", missing_expected));
+    }
+
+    if !provenance_density_passed {
+        failure_reasons.push(format!(
+            "Provenance density {:.2} below minimum {:.2}",
+            actual.provenance_density, case.min_provenance_density
+        ));
+    }
+
+    if !token_budget_passed {
+        failure_reasons.push(format!(
+            "Token usage {} exceeds budget {}",
+            actual.tokens_used, case.token_budget.expected_used_tokens_max
+        ));
+    }
+
+    let verdict = if !omitted_critical_found.is_empty() || !actual_leaks.is_empty() {
+        PackQualityVerdict::Regression
+    } else if !missing_expected.is_empty()
+        || !unexpected.is_empty()
+        || !unexpected_degradation.is_empty()
+        || !provenance_density_passed
+        || !token_budget_passed
+    {
+        PackQualityVerdict::Drift
+    } else {
+        PackQualityVerdict::Within
+    };
+
+    PackQualityComparison {
+        case_id: case.case_id.clone(),
+        scenario_id: case.scenario_id.clone(),
+        verdict,
+        expected_selected_ids: case.expected_selected_memory_ids.clone(),
+        actual_selected_ids: actual.selected_memory_ids.clone(),
+        missing_expected_ids: missing_expected,
+        unexpected_ids: unexpected,
+        critical_omitted_ids: case.critical_omitted_memory_ids.clone(),
+        omitted_critical_found,
+        provenance_density: actual.provenance_density,
+        min_provenance_density: case.min_provenance_density,
+        provenance_density_passed,
+        expected_degradation_codes: case.allowed_degradation_codes.clone(),
+        actual_degradation_codes: actual.degradation_codes.clone(),
+        unexpected_degradation_codes: unexpected_degradation,
+        forbidden_redaction_leaks: case.forbidden_redaction_leaks.clone(),
+        actual_redaction_leaks: actual_leaks,
+        token_budget_max: case.token_budget.expected_used_tokens_max,
+        actual_tokens_used: actual.tokens_used,
+        token_budget_passed,
+        failure_reasons,
+    }
+}
+
+/// Evaluate all pack-quality cases from a fixture against actual results.
+#[must_use]
+pub fn evaluate_pack_quality(
+    fixture_id: &str,
+    cases: &[PackQualityCase],
+    actuals: &[PackQualityActual],
+) -> PackQualityReport {
+    let mut report = PackQualityReport::new(fixture_id.to_string());
+
+    for (case, actual) in cases.iter().zip(actuals.iter()) {
+        let comparison = compare_pack_quality(case, actual);
+        report.add_comparison(comparison);
+    }
+
+    for case in cases.iter().skip(actuals.len()) {
+        let inconclusive = PackQualityComparison {
+            case_id: case.case_id.clone(),
+            scenario_id: case.scenario_id.clone(),
+            verdict: PackQualityVerdict::Inconclusive,
+            expected_selected_ids: case.expected_selected_memory_ids.clone(),
+            actual_selected_ids: Vec::new(),
+            missing_expected_ids: case.expected_selected_memory_ids.clone(),
+            unexpected_ids: Vec::new(),
+            critical_omitted_ids: case.critical_omitted_memory_ids.clone(),
+            omitted_critical_found: Vec::new(),
+            provenance_density: 0.0,
+            min_provenance_density: case.min_provenance_density,
+            provenance_density_passed: false,
+            expected_degradation_codes: case.allowed_degradation_codes.clone(),
+            actual_degradation_codes: Vec::new(),
+            unexpected_degradation_codes: Vec::new(),
+            forbidden_redaction_leaks: case.forbidden_redaction_leaks.clone(),
+            actual_redaction_leaks: Vec::new(),
+            token_budget_max: case.token_budget.expected_used_tokens_max,
+            actual_tokens_used: 0,
+            token_budget_passed: false,
+            failure_reasons: vec!["No actual result provided for this case".to_string()],
+        };
+        report.add_comparison(inconclusive);
+    }
+
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1209,5 +1500,278 @@ mod tests {
             "source schema",
         )?;
         ensure(EVAL_REPORT_SCHEMA_V1, "ee.eval.report.v1", "report schema")
+    }
+
+    // ========================================================================
+    // Pack Quality Comparison Tests (ADR-0026)
+    // ========================================================================
+
+    fn make_pack_quality_case(
+        case_id: &str,
+        expected_ids: Vec<&str>,
+        critical_omitted: Vec<&str>,
+    ) -> PackQualityCase {
+        PackQualityCase {
+            case_id: case_id.into(),
+            scenario_id: "test_scenario".into(),
+            command_step: 1,
+            query_surface: PackQualityQuerySurface {
+                kind: "inline".into(),
+                query: Some("test query".into()),
+                path: None,
+                schema: None,
+            },
+            expected_selected_memory_ids: expected_ids.into_iter().map(String::from).collect(),
+            critical_omitted_memory_ids: critical_omitted.into_iter().map(String::from).collect(),
+            min_provenance_density: 0.5,
+            allowed_degradation_codes: vec![],
+            forbidden_redaction_leaks: vec!["secret".into(), "pii".into()],
+            token_budget: PackQualityTokenBudget {
+                max_tokens: 4000,
+                expected_used_tokens_max: 3500,
+                expect_truncation: false,
+            },
+            stable_first_failure_label: "test_failure".into(),
+        }
+    }
+
+    fn make_pack_quality_actual(
+        selected_ids: Vec<&str>,
+        tokens: u32,
+        provenance_density: f64,
+    ) -> PackQualityActual {
+        PackQualityActual {
+            selected_memory_ids: selected_ids.into_iter().map(String::from).collect(),
+            degradation_codes: vec![],
+            redaction_leaks: vec![],
+            tokens_used: tokens,
+            provenance_density,
+        }
+    }
+
+    #[test]
+    fn pack_quality_verdict_strings_stable() -> TestResult {
+        ensure(PackQualityVerdict::Within.as_str(), "within", "within")?;
+        ensure(PackQualityVerdict::Drift.as_str(), "drift", "drift")?;
+        ensure(
+            PackQualityVerdict::Regression.as_str(),
+            "regression",
+            "regression",
+        )?;
+        ensure(
+            PackQualityVerdict::Inconclusive.as_str(),
+            "inconclusive",
+            "inconclusive",
+        )
+    }
+
+    #[test]
+    fn pack_quality_verdict_is_passing() -> TestResult {
+        ensure(PackQualityVerdict::Within.is_passing(), true, "within")?;
+        ensure(PackQualityVerdict::Drift.is_passing(), true, "drift")?;
+        ensure(
+            PackQualityVerdict::Regression.is_passing(),
+            false,
+            "regression",
+        )?;
+        ensure(
+            PackQualityVerdict::Inconclusive.is_passing(),
+            false,
+            "inconclusive",
+        )
+    }
+
+    #[test]
+    fn pack_quality_compare_perfect_match() -> TestResult {
+        let case = make_pack_quality_case("perfect", vec!["mem_001", "mem_002"], vec![]);
+        let actual = make_pack_quality_actual(vec!["mem_001", "mem_002"], 2000, 0.8);
+
+        let result = compare_pack_quality(&case, &actual);
+
+        ensure(result.verdict, PackQualityVerdict::Within, "verdict")?;
+        ensure(result.missing_expected_ids.is_empty(), true, "no missing")?;
+        ensure(result.unexpected_ids.is_empty(), true, "no unexpected")?;
+        ensure(result.provenance_density_passed, true, "provenance ok")?;
+        ensure(result.token_budget_passed, true, "tokens ok")?;
+        ensure(result.failure_reasons.is_empty(), true, "no failures")
+    }
+
+    #[test]
+    fn pack_quality_compare_missing_expected_id() -> TestResult {
+        let case = make_pack_quality_case("missing", vec!["mem_001", "mem_002", "mem_003"], vec![]);
+        let actual = make_pack_quality_actual(vec!["mem_001", "mem_002"], 2000, 0.8);
+
+        let result = compare_pack_quality(&case, &actual);
+
+        ensure(result.verdict, PackQualityVerdict::Drift, "verdict")?;
+        ensure(result.missing_expected_ids.len(), 1, "one missing")?;
+        ensure(
+            result.missing_expected_ids[0].as_str(),
+            "mem_003",
+            "missing id",
+        )
+    }
+
+    #[test]
+    fn pack_quality_compare_unexpected_id() -> TestResult {
+        let case = make_pack_quality_case("unexpected", vec!["mem_001"], vec![]);
+        let actual = make_pack_quality_actual(vec!["mem_001", "mem_extra"], 2000, 0.8);
+
+        let result = compare_pack_quality(&case, &actual);
+
+        ensure(result.verdict, PackQualityVerdict::Drift, "verdict")?;
+        ensure(result.unexpected_ids.len(), 1, "one unexpected")?;
+        ensure(result.unexpected_ids[0].as_str(), "mem_extra", "unexpected id")
+    }
+
+    #[test]
+    fn pack_quality_compare_critical_omitted_found() -> TestResult {
+        let case = make_pack_quality_case(
+            "critical_omitted",
+            vec!["mem_001"],
+            vec!["mem_secret"], // This should NOT be in pack
+        );
+        // But it IS in the pack - regression
+        let actual = make_pack_quality_actual(vec!["mem_001", "mem_secret"], 2000, 0.8);
+
+        let result = compare_pack_quality(&case, &actual);
+
+        ensure(result.verdict, PackQualityVerdict::Regression, "verdict")?;
+        ensure(
+            result.omitted_critical_found.len(),
+            1,
+            "one critical found",
+        )?;
+        ensure(
+            result.omitted_critical_found[0].as_str(),
+            "mem_secret",
+            "critical id",
+        )
+    }
+
+    #[test]
+    fn pack_quality_compare_provenance_density_below_min() -> TestResult {
+        let case = make_pack_quality_case("low_provenance", vec!["mem_001"], vec![]);
+        let actual = make_pack_quality_actual(vec!["mem_001"], 2000, 0.3); // Below 0.5 min
+
+        let result = compare_pack_quality(&case, &actual);
+
+        ensure(result.verdict, PackQualityVerdict::Drift, "verdict")?;
+        ensure(result.provenance_density_passed, false, "provenance failed")
+    }
+
+    #[test]
+    fn pack_quality_compare_token_budget_exceeded() -> TestResult {
+        let case = make_pack_quality_case("over_budget", vec!["mem_001"], vec![]);
+        let actual = make_pack_quality_actual(vec!["mem_001"], 4000, 0.8); // Exceeds 3500 max
+
+        let result = compare_pack_quality(&case, &actual);
+
+        ensure(result.verdict, PackQualityVerdict::Drift, "verdict")?;
+        ensure(result.token_budget_passed, false, "budget failed")
+    }
+
+    #[test]
+    fn pack_quality_compare_redaction_leak() -> TestResult {
+        let case = make_pack_quality_case("leak", vec!["mem_001"], vec![]);
+        let mut actual = make_pack_quality_actual(vec!["mem_001"], 2000, 0.8);
+        actual.redaction_leaks = vec!["secret".into()]; // Forbidden leak
+
+        let result = compare_pack_quality(&case, &actual);
+
+        ensure(result.verdict, PackQualityVerdict::Regression, "verdict")?;
+        ensure(result.actual_redaction_leaks.len(), 1, "one leak")?;
+        ensure(
+            result.actual_redaction_leaks[0].as_str(),
+            "secret",
+            "leak class",
+        )
+    }
+
+    #[test]
+    fn pack_quality_compare_unexpected_degradation() -> TestResult {
+        let case = make_pack_quality_case("degraded", vec!["mem_001"], vec![]);
+        let mut actual = make_pack_quality_actual(vec!["mem_001"], 2000, 0.8);
+        actual.degradation_codes = vec!["semantic_unavailable".into()]; // Not allowed
+
+        let result = compare_pack_quality(&case, &actual);
+
+        ensure(result.verdict, PackQualityVerdict::Drift, "verdict")?;
+        ensure(result.unexpected_degradation_codes.len(), 1, "one unexpected")
+    }
+
+    #[test]
+    fn pack_quality_report_aggregates_correctly() -> TestResult {
+        let case1 = make_pack_quality_case("case1", vec!["mem_001"], vec![]);
+        let case2 = make_pack_quality_case("case2", vec!["mem_002"], vec![]);
+        let case3 = make_pack_quality_case("case3", vec!["mem_003"], vec!["mem_secret"]);
+
+        let actual1 = make_pack_quality_actual(vec!["mem_001"], 2000, 0.8); // Within
+        let actual2 = make_pack_quality_actual(vec!["mem_002", "extra"], 2000, 0.8); // Drift
+        let actual3 = make_pack_quality_actual(vec!["mem_003", "mem_secret"], 2000, 0.8); // Regression
+
+        let report = evaluate_pack_quality(
+            "test_fixture",
+            &[case1, case2, case3],
+            &[actual1, actual2, actual3],
+        );
+
+        ensure(report.cases_total, 3, "total cases")?;
+        ensure(report.cases_within, 1, "within count")?;
+        ensure(report.cases_drift, 1, "drift count")?;
+        ensure(report.cases_regression, 1, "regression count")?;
+        ensure(
+            report.aggregate_verdict,
+            PackQualityVerdict::Regression,
+            "aggregate",
+        )
+    }
+
+    #[test]
+    fn pack_quality_report_missing_actuals_inconclusive() -> TestResult {
+        let case1 = make_pack_quality_case("case1", vec!["mem_001"], vec![]);
+        let case2 = make_pack_quality_case("case2", vec!["mem_002"], vec![]);
+
+        let actual1 = make_pack_quality_actual(vec!["mem_001"], 2000, 0.8);
+        // No actual2 provided
+
+        let report = evaluate_pack_quality("test_fixture", &[case1, case2], &[actual1]);
+
+        ensure(report.cases_total, 2, "total cases")?;
+        ensure(report.cases_within, 1, "within count")?;
+        ensure(report.cases_inconclusive, 1, "inconclusive count")?;
+        ensure(
+            report.aggregate_verdict,
+            PackQualityVerdict::Inconclusive,
+            "aggregate",
+        )
+    }
+
+    #[test]
+    fn pack_quality_report_all_within() -> TestResult {
+        let case1 = make_pack_quality_case("case1", vec!["mem_001"], vec![]);
+        let case2 = make_pack_quality_case("case2", vec!["mem_002"], vec![]);
+
+        let actual1 = make_pack_quality_actual(vec!["mem_001"], 2000, 0.8);
+        let actual2 = make_pack_quality_actual(vec!["mem_002"], 2000, 0.8);
+
+        let report = evaluate_pack_quality("test_fixture", &[case1, case2], &[actual1, actual2]);
+
+        ensure(report.cases_total, 2, "total cases")?;
+        ensure(report.cases_within, 2, "all within")?;
+        ensure(
+            report.aggregate_verdict,
+            PackQualityVerdict::Within,
+            "aggregate",
+        )
+    }
+
+    #[test]
+    fn pack_quality_schema_version_stable() -> TestResult {
+        ensure(
+            PACK_QUALITY_REPORT_SCHEMA_V1,
+            "ee.eval.pack_quality_report.v1",
+            "pack quality report schema",
+        )
     }
 }

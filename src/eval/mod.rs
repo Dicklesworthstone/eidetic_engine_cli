@@ -20,8 +20,10 @@ pub use redaction::{LeakDetection, LeakPattern, RedactionLeakDetector, Redaction
 pub use runner::{
     DEFAULT_FIXTURE_DIR, DiscoveredFixture, EVAL_REPORT_SCHEMA_V1, EvalRunReport, EvalRunStatus,
     FixtureListEntry, FixtureMetrics, FixtureScenario, PACK_QUALITY_EXPECTATIONS_SCHEMA_V1,
-    QueryMetrics, SourceMemory, SourceMemoryFile, compute_data_hash, compute_fixture_metrics,
-    compute_query_metrics, discover_fixtures, list_fixtures, load_scenario, load_source_memories,
+    PackQualityActual, PackQualityCase, PackQualityComparison, PackQualityReport,
+    PackQualityVerdict, QueryMetrics, SourceMemory, SourceMemoryFile, compare_pack_quality,
+    compute_data_hash, compute_fixture_metrics, compute_query_metrics, discover_fixtures,
+    evaluate_pack_quality, list_fixtures, load_scenario, load_source_memories,
     validate_fixture_scenario,
 };
 
