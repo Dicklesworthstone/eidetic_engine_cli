@@ -17,6 +17,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use ee::db::{DatabaseConfig, DbConnection};
+use ee::policy::redact_secret_like_content;
 
 type TestResult = Result<(), String>;
 
@@ -65,6 +66,12 @@ struct SummaryEvent {
     failure_memory_id: String,
     pack_hash: String,
     context_item_ids: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+struct SecretProbe {
+    class: &'static str,
+    raw: &'static str,
 }
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
@@ -229,12 +236,17 @@ fn run_step_with_env(
 
     let parsed_stdout = serde_json::from_str::<JsonValue>(&stdout).ok();
     let stdout_schema = parsed_stdout.as_ref().and_then(schema_from_json);
+    let logged_args = spec
+        .args
+        .iter()
+        .map(|arg| redact_secret_like_content(arg).content)
+        .collect::<Vec<_>>();
     let mut event = CommandEvent {
         schema: "ee.e2e.command_event.v1",
         scenario_id,
         step: spec.name.to_owned(),
         command: "ee",
-        args: spec.args,
+        args: logged_args,
         cwd: env::current_dir()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| "<unknown>".to_owned()),
@@ -358,6 +370,88 @@ fn ensure_no_ansi(text: &str, context: &str) -> TestResult {
     ensure(
         !text.contains("\u{1b}["),
         format!("{context} must not contain ANSI escape sequences"),
+    )
+}
+
+fn egress_secret_probes() -> Vec<SecretProbe> {
+    vec![
+        SecretProbe {
+            class: "anthropic_api_key",
+            raw: "sk-ant-api03-redactionegressredactionegressredactionegress",
+        },
+        SecretProbe {
+            class: "aws_secret_access_key",
+            raw: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        },
+        SecretProbe {
+            class: "jwt_token",
+            raw: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.Rq8IjqberX03cRIZHg7v0Rq8IjqberX03cRIZHg7v0",
+        },
+        SecretProbe {
+            class: "pem_private_key_header",
+            raw: "-----BEGIN RSA PRIVATE KEY-----",
+        },
+        SecretProbe {
+            class: "pem_private_key_body",
+            raw: "MIIEowIBAAKCAQEAredactionegressredactionegressredaction",
+        },
+    ]
+}
+
+fn ensure_text_omits_secret_probes(
+    surface: &str,
+    stream: &str,
+    artifact_path: &str,
+    text: &str,
+    probes: &[SecretProbe],
+) -> TestResult {
+    for probe in probes {
+        ensure(
+            !text.contains(probe.raw),
+            format!(
+                "{surface} {stream} leaked secret class {}; artifact={artifact_path}",
+                probe.class
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_step_omits_secret_probes(
+    surface: &str,
+    event: &CommandEvent,
+    json_payload: &JsonValue,
+    probes: &[SecretProbe],
+) -> TestResult {
+    ensure_text_omits_secret_probes(
+        surface,
+        "stdout",
+        &event.stdout_artifact_path,
+        &event.stdout,
+        probes,
+    )?;
+    ensure_text_omits_secret_probes(
+        surface,
+        "stderr",
+        &event.stderr_artifact_path,
+        &event.stderr,
+        probes,
+    )?;
+    ensure_text_omits_secret_probes(
+        surface,
+        "json",
+        &event.stdout_artifact_path,
+        &json_payload.to_string(),
+        probes,
+    )?;
+    let logged_args = serde_json::to_string(&event.args)
+        .map_err(|error| format!("failed to serialize logged argv: {error}"))?;
+    ensure_text_omits_secret_probes(
+        surface,
+        "logged-argv",
+        "commands.jsonl",
+        &logged_args,
+        probes,
     )
 }
 
@@ -953,6 +1047,302 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
     )?;
 
     Ok(())
+}
+
+#[test]
+fn no_mocks_public_outputs_redact_secret_like_memory_content() -> TestResult {
+    let scenario_id = "redaction_egress_public_outputs";
+    let probes = egress_secret_probes();
+    let log_dir = unique_log_dir(scenario_id)?;
+    let artifact_dir = log_dir.join("artifacts");
+    fs::create_dir_all(&artifact_dir)
+        .map_err(|error| format!("failed to create artifact dir: {error}"))?;
+    let events_path = log_dir.join("commands.jsonl");
+
+    let workspace_temp = tempfile::Builder::new()
+        .prefix("ee-redaction-egress-workspace-")
+        .tempdir()
+        .map_err(|error| format!("failed to create temp workspace: {error}"))?;
+    let workspace = workspace_temp.path().to_path_buf();
+    let workspace_arg = workspace.display().to_string();
+    let marker = "rynf redaction egress anchor";
+    let jwt = probes
+        .iter()
+        .find(|probe| probe.class == "jwt_token")
+        .map(|probe| probe.raw)
+        .ok_or_else(|| "jwt probe missing".to_owned())?;
+    let raw_content = format!(
+        "{marker}. Use API token {}; AWS_SECRET_ACCESS_KEY={}; Authorization: Bearer {jwt}; PEM block {} {} -----END RSA PRIVATE KEY-----.",
+        probes[0].raw, probes[1].raw, probes[3].raw, probes[4].raw
+    );
+    let redaction_report = redact_secret_like_content(&raw_content);
+    ensure(
+        redaction_report.redacted,
+        "redaction fixture must exercise real secret-like content",
+    )?;
+    ensure_text_omits_secret_probes(
+        "redacted fixture",
+        "content",
+        "in-memory",
+        &redaction_report.content,
+        &probes,
+    )?;
+    let redacted_content = redaction_report
+        .content
+        .replace("Use API token ", "Scanner alpha placeholder ")
+        .replace("AWS_SECRET_ACCESS_KEY=", "Scanner beta placeholder ")
+        .replace("Authorization: Bearer ", "Scanner gamma placeholder ")
+        .replace("PEM block ", "Scanner delta placeholder ")
+        .replace("[REDACTED:anthropic_api_key]", "[REDACTED:alpha]")
+        .replace("[REDACTED:aws_secret_access_key]", "[REDACTED:beta]")
+        .replace("[REDACTED:bearer_token]", "[REDACTED:gamma]")
+        .replace("[REDACTED:pem_block]", "[REDACTED:delta]");
+    let storage_policy_check = redact_secret_like_content(&redacted_content);
+    ensure(
+        !storage_policy_check.redacted,
+        format!(
+            "redacted fixture must be accepted by remember policy, still matched {:?}",
+            storage_policy_check.redacted_reasons
+        ),
+    )?;
+
+    let (_init_event, _init_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "01_init",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "init".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+
+    let (deny_event, deny_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "02_reject_raw_secret_like_memory",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "remember".to_owned(),
+                "--level".to_owned(),
+                "procedural".to_owned(),
+                "--kind".to_owned(),
+                "rule".to_owned(),
+                "--tags".to_owned(),
+                "redaction,egress".to_owned(),
+                "--source".to_owned(),
+                "file://tests/no_mocks_e2e.rs#L1050".to_owned(),
+                raw_content,
+            ],
+            expected_exit_code: 7,
+            expected_schema: "ee.error.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    ensure_step_omits_secret_probes("remember policy denial", &deny_event, &deny_json, &probes)?;
+    ensure_equal(
+        &deny_json.pointer("/error/code"),
+        &Some(&JsonValue::String("policy_denied".to_owned())),
+        "raw secret-like remember denial code",
+    )?;
+
+    let (remember_event, remember_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "03_remember_redacted_memory",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "remember".to_owned(),
+                "--level".to_owned(),
+                "procedural".to_owned(),
+                "--kind".to_owned(),
+                "rule".to_owned(),
+                "--tags".to_owned(),
+                "redaction,egress".to_owned(),
+                "--source".to_owned(),
+                "file://tests/no_mocks_e2e.rs#L1050".to_owned(),
+                redacted_content,
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    ensure_step_omits_secret_probes("remember", &remember_event, &remember_json, &probes)?;
+    let memory_id = string_at(
+        &remember_json,
+        "/data/memory_id",
+        "remember redaction egress",
+    )?;
+
+    let (index_event, index_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "04_index_rebuild",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "index".to_owned(),
+                "rebuild".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    ensure_step_omits_secret_probes("index rebuild", &index_event, &index_json, &probes)?;
+
+    let (search_event, search_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "05_search_redacted_memory",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "search".to_owned(),
+                marker.to_owned(),
+                "--limit".to_owned(),
+                "5".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    ensure_step_omits_secret_probes("search", &search_event, &search_json, &probes)?;
+    let search_results = json_array(&search_json, "/data/results", "redaction egress search")?;
+    ensure(
+        search_results
+            .iter()
+            .any(|result| result.get("docId").and_then(JsonValue::as_str) == Some(&memory_id)),
+        "search should retrieve the redacted memory by non-secret marker",
+    )?;
+
+    let (context_event, context_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "06_context_redacted_memory",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "context".to_owned(),
+                marker.to_owned(),
+                "--max-tokens".to_owned(),
+                "2000".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    ensure_step_omits_secret_probes("context", &context_event, &context_json, &probes)?;
+    let context_item_ids = memory_ids_from_context(&context_json)?;
+    ensure(
+        context_item_ids.iter().any(|id| id == &memory_id),
+        "context should select the redacted memory by non-secret marker",
+    )?;
+
+    let (why_event, why_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "07_why_redacted_memory",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "why".to_owned(),
+                memory_id,
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    ensure_step_omits_secret_probes("why", &why_event, &why_json, &probes)?;
+    ensure_equal(
+        &why_json.pointer("/data/found"),
+        &Some(&JsonValue::Bool(true)),
+        "why should find the redacted memory",
+    )?;
+
+    let (support_event, support_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "08_support_bundle_dry_run",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg,
+                "--json".to_owned(),
+                "support".to_owned(),
+                "bundle".to_owned(),
+                "--dry-run".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    ensure_step_omits_secret_probes(
+        "support bundle dry-run",
+        &support_event,
+        &support_json,
+        &probes,
+    )?;
+    ensure_equal(
+        &support_json.pointer("/data/schema"),
+        &Some(&JsonValue::String("ee.support_bundle.v1".to_owned())),
+        "support bundle dry-run schema",
+    )?;
+
+    let events_text = fs::read_to_string(&events_path).map_err(|error| {
+        format!(
+            "failed to read JSONL log {}: {error}",
+            events_path.display()
+        )
+    })?;
+    ensure_text_omits_secret_probes(
+        "command event log",
+        "jsonl",
+        &events_path.display().to_string(),
+        &events_text,
+        &probes,
+    )
 }
 
 #[test]
