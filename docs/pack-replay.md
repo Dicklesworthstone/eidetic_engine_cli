@@ -169,6 +169,124 @@ ee support inspect <bundle-path> --json
 
 Validates bundle integrity and reports summary without exposing raw content.
 
+## Pack Quality Sentinel
+
+Use the pack-quality sentinel when the question is whether a canonical task still
+gets the evidence it needs. It is an `eval` command over deterministic fixtures,
+not a performance benchmark, a support bundle, or a replacement for `ee pack
+diff`.
+
+```bash
+ee eval run release_failure --pack-quality --scenario usr_pre_task_brief --json
+```
+
+Run the command without `--scenario` to evaluate every pack-quality case in the
+fixture family. JSON stdout uses the `ee.response.v1` envelope and carries
+`ee.eval.pack_quality_report.v1`.
+
+### Interpreting Results
+
+The report's `aggregate_verdict` is the first field to inspect:
+
+| Verdict | Meaning | Usual next step |
+|---------|---------|-----------------|
+| `within` | Selection, provenance, degradation, redaction, and budget expectations matched | Keep the fixture as regression coverage |
+| `drift` | Behavior changed without a known critical omission or forbidden leak | Inspect selected/omitted IDs and decide whether to update expectations |
+| `regression` | Critical evidence was omitted, forbidden evidence leaked, or an unexpected degradation appeared | Fix retrieval/packing/redaction behavior before updating fixtures |
+| `inconclusive` | Required fixture, workspace, ledger, or derived-asset evidence was unavailable or malformed | Repair the fixture or rerun after restoring the missing evidence |
+
+Useful JSON checks:
+
+```bash
+ee eval run release_failure --pack-quality --json \
+  | jq '.data.report.aggregate_verdict'
+
+ee eval run release_failure --pack-quality --json \
+  | jq '.data.report.comparisons[] | {case_id, verdict, failure_reasons}'
+
+ee eval run release_failure --pack-quality --json \
+  | jq '.data.degradedBranches[]? | {code, repairAction}'
+
+ee eval run release_failure --pack-quality --json \
+  | jq '.data.artifactPaths[] | {scenarioId, stdout, stderr}'
+```
+
+Failure triage:
+
+1. Start with `failure_reasons` and the comparison row for the failing case.
+2. Check `expected_selected_memory_ids` against `actual_selected_ids` before
+   looking at aggregate metrics.
+3. Treat `critical_omitted_memory_ids` matches as regressions unless the fixture
+   is wrong.
+4. Check `unexpected_degradation_codes` and `actual_redaction_leaks` before
+   changing expected memory IDs.
+5. Use the reported artifact paths to inspect stdout/stderr from the real-binary
+   scenario run.
+6. Update fixture expectations only after the new behavior is intentional and
+   documented.
+
+## Fixture Authoring
+
+Pack-quality cases live with normal eval fixtures under
+`tests/fixtures/eval/<fixture-family>/`. A complete fixture family has:
+
+| File | Purpose |
+|------|---------|
+| `README.md` | Human intent, user workflow, expected signal, artifact location |
+| `source_memory.json` | Deterministic synthetic memories and stable memory IDs |
+| `scenario.json` | Command sequence, expected stdout contracts, degraded branches, pack-quality expectations |
+
+Add a `pack_quality_expectations` block to `scenario.json`:
+
+```json
+{
+  "schema": "ee.eval.pack_quality_expectations.v1",
+  "cases": [
+    {
+      "case_id": "pq.release_failure.context.v1",
+      "scenario_id": "usr_pre_task_brief",
+      "command_step": 4,
+      "query_surface": {
+        "kind": "inline_query",
+        "query": "prepare release"
+      },
+      "expected_selected_memory_ids": [
+        "mem_00000000000000000000000101"
+      ],
+      "critical_omitted_memory_ids": [],
+      "min_provenance_density": 1.0,
+      "allowed_degradation_codes": [
+        "semantic_disabled"
+      ],
+      "forbidden_redaction_leaks": [
+        "secret",
+        "token"
+      ],
+      "token_budget": {
+        "max_tokens": 4000,
+        "expected_used_tokens_max": 1200,
+        "expect_truncation": false
+      },
+      "stable_first_failure_label": "missing_release_failure_context"
+    }
+  ]
+}
+```
+
+Authoring rules:
+
+1. Use stable fixture IDs, scenario IDs, memory IDs, clocks, and hashes.
+2. Keep source memories synthetic and secret-free unless the fixture is
+   explicitly testing redaction with safe probes.
+3. Put only memories that must appear in `expected_selected_memory_ids`.
+4. Put memories whose selection would be harmful in
+   `critical_omitted_memory_ids`.
+5. List expected degraded modes in `allowed_degradation_codes`; do not leave
+   degraded behavior implicit.
+6. Require `min_provenance_density` high enough to catch unsupported selection.
+7. Give every case a stable, grep-friendly `stable_first_failure_label`.
+8. Update the fixture README when the user workflow or expected signal changes.
+
 ## Test Coverage
 
 The following test families cover replay, freshness, and egress:

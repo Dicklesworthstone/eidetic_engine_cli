@@ -434,9 +434,18 @@ provenance text, and full ledger payloads.
 | Command | Purpose |
 |---|---|
 | `ee eval run` / `list` | Run or list retrieval-quality evaluation fixtures |
+| `ee eval run <fixture> --pack-quality --json` | Check whether deterministic fixtures still select required context-pack evidence |
 | `ee analyze science-status --json` | Report optional science analytics feature posture and degradations |
 | `ee capabilities` / `check` / `health` | Inspect feature availability and readiness |
 | `ee daemon --foreground` | Optional supervised maintenance daemon |
+
+Use pack-quality evaluation when a canonical task should keep selecting specific
+memories across retrieval or packing changes. The report is a deterministic
+`ee.eval.pack_quality_report.v1` result with selected and omitted memory IDs,
+degradation posture, redaction status, artifact paths, and stable failure
+reasons for fixture triage. See
+[`docs/pack-replay.md`](docs/pack-replay.md) for operator and fixture-authoring
+guidance.
 
 ---
 
@@ -890,6 +899,7 @@ No. The steward proposes; you approve. Every promotion, consolidation, replaceme
 | [`docs/command_classification.md`](docs/command_classification.md) | Command effect taxonomy and read/write classification |
 | [`docs/migration-guide.md`](docs/migration-guide.md) | DB schema migrations and upgrade paths |
 | [`docs/toon-output.md`](docs/toon-output.md) | TOON (Text-Only Object Notation) output format |
+| [`docs/pack-replay.md`](docs/pack-replay.md) | Pack replay, support-bundle safety, pack-quality operator guidance, and fixture authoring |
 | [`docs/adr/0025-replayable-context-pack-selection-ledgers.md`](docs/adr/0025-replayable-context-pack-selection-ledgers.md) | Pack replay/diff ledger contract, freshness states, and support-bundle safety rules |
 | [`docs/adr/`](docs/adr/) | Architectural decision records |
 
