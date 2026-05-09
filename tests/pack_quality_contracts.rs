@@ -17,8 +17,8 @@ fn unique_artifact_dir(prefix: &str) -> Result<PathBuf, String> {
 }
 
 fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
-    let exe = std::env::var("CARGO_BIN_EXE_ee")
-        .unwrap_or_else(|_| env!("CARGO_BIN_EXE_ee").to_string());
+    let exe =
+        std::env::var("CARGO_BIN_EXE_ee").unwrap_or_else(|_| env!("CARGO_BIN_EXE_ee").to_string());
     Command::new(&exe)
         .args(args)
         .output()
@@ -37,11 +37,7 @@ fn scrub_pack_quality_report(value: &mut Value) {
                     if let Some(s) = child.as_str() {
                         if s.contains("target/ee-e2e") {
                             *child = Value::String(
-                                s.replace(
-                                    |c: char| c.is_ascii_hexdigit(),
-                                    "X",
-                                )
-                                .to_string(),
+                                s.replace(|c: char| c.is_ascii_hexdigit(), "X").to_string(),
                             );
                         }
                     }
@@ -69,10 +65,9 @@ fn scrub_pack_quality_report(value: &mut Value) {
 #[test]
 fn pack_quality_report_schema_is_registered() -> TestResult {
     let output = run_ee(&["--json", "version"])?;
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|e| format!("stdout not UTF-8: {e}"))?;
-    let value: Value = serde_json::from_str(&stdout)
-        .map_err(|e| format!("version output not JSON: {e}"))?;
+    let stdout = String::from_utf8(output.stdout).map_err(|e| format!("stdout not UTF-8: {e}"))?;
+    let value: Value =
+        serde_json::from_str(&stdout).map_err(|e| format!("version output not JSON: {e}"))?;
 
     let schemas = value
         .pointer("/data/schemas")
@@ -111,10 +106,8 @@ fn pack_quality_report_has_stable_field_names() -> TestResult {
         return Err(format!("eval run --pack-quality failed: {stderr}"));
     }
 
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|e| format!("stdout not UTF-8: {e}"))?;
-    let stderr = String::from_utf8(output.stderr)
-        .map_err(|e| format!("stderr not UTF-8: {e}"))?;
+    let stdout = String::from_utf8(output.stdout).map_err(|e| format!("stdout not UTF-8: {e}"))?;
+    let stderr = String::from_utf8(output.stderr).map_err(|e| format!("stderr not UTF-8: {e}"))?;
 
     if !stderr.is_empty() {
         return Err(format!(
@@ -122,8 +115,8 @@ fn pack_quality_report_has_stable_field_names() -> TestResult {
         ));
     }
 
-    let mut value: Value = serde_json::from_str(&stdout)
-        .map_err(|e| format!("pack-quality output not JSON: {e}"))?;
+    let mut value: Value =
+        serde_json::from_str(&stdout).map_err(|e| format!("pack-quality output not JSON: {e}"))?;
 
     let schema = value
         .pointer("/schema")
@@ -189,21 +182,24 @@ fn pack_quality_report_arrays_are_deterministically_sorted() -> TestResult {
         "usr_pre_task_brief",
     ])?;
 
-    let stdout1 = String::from_utf8(output1.stdout)
-        .map_err(|e| format!("stdout1 not UTF-8: {e}"))?;
-    let stdout2 = String::from_utf8(output2.stdout)
-        .map_err(|e| format!("stdout2 not UTF-8: {e}"))?;
+    let stdout1 =
+        String::from_utf8(output1.stdout).map_err(|e| format!("stdout1 not UTF-8: {e}"))?;
+    let stdout2 =
+        String::from_utf8(output2.stdout).map_err(|e| format!("stdout2 not UTF-8: {e}"))?;
 
-    let mut v1: Value = serde_json::from_str(&stdout1)
-        .map_err(|e| format!("output1 not JSON: {e}"))?;
-    let mut v2: Value = serde_json::from_str(&stdout2)
-        .map_err(|e| format!("output2 not JSON: {e}"))?;
+    let mut v1: Value =
+        serde_json::from_str(&stdout1).map_err(|e| format!("output1 not JSON: {e}"))?;
+    let mut v2: Value =
+        serde_json::from_str(&stdout2).map_err(|e| format!("output2 not JSON: {e}"))?;
 
     scrub_pack_quality_report(&mut v1);
     scrub_pack_quality_report(&mut v2);
 
     if v1 != v2 {
-        return Err("pack-quality reports differ between identical runs - ordering is not deterministic".to_string());
+        return Err(
+            "pack-quality reports differ between identical runs - ordering is not deterministic"
+                .to_string(),
+        );
     }
 
     Ok(())
@@ -226,10 +222,9 @@ fn pack_quality_lexical_only_branch_is_reported() -> TestResult {
         return Err(format!("eval run --pack-quality failed: {stderr}"));
     }
 
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|e| format!("stdout not UTF-8: {e}"))?;
-    let value: Value = serde_json::from_str(&stdout)
-        .map_err(|e| format!("output not JSON: {e}"))?;
+    let stdout = String::from_utf8(output.stdout).map_err(|e| format!("stdout not UTF-8: {e}"))?;
+    let value: Value =
+        serde_json::from_str(&stdout).map_err(|e| format!("output not JSON: {e}"))?;
 
     let degraded_branches = value
         .pointer("/data/degradedBranches")
@@ -270,10 +265,9 @@ fn pack_quality_artifact_paths_are_reported() -> TestResult {
         return Err(format!("eval run --pack-quality failed: {stderr}"));
     }
 
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|e| format!("stdout not UTF-8: {e}"))?;
-    let value: Value = serde_json::from_str(&stdout)
-        .map_err(|e| format!("output not JSON: {e}"))?;
+    let stdout = String::from_utf8(output.stdout).map_err(|e| format!("stdout not UTF-8: {e}"))?;
+    let value: Value =
+        serde_json::from_str(&stdout).map_err(|e| format!("output not JSON: {e}"))?;
 
     let artifact_paths = value
         .pointer("/data/artifactPaths")
@@ -304,10 +298,8 @@ fn pack_quality_no_diagnostics_on_json_stdout() -> TestResult {
         "usr_pre_task_brief",
     ])?;
 
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|e| format!("stdout not UTF-8: {e}"))?;
-    let stderr = String::from_utf8(output.stderr)
-        .map_err(|e| format!("stderr not UTF-8: {e}"))?;
+    let stdout = String::from_utf8(output.stdout).map_err(|e| format!("stdout not UTF-8: {e}"))?;
+    let stderr = String::from_utf8(output.stderr).map_err(|e| format!("stderr not UTF-8: {e}"))?;
 
     if !stderr.is_empty() {
         return Err(format!(
@@ -316,9 +308,7 @@ fn pack_quality_no_diagnostics_on_json_stdout() -> TestResult {
     }
 
     if stdout.contains("WARN") || stdout.contains("ERROR") || stdout.contains("DEBUG") {
-        return Err(format!(
-            "stdout contains diagnostic markers: {stdout}"
-        ));
+        return Err(format!("stdout contains diagnostic markers: {stdout}"));
     }
 
     if stdout.contains('\x1b') {
@@ -330,18 +320,11 @@ fn pack_quality_no_diagnostics_on_json_stdout() -> TestResult {
 
 #[test]
 fn pack_quality_verdict_values_are_stable() -> TestResult {
-    let output = run_ee(&[
-        "--json",
-        "eval",
-        "run",
-        "release_failure",
-        "--pack-quality",
-    ])?;
+    let output = run_ee(&["--json", "eval", "run", "release_failure", "--pack-quality"])?;
 
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|e| format!("stdout not UTF-8: {e}"))?;
-    let value: Value = serde_json::from_str(&stdout)
-        .map_err(|e| format!("output not JSON: {e}"))?;
+    let stdout = String::from_utf8(output.stdout).map_err(|e| format!("stdout not UTF-8: {e}"))?;
+    let value: Value =
+        serde_json::from_str(&stdout).map_err(|e| format!("output not JSON: {e}"))?;
 
     let verdict = value
         .pointer("/data/report/aggregate_verdict")
