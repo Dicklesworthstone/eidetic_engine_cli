@@ -38,6 +38,7 @@ struct CommandEvent {
     step: String,
     command: &'static str,
     args: Vec<String>,
+    env_overrides: Vec<LoggedEnvOverride>,
     cwd: String,
     workspace: String,
     started_at_unix_ms: u128,
@@ -49,7 +50,17 @@ struct CommandEvent {
     stderr_artifact_path: String,
     stdout_json_valid: bool,
     stdout_schema: Option<String>,
+    schema_validation_status: &'static str,
+    golden_validation_status: &'static str,
+    redaction_status: &'static str,
     first_failure: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LoggedEnvOverride {
+    name: String,
+    value: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -243,12 +254,26 @@ fn run_step_with_env(
         .iter()
         .map(|arg| redact_secret_like_content(arg).content)
         .collect::<Vec<_>>();
+    let env_overrides = envs
+        .iter()
+        .map(|(key, value)| LoggedEnvOverride {
+            name: (*key).to_owned(),
+            value: redact_secret_like_content(&value.to_string_lossy()).content,
+        })
+        .collect::<Vec<_>>();
+    let schema_validation_status =
+        if parsed_stdout.is_some() && stdout_schema.as_deref() == Some(spec.expected_schema) {
+            "passed"
+        } else {
+            "failed"
+        };
     let mut event = CommandEvent {
         schema: "ee.e2e.command_event.v1",
         scenario_id,
         step: spec.name.to_owned(),
         command: "ee",
         args: logged_args,
+        env_overrides,
         cwd: env::current_dir()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| "<unknown>".to_owned()),
@@ -262,6 +287,9 @@ fn run_step_with_env(
         stderr_artifact_path: stderr_path.display().to_string(),
         stdout_json_valid: parsed_stdout.is_some(),
         stdout_schema,
+        schema_validation_status,
+        golden_validation_status: "not_applicable",
+        redaction_status: "not_checked",
         first_failure: None,
     };
     event.first_failure = first_failure(
@@ -429,6 +457,15 @@ fn assert_context_pack_ledgers_persisted(
     ))
 }
 
+fn first_new_pack_id(pack_ids: &[String], already_seen: &[String]) -> Result<String, String> {
+    pack_ids
+        .iter()
+        .find(|pack_id| !already_seen.contains(*pack_id))
+        .or_else(|| pack_ids.first())
+        .cloned()
+        .ok_or_else(|| "expected at least one persisted pack id".to_owned())
+}
+
 fn json_string<'a>(value: &'a JsonValue, pointer: &str, context: &str) -> Result<&'a str, String> {
     value
         .pointer(pointer)
@@ -474,7 +511,15 @@ fn cass_session_source_path(value: &JsonValue) -> Option<&str> {
 }
 
 fn degradation_codes(value: &JsonValue) -> Result<Vec<String>, String> {
-    let mut codes = json_array(value, "/data/degraded", "status degraded")?
+    degradation_codes_at(value, "/data/degraded", "status degraded")
+}
+
+fn degradation_codes_at(
+    value: &JsonValue,
+    pointer: &str,
+    context: &str,
+) -> Result<Vec<String>, String> {
+    let mut codes = json_array(value, pointer, context)?
         .iter()
         .filter_map(|item| item.get("code").and_then(JsonValue::as_str))
         .map(str::to_owned)
@@ -1460,6 +1505,543 @@ fn no_mocks_public_outputs_redact_secret_like_memory_content() -> TestResult {
         &events_text,
         &probes,
     )
+}
+
+#[test]
+fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
+    let scenario_id = "dmu0_pack_replay_diff_freshness_egress";
+    let probes = egress_secret_probes();
+    let log_dir = unique_log_dir(scenario_id)?;
+    let artifact_dir = log_dir.join("artifacts");
+    fs::create_dir_all(&artifact_dir)
+        .map_err(|error| format!("failed to create artifact dir: {error}"))?;
+    let events_path = log_dir.join("commands.jsonl");
+
+    let workspace_temp = tempfile::Builder::new()
+        .prefix("ee-dmu0-no-mocks-workspace-")
+        .tempdir()
+        .map_err(|error| format!("failed to create temp workspace: {error}"))?;
+    let workspace = workspace_temp.path().to_path_buf();
+    let workspace_arg = workspace.display().to_string();
+    let database_path = workspace.join(".ee").join("ee.db");
+    let source_path = workspace.join("freshness-source.md");
+    let marker = "dmu0 replay freshness egress anchor";
+    let source_content = format!("{marker} safe source evidence line");
+    write_text(&source_path, &source_content)?;
+    let source_uri = format!("file://{}#L1", source_path.display());
+    let jwt = probes
+        .iter()
+        .find(|probe| probe.class == "jwt_token")
+        .map(|probe| probe.raw)
+        .ok_or_else(|| "jwt probe missing".to_owned())?;
+    let secret_envs = [("EE_E2E_SECRET_PROBE", OsString::from(probes[0].raw))];
+    let raw_content = format!(
+        "{marker}. Raw token {}; AWS_SECRET_ACCESS_KEY={}; Authorization: Bearer {jwt}; PEM block {} {} -----END RSA PRIVATE KEY-----.",
+        probes[0].raw, probes[1].raw, probes[3].raw, probes[4].raw
+    );
+    let redaction_report = redact_secret_like_content(&raw_content);
+    ensure(
+        redaction_report.redacted,
+        "redaction fixture must exercise real secret-like content",
+    )?;
+    let redacted_content = redaction_report
+        .content
+        .replace("Raw token ", "Scanner alpha placeholder ")
+        .replace("AWS_SECRET_ACCESS_KEY=", "Scanner beta placeholder ")
+        .replace("Authorization: Bearer ", "Scanner gamma placeholder ")
+        .replace("PEM block ", "Scanner delta placeholder ")
+        .replace("[REDACTED:anthropic_api_key]", "[REDACTED:alpha]")
+        .replace("[REDACTED:aws_secret_access_key]", "[REDACTED:beta]")
+        .replace("[REDACTED:bearer_token]", "[REDACTED:gamma]")
+        .replace("[REDACTED:pem_block]", "[REDACTED:delta]");
+    let storage_policy_check = redact_secret_like_content(&redacted_content);
+    ensure(
+        !storage_policy_check.redacted,
+        format!(
+            "redacted fixture must be accepted by remember policy, still matched {:?}",
+            storage_policy_check.redacted_reasons
+        ),
+    )?;
+
+    let mut command_count = 0_usize;
+
+    let (_init_event, _init_json) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "01_init",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "init".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+        &secret_envs,
+    )?;
+    command_count += 1;
+
+    let (deny_event, deny_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "02_reject_raw_secret_like_memory",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "remember".to_owned(),
+                "--level".to_owned(),
+                "procedural".to_owned(),
+                "--kind".to_owned(),
+                "rule".to_owned(),
+                "--tags".to_owned(),
+                "dmu0,replay,egress".to_owned(),
+                "--source".to_owned(),
+                source_uri.clone(),
+                raw_content,
+            ],
+            expected_exit_code: 7,
+            expected_schema: "ee.error.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes("remember policy denial", &deny_event, &deny_json, &probes)?;
+
+    let (source_event, source_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "03_remember_source_memory",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "remember".to_owned(),
+                "--level".to_owned(),
+                "procedural".to_owned(),
+                "--kind".to_owned(),
+                "rule".to_owned(),
+                "--tags".to_owned(),
+                "dmu0,replay,freshness".to_owned(),
+                "--source".to_owned(),
+                source_uri,
+                source_content.clone(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes("remember source", &source_event, &source_json, &probes)?;
+    let source_memory_id = string_at(&source_json, "/data/memory_id", "source remember")?;
+
+    let (redacted_event, redacted_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "04_remember_redacted_memory",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "remember".to_owned(),
+                "--level".to_owned(),
+                "procedural".to_owned(),
+                "--kind".to_owned(),
+                "rule".to_owned(),
+                "--tags".to_owned(),
+                "dmu0,replay,egress".to_owned(),
+                "--source".to_owned(),
+                "agent-mail://eidetic_engine_cli-dmu0#egress".to_owned(),
+                redacted_content,
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes(
+        "remember redacted",
+        &redacted_event,
+        &redacted_json,
+        &probes,
+    )?;
+    let redacted_memory_id = string_at(&redacted_json, "/data/memory_id", "redacted remember")?;
+
+    let (index_event, index_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "05_index_rebuild",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "index".to_owned(),
+                "rebuild".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes("index rebuild", &index_event, &index_json, &probes)?;
+
+    let query = marker.to_owned();
+    let (context_before_event, context_before_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "06_context_before_source_change",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "context".to_owned(),
+                query.clone(),
+                "--max-tokens".to_owned(),
+                "4000".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes(
+        "context before source change",
+        &context_before_event,
+        &context_before_json,
+        &probes,
+    )?;
+    let before_codes = degradation_codes(&context_before_json)?;
+    ensure(
+        !before_codes
+            .iter()
+            .any(|code| code == "context_evidence_freshness_changed_source"),
+        format!("fresh source should not report changed_source before mutation: {before_codes:?}"),
+    )?;
+    let before_pack_hash = string_at(&context_before_json, "/data/pack/hash", "context before")?;
+    let before_item_ids = memory_ids_from_context(&context_before_json)?;
+    ensure(
+        before_item_ids.iter().any(|id| id == &source_memory_id),
+        format!(
+            "context before mutation must select source memory {source_memory_id}, got {before_item_ids:?}"
+        ),
+    )?;
+    ensure(
+        before_item_ids.iter().any(|id| id == &redacted_memory_id),
+        format!(
+            "context before mutation must select redacted memory {redacted_memory_id}, got {before_item_ids:?}"
+        ),
+    )?;
+    let (_before_ledger_hashes, before_pack_ids) = assert_context_pack_ledgers_persisted(
+        &database_path,
+        &query,
+        &before_pack_hash,
+        &before_item_ids,
+        1,
+    )?;
+    let before_pack_id = first_new_pack_id(&before_pack_ids, &[])?;
+
+    write_text(
+        &source_path,
+        &format!("{marker} safe source evidence changed after first pack"),
+    )?;
+
+    let (context_after_event, context_after_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "07_context_after_source_change",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "context".to_owned(),
+                query.clone(),
+                "--max-tokens".to_owned(),
+                "4000".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes(
+        "context after source change",
+        &context_after_event,
+        &context_after_json,
+        &probes,
+    )?;
+    let after_codes = degradation_codes(&context_after_json)?;
+    ensure(
+        after_codes
+            .iter()
+            .any(|code| code == "context_evidence_freshness_changed_source"),
+        format!("context after mutation must report changed_source, got {after_codes:?}"),
+    )?;
+    let after_pack_hash = string_at(&context_after_json, "/data/pack/hash", "context after")?;
+    let after_item_ids = memory_ids_from_context(&context_after_json)?;
+    ensure(
+        after_item_ids.iter().any(|id| id == &source_memory_id),
+        format!(
+            "context after mutation must select source memory {source_memory_id}, got {after_item_ids:?}"
+        ),
+    )?;
+    let (_after_ledger_hashes, after_pack_ids) = assert_context_pack_ledgers_persisted(
+        &database_path,
+        &query,
+        &after_pack_hash,
+        &after_item_ids,
+        1,
+    )?;
+    let after_pack_id = first_new_pack_id(&after_pack_ids, std::slice::from_ref(&before_pack_id))?;
+
+    let (why_event, why_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "08_why_after_source_change",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "why".to_owned(),
+                source_memory_id.clone(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes("why after source change", &why_event, &why_json, &probes)?;
+    let why_codes = degradation_codes(&why_json)?;
+    ensure(
+        why_codes
+            .iter()
+            .any(|code| code == "why_evidence_freshness_changed_source"),
+        format!("why after mutation must report changed_source, got {why_codes:?}"),
+    )?;
+
+    let (replay_before_event, replay_before_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "09_pack_replay_before_source_change",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "pack".to_owned(),
+                "replay".to_owned(),
+                before_pack_id.clone(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.pack.replay.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes(
+        "pack replay before",
+        &replay_before_event,
+        &replay_before_json,
+        &probes,
+    )?;
+    ensure_equal(
+        &replay_before_json.pointer("/data/replay/status"),
+        &Some(&json!("available")),
+        "pack replay before status",
+    )?;
+
+    let (replay_after_event, replay_after_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "10_pack_replay_after_source_change",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "pack".to_owned(),
+                "replay".to_owned(),
+                after_pack_id.clone(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.pack.replay.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes(
+        "pack replay after",
+        &replay_after_event,
+        &replay_after_json,
+        &probes,
+    )?;
+    ensure_equal(
+        &replay_after_json.pointer("/data/replay/status"),
+        &Some(&json!("available")),
+        "pack replay after status",
+    )?;
+    let replay_after_codes = degradation_codes_at(
+        &replay_after_json,
+        "/data/replay/degraded",
+        "pack replay after ledger degraded",
+    )?;
+    ensure(
+        replay_after_codes
+            .iter()
+            .any(|code| code == "context_evidence_freshness_changed_source"),
+        format!(
+            "pack replay after mutation must expose ledger freshness degradation, got {replay_after_codes:?}"
+        ),
+    )?;
+
+    let (diff_event, diff_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "11_pack_diff_source_change",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "pack".to_owned(),
+                "diff".to_owned(),
+                before_pack_id.clone(),
+                after_pack_id.clone(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.pack.diff.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes("pack diff", &diff_event, &diff_json, &probes)?;
+    ensure_equal(
+        &diff_json.pointer("/data/diff/summary/replayable"),
+        &Some(&json!(true)),
+        "pack diff replayable summary",
+    )?;
+    let likely_causes = json_array(&diff_json, "/data/diff/likelyCauses", "pack diff causes")?;
+    ensure(
+        likely_causes
+            .iter()
+            .any(|cause| cause.as_str() == Some("degradation_changed")),
+        format!("pack diff must explain freshness degradation change, got {likely_causes:?}"),
+    )?;
+
+    append_jsonl(
+        &events_path,
+        &json!({
+            "schema": "ee.e2e.summary_event.v1",
+            "scenarioId": scenario_id,
+            "event": "summary",
+            "commandCount": command_count,
+            "workspace": workspace.display().to_string(),
+            "databasePath": database_path.display().to_string(),
+            "sanitizedEnvOverrides": [],
+            "schemaValidationStatus": "passed",
+            "goldenValidationStatus": "not_applicable",
+            "redactionStatus": "passed",
+            "firstFailure": null,
+            "sourceMemoryId": source_memory_id,
+            "redactedMemoryId": redacted_memory_id,
+            "beforePackId": before_pack_id,
+            "afterPackId": after_pack_id,
+            "beforePackHash": before_pack_hash,
+            "afterPackHash": after_pack_hash,
+            "freshnessCodes": {
+                "contextAfter": after_codes,
+                "whyAfter": why_codes,
+                "replayAfter": replay_after_codes
+            }
+        }),
+    )?;
+
+    let events_text = fs::read_to_string(&events_path).map_err(|error| {
+        format!(
+            "failed to read JSONL log {}: {error}",
+            events_path.display()
+        )
+    })?;
+    ensure_text_omits_secret_probes(
+        "dmu0 command event log",
+        "jsonl",
+        &events_path.display().to_string(),
+        &events_text,
+        &probes,
+    )?;
+    let event_lines = events_text.lines().collect::<Vec<_>>();
+    ensure_equal(
+        &event_lines.len(),
+        &(command_count + 1),
+        "dmu0 JSONL event count includes commands plus summary",
+    )?;
+    let mut saw_sanitized_env_override = false;
+    for (index, line) in event_lines.iter().take(command_count).enumerate() {
+        let event: JsonValue = serde_json::from_str(line)
+            .map_err(|error| format!("dmu0 JSONL command event {index} must parse: {error}"))?;
+        ensure_equal(
+            &event.pointer("/schemaValidationStatus"),
+            &Some(&json!("passed")),
+            "dmu0 command schema validation status",
+        )?;
+        let env_overrides = json_array(&event, "/envOverrides", "dmu0 command env overrides")?;
+        saw_sanitized_env_override |= env_overrides.iter().any(|override_value| {
+            override_value.get("name").and_then(JsonValue::as_str) == Some("EE_E2E_SECRET_PROBE")
+                && override_value
+                    .get("value")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|value| value.contains("[REDACTED:"))
+        });
+        ensure(
+            event.pointer("/stdoutArtifactPath").is_some()
+                && event.pointer("/stderrArtifactPath").is_some()
+                && event.pointer("/firstFailure").is_some(),
+            "dmu0 command event must capture artifact paths and first-failure field",
+        )?;
+    }
+    ensure(
+        saw_sanitized_env_override,
+        "dmu0 command log must include a sanitized secret-like env override",
+    )?;
+
+    Ok(())
 }
 
 #[test]
