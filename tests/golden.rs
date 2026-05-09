@@ -541,23 +541,25 @@ mod tests {
             .map_err(|error| error.to_string())
     }
 
-    fn pack_fixture_ledger(
-        pack_id: &str,
-        pack_hash: &str,
-        ledger_hash: &str,
+    struct PackFixtureLedgerInput<'a> {
+        pack_id: &'a str,
+        pack_hash: &'a str,
+        ledger_hash: &'a str,
         rank: u32,
         relevance: f32,
         utility: f32,
-        redaction_classes: &[&str],
+        redaction_classes: &'a [&'a str],
         search_index: serde_json::Value,
         graph_snapshot: serde_json::Value,
         degraded: Vec<serde_json::Value>,
-    ) -> serde_json::Value {
+    }
+
+    fn pack_fixture_ledger(input: PackFixtureLedgerInput<'_>) -> serde_json::Value {
         serde_json::json!({
             "core": {
                 "schema": "ee.pack_replay_ledger.v1",
-                "packId": pack_id,
-                "packHash": pack_hash,
+                "packId": input.pack_id,
+                "packHash": input.pack_hash,
                 "workspaceId": "wsp_searchjson0000000000000001",
                 "createdAt": "2026-04-29T12:01:00+00:00",
                 "createdBy": "golden-test",
@@ -578,8 +580,8 @@ mod tests {
                     "generation": 40
                 },
                 "derivedAssets": {
-                    "searchIndex": search_index,
-                    "graphSnapshot": graph_snapshot
+                    "searchIndex": input.search_index,
+                    "graphSnapshot": input.graph_snapshot
                 },
                 "candidateCounts": {
                     "selected": 1,
@@ -588,12 +590,12 @@ mod tests {
                 },
                 "selectedItems": [{
                     "memoryId": "mem_00000000000000000000000001",
-                    "rank": rank,
+                    "rank": input.rank,
                     "section": "procedural_rules",
                     "estimatedTokens": 8,
                     "scores": {
-                        "relevance": relevance,
-                        "utility": utility
+                        "relevance": input.relevance,
+                        "utility": input.utility
                     },
                     "why": {
                         "hash": "blake3:why-fixture",
@@ -610,13 +612,13 @@ mod tests {
                         "redacted": false,
                         "redactionReasons": []
                     },
-                    "redactionClasses": redaction_classes,
+                    "redactionClasses": input.redaction_classes,
                     "freshness": "unavailable"
                 }],
                 "omittedItems": [],
-                "degraded": degraded
+                "degraded": input.degraded
             },
-            "ledgerHash": ledger_hash
+            "ledgerHash": input.ledger_hash
         })
     }
 
@@ -628,18 +630,18 @@ mod tests {
         let stale_graph =
             serde_json::json!({"status": "stale", "manifestHash": "blake3:graph-old"});
 
-        let base_ledger = pack_fixture_ledger(
-            "pack_00000000000000000000000011",
-            "blake3:pack-base",
-            "blake3:ledger-base",
-            1,
-            0.91,
-            0.80,
-            &[],
-            unavailable_asset.clone(),
-            unavailable_asset.clone(),
-            Vec::new(),
-        );
+        let base_ledger = pack_fixture_ledger(PackFixtureLedgerInput {
+            pack_id: "pack_00000000000000000000000011",
+            pack_hash: "blake3:pack-base",
+            ledger_hash: "blake3:ledger-base",
+            rank: 1,
+            relevance: 0.91,
+            utility: 0.80,
+            redaction_classes: &[],
+            search_index: unavailable_asset.clone(),
+            graph_snapshot: unavailable_asset.clone(),
+            degraded: Vec::new(),
+        });
         insert_pack_fixture(
             &connection,
             PackFixtureInput {
@@ -655,18 +657,18 @@ mod tests {
             },
         )?;
 
-        let ranking_ledger = pack_fixture_ledger(
-            "pack_00000000000000000000000012",
-            "blake3:pack-ranking",
-            "blake3:ledger-ranking",
-            2,
-            0.84,
-            0.70,
-            &[],
-            unavailable_asset.clone(),
-            unavailable_asset.clone(),
-            Vec::new(),
-        );
+        let ranking_ledger = pack_fixture_ledger(PackFixtureLedgerInput {
+            pack_id: "pack_00000000000000000000000012",
+            pack_hash: "blake3:pack-ranking",
+            ledger_hash: "blake3:ledger-ranking",
+            rank: 2,
+            relevance: 0.84,
+            utility: 0.70,
+            redaction_classes: &[],
+            search_index: unavailable_asset.clone(),
+            graph_snapshot: unavailable_asset.clone(),
+            degraded: Vec::new(),
+        });
         insert_pack_fixture(
             &connection,
             PackFixtureInput {
@@ -682,18 +684,18 @@ mod tests {
             },
         )?;
 
-        let redaction_ledger = pack_fixture_ledger(
-            "pack_00000000000000000000000013",
-            "blake3:pack-redaction",
-            "blake3:ledger-redaction",
-            1,
-            0.91,
-            0.80,
-            &["anthropic_api_key"],
-            unavailable_asset.clone(),
-            unavailable_asset.clone(),
-            Vec::new(),
-        );
+        let redaction_ledger = pack_fixture_ledger(PackFixtureLedgerInput {
+            pack_id: "pack_00000000000000000000000013",
+            pack_hash: "blake3:pack-redaction",
+            ledger_hash: "blake3:ledger-redaction",
+            rank: 1,
+            relevance: 0.91,
+            utility: 0.80,
+            redaction_classes: &["anthropic_api_key"],
+            search_index: unavailable_asset.clone(),
+            graph_snapshot: unavailable_asset.clone(),
+            degraded: Vec::new(),
+        });
         insert_pack_fixture(
             &connection,
             PackFixtureInput {
@@ -709,22 +711,22 @@ mod tests {
             },
         )?;
 
-        let degraded_ledger = pack_fixture_ledger(
-            "pack_00000000000000000000000014",
-            "blake3:pack-degraded",
-            "blake3:ledger-degraded",
-            1,
-            0.91,
-            0.80,
-            &[],
-            available_search,
-            stale_graph,
-            vec![serde_json::json!({
+        let degraded_ledger = pack_fixture_ledger(PackFixtureLedgerInput {
+            pack_id: "pack_00000000000000000000000014",
+            pack_hash: "blake3:pack-degraded",
+            ledger_hash: "blake3:ledger-degraded",
+            rank: 1,
+            relevance: 0.91,
+            utility: 0.80,
+            redaction_classes: &[],
+            search_index: available_search,
+            graph_snapshot: stale_graph,
+            degraded: vec![serde_json::json!({
                 "code": "context_graph_snapshot_stale",
                 "message": "Graph snapshot was stale during pack selection.",
                 "severity": "medium"
             })],
-        );
+        });
         insert_pack_fixture(
             &connection,
             PackFixtureInput {
