@@ -129,6 +129,17 @@ fn bench_script_exposes_rch_safe_profiles_and_report_fields() -> TestResult {
         "max_rss_kb",
         "allocation_count",
         "rows_per_sec",
+        "artifact_redaction",
+        "regression_status",
+        "--advisory",
+        "CARGO_TARGET_DIR",
+        "pack-replay-freshness-smoke",
+        "ee_context_pack_assembly_no_ledger",
+        "ee_context_pack_persistence_ledger",
+        "ee_pack_query_file_with_ledger",
+        "ee_context_freshness_scan",
+        "ee_pack_replay_ledger",
+        "ee_pack_diff_ledger",
     ] {
         if !source.contains(expected) {
             return Err(format!("scripts/bench.sh missing `{expected}`"));
@@ -186,10 +197,83 @@ fn benchmark_budget_profiles_are_explicit_and_advisory() -> TestResult {
         .get("ci-smoke")
         .ok_or_else(|| "missing ci-smoke profile".to_owned())?;
     let smoke_benches = toml_string_array(smoke, "benches")?;
-    if smoke_benches != vec!["status".to_owned()] {
+    if smoke_benches
+        != vec![
+            "status".to_owned(),
+            "pack_replay_freshness_smoke".to_owned(),
+        ]
+    {
         return Err(format!(
-            "ci-smoke must run only the status smoke benchmark, got {smoke_benches:?}"
+            "ci-smoke must run status plus pack replay/freshness smoke benchmarks, got {smoke_benches:?}"
         ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn pack_replay_freshness_budget_operations_are_advisory() -> TestResult {
+    let manifest = budgets_manifest()?;
+    let operations = manifest
+        .get("operations")
+        .ok_or_else(|| "missing TOML field `operations`".to_owned())?
+        .as_table()
+        .ok_or_else(|| "`operations` must be a TOML table".to_owned())?;
+
+    for operation in [
+        "ee_context_pack_assembly_no_ledger",
+        "ee_context_pack_persistence_ledger",
+        "ee_context_pack_with_ledger",
+        "ee_pack_query_file_assembly_no_ledger",
+        "ee_pack_query_file_persistence_ledger",
+        "ee_pack_query_file_with_ledger",
+        "ee_context_freshness_scan",
+        "ee_pack_replay_ledger",
+        "ee_pack_diff_ledger",
+    ] {
+        let entry = operations
+            .get(operation)
+            .ok_or_else(|| format!("missing benchmark operation `{operation}`"))?;
+        let p50 = toml_field(entry, "p50_ms_max")?
+            .as_value()
+            .and_then(|field| {
+                field
+                    .as_float()
+                    .or_else(|| field.as_integer().map(|v| v as f64))
+            })
+            .ok_or_else(|| format!("operation `{operation}` missing p50_ms_max"))?;
+        let p99 = toml_field(entry, "p99_ms_max")?
+            .as_value()
+            .and_then(|field| {
+                field
+                    .as_float()
+                    .or_else(|| field.as_integer().map(|v| v as f64))
+            })
+            .ok_or_else(|| format!("operation `{operation}` missing p99_ms_max"))?;
+        if !(p50 > 0.0 && p99 >= p50) {
+            return Err(format!(
+                "operation `{operation}` must have positive monotonic p50/p99 budgets, got p50={p50}, p99={p99}"
+            ));
+        }
+        if toml_string(entry, "description")?.is_empty() {
+            return Err(format!(
+                "operation `{operation}` must describe the measured surface"
+            ));
+        }
+    }
+
+    let baseline = fs::read_to_string(BASELINE_PATH)
+        .map_err(|error| format!("failed to read `{BASELINE_PATH}`: {error}"))?;
+    for operation in [
+        "ee_context_pack_with_ledger",
+        "ee_pack_query_file_with_ledger",
+        "ee_context_freshness_scan",
+        "ee_pack_replay_ledger",
+        "ee_pack_diff_ledger",
+    ] {
+        if !baseline.contains(operation) {
+            return Err(format!("baseline missing `{operation}`"));
+        }
     }
 
     Ok(())

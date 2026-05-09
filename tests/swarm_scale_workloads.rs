@@ -12,6 +12,7 @@ const EXPECTED_TRAFFIC_FAMILIES: &[&str] = &[
     "index_rebuild",
     "graph_refresh",
     "daemon_maintenance",
+    "pack_replay_freshness_scan",
     "mixed_mode_swarm",
 ];
 const EXPECTED_TIERS: &[&str] = &["small", "medium", "large", "stress"];

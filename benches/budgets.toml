@@ -17,7 +17,10 @@ budget_mode = "advisory"
 description = "Smallest RCH-friendly no-mock smoke profile for PR and agent closeout checks"
 ci_suitability = "normal_ci"
 workload_tier = "small"
-benches = ["status"]
+benches = [
+  "status",
+  "pack_replay_freshness_smoke",
+]
 sample_size = 10
 measurement_time_secs = 0.5
 release_blocking = false
@@ -116,3 +119,48 @@ description = "Compute PageRank over memory graph"
 p50_ms_max = 50.0
 p99_ms_max = 150.0
 description = "Generate curation candidates from feedback"
+
+[operations.ee_context_pack_assembly_no_ledger]
+p50_ms_max = 95.0
+p99_ms_max = 240.0
+description = "Assemble a context pack before pack-record and replay-ledger persistence"
+
+[operations.ee_context_pack_persistence_ledger]
+p50_ms_max = 25.0
+p99_ms_max = 75.0
+description = "Persist context pack records, items, omissions, and replay ledger"
+
+[operations.ee_context_pack_with_ledger]
+p50_ms_max = 120.0
+p99_ms_max = 300.0
+description = "Build a context pack including replay-ledger persistence"
+
+[operations.ee_pack_query_file_assembly_no_ledger]
+p50_ms_max = 95.0
+p99_ms_max = 240.0
+description = "Assemble a query-file pack before pack-record and replay-ledger persistence"
+
+[operations.ee_pack_query_file_persistence_ledger]
+p50_ms_max = 25.0
+p99_ms_max = 75.0
+description = "Persist query-file pack records, items, omissions, and replay ledger"
+
+[operations.ee_pack_query_file_with_ledger]
+p50_ms_max = 120.0
+p99_ms_max = 300.0
+description = "Build a query-file pack including replay-ledger persistence"
+
+[operations.ee_context_freshness_scan]
+p50_ms_max = 140.0
+p99_ms_max = 340.0
+description = "Build context while checking file provenance freshness"
+
+[operations.ee_pack_replay_ledger]
+p50_ms_max = 20.0
+p99_ms_max = 60.0
+description = "Read and validate a persisted pack replay ledger"
+
+[operations.ee_pack_diff_ledger]
+p50_ms_max = 30.0
+p99_ms_max = 90.0
+description = "Compare two persisted pack replay ledgers"

@@ -63,6 +63,8 @@ TARGET_ROOT="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_ee_bench}"
 CRITERION_DIR="$TARGET_ROOT/criterion"
 ARTIFACT_DIR="${EE_BENCH_ARTIFACT_DIR:-$TARGET_ROOT/ee-bench}"
 OUTPUT_FILE="${EE_BENCH_OUTPUT:-$ARTIFACT_DIR/ee-perf.v1.json}"
+EE_BIN="$TARGET_ROOT/release/ee"
+export CARGO_TARGET_DIR="$TARGET_ROOT"
 
 if [ ! -f "$BUDGETS_FILE" ]; then
     echo "Error: budgets.toml not found at $BUDGETS_FILE" >&2
@@ -138,6 +140,7 @@ append_result() {
     p99_ms="$5"
     max_ms="$6"
     rows_per_sec="$7"
+    regression_status="${8:-not_checked}"
 
     if [ -n "$RESULTS" ]; then
         RESULTS="$RESULTS,"
@@ -157,8 +160,21 @@ append_result() {
       \"db_size_bytes\": null,
       \"index_size_bytes\": null,
       \"rows_per_sec\": $rows_per_sec,
+      \"regression_status\": \"$regression_status\",
       \"budget_mode\": \"advisory\"
     }"
+}
+
+append_measured_ms() {
+    key="$1"
+    elapsed_ms="$2"
+    regression_status=$(budget_status "$key" "$elapsed_ms")
+    append_result "$key" "measured" "$elapsed_ms" "$elapsed_ms" "$elapsed_ms" "$elapsed_ms" null "$regression_status"
+}
+
+append_smoke_failure() {
+    key="$1"
+    append_result "$key" "failed" null null null null null
 }
 
 to_ms() {
@@ -186,6 +202,75 @@ parse_time_value() {
         | sed -n '1p'
 }
 
+budget_status() {
+    key="$1"
+    elapsed_ms="$2"
+
+    case "$elapsed_ms" in
+        ""|null) printf '%s\n' "not_available"; return ;;
+    esac
+
+    if ! command -v jq >/dev/null 2>&1 || [ ! -f "$BASELINE_FILE" ]; then
+        printf '%s\n' "not_checked"
+        return
+    fi
+
+    ceiling_ms=$(jq -r --arg key "$key" '
+        .operations[$key].p99_ms
+        // .operations[$key].hard_ceiling_ms
+        // .operations[$key].p50_ms
+        // empty
+    ' "$BASELINE_FILE")
+    if [ -z "$ceiling_ms" ] || [ "$ceiling_ms" = "null" ]; then
+        printf '%s\n' "not_checked"
+        return
+    fi
+
+    awk -v elapsed="$elapsed_ms" -v ceiling="$ceiling_ms" 'BEGIN {
+        if (elapsed <= ceiling) {
+            print "within_budget";
+        } else {
+            print "exceeded_budget";
+        }
+    }'
+}
+
+now_ns() {
+    date +%s%N
+}
+
+elapsed_ms() {
+    start_ns="$1"
+    end_ns="$2"
+    awk -v start="$start_ns" -v end="$end_ns" 'BEGIN {
+        printf "%.6f", (end - start) / 1000000;
+    }'
+}
+
+json_get() {
+    file="$1"
+    filter="$2"
+    if command -v jq >/dev/null 2>&1; then
+        jq -r "$filter // empty" "$file"
+    else
+        printf ''
+    fi
+}
+
+json_timing_ms() {
+    file="$1"
+    timing="$2"
+    if command -v jq >/dev/null 2>&1; then
+        jq -r --arg timing "$timing" '
+            .data.timings[]
+            | select(.name == $timing)
+            | .elapsedMs
+        ' "$file" | sed -n '1p'
+    else
+        printf ''
+    fi
+}
+
 workload_json() {
     if command -v jq >/dev/null 2>&1 && [ -f "$WORKLOAD_FILE" ]; then
         jq -c --arg tier "$WORKLOAD_TIER" '
@@ -209,17 +294,19 @@ workload_json() {
 }
 
 run_status_smoke() {
-    if output=$(cargo bench --bench status -- --quick); then
+    if output=$(cargo bench --bench status -- --quick --advisory); then
         printf '%s\n' "$output" >&2
         if command -v jq >/dev/null 2>&1; then
             p50_ms=$(printf '%s\n' "$output" | jq -r '.aggregate_p50_ms // null')
             max_ms=$(printf '%s\n' "$output" | jq -r '[.scales[].max_ms] | max // null')
+            regression_status=$(printf '%s\n' "$output" | jq -r '.regression.status // "not_checked"')
         else
             p50_ms=null
             max_ms=null
+            regression_status=not_checked
         fi
-        append_result "ee_status" "measured" "$p50_ms" null null "$max_ms" null
-        echo "[+] status: p50=${p50_ms}ms max=${max_ms}ms" >&2
+        append_result "ee_status" "measured" "$p50_ms" null null "$max_ms" null "$regression_status"
+        echo "[+] status: p50=${p50_ms}ms max=${max_ms}ms regression=${regression_status}" >&2
     else
         append_result "ee_status" "failed" null null null null null
         echo "[-] status: FAILED" >&2
@@ -249,6 +336,229 @@ run_criterion_bench() {
     fi
 }
 
+run_pack_replay_freshness_smoke() {
+    echo "" >&2
+    echo "[*] Pack replay/freshness overhead smoke..." >&2
+
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "[-] jq is required for pack replay/freshness smoke measurement" >&2
+        for op in \
+            ee_context_pack_assembly_no_ledger \
+            ee_context_pack_persistence_ledger \
+            ee_context_pack_with_ledger \
+            ee_pack_query_file_assembly_no_ledger \
+            ee_pack_query_file_persistence_ledger \
+            ee_pack_query_file_with_ledger \
+            ee_context_freshness_scan \
+            ee_pack_replay_ledger \
+            ee_pack_diff_ledger
+        do
+            append_smoke_failure "$op"
+        done
+        FAILED=true
+        return
+    fi
+
+    echo "[*] Building ee binary for smoke workload..." >&2
+    if ! cargo build --release --bin ee >&2; then
+        echo "[-] ee binary build failed" >&2
+        for op in \
+            ee_context_pack_assembly_no_ledger \
+            ee_context_pack_persistence_ledger \
+            ee_context_pack_with_ledger \
+            ee_pack_query_file_assembly_no_ledger \
+            ee_pack_query_file_persistence_ledger \
+            ee_pack_query_file_with_ledger \
+            ee_context_freshness_scan \
+            ee_pack_replay_ledger \
+            ee_pack_diff_ledger
+        do
+            append_smoke_failure "$op"
+        done
+        FAILED=true
+        return
+    fi
+
+    smoke_root="$ARTIFACT_DIR/pack-replay-freshness-smoke-$$-$(date -u +%Y%m%dT%H%M%SZ)"
+    smoke_workspace="$smoke_root/workspace"
+    smoke_artifacts="$smoke_root/artifacts"
+    smoke_source="$smoke_workspace/freshness-source.md"
+    smoke_query_file="$smoke_root/query.eeq.json"
+    smoke_marker="dcub pack replay freshness smoke"
+    mkdir -p "$smoke_workspace" "$smoke_artifacts"
+    printf '%s\n' "$smoke_marker source evidence line" > "$smoke_source"
+    cat > "$smoke_query_file" <<EOF
+{
+  "version": "ee.query.v1",
+  "query": { "text": "$smoke_marker" },
+  "budget": { "maxTokens": 2000, "candidatePool": 20 },
+  "output": { "profile": "compact" }
+}
+EOF
+
+    run_smoke_command() {
+        step="$1"
+        shift
+        step_slug=$(printf '%s' "$step" | sed 's/[^A-Za-z0-9_]/_/g')
+        LAST_STDOUT_FILE="$smoke_artifacts/$step_slug.stdout.json"
+        LAST_STDERR_FILE="$smoke_artifacts/$step_slug.stderr.log"
+        start_ns=$(now_ns)
+        if "$EE_BIN" "$@" >"$LAST_STDOUT_FILE" 2>"$LAST_STDERR_FILE"; then
+            LAST_EXIT_CODE=0
+        else
+            LAST_EXIT_CODE=$?
+        fi
+        end_ns=$(now_ns)
+        LAST_ELAPSED_MS=$(elapsed_ms "$start_ns" "$end_ns")
+        if [ "$LAST_EXIT_CODE" -ne 0 ]; then
+            echo "[-] $step failed with exit $LAST_EXIT_CODE; stdout=$LAST_STDOUT_FILE stderr=$LAST_STDERR_FILE" >&2
+            return 1
+        fi
+        if [ -s "$LAST_STDERR_FILE" ]; then
+            echo "[-] $step wrote stderr; stdout=$LAST_STDOUT_FILE stderr=$LAST_STDERR_FILE" >&2
+            return 1
+        fi
+        if ! jq -e . "$LAST_STDOUT_FILE" >/dev/null 2>&1; then
+            echo "[-] $step stdout is not JSON; stdout=$LAST_STDOUT_FILE" >&2
+            return 1
+        fi
+        return 0
+    }
+
+    if ! run_smoke_command init --workspace "$smoke_workspace" --json init; then
+        append_smoke_failure "ee_context_pack_with_ledger"
+        FAILED=true
+        return
+    fi
+
+    source_uri="file://$smoke_source#L1"
+    source_content="$smoke_marker source evidence line"
+    if ! run_smoke_command remember-source \
+        --workspace "$smoke_workspace" --json remember \
+        --level procedural --kind rule --tags dcub,replay,freshness \
+        --source "$source_uri" "$source_content"; then
+        append_smoke_failure "ee_context_pack_with_ledger"
+        FAILED=true
+        return
+    fi
+    source_memory_id=$(json_get "$LAST_STDOUT_FILE" '.data.memory_id')
+
+    if ! run_smoke_command remember-redaction-safe \
+        --workspace "$smoke_workspace" --json remember \
+        --level procedural --kind rule --tags dcub,replay,egress \
+        --source "agent-mail://eidetic_engine_cli-dcub#benchmark" \
+        "$smoke_marker redaction-safe placeholder [REDACTED:alpha] [REDACTED:beta]"; then
+        append_smoke_failure "ee_context_pack_with_ledger"
+        FAILED=true
+        return
+    fi
+
+    if ! run_smoke_command index-rebuild --workspace "$smoke_workspace" --json index rebuild; then
+        append_smoke_failure "ee_context_pack_with_ledger"
+        FAILED=true
+        return
+    fi
+
+    if ! run_smoke_command context-performance-before \
+        --workspace "$smoke_workspace" --json context "$smoke_marker" \
+        --max-tokens 2000 --explain-performance; then
+        append_smoke_failure "ee_context_pack_with_ledger"
+        FAILED=true
+        return
+    fi
+    context_assembly_ms=$(json_timing_ms "$LAST_STDOUT_FILE" "packAssembly")
+    context_persistence_ms=$(json_timing_ms "$LAST_STDOUT_FILE" "packPersistence")
+    context_total_ms=$(json_timing_ms "$LAST_STDOUT_FILE" "total")
+    append_measured_ms "ee_context_pack_assembly_no_ledger" "${context_assembly_ms:-null}"
+    append_measured_ms "ee_context_pack_persistence_ledger" "${context_persistence_ms:-null}"
+    append_measured_ms "ee_context_pack_with_ledger" "${context_total_ms:-$LAST_ELAPSED_MS}"
+
+    if ! run_smoke_command why-before --workspace "$smoke_workspace" --json why "$source_memory_id"; then
+        append_smoke_failure "ee_pack_replay_ledger"
+        FAILED=true
+        return
+    fi
+    before_pack_id=$(json_get "$LAST_STDOUT_FILE" '.data.selection.latestPackSelection.packId')
+
+    if ! run_smoke_command pack-query-performance \
+        --workspace "$smoke_workspace" --json pack --query-file "$smoke_query_file" \
+        --explain-performance; then
+        append_smoke_failure "ee_pack_query_file_with_ledger"
+        FAILED=true
+        return
+    fi
+    pack_assembly_ms=$(json_timing_ms "$LAST_STDOUT_FILE" "packAssembly")
+    pack_persistence_ms=$(json_timing_ms "$LAST_STDOUT_FILE" "packPersistence")
+    pack_total_ms=$(json_timing_ms "$LAST_STDOUT_FILE" "total")
+    append_measured_ms "ee_pack_query_file_assembly_no_ledger" "${pack_assembly_ms:-null}"
+    append_measured_ms "ee_pack_query_file_persistence_ledger" "${pack_persistence_ms:-null}"
+    append_measured_ms "ee_pack_query_file_with_ledger" "${pack_total_ms:-$LAST_ELAPSED_MS}"
+
+    printf '%s\n' "$smoke_marker source evidence changed after first pack" > "$smoke_source"
+    if ! run_smoke_command context-performance-after \
+        --workspace "$smoke_workspace" --json context "$smoke_marker" \
+        --max-tokens 2000 --explain-performance; then
+        append_smoke_failure "ee_context_freshness_scan"
+        FAILED=true
+        return
+    fi
+    freshness_total_ms=$(json_timing_ms "$LAST_STDOUT_FILE" "total")
+    freshness_code_count=$(jq '[.data.fallbacks[].code | select(. == "context_evidence_freshness_changed_source")] | length' "$LAST_STDOUT_FILE")
+    if [ "$freshness_code_count" -eq 0 ]; then
+        echo "[-] freshness smoke did not report context_evidence_freshness_changed_source; stdout=$LAST_STDOUT_FILE" >&2
+        append_smoke_failure "ee_context_freshness_scan"
+        FAILED=true
+        return
+    fi
+    append_measured_ms "ee_context_freshness_scan" "${freshness_total_ms:-$LAST_ELAPSED_MS}"
+
+    if ! run_smoke_command why-after --workspace "$smoke_workspace" --json why "$source_memory_id"; then
+        append_smoke_failure "ee_pack_replay_ledger"
+        FAILED=true
+        return
+    fi
+    after_pack_id=$(json_get "$LAST_STDOUT_FILE" '.data.selection.latestPackSelection.packId')
+
+    if [ -z "$before_pack_id" ] || [ -z "$after_pack_id" ] || [ "$before_pack_id" = "$after_pack_id" ]; then
+        echo "[-] smoke pack ids unavailable or identical: before=$before_pack_id after=$after_pack_id" >&2
+        append_smoke_failure "ee_pack_replay_ledger"
+        append_smoke_failure "ee_pack_diff_ledger"
+        FAILED=true
+        return
+    fi
+
+    if ! run_smoke_command pack-replay-after \
+        --workspace "$smoke_workspace" --json pack replay "$after_pack_id"; then
+        append_smoke_failure "ee_pack_replay_ledger"
+        FAILED=true
+        return
+    fi
+    replay_status=$(json_get "$LAST_STDOUT_FILE" '.data.replay.status')
+    if [ "$replay_status" != "available" ]; then
+        echo "[-] pack replay ledger status was $replay_status; stdout=$LAST_STDOUT_FILE" >&2
+        append_smoke_failure "ee_pack_replay_ledger"
+        FAILED=true
+        return
+    fi
+    append_measured_ms "ee_pack_replay_ledger" "$LAST_ELAPSED_MS"
+
+    if ! run_smoke_command pack-diff \
+        --workspace "$smoke_workspace" --json pack diff "$before_pack_id" "$after_pack_id"; then
+        append_smoke_failure "ee_pack_diff_ledger"
+        FAILED=true
+        return
+    fi
+    replayable=$(json_get "$LAST_STDOUT_FILE" '.data.diff.summary.replayable')
+    if [ "$replayable" != "true" ]; then
+        echo "[-] pack diff was not replayable; stdout=$LAST_STDOUT_FILE" >&2
+        append_smoke_failure "ee_pack_diff_ledger"
+        FAILED=true
+        return
+    fi
+    append_measured_ms "ee_pack_diff_ledger" "$LAST_ELAPSED_MS"
+    echo "[+] pack replay/freshness smoke artifacts: $smoke_root" >&2
+}
+
 for bench in $BENCHMARKS; do
     echo "" >&2
     echo "[*] Benchmark: $bench" >&2
@@ -258,6 +568,10 @@ for bench in $BENCHMARKS; do
         run_criterion_bench "$bench"
     fi
 done
+
+if [ "$PROFILE" = "ci-smoke" ]; then
+    run_pack_replay_freshness_smoke
+fi
 
 WORKLOAD_JSON=$(workload_json)
 
@@ -275,6 +589,11 @@ PERF_JSON=$(cat <<EOF
   "artifact_dir": "$ARTIFACT_DIR",
   "budget_mode": "advisory",
   "release_blocking": $RELEASE_BLOCKING,
+  "artifact_redaction": {
+    "status": "redaction_safe",
+    "raw_secret_material": "not_used",
+    "policy": "synthetic placeholders only; command artifacts are JSON/stderr files under artifact_dir"
+  },
   "workload": $WORKLOAD_JSON,
   "operations": {
     $RESULTS

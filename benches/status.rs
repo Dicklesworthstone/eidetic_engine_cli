@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use criterion::{BenchmarkId, Criterion, black_box};
@@ -12,16 +12,17 @@ use ee::core::status::{
 };
 
 const BASELINE_PATH: &str = "benches/baselines/v0.1.json";
-const QUICK_SUMMARY_PATH: &str = "target/criterion/ee_status/quick_summary.json";
+const QUICK_SUMMARY_RELATIVE_PATH: &str = "criterion/ee_status/quick_summary.json";
 const REGRESSION_TOLERANCE: f64 = 1.30;
 
 fn main() -> ExitCode {
     let args = env::args().skip(1).collect::<Vec<_>>();
     let quick = args.iter().any(|arg| arg == "--quick");
     let compare_only = args.iter().any(|arg| arg == "--compare-only");
+    let advisory = args.iter().any(|arg| arg == "--advisory");
 
     if quick || compare_only {
-        return match run_quick_mode(compare_only) {
+        return match run_quick_mode(compare_only, advisory) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("error: {error}");
@@ -34,22 +35,28 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_quick_mode(compare_only: bool) -> Result<(), String> {
+fn run_quick_mode(compare_only: bool, advisory: bool) -> Result<(), String> {
     let report = run_status_bench_quick()?;
-    if status_bench_exceeds_hard_ceiling(&report) {
-        return Err(format!(
-            "status benchmark exceeded hard ceiling of {:.2}ms (aggregate p50 {:.2}ms)",
-            report.hard_ceiling_ms, report.aggregate_p50_ms
-        ));
-    }
+    let exceeds_hard_ceiling = status_bench_exceeds_hard_ceiling(&report);
 
     if compare_only {
         compare_against_baseline(&report)?;
     }
 
-    let summary = quick_summary_json(&report);
+    let summary_path = quick_summary_path();
+    let summary = quick_summary_json(&report, &summary_path, advisory, exceeds_hard_ceiling);
     write_quick_summary(&summary)?;
     println!("{summary}");
+
+    if exceeds_hard_ceiling && !advisory {
+        return Err(format!(
+            "status benchmark exceeded hard ceiling of {:.2}ms (aggregate p50 {:.2}ms; failing scales: {})",
+            report.hard_ceiling_ms,
+            report.aggregate_p50_ms,
+            failing_scales(&report)
+        ));
+    }
+
     Ok(())
 }
 
@@ -144,11 +151,21 @@ fn value_f64(object: &Value, key: &str) -> Result<f64, String> {
         .ok_or_else(|| format!("baseline field `{key}` missing or not a number"))
 }
 
-fn quick_summary_json(report: &StatusBenchReport) -> String {
+fn quick_summary_json(
+    report: &StatusBenchReport,
+    summary_path: &Path,
+    advisory: bool,
+    exceeds_hard_ceiling: bool,
+) -> String {
     let scales = report
         .scales
         .iter()
         .map(|sample| {
+            let regression_status = if sample.p50_ms > sample.hard_ceiling_ms {
+                "exceeded_hard_ceiling"
+            } else {
+                "within_budget"
+            };
             json!({
                 "scale": sample.scale_name,
                 "memory_count": sample.memory_count,
@@ -156,18 +173,30 @@ fn quick_summary_json(report: &StatusBenchReport) -> String {
                 "p50_ms": sample.p50_ms,
                 "max_ms": sample.max_ms,
                 "hard_ceiling_ms": sample.hard_ceiling_ms,
+                "regression_status": regression_status,
             })
         })
         .collect::<Vec<_>>();
 
+    let regression_status = if exceeds_hard_ceiling {
+        "exceeded_hard_ceiling"
+    } else {
+        "within_budget"
+    };
+    let budget_mode = if advisory { "advisory" } else { "blocking" };
     let payload = json!({
         "schema": "ee.perf.quick_bench.v1",
         "operation": report.operation,
         "iterations_per_scale": report.iterations_per_scale,
         "aggregate_p50_ms": report.aggregate_p50_ms,
         "hard_ceiling_ms": report.hard_ceiling_ms,
+        "regression": {
+            "status": regression_status,
+            "budget_mode": budget_mode,
+            "hard_ceiling_exceeded": exceeds_hard_ceiling,
+        },
         "scales": scales,
-        "quick_summary_path": QUICK_SUMMARY_PATH,
+        "quick_summary_path": summary_path.display().to_string(),
     });
 
     serde_json::to_string_pretty(&payload).unwrap_or_else(|error| {
@@ -178,8 +207,15 @@ fn quick_summary_json(report: &StatusBenchReport) -> String {
     })
 }
 
+fn quick_summary_path() -> PathBuf {
+    env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("target"))
+        .join(QUICK_SUMMARY_RELATIVE_PATH)
+}
+
 fn write_quick_summary(summary_json: &str) -> Result<(), String> {
-    let path = Path::new(QUICK_SUMMARY_PATH);
+    let path = quick_summary_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             format!(
@@ -188,10 +224,30 @@ fn write_quick_summary(summary_json: &str) -> Result<(), String> {
             )
         })?;
     }
-    fs::write(path, summary_json).map_err(|error| {
+    fs::write(&path, summary_json).map_err(|error| {
         format!(
             "failed to write quick summary file `{}`: {error}",
             path.display()
         )
     })
+}
+
+fn failing_scales(report: &StatusBenchReport) -> String {
+    let scales = report
+        .scales
+        .iter()
+        .filter(|sample| sample.p50_ms > sample.hard_ceiling_ms)
+        .map(|sample| {
+            format!(
+                "{} {:.2}ms>{:.2}ms",
+                sample.scale_name, sample.p50_ms, sample.hard_ceiling_ms
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if scales.is_empty() {
+        return "aggregate".to_owned();
+    }
+
+    scales.join(", ")
 }
