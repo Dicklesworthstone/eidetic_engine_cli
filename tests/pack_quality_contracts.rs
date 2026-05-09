@@ -1,20 +1,10 @@
 use std::collections::BTreeSet;
-use std::fs;
-use std::path::PathBuf;
 use std::process::Command;
 
 use insta::assert_json_snapshot;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 type TestResult = Result<(), String>;
-
-fn unique_artifact_dir(prefix: &str) -> Result<PathBuf, String> {
-    tempfile::Builder::new()
-        .prefix(&format!("{prefix}-"))
-        .tempdir()
-        .map(tempfile::TempDir::keep)
-        .map_err(|error| format!("failed to create {prefix} artifact directory: {error}"))
-}
 
 fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
     let exe =
