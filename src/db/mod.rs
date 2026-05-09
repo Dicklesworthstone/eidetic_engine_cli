@@ -35,6 +35,9 @@ pub const AUDIT_ROW_HASH_VERSION: &str = "ee.audit.row_hash.v1";
 pub const MIGRATION_DRIFT_ERROR_ID: &str = "EE-E040";
 pub const MIGRATION_DRIFT_ERROR_CODE: &str = "migration_drift";
 pub const PACK_REPLAY_LEDGER_SCHEMA_V1: &str = "ee.pack_replay_ledger.v1";
+pub const PACK_REPLAY_LEDGER_MISSING: &str = "pack_replay_ledger_missing";
+pub const PACK_REPLAY_LEDGER_MALFORMED: &str = "pack_replay_ledger_malformed";
+pub const PACK_REPLAY_LEDGER_HASH_MISMATCH: &str = "pack_replay_ledger_hash_mismatch";
 
 /// Standard audit action types for memory operations (EE-070).
 pub mod audit_actions {
@@ -9998,6 +10001,33 @@ pub struct StoredPackRecord {
     pub created_by: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackLedgerStatus {
+    Available,
+    Missing,
+    Malformed,
+    HashMismatch,
+}
+
+impl PackLedgerStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Missing => "missing",
+            Self::Malformed => "malformed",
+            Self::HashMismatch => "hash_mismatch",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParsedPackLedger {
+    pub status: PackLedgerStatus,
+    pub ledger: Option<serde_json::Value>,
+    pub degraded: Vec<serde_json::Value>,
+}
+
 /// Input for creating a pack item (junction with memory).
 #[derive(Debug, Clone)]
 pub struct CreatePackItemInput {
@@ -10491,6 +10521,116 @@ fn pack_ledger_degradations(degraded_json: Option<&str>) -> Result<Vec<serde_jso
         })?;
     degraded.sort_by_key(degradation_sort_key);
     Ok(degraded)
+}
+
+pub fn pack_ledger_degradation(
+    code: &str,
+    message: &str,
+    severity: &str,
+    repair: Option<&str>,
+    details: serde_json::Value,
+) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "code": code,
+        "message": message,
+        "severity": severity,
+        "details": details,
+    });
+    if let Some(repair) = repair {
+        value["repair"] = serde_json::Value::String(repair.to_string());
+    }
+    value
+}
+
+pub fn parse_stored_pack_ledger(record: &StoredPackRecord) -> ParsedPackLedger {
+    let Some(raw_ledger) = record.ledger_json.as_deref() else {
+        return ParsedPackLedger {
+            status: PackLedgerStatus::Missing,
+            ledger: None,
+            degraded: vec![pack_ledger_degradation(
+                PACK_REPLAY_LEDGER_MISSING,
+                "Pack selection ledger is missing for this pack record.",
+                "medium",
+                Some("Rebuild the pack with a binary that persists selection ledgers."),
+                serde_json::json!({"packId": record.id}),
+            )],
+        };
+    };
+
+    let parsed = match serde_json::from_str::<serde_json::Value>(raw_ledger) {
+        Ok(value) => value,
+        Err(error) => {
+            return ParsedPackLedger {
+                status: PackLedgerStatus::Malformed,
+                ledger: None,
+                degraded: vec![pack_ledger_degradation(
+                    PACK_REPLAY_LEDGER_MALFORMED,
+                    "Pack selection ledger is malformed and cannot be replayed.",
+                    "high",
+                    Some("Inspect the pack record and rebuild the pack if possible."),
+                    serde_json::json!({
+                        "packId": record.id,
+                        "parseError": error.to_string(),
+                    }),
+                )],
+            };
+        }
+    };
+
+    let expected_hash = record.ledger_hash.as_deref();
+    let actual_hash = parsed
+        .get("ledgerHash")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    if expected_hash.is_some() && actual_hash.as_deref() != expected_hash {
+        return ParsedPackLedger {
+            status: PackLedgerStatus::HashMismatch,
+            ledger: Some(parsed),
+            degraded: vec![pack_ledger_degradation(
+                PACK_REPLAY_LEDGER_HASH_MISMATCH,
+                "Pack selection ledger hash does not match the pack record.",
+                "high",
+                Some("Treat this replay as diagnostic only and inspect the database."),
+                serde_json::json!({
+                    "packId": record.id,
+                    "recordLedgerHash": expected_hash,
+                    "ledgerHash": actual_hash,
+                }),
+            )],
+        };
+    }
+
+    ParsedPackLedger {
+        status: PackLedgerStatus::Available,
+        ledger: Some(parsed),
+        degraded: Vec::new(),
+    }
+}
+
+pub fn pack_ledger_core_value<'a>(
+    ledger: &'a serde_json::Value,
+    field: &str,
+) -> Option<&'a serde_json::Value> {
+    ledger
+        .get("core")
+        .and_then(|core| core.get(field))
+        .or_else(|| ledger.get(field))
+}
+
+pub fn pack_ledger_core_array<'a>(
+    ledger: &'a serde_json::Value,
+    field: &str,
+) -> Option<&'a Vec<serde_json::Value>> {
+    pack_ledger_core_value(ledger, field).and_then(serde_json::Value::as_array)
+}
+
+pub fn stored_pack_ledger_degraded_values(parsed: &ParsedPackLedger) -> Vec<serde_json::Value> {
+    parsed
+        .ledger
+        .as_ref()
+        .and_then(|ledger| pack_ledger_core_array(ledger, "degraded"))
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn degradation_sort_key(value: &serde_json::Value) -> String {
@@ -18853,6 +18993,107 @@ mod tests {
             &ledger["degraded"][0]["code"],
             &serde_json::json!("graph_unavailable"),
             "degradations sorted by code",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn parse_stored_pack_ledger_reports_replay_statuses() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_pack_test_memory(&connection)?;
+
+        let pack_id = "pack_000000000000000000000pars1";
+        let input = super::CreatePackRecordInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            query: "format before release".to_string(),
+            profile: "compact".to_string(),
+            max_tokens: 1200,
+            used_tokens: 50,
+            item_count: 1,
+            omitted_count: 0,
+            pack_hash: "blake3:parse-pack".to_string(),
+            degraded_json: None,
+            created_by: Some("ee context".to_string()),
+        };
+        let items = vec![super::CreatePackItemInput {
+            pack_id: pack_id.to_string(),
+            memory_id: "mem_00000000000000000000pack01".to_string(),
+            rank: 1,
+            section: "procedural_rules".to_string(),
+            estimated_tokens: 50,
+            relevance: 0.95,
+            utility: 0.8,
+            why: "Selected because the memory matches release work.".to_string(),
+            diversity_key: Some("release".to_string()),
+            provenance_json: r#"{"schema":"ee.pack_item.provenance.v1","entries":[]}"#.to_string(),
+            trust_class: "human_explicit".to_string(),
+            trust_subclass: Some("project-rule".to_string()),
+        }];
+
+        connection.insert_pack_record(pack_id, &input, &items, &[])?;
+        let record = connection
+            .get_pack_record(pack_id)?
+            .ok_or_else(|| TestFailure::new("pack record not found"))?;
+
+        let available = super::parse_stored_pack_ledger(&record);
+        ensure_equal(
+            &available.status,
+            &super::PackLedgerStatus::Available,
+            "available ledger status",
+        )?;
+        ensure(
+            available.ledger.is_some(),
+            "available ledger keeps parsed JSON",
+        )?;
+        ensure(
+            available.degraded.is_empty(),
+            "available ledger has no parser degradations",
+        )?;
+
+        let mut missing = record.clone();
+        missing.ledger_json = None;
+        missing.ledger_hash = None;
+        let missing = super::parse_stored_pack_ledger(&missing);
+        ensure_equal(
+            &missing.status,
+            &super::PackLedgerStatus::Missing,
+            "missing ledger status",
+        )?;
+        ensure_equal(
+            &missing.degraded[0]["code"],
+            &serde_json::json!(super::PACK_REPLAY_LEDGER_MISSING),
+            "missing ledger code",
+        )?;
+
+        let mut malformed = record.clone();
+        malformed.ledger_json = Some("{not valid json".to_string());
+        let malformed = super::parse_stored_pack_ledger(&malformed);
+        ensure_equal(
+            &malformed.status,
+            &super::PackLedgerStatus::Malformed,
+            "malformed ledger status",
+        )?;
+        ensure_equal(
+            &malformed.degraded[0]["code"],
+            &serde_json::json!(super::PACK_REPLAY_LEDGER_MALFORMED),
+            "malformed ledger code",
+        )?;
+
+        let mut hash_mismatch = record;
+        hash_mismatch.ledger_hash = Some("blake3:not-the-stored-ledger-hash".to_string());
+        let hash_mismatch = super::parse_stored_pack_ledger(&hash_mismatch);
+        ensure_equal(
+            &hash_mismatch.status,
+            &super::PackLedgerStatus::HashMismatch,
+            "hash mismatch ledger status",
+        )?;
+        ensure_equal(
+            &hash_mismatch.degraded[0]["code"],
+            &serde_json::json!(super::PACK_REPLAY_LEDGER_HASH_MISMATCH),
+            "hash mismatch ledger code",
         )?;
 
         connection.close()?;

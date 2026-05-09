@@ -14617,36 +14617,10 @@ pub const PACK_REPLAY_SCHEMA_V1: &str = "ee.pack.replay.v1";
 /// Schema for pack diff response.
 pub const PACK_DIFF_SCHEMA_V1: &str = "ee.pack.diff.v1";
 
-const PACK_REPLAY_LEDGER_MISSING: &str = "pack_replay_ledger_missing";
-const PACK_REPLAY_LEDGER_MALFORMED: &str = "pack_replay_ledger_malformed";
-const PACK_REPLAY_LEDGER_HASH_MISMATCH: &str = "pack_replay_ledger_hash_mismatch";
 const PACK_DIFF_SCORE_EPSILON: f64 = 0.000_001;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PackLedgerStatus {
-    Available,
-    Missing,
-    Malformed,
-    HashMismatch,
-}
-
-impl PackLedgerStatus {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Available => "available",
-            Self::Missing => "missing",
-            Self::Malformed => "malformed",
-            Self::HashMismatch => "hash_mismatch",
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct ParsedPackLedger {
-    status: PackLedgerStatus,
-    ledger: Option<serde_json::Value>,
-    degraded: Vec<serde_json::Value>,
-}
+type PackLedgerStatus = crate::db::PackLedgerStatus;
+type ParsedPackLedger = crate::db::ParsedPackLedger;
 
 #[derive(Clone, Debug, PartialEq)]
 struct PackDiffItem {
@@ -14724,88 +14698,8 @@ fn load_pack_items(
         })
 }
 
-fn pack_degradation(
-    code: &str,
-    message: &str,
-    severity: &str,
-    repair: Option<&str>,
-    details: serde_json::Value,
-) -> serde_json::Value {
-    let mut value = serde_json::json!({
-        "code": code,
-        "message": message,
-        "severity": severity,
-        "details": details,
-    });
-    if let Some(repair) = repair {
-        value["repair"] = serde_json::Value::String(repair.to_string());
-    }
-    value
-}
-
 fn parse_pack_ledger(record: &crate::db::StoredPackRecord) -> ParsedPackLedger {
-    let Some(raw_ledger) = record.ledger_json.as_deref() else {
-        return ParsedPackLedger {
-            status: PackLedgerStatus::Missing,
-            ledger: None,
-            degraded: vec![pack_degradation(
-                PACK_REPLAY_LEDGER_MISSING,
-                "Pack selection ledger is missing for this pack record.",
-                "medium",
-                Some("Rebuild the pack with a binary that persists selection ledgers."),
-                serde_json::json!({"packId": record.id}),
-            )],
-        };
-    };
-
-    let parsed = match serde_json::from_str::<serde_json::Value>(raw_ledger) {
-        Ok(value) => value,
-        Err(error) => {
-            return ParsedPackLedger {
-                status: PackLedgerStatus::Malformed,
-                ledger: None,
-                degraded: vec![pack_degradation(
-                    PACK_REPLAY_LEDGER_MALFORMED,
-                    "Pack selection ledger is malformed and cannot be replayed.",
-                    "high",
-                    Some("Inspect the pack record and rebuild the pack if possible."),
-                    serde_json::json!({
-                        "packId": record.id,
-                        "parseError": error.to_string(),
-                    }),
-                )],
-            };
-        }
-    };
-
-    let expected_hash = record.ledger_hash.as_deref();
-    let actual_hash = parsed
-        .get("ledgerHash")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    if expected_hash.is_some() && actual_hash.as_deref() != expected_hash {
-        return ParsedPackLedger {
-            status: PackLedgerStatus::HashMismatch,
-            ledger: Some(parsed),
-            degraded: vec![pack_degradation(
-                PACK_REPLAY_LEDGER_HASH_MISMATCH,
-                "Pack selection ledger hash does not match the pack record.",
-                "high",
-                Some("Treat this replay as diagnostic only and inspect the database."),
-                serde_json::json!({
-                    "packId": record.id,
-                    "recordLedgerHash": expected_hash,
-                    "ledgerHash": actual_hash,
-                }),
-            )],
-        };
-    }
-
-    ParsedPackLedger {
-        status: PackLedgerStatus::Available,
-        ledger: Some(parsed),
-        degraded: Vec::new(),
-    }
+    crate::db::parse_stored_pack_ledger(record)
 }
 
 fn stored_pack_item_json(item: &crate::db::StoredPackItem) -> serde_json::Value {
@@ -14846,30 +14740,15 @@ fn pack_record_json(
     })
 }
 
-fn ledger_core_value<'a>(
-    ledger: &'a serde_json::Value,
-    field: &str,
-) -> Option<&'a serde_json::Value> {
-    ledger
-        .get("core")
-        .and_then(|core| core.get(field))
-        .or_else(|| ledger.get(field))
-}
-
 fn ledger_core_array<'a>(
     ledger: &'a serde_json::Value,
     field: &str,
 ) -> Option<&'a Vec<serde_json::Value>> {
-    ledger_core_value(ledger, field).and_then(serde_json::Value::as_array)
+    crate::db::pack_ledger_core_array(ledger, field)
 }
 
 fn ledger_degraded_values(parsed: &ParsedPackLedger) -> Vec<serde_json::Value> {
-    parsed
-        .ledger
-        .as_ref()
-        .and_then(|ledger| ledger_core_array(ledger, "degraded"))
-        .cloned()
-        .unwrap_or_default()
+    crate::db::stored_pack_ledger_degraded_values(parsed)
 }
 
 fn canonical_json(value: &serde_json::Value) -> String {
