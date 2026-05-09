@@ -28,6 +28,30 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
+fn run_ee_pack_query_file(workspace: &str, query_file: &str) -> Result<Output, String> {
+    let build_output = run_ee(&[
+        "--workspace",
+        workspace,
+        "pack",
+        "build",
+        "--query-file",
+        query_file,
+        "--json",
+    ])?;
+    if build_output.status.code() == Some(EXIT_SUCCESS) {
+        return Ok(build_output);
+    }
+
+    run_ee(&[
+        "--workspace",
+        workspace,
+        "pack",
+        "--query-file",
+        query_file,
+        "--json",
+    ])
+}
+
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
         Ok(())
@@ -821,6 +845,131 @@ fn matrix_redaction_respect_succeeds() -> TestResult {
     let json = stdout_json(&output)?;
     assert_response_envelope(&json, "redaction")?;
     assert_stderr_empty(&output, "redaction")
+}
+
+#[test]
+fn matrix_redaction_allow_categories_filters_secret_reasons() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+    let init_output = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(
+        &init_output.status.code(),
+        &Some(EXIT_SUCCESS),
+        "redaction allow init",
+    )?;
+    assert_stderr_empty(&init_output, "redaction allow init")?;
+
+    let database_path = Path::new(&workspace).join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+    let workspace_row = connection
+        .get_workspace_by_path(&workspace)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "redaction allow workspace row missing".to_string())?;
+    let memory_input = |content: &str| CreateMemoryInput {
+        workspace_id: workspace_row.id.clone(),
+        level: "semantic".to_string(),
+        kind: "fact".to_string(),
+        content: content.to_string(),
+        workflow_id: None,
+        confidence: 0.9,
+        utility: 0.8,
+        importance: 0.7,
+        provenance_uri: Some("file://docs/query-schema.md#L190".to_string()),
+        trust_class: "agent_validated".to_string(),
+        trust_subclass: Some("query-v1-matrix".to_string()),
+        valid_from: None,
+        valid_to: None,
+        tags: vec!["redaction".to_string()],
+    };
+    let blocked_secret = "sk-ant-api03-redactionfuzztokenredactionfuzztokenredactionfuzztoken";
+    let blocked_content = format!("redaction allowcategory blocked candidate {blocked_secret}");
+    connection
+        .insert_memory(
+            "mem_00000000000000000000000401",
+            &memory_input("redaction allowcategory safe candidate"),
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .insert_memory(
+            "mem_00000000000000000000000402",
+            &memory_input(&blocked_content),
+        )
+        .map_err(|error| error.to_string())?;
+    connection.close().map_err(|error| error.to_string())?;
+
+    let rebuild = run_ee(&["--workspace", &workspace, "index", "rebuild", "--json"])?;
+    ensure_equal(
+        &rebuild.status.code(),
+        &Some(EXIT_SUCCESS),
+        "redaction allow index rebuild",
+    )?;
+    assert_stderr_empty(&rebuild, "redaction allow index rebuild")?;
+
+    let excluded_query = write_query_file(
+        &tempdir,
+        r#"{
+            "version": "ee.query.v1",
+            "query": {"text": "redaction allowcategory"},
+            "redaction": {"allowCategories": ["email_address"]}
+        }"#,
+    )?;
+    let excluded_output = run_ee_pack_query_file(&workspace, &excluded_query)?;
+    ensure_equal(
+        &excluded_output.status.code(),
+        &Some(EXIT_SUCCESS),
+        "redaction allow excluded",
+    )?;
+    let excluded_json = stdout_json(&excluded_output)?;
+    assert_response_envelope(&excluded_json, "redaction allow excluded")?;
+    let excluded_contents = pack_item_contents(&excluded_json, "redaction allow excluded")?;
+    ensure(
+        excluded_contents
+            .iter()
+            .any(|content| content.contains("safe candidate")),
+        "redaction allow excluded: safe candidate should remain",
+    )?;
+    ensure(
+        excluded_contents
+            .iter()
+            .all(|content| !content.contains("blocked candidate")),
+        "redaction allow excluded: secret candidate should be filtered",
+    )?;
+    ensure(
+        degraded_codes(&excluded_json).contains(&"context_redaction_filtered_results"),
+        "redaction allow excluded: filtering should be reported",
+    )?;
+    assert_stderr_empty(&excluded_output, "redaction allow excluded")?;
+
+    let included_query = write_query_file(
+        &tempdir,
+        r#"{
+            "version": "ee.query.v1",
+            "query": {"text": "redaction allowcategory"},
+            "redaction": {"allowCategories": ["anthropic_api_key"]}
+        }"#,
+    )?;
+    let included_output = run_ee_pack_query_file(&workspace, &included_query)?;
+    ensure_equal(
+        &included_output.status.code(),
+        &Some(EXIT_SUCCESS),
+        "redaction allow included",
+    )?;
+    let included_json = stdout_json(&included_output)?;
+    assert_response_envelope(&included_json, "redaction allow included")?;
+    let included_contents = pack_item_contents(&included_json, "redaction allow included")?;
+    ensure(
+        included_contents
+            .iter()
+            .any(|content| content.contains("blocked candidate")),
+        "redaction allow included: allowed secret category should be retained",
+    )?;
+    ensure(
+        included_contents
+            .iter()
+            .all(|content| !content.contains(blocked_secret)),
+        "redaction allow included: raw secret must still be redacted",
+    )?;
+    assert_stderr_empty(&included_output, "redaction allow included")
 }
 
 #[test]

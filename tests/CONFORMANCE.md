@@ -15,7 +15,7 @@ schema contracts defined in `docs/`.
 
 | Category | Count | Description |
 |----------|-------|-------------|
-| Implemented Features | 21 | Working features that should succeed |
+| Implemented Features | 22 | Working features that should succeed |
 | Unimplemented Features | 0 | Features returning `ERR_UNSUPPORTED_FEATURE` |
 | Error Cases | 11 | Invalid inputs returning appropriate error codes |
 | Combination Tests | 3 | Multiple features used together |
@@ -42,6 +42,7 @@ schema contracts defined in `docs/`.
 | `matrix_temporal_validity_strict_succeeds` | temporalValidity | docs/query-schema.md:171-186 |
 | `matrix_trust_min_class_succeeds` | trust.minClass | docs/query-schema.md:192-217 |
 | `matrix_redaction_respect_succeeds` | redaction.policy=respect | docs/query-schema.md:192-217 |
+| `matrix_redaction_allow_categories_filters_secret_reasons` | redaction.allowCategories | docs/query-schema.md:192-217 |
 | `matrix_graph_traversal_hints_expand_seed_neighborhood` | graph traversal, linkTypes, includeOrphans | docs/query-schema.md:221-258 |
 | `matrix_graph_traversal_direction_and_orphan_handling` | inbound/outbound/bidirectional graph traversal | docs/query-schema.md:221-258 |
 | `matrix_graph_hints_do_not_expand_cross_workspace_links` | graph workspace scope filtering | docs/query-schema.md:221-258 |

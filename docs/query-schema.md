@@ -189,10 +189,10 @@ Boolean predicates on memory metadata fields.
 
 ## Trust and Redaction Filters
 
-> **Status: Partially Implemented** — Trust filters are applied during pack
-> candidate resolution. `redaction.policy: "respect"` is accepted; `"bypass"`
-> is denied with a policy error. Redaction category allow-lists are validated
-> but not yet used as selection filters.
+> **Status: Implemented** — Trust filters are applied during pack candidate
+> resolution. `redaction.policy: "respect"` is accepted; `"bypass"` is denied
+> with a policy error. Redaction allow-lists filter memories by the stable
+> redaction reason codes detected in memory content.
 
 ```json
 {
@@ -203,7 +203,7 @@ Boolean predicates on memory metadata fields.
   },
   "redaction": {
     "policy": "respect",
-    "allowCategories": ["internal"]
+    "allowCategories": ["anthropic_api_key", "email_address"]
   }
 }
 ```
@@ -214,9 +214,12 @@ Boolean predicates on memory metadata fields.
 | `trust.excludeClasses` | string[] | Trust classes to exclude |
 | `trust.requirePosture` | enum | Required trust posture |
 | `redaction.policy` | enum | `"respect"` (apply redaction), `"bypass"` (requires elevated permission) |
-| `redaction.allowCategories` | string[] | Redaction categories that are acceptable |
+| `redaction.allowCategories` | string[] | Stable redaction reason codes that are acceptable, such as `anthropic_api_key` or `email_address` |
 
-**Behavior**: Trust filters are **selection filters**. Memories not meeting trust criteria are excluded.
+**Behavior**: Trust filters and redaction allow-lists are **selection filters**.
+Memories not meeting trust criteria are excluded. Memories with redaction
+reasons outside `redaction.allowCategories` are excluded before packing; memory
+content that remains selected is still redacted before output.
 
 ---
 
@@ -305,8 +308,9 @@ When `budget.maxResults` trims candidates, JSON output includes the
 
 ### Pagination
 
-> **Status: Not Implemented** — Pagination fields are recognized but return `ERR_UNSUPPORTED_FEATURE`.
-> Use CLI flags: `ee search --limit 25 --offset 50`.
+> **Status: Implemented** — Pagination uses opaque cursors that encode the
+> current offset and query shape. A cursor from a different query shape returns
+> `ERR_INVALID_CURSOR`.
 
 ```json
 {
@@ -364,7 +368,10 @@ When `budget.maxResults` trims candidates, JSON output includes the
 
 ### Future Features
 
-Fields that are recognized but not yet implemented return `ERR_UNSUPPORTED_FEATURE` with a message indicating the feature name and expected availability.
+Recognized fields that are intentionally not supported return
+`ERR_UNSUPPORTED_FEATURE` with a message indicating the feature name and
+expected availability. In `ee.query.v1`, this currently applies to non-hybrid
+`query.mode` values such as `lexical`, `semantic`, and `exact`.
 
 ---
 
@@ -387,8 +394,8 @@ Fields that are recognized but not yet implemented return `ERR_UNSUPPORTED_FEATU
 
 ## Examples
 
-> **Note**: Examples marked with ⚠️ use fields that are not yet implemented and will return
-> `ERR_UNSUPPORTED_FEATURE`. Use the equivalent CLI flags shown in the Implementation Status table.
+> **Note**: `ee.query.v1` examples below are executable unless they explicitly
+> call out a non-hybrid `query.mode`.
 
 ### Simple Text Query (working)
 
@@ -484,9 +491,12 @@ Equivalent CLI flags remain available for ad hoc commands:
 }
 ```
 
-### ⚠️ Full Composition (many fields not implemented)
+### Full Composition
 
-The following shows the full schema, but most fields will error. A working subset is shown below.
+The following shows the implemented query-file surface in one request. The
+composition remains declarative: retrieval stays Frankensearch-backed, filters
+are deterministic, graph traversal is bounded, and JSON output keeps
+provenance/explanation fields observable.
 
 ```json
 {
@@ -517,37 +527,17 @@ The following shows the full schema, but most fields will error. A working subse
     "traversal": "bidirectional",
     "maxHops": 1
   },
-  "budget": {                         // ✓ Implemented
+  "budget": {                         // Implemented
     "maxTokens": 4000,
+    "maxResults": 50,
     "candidatePool": 200
   },
-  "output": {                         // ✓ Partially implemented
+  "output": {                         // Implemented
     "profile": "balanced",
-    "explain": true                   // ⚠️ Not implemented
-  }
-}
-```
-
-### Working Subset
-
-```json
-{
-  "version": "ee.query.v1",
-  "workspace": "/data/projects/myproject",
-  "query": {
-    "text": "prepare release",
-    "mode": "hybrid"
+    "explain": true
   },
-  "filters": {
-    "level": {"in": ["procedural", "episodic"]},
-    "confidence": {"gte": 0.7}
-  },
-  "budget": {
-    "maxTokens": 4000,
-    "candidatePool": 200
-  },
-  "output": {
-    "profile": "balanced"
+  "pagination": {                     // Implemented
+    "limit": 25
   }
 }
 ```
@@ -568,9 +558,9 @@ This schema **does not**:
 
 ## Implementation Status
 
-> **Note**: Fields marked "Not Implemented" are recognized by the parser but rejected
-> at runtime with `ERR_UNSUPPORTED_FEATURE`. Use CLI flags for equivalent functionality
-> where available.
+> **Note**: Non-hybrid `query.mode` values are reserved and rejected with
+> `ERR_UNSUPPORTED_FEATURE`; the implemented query-file surface otherwise
+> composes through the pack/search execution path.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
@@ -583,7 +573,7 @@ This schema **does not**:
 | `asOf` | **Implemented** | Excludes memories created or updated after the snapshot timestamp |
 | `temporalValidity` | **Implemented** | strict, relaxed, and ignore postures over `valid_from`/`valid_to` |
 | `trust.*` | **Implemented** | minClass, excludeClasses, requirePosture candidate filtering |
-| `redaction.*` | Partial | `respect` accepted, `bypass` policy denied; category allow-list filtering pending |
+| `redaction.*` | **Implemented** | `respect` accepted, `bypass` policy denied; allowCategories filters on stable redaction reason codes |
 | `graph.*` | **Implemented** | seedMemories, traversal, bounded maxHops, linkTypes, includeOrphans |
 | `budget.maxTokens` | **Implemented** | Token budget for context pack |
 | `budget.candidatePool` | **Implemented** | Candidate pool size |
@@ -609,7 +599,7 @@ These fields are recognized and validated but not wired through to pack/search e
 - [x] **temporalValidity** — Valid-from/valid-to support (EE-TEMPORAL-VALIDITY-001)
 - [x] **trust.minClass, trust.excludeClasses** — Wire to trust class filtering
 - [x] **redaction.policy** — Accept respect and policy-deny bypass
-- [ ] **redaction.allowCategories** — Wire category allow-list filtering
+- [x] **redaction.allowCategories** — Wire category allow-list filtering
 - [x] **graph.seedMemories, graph.traversal, graph.maxHops** — Bounded graph traversal and ranking hints
 - [x] **pagination.cursor, pagination.limit** — Cursor-based pagination
 - [x] **budget.maxResults** — Candidate admission limit

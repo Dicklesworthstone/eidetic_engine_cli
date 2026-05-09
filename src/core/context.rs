@@ -635,7 +635,6 @@ pub fn run_context_pack_with_performance(
     candidate_metrics.graph_filtered_candidates = graph_metrics.filtered_candidates;
     candidate_metrics.graph_missing_seeds = graph_metrics.missing_seeds;
     candidate_metrics.graph_traversed_edges = graph_metrics.traversed_edges;
-    trace.candidate_resolution = candidate_metrics;
     trace.record_elapsed("candidateResolution", candidate_start);
 
     let focus_start = Instant::now();
@@ -662,6 +661,43 @@ pub fn run_context_pack_with_performance(
         ),
     }
     trace.record_elapsed("focusState", focus_start);
+
+    let redaction_filter_input_count =
+        candidate_filter_input_count.saturating_add(trace.focus_candidate_count);
+    let redaction_filtered_candidates = filter_candidates_by_redaction_allow_categories(
+        &mut candidates,
+        &options.filters.redaction,
+    );
+    if redaction_filtered_candidates > 0 {
+        candidate_metrics.redaction_filtered_candidates = candidate_metrics
+            .redaction_filtered_candidates
+            .saturating_add(redaction_filtered_candidates);
+    }
+    trace.candidate_resolution = candidate_metrics;
+    if trace.candidate_resolution.redaction_filtered_candidates > 0 {
+        trace.filter_input_count = trace.filter_input_count.max(redaction_filter_input_count);
+        trace.filtered_count = trace
+            .filtered_count
+            .saturating_add(trace.candidate_resolution.redaction_filtered_candidates);
+        push_degradation(
+            &mut degraded,
+            "context_redaction_filtered_results",
+            ContextResponseSeverity::Low,
+            format!(
+                "{} candidate memor{} excluded by redaction.allowCategories.",
+                trace.candidate_resolution.redaction_filtered_candidates,
+                if trace.candidate_resolution.redaction_filtered_candidates == 1 {
+                    "y was"
+                } else {
+                    "ies were"
+                }
+            ),
+            Some(
+                "Add the emitted redaction reason to redaction.allowCategories or omit the allow-list."
+                    .to_string(),
+            ),
+        );
+    }
 
     sort_context_candidates(&mut candidates);
 
@@ -1470,6 +1506,17 @@ fn candidates_from_search_with_metrics(
                         continue;
                     }
                 }
+                if !filters.redaction.allow_categories.is_empty() {
+                    let Some(memory) = memories.get(&memory_key) else {
+                        metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
+                        continue;
+                    };
+                    if !redaction_allow_categories(&memory.content, &filters.redaction) {
+                        metrics.redaction_filtered_candidates =
+                            metrics.redaction_filtered_candidates.saturating_add(1);
+                        continue;
+                    }
+                }
                 match candidate_from_hit_preloaded(
                     &memories,
                     &tags_map,
@@ -2000,7 +2047,42 @@ fn graph_memory_matches_filters(
             return false;
         }
     }
+    if !filters.redaction.allow_categories.is_empty()
+        && !redaction_allow_categories(&memory.content, &filters.redaction)
+    {
+        return false;
+    }
     true
+}
+
+fn redaction_allow_categories(content: &str, filters: &crate::models::RedactionFilters) -> bool {
+    if filters.allow_categories.is_empty() {
+        return true;
+    }
+
+    let allowed: BTreeSet<&str> = filters
+        .allow_categories
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let report = crate::policy::redact_secret_like_content(content);
+    report
+        .redacted_reasons
+        .iter()
+        .all(|reason| allowed.contains(reason))
+}
+
+fn filter_candidates_by_redaction_allow_categories(
+    candidates: &mut Vec<PackCandidate>,
+    filters: &crate::models::RedactionFilters,
+) -> usize {
+    if filters.allow_categories.is_empty() {
+        return 0;
+    }
+
+    let before = candidates.len();
+    candidates.retain(|candidate| redaction_allow_categories(&candidate.content, filters));
+    before.saturating_sub(candidates.len())
 }
 
 fn graph_candidate_from_memory(
