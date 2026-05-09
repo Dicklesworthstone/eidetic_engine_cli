@@ -209,6 +209,20 @@ normalize_command() {
     esac
 }
 
+canonical_command_alias() {
+    case "$1" in
+        pack)
+            echo "pack build"
+            ;;
+        graph\ refresh)
+            echo "graph centrality-refresh"
+            ;;
+        *)
+            echo "$1"
+            ;;
+    esac
+}
+
 extract_readme_command_reference() {
     read_source "$README_FILE" |
         sed -n '/^## Command Reference/,/^## Configuration/p' |
@@ -283,7 +297,9 @@ documented_commands() {
         extract_plan_cli_tree
     } |
         while IFS= read -r raw; do
-            normalize_command "$raw"
+            command=$(normalize_command "$raw")
+            [ -n "$command" ] || continue
+            canonical_command_alias "$command"
         done |
         sed '/^$/d' |
         grep -Ev '^(help|ee|COMMAND|COMMANDS)$' |
@@ -294,6 +310,9 @@ implemented_commands() {
     read_source "$CLI_MOD" |
         grep -o '=> "[^"]*"\.to_string()' |
         sed 's/.*=> "//; s/".*//' |
+        while IFS= read -r command; do
+            canonical_command_alias "$command"
+        done |
         sort -u
 }
 

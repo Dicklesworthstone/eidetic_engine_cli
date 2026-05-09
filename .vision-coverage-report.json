@@ -1,6 +1,6 @@
 {
   "schema": "ee.vision_coverage.v1",
-  "generated_at": "2026-05-08T19:22:46Z",
+  "generated_at": "2026-05-09T07:33:33Z",
   "status": "warn",
   "release_tag_commit": false,
   "sources": {
@@ -13,12 +13,12 @@
   },
   "surfaces": {
     "total_documented": 64,
-    "implemented": 43,
+    "implemented": 44,
     "stubbed": 0,
-    "missing": 21,
+    "missing": 20,
     "with_open_implements_bead": 0
   },
-  "gap_percentage": 32.81,
+  "gap_percentage": 31.25,
   "implemented_surfaces": [
     "analyze science-status",
     "backup create",
@@ -51,7 +51,7 @@
     "memory show",
     "model status",
     "outcome",
-    "pack",
+    "pack build",
     "playbook extract",
     "remember",
     "review session",
@@ -61,6 +61,7 @@
     "schema list",
     "search",
     "status",
+    "support bundle",
     "why",
     "workspace resolve"
   ],
@@ -72,7 +73,6 @@
     "eval report",
     "export",
     "graph centrality",
-    "graph refresh",
     "index vacuum",
     "mcp",
     "memory expire",
@@ -117,7 +117,6 @@
     "graph feature-enrichment",
     "graph neighborhood",
     "graph path",
-    "graph refresh",
     "import cass",
     "import eidetic-legacy",
     "import jsonl",
@@ -134,7 +133,7 @@
     "memory tags",
     "model status",
     "outcome",
-    "pack",
+    "pack build",
     "playbook export",
     "playbook extract",
     "playbook import",
@@ -151,6 +150,7 @@
     "search",
     "serve",
     "status",
+    "support bundle",
     "why",
     "workflow create",
     "workspace resolve"

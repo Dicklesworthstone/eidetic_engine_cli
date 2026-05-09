@@ -94,6 +94,28 @@ fn ensure(condition: bool, context: &str) -> TestResult {
     }
 }
 
+fn string_array_contains(value: &serde_json::Value, pointer: &str, needle: &str) -> TestResult {
+    let array = value
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("{pointer} is not an array"))?;
+    ensure(
+        array.iter().any(|item| item.as_str() == Some(needle)),
+        &format!("{pointer} does not contain {needle}"),
+    )
+}
+
+fn string_array_omits(value: &serde_json::Value, pointer: &str, needle: &str) -> TestResult {
+    let array = value
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("{pointer} is not an array"))?;
+    ensure(
+        array.iter().all(|item| item.as_str() != Some(needle)),
+        &format!("{pointer} unexpectedly contains {needle}"),
+    )
+}
+
 #[test]
 fn vision_coverage_report_has_required_shape() -> TestResult {
     let report_path = unique_report_path("shape")?;
@@ -140,6 +162,30 @@ fn vision_coverage_report_has_required_shape() -> TestResult {
         )?;
     }
     Ok(())
+}
+
+#[test]
+fn vision_coverage_canonicalizes_known_command_aliases() -> TestResult {
+    let report_path = unique_report_path("aliases")?;
+    let output = run_gate(&report_path, false, None)?;
+    ensure(
+        output.status.success(),
+        &format!(
+            "alias coverage should warn without failing\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+
+    let report = read_report(&report_path)?;
+    string_array_contains(&report, "/implemented_surfaces", "pack build")?;
+    string_array_omits(&report, "/missing_surfaces", "pack")?;
+    string_array_contains(&report, "/implemented_surfaces", "graph centrality-refresh")?;
+    string_array_omits(&report, "/missing_surfaces", "graph refresh")?;
+
+    string_array_contains(&report, "/missing_surfaces", "index vacuum")?;
+    string_array_contains(&report, "/missing_surfaces", "eval report")?;
+    string_array_contains(&report, "/missing_surfaces", "completion")
 }
 
 #[test]
