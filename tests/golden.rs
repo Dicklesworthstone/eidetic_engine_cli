@@ -147,8 +147,34 @@ mod tests {
     type TestResult = Result<(), String>;
     const DOCTOR_GOLDEN_WORKSPACE: &str = "tests/fixtures";
 
+    fn ee_binary_path() -> Result<PathBuf, String> {
+        let cargo_path = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
+        if cargo_path.exists() {
+            return Ok(cargo_path);
+        }
+
+        let current_exe = env::current_exe()
+            .map_err(|error| format!("failed to resolve current test binary: {error}"))?;
+        let debug_dir = current_exe.parent().and_then(Path::parent).ok_or_else(|| {
+            format!(
+                "failed to resolve debug directory from test binary {}",
+                current_exe.display()
+            )
+        })?;
+        let sibling = debug_dir.join("ee");
+        if sibling.exists() {
+            Ok(sibling)
+        } else {
+            Err(format!(
+                "ee binary not found at {} or {}",
+                cargo_path.display(),
+                sibling.display()
+            ))
+        }
+    }
+
     fn run_ee(args: &[&str]) -> Result<Output, String> {
-        Command::new(env!("CARGO_BIN_EXE_ee"))
+        Command::new(ee_binary_path()?)
             .args(args)
             .output()
             .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
@@ -461,6 +487,417 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())
+    }
+
+    fn sql_text(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+
+    fn sql_json(value: Option<&serde_json::Value>) -> Result<String, String> {
+        value
+            .map_or_else(
+                || Ok("NULL".to_string()),
+                |json| serde_json::to_string(json).map(|raw| sql_text(&raw)),
+            )
+            .map_err(|error| format!("failed to serialize fixture JSON: {error}"))
+    }
+
+    struct PackFixtureInput<'a> {
+        id: &'a str,
+        pack_hash: &'a str,
+        ledger_hash: Option<&'a str>,
+        ledger_json: Option<serde_json::Value>,
+        created_at: &'a str,
+        rank: u32,
+        relevance: f32,
+        utility: f32,
+        why: &'a str,
+    }
+
+    fn insert_pack_fixture(connection: &DbConnection, input: PackFixtureInput<'_>) -> TestResult {
+        let ledger_json_sql = sql_json(input.ledger_json.as_ref())?;
+        let ledger_hash_sql = input
+            .ledger_hash
+            .map_or_else(|| "NULL".to_string(), sql_text);
+        connection
+            .execute_raw(&format!(
+                "INSERT INTO pack_records (id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, ledger_json, ledger_hash, created_at, created_by) VALUES ({}, 'wsp_searchjson0000000000000001', 'format before release', 'compact', 4000, 8, 1, 0, {}, NULL, {}, {}, {}, 'golden-test')",
+                sql_text(input.id),
+                sql_text(input.pack_hash),
+                ledger_json_sql,
+                ledger_hash_sql,
+                sql_text(input.created_at),
+            ))
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(&format!(
+                "INSERT INTO pack_items (pack_id, memory_id, rank, section, estimated_tokens, relevance, utility, why, diversity_key, provenance_json, trust_class, trust_subclass) VALUES ({}, 'mem_00000000000000000000000001', {}, 'procedural_rules', 8, {}, {}, {}, 'procedural:rule:cargo', '{{\"schema\":\"ee.pack_item.provenance.v1\",\"entries\":[]}}', 'human_explicit', 'project-rule')",
+                sql_text(input.id),
+                input.rank,
+                input.relevance,
+                input.utility,
+                sql_text(input.why),
+            ))
+            .map_err(|error| error.to_string())
+    }
+
+    fn pack_fixture_ledger(
+        pack_id: &str,
+        pack_hash: &str,
+        ledger_hash: &str,
+        rank: u32,
+        relevance: f32,
+        utility: f32,
+        redaction_classes: &[&str],
+        search_index: serde_json::Value,
+        graph_snapshot: serde_json::Value,
+        degraded: Vec<serde_json::Value>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "core": {
+                "schema": "ee.pack_replay_ledger.v1",
+                "packId": pack_id,
+                "packHash": pack_hash,
+                "workspaceId": "wsp_searchjson0000000000000001",
+                "createdAt": "2026-04-29T12:01:00+00:00",
+                "createdBy": "golden-test",
+                "commandSurface": "ee context",
+                "request": {
+                    "query": {
+                        "hash": "blake3:query-fixture",
+                        "redacted": false,
+                        "redactionReasons": [],
+                        "text": "format before release",
+                        "redactedText": null
+                    },
+                    "profile": "compact",
+                    "maxTokens": 4000
+                },
+                "database": {
+                    "schemaVersion": 40,
+                    "generation": 40
+                },
+                "derivedAssets": {
+                    "searchIndex": search_index,
+                    "graphSnapshot": graph_snapshot
+                },
+                "candidateCounts": {
+                    "selected": 1,
+                    "omitted": 0,
+                    "candidatePool": 1
+                },
+                "selectedItems": [{
+                    "memoryId": "mem_00000000000000000000000001",
+                    "rank": rank,
+                    "section": "procedural_rules",
+                    "estimatedTokens": 8,
+                    "scores": {
+                        "relevance": relevance,
+                        "utility": utility
+                    },
+                    "why": {
+                        "hash": "blake3:why-fixture",
+                        "redacted": false,
+                        "redactionReasons": [],
+                        "text": "Selected because the memory matches release-formatting work.",
+                        "redactedText": null
+                    },
+                    "diversityKey": "procedural:rule:cargo",
+                    "trustClass": "human_explicit",
+                    "trustSubclass": "project-rule",
+                    "provenance": {
+                        "hash": "blake3:provenance-fixture",
+                        "redacted": false,
+                        "redactionReasons": []
+                    },
+                    "redactionClasses": redaction_classes,
+                    "freshness": "unavailable"
+                }],
+                "omittedItems": [],
+                "degraded": degraded
+            },
+            "ledgerHash": ledger_hash
+        })
+    }
+
+    fn seed_pack_replay_fixtures(database: &Path) -> TestResult {
+        let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
+        let unavailable_asset = serde_json::json!({"status": "not_recorded", "manifestHash": null});
+        let available_search =
+            serde_json::json!({"status": "available", "manifestHash": "blake3:search-v2"});
+        let stale_graph =
+            serde_json::json!({"status": "stale", "manifestHash": "blake3:graph-old"});
+
+        let base_ledger = pack_fixture_ledger(
+            "pack_00000000000000000000000011",
+            "blake3:pack-base",
+            "blake3:ledger-base",
+            1,
+            0.91,
+            0.80,
+            &[],
+            unavailable_asset.clone(),
+            unavailable_asset.clone(),
+            Vec::new(),
+        );
+        insert_pack_fixture(
+            &connection,
+            PackFixtureInput {
+                id: "pack_00000000000000000000000011",
+                pack_hash: "blake3:pack-base",
+                ledger_hash: Some("blake3:ledger-base"),
+                ledger_json: Some(base_ledger),
+                created_at: "2026-04-29T12:01:00+00:00",
+                rank: 1,
+                relevance: 0.91,
+                utility: 0.80,
+                why: "Selected because the memory matches release-formatting work.",
+            },
+        )?;
+
+        let ranking_ledger = pack_fixture_ledger(
+            "pack_00000000000000000000000012",
+            "blake3:pack-ranking",
+            "blake3:ledger-ranking",
+            2,
+            0.84,
+            0.70,
+            &[],
+            unavailable_asset.clone(),
+            unavailable_asset.clone(),
+            Vec::new(),
+        );
+        insert_pack_fixture(
+            &connection,
+            PackFixtureInput {
+                id: "pack_00000000000000000000000012",
+                pack_hash: "blake3:pack-ranking",
+                ledger_hash: Some("blake3:ledger-ranking"),
+                ledger_json: Some(ranking_ledger),
+                created_at: "2026-04-29T12:02:00+00:00",
+                rank: 2,
+                relevance: 0.84,
+                utility: 0.70,
+                why: "Selected after ranking changed.",
+            },
+        )?;
+
+        let redaction_ledger = pack_fixture_ledger(
+            "pack_00000000000000000000000013",
+            "blake3:pack-redaction",
+            "blake3:ledger-redaction",
+            1,
+            0.91,
+            0.80,
+            &["anthropic_api_key"],
+            unavailable_asset.clone(),
+            unavailable_asset.clone(),
+            Vec::new(),
+        );
+        insert_pack_fixture(
+            &connection,
+            PackFixtureInput {
+                id: "pack_00000000000000000000000013",
+                pack_hash: "blake3:pack-redaction",
+                ledger_hash: Some("blake3:ledger-redaction"),
+                ledger_json: Some(redaction_ledger),
+                created_at: "2026-04-29T12:03:00+00:00",
+                rank: 1,
+                relevance: 0.91,
+                utility: 0.80,
+                why: "Selected after redaction classification changed.",
+            },
+        )?;
+
+        let degraded_ledger = pack_fixture_ledger(
+            "pack_00000000000000000000000014",
+            "blake3:pack-degraded",
+            "blake3:ledger-degraded",
+            1,
+            0.91,
+            0.80,
+            &[],
+            available_search,
+            stale_graph,
+            vec![serde_json::json!({
+                "code": "context_graph_snapshot_stale",
+                "message": "Graph snapshot was stale during pack selection.",
+                "severity": "medium"
+            })],
+        );
+        insert_pack_fixture(
+            &connection,
+            PackFixtureInput {
+                id: "pack_00000000000000000000000014",
+                pack_hash: "blake3:pack-degraded",
+                ledger_hash: Some("blake3:ledger-degraded"),
+                ledger_json: Some(degraded_ledger),
+                created_at: "2026-04-29T12:04:00+00:00",
+                rank: 1,
+                relevance: 0.91,
+                utility: 0.80,
+                why: "Selected with degraded graph evidence.",
+            },
+        )?;
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    fn assert_pack_command_golden(
+        workspace: &Path,
+        database: &Path,
+        pack_args: &[&str],
+        golden_name: &str,
+    ) -> TestResult {
+        let workspace_arg = workspace.to_string_lossy().into_owned();
+        let database_arg = database.to_string_lossy().into_owned();
+        let mut args = vec!["--json", "--workspace", workspace_arg.as_str(), "pack"];
+        args.extend_from_slice(pack_args);
+        args.extend_from_slice(&["--database", database_arg.as_str()]);
+
+        let output = run_ee(&args)?;
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|error| format!("pack stdout was not UTF-8: {error}"))?;
+        let stderr = String::from_utf8(output.stderr)
+            .map_err(|error| format!("pack stderr was not UTF-8: {error}"))?;
+        ensure(
+            output.status.success(),
+            format!("ee {} should succeed; stderr: {stderr}", args.join(" ")),
+        )?;
+        ensure(
+            stderr.is_empty(),
+            format!(
+                "ee {} stderr must be empty, got: {stderr:?}",
+                args.join(" ")
+            ),
+        )?;
+        ensure(
+            stdout.starts_with('{'),
+            format!("ee {} stdout must start with JSON", args.join(" ")),
+        )?;
+        ensure(
+            stdout.ends_with('\n'),
+            format!("ee {} stdout must end with newline", args.join(" ")),
+        )?;
+        assert_golden("pack", golden_name, &stdout)
+    }
+
+    #[test]
+    fn pack_replay_available_matches_golden() -> TestResult {
+        let artifact_dir = unique_artifact_dir("pack-replay-available")?;
+        let workspace = artifact_dir.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        seed_search_workspace(&workspace, &database)?;
+        seed_pack_replay_fixtures(&database)?;
+
+        assert_pack_command_golden(
+            &workspace,
+            &database,
+            &["replay", "pack_00000000000000000000000011"],
+            "pack_replay_available.json",
+        )
+    }
+
+    #[test]
+    fn pack_replay_missing_ledger_matches_golden() -> TestResult {
+        let artifact_dir = unique_artifact_dir("pack-replay-missing-ledger")?;
+        let workspace = artifact_dir.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        seed_search_workspace(&workspace, &database)?;
+        seed_pack_selection(&database)?;
+
+        assert_pack_command_golden(
+            &workspace,
+            &database,
+            &["replay", "pack_00000000000000000000000001"],
+            "pack_replay_missing_ledger.json",
+        )
+    }
+
+    #[test]
+    fn pack_diff_no_change_matches_golden() -> TestResult {
+        let artifact_dir = unique_artifact_dir("pack-diff-no-change")?;
+        let workspace = artifact_dir.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        seed_search_workspace(&workspace, &database)?;
+        seed_pack_replay_fixtures(&database)?;
+
+        assert_pack_command_golden(
+            &workspace,
+            &database,
+            &[
+                "diff",
+                "pack_00000000000000000000000011",
+                "pack_00000000000000000000000011",
+            ],
+            "pack_diff_no_change.json",
+        )
+    }
+
+    #[test]
+    fn pack_diff_ranking_change_matches_golden() -> TestResult {
+        let artifact_dir = unique_artifact_dir("pack-diff-ranking")?;
+        let workspace = artifact_dir.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        seed_search_workspace(&workspace, &database)?;
+        seed_pack_replay_fixtures(&database)?;
+
+        assert_pack_command_golden(
+            &workspace,
+            &database,
+            &[
+                "diff",
+                "pack_00000000000000000000000011",
+                "pack_00000000000000000000000012",
+            ],
+            "pack_diff_ranking_change.json",
+        )
+    }
+
+    #[test]
+    fn pack_diff_redaction_change_matches_golden() -> TestResult {
+        let artifact_dir = unique_artifact_dir("pack-diff-redaction")?;
+        let workspace = artifact_dir.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        seed_search_workspace(&workspace, &database)?;
+        seed_pack_replay_fixtures(&database)?;
+
+        assert_pack_command_golden(
+            &workspace,
+            &database,
+            &[
+                "diff",
+                "pack_00000000000000000000000011",
+                "pack_00000000000000000000000013",
+            ],
+            "pack_diff_redaction_change.json",
+        )
+    }
+
+    #[test]
+    fn pack_diff_degraded_assets_match_golden() -> TestResult {
+        let artifact_dir = unique_artifact_dir("pack-diff-degraded-assets")?;
+        let workspace = artifact_dir.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        seed_search_workspace(&workspace, &database)?;
+        seed_pack_replay_fixtures(&database)?;
+
+        assert_pack_command_golden(
+            &workspace,
+            &database,
+            &[
+                "diff",
+                "pack_00000000000000000000000011",
+                "pack_00000000000000000000000014",
+            ],
+            "pack_diff_degraded_assets.json",
+        )
     }
 
     fn build_search_index(workspace: &Path, database: &Path, index_dir: &Path) -> TestResult {

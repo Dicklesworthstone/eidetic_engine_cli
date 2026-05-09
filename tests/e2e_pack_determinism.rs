@@ -7,15 +7,41 @@
 
 use ee::db::{DbConnection, PACK_REPLAY_LEDGER_SCHEMA_V1};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 type TestResult = Result<(), String>;
 
 const EXIT_SUCCESS: i32 = 0;
 
+fn ee_binary_path() -> Result<PathBuf, String> {
+    let cargo_path = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
+    if cargo_path.exists() {
+        return Ok(cargo_path);
+    }
+
+    let current_exe = std::env::current_exe()
+        .map_err(|error| format!("failed to resolve current test binary: {error}"))?;
+    let debug_dir = current_exe.parent().and_then(Path::parent).ok_or_else(|| {
+        format!(
+            "failed to resolve debug directory from test binary {}",
+            current_exe.display()
+        )
+    })?;
+    let sibling = debug_dir.join("ee");
+    if sibling.exists() {
+        Ok(sibling)
+    } else {
+        Err(format!(
+            "ee binary not found at {} or {}",
+            cargo_path.display(),
+            sibling.display()
+        ))
+    }
+}
+
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    Command::new(ee_binary_path()?)
         .args(args)
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")
@@ -92,6 +118,32 @@ fn extract_item_ids(json: &serde_json::Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn pack_record_ids_for_selection(
+    workspace: &Path,
+    query: &str,
+    pack_hash: &str,
+    selected_item_ids: &[String],
+) -> Result<Vec<String>, String> {
+    let anchor_memory_id = selected_item_ids
+        .first()
+        .ok_or_else(|| "pack selected no anchor memory".to_owned())?;
+    let database_path = workspace.join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| format!("open pack ledger database: {error}"))?;
+    let history = connection
+        .list_pack_records_for_memory(anchor_memory_id, 20)
+        .map_err(|error| format!("list persisted pack records: {error}"))?;
+
+    let ids = history
+        .iter()
+        .filter(|(record, _item)| record.query == query && record.pack_hash == pack_hash)
+        .map(|(record, _item)| record.id.clone())
+        .collect();
+
+    connection.close().map_err(|error| error.to_string())?;
+    Ok(ids)
 }
 
 fn assert_pack_ledger_persisted(
@@ -409,6 +461,181 @@ fn pack_query_file_persists_selection_ledger() -> TestResult {
     )?;
 
     assert_pack_ledger_persisted(tempdir.path(), query_text, &pack_hash, &item_ids)
+}
+
+#[test]
+fn pack_replay_and_diff_work_for_real_pack_records() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    let init = run_ee(&["--json", "--workspace", &workspace, "init"])?;
+    ensure(init.status.code() == Some(EXIT_SUCCESS), "init failed")?;
+    ensure_stderr_empty(&init, "init")?;
+
+    for content in [
+        "Pack replay rule: run cargo fmt before release",
+        "Pack replay rule: run cargo clippy before release",
+    ] {
+        let remember = run_ee(&[
+            "--json",
+            "--workspace",
+            &workspace,
+            "remember",
+            content,
+            "--kind",
+            "rule",
+        ])?;
+        ensure(
+            remember.status.code() == Some(EXIT_SUCCESS),
+            format!("remember failed for '{content}'"),
+        )?;
+        ensure_stderr_empty(&remember, "remember")?;
+    }
+
+    let index = run_ee(&["--json", "--workspace", &workspace, "index", "rebuild"])?;
+    ensure(
+        index.status.code() == Some(EXIT_SUCCESS),
+        "index rebuild failed",
+    )?;
+    ensure_stderr_empty(&index, "index rebuild")?;
+
+    let query_file = tempdir.path().join("pack-replay-query.json");
+    let query_text = "pack replay release";
+    fs::write(
+        &query_file,
+        format!(
+            r#"{{
+  "version": "ee.query.v1",
+  "query": {{"text": "{query_text}"}},
+  "budget": {{"maxTokens": 2000, "candidatePool": 20}},
+  "output": {{"profile": "compact"}}
+}}"#
+        ),
+    )
+    .map_err(|error| format!("failed to write query file: {error}"))?;
+
+    let first_output = run_ee_pack_query_file(&workspace, &query_file)?;
+    ensure(
+        first_output.status.code() == Some(EXIT_SUCCESS),
+        format!(
+            "first pack query-file failed: {:?}",
+            first_output.status.code()
+        ),
+    )?;
+    ensure_stderr_empty(&first_output, "first pack query-file")?;
+    let first_json = stdout_json(&first_output)?;
+    let first_hash =
+        extract_pack_hash(&first_json).ok_or_else(|| "first pack missing hash".to_owned())?;
+    let first_item_ids = extract_item_ids(&first_json);
+    assert_pack_ledger_persisted(tempdir.path(), query_text, &first_hash, &first_item_ids)?;
+    let before_ids =
+        pack_record_ids_for_selection(tempdir.path(), query_text, &first_hash, &first_item_ids)?;
+    let first_pack_id = before_ids
+        .first()
+        .ok_or_else(|| "first pack record id missing".to_owned())?
+        .clone();
+
+    let replay = run_ee(&[
+        "--json",
+        "--workspace",
+        &workspace,
+        "pack",
+        "replay",
+        &first_pack_id,
+    ])?;
+    ensure(
+        replay.status.code() == Some(EXIT_SUCCESS),
+        format!("pack replay failed: {:?}", replay.status.code()),
+    )?;
+    ensure_stderr_empty(&replay, "pack replay")?;
+    let replay_json = stdout_json(&replay)?;
+    ensure(
+        replay_json.pointer("/schema") == Some(&serde_json::json!("ee.pack.replay.v1")),
+        "pack replay schema mismatch",
+    )?;
+    ensure(
+        replay_json.pointer("/data/pack/id") == Some(&serde_json::json!(first_pack_id.as_str())),
+        "pack replay should identify the requested pack",
+    )?;
+    ensure(
+        replay_json.pointer("/data/replay/status") == Some(&serde_json::json!("available")),
+        "pack replay should report an available persisted ledger",
+    )?;
+    let replay_ledger_pack_id = replay_json
+        .pointer("/data/replay/ledger/core/packId")
+        .or_else(|| replay_json.pointer("/data/replay/ledger/packId"));
+    ensure(
+        replay_ledger_pack_id == Some(&serde_json::json!(first_pack_id.as_str())),
+        "pack replay ledger should match requested pack id",
+    )?;
+
+    let second_output = run_ee_pack_query_file(&workspace, &query_file)?;
+    ensure(
+        second_output.status.code() == Some(EXIT_SUCCESS),
+        format!(
+            "second pack query-file failed: {:?}",
+            second_output.status.code()
+        ),
+    )?;
+    ensure_stderr_empty(&second_output, "second pack query-file")?;
+    let second_json = stdout_json(&second_output)?;
+    let second_hash =
+        extract_pack_hash(&second_json).ok_or_else(|| "second pack missing hash".to_owned())?;
+    let second_item_ids = extract_item_ids(&second_json);
+    ensure(
+        second_hash == first_hash,
+        format!("same input should produce same pack hash: {first_hash} vs {second_hash}"),
+    )?;
+    ensure(
+        second_item_ids == first_item_ids,
+        "same input should select the same pack item order",
+    )?;
+    assert_pack_ledger_persisted(tempdir.path(), query_text, &second_hash, &second_item_ids)?;
+    let after_ids =
+        pack_record_ids_for_selection(tempdir.path(), query_text, &second_hash, &second_item_ids)?;
+    let second_pack_id = after_ids
+        .iter()
+        .find(|id| !before_ids.contains(id))
+        .ok_or_else(|| {
+            format!("second pack record id missing; before={before_ids:?}, after={after_ids:?}")
+        })?
+        .clone();
+
+    let diff = run_ee(&[
+        "--json",
+        "--workspace",
+        &workspace,
+        "pack",
+        "diff",
+        &first_pack_id,
+        &second_pack_id,
+    ])?;
+    ensure(
+        diff.status.code() == Some(EXIT_SUCCESS),
+        format!("pack diff failed: {:?}", diff.status.code()),
+    )?;
+    ensure_stderr_empty(&diff, "pack diff")?;
+    let diff_json = stdout_json(&diff)?;
+    ensure(
+        diff_json.pointer("/schema") == Some(&serde_json::json!("ee.pack.diff.v1")),
+        "pack diff schema mismatch",
+    )?;
+    ensure(
+        diff_json.pointer("/data/diff/summary/replayable") == Some(&serde_json::json!(true)),
+        "pack diff should be replayable when both ledgers exist",
+    )?;
+    ensure(
+        diff_json.pointer("/data/diff/summary/hashMatch") == Some(&serde_json::json!(true)),
+        "pack diff should report matching pack hashes for repeated input",
+    )?;
+    ensure(
+        diff_json.pointer("/data/diff/summary/changedCount") == Some(&serde_json::json!(0)),
+        "pack diff should report no changed items for repeated input",
+    )?;
+    ensure(
+        diff_json.pointer("/data/diff/likelyCauses") == Some(&serde_json::json!(["no_change"])),
+        "pack diff should explain repeated packs as no_change",
+    )
 }
 
 #[test]

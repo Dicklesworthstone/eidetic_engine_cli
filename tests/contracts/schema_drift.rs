@@ -164,6 +164,8 @@ pub const CONTEXT_SCHEMAS: &[SchemaEntry] = &[
         "ee.pack_replay_ledger.v1",
         SchemaCategory::Context,
     ),
+    SchemaEntry::new("pack_replay", "ee.pack.replay.v1", SchemaCategory::Context),
+    SchemaEntry::new("pack_diff", "ee.pack.diff.v1", SchemaCategory::Context),
     SchemaEntry::new("query", "ee.query.v1", SchemaCategory::Context),
     SchemaEntry::new(
         "search_results",

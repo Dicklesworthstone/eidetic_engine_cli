@@ -443,7 +443,7 @@ pub enum Command {
     /// Review harmful-feedback quarantine rows.
     #[command(name = "outcome-quarantine", subcommand)]
     OutcomeQuarantine(OutcomeQuarantineCommand),
-    /// Build a context pack from an explicit query document.
+    /// Build, replay, or diff context packs.
     Pack(PackArgs),
     /// Compare normalized performance artifacts without mutating state.
     #[command(subcommand)]
@@ -1166,7 +1166,59 @@ pub struct ContextArgs {
 
 /// Arguments for `ee pack`.
 #[derive(Clone, Debug, Parser, PartialEq)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct PackArgs {
+    /// Optional pack subcommand. Omit it to build from `--query-file`.
+    #[command(subcommand)]
+    pub command: Option<PackCommand>,
+
+    /// Path to an `ee.query.v1` JSON query document.
+    #[arg(long, value_name = "PATH")]
+    pub query_file: Option<PathBuf>,
+
+    /// Maximum token budget for the context pack. Overrides query-file budget.
+    #[arg(long, short = 't')]
+    pub max_tokens: Option<u32>,
+
+    /// Maximum candidate memories to retrieve before packing. Overrides query-file budget.
+    #[arg(long)]
+    pub candidate_pool: Option<u32>,
+
+    /// Retrieval speed/quality budget. Overrides query-file speed.
+    #[arg(long, value_parser = parse_speed_mode_arg)]
+    pub speed: Option<crate::search::SpeedMode>,
+
+    /// Context profile: compact, balanced, thorough, or submodular.
+    #[arg(long, short = 'p')]
+    pub profile: Option<String>,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Index directory. Defaults to <workspace>/.ee/index/.
+    #[arg(long, value_name = "PATH")]
+    pub index_dir: Option<PathBuf>,
+
+    /// Emit a redaction-safe query and pack performance report instead of the context pack.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub explain_performance: bool,
+}
+
+/// Pack subcommands: build, replay, diff.
+#[derive(Clone, Debug, PartialEq, Subcommand)]
+pub enum PackCommand {
+    /// Build a context pack from an explicit query document.
+    Build(PackBuildArgs),
+    /// Replay a previously persisted pack's selection ledger.
+    Replay(PackReplayArgs),
+    /// Compare two persisted packs and report differences.
+    Diff(PackDiffArgs),
+}
+
+/// Arguments for `ee pack build`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct PackBuildArgs {
     /// Path to an `ee.query.v1` JSON query document.
     #[arg(long, value_name = "PATH")]
     pub query_file: PathBuf,
@@ -1198,6 +1250,59 @@ pub struct PackArgs {
     /// Emit a redaction-safe query and pack performance report instead of the context pack.
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain_performance: bool,
+}
+
+impl PackArgs {
+    fn legacy_build_args(&self) -> Result<PackBuildArgs, DomainError> {
+        let Some(query_file) = self.query_file.clone() else {
+            return Err(DomainError::Usage {
+                message: "Pack build requires --query-file or a pack subcommand.".to_string(),
+                repair: Some(
+                    "Use `ee pack --query-file task.eeq.json` or `ee pack replay <pack-id>`."
+                        .to_string(),
+                ),
+            });
+        };
+
+        Ok(PackBuildArgs {
+            query_file,
+            max_tokens: self.max_tokens,
+            candidate_pool: self.candidate_pool,
+            speed: self.speed,
+            profile: self.profile.clone(),
+            database: self.database.clone(),
+            index_dir: self.index_dir.clone(),
+            explain_performance: self.explain_performance,
+        })
+    }
+}
+
+/// Arguments for `ee pack replay`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct PackReplayArgs {
+    /// The pack ID to replay (e.g., pack_01234567890abcdef).
+    #[arg(value_name = "PACK_ID")]
+    pub pack_id: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee pack diff`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct PackDiffArgs {
+    /// The first (older) pack ID.
+    #[arg(value_name = "PACK_A")]
+    pub pack_a: String,
+
+    /// The second (newer) pack ID.
+    #[arg(value_name = "PACK_B")]
+    pub pack_b: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -5827,7 +5932,7 @@ where
         Some(Command::OutcomeQuarantine(OutcomeQuarantineCommand::Release(ref args))) => {
             handle_outcome_quarantine_release(&cli, args, stdout, stderr)
         }
-        Some(Command::Pack(ref args)) => handle_pack(&cli, args, stdout, stderr),
+        Some(Command::Pack(ref args)) => handle_pack_command(&cli, args, stdout, stderr),
         Some(Command::Perf(ref perf_cmd)) => handle_perf_command(&cli, perf_cmd, stdout, stderr),
         Some(Command::Preflight(PreflightCommand::Run(ref args))) => {
             handle_preflight_run(&cli, args, stdout, stderr)
@@ -14362,7 +14467,35 @@ type QueryOutputControls = (
     Vec<ContextResponseDegradation>,
 );
 
-fn handle_pack<W, E>(cli: &Cli, args: &PackArgs, stdout: &mut W, stderr: &mut E) -> ProcessExitCode
+fn handle_pack_command<W, E>(
+    cli: &Cli,
+    args: &PackArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match &args.command {
+        Some(PackCommand::Build(build_args)) => handle_pack(cli, build_args, stdout, stderr),
+        Some(PackCommand::Replay(replay_args)) => {
+            handle_pack_replay(cli, replay_args, stdout, stderr)
+        }
+        Some(PackCommand::Diff(diff_args)) => handle_pack_diff(cli, diff_args, stdout, stderr),
+        None => match args.legacy_build_args() {
+            Ok(build_args) => handle_pack(cli, &build_args, stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        },
+    }
+}
+
+fn handle_pack<W, E>(
+    cli: &Cli,
+    args: &PackBuildArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
 where
     W: Write,
     E: Write,
@@ -14476,6 +14609,693 @@ where
             )
         }
     }
+}
+
+/// Schema for pack replay response.
+pub const PACK_REPLAY_SCHEMA_V1: &str = "ee.pack.replay.v1";
+
+/// Schema for pack diff response.
+pub const PACK_DIFF_SCHEMA_V1: &str = "ee.pack.diff.v1";
+
+const PACK_REPLAY_LEDGER_MISSING: &str = "pack_replay_ledger_missing";
+const PACK_REPLAY_LEDGER_MALFORMED: &str = "pack_replay_ledger_malformed";
+const PACK_REPLAY_LEDGER_HASH_MISMATCH: &str = "pack_replay_ledger_hash_mismatch";
+const PACK_DIFF_SCORE_EPSILON: f64 = 0.000_001;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PackLedgerStatus {
+    Available,
+    Missing,
+    Malformed,
+    HashMismatch,
+}
+
+impl PackLedgerStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Missing => "missing",
+            Self::Malformed => "malformed",
+            Self::HashMismatch => "hash_mismatch",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ParsedPackLedger {
+    status: PackLedgerStatus,
+    ledger: Option<serde_json::Value>,
+    degraded: Vec<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PackDiffItem {
+    memory_id: String,
+    rank: Option<u32>,
+    section: Option<String>,
+    relevance: Option<f64>,
+    utility: Option<f64>,
+    redaction_classes: Vec<String>,
+    trust_class: Option<String>,
+    trust_subclass: Option<String>,
+    why_hash: Option<String>,
+}
+
+fn pack_database_path(cli: &Cli, database: Option<&Path>) -> PathBuf {
+    database.map_or_else(
+        || {
+            cli.workspace
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".ee")
+                .join("ee.db")
+        },
+        Path::to_path_buf,
+    )
+}
+
+fn open_pack_read_database(
+    cli: &Cli,
+    database: Option<&Path>,
+) -> Result<crate::db::DbConnection, DomainError> {
+    let database_path = pack_database_path(cli, database);
+    if !database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        });
+    }
+
+    crate::db::DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to open database {}: {error}",
+            database_path.display()
+        ),
+        repair: Some("Check the database path or run `ee init --workspace .`.".to_string()),
+    })
+}
+
+fn load_pack_record(
+    connection: &crate::db::DbConnection,
+    pack_id: &str,
+) -> Result<crate::db::StoredPackRecord, DomainError> {
+    connection
+        .get_pack_record(pack_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to retrieve pack {pack_id}: {error}"),
+            repair: Some("Run `ee doctor --json` to inspect database health.".to_string()),
+        })?
+        .ok_or_else(|| DomainError::NotFound {
+            resource: "pack".to_string(),
+            id: pack_id.to_string(),
+            repair: Some("Check the pack ID from `ee why <memory-id> --json`.".to_string()),
+        })
+}
+
+fn load_pack_items(
+    connection: &crate::db::DbConnection,
+    pack_id: &str,
+) -> Result<Vec<crate::db::StoredPackItem>, DomainError> {
+    connection
+        .get_pack_items(pack_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to retrieve pack {pack_id} items: {error}"),
+            repair: Some("Run `ee doctor --json` to inspect database health.".to_string()),
+        })
+}
+
+fn pack_degradation(
+    code: &str,
+    message: &str,
+    severity: &str,
+    repair: Option<&str>,
+    details: serde_json::Value,
+) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "code": code,
+        "message": message,
+        "severity": severity,
+        "details": details,
+    });
+    if let Some(repair) = repair {
+        value["repair"] = serde_json::Value::String(repair.to_string());
+    }
+    value
+}
+
+fn parse_pack_ledger(record: &crate::db::StoredPackRecord) -> ParsedPackLedger {
+    let Some(raw_ledger) = record.ledger_json.as_deref() else {
+        return ParsedPackLedger {
+            status: PackLedgerStatus::Missing,
+            ledger: None,
+            degraded: vec![pack_degradation(
+                PACK_REPLAY_LEDGER_MISSING,
+                "Pack selection ledger is missing for this pack record.",
+                "medium",
+                Some("Rebuild the pack with a binary that persists selection ledgers."),
+                serde_json::json!({"packId": record.id}),
+            )],
+        };
+    };
+
+    let parsed = match serde_json::from_str::<serde_json::Value>(raw_ledger) {
+        Ok(value) => value,
+        Err(error) => {
+            return ParsedPackLedger {
+                status: PackLedgerStatus::Malformed,
+                ledger: None,
+                degraded: vec![pack_degradation(
+                    PACK_REPLAY_LEDGER_MALFORMED,
+                    "Pack selection ledger is malformed and cannot be replayed.",
+                    "high",
+                    Some("Inspect the pack record and rebuild the pack if possible."),
+                    serde_json::json!({
+                        "packId": record.id,
+                        "parseError": error.to_string(),
+                    }),
+                )],
+            };
+        }
+    };
+
+    let expected_hash = record.ledger_hash.as_deref();
+    let actual_hash = parsed
+        .get("ledgerHash")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    if expected_hash.is_some() && actual_hash.as_deref() != expected_hash {
+        return ParsedPackLedger {
+            status: PackLedgerStatus::HashMismatch,
+            ledger: Some(parsed),
+            degraded: vec![pack_degradation(
+                PACK_REPLAY_LEDGER_HASH_MISMATCH,
+                "Pack selection ledger hash does not match the pack record.",
+                "high",
+                Some("Treat this replay as diagnostic only and inspect the database."),
+                serde_json::json!({
+                    "packId": record.id,
+                    "recordLedgerHash": expected_hash,
+                    "ledgerHash": actual_hash,
+                }),
+            )],
+        };
+    }
+
+    ParsedPackLedger {
+        status: PackLedgerStatus::Available,
+        ledger: Some(parsed),
+        degraded: Vec::new(),
+    }
+}
+
+fn stored_pack_item_json(item: &crate::db::StoredPackItem) -> serde_json::Value {
+    serde_json::json!({
+        "memoryId": item.memory_id,
+        "rank": item.rank,
+        "section": item.section,
+        "estimatedTokens": item.estimated_tokens,
+        "scores": {
+            "relevance": item.relevance,
+            "utility": item.utility,
+        },
+        "why": item.why,
+        "diversityKey": item.diversity_key,
+        "trustClass": item.trust_class,
+        "trustSubclass": item.trust_subclass,
+    })
+}
+
+fn pack_record_json(
+    record: &crate::db::StoredPackRecord,
+    ledger: &ParsedPackLedger,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": record.id,
+        "workspaceId": record.workspace_id,
+        "query": record.query,
+        "profile": record.profile,
+        "maxTokens": record.max_tokens,
+        "usedTokens": record.used_tokens,
+        "itemCount": record.item_count,
+        "omittedCount": record.omitted_count,
+        "packHash": record.pack_hash,
+        "createdAt": record.created_at,
+        "createdBy": record.created_by,
+        "ledgerHash": record.ledger_hash,
+        "ledgerStatus": ledger.status.as_str(),
+    })
+}
+
+fn ledger_core_value<'a>(
+    ledger: &'a serde_json::Value,
+    field: &str,
+) -> Option<&'a serde_json::Value> {
+    ledger
+        .get("core")
+        .and_then(|core| core.get(field))
+        .or_else(|| ledger.get(field))
+}
+
+fn ledger_core_array<'a>(
+    ledger: &'a serde_json::Value,
+    field: &str,
+) -> Option<&'a Vec<serde_json::Value>> {
+    ledger_core_value(ledger, field).and_then(serde_json::Value::as_array)
+}
+
+fn ledger_degraded_values(parsed: &ParsedPackLedger) -> Vec<serde_json::Value> {
+    parsed
+        .ledger
+        .as_ref()
+        .and_then(|ledger| ledger_core_array(ledger, "degraded"))
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn canonical_json(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn sorted_unique_strings(values: &serde_json::Value) -> Vec<String> {
+    let mut strings = values
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    strings.sort();
+    strings.dedup();
+    strings
+}
+
+fn optional_u32(value: Option<&serde_json::Value>) -> Option<u32> {
+    value
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|raw| u32::try_from(raw).ok())
+}
+
+fn optional_f64(value: Option<&serde_json::Value>) -> Option<f64> {
+    value.and_then(serde_json::Value::as_f64)
+}
+
+fn optional_string(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+fn diff_item_from_ledger(value: &serde_json::Value) -> Option<PackDiffItem> {
+    let memory_id = value.get("memoryId")?.as_str()?.to_string();
+    Some(PackDiffItem {
+        memory_id,
+        rank: optional_u32(value.get("rank")),
+        section: optional_string(value.get("section")),
+        relevance: optional_f64(value.pointer("/scores/relevance")),
+        utility: optional_f64(value.pointer("/scores/utility")),
+        redaction_classes: sorted_unique_strings(
+            value
+                .get("redactionClasses")
+                .unwrap_or(&serde_json::Value::Null),
+        ),
+        trust_class: optional_string(value.get("trustClass")),
+        trust_subclass: optional_string(value.get("trustSubclass")),
+        why_hash: optional_string(value.pointer("/why/hash")),
+    })
+}
+
+fn diff_item_from_stored(item: &crate::db::StoredPackItem) -> PackDiffItem {
+    PackDiffItem {
+        memory_id: item.memory_id.clone(),
+        rank: Some(item.rank),
+        section: Some(item.section.clone()),
+        relevance: Some(f64::from(item.relevance)),
+        utility: Some(f64::from(item.utility)),
+        redaction_classes: Vec::new(),
+        trust_class: Some(item.trust_class.clone()),
+        trust_subclass: item.trust_subclass.clone(),
+        why_hash: None,
+    }
+}
+
+fn diff_items_for_pack(
+    parsed: &ParsedPackLedger,
+    stored_items: &[crate::db::StoredPackItem],
+) -> BTreeMap<String, PackDiffItem> {
+    if let Some(ledger) = parsed.ledger.as_ref()
+        && let Some(items) = ledger_core_array(ledger, "selectedItems")
+    {
+        return items
+            .iter()
+            .filter_map(diff_item_from_ledger)
+            .map(|item| (item.memory_id.clone(), item))
+            .collect();
+    }
+
+    stored_items
+        .iter()
+        .map(diff_item_from_stored)
+        .map(|item| (item.memory_id.clone(), item))
+        .collect()
+}
+
+fn diff_item_json(item: &PackDiffItem) -> serde_json::Value {
+    serde_json::json!({
+        "memoryId": item.memory_id,
+        "rank": item.rank,
+        "section": item.section,
+        "scores": {
+            "relevance": item.relevance,
+            "utility": item.utility,
+        },
+        "redactionClasses": item.redaction_classes,
+        "trustClass": item.trust_class,
+        "trustSubclass": item.trust_subclass,
+        "whyHash": item.why_hash,
+    })
+}
+
+fn score_delta(new_value: Option<f64>, old_value: Option<f64>) -> Option<f64> {
+    match (new_value, old_value) {
+        (Some(new_value), Some(old_value)) => Some(new_value - old_value),
+        _ => None,
+    }
+}
+
+fn score_delta_changed(delta: Option<f64>) -> bool {
+    delta.is_some_and(|value| value.abs() > PACK_DIFF_SCORE_EPSILON)
+}
+
+fn pack_record_request_value(ledger: &ParsedPackLedger, field: &str) -> Option<serde_json::Value> {
+    ledger
+        .ledger
+        .as_ref()
+        .and_then(|value| {
+            value
+                .pointer(&format!("/core/request/{field}"))
+                .or_else(|| value.pointer(&format!("/request/{field}")))
+        })
+        .cloned()
+}
+
+fn pack_record_derived_asset(ledger: &ParsedPackLedger, field: &str) -> Option<serde_json::Value> {
+    ledger
+        .ledger
+        .as_ref()
+        .and_then(|value| {
+            value
+                .pointer(&format!("/core/derivedAssets/{field}"))
+                .or_else(|| value.pointer(&format!("/derivedAssets/{field}")))
+        })
+        .cloned()
+}
+
+fn set_diff_values(
+    left: &[serde_json::Value],
+    right: &[serde_json::Value],
+) -> Vec<serde_json::Value> {
+    let right_keys = right.iter().map(canonical_json).collect::<BTreeSet<_>>();
+    left.iter()
+        .filter(|value| !right_keys.contains(&canonical_json(value)))
+        .cloned()
+        .collect()
+}
+
+fn collect_pack_diff(
+    record_a: &crate::db::StoredPackRecord,
+    ledger_a: &ParsedPackLedger,
+    items_a: &[crate::db::StoredPackItem],
+    record_b: &crate::db::StoredPackRecord,
+    ledger_b: &ParsedPackLedger,
+    items_b: &[crate::db::StoredPackItem],
+) -> serde_json::Value {
+    let comparable_a = diff_items_for_pack(ledger_a, items_a);
+    let comparable_b = diff_items_for_pack(ledger_b, items_b);
+    let ids_a = comparable_a.keys().cloned().collect::<BTreeSet<_>>();
+    let ids_b = comparable_b.keys().cloned().collect::<BTreeSet<_>>();
+
+    let added = ids_b
+        .difference(&ids_a)
+        .filter_map(|memory_id| comparable_b.get(memory_id))
+        .map(diff_item_json)
+        .collect::<Vec<_>>();
+    let removed = ids_a
+        .difference(&ids_b)
+        .filter_map(|memory_id| comparable_a.get(memory_id))
+        .map(diff_item_json)
+        .collect::<Vec<_>>();
+
+    let mut changed = Vec::new();
+    let mut redaction_changes = Vec::new();
+    for memory_id in ids_a.intersection(&ids_b) {
+        let Some(old_item) = comparable_a.get(memory_id) else {
+            continue;
+        };
+        let Some(new_item) = comparable_b.get(memory_id) else {
+            continue;
+        };
+
+        let relevance_delta = score_delta(new_item.relevance, old_item.relevance);
+        let utility_delta = score_delta(new_item.utility, old_item.utility);
+        let old_rank = old_item.rank.unwrap_or_default();
+        let new_rank = new_item.rank.unwrap_or_default();
+        let rank_delta = i64::from(new_rank) - i64::from(old_rank);
+        let section_changed = old_item.section != new_item.section;
+        let trust_changed = old_item.trust_class != new_item.trust_class
+            || old_item.trust_subclass != new_item.trust_subclass;
+        let why_changed = old_item.why_hash != new_item.why_hash;
+        let redaction_changed = old_item.redaction_classes != new_item.redaction_classes;
+
+        if redaction_changed {
+            redaction_changes.push(serde_json::json!({
+                "memoryId": memory_id,
+                "oldClasses": old_item.redaction_classes,
+                "newClasses": new_item.redaction_classes,
+            }));
+        }
+
+        if rank_delta != 0
+            || score_delta_changed(relevance_delta)
+            || score_delta_changed(utility_delta)
+            || section_changed
+            || trust_changed
+            || why_changed
+            || redaction_changed
+        {
+            changed.push(serde_json::json!({
+                "memoryId": memory_id,
+                "old": diff_item_json(old_item),
+                "new": diff_item_json(new_item),
+                "rankDelta": rank_delta,
+                "scoreDelta": {
+                    "relevance": relevance_delta,
+                    "utility": utility_delta,
+                },
+                "sectionChanged": section_changed,
+                "trustChanged": trust_changed,
+                "whyChanged": why_changed,
+                "redactionChanged": redaction_changed,
+            }));
+        }
+    }
+
+    let degraded_a = ledger_degraded_values(ledger_a);
+    let degraded_b = ledger_degraded_values(ledger_b);
+    let degradation_added = set_diff_values(&degraded_b, &degraded_a);
+    let degradation_removed = set_diff_values(&degraded_a, &degraded_b);
+
+    let mut derived_asset_changes = Vec::new();
+    for field in ["searchIndex", "graphSnapshot"] {
+        let old_asset = pack_record_derived_asset(ledger_a, field);
+        let new_asset = pack_record_derived_asset(ledger_b, field);
+        if old_asset != new_asset {
+            derived_asset_changes.push(serde_json::json!({
+                "asset": field,
+                "old": old_asset,
+                "new": new_asset,
+            }));
+        }
+    }
+
+    let old_max_tokens = pack_record_request_value(ledger_a, "maxTokens")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(u64::from(record_a.max_tokens));
+    let new_max_tokens = pack_record_request_value(ledger_b, "maxTokens")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(u64::from(record_b.max_tokens));
+
+    let mut likely_causes = BTreeSet::new();
+    if ledger_a.status != PackLedgerStatus::Available
+        || ledger_b.status != PackLedgerStatus::Available
+    {
+        likely_causes.insert("ledger_unavailable_or_untrusted");
+    }
+    if record_a.query != record_b.query {
+        likely_causes.insert("query_changed");
+    }
+    if record_a.profile != record_b.profile {
+        likely_causes.insert("profile_changed");
+    }
+    if old_max_tokens != new_max_tokens {
+        likely_causes.insert("budget_changed");
+    }
+    if !derived_asset_changes.is_empty() {
+        likely_causes.insert("derived_asset_changed");
+    }
+    if !degradation_added.is_empty() || !degradation_removed.is_empty() {
+        likely_causes.insert("degradation_changed");
+    }
+    if !redaction_changes.is_empty() {
+        likely_causes.insert("redaction_changed");
+    }
+    if !changed.is_empty() || !added.is_empty() || !removed.is_empty() {
+        likely_causes.insert("selection_changed");
+    }
+    if likely_causes.is_empty() && record_a.pack_hash == record_b.pack_hash {
+        likely_causes.insert("no_change");
+    } else if record_a.pack_hash != record_b.pack_hash && likely_causes.is_empty() {
+        likely_causes.insert("memory_or_index_state_changed");
+    }
+
+    serde_json::json!({
+        "summary": {
+            "addedCount": added.len(),
+            "removedCount": removed.len(),
+            "changedCount": changed.len(),
+            "redactionChangeCount": redaction_changes.len(),
+            "degradationAddedCount": degradation_added.len(),
+            "degradationRemovedCount": degradation_removed.len(),
+            "derivedAssetChangeCount": derived_asset_changes.len(),
+            "hashMatch": record_a.pack_hash == record_b.pack_hash,
+            "queryMatch": record_a.query == record_b.query,
+            "profileMatch": record_a.profile == record_b.profile,
+            "tokenDelta": i64::from(record_b.used_tokens) - i64::from(record_a.used_tokens),
+            "replayable": ledger_a.ledger.is_some() && ledger_b.ledger.is_some(),
+        },
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+        "redactionChanges": redaction_changes,
+        "degradationChanges": {
+            "added": degradation_added,
+            "removed": degradation_removed,
+        },
+        "derivedAssetChanges": derived_asset_changes,
+        "likelyCauses": likely_causes.into_iter().collect::<Vec<_>>(),
+    })
+}
+
+fn handle_pack_replay<W, E>(
+    cli: &Cli,
+    args: &PackReplayArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let connection = match open_pack_read_database(cli, args.database.as_deref()) {
+        Ok(connection) => connection,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let record = match load_pack_record(&connection, &args.pack_id) {
+        Ok(record) => record,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let items = match load_pack_items(&connection, &args.pack_id) {
+        Ok(items) => items,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let ledger = parse_pack_ledger(&record);
+    let ledger_value = ledger.ledger.clone();
+    let selected_items = ledger_value
+        .as_ref()
+        .and_then(|value| ledger_core_array(value, "selectedItems"))
+        .cloned()
+        .unwrap_or_default();
+    let omitted_items = ledger_value
+        .as_ref()
+        .and_then(|value| ledger_core_array(value, "omittedItems"))
+        .cloned()
+        .unwrap_or_default();
+    let ledger_degraded = ledger_degraded_values(&ledger);
+
+    let response = serde_json::json!({
+        "schema": PACK_REPLAY_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "command": "pack replay",
+            "pack": pack_record_json(&record, &ledger),
+            "replay": {
+                "status": ledger.status.as_str(),
+                "ledger": ledger_value,
+                "selectedItems": selected_items,
+                "omittedItems": omitted_items,
+                "degraded": ledger_degraded,
+            },
+            "storedItems": items.iter().map(stored_pack_item_json).collect::<Vec<_>>(),
+            "degraded": ledger.degraded,
+        }
+    });
+
+    write_stdout(stdout, &(response.to_string() + "\n"))
+}
+
+fn handle_pack_diff<W, E>(
+    cli: &Cli,
+    args: &PackDiffArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let connection = match open_pack_read_database(cli, args.database.as_deref()) {
+        Ok(connection) => connection,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let record_a = match load_pack_record(&connection, &args.pack_a) {
+        Ok(record) => record,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let record_b = match load_pack_record(&connection, &args.pack_b) {
+        Ok(record) => record,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let items_a = match load_pack_items(&connection, &args.pack_a) {
+        Ok(items) => items,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let items_b = match load_pack_items(&connection, &args.pack_b) {
+        Ok(items) => items,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let ledger_a = parse_pack_ledger(&record_a);
+    let ledger_b = parse_pack_ledger(&record_b);
+    let diff = collect_pack_diff(
+        &record_a, &ledger_a, &items_a, &record_b, &ledger_b, &items_b,
+    );
+    let mut degraded = ledger_a.degraded.clone();
+    degraded.extend(ledger_b.degraded.clone());
+
+    let response = serde_json::json!({
+        "schema": PACK_DIFF_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "command": "pack diff",
+            "packA": pack_record_json(&record_a, &ledger_a),
+            "packB": pack_record_json(&record_b, &ledger_b),
+            "diff": diff,
+            "degraded": degraded,
+        }
+    });
+
+    write_stdout(stdout, &(response.to_string() + "\n"))
 }
 
 fn load_query_file(path: &Path) -> Result<QueryFileRequest, QueryFileError> {
@@ -21804,7 +22624,11 @@ impl NormalizedInvocation {
                         "outcome quarantine release".to_string()
                     }
                 },
-                Command::Pack(_) => "pack".to_string(),
+                Command::Pack(pack) => match &pack.command {
+                    Some(PackCommand::Build(_)) | None => "pack build".to_string(),
+                    Some(PackCommand::Replay(_)) => "pack replay".to_string(),
+                    Some(PackCommand::Diff(_)) => "pack diff".to_string(),
+                },
                 Command::Perf(perf) => match perf {
                     PerfCommand::Compare(_) => "perf compare".to_string(),
                     PerfCommand::Budget(PerfBudgetCommand::Check(_)) => {
@@ -22510,8 +23334,8 @@ mod tests {
         Command, CurateCommand, DaemonCommand, DiagCommand, DiagQuarantineCommand, EconomyCommand,
         FieldsLevel, FocusCommand, GraphCommand, ImportCommand, JobCommand, LearnCommand,
         LearnExperimentCommand, MaintenanceCommand, MemoryCommand, OutcomeQuarantineCommand,
-        OutputFormat, PlaybookCommand, RuleCommand, ShadowMode, SituationCommand, TaskFrameCommand,
-        TaskFrameSubgoalCommand, WorkflowCommand, run, write_index_rebuild_error,
+        OutputFormat, PackCommand, PlaybookCommand, RuleCommand, ShadowMode, SituationCommand,
+        TaskFrameCommand, TaskFrameSubgoalCommand, WorkflowCommand, run, write_index_rebuild_error,
     };
     use crate::core::index::IndexRebuildError;
     use crate::core::search::{
@@ -22884,16 +23708,40 @@ mod tests {
         let pack = Cli::try_parse_from([
             "ee",
             "pack",
+            "build",
             "--query-file",
             "query.json",
             "--explain-performance",
         ])
         .map_err(|error| format!("pack flag parse failed: {:?}", error.kind()))?;
         match pack.command {
+            Some(Command::Pack(args)) => match args.command {
+                Some(PackCommand::Build(args)) => {
+                    ensure_equal(&args.explain_performance, &true, "pack explain performance")?;
+                }
+                other => return Err(format!("expected pack build command, got {other:?}")),
+            },
+            other => return Err(format!("expected pack command, got {other:?}")),
+        }
+
+        let legacy_pack = Cli::try_parse_from([
+            "ee",
+            "pack",
+            "--query-file",
+            "query.json",
+            "--explain-performance",
+        ])
+        .map_err(|error| format!("legacy pack flag parse failed: {:?}", error.kind()))?;
+        match legacy_pack.command {
             Some(Command::Pack(args)) => {
                 ensure_equal(&args.explain_performance, &true, "pack explain performance")?;
+                ensure_equal(
+                    &args.query_file,
+                    &Some(std::path::PathBuf::from("query.json")),
+                    "legacy pack query file",
+                )?;
             }
-            other => return Err(format!("expected pack command, got {other:?}")),
+            other => return Err(format!("expected legacy pack command, got {other:?}")),
         }
 
         let search = Cli::try_parse_from(["ee", "search", "release", "--explain-performance"])
@@ -27079,6 +27927,48 @@ mod tests {
         let parsed = Cli::try_parse_from([
             "ee",
             "pack",
+            "build",
+            "--query-file",
+            "task.eeq.json",
+            "--max-tokens",
+            "3000",
+            "--candidate-pool",
+            "42",
+            "--speed",
+            "quality",
+            "--profile",
+            "compact",
+        ])
+        .map_err(|e| format!("failed to parse pack: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Pack(ref args)) => match &args.command {
+                Some(PackCommand::Build(args)) => {
+                    ensure_equal(
+                        &args.query_file,
+                        &std::path::PathBuf::from("task.eeq.json"),
+                        "pack query file",
+                    )?;
+                    ensure_equal(&args.max_tokens, &Some(3000), "pack max tokens")?;
+                    ensure_equal(&args.candidate_pool, &Some(42), "pack candidate pool")?;
+                    ensure_equal(
+                        &args.speed,
+                        &Some(crate::search::SpeedMode::Quality),
+                        "pack speed",
+                    )?;
+                    ensure_equal(&args.profile, &Some("compact".to_string()), "pack profile")
+                }
+                _ => Err("expected Pack Build command".to_string()),
+            },
+            _ => Err("expected Pack command".to_string()),
+        }
+    }
+
+    #[test]
+    fn pack_command_parses_legacy_query_file_without_build_subcommand() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "pack",
             "--query-file",
             "task.eeq.json",
             "--max-tokens",
@@ -27096,7 +27986,7 @@ mod tests {
             Some(Command::Pack(ref args)) => {
                 ensure_equal(
                     &args.query_file,
-                    &std::path::PathBuf::from("task.eeq.json"),
+                    &Some(std::path::PathBuf::from("task.eeq.json")),
                     "pack query file",
                 )?;
                 ensure_equal(&args.max_tokens, &Some(3000), "pack max tokens")?;
