@@ -484,6 +484,37 @@ fn json_array<'a>(
         .ok_or_else(|| format!("{context} missing array at {pointer}"))
 }
 
+fn json_string_vec(value: &JsonValue, pointer: &str, context: &str) -> Result<Vec<String>, String> {
+    json_array(value, pointer, context)?
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            item.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{context} has non-string value at {pointer}[{index}]"))
+        })
+        .collect()
+}
+
+fn first_pack_quality_comparison<'a>(
+    value: &'a JsonValue,
+    context: &str,
+) -> Result<&'a JsonValue, String> {
+    json_array(value, "/data/report/comparisons", context)?
+        .first()
+        .ok_or_else(|| format!("{context} missing first pack-quality comparison"))
+}
+
+fn pack_quality_degraded_codes(value: &JsonValue, context: &str) -> Result<Vec<String>, String> {
+    let mut codes = json_array(value, "/data/degradedBranches", context)?
+        .iter()
+        .filter_map(|branch| branch.get("code").and_then(JsonValue::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    codes.sort();
+    Ok(codes)
+}
+
 fn cass_sessions_array<'a>(
     value: &'a JsonValue,
     context: &str,
@@ -2297,6 +2328,578 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
     ensure(
         saw_sanitized_env_override,
         "dmu0 command log must include a sanitized secret-like env override",
+    )?;
+
+    Ok(())
+}
+
+#[test]
+fn no_mocks_pack_quality_sentinel_scenarios_are_logged() -> TestResult {
+    let scenario_id = "mccc_pack_quality_logged_no_mocks";
+    let probes = egress_secret_probes();
+    let log_dir = unique_log_dir(scenario_id)?;
+    let artifact_dir = log_dir.join("artifacts");
+    fs::create_dir_all(&artifact_dir)
+        .map_err(|error| format!("failed to create artifact dir: {error}"))?;
+    let events_path = log_dir.join("commands.jsonl");
+
+    let workspace_temp = tempfile::Builder::new()
+        .prefix("ee-mccc-pack-quality-workspace-")
+        .tempdir()
+        .map_err(|error| format!("failed to create temp workspace: {error}"))?;
+    let workspace = workspace_temp.path().to_path_buf();
+    let workspace_arg = workspace.display().to_string();
+    let database_path = workspace.join(".ee").join("ee.db");
+    let index_metadata_path = workspace.join(".ee").join("index").join("meta.json");
+    let query_file_path = workspace.join("mccc-release-query.eeq.json");
+    let secret_envs = [("EE_E2E_SECRET_PROBE", OsString::from(probes[0].raw))];
+
+    let mut command_count = 0_usize;
+
+    let (init_event, init_json) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "01_init",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "init".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+        &secret_envs,
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes("mccc init", &init_event, &init_json, &probes)?;
+    ensure(database_path.is_file(), "init must create real EE database")?;
+
+    let (rule_event, rule_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "02_remember_release_rule_fixture_memory",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "remember".to_owned(),
+                "--level".to_owned(),
+                "procedural".to_owned(),
+                "--kind".to_owned(),
+                "rule".to_owned(),
+                "--tags".to_owned(),
+                "release,cargo,verification,mccc".to_owned(),
+                "--source".to_owned(),
+                "file://tests/fixtures/eval/release_failure/source_memory.json#L1".to_owned(),
+                "Before release, run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`; verify GitHub release assets before pushing to main."
+                    .to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes("mccc remember rule", &rule_event, &rule_json, &probes)?;
+    let rule_memory_id = string_at(&rule_json, "/data/memory_id", "mccc rule memory")?;
+
+    let (failure_event, failure_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "03_remember_release_failure_fixture_memory",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "remember".to_owned(),
+                "--level".to_owned(),
+                "episodic".to_owned(),
+                "--kind".to_owned(),
+                "failure".to_owned(),
+                "--tags".to_owned(),
+                "release,clippy,workflow,mccc".to_owned(),
+                "--source".to_owned(),
+                "file://tests/fixtures/eval/release_failure/source_memory.json#L2".to_owned(),
+                "A previous release attempt failed because clippy was skipped after a formatting-only change; the release workflow rejected `cargo clippy --all-targets -- -D warnings` with an unused import before artifacts could be published."
+                    .to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes(
+        "mccc remember failure",
+        &failure_event,
+        &failure_json,
+        &probes,
+    )?;
+    let failure_memory_id = string_at(&failure_json, "/data/memory_id", "mccc failure memory")?;
+
+    let (index_event, index_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "04_index_rebuild",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "index".to_owned(),
+                "rebuild".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes("mccc index rebuild", &index_event, &index_json, &probes)?;
+    ensure(
+        index_metadata_path.is_file(),
+        "index rebuild must publish real index metadata",
+    )?;
+
+    let query = "prepare release";
+    let query_file_json = serde_json::to_string_pretty(&json!({
+        "version": "ee.query.v1",
+        "query": {
+            "text": query,
+            "mode": "hybrid"
+        },
+        "budget": {
+            "maxTokens": 4000,
+            "candidatePool": 20
+        },
+        "output": {
+            "format": "json",
+            "profile": "compact",
+            "explain": true
+        }
+    }))
+    .map_err(|error| format!("failed to serialize mccc query file: {error}"))?;
+    write_text(&query_file_path, &query_file_json)?;
+    let query_file_arg = query_file_path.display().to_string();
+
+    let (context_event, context_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "05_context_release_fixture_memories",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "context".to_owned(),
+                query.to_owned(),
+                "--max-tokens".to_owned(),
+                "4000".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes("mccc context", &context_event, &context_json, &probes)?;
+    let context_pack_hash = string_at(&context_json, "/data/pack/hash", "mccc context")?;
+    let context_item_ids = memory_ids_from_context(&context_json)?;
+    ensure(
+        context_item_ids.iter().any(|id| id == &rule_memory_id)
+            && context_item_ids.iter().any(|id| id == &failure_memory_id),
+        format!(
+            "context pack must select both fixture memories; got {context_item_ids:?}, wanted {rule_memory_id} and {failure_memory_id}"
+        ),
+    )?;
+    let (context_ledger_hashes, context_pack_ids) = assert_context_pack_ledgers_persisted(
+        &database_path,
+        query,
+        &context_pack_hash,
+        &context_item_ids,
+        1,
+    )?;
+    let context_pack_id = first_new_pack_id(&context_pack_ids, &[])?;
+
+    let (pack_event, pack_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "06_pack_query_file_release_fixture_memories",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "pack".to_owned(),
+                "--query-file".to_owned(),
+                query_file_arg,
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes("mccc pack query-file", &pack_event, &pack_json, &probes)?;
+    let pack_query_hash = string_at(&pack_json, "/data/pack/hash", "mccc pack query-file")?;
+    let pack_query_item_ids = memory_ids_from_context(&pack_json)?;
+    ensure(
+        pack_query_item_ids.iter().any(|id| id == &rule_memory_id)
+            && pack_query_item_ids
+                .iter()
+                .any(|id| id == &failure_memory_id),
+        format!(
+            "query-file pack must select both fixture memories; got {pack_query_item_ids:?}, wanted {rule_memory_id} and {failure_memory_id}"
+        ),
+    )?;
+    let (pack_query_ledger_hashes, pack_query_pack_ids) = assert_context_pack_ledgers_persisted(
+        &database_path,
+        query,
+        &pack_query_hash,
+        &pack_query_item_ids,
+        1,
+    )?;
+    let pack_query_pack_id =
+        first_new_pack_id(&pack_query_pack_ids, std::slice::from_ref(&context_pack_id))?;
+
+    let (passing_event, passing_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "07_pack_quality_release_failure_passing_fixture",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "eval".to_owned(),
+                "run".to_owned(),
+                "release_failure".to_owned(),
+                "--pack-quality".to_owned(),
+                "--scenario".to_owned(),
+                "usr_pre_task_brief".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes(
+        "mccc passing pack-quality",
+        &passing_event,
+        &passing_json,
+        &probes,
+    )?;
+    ensure_equal(
+        &passing_json.pointer("/success"),
+        &Some(&json!(true)),
+        "passing pack-quality success flag",
+    )?;
+    ensure_equal(
+        &passing_json.pointer("/data/report/fixture_id"),
+        &Some(&json!("fx.release_failure.v1")),
+        "passing pack-quality fixture id",
+    )?;
+    ensure_equal(
+        &passing_json.pointer("/data/report/aggregate_verdict"),
+        &Some(&json!("within")),
+        "passing pack-quality verdict",
+    )?;
+    let passing_comparison =
+        first_pack_quality_comparison(&passing_json, "passing pack-quality report")?;
+    ensure_equal(
+        &passing_comparison.pointer("/case_id"),
+        &Some(&json!("pq.release_failure.context.v1")),
+        "passing pack-quality case id",
+    )?;
+    ensure(
+        json_array(
+            &passing_json,
+            "/data/artifactPaths",
+            "passing pack-quality artifacts",
+        )?
+        .iter()
+        .any(|path| {
+            path.get("stdout").and_then(JsonValue::as_str)
+                == Some("target/ee-e2e/usr_pre_task_brief/<run-id>/04-context.stdout.json")
+        }),
+        "passing pack-quality report must include fixture stdout artifact path",
+    )?;
+
+    let (failing_event, failing_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "08_pack_quality_data_size_tiers_intentional_failure",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "eval".to_owned(),
+                "run".to_owned(),
+                "data_size_tiers".to_owned(),
+                "--pack-quality".to_owned(),
+                "--scenario".to_owned(),
+                "usr_context_medium_workspace".to_owned(),
+            ],
+            expected_exit_code: 9,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes(
+        "mccc failing pack-quality",
+        &failing_event,
+        &failing_json,
+        &probes,
+    )?;
+    ensure_equal(
+        &failing_json.pointer("/success"),
+        &Some(&json!(false)),
+        "failing pack-quality success flag",
+    )?;
+    ensure_equal(
+        &failing_json.pointer("/data/report/fixture_id"),
+        &Some(&json!("fx.data_size_tiers.v1")),
+        "failing pack-quality fixture id",
+    )?;
+    ensure_equal(
+        &failing_json.pointer("/data/report/aggregate_verdict"),
+        &Some(&json!("regression")),
+        "failing pack-quality verdict",
+    )?;
+    let failing_comparison =
+        first_pack_quality_comparison(&failing_json, "failing pack-quality report")?;
+    ensure_equal(
+        &failing_comparison.pointer("/scenario_id"),
+        &Some(&json!("usr_context_medium_workspace")),
+        "failing pack-quality scenario id",
+    )?;
+    let failing_failure_reasons = json_string_vec(
+        failing_comparison,
+        "/failure_reasons",
+        "failing pack-quality failure reasons",
+    )?;
+    ensure(
+        !failing_failure_reasons.is_empty(),
+        "intentionally failing fixture must include machine-readable failure reasons",
+    )?;
+    let failing_omitted_critical = json_string_vec(
+        failing_comparison,
+        "/omitted_critical_found",
+        "failing pack-quality omitted critical ids",
+    )?;
+    ensure(
+        !failing_omitted_critical.is_empty(),
+        "intentionally failing fixture must expose rejected critical memory IDs",
+    )?;
+
+    let mut ledger_hashes = context_ledger_hashes.clone();
+    ledger_hashes.extend(pack_query_ledger_hashes.clone());
+    ledger_hashes.sort();
+    ledger_hashes.dedup();
+    let mut pack_ids = vec![context_pack_id.clone(), pack_query_pack_id.clone()];
+    pack_ids.sort();
+    pack_ids.dedup();
+    let mut pack_hashes = vec![context_pack_hash.clone(), pack_query_hash.clone()];
+    pack_hashes.sort();
+    pack_hashes.dedup();
+    let passing_selected_ids = json_string_vec(
+        passing_comparison,
+        "/actual_selected_ids",
+        "passing pack-quality selected ids",
+    )?;
+    let failing_selected_ids = json_string_vec(
+        failing_comparison,
+        "/actual_selected_ids",
+        "failing pack-quality selected ids",
+    )?;
+    let failing_unexpected_ids = json_string_vec(
+        failing_comparison,
+        "/unexpected_ids",
+        "failing pack-quality unexpected ids",
+    )?;
+    let rejected_memory_ids = failing_omitted_critical
+        .iter()
+        .chain(failing_unexpected_ids.iter())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut degradation_codes =
+        pack_quality_degraded_codes(&passing_json, "passing pack-quality degraded branches")?;
+    degradation_codes.extend(pack_quality_degraded_codes(
+        &failing_json,
+        "failing pack-quality degraded branches",
+    )?);
+    degradation_codes.sort();
+    degradation_codes.dedup();
+
+    append_jsonl(
+        &events_path,
+        &json!({
+            "schema": "ee.e2e.pack_quality_summary.v1",
+            "scenarioId": scenario_id,
+            "event": "summary",
+            "commandCount": command_count,
+            "workspace": workspace.display().to_string(),
+            "databasePath": database_path.display().to_string(),
+            "indexMetadataPath": index_metadata_path.display().to_string(),
+            "sanitizedEnvOverrides": ["EE_E2E_SECRET_PROBE"],
+            "fixtureIds": [
+                "fx.release_failure.v1",
+                "fx.data_size_tiers.v1"
+            ],
+            "scenarioIds": [
+                "usr_pre_task_brief",
+                "usr_context_medium_workspace"
+            ],
+            "loadedFixtureMemoryIds": [
+                rule_memory_id,
+                failure_memory_id
+            ],
+            "selectedMemoryIds": {
+                "workspaceContext": context_item_ids,
+                "workspacePack": pack_query_item_ids,
+                "packQualityPassing": passing_selected_ids,
+                "packQualityFailing": failing_selected_ids
+            },
+            "rejectedMemoryIds": rejected_memory_ids,
+            "packIds": pack_ids,
+            "packHashes": pack_hashes,
+            "ledgerHashes": ledger_hashes,
+            "schemaValidationStatus": "passed",
+            "goldenValidationStatus": "not_applicable",
+            "redactionStatus": "passed",
+            "degradationCodes": degradation_codes,
+            "firstFailure": null,
+            "firstFailureDiagnosis": failing_failure_reasons.first(),
+            "packQuality": {
+                "passing": {
+                    "fixtureId": "fx.release_failure.v1",
+                    "scenarioId": "usr_pre_task_brief",
+                    "verdict": "within",
+                    "stdoutArtifactPath": passing_event.stdout_artifact_path,
+                    "stderrArtifactPath": passing_event.stderr_artifact_path
+                },
+                "failing": {
+                    "fixtureId": "fx.data_size_tiers.v1",
+                    "scenarioId": "usr_context_medium_workspace",
+                    "verdict": "regression",
+                    "exitCode": failing_event.exit_code,
+                    "stdoutArtifactPath": failing_event.stdout_artifact_path,
+                    "stderrArtifactPath": failing_event.stderr_artifact_path,
+                    "failureReasons": failing_failure_reasons
+                }
+            }
+        }),
+    )?;
+
+    let events_text = fs::read_to_string(&events_path).map_err(|error| {
+        format!(
+            "failed to read mccc JSONL log {}: {error}",
+            events_path.display()
+        )
+    })?;
+    ensure_text_omits_secret_probes(
+        "mccc command event log",
+        "jsonl",
+        &events_path.display().to_string(),
+        &events_text,
+        &probes,
+    )?;
+    let event_lines = events_text.lines().collect::<Vec<_>>();
+    ensure_equal(
+        &event_lines.len(),
+        &(command_count + 1),
+        "mccc JSONL event count includes commands plus summary",
+    )?;
+    let mut saw_sanitized_env_override = false;
+    for (index, line) in event_lines.iter().take(command_count).enumerate() {
+        let event: JsonValue = serde_json::from_str(line)
+            .map_err(|error| format!("mccc JSONL command event {index} must parse: {error}"))?;
+        ensure_equal(
+            &event.pointer("/schema"),
+            &Some(&json!("ee.e2e.command_event.v1")),
+            "mccc command event schema",
+        )?;
+        ensure_equal(
+            &event.pointer("/schemaValidationStatus"),
+            &Some(&json!("passed")),
+            "mccc command schema validation status",
+        )?;
+        ensure(
+            event.pointer("/command").is_some()
+                && event.pointer("/args").is_some()
+                && event.pointer("/cwd").is_some()
+                && event.pointer("/workspace").is_some()
+                && event.pointer("/elapsedMs").is_some()
+                && event.pointer("/exitCode").is_some()
+                && event.pointer("/stdoutArtifactPath").is_some()
+                && event.pointer("/stderrArtifactPath").is_some()
+                && event.pointer("/goldenValidationStatus").is_some()
+                && event.pointer("/redactionStatus").is_some()
+                && event.pointer("/firstFailure").is_some(),
+            "mccc command event must capture command, cwd/workspace, timing, exit, artifact, validation, redaction, and first-failure fields",
+        )?;
+        saw_sanitized_env_override |=
+            json_array(&event, "/envOverrides", "mccc command env overrides")?
+                .iter()
+                .any(|override_value| {
+                    override_value.get("name").and_then(JsonValue::as_str)
+                        == Some("EE_E2E_SECRET_PROBE")
+                        && override_value
+                            .get("value")
+                            .and_then(JsonValue::as_str)
+                            .is_some_and(|value| value.contains("[REDACTED:"))
+                });
+    }
+    ensure(
+        saw_sanitized_env_override,
+        "mccc command log must include a sanitized secret-like env override",
+    )?;
+    let summary: JsonValue = serde_json::from_str(
+        event_lines
+            .last()
+            .ok_or_else(|| "mccc JSONL log missing summary event".to_owned())?,
+    )
+    .map_err(|error| format!("mccc summary event must parse: {error}"))?;
+    ensure_equal(
+        &summary.pointer("/schema"),
+        &Some(&json!("ee.e2e.pack_quality_summary.v1")),
+        "mccc summary schema",
+    )?;
+    ensure(
+        !json_array(&summary, "/packIds", "mccc summary pack ids")?.is_empty()
+            && !json_array(&summary, "/packHashes", "mccc summary pack hashes")?.is_empty()
+            && !json_array(&summary, "/ledgerHashes", "mccc summary ledger hashes")?.is_empty(),
+        "mccc summary must include pack IDs, pack hashes, and ledger hashes",
+    )?;
+    ensure(
+        summary.pointer("/firstFailureDiagnosis").is_some(),
+        "mccc summary must include stable first-failure diagnosis",
     )?;
 
     Ok(())
