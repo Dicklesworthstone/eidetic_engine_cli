@@ -1109,6 +1109,7 @@ impl EffectManifest {
                 "support inspect",
                 "Verify and inspect a redacted support bundle manifest",
             ),
+            CommandEffect::read_only("swarm brief", "Report read-only swarm coordination brief"),
             CommandEffect::read_only("task-frame show", "Show passive task-frame state"),
             CommandEffect::read_only("tripwire list", "List persisted tripwire rules"),
             CommandEffect::read_only("update", "Plan update without mutation"),

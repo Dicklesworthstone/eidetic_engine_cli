@@ -418,7 +418,7 @@ fn mechanical_boundary_inventory_covers_all_cli_command_paths() -> Result<(), St
     let commands = command_paths_from_extract_function(CLI_SOURCE)?;
     assert_eq!(
         commands.len(),
-        186,
+        187,
         "unexpected CLI command count; update the mechanical boundary inventory"
     );
 

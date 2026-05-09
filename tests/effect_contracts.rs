@@ -255,6 +255,32 @@ fn effect_manifest_includes_status_as_read_only() -> TestResult {
 }
 
 #[test]
+fn effect_manifest_includes_swarm_brief_as_read_only() -> TestResult {
+    use ee::core::effect::{EffectClass, EffectManifest, SideEffectClass};
+
+    let manifest = EffectManifest::build();
+    let effect = manifest
+        .get("swarm brief")
+        .ok_or_else(|| "swarm brief not in manifest".to_string())?;
+
+    ensure(
+        effect.default_effect,
+        EffectClass::ReadOnly,
+        "swarm brief is read_only",
+    )?;
+    ensure(
+        effect.mutation_contract.side_effect_class,
+        SideEffectClass::ReadOnly,
+        "swarm brief side effect class",
+    )?;
+    ensure(
+        effect.is_safe_mid_task(),
+        true,
+        "swarm brief is safe mid-task",
+    )
+}
+
+#[test]
 fn effect_manifest_includes_perf_commands_as_read_only() -> TestResult {
     use ee::core::effect::{EffectClass, EffectManifest, SideEffectClass};
 

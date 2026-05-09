@@ -1,12 +1,14 @@
 //! Read-only coordination snapshot model for swarm preflight briefs.
 //!
-//! This module deliberately stops at the internal source/model layer. Public
-//! CLI rendering is owned by the follow-on `ee swarm brief` surface.
+//! This module owns source collection, normalization, and deterministic advice.
+//! Public CLI rendering is wired through `ee swarm brief`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -31,6 +33,7 @@ pub struct SwarmBriefCollectOptions {
     pub workspace: PathBuf,
     pub max_recent_commits: usize,
     pub include_rch: bool,
+    pub enabled_sources: BTreeSet<SwarmBriefSourceKind>,
     pub agent_mail_snapshot_path: Option<PathBuf>,
     pub command_timeout_ms: u64,
 }
@@ -42,10 +45,40 @@ impl SwarmBriefCollectOptions {
             workspace: workspace.into(),
             max_recent_commits: 8,
             include_rch: false,
+            enabled_sources: default_swarm_brief_sources(),
             agent_mail_snapshot_path: None,
             command_timeout_ms: 1_500,
         }
     }
+}
+
+#[must_use]
+pub fn default_swarm_brief_sources() -> BTreeSet<SwarmBriefSourceKind> {
+    [
+        SwarmBriefSourceKind::AgentInventory,
+        SwarmBriefSourceKind::AgentMail,
+        SwarmBriefSourceKind::Beads,
+        SwarmBriefSourceKind::Bv,
+        SwarmBriefSourceKind::Git,
+        SwarmBriefSourceKind::HostProfile,
+    ]
+    .into_iter()
+    .collect()
+}
+
+#[must_use]
+pub fn all_swarm_brief_sources() -> BTreeSet<SwarmBriefSourceKind> {
+    [
+        SwarmBriefSourceKind::AgentInventory,
+        SwarmBriefSourceKind::AgentMail,
+        SwarmBriefSourceKind::Beads,
+        SwarmBriefSourceKind::Bv,
+        SwarmBriefSourceKind::Git,
+        SwarmBriefSourceKind::HostProfile,
+        SwarmBriefSourceKind::Rch,
+    ]
+    .into_iter()
+    .collect()
 }
 
 /// Versioned report assembled from read-only coordination sources.
@@ -540,12 +573,16 @@ impl SwarmBriefCommandRunner for SystemSwarmBriefCommandRunner {
         program: &str,
         args: &[&str],
         cwd: &Path,
-        _timeout_ms: u64,
+        timeout_ms: u64,
     ) -> Result<SwarmBriefCommandOutput, SwarmBriefCommandError> {
-        let output = Command::new(program)
+        let timeout_ms = timeout_ms.max(1);
+        let timeout = Duration::from_millis(timeout_ms);
+        let mut child = Command::new(program)
             .args(args)
             .current_dir(cwd)
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|error| {
                 if error.kind() == std::io::ErrorKind::NotFound {
                     SwarmBriefCommandError::Unavailable(format!("{program} was not found on PATH."))
@@ -553,6 +590,31 @@ impl SwarmBriefCommandRunner for SystemSwarmBriefCommandRunner {
                     SwarmBriefCommandError::Unavailable(error.to_string())
                 }
             })?;
+
+        let started_at = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_status)) => break,
+                Ok(None) => {
+                    let elapsed = started_at.elapsed();
+                    if elapsed >= timeout {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(SwarmBriefCommandError::TimedOut { timeout_ms });
+                    }
+                    thread::sleep(Duration::from_millis(10).min(timeout.saturating_sub(elapsed)));
+                }
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(SwarmBriefCommandError::Unavailable(error.to_string()));
+                }
+            }
+        }
+
+        let output = child
+            .wait_with_output()
+            .map_err(|error| SwarmBriefCommandError::Unavailable(error.to_string()))?;
 
         let stdout = String::from_utf8(output.stdout)
             .map_err(|error| SwarmBriefCommandError::InvalidUtf8(error.to_string()))?;
@@ -931,7 +993,7 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for RchSourceAdapter<'_
     fn collect(&self, options: &SwarmBriefCollectOptions) -> SwarmBriefSourceOutput {
         let args = ["status", "--json"];
         let provenance = SwarmBriefSourceProvenance::command("rch", &args);
-        if !options.include_rch {
+        if !swarm_brief_source_enabled(options, SwarmBriefSourceKind::Rch) {
             return SwarmBriefSourceOutput {
                 snapshot: SwarmBriefSourceSnapshot {
                     source: SwarmBriefSourceKind::Rch,
@@ -1094,16 +1156,99 @@ pub fn collect_swarm_brief(
     runner: &impl SwarmBriefCommandRunner,
 ) -> SwarmBriefReport {
     let mut report = SwarmBriefReport::empty(&options.workspace);
-    apply_source_output(&mut report, GitSourceAdapter { runner }.collect(options));
-    apply_source_output(&mut report, BeadsSourceAdapter { runner }.collect(options));
-    apply_source_output(&mut report, BvSourceAdapter { runner }.collect(options));
-    apply_source_output(&mut report, AgentMailSnapshotFileAdapter.collect(options));
-    apply_source_output(&mut report, RchSourceAdapter { runner }.collect(options));
-    apply_source_output(&mut report, HostProfileSourceAdapter.collect(options));
-    apply_source_output(&mut report, AgentInventorySourceAdapter.collect(options));
+    collect_selected_source(
+        &mut report,
+        options,
+        SwarmBriefSourceKind::Git,
+        SwarmBriefSourceProvenance::command("git", &["status", "--short"]),
+        || GitSourceAdapter { runner }.collect(options),
+    );
+    collect_selected_source(
+        &mut report,
+        options,
+        SwarmBriefSourceKind::Beads,
+        SwarmBriefSourceProvenance::command("br", &["ready", "--json"]),
+        || BeadsSourceAdapter { runner }.collect(options),
+    );
+    collect_selected_source(
+        &mut report,
+        options,
+        SwarmBriefSourceKind::Bv,
+        SwarmBriefSourceProvenance::command("bv", &["--robot-triage", "--robot-triage-by-track"]),
+        || BvSourceAdapter { runner }.collect(options),
+    );
+    collect_selected_source(
+        &mut report,
+        options,
+        SwarmBriefSourceKind::AgentMail,
+        SwarmBriefSourceProvenance::local_probe(),
+        || AgentMailSnapshotFileAdapter.collect(options),
+    );
+    collect_selected_source(
+        &mut report,
+        options,
+        SwarmBriefSourceKind::Rch,
+        SwarmBriefSourceProvenance::command("rch", &["status", "--json"]),
+        || RchSourceAdapter { runner }.collect(options),
+    );
+    collect_selected_source(
+        &mut report,
+        options,
+        SwarmBriefSourceKind::HostProfile,
+        SwarmBriefSourceProvenance::local_probe(),
+        || HostProfileSourceAdapter.collect(options),
+    );
+    collect_selected_source(
+        &mut report,
+        options,
+        SwarmBriefSourceKind::AgentInventory,
+        SwarmBriefSourceProvenance::local_probe(),
+        || AgentInventorySourceAdapter.collect(options),
+    );
     apply_swarm_brief_advice(&mut report);
     report.finalize();
     report
+}
+
+fn collect_selected_source<F>(
+    report: &mut SwarmBriefReport,
+    options: &SwarmBriefCollectOptions,
+    source: SwarmBriefSourceKind,
+    provenance: SwarmBriefSourceProvenance,
+    collect: F,
+) where
+    F: FnOnce() -> SwarmBriefSourceOutput,
+{
+    if swarm_brief_source_enabled(options, source) {
+        apply_source_output(report, collect());
+    } else {
+        apply_source_output(report, skipped_source_output(source, provenance));
+    }
+}
+
+fn swarm_brief_source_enabled(
+    options: &SwarmBriefCollectOptions,
+    source: SwarmBriefSourceKind,
+) -> bool {
+    options.enabled_sources.contains(&source)
+        || (source == SwarmBriefSourceKind::Rch && options.include_rch)
+}
+
+fn skipped_source_output(
+    source: SwarmBriefSourceKind,
+    provenance: SwarmBriefSourceProvenance,
+) -> SwarmBriefSourceOutput {
+    SwarmBriefSourceOutput {
+        snapshot: SwarmBriefSourceSnapshot {
+            source,
+            status: SwarmBriefSourceStatus::Skipped,
+            freshness: SwarmBriefSourceFreshness::unknown(),
+            provenance,
+            item_count: 0,
+            degraded: Vec::new(),
+        },
+        contribution: SwarmBriefContribution::None,
+    }
 }
 
 fn apply_source_output(report: &mut SwarmBriefReport, output: SwarmBriefSourceOutput) {
@@ -1362,16 +1507,21 @@ fn recommend_swarm_brief_actions(report: &SwarmBriefReport) -> Vec<SwarmBriefRec
     recommendations.extend(resource_pressure_recommendations(report));
     recommendations.extend(surface_conflict_recommendations(report));
 
-    if report.beads.ready.is_empty() {
-        recommendations.push(no_ready_work_recommendation(report));
-    } else {
-        for bead in &report.beads.ready {
-            recommendations.push(ready_bead_recommendation(report, bead));
+    if matches!(
+        source_status(report, SwarmBriefSourceKind::Beads),
+        Some(SwarmBriefSourceStatus::Ready | SwarmBriefSourceStatus::Degraded)
+    ) {
+        if report.beads.ready.is_empty() {
+            recommendations.push(no_ready_work_recommendation(report));
+        } else {
+            for bead in &report.beads.ready {
+                recommendations.push(ready_bead_recommendation(report, bead));
+            }
         }
-    }
 
-    for bead in &report.beads.in_progress {
-        recommendations.push(in_progress_follow_up_recommendation(report, bead));
+        for bead in &report.beads.in_progress {
+            recommendations.push(in_progress_follow_up_recommendation(report, bead));
+        }
     }
 
     recommendations.sort();
@@ -2378,6 +2528,31 @@ mod tests {
         assert!(
             rec.suggested_commands
                 .contains(&"bv --robot-triage".to_string())
+        );
+    }
+
+    #[test]
+    fn advisor_does_not_infer_no_ready_work_when_beads_skipped() {
+        let mut report = report_with_ready_sources();
+        for source in &mut report.sources {
+            if source.source == SwarmBriefSourceKind::Beads {
+                source.status = SwarmBriefSourceStatus::Skipped;
+            }
+        }
+
+        apply_swarm_brief_advice(&mut report);
+
+        assert!(
+            report
+                .recommendations
+                .iter()
+                .all(|recommendation| recommendation.id != "rec.work_selection.no_ready_beads")
+        );
+        assert!(
+            report
+                .recommendations
+                .iter()
+                .any(|recommendation| recommendation.id == "rec.degraded.beads.beads_missing")
         );
     }
 

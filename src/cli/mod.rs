@@ -138,6 +138,11 @@ use crate::core::rule::{
 };
 use crate::core::search::{SearchOptions, SearchReport, run_search};
 use crate::core::status::StatusReport;
+use crate::core::swarm_brief::{
+    SwarmBriefCollectOptions, SwarmBriefReport, SwarmBriefSourceKind, SwarmBriefSourceStatus,
+    SystemSwarmBriefCommandRunner, all_swarm_brief_sources, collect_swarm_brief,
+    default_swarm_brief_sources,
+};
 use crate::core::task_frame::{
     TaskEvidenceLink, TaskFrameCloseOptions, TaskFrameCreateOptions, TaskFrameReport,
     TaskFrameShowOptions, TaskFrameStatus, TaskFrameUpdateOptions, TaskSubgoalAddOptions,
@@ -493,6 +498,9 @@ pub enum Command {
     /// Create or inspect redacted diagnostic support bundles.
     #[command(subcommand)]
     Support(SupportCommand),
+    /// Read-only coordination snapshot and preflight recommendations for agent swarms.
+    #[command(subcommand)]
+    Swarm(SwarmCommand),
     /// Durable passive task frames and goal stacks.
     #[command(name = "task-frame", subcommand)]
     TaskFrame(TaskFrameCommand),
@@ -5139,6 +5147,41 @@ pub struct SupportInspectArgs {
     pub check_versions: bool,
 }
 
+/// Subcommands for `ee swarm`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum SwarmCommand {
+    /// Emit a read-only coordination brief for agent swarms.
+    Brief(SwarmBriefArgs),
+}
+
+/// Arguments for `ee swarm brief`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct SwarmBriefArgs {
+    /// Comma-separated sources to collect: default, all, none, git, beads, bv, agent-mail, rch, host-profile, agent-inventory.
+    #[arg(long, value_name = "LIST", default_value = "default")]
+    pub sources: String,
+
+    /// Include the optional RCH status probe. Equivalent to adding rch to --sources.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_rch: bool,
+
+    /// Redacted Agent Mail snapshot JSON to include. No live Agent Mail mutation is performed.
+    #[arg(long, value_name = "PATH")]
+    pub agent_mail_snapshot: Option<PathBuf>,
+
+    /// Number of recent git commits to include when the git source is enabled.
+    #[arg(long, value_name = "N", default_value_t = 8)]
+    pub max_recent_commits: usize,
+
+    /// Per-source command timeout budget in milliseconds.
+    #[arg(long, value_name = "MS", default_value_t = 1_500)]
+    pub command_timeout_ms: u64,
+
+    /// Fail with exit code 6 when any selected source is unavailable, not configured, or skipped.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub require_sources: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum OutputFormat {
     #[default]
@@ -6253,6 +6296,9 @@ where
         }
         Some(Command::Support(SupportCommand::Inspect(ref args))) => {
             handle_support_inspect(&cli, args, stdout, stderr)
+        }
+        Some(Command::Swarm(SwarmCommand::Brief(ref args))) => {
+            handle_swarm_brief(&cli, args, stdout, stderr)
         }
         Some(Command::Workspace(ref cmd)) => handle_workspace_command(&cli, cmd, stdout, stderr),
         Some(Command::Tripwire(TripwireCommand::List(ref args))) => {
@@ -22346,6 +22392,282 @@ where
     }
 }
 
+fn handle_swarm_brief<W, E>(
+    cli: &Cli,
+    args: &SwarmBriefArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let enabled_sources = match parse_swarm_brief_sources(&args.sources, args.include_rch) {
+        Ok(sources) => sources,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let mut options = SwarmBriefCollectOptions::for_workspace(
+        cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+    );
+    options.max_recent_commits = args.max_recent_commits;
+    options.include_rch = enabled_sources.contains(&SwarmBriefSourceKind::Rch);
+    options.enabled_sources = enabled_sources;
+    options.agent_mail_snapshot_path = args.agent_mail_snapshot.clone();
+    options.command_timeout_ms = args.command_timeout_ms;
+
+    let runner = SystemSwarmBriefCommandRunner;
+    let report = collect_swarm_brief(&options, &runner);
+    let unavailable_sources = swarm_brief_unavailable_sources(&report);
+    if args.require_sources && !unavailable_sources.is_empty() {
+        let error = DomainError::UnsatisfiedDegradedMode {
+            message: format!(
+                "Required swarm brief sources are unavailable: {}.",
+                unavailable_sources.join(", ")
+            ),
+            repair: Some(
+                "Run without --require-sources, adjust --sources, or provide --agent-mail-snapshot."
+                    .to_string(),
+            ),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_swarm_brief_markdown(&report))
+        }
+        output::Renderer::Toon => {
+            match render_swarm_brief_json(&report, output::FieldProfile::Summary) {
+                Ok(json) => write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n")),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            }
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let profile = if matches!(cli.renderer(), output::Renderer::Compact) {
+                output::FieldProfile::Summary
+            } else {
+                cli.fields_level().to_field_profile()
+            };
+            match render_swarm_brief_json(&report, profile) {
+                Ok(json) => write_stdout(stdout, &(json + "\n")),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            }
+        }
+    }
+}
+
+fn parse_swarm_brief_sources(
+    raw: &str,
+    include_rch: bool,
+) -> Result<BTreeSet<SwarmBriefSourceKind>, DomainError> {
+    let mut sources = BTreeSet::new();
+    let mut saw_token = false;
+    for token in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        saw_token = true;
+        let normalized = token.to_ascii_lowercase().replace('_', "-");
+        match normalized.as_str() {
+            "default" => sources.extend(default_swarm_brief_sources()),
+            "all" => sources = all_swarm_brief_sources(),
+            "none" => sources.clear(),
+            "agent-inventory" => {
+                sources.insert(SwarmBriefSourceKind::AgentInventory);
+            }
+            "agent-mail" => {
+                sources.insert(SwarmBriefSourceKind::AgentMail);
+            }
+            "beads" => {
+                sources.insert(SwarmBriefSourceKind::Beads);
+            }
+            "bv" => {
+                sources.insert(SwarmBriefSourceKind::Bv);
+            }
+            "git" => {
+                sources.insert(SwarmBriefSourceKind::Git);
+            }
+            "host-profile" => {
+                sources.insert(SwarmBriefSourceKind::HostProfile);
+            }
+            "rch" => {
+                sources.insert(SwarmBriefSourceKind::Rch);
+            }
+            _ => {
+                return Err(DomainError::Usage {
+                    message: format!("Unknown swarm brief source `{token}`."),
+                    repair: Some(
+                        "Use --sources default, all, none, git, beads, bv, agent-mail, rch, host-profile, or agent-inventory."
+                            .to_string(),
+                    ),
+                });
+            }
+        }
+    }
+    if !saw_token {
+        sources = default_swarm_brief_sources();
+    }
+    if include_rch {
+        sources.insert(SwarmBriefSourceKind::Rch);
+    }
+    Ok(sources)
+}
+
+fn swarm_brief_unavailable_sources(report: &SwarmBriefReport) -> Vec<String> {
+    report
+        .sources
+        .iter()
+        .filter(|source| {
+            matches!(
+                source.status,
+                SwarmBriefSourceStatus::Unavailable
+                    | SwarmBriefSourceStatus::NotConfigured
+                    | SwarmBriefSourceStatus::Skipped
+            )
+        })
+        .map(|source| format!("{}:{}", source.source.as_str(), source.status.as_str()))
+        .collect()
+}
+
+fn render_swarm_brief_json(
+    report: &SwarmBriefReport,
+    profile: output::FieldProfile,
+) -> Result<String, DomainError> {
+    let data = match profile {
+        output::FieldProfile::Minimal => serde_json::json!({
+            "schema": report.schema,
+            "workspace": &report.workspace,
+            "redactionStatus": report.redaction_status,
+            "sourceCount": report.sources.len(),
+            "recommendationCount": report.recommendations.len(),
+            "degradedCount": report.degraded.len(),
+        }),
+        output::FieldProfile::Summary => serde_json::json!({
+            "schema": report.schema,
+            "workspace": &report.workspace,
+            "redactionStatus": report.redaction_status,
+            "sources": report.sources.iter().map(|source| {
+                serde_json::json!({
+                    "source": source.source.as_str(),
+                    "status": source.status.as_str(),
+                    "itemCount": source.item_count,
+                })
+            }).collect::<Vec<_>>(),
+            "beads": {
+                "readyCount": report.beads.ready.len(),
+                "blockedCount": report.beads.blocked.len(),
+                "inProgressCount": report.beads.in_progress.len(),
+                "deferredCount": report.beads.deferred.len(),
+            },
+            "topRecommendations": report.recommendations.iter().take(5).map(|recommendation| {
+                serde_json::json!({
+                    "id": &recommendation.id,
+                    "kind": &recommendation.kind,
+                    "severity": &recommendation.severity,
+                    "confidence": &recommendation.confidence,
+                    "reasonCodes": &recommendation.reason_codes,
+                    "suggestedCommands": &recommendation.suggested_commands,
+                })
+            }).collect::<Vec<_>>(),
+            "degraded": report.degraded.iter().map(|degradation| {
+                serde_json::json!({
+                    "source": degradation.source.as_str(),
+                    "code": &degradation.code,
+                    "severity": degradation.severity,
+                    "message": &degradation.message,
+                    "repair": &degradation.repair,
+                })
+            }).collect::<Vec<_>>(),
+        }),
+        output::FieldProfile::Standard | output::FieldProfile::Full => serde_json::to_value(report)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to serialize swarm brief report: {error}."),
+                repair: Some("Fix the swarm brief serializer before emitting JSON.".to_string()),
+            })?,
+    };
+
+    Ok(output::ResponseEnvelope::success()
+        .data_raw(&data.to_string())
+        .finish())
+}
+
+fn render_swarm_brief_markdown(report: &SwarmBriefReport) -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+    let _ = writeln!(output, "# Swarm Brief");
+    let _ = writeln!(output);
+    let _ = writeln!(output, "- Workspace: `{}`", report.workspace);
+    let _ = writeln!(output, "- Redaction: `{}`", report.redaction_status);
+    let _ = writeln!(output);
+    let _ = writeln!(output, "## Sources");
+    for source in &report.sources {
+        let _ = writeln!(
+            output,
+            "- `{}`: `{}` ({} item{})",
+            source.source.as_str(),
+            source.status.as_str(),
+            source.item_count,
+            if source.item_count == 1 { "" } else { "s" }
+        );
+    }
+
+    let _ = writeln!(output);
+    let _ = writeln!(output, "## Recommendations");
+    if report.recommendations.is_empty() {
+        let _ = writeln!(output, "- none");
+    } else {
+        for recommendation in report.recommendations.iter().take(10) {
+            let commands = if recommendation.suggested_commands.is_empty() {
+                "none".to_string()
+            } else {
+                recommendation.suggested_commands.join("; ")
+            };
+            let _ = writeln!(
+                output,
+                "- `{}` `{}` `{}`: {}",
+                recommendation.id, recommendation.severity, recommendation.confidence, commands
+            );
+        }
+    }
+
+    let _ = writeln!(output);
+    let _ = writeln!(output, "## File Surface Risks");
+    if report.file_surface_risks.is_empty() {
+        let _ = writeln!(output, "- none");
+    } else {
+        for risk in report.file_surface_risks.iter().take(10) {
+            let _ = writeln!(
+                output,
+                "- `{}` `{}` score {}",
+                risk.path_pattern, risk.severity, risk.score
+            );
+        }
+    }
+
+    let _ = writeln!(output);
+    let _ = writeln!(output, "## Degraded");
+    if report.degraded.is_empty() {
+        let _ = writeln!(output, "- none");
+    } else {
+        for degradation in &report.degraded {
+            let _ = writeln!(
+                output,
+                "- `{}` `{}`: {}",
+                degradation.source.as_str(),
+                degradation.code,
+                degradation.message
+            );
+        }
+    }
+
+    output
+}
+
 // ============================================================================
 // EE-431: Memory Economics and Attention Budgets
 // ============================================================================
@@ -22685,6 +23007,7 @@ const COMMAND_NAMES: &[&str] = &[
     "situation",
     "status",
     "support",
+    "swarm",
     "tripwire",
     "update",
     "version",
@@ -22775,6 +23098,7 @@ const RULE_SUBCOMMANDS: &[&str] = &["add", "list", "show", "protect"];
 const SCHEMA_SUBCOMMANDS: &[&str] = &["list", "export"];
 const SITUATION_SUBCOMMANDS: &[&str] = &["classify", "compare", "link", "show", "explain"];
 const SUPPORT_SUBCOMMANDS: &[&str] = &["bundle", "inspect"];
+const SWARM_SUBCOMMANDS: &[&str] = &["brief"];
 const TASK_FRAME_SUBCOMMANDS: &[&str] = &["create", "show", "update", "close", "subgoal"];
 const TASK_FRAME_SUBGOAL_SUBCOMMANDS: &[&str] = &["add"];
 const TRIPWIRE_SUBCOMMANDS: &[&str] = &["list", "check"];
@@ -23101,6 +23425,9 @@ impl NormalizedInvocation {
                     SupportCommand::Bundle(_) => "support bundle".to_string(),
                     SupportCommand::Inspect(_) => "support inspect".to_string(),
                 },
+                Command::Swarm(swarm) => match swarm {
+                    SwarmCommand::Brief(_) => "swarm brief".to_string(),
+                },
                 Command::TaskFrame(task_frame) => match task_frame {
                     TaskFrameCommand::Create(_) => "task-frame create".to_string(),
                     TaskFrameCommand::Show(_) => "task-frame show".to_string(),
@@ -23243,6 +23570,7 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "schema" => Some(SCHEMA_SUBCOMMANDS),
         "situation" => Some(SITUATION_SUBCOMMANDS),
         "support" => Some(SUPPORT_SUBCOMMANDS),
+        "swarm" => Some(SWARM_SUBCOMMANDS),
         "task-frame" => Some(TASK_FRAME_SUBCOMMANDS),
         "task-frame subgoal" => Some(TASK_FRAME_SUBGOAL_SUBCOMMANDS),
         "tripwire" => Some(TRIPWIRE_SUBCOMMANDS),
@@ -23714,7 +24042,8 @@ mod tests {
         FieldsLevel, FocusCommand, GraphCommand, ImportCommand, JobCommand, LearnCommand,
         LearnExperimentCommand, MaintenanceCommand, MemoryCommand, OutcomeQuarantineCommand,
         OutputFormat, PackCommand, PlaybookCommand, RuleCommand, ShadowMode, SituationCommand,
-        TaskFrameCommand, TaskFrameSubgoalCommand, WorkflowCommand, run, write_index_rebuild_error,
+        SwarmBriefArgs, SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand, WorkflowCommand,
+        run, write_index_rebuild_error,
     };
     use crate::core::index::IndexRebuildError;
     use crate::core::search::{
@@ -24052,6 +24381,51 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_swarm_brief_flags() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "swarm",
+            "brief",
+            "--workspace",
+            ".",
+            "--json",
+            "--sources",
+            "none,rch",
+            "--include-rch",
+            "--agent-mail-snapshot",
+            "mail.json",
+            "--max-recent-commits",
+            "3",
+            "--command-timeout-ms",
+            "25",
+            "--require-sources",
+        ])
+        .map_err(|error| format!("failed to parse swarm brief flags: {:?}", error.kind()))?;
+
+        ensure_equal(&parsed.json, &true, "swarm brief json global")?;
+        ensure_equal(
+            &parsed.workspace,
+            &Some(PathBuf::from(".")),
+            "swarm brief workspace global",
+        )?;
+        match parsed.command {
+            Some(Command::Swarm(SwarmCommand::Brief(args))) => {
+                ensure_equal(&args.sources, &"none,rch".to_string(), "sources")?;
+                ensure_equal(&args.include_rch, &true, "include rch")?;
+                ensure_equal(
+                    &args.agent_mail_snapshot,
+                    &Some(PathBuf::from("mail.json")),
+                    "agent mail snapshot",
+                )?;
+                ensure_equal(&args.max_recent_commits, &3, "max recent commits")?;
+                ensure_equal(&args.command_timeout_ms, &25, "command timeout")?;
+                ensure_equal(&args.require_sources, &true, "require sources")
+            }
+            other => Err(format!("expected swarm brief command, got {other:?}")),
+        }
+    }
+
+    #[test]
     fn parser_accepts_init_skip_boilerplate_flag() -> TestResult {
         let parsed =
             Cli::try_parse_from(["ee", "init", "--skip-boilerplate"]).map_err(|error| {
@@ -24067,6 +24441,151 @@ mod tests {
             }
             other => Err(format!("expected init command, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn parser_accepts_swarm_brief_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "--json",
+            "--workspace",
+            ".",
+            "swarm",
+            "brief",
+            "--sources",
+            "git,beads",
+            "--include-rch",
+            "--agent-mail-snapshot",
+            "agent-mail-snapshot.json",
+            "--max-recent-commits",
+            "3",
+            "--command-timeout-ms",
+            "250",
+            "--require-sources",
+        ])
+        .map_err(|error| format!("failed to parse swarm brief: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Swarm(SwarmCommand::Brief(SwarmBriefArgs {
+                sources,
+                include_rch,
+                agent_mail_snapshot,
+                max_recent_commits,
+                command_timeout_ms,
+                require_sources,
+            }))) => {
+                ensure_equal(&sources, &"git,beads".to_string(), "sources")?;
+                ensure_equal(&include_rch, &true, "include rch")?;
+                ensure_equal(
+                    &agent_mail_snapshot,
+                    &Some(PathBuf::from("agent-mail-snapshot.json")),
+                    "agent mail snapshot path",
+                )?;
+                ensure_equal(&max_recent_commits, &3, "max recent commits")?;
+                ensure_equal(&command_timeout_ms, &250, "command timeout")?;
+                ensure_equal(&require_sources, &true, "require sources")
+            }
+            other => Err(format!("expected swarm brief command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn swarm_brief_source_parser_handles_aliases_and_required_rch() -> TestResult {
+        let sources = super::parse_swarm_brief_sources("git,agent_mail,host-profile,none,bv", true)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&sources.len(), &2, "none resets earlier source tokens")?;
+        ensure(
+            sources.contains(&crate::core::swarm_brief::SwarmBriefSourceKind::Bv),
+            "bv source selected",
+        )?;
+        ensure(
+            sources.contains(&crate::core::swarm_brief::SwarmBriefSourceKind::Rch),
+            "include-rch adds rch source",
+        )?;
+
+        let default_sources = super::parse_swarm_brief_sources("default", false)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            default_sources.contains(&crate::core::swarm_brief::SwarmBriefSourceKind::Git),
+            "default includes git",
+        )?;
+        ensure(
+            !default_sources.contains(&crate::core::swarm_brief::SwarmBriefSourceKind::Rch),
+            "default leaves rch optional",
+        )?;
+
+        ensure(
+            super::parse_swarm_brief_sources("unknown-source", false).is_err(),
+            "unknown swarm brief source fails",
+        )
+    }
+
+    #[test]
+    fn swarm_brief_json_none_sources_is_enveloped_and_stderr_clean() -> TestResult {
+        let (exit, stdout, stderr) =
+            invoke(&["ee", "--json", "swarm", "brief", "--sources", "none"]);
+
+        ensure_equal(&exit, &ProcessExitCode::Success, "swarm brief JSON exit")?;
+        ensure(stderr.is_empty(), "swarm brief JSON stderr clean")?;
+        ensure_ends_with(&stdout, '\n', "swarm brief JSON trailing newline")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V1),
+            "swarm brief response schema",
+        )?;
+        ensure_equal(
+            &value["success"],
+            &serde_json::json!(true),
+            "swarm brief success",
+        )?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!(crate::core::swarm_brief::SWARM_BRIEF_SCHEMA_V1),
+            "swarm brief data schema",
+        )?;
+        ensure(
+            value["data"]["sources"]
+                .as_array()
+                .is_some_and(|sources| !sources.is_empty()),
+            "swarm brief reports skipped source states",
+        )
+    }
+
+    #[test]
+    fn swarm_brief_require_sources_fails_for_skipped_sources() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "swarm",
+            "brief",
+            "--sources",
+            "none",
+            "--require-sources",
+        ]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::UnsatisfiedDegradedMode,
+            "swarm brief required-source exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "required-source failure keeps diagnostics off stderr in JSON mode",
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V1),
+            "required-source error schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("unsatisfied_degraded_mode"),
+            "required-source JSON error code",
+        )
     }
 
     #[test]
@@ -26371,6 +26890,69 @@ mod tests {
             "status format JSON schema",
         )?;
         ensure(stderr.is_empty(), "status format JSON stderr must be empty")
+    }
+
+    #[test]
+    fn swarm_brief_json_writes_machine_data_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) =
+            invoke(&["ee", "--json", "swarm", "brief", "--sources", "none"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "swarm brief JSON exit")?;
+        ensure(stderr.is_empty(), "swarm brief JSON stderr must be empty")?;
+        ensure_ends_with(&stdout, '\n', "swarm brief JSON trailing newline")?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("swarm brief stdout must parse as JSON: {error}"))?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "swarm brief response schema",
+        )?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!("ee.swarm.brief.v1"),
+            "swarm brief data schema",
+        )?;
+        ensure_equal(
+            &value["data"]["sources"]
+                .as_array()
+                .map(std::vec::Vec::len)
+                .unwrap_or_default(),
+            &7,
+            "swarm brief source count",
+        )
+    }
+
+    #[test]
+    fn swarm_brief_require_sources_uses_degraded_exit_code() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "swarm",
+            "brief",
+            "--sources",
+            "none",
+            "--require-sources",
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::UnsatisfiedDegradedMode,
+            "swarm brief require-sources exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "swarm brief require-sources stderr clean",
+        )?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("require-sources stdout must parse as JSON: {error}"))?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.error.v1"),
+            "require-sources error schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("unsatisfied_degraded_mode"),
+            "require-sources error code",
+        )
     }
 
     #[test]
