@@ -1,0 +1,94 @@
+---
+source: tests/pack_quality_contracts.rs
+expression: value
+---
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "command": "eval run",
+    "mode": "pack_quality",
+    "fixtureDir": "[FIXTURE_DIR]",
+    "scenarioFilter": "usr_pre_task_brief",
+    "report": {
+      "schema": "ee.eval.pack_quality_report.v1",
+      "fixture_id": "fx.release_failure.v1",
+      "aggregate_verdict": "within",
+      "cases_total": 1,
+      "cases_within": 1,
+      "cases_drift": 0,
+      "cases_regression": 0,
+      "cases_inconclusive": 0,
+      "comparisons": [
+        {
+          "case_id": "pq.release_failure.context.v1",
+          "scenario_id": "usr_pre_task_brief",
+          "verdict": "within",
+          "expected_selected_ids": [
+            "mem_00000000000000000000000101",
+            "mem_00000000000000000000000102"
+          ],
+          "actual_selected_ids": [
+            "mem_00000000000000000000000101",
+            "mem_00000000000000000000000102"
+          ],
+          "missing_expected_ids": [],
+          "unexpected_ids": [],
+          "critical_omitted_ids": [],
+          "omitted_critical_found": [],
+          "provenance_density": 1.0,
+          "min_provenance_density": 1.0,
+          "provenance_density_passed": true,
+          "expected_degradation_codes": [
+            "semantic_disabled",
+            "graph_snapshot_stale"
+          ],
+          "actual_degradation_codes": [
+            "semantic_disabled",
+            "graph_snapshot_stale"
+          ],
+          "unexpected_degradation_codes": [],
+          "forbidden_redaction_leaks": [
+            "secret",
+            "token"
+          ],
+          "actual_redaction_leaks": [],
+          "token_budget_max": 1200,
+          "actual_tokens_used": 144,
+          "token_budget_passed": true,
+          "failure_reasons": []
+        }
+      ]
+    },
+    "artifactPaths": [
+      {
+        "fixtureId": "fx.release_failure.v1",
+        "caseId": "pq.release_failure.context.v1",
+        "scenarioId": "usr_pre_task_brief",
+        "commandStep": 4,
+        "stdout": "tXrgXt/XX-XXX/usr_prX_tXsk_XriXX/<run-iX>/XX-XontXxt.stXout.json",
+        "stderr": "target/ee-e2e/usr_pre_task_brief/<run-id>/04-context.stderr.txt"
+      }
+    ],
+    "degradedBranches": [
+      {
+        "fixtureId": "fx.release_failure.v1",
+        "code": "semantic_disabled",
+        "description": "Semantic retrieval unavailable; lexical/manual memories still surface the release rule.",
+        "repairAction": "ee index rebuild --workspace <workspace>",
+        "preservesSuccessSignal": true,
+        "executed": true,
+        "mode": "lexical_only"
+      },
+      {
+        "fixtureId": "fx.release_failure.v1",
+        "code": "graph_snapshot_stale",
+        "description": "Graph boosts unavailable or stale; context pack still includes explicit release evidence with provenance.",
+        "repairAction": "ee graph refresh --workspace <workspace>",
+        "preservesSuccessSignal": true,
+        "executed": true,
+        "mode": "declared_fixture_branch"
+      }
+    ]
+  }
+}
