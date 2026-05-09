@@ -1,0 +1,20 @@
+---
+source: tests/conformance/query_v1_matrix.rs
+assertion: ee.query.v1 temporal query-file filters apply time windows and validity posture without unsupported sentinels
+schema:
+  query_file: ee.query.v1
+  filters: ee.query.filters.temporal.v1
+contracts:
+  - time.after filters candidates by created_at lower bounds
+  - time.before accepts open-ended future windows and preserves deterministic ordering
+  - asOf provides point-in-time behavior for query-file execution
+  - temporalValidity strict/relaxed/ignore postures are parsed and applied explicitly
+  - invalid timestamps retain stable timestamp validation errors
+  - temporal filtering reports explainable degradation where derived data is unavailable
+evidence:
+  - tests/conformance/query_v1_matrix.rs::matrix_time_after_filters_created_at
+  - tests/conformance/query_v1_matrix.rs::matrix_time_before_accepts_open_ended_future_window
+  - tests/conformance/query_v1_matrix.rs::matrix_as_of_future_snapshot_succeeds
+  - tests/conformance/query_v1_matrix.rs::matrix_temporal_validity_strict_succeeds
+  - src/cli/mod.rs::temporal_filters_from_document
+  - eidetic_engine_cli-lvd4

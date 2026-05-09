@@ -1,0 +1,20 @@
+---
+source: tests/conformance/query_v1_matrix.rs
+assertion: ee.query.v1 query-file pagination is cursor-based, deterministic, and failure-explicit
+schema:
+  query_file: ee.query.v1
+  pagination: ee.query.pagination.v1
+contracts:
+  - pagination.limit applies a bounded page size without changing deterministic ordering
+  - pagination.cursor resumes from an opaque token scoped to the query shape
+  - malformed cursors fail with a stable invalid-cursor error
+  - zero or oversized limits fail validation instead of silently falling back
+  - pagination composes with pack output while preserving JSON stdout discipline
+evidence:
+  - tests/conformance/query_v1_matrix.rs::matrix_pagination_limit
+  - tests/conformance/query_v1_matrix.rs::matrix_pagination_cursor_first_page
+  - tests/conformance/query_v1_matrix.rs::matrix_pagination_invalid_cursor
+  - tests/conformance/query_v1_matrix.rs::matrix_pagination_zero_limit
+  - src/cli/mod.rs::pagination_from_document
+  - src/cli/mod.rs::validate_pagination_object
+  - eidetic_engine_cli-4x80

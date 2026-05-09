@@ -1,0 +1,18 @@
+---
+source: docs/silent-fallback-inventory.md
+assertion: no-silent-fallback inventory classifies production defaults instead of allowing hidden empty-data success
+schema:
+  inventory: ee.no_silent_fallback.inventory.v1
+contracts:
+  - query-file filter array defaults are documented as safe no-op filters
+  - context tag lookup defaults are documented as safe optional metadata gaps
+  - performance-forensics metadata defaults are documented as optional display only
+  - CASS process stdout/stderr take defaults are tracked as must-fix follow-up work
+  - new production silent-fallback patterns must be classified or rejected by the conformance guard
+evidence:
+  - docs/silent-fallback-inventory.md
+  - tests/contracts/no_silent_fallback.rs
+  - tests/no_silent_fallback_e2e.rs
+  - eidetic_engine_cli-08rn
+residual_risk:
+  - inventory entries are policy evidence; behavior remains enforced by the guard and focused surface tests

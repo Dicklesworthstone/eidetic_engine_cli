@@ -1,0 +1,22 @@
+---
+source: tests/conformance/query_v1_matrix.rs
+assertion: ee.query.v1 trust and redaction query-file filters use policy-aware selection instead of silent acceptance
+schema:
+  query_file: ee.query.v1
+  filters:
+    trust: ee.query.filters.trust.v1
+    redaction: ee.query.filters.redaction.v1
+contracts:
+  - trust.minClass filters candidates by minimum trust class
+  - trust.excludeClasses removes disallowed trust classes
+  - trust.requirePosture validates supported trust postures
+  - redaction.policy=respect is accepted and preserves redaction behavior
+  - redaction.policy=bypass is policy-denied without elevated permission
+  - redaction.allowCategories filters on stable redaction reason codes without leaking secret content
+evidence:
+  - tests/conformance/query_v1_matrix.rs::matrix_trust_min_class_succeeds
+  - tests/conformance/query_v1_matrix.rs::matrix_redaction_respect_succeeds
+  - tests/conformance/query_v1_matrix.rs::matrix_redaction_allow_categories_filters_secret_reasons
+  - src/cli/mod.rs::validate_trust_object
+  - src/cli/mod.rs::validate_redaction_object
+  - eidetic_engine_cli-vpqq

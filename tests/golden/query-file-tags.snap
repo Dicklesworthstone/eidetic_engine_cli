@@ -1,0 +1,21 @@
+---
+source: tests/conformance/query_v1_matrix.rs
+assertion: ee.query.v1 query-file tag filters select and exclude memories deterministically
+schema:
+  query_file: ee.query.v1
+  filters: ee.query.filters.tags.v1
+contracts:
+  - tags.require requires all listed tags
+  - tags.requireAny accepts any listed tag
+  - tags.exclude removes matching candidates
+  - combined tag filters have deterministic behavior and stable ordering
+  - wrong tag object or element types fail with stable machine errors
+  - empty tag arrays are documented no-op filters rather than hidden fallback
+evidence:
+  - tests/conformance/query_v1_matrix.rs::matrix_tags_require_only
+  - tests/conformance/query_v1_matrix.rs::matrix_tags_require_any
+  - tests/conformance/query_v1_matrix.rs::matrix_tags_exclude
+  - tests/conformance/query_v1_matrix.rs::matrix_tags_combined_filters
+  - tests/conformance/query_v1_matrix.rs::matrix_error_tags_wrong_type_array
+  - src/cli/mod.rs::parse_tags
+  - eidetic_engine_cli-0u8d

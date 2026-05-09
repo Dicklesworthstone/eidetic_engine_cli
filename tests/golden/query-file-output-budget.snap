@@ -1,0 +1,18 @@
+---
+source: tests/conformance/query_v1_matrix.rs
+assertion: ee.query.v1 query-file output and budget controls are observable and not silent no-ops
+schema:
+  query_file: ee.query.v1
+  response: ee.response.v1
+contracts:
+  - output.explain=true is accepted and reports that JSON packs already include selection certificates and per-item why details
+  - output.explain rejects non-boolean values with stable machine errors
+  - budget.maxResults constrains candidate count through the query-file execution path
+  - maxResults appears in the request echo or degradation metadata so users can verify it was applied
+  - JSON stdout remains the response envelope and diagnostics stay off stdout
+evidence:
+  - tests/conformance/query_v1_matrix.rs::matrix_output_explain_true
+  - tests/conformance/query_v1_matrix.rs::matrix_budget_max_results
+  - src/cli/mod.rs::output_from_document
+  - src/cli/mod.rs::budget_from_document
+  - eidetic_engine_cli-93jo
