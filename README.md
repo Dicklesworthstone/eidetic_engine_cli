@@ -348,6 +348,28 @@ Each gate reports exit code and elapsed time.
 | `ee pack diff <old-pack-id> <new-pack-id> --json` | Compare two persisted pack ledgers and explain selection, freshness, redaction, or derived-asset changes |
 | `ee support bundle --out <dir> --json` | Create a redacted diagnostic bundle, including pack replay ledger summaries without raw query or memory content |
 
+### Pack replay evidence
+
+Use `ee pack replay <pack-id> --json` when you need to explain what a historical
+pack actually selected from its persisted ledger. Replay is forensic: it reads
+the stored non-secret ledger and does not claim that a fresh search would make
+the same choices today. Use a new `ee context` or `ee pack` run when you want
+live re-retrieval against current memories, indexes, graph snapshots, and trust
+state.
+
+Use `ee pack diff <old-pack-id> <new-pack-id> --json` when a later pack changed
+and you need to separate selection, freshness, redaction, trust, or derived-asset
+causes. Freshness states and degradation codes identify evidence that was
+changed, missing, stale, or unavailable at replay time; treat those as repair or
+revalidation signals instead of silently dropping the memory from the story.
+
+For bug reports and handoffs, attach the output of
+`ee support bundle --out <dir> --json`. The bundle includes
+`pack_replay_summary.json`, which keeps pack IDs, pack hashes, ledger hashes,
+freshness counts, degradation codes, redaction classes, and derived-asset
+metadata, while hashing query text and omitting raw memory content, `why` text,
+provenance text, and full ledger payloads.
+
 ### Import & ingestion
 
 | Command | Purpose |
