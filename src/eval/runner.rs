@@ -19,6 +19,9 @@ pub const EVAL_SOURCE_MEMORY_SCHEMA_V1: &str = "ee.eval_source_memory.v1";
 /// Schema version for eval run report.
 pub const EVAL_REPORT_SCHEMA_V1: &str = "ee.eval.report.v1";
 
+/// Schema version for pack-quality expectations embedded in eval fixtures.
+pub const PACK_QUALITY_EXPECTATIONS_SCHEMA_V1: &str = "ee.eval.pack_quality_expectations.v1";
+
 /// Default fixture directory relative to project root.
 pub const DEFAULT_FIXTURE_DIR: &str = "tests/fixtures/eval";
 
@@ -57,6 +60,8 @@ pub struct FixtureScenario {
     pub command_sequence: Vec<CommandStep>,
     #[serde(default)]
     pub expected_outputs: Vec<ExpectedOutput>,
+    #[serde(default)]
+    pub pack_quality_expectations: Option<PackQualityExpectations>,
     #[serde(default)]
     pub degraded_branches: Vec<DegradedBranch>,
     pub agent_success_signal: String,
@@ -137,6 +142,51 @@ fn default_true() -> bool {
     true
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct PackQualityExpectations {
+    pub schema: String,
+    #[serde(default)]
+    pub cases: Vec<PackQualityCase>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PackQualityCase {
+    pub case_id: String,
+    pub scenario_id: String,
+    pub command_step: u32,
+    pub query_surface: PackQualityQuerySurface,
+    #[serde(default)]
+    pub expected_selected_memory_ids: Vec<String>,
+    #[serde(default)]
+    pub critical_omitted_memory_ids: Vec<String>,
+    pub min_provenance_density: f64,
+    #[serde(default)]
+    pub allowed_degradation_codes: Vec<String>,
+    #[serde(default)]
+    pub forbidden_redaction_leaks: Vec<String>,
+    pub token_budget: PackQualityTokenBudget,
+    pub stable_first_failure_label: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PackQualityQuerySurface {
+    pub kind: String,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub schema: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PackQualityTokenBudget {
+    pub max_tokens: u32,
+    pub expected_used_tokens_max: u32,
+    #[serde(default)]
+    pub expect_truncation: bool,
+}
+
 /// Source memory definition (parsed from source_memory.json).
 #[derive(Clone, Debug, Deserialize)]
 pub struct SourceMemoryFile {
@@ -146,7 +196,12 @@ pub struct SourceMemoryFile {
     pub source_kind: String,
     #[serde(default)]
     pub fixed_clock: Option<String>,
+    #[serde(default)]
     pub memories: Vec<SourceMemory>,
+    #[serde(default)]
+    pub seed_memory: Option<SourceMemory>,
+    #[serde(default)]
+    pub tiers: Vec<SourceMemoryTier>,
     #[serde(default)]
     pub secret_policy: SecretPolicy,
 }
@@ -181,6 +236,21 @@ pub struct SourceMemory {
     pub provenance_uri: Option<String>,
     #[serde(default)]
     pub expected_query_match: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SourceMemoryTier {
+    pub name: String,
+    #[serde(default)]
+    pub expected_memory_count: u32,
+    #[serde(default)]
+    pub id_range: Option<SourceMemoryIdRange>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SourceMemoryIdRange {
+    pub start: String,
+    pub end: String,
 }
 
 /// Retrieval metrics for a single query.
@@ -348,6 +418,405 @@ pub fn load_source_memories(path: &Path) -> Result<SourceMemoryFile, DomainError
         message: format!("Failed to parse source memory JSON: {e}"),
         repair: Some("Check source_memory.json syntax".into()),
     })
+}
+
+/// Validate cross-file fixture expectations that cannot be checked by JSON syntax alone.
+pub fn validate_fixture_scenario(
+    scenario: &FixtureScenario,
+    source: &SourceMemoryFile,
+) -> Result<(), DomainError> {
+    if scenario.fixture_id != source.fixture_id {
+        return Err(fixture_validation_error(format!(
+            "fixture_id mismatch: scenario `{}` uses source `{}`",
+            scenario.fixture_id, source.fixture_id
+        )));
+    }
+
+    validate_pack_quality_expectations(scenario, source)
+}
+
+fn validate_pack_quality_expectations(
+    scenario: &FixtureScenario,
+    source: &SourceMemoryFile,
+) -> Result<(), DomainError> {
+    let Some(expectations) = &scenario.pack_quality_expectations else {
+        return Ok(());
+    };
+
+    if expectations.schema != PACK_QUALITY_EXPECTATIONS_SCHEMA_V1 {
+        return Err(fixture_validation_error(format!(
+            "pack_quality_expectations schema `{}` must be `{}`",
+            expectations.schema, PACK_QUALITY_EXPECTATIONS_SCHEMA_V1
+        )));
+    }
+
+    if expectations.cases.is_empty() {
+        return Err(fixture_validation_error(
+            "pack_quality_expectations cases must not be empty",
+        ));
+    }
+
+    let source_ids = source_memory_ids(source)?;
+    let scenario_ids: HashSet<&str> = scenario.scenario_ids.iter().map(String::as_str).collect();
+    let command_steps: HashSet<u32> = scenario
+        .command_sequence
+        .iter()
+        .map(|command| command.step)
+        .collect();
+    let degradation_codes: HashSet<&str> = scenario
+        .degraded_branches
+        .iter()
+        .map(|branch| branch.code.as_str())
+        .collect();
+    let mut case_ids = HashSet::new();
+    let mut scenario_refs = HashSet::new();
+
+    for case in &expectations.cases {
+        validate_required_label(&case.case_id, "case_id", "<pack_quality>")?;
+        if !case_ids.insert(case.case_id.as_str()) {
+            return Err(fixture_validation_error(format!(
+                "duplicate pack-quality case_id `{}`",
+                case.case_id
+            )));
+        }
+
+        validate_required_label(&case.scenario_id, "scenario_id", &case.case_id)?;
+        if !scenario_ids.contains(case.scenario_id.as_str()) {
+            return Err(fixture_validation_error(format!(
+                "pack-quality case `{}` references unknown scenario_id `{}`",
+                case.case_id, case.scenario_id
+            )));
+        }
+
+        if !command_steps.contains(&case.command_step) {
+            return Err(fixture_validation_error(format!(
+                "pack-quality case `{}` references unknown command step {}",
+                case.case_id, case.command_step
+            )));
+        }
+
+        let scenario_ref = format!(
+            "{}:{}:{}",
+            case.scenario_id, case.command_step, case.query_surface.kind
+        );
+        if !scenario_refs.insert(scenario_ref) {
+            return Err(fixture_validation_error(format!(
+                "pack-quality case `{}` duplicates an ambiguous scenario/query reference",
+                case.case_id
+            )));
+        }
+
+        validate_query_surface(case)?;
+        validate_memory_id_list(
+            &case.expected_selected_memory_ids,
+            "expected_selected_memory_ids",
+            case,
+        )?;
+        validate_memory_id_list(
+            &case.critical_omitted_memory_ids,
+            "critical_omitted_memory_ids",
+            case,
+        )?;
+        validate_known_memory_ids(
+            &case.expected_selected_memory_ids,
+            &source_ids,
+            "expected_selected_memory_ids",
+            case,
+        )?;
+        validate_known_memory_ids(
+            &case.critical_omitted_memory_ids,
+            &source_ids,
+            "critical_omitted_memory_ids",
+            case,
+        )?;
+        validate_no_selection_overlap(case)?;
+        validate_provenance_density(case)?;
+        validate_degradation_codes(case, &degradation_codes)?;
+        validate_forbidden_redaction_leaks(case)?;
+        validate_token_budget(case)?;
+        validate_failure_label(case)?;
+    }
+
+    Ok(())
+}
+
+fn fixture_validation_error(message: impl Into<String>) -> DomainError {
+    DomainError::Configuration {
+        message: message.into(),
+        repair: Some("Fix the eval fixture scenario/source memory contract.".to_string()),
+    }
+}
+
+fn validate_required_label(value: &str, field: &str, case_id: &str) -> Result<(), DomainError> {
+    if value.trim().is_empty() {
+        return Err(fixture_validation_error(format!(
+            "pack-quality case `{case_id}` field `{field}` must not be empty"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_query_surface(case: &PackQualityCase) -> Result<(), DomainError> {
+    match case.query_surface.kind.as_str() {
+        "inline_query" => {
+            validate_required_option(
+                case.query_surface.query.as_deref(),
+                "query_surface.query",
+                case,
+            )?;
+            if case.query_surface.path.is_some() {
+                return Err(fixture_validation_error(format!(
+                    "pack-quality case `{}` inline_query must not set query_surface.path",
+                    case.case_id
+                )));
+            }
+        }
+        "query_file" => {
+            validate_required_option(
+                case.query_surface.path.as_deref(),
+                "query_surface.path",
+                case,
+            )?;
+            if case.query_surface.schema.as_deref() != Some("ee.query.v1") {
+                return Err(fixture_validation_error(format!(
+                    "pack-quality case `{}` query_file must declare schema `ee.query.v1`",
+                    case.case_id
+                )));
+            }
+        }
+        other => {
+            return Err(fixture_validation_error(format!(
+                "pack-quality case `{}` has invalid query_surface.kind `{other}`",
+                case.case_id
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_required_option(
+    value: Option<&str>,
+    field: &str,
+    case: &PackQualityCase,
+) -> Result<(), DomainError> {
+    match value {
+        Some(value) if !value.trim().is_empty() => Ok(()),
+        _ => Err(fixture_validation_error(format!(
+            "pack-quality case `{}` field `{field}` must not be empty",
+            case.case_id
+        ))),
+    }
+}
+
+fn validate_memory_id_list(
+    ids: &[String],
+    field: &str,
+    case: &PackQualityCase,
+) -> Result<(), DomainError> {
+    let mut seen = HashSet::new();
+    for id in ids {
+        validate_required_label(id, field, &case.case_id)?;
+        if !seen.insert(id.as_str()) {
+            return Err(fixture_validation_error(format!(
+                "pack-quality case `{}` has duplicate memory ID `{id}` in `{field}`",
+                case.case_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_known_memory_ids(
+    ids: &[String],
+    source_ids: &HashSet<String>,
+    field: &str,
+    case: &PackQualityCase,
+) -> Result<(), DomainError> {
+    for id in ids {
+        if !source_ids.contains(id) {
+            return Err(fixture_validation_error(format!(
+                "pack-quality case `{}` has unknown memory ID `{id}` in `{field}`",
+                case.case_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_no_selection_overlap(case: &PackQualityCase) -> Result<(), DomainError> {
+    let selected: HashSet<&str> = case
+        .expected_selected_memory_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
+    for omitted in &case.critical_omitted_memory_ids {
+        if selected.contains(omitted.as_str()) {
+            return Err(fixture_validation_error(format!(
+                "pack-quality case `{}` memory ID `{omitted}` is both selected and omitted",
+                case.case_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_provenance_density(case: &PackQualityCase) -> Result<(), DomainError> {
+    if !case.min_provenance_density.is_finite()
+        || !(0.0..=1.0).contains(&case.min_provenance_density)
+    {
+        return Err(fixture_validation_error(format!(
+            "pack-quality case `{}` min_provenance_density must be between 0.0 and 1.0",
+            case.case_id
+        )));
+    }
+    Ok(())
+}
+
+fn validate_degradation_codes(
+    case: &PackQualityCase,
+    fixture_codes: &HashSet<&str>,
+) -> Result<(), DomainError> {
+    let mut seen = HashSet::new();
+    for code in &case.allowed_degradation_codes {
+        validate_required_label(code, "allowed_degradation_codes", &case.case_id)?;
+        if !seen.insert(code.as_str()) {
+            return Err(fixture_validation_error(format!(
+                "pack-quality case `{}` has duplicate degradation code `{code}`",
+                case.case_id
+            )));
+        }
+        if !fixture_codes.contains(code.as_str()) {
+            return Err(fixture_validation_error(format!(
+                "pack-quality case `{}` has invalid degradation code `{code}`",
+                case.case_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_forbidden_redaction_leaks(case: &PackQualityCase) -> Result<(), DomainError> {
+    if case.forbidden_redaction_leaks.is_empty() {
+        return Err(fixture_validation_error(format!(
+            "pack-quality case `{}` forbidden_redaction_leaks must not be empty",
+            case.case_id
+        )));
+    }
+    validate_memory_id_list(
+        &case.forbidden_redaction_leaks,
+        "forbidden_redaction_leaks",
+        case,
+    )
+}
+
+fn validate_token_budget(case: &PackQualityCase) -> Result<(), DomainError> {
+    let budget = &case.token_budget;
+    if budget.max_tokens == 0 {
+        return Err(fixture_validation_error(format!(
+            "pack-quality case `{}` token_budget.max_tokens must be positive",
+            case.case_id
+        )));
+    }
+    if budget.expected_used_tokens_max == 0 {
+        return Err(fixture_validation_error(format!(
+            "pack-quality case `{}` token_budget.expected_used_tokens_max must be positive",
+            case.case_id
+        )));
+    }
+    if budget.expected_used_tokens_max > budget.max_tokens {
+        return Err(fixture_validation_error(format!(
+            "pack-quality case `{}` token_budget expected usage exceeds max_tokens",
+            case.case_id
+        )));
+    }
+    Ok(())
+}
+
+fn validate_failure_label(case: &PackQualityCase) -> Result<(), DomainError> {
+    let label = case.stable_first_failure_label.as_str();
+    validate_required_label(label, "stable_first_failure_label", &case.case_id)?;
+    let mut chars = label.chars();
+    let Some(first) = chars.next() else {
+        return Err(fixture_validation_error(format!(
+            "pack-quality case `{}` stable_first_failure_label must not be empty",
+            case.case_id
+        )));
+    };
+    if !first.is_ascii_lowercase()
+        || !chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+    {
+        return Err(fixture_validation_error(format!(
+            "pack-quality case `{}` stable_first_failure_label must be snake_case",
+            case.case_id
+        )));
+    }
+    Ok(())
+}
+
+fn source_memory_ids(source: &SourceMemoryFile) -> Result<HashSet<String>, DomainError> {
+    let mut ids: HashSet<String> = source
+        .memories
+        .iter()
+        .map(|memory| memory.id.clone())
+        .collect();
+    if let Some(seed_memory) = &source.seed_memory {
+        ids.insert(seed_memory.id.clone());
+    }
+    for tier in &source.tiers {
+        if let Some(range) = &tier.id_range {
+            ids.extend(expand_source_id_range(range, &tier.name)?);
+        }
+    }
+    Ok(ids)
+}
+
+fn expand_source_id_range(
+    range: &SourceMemoryIdRange,
+    tier_name: &str,
+) -> Result<Vec<String>, DomainError> {
+    let Some((start_prefix, start_number, start_width)) = stable_numeric_suffix(&range.start)
+    else {
+        return Err(fixture_validation_error(format!(
+            "source tier `{tier_name}` id_range.start `{}` has no numeric suffix",
+            range.start
+        )));
+    };
+    let Some((end_prefix, end_number, end_width)) = stable_numeric_suffix(&range.end) else {
+        return Err(fixture_validation_error(format!(
+            "source tier `{tier_name}` id_range.end `{}` has no numeric suffix",
+            range.end
+        )));
+    };
+
+    if start_prefix != end_prefix || start_width != end_width || end_number < start_number {
+        return Err(fixture_validation_error(format!(
+            "source tier `{tier_name}` id_range must use one ordered stable ID prefix"
+        )));
+    }
+
+    let count = end_number - start_number + 1;
+    if count > 10_000 {
+        return Err(fixture_validation_error(format!(
+            "source tier `{tier_name}` id_range is too large for fixture validation"
+        )));
+    }
+
+    Ok((start_number..=end_number)
+        .map(|number| format!("{start_prefix}{number:0start_width$}"))
+        .collect())
+}
+
+fn stable_numeric_suffix(value: &str) -> Option<(&str, u64, usize)> {
+    let split_at = value
+        .rfind(|ch: char| !ch.is_ascii_digit())
+        .map_or(0, |index| index + 1);
+    let digits = value.get(split_at..)?;
+    if digits.is_empty() {
+        return None;
+    }
+    let number = digits.parse().ok()?;
+    Some((&value[..split_at], number, digits.len()))
 }
 
 fn source_memory_counts(path: &Path) -> Result<(usize, usize), DomainError> {

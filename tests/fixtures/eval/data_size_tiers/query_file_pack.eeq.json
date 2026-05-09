@@ -1,0 +1,13 @@
+{
+  "version": "ee.query.v1",
+  "query": {
+    "text": "prepare release from query file history"
+  },
+  "budget": {
+    "maxTokens": 1200,
+    "candidatePool": 12
+  },
+  "output": {
+    "profile": "compact"
+  }
+}

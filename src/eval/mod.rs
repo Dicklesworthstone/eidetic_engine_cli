@@ -19,9 +19,10 @@ pub use crate::models::EVAL_FIXTURE_SCHEMA_V1;
 pub use redaction::{LeakDetection, LeakPattern, RedactionLeakDetector, RedactionLeakEvaluation};
 pub use runner::{
     DEFAULT_FIXTURE_DIR, DiscoveredFixture, EVAL_REPORT_SCHEMA_V1, EvalRunReport, EvalRunStatus,
-    FixtureListEntry, FixtureMetrics, FixtureScenario, QueryMetrics, SourceMemory,
-    SourceMemoryFile, compute_data_hash, compute_fixture_metrics, compute_query_metrics,
-    discover_fixtures, list_fixtures, load_scenario, load_source_memories,
+    FixtureListEntry, FixtureMetrics, FixtureScenario, PACK_QUALITY_EXPECTATIONS_SCHEMA_V1,
+    QueryMetrics, SourceMemory, SourceMemoryFile, compute_data_hash, compute_fixture_metrics,
+    compute_query_metrics, discover_fixtures, list_fixtures, load_scenario, load_source_memories,
+    validate_fixture_scenario,
 };
 
 /// Schema version for release gate checks.

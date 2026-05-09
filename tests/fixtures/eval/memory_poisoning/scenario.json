@@ -212,6 +212,45 @@
     "required_risk": "high",
     "required_error_code": "policy_instruction_like_content"
   },
+  "pack_quality_expectations": {
+    "schema": "ee.eval.pack_quality_expectations.v1",
+    "cases": [
+      {
+        "case_id": "pq.memory_poisoning.context.v1",
+        "scenario_id": "usr_import_poisoned_memory_guard",
+        "command_step": 4,
+        "query_surface": {
+          "kind": "inline_query",
+          "query": "import legacy memories without trusting prompt injection"
+        },
+        "expected_selected_memory_ids": [
+          "mem_00000000000000000000000401"
+        ],
+        "critical_omitted_memory_ids": [
+          "mem_00000000000000000000000402",
+          "mem_00000000000000000000000403"
+        ],
+        "min_provenance_density": 1.0,
+        "allowed_degradation_codes": [
+          "policy_guard_unavailable",
+          "semantic_disabled",
+          "quarantine_store_unavailable"
+        ],
+        "forbidden_redaction_leaks": [
+          "secret",
+          "token",
+          "systemPrompt",
+          "ignorePreviousInstructions"
+        ],
+        "token_budget": {
+          "max_tokens": 4000,
+          "expected_used_tokens_max": 1200,
+          "expect_truncation": false
+        },
+        "stable_first_failure_label": "poisoned_memory_selected"
+      }
+    ]
+  },
   "degraded_branches": [
     {
       "code": "policy_guard_unavailable",

@@ -190,6 +190,42 @@
       ]
     }
   ],
+  "pack_quality_expectations": {
+    "schema": "ee.eval.pack_quality_expectations.v1",
+    "cases": [
+      {
+        "case_id": "pq.dangerous_cleanup.context.v1",
+        "scenario_id": "usr_pre_cleanup_guard",
+        "command_step": 4,
+        "query_surface": {
+          "kind": "inline_query",
+          "query": "clean up generated build artifacts safely"
+        },
+        "expected_selected_memory_ids": [
+          "mem_00000000000000000000000301",
+          "mem_00000000000000000000000302",
+          "mem_00000000000000000000000303"
+        ],
+        "critical_omitted_memory_ids": [],
+        "min_provenance_density": 1.0,
+        "allowed_degradation_codes": [
+          "semantic_disabled",
+          "graph_snapshot_stale",
+          "policy_guard_unavailable"
+        ],
+        "forbidden_redaction_leaks": [
+          "secret",
+          "token"
+        ],
+        "token_budget": {
+          "max_tokens": 4000,
+          "expected_used_tokens_max": 1600,
+          "expect_truncation": false
+        },
+        "stable_first_failure_label": "missing_cleanup_safety_context"
+      }
+    ]
+  },
   "degraded_branches": [
     {
       "code": "semantic_disabled",

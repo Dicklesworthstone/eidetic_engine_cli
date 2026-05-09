@@ -7,6 +7,7 @@ Scenarios:
 - `usr_context_small_workspace`
 - `usr_context_medium_workspace`
 - `usr_context_large_workspace`
+- `usr_context_query_file_pack`
 
 This fixture defines deterministic small, medium, and large memory-source
 profiles for context-packing evaluation. It is intentionally compact: the
@@ -19,6 +20,7 @@ predictably as the memory set grows:
 - small tier: all relevant memories fit with full provenance
 - medium tier: section quotas and redundancy suppression are visible
 - large tier: budget truncation is explained and provenance is preserved
+- query-file pack: the same expectation schema covers `ee.query.v1` input
 
 Generated run artifacts belong under
 `target/ee-e2e/data_size_tiers/<run-id>/`.

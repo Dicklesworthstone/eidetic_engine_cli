@@ -1,6 +1,7 @@
 use ee::eval::{
     CommandStep, DegradedBranch, EVAL_FIXTURE_SCHEMA_V1, EvaluationScenario, ExpectedOutput,
-    RedactionClass, RedactionLeakDetector,
+    FixtureScenario, PACK_QUALITY_EXPECTATIONS_SCHEMA_V1, RedactionClass, RedactionLeakDetector,
+    SourceMemoryFile, validate_fixture_scenario,
 };
 use ee::models::model_registry::{
     EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
@@ -8,7 +9,7 @@ use ee::models::model_registry::{
     SemanticModelAdmissibilityReport, SemanticModelCandidate,
 };
 use ee::policy::detect_instruction_like_content;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const RELEASE_FAILURE_SCENARIO: &str = include_str!("fixtures/eval/release_failure/scenario.json");
 const RELEASE_FAILURE_SOURCE: &str =
@@ -36,6 +37,8 @@ const DATA_SIZE_TIERS_SCENARIO: &str = include_str!("fixtures/eval/data_size_tie
 const DATA_SIZE_TIERS_SOURCE: &str =
     include_str!("fixtures/eval/data_size_tiers/source_memory.json");
 const DATA_SIZE_TIERS_README: &str = include_str!("fixtures/eval/data_size_tiers/README.md");
+const DATA_SIZE_TIERS_QUERY_FILE: &str =
+    include_str!("fixtures/eval/data_size_tiers/query_file_pack.eeq.json");
 
 const SEMANTIC_MODEL_ADMISSIBILITY_SCENARIO: &str =
     include_str!("fixtures/eval/semantic_model_admissibility/scenario.json");
@@ -55,6 +58,43 @@ type TestResult = Result<(), String>;
 
 fn parse_json(source: &str, label: &str) -> Result<Value, String> {
     serde_json::from_str(source).map_err(|error| format!("{label} must parse as JSON: {error}"))
+}
+
+fn parse_scenario_model(source: &str, label: &str) -> Result<FixtureScenario, String> {
+    serde_json::from_str(source)
+        .map_err(|error| format!("{label} must parse as FixtureScenario: {error}"))
+}
+
+fn parse_source_model(source: &str, label: &str) -> Result<SourceMemoryFile, String> {
+    serde_json::from_str(source)
+        .map_err(|error| format!("{label} must parse as SourceMemoryFile: {error}"))
+}
+
+fn first_pack_quality_case_mut(value: &mut Value) -> Result<&mut Value, String> {
+    value
+        .get_mut("pack_quality_expectations")
+        .and_then(|expectations| expectations.get_mut("cases"))
+        .and_then(Value::as_array_mut)
+        .and_then(|cases| cases.first_mut())
+        .ok_or_else(|| "missing first pack-quality case".to_string())
+}
+
+fn expect_pack_quality_validation_error(
+    mut scenario_json: Value,
+    source: &SourceMemoryFile,
+    mutate: impl FnOnce(&mut Value) -> Result<(), String>,
+    expected_fragment: &str,
+) -> TestResult {
+    mutate(&mut scenario_json)?;
+    let scenario: FixtureScenario =
+        serde_json::from_value(scenario_json).map_err(|error| error.to_string())?;
+    let Err(error) = validate_fixture_scenario(&scenario, source) else {
+        return Err("malformed pack-quality fixture unexpectedly passed validation".to_string());
+    };
+    ensure(
+        error.to_string().contains(expected_fragment),
+        &format!("error `{error}` must contain `{expected_fragment}`"),
+    )
 }
 
 fn field<'a>(value: &'a Value, name: &str) -> Result<&'a Value, String> {
@@ -133,6 +173,144 @@ fn case_by_id<'a>(cases: &'a [Value], case_id: &str) -> Result<&'a Value, String
 
 fn score_field(value: &Value, name: &str) -> Result<u64, String> {
     u64_field(field(value, "scores")?, name)
+}
+
+#[test]
+fn pack_quality_expectations_validate_required_fixture_set() -> TestResult {
+    for (label, scenario_source, source_source) in [
+        (
+            "release_failure",
+            RELEASE_FAILURE_SCENARIO,
+            RELEASE_FAILURE_SOURCE,
+        ),
+        (
+            "dangerous_cleanup",
+            DANGEROUS_CLEANUP_SCENARIO,
+            DANGEROUS_CLEANUP_SOURCE,
+        ),
+        (
+            "memory_poisoning",
+            MEMORY_POISONING_SCENARIO,
+            MEMORY_POISONING_SOURCE,
+        ),
+        (
+            "data_size_tiers",
+            DATA_SIZE_TIERS_SCENARIO,
+            DATA_SIZE_TIERS_SOURCE,
+        ),
+    ] {
+        let scenario = parse_scenario_model(scenario_source, label)?;
+        let source = parse_source_model(source_source, label)?;
+        validate_fixture_scenario(&scenario, &source).map_err(|error| error.to_string())?;
+
+        let expectations = scenario
+            .pack_quality_expectations
+            .ok_or_else(|| format!("{label} must define pack-quality expectations"))?;
+        ensure_equal(
+            expectations.schema,
+            PACK_QUALITY_EXPECTATIONS_SCHEMA_V1.to_string(),
+            "pack-quality schema",
+        )?;
+        ensure(
+            !expectations.cases.is_empty(),
+            &format!("{label} must define at least one pack-quality case"),
+        )?;
+    }
+
+    let data_size = parse_scenario_model(DATA_SIZE_TIERS_SCENARIO, "data_size_tiers")?;
+    let data_cases = data_size
+        .pack_quality_expectations
+        .ok_or_else(|| "data_size_tiers pack-quality expectations missing".to_string())?
+        .cases;
+    ensure(
+        data_cases.iter().any(|case| {
+            case.scenario_id == "usr_context_query_file_pack"
+                && case.query_surface.kind == "query_file"
+                && case.query_surface.schema.as_deref() == Some("ee.query.v1")
+        }),
+        "data_size_tiers must include a query-file pack-quality case",
+    )?;
+
+    let query_file = parse_json(DATA_SIZE_TIERS_QUERY_FILE, "data_size_tiers query file")?;
+    ensure_equal(
+        string_field(&query_file, "version")?,
+        "ee.query.v1",
+        "query-file schema",
+    )
+}
+
+#[test]
+fn pack_quality_validation_rejects_malformed_expectations() -> TestResult {
+    let release_source = parse_source_model(RELEASE_FAILURE_SOURCE, "release_failure source")?;
+
+    expect_pack_quality_validation_error(
+        parse_json(RELEASE_FAILURE_SCENARIO, "release_failure scenario")?,
+        &release_source,
+        |scenario| {
+            first_pack_quality_case_mut(scenario)?["expected_selected_memory_ids"] = json!([
+                "mem_00000000000000000000000101",
+                "mem_00000000000000000000000101"
+            ]);
+            Ok(())
+        },
+        "duplicate memory ID",
+    )?;
+
+    expect_pack_quality_validation_error(
+        parse_json(RELEASE_FAILURE_SCENARIO, "release_failure scenario")?,
+        &release_source,
+        |scenario| {
+            first_pack_quality_case_mut(scenario)?["expected_selected_memory_ids"] =
+                json!(["mem_00000000000000000000999999"]);
+            Ok(())
+        },
+        "unknown memory ID",
+    )?;
+
+    expect_pack_quality_validation_error(
+        parse_json(RELEASE_FAILURE_SCENARIO, "release_failure scenario")?,
+        &release_source,
+        |scenario| {
+            first_pack_quality_case_mut(scenario)?["token_budget"] = json!({
+                "max_tokens": 10,
+                "expected_used_tokens_max": 11,
+                "expect_truncation": false
+            });
+            Ok(())
+        },
+        "expected usage exceeds max_tokens",
+    )?;
+
+    expect_pack_quality_validation_error(
+        parse_json(RELEASE_FAILURE_SCENARIO, "release_failure scenario")?,
+        &release_source,
+        |scenario| {
+            first_pack_quality_case_mut(scenario)?["allowed_degradation_codes"] =
+                json!(["made_up_degradation"]);
+            Ok(())
+        },
+        "invalid degradation code",
+    )?;
+
+    expect_pack_quality_validation_error(
+        parse_json(RELEASE_FAILURE_SCENARIO, "release_failure scenario")?,
+        &release_source,
+        |scenario| {
+            let cases = scenario
+                .get_mut("pack_quality_expectations")
+                .and_then(|expectations| expectations.get_mut("cases"))
+                .and_then(Value::as_array_mut)
+                .ok_or_else(|| "missing pack-quality cases".to_string())?;
+            let mut duplicate = cases
+                .first()
+                .cloned()
+                .ok_or_else(|| "missing first pack-quality case".to_string())?;
+            duplicate["case_id"] = json!("pq.release_failure.ambiguous_ref.v1");
+            cases.push(duplicate);
+            Ok(())
+        },
+        "ambiguous scenario/query reference",
+    )
 }
 
 #[test]
@@ -1065,6 +1243,7 @@ fn data_size_tiers_scenario_contract_is_complete() -> TestResult {
         "usr_context_small_workspace",
         "usr_context_medium_workspace",
         "usr_context_large_workspace",
+        "usr_context_query_file_pack",
     ] {
         ensure(
             array_contains_string(array_field(&scenario, "scenario_ids")?, scenario_id),
@@ -1166,7 +1345,7 @@ fn data_size_tiers_scenario_contract_is_complete() -> TestResult {
     }
 
     let commands = array_field(&scenario, "command_sequence")?;
-    ensure_equal(commands.len(), 5, "command count")?;
+    ensure_equal(commands.len(), 6, "command count")?;
     for (index, command) in commands.iter().enumerate() {
         let argv = array_field(command, "argv")?;
         ensure_equal(
@@ -1225,6 +1404,22 @@ fn data_size_tiers_scenario_contract_is_complete() -> TestResult {
             "context command tier label",
         )?;
     }
+
+    let query_file_command = &commands[5];
+    let query_file_argv = array_field(query_file_command, "argv")?;
+    ensure(
+        array_contains_string(query_file_argv, "pack"),
+        "query-file command must exercise ee pack",
+    )?;
+    ensure(
+        array_contains_string(query_file_argv, "--query-file"),
+        "query-file command must pass --query-file",
+    )?;
+    ensure_equal(
+        string_field(query_file_command, "query_surface")?,
+        "query_file",
+        "query-file command surface",
+    )?;
 
     let degraded_codes: Vec<&str> = array_field(&scenario, "degraded_branches")?
         .iter()
@@ -1390,8 +1585,9 @@ fn data_size_tiers_source_memory_profiles_are_deterministic_and_secret_free() ->
         "source fixture must be secret-free",
     )?;
 
-    let all_fixture_text =
-        format!("{DATA_SIZE_TIERS_SCENARIO}\n{DATA_SIZE_TIERS_SOURCE}\n{DATA_SIZE_TIERS_README}");
+    let all_fixture_text = format!(
+        "{DATA_SIZE_TIERS_SCENARIO}\n{DATA_SIZE_TIERS_SOURCE}\n{DATA_SIZE_TIERS_README}\n{DATA_SIZE_TIERS_QUERY_FILE}"
+    );
     for forbidden in ["sk-", "ghp_", "AKIA", "-----BEGIN PRIVATE KEY-----"] {
         ensure(
             !all_fixture_text.contains(forbidden),
@@ -1407,6 +1603,7 @@ fn data_size_tiers_source_memory_profiles_are_deterministic_and_secret_free() ->
         "usr_context_small_workspace",
         "usr_context_medium_workspace",
         "usr_context_large_workspace",
+        "usr_context_query_file_pack",
     ] {
         ensure(
             DATA_SIZE_TIERS_README.contains(scenario_id),
@@ -1519,14 +1716,14 @@ fn data_size_tiers_json_fixture_maps_to_eval_domain_types() -> TestResult {
         "usr_context_small_workspace".to_string(),
         "domain scenario id",
     )?;
-    ensure_equal(scenario.command_sequence.len(), 5, "domain commands")?;
+    ensure_equal(scenario.command_sequence.len(), 6, "domain commands")?;
     ensure(
         scenario.command_sequence[4]
             .command_template
             .contains("--max-tokens 4000"),
         "large-tier command keeps its token budget",
     )?;
-    ensure_equal(scenario.expected_outputs.len(), 5, "domain outputs")?;
+    ensure_equal(scenario.expected_outputs.len(), 6, "domain outputs")?;
     ensure_equal(
         scenario.degraded_branches.len(),
         3,

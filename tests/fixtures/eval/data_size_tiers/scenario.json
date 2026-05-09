@@ -4,7 +4,8 @@
   "scenario_ids": [
     "usr_context_small_workspace",
     "usr_context_medium_workspace",
-    "usr_context_large_workspace"
+    "usr_context_large_workspace",
+    "usr_context_query_file_pack"
   ],
   "fixture_family": "data_size_tiers",
   "coverage_state": "implemented",
@@ -25,7 +26,8 @@
       "mem_00000000000000000000000600",
       "pack_00000000000000000000000501",
       "pack_00000000000000000000000502",
-      "pack_00000000000000000000000503"
+      "pack_00000000000000000000000503",
+      "pack_00000000000000000000000504"
     ],
     "workspace_fingerprints": [
       "workspace.data_size_tiers.small.v1",
@@ -188,6 +190,27 @@
       "tier": "large",
       "stdout_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/05-context-large.stdout.json",
       "stderr_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/05-context-large.stderr.txt"
+    },
+    {
+      "step": 6,
+      "argv": [
+        "ee",
+        "pack",
+        "--query-file",
+        "tests/fixtures/eval/data_size_tiers/query_file_pack.eeq.json",
+        "--workspace",
+        "<workspace>",
+        "--max-tokens",
+        "1200",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "query_surface": "query_file",
+      "stdout_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/06-pack-query-file.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/06-pack-query-file.stderr.txt"
     }
   ],
   "expected_outputs": [
@@ -260,8 +283,156 @@
         "secret",
         "token"
       ]
+    },
+    {
+      "step": 6,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.pack.items",
+        "data.pack.provenance",
+        "data.pack.hash",
+        "data.pack.request.queryFile"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
     }
   ],
+  "pack_quality_expectations": {
+    "schema": "ee.eval.pack_quality_expectations.v1",
+    "cases": [
+      {
+        "case_id": "pq.data_size_tiers.small_context.v1",
+        "scenario_id": "usr_context_small_workspace",
+        "command_step": 3,
+        "query_surface": {
+          "kind": "inline_query",
+          "query": "prepare release from small workspace history"
+        },
+        "expected_selected_memory_ids": [
+          "mem_00000000000000000000000501",
+          "mem_00000000000000000000000502",
+          "mem_00000000000000000000000503"
+        ],
+        "critical_omitted_memory_ids": [],
+        "min_provenance_density": 1.0,
+        "allowed_degradation_codes": [
+          "semantic_disabled",
+          "graph_snapshot_stale"
+        ],
+        "forbidden_redaction_leaks": [
+          "secret",
+          "token"
+        ],
+        "token_budget": {
+          "max_tokens": 800,
+          "expected_used_tokens_max": 760,
+          "expect_truncation": false
+        },
+        "stable_first_failure_label": "small_pack_missing_release_memory"
+      },
+      {
+        "case_id": "pq.data_size_tiers.medium_context.v1",
+        "scenario_id": "usr_context_medium_workspace",
+        "command_step": 4,
+        "query_surface": {
+          "kind": "inline_query",
+          "query": "prepare release from medium workspace history"
+        },
+        "expected_selected_memory_ids": [
+          "mem_00000000000000000000000501",
+          "mem_00000000000000000000000502",
+          "mem_00000000000000000000000504"
+        ],
+        "critical_omitted_memory_ids": [
+          "mem_00000000000000000000000505"
+        ],
+        "min_provenance_density": 0.8,
+        "allowed_degradation_codes": [
+          "semantic_disabled",
+          "graph_snapshot_stale"
+        ],
+        "forbidden_redaction_leaks": [
+          "secret",
+          "token"
+        ],
+        "token_budget": {
+          "max_tokens": 2400,
+          "expected_used_tokens_max": 2200,
+          "expect_truncation": false
+        },
+        "stable_first_failure_label": "medium_pack_missing_quota_evidence"
+      },
+      {
+        "case_id": "pq.data_size_tiers.large_context.v1",
+        "scenario_id": "usr_context_large_workspace",
+        "command_step": 5,
+        "query_surface": {
+          "kind": "inline_query",
+          "query": "prepare release from large workspace history"
+        },
+        "expected_selected_memory_ids": [
+          "mem_00000000000000000000000501",
+          "mem_00000000000000000000000503",
+          "mem_00000000000000000000000506"
+        ],
+        "critical_omitted_memory_ids": [
+          "mem_00000000000000000000000507"
+        ],
+        "min_provenance_density": 0.65,
+        "allowed_degradation_codes": [
+          "semantic_disabled",
+          "pack_budget_exceeded",
+          "graph_snapshot_stale"
+        ],
+        "forbidden_redaction_leaks": [
+          "secret",
+          "token"
+        ],
+        "token_budget": {
+          "max_tokens": 4000,
+          "expected_used_tokens_max": 4000,
+          "expect_truncation": true
+        },
+        "stable_first_failure_label": "large_pack_budget_explanation_missing"
+      },
+      {
+        "case_id": "pq.data_size_tiers.query_file_pack.v1",
+        "scenario_id": "usr_context_query_file_pack",
+        "command_step": 6,
+        "query_surface": {
+          "kind": "query_file",
+          "path": "tests/fixtures/eval/data_size_tiers/query_file_pack.eeq.json",
+          "schema": "ee.query.v1"
+        },
+        "expected_selected_memory_ids": [
+          "mem_00000000000000000000000501",
+          "mem_00000000000000000000000502",
+          "mem_00000000000000000000000503"
+        ],
+        "critical_omitted_memory_ids": [
+          "mem_00000000000000000000000507"
+        ],
+        "min_provenance_density": 0.9,
+        "allowed_degradation_codes": [
+          "semantic_disabled",
+          "graph_snapshot_stale"
+        ],
+        "forbidden_redaction_leaks": [
+          "secret",
+          "token"
+        ],
+        "token_budget": {
+          "max_tokens": 1200,
+          "expected_used_tokens_max": 1100,
+          "expect_truncation": false
+        },
+        "stable_first_failure_label": "query_file_pack_missing_seed_memory"
+      }
+    ]
+  },
   "degraded_branches": [
     {
       "code": "semantic_disabled",

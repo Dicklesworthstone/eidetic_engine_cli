@@ -189,6 +189,40 @@
       ]
     }
   ],
+  "pack_quality_expectations": {
+    "schema": "ee.eval.pack_quality_expectations.v1",
+    "cases": [
+      {
+        "case_id": "pq.release_failure.context.v1",
+        "scenario_id": "usr_pre_task_brief",
+        "command_step": 4,
+        "query_surface": {
+          "kind": "inline_query",
+          "query": "prepare release"
+        },
+        "expected_selected_memory_ids": [
+          "mem_00000000000000000000000101",
+          "mem_00000000000000000000000102"
+        ],
+        "critical_omitted_memory_ids": [],
+        "min_provenance_density": 1.0,
+        "allowed_degradation_codes": [
+          "semantic_disabled",
+          "graph_snapshot_stale"
+        ],
+        "forbidden_redaction_leaks": [
+          "secret",
+          "token"
+        ],
+        "token_budget": {
+          "max_tokens": 4000,
+          "expected_used_tokens_max": 1200,
+          "expect_truncation": false
+        },
+        "stable_first_failure_label": "missing_release_failure_context"
+      }
+    ]
+  },
   "degraded_branches": [
     {
       "code": "semantic_disabled",
