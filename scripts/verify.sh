@@ -15,12 +15,13 @@ set -euo pipefail
 # Gates (in order):
 #   1. Forbidden Dependencies  - cargo tree audit for banned crates
 #   2. Closure Linter          - prevent abstention-as-implementation closure
-#   3. Vision Coverage         - report documented implemented/stubbed/missing surfaces
-#   4. Unit/Contract/Golden    - cargo test --workspace --lib --bins --tests --examples
-#   5. Basic E2E               - scripts/e2e_test.sh
-#   6. Advanced E2E            - scripts/e2e_advanced.sh
-#   7. Boundary Migration      - scripts/e2e_boundary_migration.sh
-#   8. Benchmarks (optional)   - scripts/bench.sh --check-regression
+#   3. Snapshot Proposal Guard - block unreviewed tracked insta proposals
+#   4. Vision Coverage         - report documented implemented/stubbed/missing surfaces
+#   5. Unit/Contract/Golden    - cargo test --workspace --lib --bins --tests --examples
+#   6. Basic E2E               - scripts/e2e_test.sh
+#   7. Advanced E2E            - scripts/e2e_advanced.sh
+#   8. Boundary Migration      - scripts/e2e_boundary_migration.sh
+#   9. Benchmarks (optional)   - scripts/bench.sh --check-regression
 #
 # Exit codes match AGENTS.md conventions (0=success, 1=usage, 3=storage, etc.)
 # Artifacts are written to /tmp/ee-e2e-*/artifacts by E2E scripts.
@@ -34,7 +35,7 @@ BEADS_LOCK_SKIP_CODE=75
 for arg in "$@"; do
     case "$arg" in
         --help|-h)
-            sed -n '3,21p' "$0" | sed 's/^# //' | sed 's/^#//'
+            sed -n '3,27p' "$0" | sed 's/^# //' | sed 's/^#//'
             exit 0
             ;;
         --include-bench)
@@ -128,6 +129,47 @@ with_beads_read_locks() {
     return "$status"
 }
 
+snapshot_proposal_guard() {
+    if ! git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "ok: not in a git worktree; snapshot proposal guard skipped"
+        return 0
+    fi
+
+    local proposals
+    proposals=$(git -C "$REPO_ROOT" ls-files | grep -E '\.snap\.new$' || true)
+    if [ -z "$proposals" ]; then
+        echo "ok: no tracked insta proposal snapshots"
+        return 0
+    fi
+
+    local failures=0
+    local count=0
+    local proposal
+    local accepted
+    while IFS= read -r proposal; do
+        [ -n "$proposal" ] || continue
+        count=$((count + 1))
+        accepted="${proposal%.new}"
+        if ! git -C "$REPO_ROOT" ls-files --error-unmatch "$accepted" >/dev/null 2>&1; then
+            echo "error: tracked insta proposal has no accepted snapshot: $proposal" >&2
+            echo "       expected accepted snapshot: $accepted" >&2
+            failures=1
+            continue
+        fi
+        if ! cmp -s "$REPO_ROOT/$accepted" "$REPO_ROOT/$proposal"; then
+            echo "error: tracked insta proposal differs from accepted snapshot: $proposal" >&2
+            echo "       review with cargo insta and commit only accepted .snap files" >&2
+            failures=1
+        fi
+    done <<< "$proposals"
+
+    if [ "$failures" -ne 0 ]; then
+        return 1
+    fi
+    echo "ok: $count tracked insta proposal snapshot(s) match accepted snapshots"
+    echo "    removal of redundant .snap.new files still requires explicit approval"
+}
+
 run_stage() {
     local name="$1"
     local cmd="$2"
@@ -176,23 +218,26 @@ run_stage "Closure Linter" "with_beads_read_locks ./scripts/closure-lint.sh --au
 # Gate 2.5: Drift Guard (ensures red gates have tracking beads)
 run_stage "Verification Drift Guard" "with_beads_read_locks ./scripts/verification-drift-guard.sh --json"
 
-# Gate 3: Strategic Vision Coverage
+# Gate 3: Snapshot Proposal Guard
+run_stage "Snapshot Proposal Guard" "snapshot_proposal_guard"
+
+# Gate 4: Strategic Vision Coverage
 run_stage "Vision Coverage" "with_beads_read_locks sh ./scripts/vision-coverage.sh --json"
 
-# Gate 4: Core Cargo Tests (Contracts, Logic, Golden). Benchmarks are
+# Gate 5: Core Cargo Tests (Contracts, Logic, Golden). Benchmarks are
 # deliberately excluded here and run only through the explicit benchmark gate.
 run_stage "Unit, Contract, and Golden Tests" "cargo test --workspace --lib --bins --tests --examples"
 
-# Gate 5: Basic End-to-End
+# Gate 6: Basic End-to-End
 run_stage "Basic E2E Scripts" "./scripts/e2e_test.sh"
 
-# Gate 6: Advanced End-to-End
+# Gate 7: Advanced End-to-End
 run_stage "Advanced E2E Scripts" "./scripts/e2e_advanced.sh"
 
-# Gate 7: Boundary Migration
+# Gate 8: Boundary Migration
 run_stage "Boundary Migration Scripts" "./scripts/e2e_boundary_migration.sh"
 
-# Gate 8: Performance Benchmarks (optional, gated behind --include-bench)
+# Gate 9: Performance Benchmarks (optional, gated behind --include-bench)
 if [ "$INCLUDE_BENCH" = "true" ]; then
     run_stage "Performance Benchmarks" "./scripts/bench.sh --check-regression"
 fi

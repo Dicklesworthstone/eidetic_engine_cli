@@ -57,6 +57,9 @@ scratch/
 scratch.*
 **/*.bak
 
+# Insta review proposals are generated artifacts; accepted goldens are *.snap.
+*.snap.new
+
 # Rust profiling / coverage / nextest local outputs
 *.profraw
 *.profdata
