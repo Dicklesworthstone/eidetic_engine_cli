@@ -1525,6 +1525,7 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
     let workspace_arg = workspace.display().to_string();
     let database_path = workspace.join(".ee").join("ee.db");
     let source_path = workspace.join("freshness-source.md");
+    let query_file_path = workspace.join("dmu0-query.eeq.json");
     let marker = "dmu0 replay freshness egress anchor";
     let source_content = format!("{marker} safe source evidence line");
     write_text(&source_path, &source_content)?;
@@ -1706,6 +1707,26 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
     ensure_step_omits_secret_probes("index rebuild", &index_event, &index_json, &probes)?;
 
     let query = marker.to_owned();
+    let query_file_json = serde_json::to_string_pretty(&json!({
+        "version": "ee.query.v1",
+        "query": {
+            "text": query.as_str(),
+            "mode": "hybrid"
+        },
+        "budget": {
+            "maxTokens": 4000,
+            "candidatePool": 20
+        },
+        "output": {
+            "format": "json",
+            "profile": "compact",
+            "explain": true
+        }
+    }))
+    .map_err(|error| format!("failed to serialize dmu0 query file: {error}"))?;
+    write_text(&query_file_path, &query_file_json)?;
+    let query_file_arg = query_file_path.display().to_string();
+
     let (context_before_event, context_before_json) = run_step(
         scenario_id,
         &events_path,
@@ -1764,6 +1785,77 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
     )?;
     let before_pack_id = first_new_pack_id(&before_pack_ids, &[])?;
 
+    let (pack_query_before_event, pack_query_before_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "06b_pack_query_file_before_source_change",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "pack".to_owned(),
+                "--query-file".to_owned(),
+                query_file_arg.clone(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes(
+        "pack query-file before source change",
+        &pack_query_before_event,
+        &pack_query_before_json,
+        &probes,
+    )?;
+    let pack_query_before_codes = degradation_codes(&pack_query_before_json)?;
+    ensure(
+        !pack_query_before_codes
+            .iter()
+            .any(|code| code == "context_evidence_freshness_changed_source"),
+        format!(
+            "query-file pack should not report changed_source before mutation: {pack_query_before_codes:?}"
+        ),
+    )?;
+    let pack_query_before_hash = string_at(
+        &pack_query_before_json,
+        "/data/pack/hash",
+        "pack query-file before",
+    )?;
+    let pack_query_before_item_ids = memory_ids_from_context(&pack_query_before_json)?;
+    ensure(
+        pack_query_before_item_ids
+            .iter()
+            .any(|id| id == &source_memory_id),
+        format!(
+            "pack query-file before mutation must select source memory {source_memory_id}, got {pack_query_before_item_ids:?}"
+        ),
+    )?;
+    ensure(
+        pack_query_before_item_ids
+            .iter()
+            .any(|id| id == &redacted_memory_id),
+        format!(
+            "pack query-file before mutation must select redacted memory {redacted_memory_id}, got {pack_query_before_item_ids:?}"
+        ),
+    )?;
+    let (_pack_query_before_ledger_hashes, pack_query_before_pack_ids) =
+        assert_context_pack_ledgers_persisted(
+            &database_path,
+            &query,
+            &pack_query_before_hash,
+            &pack_query_before_item_ids,
+            1,
+        )?;
+    let pack_query_before_pack_id = first_new_pack_id(
+        &pack_query_before_pack_ids,
+        std::slice::from_ref(&before_pack_id),
+    )?;
+
     write_text(
         &source_path,
         &format!("{marker} safe source evidence changed after first pack"),
@@ -1820,6 +1912,73 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
         1,
     )?;
     let after_pack_id = first_new_pack_id(&after_pack_ids, std::slice::from_ref(&before_pack_id))?;
+
+    let (pack_query_after_event, pack_query_after_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "07b_pack_query_file_after_source_change",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "pack".to_owned(),
+                "--query-file".to_owned(),
+                query_file_arg,
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes(
+        "pack query-file after source change",
+        &pack_query_after_event,
+        &pack_query_after_json,
+        &probes,
+    )?;
+    let pack_query_after_codes = degradation_codes(&pack_query_after_json)?;
+    ensure(
+        pack_query_after_codes
+            .iter()
+            .any(|code| code == "context_evidence_freshness_changed_source"),
+        format!(
+            "pack query-file after mutation must report changed_source, got {pack_query_after_codes:?}"
+        ),
+    )?;
+    let pack_query_after_hash = string_at(
+        &pack_query_after_json,
+        "/data/pack/hash",
+        "pack query-file after",
+    )?;
+    let pack_query_after_item_ids = memory_ids_from_context(&pack_query_after_json)?;
+    ensure(
+        pack_query_after_item_ids
+            .iter()
+            .any(|id| id == &source_memory_id),
+        format!(
+            "pack query-file after mutation must select source memory {source_memory_id}, got {pack_query_after_item_ids:?}"
+        ),
+    )?;
+    let (_pack_query_after_ledger_hashes, pack_query_after_pack_ids) =
+        assert_context_pack_ledgers_persisted(
+            &database_path,
+            &query,
+            &pack_query_after_hash,
+            &pack_query_after_item_ids,
+            1,
+        )?;
+    let pack_query_after_pack_id = first_new_pack_id(
+        &pack_query_after_pack_ids,
+        &[
+            before_pack_id.clone(),
+            after_pack_id.clone(),
+            pack_query_before_pack_id.clone(),
+        ],
+    )?;
 
     let (why_event, why_json) = run_step(
         scenario_id,
@@ -1929,6 +2088,52 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
         ),
     )?;
 
+    let (pack_query_replay_after_event, pack_query_replay_after_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "10b_pack_query_file_replay_after_source_change",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "pack".to_owned(),
+                "replay".to_owned(),
+                pack_query_after_pack_id.clone(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.pack.replay.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes(
+        "pack query-file replay after",
+        &pack_query_replay_after_event,
+        &pack_query_replay_after_json,
+        &probes,
+    )?;
+    ensure_equal(
+        &pack_query_replay_after_json.pointer("/data/replay/status"),
+        &Some(&json!("available")),
+        "pack query-file replay after status",
+    )?;
+    let pack_query_replay_after_codes = degradation_codes_at(
+        &pack_query_replay_after_json,
+        "/data/replay/degraded",
+        "pack query-file replay after ledger degraded",
+    )?;
+    ensure(
+        pack_query_replay_after_codes
+            .iter()
+            .any(|code| code == "context_evidence_freshness_changed_source"),
+        format!(
+            "pack query-file replay after mutation must expose ledger freshness degradation, got {pack_query_replay_after_codes:?}"
+        ),
+    )?;
+
     let (diff_event, diff_json) = run_step(
         scenario_id,
         &events_path,
@@ -1965,6 +2170,53 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
         format!("pack diff must explain freshness degradation change, got {likely_causes:?}"),
     )?;
 
+    let (pack_query_diff_event, pack_query_diff_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "11b_pack_query_file_diff_source_change",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "pack".to_owned(),
+                "diff".to_owned(),
+                pack_query_before_pack_id.clone(),
+                pack_query_after_pack_id.clone(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.pack.diff.v1",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_step_omits_secret_probes(
+        "pack query-file diff",
+        &pack_query_diff_event,
+        &pack_query_diff_json,
+        &probes,
+    )?;
+    ensure_equal(
+        &pack_query_diff_json.pointer("/data/diff/summary/replayable"),
+        &Some(&json!(true)),
+        "pack query-file diff replayable summary",
+    )?;
+    let pack_query_likely_causes = json_array(
+        &pack_query_diff_json,
+        "/data/diff/likelyCauses",
+        "pack query-file diff causes",
+    )?;
+    ensure(
+        pack_query_likely_causes
+            .iter()
+            .any(|cause| cause.as_str() == Some("degradation_changed")),
+        format!(
+            "pack query-file diff must explain freshness degradation change, got {pack_query_likely_causes:?}"
+        ),
+    )?;
+
     append_jsonl(
         &events_path,
         &json!({
@@ -1983,12 +2235,18 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
             "redactedMemoryId": redacted_memory_id,
             "beforePackId": before_pack_id,
             "afterPackId": after_pack_id,
+            "packQueryBeforePackId": pack_query_before_pack_id,
+            "packQueryAfterPackId": pack_query_after_pack_id,
             "beforePackHash": before_pack_hash,
             "afterPackHash": after_pack_hash,
+            "packQueryBeforePackHash": pack_query_before_hash,
+            "packQueryAfterPackHash": pack_query_after_hash,
             "freshnessCodes": {
                 "contextAfter": after_codes,
                 "whyAfter": why_codes,
-                "replayAfter": replay_after_codes
+                "replayAfter": replay_after_codes,
+                "packQueryAfter": pack_query_after_codes,
+                "packQueryReplayAfter": pack_query_replay_after_codes
             }
         }),
     )?;
