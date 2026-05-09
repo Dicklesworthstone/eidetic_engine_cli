@@ -12,13 +12,14 @@ Each gate is mapped to its conformance tests, MUST clauses, and gap status.
 | Forbidden Dependencies | `check-forbidden-deps.sh` | `forbidden_deps.rs` | 7 | 7 | 100% |
 | Closure Linter | `closure-lint.sh` | `closure_lint_contracts.rs` | 5 | 5 | 100% |
 | Verification Drift | `verification-drift-guard.sh` | `verification_drift_guard.rs` | 4 | 4 | 100% |
+| Snapshot Proposal Guard | `verify.sh` | `verification_drift_guard.rs` | 4 | 4 | 100% |
 | Vision Coverage | `vision-coverage.sh` | (script-level) | 3 | 3 | 100% |
 | Effect Contracts | (cargo test) | `effect_contracts.rs` | 32 | 32 | 100% |
 | Degraded Honesty | (cargo test) | `degraded_honesty.rs` | 28 | 28 | 100% |
 | E2E Basic | `e2e_test.sh` | (script-level) | 12 | 12 | 100% |
 | E2E Advanced | `e2e_advanced.sh` | (script-level) | 8 | 8 | 100% |
 | E2E Boundary | `e2e_boundary_migration.sh` | (script-level) | 6 | 6 | 100% |
-| **Total** | | | **105** | **105** | **100%** |
+| **Total** | | | **109** | **109** | **100%** |
 
 ---
 
@@ -74,7 +75,23 @@ Each gate is mapped to its conformance tests, MUST clauses, and gap status.
 
 ---
 
-## 4. Effect Contracts Gate
+## 4. Snapshot Proposal Guard Gate
+
+**Script:** `scripts/verify.sh`
+**Test File:** `tests/verification_drift_guard.rs`
+
+### MUST Clauses
+
+| ID | Clause | Test | Status |
+|----|--------|------|--------|
+| SP-01 | MUST run before the broad Cargo test gate | `verify_sh_includes_snapshot_proposal_guard_gate` | PASS |
+| SP-02 | MUST accept tracked `.snap.new` proposals only when they match accepted `.snap` files | `snapshot_proposal_guard_accepts_matching_tracked_proposals` | PASS |
+| SP-03 | MUST reject tracked `.snap.new` proposals without accepted `.snap` files | `snapshot_proposal_guard_rejects_orphaned_tracked_proposals` | PASS |
+| SP-04 | MUST reject tracked `.snap.new` proposals that differ from accepted `.snap` files | `snapshot_proposal_guard_rejects_divergent_tracked_proposals` | PASS |
+
+---
+
+## 5. Effect Contracts Gate
 
 **Test File:** `tests/effect_contracts.rs` (32 tests)
 
@@ -131,7 +148,7 @@ Each gate is mapped to its conformance tests, MUST clauses, and gap status.
 
 ---
 
-## 5. Degraded Honesty Gate
+## 6. Degraded Honesty Gate
 
 **Test File:** `tests/degraded_honesty.rs` (28 tests)
 
@@ -176,7 +193,7 @@ Each gate is mapped to its conformance tests, MUST clauses, and gap status.
 
 ---
 
-## 6. E2E Gates
+## 7. E2E Gates
 
 ### Basic E2E (`scripts/e2e_test.sh`)
 
@@ -246,6 +263,7 @@ No coverage gaps identified. All MUST clauses have corresponding tests.
 ./scripts/check-forbidden-deps.sh
 ./scripts/closure-lint.sh --audit --json
 ./scripts/verification-drift-guard.sh --json
+cargo test --test verification_drift_guard snapshot_proposal_guard
 cargo test --test effect_contracts
 cargo test --test degraded_honesty
 ./scripts/e2e_test.sh

@@ -6,14 +6,81 @@
 #![allow(clippy::expect_used)]
 
 use std::fs;
-use std::path::Path;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 
 const NORMAL_CARGO_TEST_GATE: &str = "cargo test --workspace --lib --bins --tests --examples";
 const BENCH_INCLUDED_TEST_GATE: &str = "cargo test --workspace --all-targets";
 
 fn project_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn verify_script_path() -> PathBuf {
+    project_root().join("scripts/verify.sh")
+}
+
+fn output_excerpt(output: &Output) -> String {
+    format!(
+        "status={:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn init_git_fixture(root: &Path) {
+    let output = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(root)
+        .output()
+        .expect("git init fixture");
+    assert!(
+        output.status.success(),
+        "git init fixture failed\n{}",
+        output_excerpt(&output)
+    );
+}
+
+fn git_add_fixture(root: &Path, paths: &[&str]) {
+    let output = Command::new("git")
+        .arg("add")
+        .args(paths)
+        .current_dir(root)
+        .output()
+        .expect("git add fixture");
+    assert!(
+        output.status.success(),
+        "git add fixture failed\n{}",
+        output_excerpt(&output)
+    );
+}
+
+fn write_snapshot_fixture(root: &Path, name: &str, snap: Option<&str>, proposal: &str) {
+    let snapshot_dir = root.join("tests/snapshots");
+    fs::create_dir_all(&snapshot_dir).expect("create fixture snapshots dir");
+    if let Some(contents) = snap {
+        fs::write(snapshot_dir.join(format!("{name}.snap")), contents).expect("write .snap");
+    }
+    fs::write(snapshot_dir.join(format!("{name}.snap.new")), proposal).expect("write .snap.new");
+}
+
+fn run_snapshot_proposal_guard(root: &Path) -> Output {
+    Command::new("bash")
+        .arg("-c")
+        .arg(
+            r#"
+set -euo pipefail
+REPO_ROOT="$FIXTURE_ROOT"
+eval "$(awk '/^snapshot_proposal_guard\(\) /,/^}/' "$VERIFY_SCRIPT")"
+snapshot_proposal_guard
+"#,
+        )
+        .env("FIXTURE_ROOT", root)
+        .env("VERIFY_SCRIPT", verify_script_path())
+        .current_dir(project_root())
+        .output()
+        .expect("run snapshot proposal guard")
 }
 
 #[test]
@@ -131,8 +198,7 @@ fn drift_guard_detects_closure_violations_without_bead() {
 
 #[test]
 fn verify_sh_includes_drift_guard_gate() {
-    let verify_script =
-        fs::read_to_string(project_root().join("scripts/verify.sh")).expect("read verify.sh");
+    let verify_script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
 
     assert!(
         verify_script.contains("verification-drift-guard.sh"),
@@ -145,9 +211,100 @@ fn verify_sh_includes_drift_guard_gate() {
 }
 
 #[test]
+fn verify_sh_includes_snapshot_proposal_guard_gate() {
+    let verify_script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    let snapshot_guard_pos = verify_script
+        .find("Snapshot Proposal Guard")
+        .expect("verify.sh should name the snapshot proposal guard stage");
+    let cargo_test_pos = verify_script
+        .find(NORMAL_CARGO_TEST_GATE)
+        .expect("verify.sh should contain the normal cargo test gate");
+
+    assert!(
+        verify_script.contains("snapshot_proposal_guard"),
+        "verify.sh should define and run the snapshot proposal guard"
+    );
+    assert!(
+        snapshot_guard_pos < cargo_test_pos,
+        "snapshot proposal guard should run before the broad cargo test gate"
+    );
+}
+
+#[test]
+fn snapshot_proposal_guard_accepts_matching_tracked_proposals() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    init_git_fixture(temp.path());
+    write_snapshot_fixture(temp.path(), "accepted", Some("same\n"), "same\n");
+    git_add_fixture(
+        temp.path(),
+        &[
+            "tests/snapshots/accepted.snap",
+            "tests/snapshots/accepted.snap.new",
+        ],
+    );
+
+    let output = run_snapshot_proposal_guard(temp.path());
+    assert!(
+        output.status.success(),
+        "matching proposal should pass\n{}",
+        output_excerpt(&output)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("1 tracked insta proposal snapshot(s) match accepted snapshots"),
+        "guard should report matching tracked proposal count: {stdout}"
+    );
+}
+
+#[test]
+fn snapshot_proposal_guard_rejects_orphaned_tracked_proposals() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    init_git_fixture(temp.path());
+    write_snapshot_fixture(temp.path(), "orphaned", None, "proposal\n");
+    git_add_fixture(temp.path(), &["tests/snapshots/orphaned.snap.new"]);
+
+    let output = run_snapshot_proposal_guard(temp.path());
+    assert!(
+        !output.status.success(),
+        "orphaned proposal should fail\n{}",
+        output_excerpt(&output)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("tracked insta proposal has no accepted snapshot"),
+        "guard should explain missing accepted snapshot: {stderr}"
+    );
+}
+
+#[test]
+fn snapshot_proposal_guard_rejects_divergent_tracked_proposals() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    init_git_fixture(temp.path());
+    write_snapshot_fixture(temp.path(), "changed", Some("accepted\n"), "proposal\n");
+    git_add_fixture(
+        temp.path(),
+        &[
+            "tests/snapshots/changed.snap",
+            "tests/snapshots/changed.snap.new",
+        ],
+    );
+
+    let output = run_snapshot_proposal_guard(temp.path());
+    assert!(
+        !output.status.success(),
+        "divergent proposal should fail\n{}",
+        output_excerpt(&output)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("tracked insta proposal differs from accepted snapshot"),
+        "guard should explain divergent proposal: {stderr}"
+    );
+}
+
+#[test]
 fn normal_verify_test_gate_excludes_criterion_benches() {
-    let verify_script =
-        fs::read_to_string(project_root().join("scripts/verify.sh")).expect("read verify.sh");
+    let verify_script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
 
     assert!(
         verify_script.contains(NORMAL_CARGO_TEST_GATE),
