@@ -1178,6 +1178,26 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
         bundle_dir.join("doctor.json").is_file(),
         "bundle must contain doctor.json".to_owned(),
     )?;
+    ensure(
+        bundle_dir.join("pack_replay_summary.json").is_file(),
+        "bundle must contain pack_replay_summary.json".to_owned(),
+    )?;
+    let pack_replay_summary = fs::read_to_string(bundle_dir.join("pack_replay_summary.json"))
+        .map_err(|error| format!("failed to read pack replay support summary: {error}"))?;
+    let pack_replay_summary_json: Value = serde_json::from_str(&pack_replay_summary)
+        .map_err(|error| format!("pack replay support summary must parse: {error}"))?;
+    ensure_json_pointer(
+        &pack_replay_summary_json,
+        "/schema",
+        json!("ee.support_bundle.pack_replay_summary.v1"),
+        "support bundle pack replay summary schema",
+    )?;
+    ensure_json_pointer(
+        &pack_replay_summary_json,
+        "/redactionStatus",
+        json!("ids_hashes_counts_codes_only_no_query_text_no_memory_content"),
+        "support bundle pack replay summary redaction posture",
+    )?;
 
     let inspect_result = run_ee_logged(
         "support-bundle-inspect",

@@ -344,6 +344,9 @@ Each gate reports exit code and elapsed time.
 | `ee outcome <id> --signal helpful\|harmful [--reason "<reason>"]` | Record feedback, updating utility/confidence |
 | `ee why <memory-id> [--json]` | Explain why a memory was selected, scored, or curated the way it was |
 | `ee pack --query-file task.eeq.json --max-tokens N --format toon` | Build a pack from an explicit EQL query document |
+| `ee pack replay <pack-id> --json` | Inspect the persisted, redaction-safe selection ledger for a historical pack |
+| `ee pack diff <old-pack-id> <new-pack-id> --json` | Compare two persisted pack ledgers and explain selection, freshness, redaction, or derived-asset changes |
+| `ee support bundle --out <dir> --json` | Create a redacted diagnostic bundle, including pack replay ledger summaries without raw query or memory content |
 
 ### Import & ingestion
 
@@ -865,6 +868,7 @@ No. The steward proposes; you approve. Every promotion, consolidation, replaceme
 | [`docs/command_classification.md`](docs/command_classification.md) | Command effect taxonomy and read/write classification |
 | [`docs/migration-guide.md`](docs/migration-guide.md) | DB schema migrations and upgrade paths |
 | [`docs/toon-output.md`](docs/toon-output.md) | TOON (Text-Only Object Notation) output format |
+| [`docs/adr/0025-replayable-context-pack-selection-ledgers.md`](docs/adr/0025-replayable-context-pack-selection-ledgers.md) | Pack replay/diff ledger contract, freshness states, and support-bundle safety rules |
 | [`docs/adr/`](docs/adr/) | Architectural decision records |
 
 ---

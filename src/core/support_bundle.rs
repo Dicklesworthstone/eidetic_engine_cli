@@ -11,6 +11,7 @@
 //! All content is passed through the secret redaction scanner before being
 //! written to the bundle directory.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -61,6 +62,8 @@ const WRITE_QUEUE_REPORT_FILE: &str = "scale_write_queue_report.json";
 const PERFORMANCE_EXPLAIN_SAMPLES_FILE: &str = "scale_performance_explain_samples.json";
 const PERFORMANCE_EXPLAIN_SAMPLE_DIR: &str = "performance-explain";
 const MAX_PERFORMANCE_EXPLAIN_SAMPLES: usize = 16;
+const PACK_REPLAY_SUMMARY_FILE: &str = "pack_replay_summary.json";
+const MAX_PACK_REPLAY_SUMMARY_RECORDS: usize = 16;
 const TRIAGE_SUMMARY_FILE: &str = "scale_triage_summary.json";
 const PERF_COMPARE_BUNDLE_SECTIONS: [(&str, &str); 7] = [
     ("profile_evidence", PROFILE_EVIDENCE_FILE),
@@ -218,6 +221,7 @@ struct CollectedDiagnostics {
     cache_reports_json: String,
     write_queue_report_json: String,
     performance_explain_samples_json: String,
+    pack_replay_summary_json: String,
     triage_summary_json: String,
 }
 
@@ -301,6 +305,10 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         (
             PERFORMANCE_EXPLAIN_SAMPLES_FILE,
             &diagnostics.performance_explain_samples_json,
+        ),
+        (
+            PACK_REPLAY_SUMMARY_FILE,
+            &diagnostics.pack_replay_summary_json,
         ),
         (TRIAGE_SUMMARY_FILE, &diagnostics.triage_summary_json),
     ];
@@ -731,6 +739,7 @@ fn collect_diagnostics(
     let cache_reports_json = cache_reports_json(workspace);
     let write_queue_report_json = write_queue_report_json();
     let performance_explain_samples_json = performance_explain_samples_json(workspace);
+    let pack_replay_summary_json = pack_replay_summary_json(workspace);
     let triage_summary_json = triage_summary_json(&status, &swarm_reports);
 
     Ok(CollectedDiagnostics {
@@ -745,6 +754,7 @@ fn collect_diagnostics(
         cache_reports_json,
         write_queue_report_json,
         performance_explain_samples_json,
+        pack_replay_summary_json,
         triage_summary_json,
     })
 }
@@ -1324,6 +1334,235 @@ fn performance_explain_samples_json(workspace: &Path) -> String {
     }))
 }
 
+fn pack_replay_summary_json(workspace: &Path) -> String {
+    stable_json(&collect_pack_replay_summary(workspace))
+}
+
+fn collect_pack_replay_summary(workspace: &Path) -> Value {
+    let database_path = workspace.join(".ee").join("ee.db");
+    let mut database = json!({
+        "present": database_path.is_file(),
+        "readable": false,
+        "workspaceRowPresent": false,
+        "schemaVersion": null,
+        "packRecordCount": 0,
+        "summarizedPackCount": 0,
+        "ledgerAvailableCount": 0,
+        "ledgerMissingCount": 0,
+        "ledgerMalformedCount": 0,
+        "ledgerHashMismatchCount": 0,
+    });
+
+    if !database_path.is_file() {
+        return pack_replay_summary_value("database_missing", database, Vec::new());
+    }
+
+    let Ok(connection) = DbConnection::open_file(&database_path) else {
+        return pack_replay_summary_value("database_unreadable", database, Vec::new());
+    };
+    database["readable"] = json!(true);
+    database["schemaVersion"] = connection
+        .schema_version()
+        .ok()
+        .flatten()
+        .map_or(Value::Null, Value::from);
+
+    let workspace_path = workspace.display().to_string();
+    let Ok(Some(workspace_row)) = connection.get_workspace_by_path(&workspace_path) else {
+        return pack_replay_summary_value("workspace_missing", database, Vec::new());
+    };
+    database["workspaceRowPresent"] = json!(true);
+
+    let total_count = query_cache_count(
+        &connection,
+        "SELECT COUNT(*) FROM pack_records WHERE workspace_id = ?1",
+        &workspace_row.id,
+    );
+    database["packRecordCount"] = json!(total_count);
+
+    let Ok(rows) = connection.query(
+        "SELECT id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, ledger_json, ledger_hash, created_at, created_by
+         FROM pack_records
+         WHERE workspace_id = ?1
+         ORDER BY created_at DESC, id ASC
+         LIMIT ?2",
+        &[
+            SqlValue::Text(workspace_row.id.clone()),
+            SqlValue::BigInt(i64::try_from(MAX_PACK_REPLAY_SUMMARY_RECORDS).unwrap_or(i64::MAX)),
+        ],
+    ) else {
+        return pack_replay_summary_value("query_failed", database, Vec::new());
+    };
+
+    let packs = rows
+        .iter()
+        .map(pack_replay_record_summary)
+        .collect::<Vec<_>>();
+    database["summarizedPackCount"] = json!(packs.len());
+    for pack in &packs {
+        match pack.pointer("/ledger/status").and_then(Value::as_str) {
+            Some("available") => increment_json_count(&mut database, "ledgerAvailableCount"),
+            Some("missing") => increment_json_count(&mut database, "ledgerMissingCount"),
+            Some("malformed") => increment_json_count(&mut database, "ledgerMalformedCount"),
+            Some("hash_mismatch") => increment_json_count(&mut database, "ledgerHashMismatchCount"),
+            _ => {}
+        }
+    }
+
+    pack_replay_summary_value("available", database, packs)
+}
+
+fn pack_replay_summary_value(status: &str, database: Value, packs: Vec<Value>) -> Value {
+    json!({
+        "schema": "ee.support_bundle.pack_replay_summary.v1",
+        "sourceSchema": crate::db::PACK_REPLAY_LEDGER_SCHEMA_V1,
+        "source": "workspace_pack_records",
+        "status": status,
+        "redactionStatus": "ids_hashes_counts_codes_only_no_query_text_no_memory_content",
+        "limits": {
+            "maxPacks": MAX_PACK_REPLAY_SUMMARY_RECORDS,
+        },
+        "database": database,
+        "packs": packs,
+    })
+}
+
+fn increment_json_count(object: &mut Value, field: &str) {
+    let next = object.get(field).and_then(Value::as_u64).unwrap_or(0) + 1;
+    object[field] = json!(next);
+}
+
+fn pack_replay_record_summary(row: &SqlRow) -> Value {
+    let pack_id = row_text(row, 0).unwrap_or("unknown");
+    let query = row_text(row, 1).unwrap_or_default();
+    let ledger_json = row_text(row, 8);
+    let ledger_hash = row_text(row, 9);
+    let ledger = summarize_pack_replay_ledger(ledger_json, ledger_hash);
+
+    json!({
+        "packId": pack_id,
+        "packHash": row_text(row, 7),
+        "ledgerHash": ledger_hash,
+        "createdAt": row_text(row, 10),
+        "createdBy": row_text(row, 11),
+        "profile": row_text(row, 2),
+        "maxTokens": row_u64(row, 3),
+        "usedTokens": row_u64(row, 4),
+        "itemCount": row_u64(row, 5),
+        "omittedCount": row_u64(row, 6),
+        "queryTextIncluded": false,
+        "queryHash": blake3_text_hash(query),
+        "ledger": ledger,
+    })
+}
+
+fn summarize_pack_replay_ledger(raw_ledger: Option<&str>, expected_hash: Option<&str>) -> Value {
+    let Some(raw_ledger) = raw_ledger else {
+        return json!({
+            "status": "missing",
+            "hashVerified": false,
+            "schema": null,
+            "selectedItemCount": 0,
+            "omittedItemCount": 0,
+            "freshnessStates": {},
+            "redactionClasses": [],
+            "degradationCodes": [],
+            "derivedAssets": {},
+            "database": {},
+            "candidateCounts": {},
+        });
+    };
+
+    let Ok(parsed) = serde_json::from_str::<Value>(raw_ledger) else {
+        return json!({
+            "status": "malformed",
+            "hashVerified": false,
+            "schema": null,
+            "selectedItemCount": 0,
+            "omittedItemCount": 0,
+            "freshnessStates": {},
+            "redactionClasses": [],
+            "degradationCodes": [],
+            "derivedAssets": {},
+            "database": {},
+            "candidateCounts": {},
+        });
+    };
+
+    let actual_hash = parsed.get("ledgerHash").and_then(Value::as_str);
+    let hash_verified = expected_hash.is_some_and(|hash| Some(hash) == actual_hash);
+    let status = if expected_hash.is_some() && !hash_verified {
+        "hash_mismatch"
+    } else {
+        "available"
+    };
+    let selected_items = support_ledger_core_array(&parsed, "selectedItems");
+    let omitted_items = support_ledger_core_array(&parsed, "omittedItems");
+
+    json!({
+        "status": status,
+        "hashVerified": hash_verified,
+        "schema": support_ledger_core_value(&parsed, "schema").cloned().unwrap_or(Value::Null),
+        "selectedItemCount": selected_items.map_or(0, Vec::len),
+        "omittedItemCount": omitted_items.map_or(0, Vec::len),
+        "freshnessStates": pack_ledger_freshness_counts(selected_items),
+        "redactionClasses": pack_ledger_redaction_classes(selected_items),
+        "degradationCodes": pack_ledger_degradation_codes(&parsed),
+        "derivedAssets": support_ledger_core_value(&parsed, "derivedAssets").cloned().unwrap_or_else(|| json!({})),
+        "database": support_ledger_core_value(&parsed, "database").cloned().unwrap_or_else(|| json!({})),
+        "candidateCounts": support_ledger_core_value(&parsed, "candidateCounts").cloned().unwrap_or_else(|| json!({})),
+    })
+}
+
+fn support_ledger_core_value<'a>(ledger: &'a Value, field: &str) -> Option<&'a Value> {
+    ledger
+        .get("core")
+        .and_then(|core| core.get(field))
+        .or_else(|| ledger.get(field))
+}
+
+fn support_ledger_core_array<'a>(ledger: &'a Value, field: &str) -> Option<&'a Vec<Value>> {
+    support_ledger_core_value(ledger, field).and_then(Value::as_array)
+}
+
+fn pack_ledger_freshness_counts(selected_items: Option<&Vec<Value>>) -> BTreeMap<String, u64> {
+    let mut counts = BTreeMap::new();
+    for item in selected_items.into_iter().flatten() {
+        let freshness = item
+            .get("freshness")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        *counts.entry(freshness.to_owned()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn pack_ledger_redaction_classes(selected_items: Option<&Vec<Value>>) -> Vec<String> {
+    let mut classes = BTreeSet::new();
+    for item in selected_items.into_iter().flatten() {
+        if let Some(values) = item.get("redactionClasses").and_then(Value::as_array) {
+            classes.extend(values.iter().filter_map(Value::as_str).map(str::to_owned));
+        }
+    }
+    classes.into_iter().collect()
+}
+
+fn pack_ledger_degradation_codes(ledger: &Value) -> Vec<String> {
+    let mut codes = support_ledger_core_array(ledger, "degraded")
+        .into_iter()
+        .flatten()
+        .filter_map(|degradation| degradation.get("code").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    codes.sort();
+    codes.dedup();
+    codes
+}
+
+fn blake3_text_hash(value: &str) -> String {
+    format!("blake3:{}", compute_hash(value))
+}
+
 fn discover_performance_explain_samples(workspace: &Path) -> Vec<Value> {
     let report_dir = workspace.join(".ee").join(PERFORMANCE_EXPLAIN_SAMPLE_DIR);
     let Ok(entries) = fs::read_dir(report_dir) else {
@@ -1596,6 +1835,7 @@ fn planned_files() -> Vec<String> {
         CACHE_REPORTS_FILE.to_owned(),
         WRITE_QUEUE_REPORT_FILE.to_owned(),
         PERFORMANCE_EXPLAIN_SAMPLES_FILE.to_owned(),
+        PACK_REPLAY_SUMMARY_FILE.to_owned(),
         TRIAGE_SUMMARY_FILE.to_owned(),
         MANIFEST_FILE.to_owned(),
     ]
@@ -1708,6 +1948,7 @@ mod tests {
             CACHE_REPORTS_FILE,
             WRITE_QUEUE_REPORT_FILE,
             PERFORMANCE_EXPLAIN_SAMPLES_FILE,
+            PACK_REPLAY_SUMMARY_FILE,
             TRIAGE_SUMMARY_FILE,
         ] {
             assert!(
@@ -1994,6 +2235,200 @@ mod tests {
                 .iter()
                 .any(|entry| entry.pointer("/kind") == Some(&json!("selection_certificate"))),
             "pack hotset must include selection certificate entries from pack records"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn create_bundle_includes_redaction_safe_pack_replay_summary() -> TestResult {
+        let root = unique_test_path("pack-replay-summary");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(workspace.join(".ee"))
+            .map_err(|error| format!("failed to create workspace metadata dir: {error}"))?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| format!("failed to canonicalize workspace: {error}"))?;
+
+        let database_path = workspace.join(".ee").join("ee.db");
+        let connection = DbConnection::open_file(&database_path)
+            .map_err(|error| format!("failed to open test db: {error}"))?;
+        connection
+            .migrate()
+            .map_err(|error| format!("failed to migrate test db: {error}"))?;
+
+        let workspace_id = "wsp_01234567890123456789012346";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("pack-replay-summary".to_owned()),
+                },
+            )
+            .map_err(|error| format!("failed to insert workspace: {error}"))?;
+
+        let memory_id = "mem_00000000000000000000sprs01";
+        connection
+            .insert_memory(
+                memory_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Run support bundle replay checks before closeout.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: Some("test://support-bundle/pack-replay".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: Some("test".to_owned()),
+                    tags: vec!["pack".to_owned(), "replay".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| format!("failed to insert memory: {error}"))?;
+
+        let raw_secret = format!("{}_{}_{}", "api", "key=sk", "test_123");
+        let degraded_json = json!([
+            {
+                "code": "context_evidence_freshness_changed_source",
+                "severity": "medium",
+                "message": "Source evidence changed after pack creation.",
+                "repair": "ee why <memory-id> --json"
+            }
+        ])
+        .to_string();
+        let pack_id = "pack_00000000000000000000sprs01";
+        let pack_items = vec![crate::db::CreatePackItemInput {
+            pack_id: pack_id.to_owned(),
+            memory_id: memory_id.to_owned(),
+            rank: 1,
+            section: "procedural_rules".to_owned(),
+            estimated_tokens: 17,
+            relevance: 0.91,
+            utility: 0.83,
+            why: format!("selected by replay query with {raw_secret}"),
+            diversity_key: Some("procedural:rule:support-bundle".to_owned()),
+            provenance_json: json!({
+                "schema": "ee.test.provenance.v1",
+                "source": format!("redacted provenance {raw_secret}")
+            })
+            .to_string(),
+            trust_class: "human_explicit".to_owned(),
+            trust_subclass: Some("test".to_owned()),
+        }];
+        connection
+            .insert_pack_record(
+                pack_id,
+                &crate::db::CreatePackRecordInput {
+                    workspace_id: workspace_id.to_owned(),
+                    query: format!("support bundle replay {raw_secret}"),
+                    profile: "compact".to_owned(),
+                    max_tokens: 4000,
+                    used_tokens: 17,
+                    item_count: 1,
+                    omitted_count: 0,
+                    pack_hash: "blake3:support-bundle-pack-replay".to_owned(),
+                    degraded_json: Some(degraded_json),
+                    created_by: Some("ee context".to_owned()),
+                },
+                &pack_items,
+                &[],
+            )
+            .map_err(|error| format!("failed to insert pack record: {error}"))?;
+        connection
+            .close()
+            .map_err(|error| format!("failed to close test db: {error}"))?;
+
+        let output_dir = root.join("out");
+        fs::create_dir_all(&output_dir)
+            .map_err(|error| format!("failed to create output dir: {error}"))?;
+        let report = create_bundle(&BundleOptions {
+            workspace,
+            output_dir: Some(output_dir),
+            dry_run: false,
+            redacted: true,
+            include_raw: false,
+            audit_limit: 5,
+        })
+        .map_err(|error| error.message())?;
+
+        assert!(
+            report
+                .files_collected
+                .contains(&PACK_REPLAY_SUMMARY_FILE.to_owned()),
+            "support bundle must include pack replay summary"
+        );
+        let bundle_dir = report
+            .output_path
+            .clone()
+            .ok_or_else(|| "created bundle must report output path".to_owned())?;
+        let summary_text = fs::read_to_string(bundle_dir.join(PACK_REPLAY_SUMMARY_FILE))
+            .map_err(|error| format!("failed to read pack replay summary: {error}"))?;
+        assert!(
+            !summary_text.contains(&raw_secret),
+            "pack replay summary must not leak raw secret-like query or why content"
+        );
+        let summary: Value = serde_json::from_str(&summary_text)
+            .map_err(|error| format!("pack replay summary must parse: {error}"))?;
+
+        assert_eq!(
+            summary.pointer("/schema"),
+            Some(&json!("ee.support_bundle.pack_replay_summary.v1"))
+        );
+        assert_eq!(summary.pointer("/status"), Some(&json!("available")));
+        assert_eq!(
+            summary.pointer("/redactionStatus"),
+            Some(&json!(
+                "ids_hashes_counts_codes_only_no_query_text_no_memory_content"
+            ))
+        );
+        assert_eq!(
+            summary.pointer("/database/packRecordCount"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            summary.pointer("/database/ledgerAvailableCount"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            summary.pointer("/packs/0/queryTextIncluded"),
+            Some(&json!(false))
+        );
+        let query_hash = summary
+            .pointer("/packs/0/queryHash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "pack summary must include a query hash".to_owned())?;
+        assert!(
+            query_hash.starts_with("blake3:"),
+            "query hash must use blake3 prefix, got {query_hash}"
+        );
+        assert_eq!(
+            summary.pointer("/packs/0/ledger/status"),
+            Some(&json!("available"))
+        );
+        assert_eq!(
+            summary.pointer("/packs/0/ledger/freshnessStates/unavailable"),
+            Some(&json!(1))
+        );
+        assert!(
+            summary
+                .pointer("/packs/0/ledger/redactionClasses")
+                .and_then(Value::as_array)
+                .is_some_and(|classes| !classes.is_empty()),
+            "pack replay summary must expose redaction classes without raw content"
+        );
+        assert!(
+            summary
+                .pointer("/packs/0/ledger/degradationCodes")
+                .and_then(Value::as_array)
+                .is_some_and(|codes| codes.iter().any(|code| {
+                    code.as_str() == Some("context_evidence_freshness_changed_source")
+                })),
+            "pack replay summary must expose freshness degradation codes"
         );
 
         Ok(())

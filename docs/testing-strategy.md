@@ -300,6 +300,14 @@ Assertions:
 - quarantined or instruction-like evidence is never rendered as authoritative
   procedural advice.
 
+Support-bundle replay evidence is covered by the `pack_replay_summary.json`
+section. That artifact records pack IDs, pack hashes, ledger hashes, freshness
+state counts, degradation codes, redaction classes, and derived-asset metadata,
+but it deliberately hashes query text and omits raw memory content, `why` text,
+and full ledger payloads. Tests must keep that summary parseable as
+`ee.support_bundle.pack_replay_summary.v1` and prove secret-like query or
+provenance text does not appear in the bundle.
+
 ## Forbidden Dependency Checks
 
 The default feature profile and every release-relevant optional profile must be

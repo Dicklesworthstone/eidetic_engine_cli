@@ -5,8 +5,11 @@ schema:
   bundle: ee.support_bundle.v1
   manifest: ee.support_bundle.manifest.v1
   inspect: ee.support_bundle.inspect.v1
+  pack_replay_summary: ee.support_bundle.pack_replay_summary.v1
 contracts:
   - bundle creates directory with status, doctor, audit, capabilities, and schema files
+  - bundle includes pack_replay_summary.json with pack IDs, pack hashes, ledger hashes, freshness state counts, degradation codes, and redaction classes
+  - pack replay support summaries hash query text and omit raw memory content, why text, and full ledger payloads
   - bundle applies redaction to collected diagnostic content
   - bundle generates manifest with content hashes for each file
   - inspect reads bundle manifest and verifies file integrity
@@ -30,6 +33,16 @@ evidence:
   - manifest.total_size_bytes
   - manifest.redaction_applied
   - manifest.redaction_reasons
+  - pack_replay_summary.status
+  - pack_replay_summary.database
+  - pack_replay_summary.packs[].packId
+  - pack_replay_summary.packs[].packHash
+  - pack_replay_summary.packs[].queryHash
+  - pack_replay_summary.packs[].queryTextIncluded
+  - pack_replay_summary.packs[].ledger.status
+  - pack_replay_summary.packs[].ledger.freshnessStates
+  - pack_replay_summary.packs[].ledger.redactionClasses
+  - pack_replay_summary.packs[].ledger.degradationCodes
   - inspect_report.bundle_path
   - inspect_report.manifest
   - inspect_report.files_found
