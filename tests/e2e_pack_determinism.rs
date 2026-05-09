@@ -5,6 +5,9 @@
 //!
 //! NO MOCKS. Real ee binary, real FrankenSQLite, real Frankensearch indexes.
 
+use ee::db::{DbConnection, PACK_REPLAY_LEDGER_SCHEMA_V1};
+use std::fs;
+use std::path::Path;
 use std::process::{Command, Output};
 
 type TestResult = Result<(), String>;
@@ -18,6 +21,31 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
         .env_remove("EE_WORKSPACE_REGISTRY")
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+}
+
+fn run_ee_pack_query_file(workspace: &str, query_file: &Path) -> Result<Output, String> {
+    let query_file_arg = query_file.to_string_lossy().into_owned();
+    let build_output = run_ee(&[
+        "--workspace",
+        workspace,
+        "pack",
+        "build",
+        "--query-file",
+        &query_file_arg,
+        "--json",
+    ])?;
+    if build_output.status.code() == Some(EXIT_SUCCESS) {
+        return Ok(build_output);
+    }
+
+    run_ee(&[
+        "--workspace",
+        workspace,
+        "pack",
+        "--query-file",
+        &query_file_arg,
+        "--json",
+    ])
 }
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
@@ -39,6 +67,14 @@ fn stdout_json(output: &Output) -> Result<serde_json::Value, String> {
         .map_err(|error| format!("stdout was not JSON: {error}\nstdout: {stdout}"))
 }
 
+fn ensure_stderr_empty(output: &Output, context: &str) -> TestResult {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    ensure(
+        stderr.trim().is_empty(),
+        format!("{context}: stderr should be empty in JSON mode, got: {stderr}"),
+    )
+}
+
 fn extract_pack_hash(json: &serde_json::Value) -> Option<String> {
     json.pointer("/data/pack/hash")
         .and_then(|v| v.as_str())
@@ -56,6 +92,79 @@ fn extract_item_ids(json: &serde_json::Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn assert_pack_ledger_persisted(
+    workspace: &Path,
+    query: &str,
+    pack_hash: &str,
+    selected_item_ids: &[String],
+) -> TestResult {
+    let anchor_memory_id = selected_item_ids
+        .first()
+        .ok_or_else(|| "pack selected no anchor memory".to_owned())?;
+    let database_path = workspace.join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| format!("open pack ledger database: {error}"))?;
+    let history = connection
+        .list_pack_records_for_memory(anchor_memory_id, 10)
+        .map_err(|error| format!("list persisted pack records: {error}"))?;
+
+    let (record, _item) = history
+        .iter()
+        .find(|(record, _item)| record.query == query && record.pack_hash == pack_hash)
+        .ok_or_else(|| {
+            format!(
+                "no persisted pack record for query {query:?}, hash {pack_hash:?}, anchor {anchor_memory_id}"
+            )
+        })?;
+    let ledger_hash = record
+        .ledger_hash
+        .as_ref()
+        .ok_or_else(|| format!("pack record {} missing ledger_hash", record.id))?;
+    let ledger_json = record
+        .ledger_json
+        .as_ref()
+        .ok_or_else(|| format!("pack record {} missing ledger_json", record.id))?;
+    let ledger: serde_json::Value = serde_json::from_str(ledger_json)
+        .map_err(|error| format!("pack ledger JSON malformed: {error}"))?;
+
+    ensure(
+        ledger_hash.starts_with("blake3:"),
+        format!("ledger hash must be blake3-prefixed, got {ledger_hash}"),
+    )?;
+    ensure(
+        ledger.pointer("/schema") == Some(&serde_json::json!(PACK_REPLAY_LEDGER_SCHEMA_V1)),
+        "ledger schema must be pinned",
+    )?;
+    ensure(
+        ledger.pointer("/ledgerHash") == Some(&serde_json::json!(ledger_hash.as_str())),
+        "ledger hash field must match pack_records.ledger_hash",
+    )?;
+    ensure(
+        ledger.pointer("/request/query/text") == Some(&serde_json::json!(query)),
+        "ledger must record safe query text",
+    )?;
+    let ledger_item_ids = ledger
+        .pointer("/selectedItems")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "ledger selectedItems missing".to_owned())?
+        .iter()
+        .map(|item| {
+            item.get("memoryId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| "ledger selected item missing memoryId".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    ensure(
+        ledger_item_ids == selected_item_ids,
+        format!(
+            "ledger selected item order mismatch: expected {selected_item_ids:?}, got {ledger_item_ids:?}"
+        ),
+    )?;
+
+    connection.close().map_err(|error| error.to_string())
 }
 
 #[test]
@@ -230,6 +339,76 @@ fn pack_item_ordering_is_deterministic() -> TestResult {
     }
 
     Ok(())
+}
+
+#[test]
+fn pack_query_file_persists_selection_ledger() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure(init.status.code() == Some(EXIT_SUCCESS), "init failed")?;
+    ensure_stderr_empty(&init, "init")?;
+
+    let memories = [
+        "Pack ledger release rule: run cargo fmt before tagging",
+        "Pack ledger release failure: clippy warning blocked release",
+    ];
+    for content in &memories {
+        let remember = run_ee(&[
+            "--workspace",
+            &workspace,
+            "remember",
+            content,
+            "--kind",
+            "rule",
+            "--json",
+        ])?;
+        ensure(
+            remember.status.code() == Some(EXIT_SUCCESS),
+            format!("remember failed for '{content}'"),
+        )?;
+        ensure_stderr_empty(&remember, "remember")?;
+    }
+
+    let index = run_ee(&["--workspace", &workspace, "index", "rebuild", "--json"])?;
+    ensure(
+        index.status.code() == Some(EXIT_SUCCESS),
+        "index rebuild failed",
+    )?;
+    ensure_stderr_empty(&index, "index rebuild")?;
+
+    let query_file = tempdir.path().join("pack-ledger-query.json");
+    let query_text = "pack ledger release";
+    fs::write(
+        &query_file,
+        format!(
+            r#"{{
+  "version": "ee.query.v1",
+  "query": {{"text": "{query_text}"}},
+  "budget": {{"maxTokens": 2000, "candidatePool": 20}},
+  "output": {{"profile": "compact"}}
+}}"#
+        ),
+    )
+    .map_err(|error| format!("failed to write query file: {error}"))?;
+
+    let output = run_ee_pack_query_file(&workspace, &query_file)?;
+    ensure(
+        output.status.code() == Some(EXIT_SUCCESS),
+        format!("pack query-file failed: {:?}", output.status.code()),
+    )?;
+    ensure_stderr_empty(&output, "pack query-file")?;
+    let json = stdout_json(&output)?;
+    let pack_hash =
+        extract_pack_hash(&json).ok_or_else(|| "pack query-file missing pack hash".to_owned())?;
+    let item_ids = extract_item_ids(&json);
+    ensure(
+        !item_ids.is_empty(),
+        "pack query-file should select at least one memory",
+    )?;
+
+    assert_pack_ledger_persisted(tempdir.path(), query_text, &pack_hash, &item_ids)
 }
 
 #[test]

@@ -159,6 +159,11 @@ pub const CONTEXT_SCHEMAS: &[SchemaEntry] = &[
         "ee.focus.schemas.v1",
         SchemaCategory::Context,
     ),
+    SchemaEntry::new(
+        "pack_replay_ledger",
+        "ee.pack_replay_ledger.v1",
+        SchemaCategory::Context,
+    ),
     SchemaEntry::new("query", "ee.query.v1", SchemaCategory::Context),
     SchemaEntry::new(
         "search_results",
@@ -634,6 +639,7 @@ mod tests {
         "idx_memories_workspace_workflow",
         "idx_pack_items_rank",
         "idx_pack_items_trust_class",
+        "idx_pack_records_ledger_hash",
         "idx_recorder_runs_workspace",
         "idx_search_index_jobs_workspace",
         "idx_workspaces_path",
@@ -692,6 +698,8 @@ mod tests {
                 "omitted_count",
                 "pack_hash",
                 "degraded_json",
+                "ledger_json",
+                "ledger_hash",
                 "created_at",
                 "created_by",
             ],

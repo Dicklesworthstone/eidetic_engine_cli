@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -33,6 +34,7 @@ pub const PROVENANCE_STATUS_SKIPPED: &str = "skipped";
 pub const AUDIT_ROW_HASH_VERSION: &str = "ee.audit.row_hash.v1";
 pub const MIGRATION_DRIFT_ERROR_ID: &str = "EE-E040";
 pub const MIGRATION_DRIFT_ERROR_CODE: &str = "migration_drift";
+pub const PACK_REPLAY_LEDGER_SCHEMA_V1: &str = "ee.pack_replay_ledger.v1";
 
 /// Standard audit action types for memory operations (EE-070).
 pub mod audit_actions {
@@ -3441,6 +3443,20 @@ CREATE INDEX idx_feedback_quarantine_status ON feedback_quarantine(status, recor
     "blake3:v038_procedure_feedback_targets_2026_05_07",
 );
 
+/// V040: Add pack_replay_ledger columns (EE-zn8i).
+pub const V040_PACK_SELECTION_LEDGERS: Migration = Migration::new(
+    40,
+    "pack_selection_ledgers",
+    r#"
+-- Pack selection ledger columns (eidetic_engine_cli-zn8i)
+-- Stores the deterministic selection ledger for context pack replay and diff.
+ALTER TABLE pack_records ADD COLUMN ledger_json TEXT CHECK (ledger_json IS NULL OR json_valid(ledger_json));
+ALTER TABLE pack_records ADD COLUMN ledger_hash TEXT CHECK (ledger_hash IS NULL OR length(trim(ledger_hash)) > 0);
+CREATE INDEX idx_pack_records_ledger_hash ON pack_records(ledger_hash);
+"#,
+    "blake3:v040_pack_selection_ledgers_2026_05_08",
+);
+
 /// V039: Allow UUID-v7 audit IDs while preserving legacy audit IDs.
 pub const V039_AUDIT_UUID_V7_IDS: Migration = Migration::new(
     39,
@@ -3563,6 +3579,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V037_CAUSAL_EVIDENCE_LEDGER,
     V038_PROCEDURE_FEEDBACK_TARGETS,
     V039_AUDIT_UUID_V7_IDS,
+    V040_PACK_SELECTION_LEDGERS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -9975,6 +9992,8 @@ pub struct StoredPackRecord {
     pub omitted_count: u32,
     pub pack_hash: String,
     pub degraded_json: Option<String>,
+    pub ledger_json: Option<String>,
+    pub ledger_hash: Option<String>,
     pub created_at: String,
     pub created_by: Option<String>,
 }
@@ -10031,6 +10050,120 @@ pub struct StoredPackOmission {
     pub reason: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackSelectionLedgerCore {
+    schema: &'static str,
+    pack_id: String,
+    pack_hash: String,
+    workspace_id: String,
+    created_at: String,
+    created_by: Option<String>,
+    command_surface: String,
+    request: PackLedgerRequest,
+    database: PackLedgerDatabase,
+    derived_assets: PackLedgerDerivedAssets,
+    candidate_counts: PackLedgerCandidateCounts,
+    selected_items: Vec<PackLedgerSelectedItem>,
+    omitted_items: Vec<PackLedgerOmittedItem>,
+    degraded: Vec<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackSelectionLedger {
+    #[serde(flatten)]
+    core: PackSelectionLedgerCore,
+    ledger_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackLedgerRequest {
+    query: PackLedgerTextRecord,
+    profile: String,
+    max_tokens: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackLedgerTextRecord {
+    hash: String,
+    redacted: bool,
+    redaction_reasons: Vec<String>,
+    text: Option<String>,
+    redacted_text: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackLedgerDatabase {
+    schema_version: u32,
+    generation: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackLedgerDerivedAssets {
+    search_index: PackLedgerDerivedAsset,
+    graph_snapshot: PackLedgerDerivedAsset,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackLedgerDerivedAsset {
+    status: &'static str,
+    manifest_hash: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackLedgerCandidateCounts {
+    selected: u32,
+    omitted: u32,
+    candidate_pool: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackLedgerSelectedItem {
+    memory_id: String,
+    rank: u32,
+    section: String,
+    estimated_tokens: u32,
+    scores: PackLedgerScoreComponents,
+    why: PackLedgerTextRecord,
+    diversity_key: Option<String>,
+    trust_class: String,
+    trust_subclass: Option<String>,
+    provenance: PackLedgerProvenanceSummary,
+    redaction_classes: Vec<String>,
+    freshness: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackLedgerScoreComponents {
+    relevance: f32,
+    utility: f32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackLedgerProvenanceSummary {
+    hash: String,
+    redacted: bool,
+    redaction_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackLedgerOmittedItem {
+    memory_id: String,
+    estimated_tokens: u32,
+    reason: String,
+}
+
 const PACK_INSERT_MAX_BIND_PARAMS: usize = 900;
 const PACK_ITEM_INSERT_VALUE_COUNT: usize = 12;
 const PACK_OMISSION_INSERT_VALUE_COUNT: usize = 4;
@@ -10049,9 +10182,11 @@ impl DbConnection {
         omissions: &[CreatePackOmissionInput],
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
+        let (ledger_json, ledger_hash) =
+            build_pack_selection_ledger(id, input, items, omissions, &now)?;
 
         self.with_transaction(|| {
-            self.insert_pack_record_row(id, input, &now)?;
+            self.insert_pack_record_row(id, input, &now, &ledger_json, &ledger_hash)?;
             self.insert_pack_items(items)?;
             self.insert_pack_omissions(omissions)
         })
@@ -10062,10 +10197,12 @@ impl DbConnection {
         id: &str,
         input: &CreatePackRecordInput,
         now: &str,
+        ledger_json: &str,
+        ledger_hash: &str,
     ) -> Result<()> {
         self.execute_for(
             DbOperation::Execute,
-            "INSERT INTO pack_records (id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, created_at, created_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO pack_records (id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, ledger_json, ledger_hash, created_at, created_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             &[
                 Value::Text(id.to_string()),
                 Value::Text(input.workspace_id.clone()),
@@ -10077,6 +10214,8 @@ impl DbConnection {
                 Value::BigInt(i64::from(input.omitted_count)),
                 Value::Text(input.pack_hash.clone()),
                 input.degraded_json.as_ref().map_or(Value::Null, |json| Value::Text(json.clone())),
+                Value::Text(ledger_json.to_string()),
+                Value::Text(ledger_hash.to_string()),
                 Value::Text(now.to_string()),
                 input.created_by.as_ref().map_or(Value::Null, |by| Value::Text(by.clone())),
             ],
@@ -10147,7 +10286,7 @@ impl DbConnection {
     pub fn get_pack_record(&self, id: &str) -> Result<Option<StoredPackRecord>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, created_at, created_by FROM pack_records WHERE id = ?1",
+            "SELECT id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, ledger_json, ledger_hash, created_at, created_by FROM pack_records WHERE id = ?1",
             &[Value::Text(id.to_string())],
         )?;
 
@@ -10173,18 +10312,212 @@ impl DbConnection {
     ) -> Result<Vec<(StoredPackRecord, StoredPackItem)>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT pr.id, pr.workspace_id, pr.query, pr.profile, pr.max_tokens, pr.used_tokens, pr.item_count, pr.omitted_count, pr.pack_hash, pr.degraded_json, pr.created_at, pr.created_by, pi.pack_id, pi.memory_id, pi.rank, pi.section, pi.estimated_tokens, pi.relevance, pi.utility, pi.why, pi.diversity_key, pi.provenance_json, pi.trust_class, pi.trust_subclass FROM pack_items pi JOIN pack_records pr ON pi.pack_id = pr.id WHERE pi.memory_id = ?1 ORDER BY pr.created_at DESC LIMIT ?2",
+            "SELECT pr.id, pr.workspace_id, pr.query, pr.profile, pr.max_tokens, pr.used_tokens, pr.item_count, pr.omitted_count, pr.pack_hash, pr.degraded_json, pr.ledger_json, pr.ledger_hash, pr.created_at, pr.created_by, pi.pack_id, pi.memory_id, pi.rank, pi.section, pi.estimated_tokens, pi.relevance, pi.utility, pi.why, pi.diversity_key, pi.provenance_json, pi.trust_class, pi.trust_subclass FROM pack_items pi JOIN pack_records pr ON pi.pack_id = pr.id WHERE pi.memory_id = ?1 ORDER BY pr.created_at DESC LIMIT ?2",
             &[Value::Text(memory_id.to_string()), Value::BigInt(i64::from(limit))],
         )?;
 
         rows.iter()
             .map(|row| {
                 let record = stored_pack_record_from_row(row)?;
-                let item = stored_pack_item_from_joined_row(row, 12)?;
+                let item = stored_pack_item_from_joined_row(row, 14)?;
                 Ok((record, item))
             })
             .collect()
     }
+}
+
+fn build_pack_selection_ledger(
+    id: &str,
+    input: &CreatePackRecordInput,
+    items: &[CreatePackItemInput],
+    omissions: &[CreatePackOmissionInput],
+    created_at: &str,
+) -> Result<(String, String)> {
+    let mut selected_items = items
+        .iter()
+        .map(pack_ledger_selected_item)
+        .collect::<Vec<_>>();
+    selected_items.sort_by(|left, right| {
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+            .then_with(|| left.section.cmp(&right.section))
+            .then_with(|| left.scores.relevance.total_cmp(&right.scores.relevance))
+            .then_with(|| left.scores.utility.total_cmp(&right.scores.utility))
+            .then_with(|| left.provenance.hash.cmp(&right.provenance.hash))
+    });
+
+    let mut omitted_items = omissions
+        .iter()
+        .map(|omission| PackLedgerOmittedItem {
+            memory_id: omission.memory_id.clone(),
+            estimated_tokens: omission.estimated_tokens,
+            reason: omission.reason.clone(),
+        })
+        .collect::<Vec<_>>();
+    omitted_items.sort_by(|left, right| {
+        left.memory_id
+            .cmp(&right.memory_id)
+            .then_with(|| left.estimated_tokens.cmp(&right.estimated_tokens))
+            .then_with(|| left.reason.cmp(&right.reason))
+    });
+
+    let core = PackSelectionLedgerCore {
+        schema: PACK_REPLAY_LEDGER_SCHEMA_V1,
+        pack_id: id.to_string(),
+        pack_hash: input.pack_hash.clone(),
+        workspace_id: input.workspace_id.clone(),
+        created_at: created_at.to_string(),
+        created_by: input.created_by.clone(),
+        command_surface: input
+            .created_by
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        request: PackLedgerRequest {
+            query: pack_ledger_text_record(&input.query),
+            profile: input.profile.clone(),
+            max_tokens: input.max_tokens,
+        },
+        database: PackLedgerDatabase {
+            schema_version: latest_schema_version(),
+            generation: latest_schema_version(),
+        },
+        derived_assets: PackLedgerDerivedAssets {
+            search_index: PackLedgerDerivedAsset {
+                status: "not_recorded",
+                manifest_hash: None,
+            },
+            graph_snapshot: PackLedgerDerivedAsset {
+                status: "not_recorded",
+                manifest_hash: None,
+            },
+        },
+        candidate_counts: PackLedgerCandidateCounts {
+            selected: input.item_count,
+            omitted: input.omitted_count,
+            candidate_pool: input.item_count.saturating_add(input.omitted_count),
+        },
+        selected_items,
+        omitted_items,
+        degraded: pack_ledger_degradations(input.degraded_json.as_deref())?,
+    };
+    let core_json = pack_ledger_json(&core, "pack selection ledger core")?;
+    let ledger_hash = blake3_text_hash(&core_json);
+    let ledger = PackSelectionLedger {
+        core,
+        ledger_hash: ledger_hash.clone(),
+    };
+    let ledger_json = pack_ledger_json(&ledger, "pack selection ledger")?;
+
+    Ok((ledger_json, ledger_hash))
+}
+
+fn latest_schema_version() -> u32 {
+    MIGRATIONS
+        .last()
+        .map(Migration::version)
+        .unwrap_or_default()
+}
+
+fn pack_ledger_selected_item(item: &CreatePackItemInput) -> PackLedgerSelectedItem {
+    let why = pack_ledger_text_record(&item.why);
+    let provenance = pack_ledger_provenance_summary(&item.provenance_json);
+    let mut redaction_classes = BTreeSet::new();
+    redaction_classes.extend(why.redaction_reasons.iter().cloned());
+    redaction_classes.extend(provenance.redaction_reasons.iter().cloned());
+
+    PackLedgerSelectedItem {
+        memory_id: item.memory_id.clone(),
+        rank: item.rank,
+        section: item.section.clone(),
+        estimated_tokens: item.estimated_tokens,
+        scores: PackLedgerScoreComponents {
+            relevance: item.relevance,
+            utility: item.utility,
+        },
+        why,
+        diversity_key: item.diversity_key.clone(),
+        trust_class: item.trust_class.clone(),
+        trust_subclass: item.trust_subclass.clone(),
+        provenance,
+        redaction_classes: redaction_classes.into_iter().collect(),
+        freshness: "unavailable",
+    }
+}
+
+fn pack_ledger_text_record(text: &str) -> PackLedgerTextRecord {
+    let report = crate::policy::redact_secret_like_content(text);
+    let redaction_reasons = redaction_reason_strings(&report.redacted_reasons);
+
+    PackLedgerTextRecord {
+        hash: blake3_text_hash(text),
+        redacted: report.redacted,
+        redaction_reasons,
+        text: (!report.redacted).then(|| text.to_string()),
+        redacted_text: report.redacted.then_some(report.content),
+    }
+}
+
+fn pack_ledger_provenance_summary(provenance_json: &str) -> PackLedgerProvenanceSummary {
+    let report = crate::policy::redact_secret_like_content(provenance_json);
+    PackLedgerProvenanceSummary {
+        hash: blake3_text_hash(provenance_json),
+        redacted: report.redacted,
+        redaction_reasons: redaction_reason_strings(&report.redacted_reasons),
+    }
+}
+
+fn redaction_reason_strings(reasons: &[&'static str]) -> Vec<String> {
+    let mut owned = reasons
+        .iter()
+        .map(|reason| (*reason).to_string())
+        .collect::<Vec<_>>();
+    owned.sort();
+    owned.dedup();
+    owned
+}
+
+fn pack_ledger_degradations(degraded_json: Option<&str>) -> Result<Vec<serde_json::Value>> {
+    let Some(degraded_json) = degraded_json else {
+        return Ok(Vec::new());
+    };
+
+    let mut degraded =
+        serde_json::from_str::<Vec<serde_json::Value>>(degraded_json).map_err(|error| {
+            DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!("pack degraded_json is malformed or incompatible JSON: {error}"),
+            }
+        })?;
+    degraded.sort_by_key(degradation_sort_key);
+    Ok(degraded)
+}
+
+fn degradation_sort_key(value: &serde_json::Value) -> String {
+    let code = value
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let severity = value
+        .get("severity")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let message = value
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    format!("{code}\u{1f}{severity}\u{1f}{message}\u{1f}{value}")
+}
+
+fn pack_ledger_json<T: Serialize>(value: &T, context: &str) -> Result<String> {
+    serde_json::to_string(value).map_err(|error| DbError::MalformedRow {
+        operation: DbOperation::Execute,
+        message: format!("{context} could not be serialized as JSON: {error}"),
+    })
+}
+
+fn blake3_text_hash(value: &str) -> String {
+    format!("blake3:{}", blake3::hash(value.as_bytes()).to_hex())
 }
 
 fn append_multi_row_placeholders(sql: &mut String, row_count: usize, values_per_row: usize) {
@@ -10228,8 +10561,10 @@ fn stored_pack_record_from_row(row: &Row) -> Result<StoredPackRecord> {
         omitted_count: required_u32(row, 7, DbOperation::Query, "omitted_count")?,
         pack_hash: required_text(row, 8, DbOperation::Query, "pack_hash")?.to_string(),
         degraded_json: optional_text(row, 9)?.map(str::to_string),
-        created_at: required_text(row, 10, DbOperation::Query, "created_at")?.to_string(),
-        created_by: optional_text(row, 11)?.map(str::to_string),
+        ledger_json: optional_text(row, 10)?.map(str::to_string),
+        ledger_hash: optional_text(row, 11)?.map(str::to_string),
+        created_at: required_text(row, 12, DbOperation::Query, "created_at")?.to_string(),
+        created_by: optional_text(row, 13)?.map(str::to_string),
     })
 }
 
@@ -18423,6 +18758,265 @@ mod tests {
             &Some("project-rule".to_string()),
             "pack item trust subclass",
         )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_pack_record_persists_redaction_safe_selection_ledger() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_pack_test_memory(&connection)?;
+
+        let pack_id = "pack_000000000000000000000ledg1";
+        let raw_secret = "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let input = super::CreatePackRecordInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            query: format!("release prep api_key={raw_secret}"),
+            profile: "compact".to_string(),
+            max_tokens: 1200,
+            used_tokens: 50,
+            item_count: 1,
+            omitted_count: 0,
+            pack_hash: "blake3:ledger-pack".to_string(),
+            degraded_json: Some(
+                r#"[{"code":"graph_unavailable","severity":"low","message":"Graph unavailable."},{"code":"lexical_only","severity":"low","message":"Semantic search unavailable."}]"#
+                    .to_string(),
+            ),
+            created_by: Some("ee context".to_string()),
+        };
+        let items = vec![super::CreatePackItemInput {
+            pack_id: pack_id.to_string(),
+            memory_id: "mem_00000000000000000000pack01".to_string(),
+            rank: 1,
+            section: "procedural_rules".to_string(),
+            estimated_tokens: 50,
+            relevance: 0.95,
+            utility: 0.8,
+            why: format!("Selected after seeing bearer {raw_secret} in the request"),
+            diversity_key: Some("release".to_string()),
+            provenance_json: format!(
+                r#"{{"schema":"ee.pack_item.provenance.v1","entries":[{{"uri":"file://AGENTS.md#L42","note":"api_key={raw_secret}"}}]}}"#
+            ),
+            trust_class: "human_explicit".to_string(),
+            trust_subclass: Some("project-rule".to_string()),
+        }];
+
+        connection.insert_pack_record(pack_id, &input, &items, &[])?;
+        let record = connection
+            .get_pack_record(pack_id)?
+            .ok_or_else(|| TestFailure::new("pack record not found"))?;
+        let ledger_json = record
+            .ledger_json
+            .as_ref()
+            .ok_or_else(|| TestFailure::new("pack record missing ledger json"))?;
+        let ledger_hash = record
+            .ledger_hash
+            .as_ref()
+            .ok_or_else(|| TestFailure::new("pack record missing ledger hash"))?;
+
+        ensure(
+            ledger_hash.starts_with("blake3:"),
+            format!("ledger hash must use blake3 prefix: {ledger_hash}"),
+        )?;
+        ensure(
+            !ledger_json.contains(raw_secret),
+            "ledger JSON must not contain raw secret-like content",
+        )?;
+
+        let ledger: serde_json::Value = serde_json::from_str(ledger_json)
+            .map_err(|error| TestFailure::new(format!("ledger json malformed: {error}")))?;
+        ensure_equal(
+            &ledger["schema"],
+            &serde_json::json!(super::PACK_REPLAY_LEDGER_SCHEMA_V1),
+            "ledger schema",
+        )?;
+        ensure_equal(
+            &ledger["ledgerHash"],
+            &serde_json::json!(ledger_hash),
+            "ledger hash field",
+        )?;
+        ensure_equal(
+            &ledger["request"]["query"]["redacted"],
+            &serde_json::json!(true),
+            "query redacted",
+        )?;
+        let redaction_classes = ledger["selectedItems"][0]["redactionClasses"]
+            .as_array()
+            .ok_or_else(|| TestFailure::new("selected item redaction classes missing"))?;
+        ensure(
+            !redaction_classes.is_empty(),
+            "selected item redaction classes must record applied redactions",
+        )?;
+        ensure_equal(
+            &ledger["degraded"][0]["code"],
+            &serde_json::json!("graph_unavailable"),
+            "degradations sorted by code",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_empty_pack_record_persists_empty_selection_ledger() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let pack_id = "pack_000000000000000000000empt1";
+        let input = super::CreatePackRecordInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            query: "no matching memories".to_string(),
+            profile: "compact".to_string(),
+            max_tokens: 512,
+            used_tokens: 0,
+            item_count: 0,
+            omitted_count: 0,
+            pack_hash: "blake3:empty-pack".to_string(),
+            degraded_json: Some(
+                r#"[{"code":"lexical_only","severity":"low","message":"Semantic search unavailable."}]"#
+                    .to_string(),
+            ),
+            created_by: Some("ee context".to_string()),
+        };
+
+        connection.insert_pack_record(pack_id, &input, &[], &[])?;
+        let record = connection
+            .get_pack_record(pack_id)?
+            .ok_or_else(|| TestFailure::new("empty pack record not found"))?;
+        let ledger_json = record
+            .ledger_json
+            .as_ref()
+            .ok_or_else(|| TestFailure::new("empty pack record missing ledger json"))?;
+        let ledger: serde_json::Value = serde_json::from_str(ledger_json)
+            .map_err(|error| TestFailure::new(format!("ledger json malformed: {error}")))?;
+
+        ensure_equal(
+            &ledger["candidateCounts"]["selected"],
+            &serde_json::json!(0),
+            "empty ledger selected count",
+        )?;
+        ensure_equal(
+            &ledger["candidateCounts"]["omitted"],
+            &serde_json::json!(0),
+            "empty ledger omitted count",
+        )?;
+        ensure_equal(
+            &ledger["selectedItems"],
+            &serde_json::json!([]),
+            "empty ledger selected items",
+        )?;
+        ensure_equal(
+            &ledger["omittedItems"],
+            &serde_json::json!([]),
+            "empty ledger omitted items",
+        )?;
+        ensure_equal(
+            &ledger["degraded"][0]["code"],
+            &serde_json::json!("lexical_only"),
+            "empty ledger lexical degradation",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn pack_selection_ledger_is_deterministic_for_equivalent_inputs() -> TestResult {
+        let pack_id = "pack_000000000000000000000ledg2";
+        let input = super::CreatePackRecordInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            query: "cargo verification".to_string(),
+            profile: "balanced".to_string(),
+            max_tokens: 4000,
+            used_tokens: 100,
+            item_count: 2,
+            omitted_count: 1,
+            pack_hash: "blake3:deterministic-pack".to_string(),
+            degraded_json: Some(
+                r#"[{"code":"zeta","severity":"low","message":"later"},{"code":"alpha","severity":"low","message":"earlier"}]"#
+                    .to_string(),
+            ),
+            created_by: Some("ee context".to_string()),
+        };
+        let first_items = vec![
+            pack_item_input(pack_id, "mem_00000000000000000000btch02", 2),
+            pack_item_input(pack_id, "mem_00000000000000000000pack01", 1),
+        ];
+        let second_items = vec![
+            pack_item_input(pack_id, "mem_00000000000000000000pack01", 1),
+            pack_item_input(pack_id, "mem_00000000000000000000btch02", 2),
+        ];
+        let omissions = vec![pack_omission_input(
+            pack_id,
+            "mem_00000000000000000000btch04",
+        )];
+        let created_at = "2026-05-09T01:00:00Z";
+
+        let (first_json, first_hash) = super::build_pack_selection_ledger(
+            pack_id,
+            &input,
+            &first_items,
+            &omissions,
+            created_at,
+        )?;
+        let (second_json, second_hash) = super::build_pack_selection_ledger(
+            pack_id,
+            &input,
+            &second_items,
+            &omissions,
+            created_at,
+        )?;
+
+        ensure_equal(&first_hash, &second_hash, "equivalent ledger hash")?;
+        ensure_equal(&first_json, &second_json, "equivalent ledger json")?;
+
+        let ledger: serde_json::Value = serde_json::from_str(&first_json)
+            .map_err(|error| TestFailure::new(format!("ledger json malformed: {error}")))?;
+        ensure_equal(
+            &ledger["selectedItems"][0]["memoryId"],
+            &serde_json::json!("mem_00000000000000000000pack01"),
+            "selected item ordering",
+        )?;
+        ensure_equal(
+            &ledger["degraded"][0]["code"],
+            &serde_json::json!("alpha"),
+            "degradation ordering",
+        )
+    }
+
+    #[test]
+    fn legacy_pack_record_without_ledger_remains_readable() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        connection.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO pack_records (id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, created_at, created_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            &[
+                Value::Text("pack_00000000000000000000legacy".to_string()),
+                Value::Text("wsp_01234567890123456789012345".to_string()),
+                Value::Text("legacy query".to_string()),
+                Value::Text("compact".to_string()),
+                Value::BigInt(4000),
+                Value::BigInt(0),
+                Value::BigInt(0),
+                Value::BigInt(0),
+                Value::Text("blake3:legacy-pack".to_string()),
+                Value::Null,
+                Value::Text("2026-05-09T01:00:00Z".to_string()),
+                Value::Text("legacy-test".to_string()),
+            ],
+        )?;
+
+        let record = connection
+            .get_pack_record("pack_00000000000000000000legacy")?
+            .ok_or_else(|| TestFailure::new("legacy pack record not found"))?;
+        ensure(record.ledger_json.is_none(), "legacy ledger json is absent")?;
+        ensure(record.ledger_hash.is_none(), "legacy ledger hash is absent")?;
 
         connection.close()?;
         Ok(())

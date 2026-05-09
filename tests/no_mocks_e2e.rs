@@ -7,6 +7,7 @@
 
 use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
+use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -15,8 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-#[cfg(unix)]
-use ee::db::{DatabaseConfig, DbConnection};
+use ee::db::{DatabaseConfig, DbConnection, PACK_REPLAY_LEDGER_SCHEMA_V1};
 use ee::policy::redact_secret_like_content;
 
 type TestResult = Result<(), String>;
@@ -65,6 +65,8 @@ struct SummaryEvent {
     rule_memory_id: String,
     failure_memory_id: String,
     pack_hash: String,
+    pack_ledger_hashes: Vec<String>,
+    pack_ledger_pack_ids: Vec<String>,
     context_item_ids: Vec<String>,
 }
 
@@ -310,6 +312,121 @@ fn memory_ids_from_context(value: &JsonValue) -> Result<Vec<String>, String> {
                 .ok_or_else(|| "context pack item missing memoryId".to_owned())
         })
         .collect()
+}
+
+fn assert_context_pack_ledgers_persisted(
+    database_path: &Path,
+    query: &str,
+    pack_hash: &str,
+    selected_item_ids: &[String],
+    min_records: usize,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let anchor_memory_id = selected_item_ids
+        .first()
+        .ok_or_else(|| "context pack selected no anchor memory".to_owned())?;
+    let connection = DbConnection::open(DatabaseConfig::file(database_path.to_path_buf()))
+        .map_err(|error| format!("open database for pack ledger inspection: {error}"))?;
+    let history = connection
+        .list_pack_records_for_memory(anchor_memory_id, 20)
+        .map_err(|error| format!("list pack records for ledger inspection: {error}"))?;
+
+    let mut pack_ids = BTreeSet::new();
+    let mut ledger_hashes = BTreeSet::new();
+    for (record, _item) in history
+        .iter()
+        .filter(|(record, _item)| record.query == query && record.pack_hash == pack_hash)
+    {
+        ensure_equal(
+            &record.created_by.as_deref(),
+            &Some("ee context"),
+            "context pack ledger created_by",
+        )?;
+        let ledger_json = record
+            .ledger_json
+            .as_ref()
+            .ok_or_else(|| format!("pack record {} missing ledger_json", record.id))?;
+        let ledger_hash = record
+            .ledger_hash
+            .as_ref()
+            .ok_or_else(|| format!("pack record {} missing ledger_hash", record.id))?;
+        ensure(
+            ledger_hash.starts_with("blake3:"),
+            format!(
+                "pack record {} ledger_hash must be blake3-prefixed",
+                record.id
+            ),
+        )?;
+
+        let ledger: JsonValue = serde_json::from_str(ledger_json)
+            .map_err(|error| format!("pack record {} ledger JSON malformed: {error}", record.id))?;
+        ensure_equal(
+            &ledger.pointer("/schema"),
+            &Some(&json!(PACK_REPLAY_LEDGER_SCHEMA_V1)),
+            "pack ledger schema",
+        )?;
+        ensure_equal(
+            &ledger.pointer("/ledgerHash"),
+            &Some(&json!(ledger_hash.as_str())),
+            "pack ledger hash field",
+        )?;
+        ensure_equal(
+            &ledger.pointer("/packId"),
+            &Some(&json!(record.id.as_str())),
+            "pack ledger pack id",
+        )?;
+        ensure_equal(
+            &ledger.pointer("/packHash"),
+            &Some(&json!(pack_hash)),
+            "pack ledger pack hash",
+        )?;
+        ensure_equal(
+            &ledger.pointer("/request/query/text"),
+            &Some(&json!(query)),
+            "pack ledger query text",
+        )?;
+        ensure_equal(
+            &ledger.pointer("/candidateCounts/selected"),
+            &Some(&json!(record.item_count)),
+            "pack ledger selected count",
+        )?;
+        ensure_equal(
+            &ledger.pointer("/candidateCounts/omitted"),
+            &Some(&json!(record.omitted_count)),
+            "pack ledger omitted count",
+        )?;
+
+        let ledger_item_ids = json_array(&ledger, "/selectedItems", "pack ledger selected items")?
+            .iter()
+            .map(|item| {
+                item.get("memoryId")
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| "pack ledger selected item missing memoryId".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        ensure_equal(
+            &ledger_item_ids,
+            &selected_item_ids.to_vec(),
+            "pack ledger selected memory order",
+        )?;
+
+        pack_ids.insert(record.id.clone());
+        ledger_hashes.insert(ledger_hash.clone());
+    }
+    connection.close().map_err(|error| error.to_string())?;
+
+    ensure(
+        pack_ids.len() >= min_records,
+        format!(
+            "expected at least {min_records} persisted pack ledgers for query {query:?}, got {}",
+            pack_ids.len()
+        ),
+    )?;
+
+    Ok((
+        ledger_hashes.into_iter().collect(),
+        pack_ids.into_iter().collect(),
+    ))
 }
 
 fn json_string<'a>(value: &'a JsonValue, pointer: &str, context: &str) -> Result<&'a str, String> {
@@ -1515,6 +1632,7 @@ fn no_mocks_init_remember_search_context_why_with_jsonl_command_events() -> Test
         ),
     )?;
 
+    let context_query = "prepare a release after clippy failure";
     let (_context_first_event, context_first_json) = run_step(
         scenario_id,
         &events_path,
@@ -1527,7 +1645,7 @@ fn no_mocks_init_remember_search_context_why_with_jsonl_command_events() -> Test
                 workspace_arg.clone(),
                 "--json".to_owned(),
                 "context".to_owned(),
-                "prepare a release after clippy failure".to_owned(),
+                context_query.to_owned(),
                 "--max-tokens".to_owned(),
                 "4000".to_owned(),
             ],
@@ -1560,7 +1678,7 @@ fn no_mocks_init_remember_search_context_why_with_jsonl_command_events() -> Test
                 workspace_arg.clone(),
                 "--json".to_owned(),
                 "context".to_owned(),
-                "prepare a release after clippy failure".to_owned(),
+                context_query.to_owned(),
                 "--max-tokens".to_owned(),
                 "4000".to_owned(),
             ],
@@ -1581,6 +1699,13 @@ fn no_mocks_init_remember_search_context_why_with_jsonl_command_events() -> Test
         &second_item_ids,
         &first_item_ids,
         "context item order deterministic across repeated context calls",
+    )?;
+    let (pack_ledger_hashes, pack_ledger_pack_ids) = assert_context_pack_ledgers_persisted(
+        &database_path,
+        context_query,
+        &first_pack_hash,
+        &first_item_ids,
+        2,
     )?;
 
     let (_why_event, why_json) = run_step(
@@ -1635,6 +1760,8 @@ fn no_mocks_init_remember_search_context_why_with_jsonl_command_events() -> Test
             rule_memory_id,
             failure_memory_id,
             pack_hash: first_pack_hash,
+            pack_ledger_hashes,
+            pack_ledger_pack_ids,
             context_item_ids: first_item_ids,
         },
     )?;
