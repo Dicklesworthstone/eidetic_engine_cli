@@ -308,6 +308,78 @@ and full ledger payloads. Tests must keep that summary parseable as
 `ee.support_bundle.pack_replay_summary.v1` and prove secret-like query or
 provenance text does not appear in the bundle.
 
+## Replay, Freshness, and Egress Tests
+
+Pack replay and evidence freshness testing verifies that:
+
+1. **Ledger persistence**: `ee context` and `ee pack` persist deterministic
+   selection ledgers to `pack_records.ledger_json`.
+2. **Ledger reconstruction**: `ee pack replay` reconstructs the selection
+   explanation from stored ledgers without re-running retrieval.
+3. **Freshness detection**: Provenance freshness states (`fresh`,
+   `missing_source`, `changed_source`, `unreachable_source`,
+   `unsupported_source`, `unknown`) are threaded into pack and why responses.
+4. **Egress safety**: Public outputs (context, search, why, pack, support
+   bundles) do not leak raw secret-like spans after redaction.
+
+### Test Files
+
+| File | Coverage |
+| --- | --- |
+| `tests/e2e_pack_determinism.rs` | Ledger persistence, query-file paths |
+| `tests/no_mocks_e2e.rs` | Real-binary pack with ledger assertions |
+| `tests/redaction_egress_no_mock.rs` | Egress matrix for secret-like spans |
+| `tests/freshness_contracts.rs` | Freshness states, deterministic ordering |
+| `tests/degraded_honesty.rs` | Support bundle schema validation |
+| `tests/support_bundle_perf_compare.rs` | Bundle profile/perf evidence |
+| `tests/json_contract_snapshots.rs` | Stable pack ledger JSON contracts |
+
+### Ledger Contract Tests
+
+Ledger tests must verify:
+
+- Empty packs have valid empty-ledger structure
+- Lexical-only degradation produces stable ledger
+- Graph-unavailable degradation produces stable ledger
+- Redacted items have redaction classes in ledger
+- Deterministic tie ordering under identical scores
+- Ledger hash matches normalized payload hash
+- Old pack records without ledgers report `ledger_unavailable`
+
+### Freshness Contract Tests
+
+Freshness tests must verify:
+
+- `changed_source` when file content differs from stored hash
+- `missing_source` when referenced file no longer exists
+- `unsupported_source` for non-verifiable provenance schemes
+- Mixed freshness states are sorted deterministically
+- Freshness states appear in pack/why JSON without diagnostics on stdout
+- Repair hints are actionable (`ee remember --update --source <path>`)
+
+### Egress Matrix Tests
+
+Egress matrix tests (ADR 0025 verification obligation) must verify:
+
+- Context pack JSON stdout contains redaction placeholders, not raw secrets
+- Search result JSON does not expose raw secret-like memory content
+- Why response JSON does not expose raw secret-like provenance
+- Support bundle `pack_replay_summary.json` excludes query text and memory
+  content
+- stderr diagnostics do not include raw secret spans
+- Command JSONL logs redact secret-like input before storage
+
+Run targeted coverage:
+
+```bash
+rch exec -- cargo test --test e2e_pack_determinism
+rch exec -- cargo test --test redaction_egress_no_mock
+rch exec -- cargo test --test freshness_contracts
+rch exec -- cargo test --test degraded_honesty pack_replay
+```
+
+See `docs/pack-replay.md` for user-facing documentation.
+
 ## Forbidden Dependency Checks
 
 The default feature profile and every release-relevant optional profile must be
