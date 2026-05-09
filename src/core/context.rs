@@ -557,6 +557,7 @@ pub fn run_context_pack_with_performance(
     let candidate_filter_input_count = search_report.results.len();
     let (mut candidates, mut candidate_metrics) = candidates_from_search_with_metrics(
         &connection,
+        &options.workspace_path,
         &search_report,
         &options.filters,
         &mut degraded,
@@ -1393,6 +1394,7 @@ fn compute_pack_hash(
 #[allow(clippy::type_complexity)]
 fn candidates_from_search_with_metrics(
     connection: &DbConnection,
+    workspace_path: &Path,
     search_report: &crate::core::search::SearchReport,
     filters: &crate::models::QueryFilters,
     degraded: &mut Vec<ContextResponseDegradation>,
@@ -1517,15 +1519,14 @@ fn candidates_from_search_with_metrics(
                         continue;
                     }
                 }
-                match candidate_from_hit_preloaded(
-                    &memories,
-                    &tags_map,
-                    hit,
-                    &search_report.query,
-                    memory_id,
-                    artifact_id,
-                    degraded,
-                ) {
+                let preloaded = PreloadedCandidateSource {
+                    memories: &memories,
+                    tags_map: &tags_map,
+                    workspace_path,
+                    query: &search_report.query,
+                };
+                match candidate_from_hit_preloaded(preloaded, hit, memory_id, artifact_id, degraded)
+                {
                     Some(candidate) => {
                         metrics.converted_candidates =
                             metrics.converted_candidates.saturating_add(1);
@@ -1713,9 +1714,14 @@ fn apply_graph_hints(
         let Some(evidence) = graph_nodes.get(&memory_id) else {
             continue;
         };
-        if let Some(candidate) =
-            graph_candidate_from_memory(memory, typed_memory_id, &tags, evidence, degraded)
-        {
+        if let Some(candidate) = graph_candidate_from_memory(
+            memory,
+            typed_memory_id,
+            &tags,
+            evidence,
+            workspace_path,
+            degraded,
+        ) {
             metrics.expanded_candidates = metrics.expanded_candidates.saturating_add(1);
             candidates.push(candidate);
         }
@@ -2090,10 +2096,13 @@ fn graph_candidate_from_memory(
     memory_id: MemoryId,
     tags: &[String],
     evidence: &GraphHintEvidence,
+    workspace_path: &Path,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<PackCandidate> {
     let mut provenance = Vec::new();
-    if let Some(memory_provenance) = provenance_for_memory(memory, memory_id, degraded) {
+    if let Some(memory_provenance) =
+        provenance_for_memory(memory, memory_id, workspace_path, degraded)
+    {
         provenance.push(memory_provenance);
     }
     if let Ok(seed_id) = MemoryId::from_str(&evidence.seed_memory_id)
@@ -2287,26 +2296,31 @@ fn load_candidate_batch_maps(
     (memories, tags_map)
 }
 
+struct PreloadedCandidateSource<'a> {
+    memories: &'a BTreeMap<String, StoredMemory>,
+    tags_map: &'a BTreeMap<String, Vec<String>>,
+    workspace_path: &'a Path,
+    query: &'a str,
+}
+
 fn candidate_from_hit_preloaded(
-    memories: &std::collections::BTreeMap<String, StoredMemory>,
-    tags_map: &std::collections::BTreeMap<String, Vec<String>>,
+    source: PreloadedCandidateSource<'_>,
     hit: &crate::core::search::SearchHit,
-    query: &str,
     memory_id: MemoryId,
     artifact_id: Option<String>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<PackCandidate> {
-    let memory = match memories.get(&memory_id.to_string()) {
+    let memory = match source.memories.get(&memory_id.to_string()) {
         Some(memory) if memory.tombstoned_at.is_none() => memory,
         _ => return None,
     };
-    let tags = tags_map.get(&memory.id).cloned().unwrap_or_default();
-    let provenance = provenance_for_memory(memory, memory_id, degraded)?;
+    let tags = source.tags_map.get(&memory.id).cloned().unwrap_or_default();
+    let provenance = provenance_for_memory(memory, memory_id, source.workspace_path, degraded)?;
     let relevance = unit_score(hit.score)?;
     let utility = unit_score(memory.utility)?;
     let content = memory.content.clone();
     let why = candidate_selection_why(
-        query,
+        source.query,
         hit.source.as_str(),
         hit.score,
         memory.utility,
@@ -2345,6 +2359,7 @@ fn focus_candidates_from_state(
             connection,
             item,
             focus_state,
+            workspace_path,
             &focus_hash,
             &storage_path,
             degraded,
@@ -2369,6 +2384,7 @@ fn focus_candidate_from_item(
     connection: &DbConnection,
     item: &crate::models::FocusItem,
     focus_state: &crate::models::FocusState,
+    workspace_path: &Path,
     focus_hash: &str,
     storage_path: &str,
     degraded: &mut Vec<ContextResponseDegradation>,
@@ -2419,7 +2435,9 @@ fn focus_candidate_from_item(
         .get_memory_tags(&memory.id)
         .unwrap_or_else(|_| Vec::new());
     let mut provenance = Vec::new();
-    if let Some(memory_provenance) = provenance_for_memory(&memory, item.memory_id, degraded) {
+    if let Some(memory_provenance) =
+        provenance_for_memory(&memory, item.memory_id, workspace_path, degraded)
+    {
         provenance.push(memory_provenance);
     }
     if let Ok(focus_provenance) = PackProvenance::new(
@@ -2638,6 +2656,7 @@ fn trust_signal_for_memory(
 fn provenance_for_memory(
     memory: &StoredMemory,
     memory_id: MemoryId,
+    workspace_path: &Path,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<PackProvenance> {
     let uri = match memory.provenance_uri.as_deref() {
@@ -2656,11 +2675,53 @@ fn provenance_for_memory(
         },
         None => ProvenanceUri::EeMemory(memory_id),
     };
-    PackProvenance::new(
-        uri,
-        format!("Memory {} selected for context pack", memory.id),
-    )
-    .ok()
+    let freshness =
+        crate::core::memory::assess_memory_evidence_freshness(memory, Some(workspace_path));
+    if freshness.status.should_report() {
+        push_evidence_freshness_degradation(memory, &freshness, degraded);
+    }
+    let note = format!(
+        "Memory {} selected for context pack; evidenceFreshness={}",
+        memory.id,
+        freshness.status.as_str()
+    );
+
+    PackProvenance::new(uri, note).ok()
+}
+
+fn push_evidence_freshness_degradation(
+    memory: &StoredMemory,
+    freshness: &crate::core::memory::EvidenceFreshness,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) {
+    let code = match freshness.status {
+        crate::core::memory::EvidenceFreshnessStatus::MissingSource => {
+            "context_evidence_freshness_missing_source"
+        }
+        crate::core::memory::EvidenceFreshnessStatus::ChangedSource => {
+            "context_evidence_freshness_changed_source"
+        }
+        crate::core::memory::EvidenceFreshnessStatus::UnreachableSource => {
+            "context_evidence_freshness_unreachable_source"
+        }
+        crate::core::memory::EvidenceFreshnessStatus::UnsupportedSource => {
+            "context_evidence_freshness_unsupported_source"
+        }
+        crate::core::memory::EvidenceFreshnessStatus::Fresh
+        | crate::core::memory::EvidenceFreshnessStatus::Unknown => return,
+    };
+    push_degradation(
+        degraded,
+        code,
+        ContextResponseSeverity::Low,
+        format!(
+            "Memory {} evidence freshness is {}: {}",
+            memory.id,
+            freshness.status.as_str(),
+            freshness.detail
+        ),
+        freshness.repair.clone(),
+    );
 }
 
 fn section_for_memory(memory: &StoredMemory) -> PackSection {
@@ -2704,7 +2765,7 @@ fn push_degradation(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     use super::{
@@ -2934,6 +2995,7 @@ mod tests {
 
         let (candidates, metrics) = super::candidates_from_search_with_metrics(
             &connection,
+            Path::new("/tmp/ee-context-test"),
             &search_report,
             &crate::models::QueryFilters::default(),
             &mut degraded,
@@ -2976,6 +3038,162 @@ mod tests {
         }));
 
         connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn candidate_resolution_reports_mixed_evidence_freshness_deterministically()
+    -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        std::fs::write(
+            workspace_path.join("changed.md"),
+            "current evidence changed",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = WorkspaceId::from_uuid(uuid::Uuid::from_u128(800)).to_string();
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.to_string_lossy().into_owned(),
+                    name: Some("freshness-ordering".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let missing_id = MemoryId::from_uuid(uuid::Uuid::from_u128(801)).to_string();
+        let unsupported_id = MemoryId::from_uuid(uuid::Uuid::from_u128(802)).to_string();
+        let changed_id = MemoryId::from_uuid(uuid::Uuid::from_u128(803)).to_string();
+        for (id, content, provenance_uri) in [
+            (
+                missing_id.as_str(),
+                "missing evidence body",
+                "file://missing.md#L1",
+            ),
+            (
+                unsupported_id.as_str(),
+                "unsupported evidence body",
+                "cass-session://freshness-ordering#L1",
+            ),
+            (
+                changed_id.as_str(),
+                "original evidence body",
+                "file://changed.md#L1",
+            ),
+        ] {
+            connection
+                .insert_memory(
+                    id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "procedural".to_string(),
+                        kind: "rule".to_string(),
+                        content: content.to_string(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.8,
+                        importance: 0.7,
+                        provenance_uri: Some(provenance_uri.to_string()),
+                        trust_class: TrustClass::HumanExplicit.as_str().to_string(),
+                        trust_subclass: Some("fixture".to_string()),
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        let search_report = SearchReport {
+            status: SearchStatus::Success,
+            query: "freshness ordering".to_string(),
+            requested_limit: 3,
+            results: vec![
+                freshness_search_hit(&missing_id, 0.93),
+                freshness_search_hit(&unsupported_id, 0.92),
+                freshness_search_hit(&changed_id, 0.91),
+            ],
+            elapsed_ms: 0.0,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+        };
+
+        let mut first_degraded = Vec::new();
+        let (first_candidates, first_metrics) = super::candidates_from_search_with_metrics(
+            &connection,
+            workspace_path,
+            &search_report,
+            &crate::models::QueryFilters::default(),
+            &mut first_degraded,
+        );
+        let mut second_degraded = Vec::new();
+        let (second_candidates, second_metrics) = super::candidates_from_search_with_metrics(
+            &connection,
+            workspace_path,
+            &search_report,
+            &crate::models::QueryFilters::default(),
+            &mut second_degraded,
+        );
+
+        assert_eq!(first_candidates.len(), 3);
+        assert_eq!(second_candidates.len(), 3);
+        assert_eq!(first_metrics.converted_candidates, 3);
+        assert_eq!(second_metrics.converted_candidates, 3);
+
+        let first_codes = freshness_degradation_codes(&first_degraded);
+        let second_codes = freshness_degradation_codes(&second_degraded);
+        assert_eq!(
+            first_codes,
+            vec![
+                "context_evidence_freshness_missing_source",
+                "context_evidence_freshness_unsupported_source",
+                "context_evidence_freshness_changed_source",
+            ]
+        );
+        assert_eq!(first_codes, second_codes);
+
+        let provenance_notes = first_candidates
+            .iter()
+            .filter_map(|candidate| candidate.provenance.first())
+            .map(|provenance| provenance.note.as_str())
+            .collect::<Vec<_>>();
+        assert!(provenance_notes[0].contains("evidenceFreshness=missing_source"));
+        assert!(provenance_notes[1].contains("evidenceFreshness=unsupported_source"));
+        assert!(provenance_notes[2].contains("evidenceFreshness=changed_source"));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    fn freshness_search_hit(memory_id: &str, score: f32) -> SearchHit {
+        SearchHit {
+            doc_id: memory_id.to_string(),
+            score,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(score),
+            rerank_score: None,
+            metadata: None,
+            explanation: None,
+        }
+    }
+
+    fn freshness_degradation_codes(
+        degraded: &[crate::pack::ContextResponseDegradation],
+    ) -> Vec<&str> {
+        degraded
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .code
+                    .starts_with("context_evidence_freshness_")
+                    .then_some(entry.code.as_str())
+            })
+            .collect()
     }
 
     #[test]

@@ -8,9 +8,11 @@
 //!
 //! This makes the system explainable and auditable.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::core::memory::memory_validity;
+use crate::core::memory::{
+    EvidenceFreshness, EvidenceFreshnessStatus, assess_memory_evidence_freshness, memory_validity,
+};
 use crate::db::DbConnection;
 use crate::models::{RationaleTrace, RationaleTraceVisibility};
 use sqlmodel_core::{Row, Value};
@@ -583,6 +585,11 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
     if let Some(degradation) = rationale_trace_fetch.degradation {
         evidence_degradations.push(degradation);
     }
+    let workspace_path = workspace_path_for_memory(&conn, &memory.workspace_id);
+    let freshness = assess_memory_evidence_freshness(&memory, workspace_path.as_deref());
+    if let Some(degradation) = why_evidence_freshness_degradation(memory_id, &freshness) {
+        evidence_degradations.push(degradation);
+    }
     let contradictions = contradiction_fetch.items;
     let links = link_fetch.items;
     let rationale_traces = rationale_trace_fetch.items;
@@ -667,6 +674,36 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
             degraded: evidence_degradations,
         },
     )
+}
+
+fn workspace_path_for_memory(conn: &DbConnection, workspace_id: &str) -> Option<PathBuf> {
+    conn.get_workspace(workspace_id)
+        .ok()
+        .flatten()
+        .map(|workspace| PathBuf::from(workspace.path))
+}
+
+fn why_evidence_freshness_degradation(
+    memory_id: &str,
+    freshness: &EvidenceFreshness,
+) -> Option<WhyDegradation> {
+    let code = match freshness.status {
+        EvidenceFreshnessStatus::MissingSource => "why_evidence_freshness_missing_source",
+        EvidenceFreshnessStatus::ChangedSource => "why_evidence_freshness_changed_source",
+        EvidenceFreshnessStatus::UnreachableSource => "why_evidence_freshness_unreachable_source",
+        EvidenceFreshnessStatus::UnsupportedSource => "why_evidence_freshness_unsupported_source",
+        EvidenceFreshnessStatus::Fresh | EvidenceFreshnessStatus::Unknown => return None,
+    };
+    Some(WhyDegradation {
+        code,
+        severity: "low",
+        message: format!(
+            "Memory {memory_id} evidence freshness is {}: {}",
+            freshness.status.as_str(),
+            freshness.detail
+        ),
+        repair: freshness.repair.clone(),
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -5,6 +5,7 @@
 //! - `revise_memory`: create an immutable revision of an existing memory
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
@@ -587,6 +588,55 @@ pub struct MemoryValidity {
     pub window_kind: String,
 }
 
+/// Stable freshness state for evidence referenced by a memory provenance URI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EvidenceFreshnessStatus {
+    /// The referenced source still appears to contain the remembered evidence.
+    Fresh,
+    /// The referenced source file no longer exists.
+    MissingSource,
+    /// The referenced source exists but no longer contains the remembered evidence.
+    ChangedSource,
+    /// The referenced source exists but cannot be read.
+    UnreachableSource,
+    /// The provenance scheme is valid but cannot be freshness-checked locally.
+    UnsupportedSource,
+    /// No checkable provenance was available.
+    Unknown,
+}
+
+impl EvidenceFreshnessStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::MissingSource => "missing_source",
+            Self::ChangedSource => "changed_source",
+            Self::UnreachableSource => "unreachable_source",
+            Self::UnsupportedSource => "unsupported_source",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    #[must_use]
+    pub const fn should_report(self) -> bool {
+        !matches!(self, Self::Fresh | Self::Unknown)
+    }
+}
+
+/// Result of checking a memory's provenance against the current workspace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvidenceFreshness {
+    /// Stable freshness status.
+    pub status: EvidenceFreshnessStatus,
+    /// Canonical provenance URI being checked, when one exists.
+    pub provenance_uri: Option<String>,
+    /// Human-readable summary safe for degraded arrays and provenance notes.
+    pub detail: String,
+    /// Suggested repair when the state is actionable.
+    pub repair: Option<String>,
+}
+
 /// Compute stable display metadata for stored validity timestamps.
 #[must_use]
 pub fn memory_validity(valid_from: &Option<String>, valid_to: &Option<String>) -> MemoryValidity {
@@ -614,6 +664,143 @@ pub fn memory_validity(valid_from: &Option<String>, valid_to: &Option<String>) -
         status: status.to_owned(),
         window_kind: validity_window_kind(valid_from.as_deref(), valid_to.as_deref()).to_owned(),
     }
+}
+
+/// Check whether a memory's explicit provenance still supports its content.
+#[must_use]
+pub fn assess_memory_evidence_freshness(
+    memory: &StoredMemory,
+    workspace_path: Option<&Path>,
+) -> EvidenceFreshness {
+    let Some(raw_provenance) = memory.provenance_uri.as_deref() else {
+        return EvidenceFreshness {
+            status: EvidenceFreshnessStatus::Unknown,
+            provenance_uri: None,
+            detail: "Memory has no explicit provenance URI to freshness-check.".to_owned(),
+            repair: None,
+        };
+    };
+
+    let provenance = match ProvenanceUri::from_str(raw_provenance) {
+        Ok(provenance) => provenance,
+        Err(error) => {
+            return EvidenceFreshness {
+                status: EvidenceFreshnessStatus::Unknown,
+                provenance_uri: Some(raw_provenance.to_owned()),
+                detail: format!("Memory provenance URI could not be parsed: {error}."),
+                repair: Some("Revise the memory with a valid provenance URI.".to_owned()),
+            };
+        }
+    };
+
+    match &provenance {
+        ProvenanceUri::File { path, span } => {
+            let source_path = resolve_provenance_file_path(path, workspace_path);
+            let canonical_uri = provenance.to_string();
+            let source_text = match fs::read_to_string(&source_path) {
+                Ok(contents) => match span {
+                    Some(_) => extract_line_span(&contents, *span).unwrap_or_default(),
+                    None => contents,
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return EvidenceFreshness {
+                        status: EvidenceFreshnessStatus::MissingSource,
+                        provenance_uri: Some(canonical_uri),
+                        detail: format!(
+                            "Referenced provenance file {} is missing.",
+                            source_path.display()
+                        ),
+                        repair: Some(
+                            "Restore the file or revise the memory provenance URI; rebuild the index if the memory content changes."
+                                .to_owned(),
+                        ),
+                    };
+                }
+                Err(error) => {
+                    return EvidenceFreshness {
+                        status: EvidenceFreshnessStatus::UnreachableSource,
+                        provenance_uri: Some(canonical_uri),
+                        detail: format!(
+                            "Referenced provenance file {} could not be read: {error}.",
+                            source_path.display()
+                        ),
+                        repair: Some(
+                            "Fix file permissions or revise the memory provenance URI.".to_owned(),
+                        ),
+                    };
+                }
+            };
+
+            if evidence_text_matches(&source_text, &memory.content) {
+                EvidenceFreshness {
+                    status: EvidenceFreshnessStatus::Fresh,
+                    provenance_uri: Some(canonical_uri),
+                    detail: format!(
+                        "Referenced provenance file {} still contains the remembered evidence.",
+                        source_path.display()
+                    ),
+                    repair: None,
+                }
+            } else {
+                EvidenceFreshness {
+                    status: EvidenceFreshnessStatus::ChangedSource,
+                    provenance_uri: Some(canonical_uri),
+                    detail: format!(
+                        "Referenced provenance file {} no longer contains the remembered evidence.",
+                        source_path.display()
+                    ),
+                    repair: Some(
+                        "Inspect the source, then re-remember or revise this memory if needed; rebuild the index if the remembered content changes."
+                            .to_owned(),
+                    ),
+                }
+            }
+        }
+        ProvenanceUri::CassSession { .. }
+        | ProvenanceUri::EeMemory(_)
+        | ProvenanceUri::Web { .. }
+        | ProvenanceUri::AgentMail { .. } => EvidenceFreshness {
+            status: EvidenceFreshnessStatus::UnsupportedSource,
+            provenance_uri: Some(provenance.to_string()),
+            detail: format!(
+                "Provenance scheme `{}` cannot be freshness-checked by the local file verifier.",
+                provenance.scheme()
+            ),
+            repair: Some(
+                "Re-import the source or attach file:// provenance when local freshness is required."
+                    .to_owned(),
+            ),
+        },
+    }
+}
+
+fn resolve_provenance_file_path(path: &str, workspace_path: Option<&Path>) -> PathBuf {
+    let source_path = PathBuf::from(path);
+    if source_path.is_absolute() {
+        source_path
+    } else {
+        workspace_path
+            .map(|workspace| workspace.join(source_path.as_path()))
+            .unwrap_or(source_path)
+    }
+}
+
+fn extract_line_span(contents: &str, span: Option<crate::models::LineSpan>) -> Option<String> {
+    let span = span?;
+    let start = usize::try_from(span.start.saturating_sub(1)).ok()?;
+    let end = span.end.unwrap_or(span.start);
+    let count = usize::try_from(end.saturating_sub(span.start).saturating_add(1)).ok()?;
+    let lines = contents.lines().skip(start).take(count).collect::<Vec<_>>();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+fn evidence_text_matches(source_text: &str, memory_content: &str) -> bool {
+    let source_text = source_text.trim();
+    let memory_content = memory_content.trim();
+    if source_text.is_empty() || memory_content.is_empty() {
+        return false;
+    }
+    source_text.contains(memory_content) || memory_content.contains(source_text)
 }
 
 fn prepare_validity_window(
@@ -2418,6 +2605,109 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    fn freshness_memory(content: &str, provenance_uri: Option<String>) -> StoredMemory {
+        StoredMemory {
+            id: "mem_0000000000000000000000fresh".to_owned(),
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            content: content.to_owned(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.8,
+            importance: 0.7,
+            provenance_uri,
+            trust_class: "human_explicit".to_owned(),
+            trust_subclass: None,
+            provenance_chain_hash: None,
+            provenance_chain_hash_version: "ee.memory.provenance_chain.v1".to_owned(),
+            provenance_verification_status: "unverified".to_owned(),
+            provenance_verified_at: None,
+            provenance_verification_note: None,
+            created_at: "2026-05-09T00:00:00Z".to_owned(),
+            updated_at: "2026-05-09T00:00:00Z".to_owned(),
+            tombstoned_at: None,
+            valid_from: None,
+            valid_to: None,
+        }
+    }
+
+    #[test]
+    fn assess_memory_evidence_freshness_covers_stable_states() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::write(
+            temp.path().join("source.md"),
+            "Freshness source release evidence line\nsecond line\n",
+        )
+        .map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join("source-dir")).map_err(|error| error.to_string())?;
+
+        let fresh = assess_memory_evidence_freshness(
+            &freshness_memory(
+                "Freshness source release evidence line",
+                Some("file://source.md#L1".to_owned()),
+            ),
+            Some(temp.path()),
+        );
+        ensure(fresh.status, EvidenceFreshnessStatus::Fresh, "fresh file")?;
+
+        let changed = assess_memory_evidence_freshness(
+            &freshness_memory(
+                "Freshness source release evidence line",
+                Some("file://source.md#L2".to_owned()),
+            ),
+            Some(temp.path()),
+        );
+        ensure(
+            changed.status,
+            EvidenceFreshnessStatus::ChangedSource,
+            "changed file span",
+        )?;
+
+        let missing = assess_memory_evidence_freshness(
+            &freshness_memory(
+                "Freshness source release evidence line",
+                Some("file://missing.md".to_owned()),
+            ),
+            Some(temp.path()),
+        );
+        ensure(
+            missing.status,
+            EvidenceFreshnessStatus::MissingSource,
+            "missing file",
+        )?;
+
+        let unreachable = assess_memory_evidence_freshness(
+            &freshness_memory(
+                "Freshness source release evidence line",
+                Some("file://source-dir".to_owned()),
+            ),
+            Some(temp.path()),
+        );
+        ensure(
+            unreachable.status,
+            EvidenceFreshnessStatus::UnreachableSource,
+            "unreadable directory source",
+        )?;
+
+        let unsupported = assess_memory_evidence_freshness(
+            &freshness_memory(
+                "Freshness source release evidence line",
+                Some("cass-session://session-a#L1".to_owned()),
+            ),
+            Some(temp.path()),
+        );
+        ensure(
+            unsupported.status,
+            EvidenceFreshnessStatus::UnsupportedSource,
+            "unsupported source",
+        )?;
+
+        let unknown =
+            assess_memory_evidence_freshness(&freshness_memory("No explicit source.", None), None);
+        ensure(unknown.status, EvidenceFreshnessStatus::Unknown, "unknown")
     }
 
     fn remember_revisable_memory(

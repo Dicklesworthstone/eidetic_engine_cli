@@ -6,6 +6,7 @@
 //! NO MOCKS. Real ee binary, real DB, real search indexes.
 
 use std::fmt::Debug;
+use std::fs;
 use std::process::{Command, Output};
 
 type TestResult = Result<(), String>;
@@ -53,6 +54,26 @@ fn assert_schema(json: &serde_json::Value, expected: &str, context: &str) -> Tes
         .and_then(|s| s.as_str())
         .ok_or_else(|| format!("{context}: missing schema field"))?;
     ensure_equal(&schema, &expected, &format!("{context} schema"))
+}
+
+fn assert_stderr_empty(output: &Output, context: &str) -> TestResult {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    ensure(
+        stderr.trim().is_empty(),
+        format!("{context}: stderr should be empty in JSON mode, got: {stderr}"),
+    )
+}
+
+fn degraded_codes(json: &serde_json::Value) -> Vec<&str> {
+    json.pointer("/data/degraded")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.get("code").and_then(serde_json::Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[test]
@@ -193,6 +214,75 @@ fn core_workflow_init_remember_search_context_why() -> TestResult {
     }
 
     Ok(())
+}
+
+#[test]
+fn context_and_why_report_changed_file_provenance() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+    let source_path = tempdir.path().join("freshness-source.md");
+    let remembered_content = "Freshness source release evidence line";
+    fs::write(&source_path, remembered_content).map_err(|error| error.to_string())?;
+    let source_uri = format!("file://{}#L1", source_path.display());
+
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(&init.status.code(), &Some(EXIT_SUCCESS), "init")?;
+    assert_stderr_empty(&init, "init")?;
+
+    let remember = run_ee(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        remembered_content,
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--source",
+        &source_uri,
+        "--json",
+    ])?;
+    ensure_equal(&remember.status.code(), &Some(EXIT_SUCCESS), "remember")?;
+    assert_stderr_empty(&remember, "remember")?;
+    let remember_json = stdout_json(&remember)?;
+    let memory_id = remember_json["data"]["memory_id"]
+        .as_str()
+        .ok_or_else(|| "remember response missing memory_id".to_string())?;
+
+    let rebuild = run_ee(&["--workspace", &workspace, "index", "rebuild", "--json"])?;
+    ensure_equal(&rebuild.status.code(), &Some(EXIT_SUCCESS), "index rebuild")?;
+    assert_stderr_empty(&rebuild, "index rebuild")?;
+
+    fs::write(&source_path, "Freshness source release evidence changed")
+        .map_err(|error| error.to_string())?;
+
+    let context = run_ee(&[
+        "--workspace",
+        &workspace,
+        "context",
+        "freshness source release",
+        "--max-tokens",
+        "2000",
+        "--json",
+    ])?;
+    ensure_equal(&context.status.code(), &Some(EXIT_SUCCESS), "context")?;
+    assert_stderr_empty(&context, "context")?;
+    let context_json = stdout_json(&context)?;
+    assert_schema(&context_json, "ee.response.v1", "context")?;
+    ensure(
+        degraded_codes(&context_json).contains(&"context_evidence_freshness_changed_source"),
+        "context should report changed source evidence freshness",
+    )?;
+
+    let why = run_ee(&["--workspace", &workspace, "why", memory_id, "--json"])?;
+    ensure_equal(&why.status.code(), &Some(EXIT_SUCCESS), "why")?;
+    assert_stderr_empty(&why, "why")?;
+    let why_json = stdout_json(&why)?;
+    assert_schema(&why_json, "ee.response.v1", "why")?;
+    ensure(
+        degraded_codes(&why_json).contains(&"why_evidence_freshness_changed_source"),
+        "why should report changed source evidence freshness",
+    )
 }
 
 #[test]
