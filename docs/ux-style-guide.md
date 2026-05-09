@@ -71,6 +71,7 @@ The `repair` field is optional but should be present when a fix is known.
 | 6 | Degraded mode unsatisfied |
 | 7 | Policy denied |
 | 8 | Migration required |
+| 9 | Evaluation failure |
 
 ## Human Output Format
 

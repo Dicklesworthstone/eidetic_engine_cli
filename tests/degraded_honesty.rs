@@ -2894,6 +2894,109 @@ fn eval_run_and_list_report_fixture_results_without_unavailable_sentinel() -> Te
 }
 
 #[test]
+fn eval_run_pack_quality_reports_fixture_comparison_without_unavailable_sentinel() -> TestResult {
+    let result = run_ee_logged(
+        "eval-run-pack-quality-fixture",
+        None,
+        vec![
+            "--json".to_owned(),
+            "eval".to_owned(),
+            "run".to_owned(),
+            "release_failure".to_owned(),
+            "--pack-quality".to_owned(),
+            "--scenario".to_owned(),
+            "usr_pre_task_brief".to_owned(),
+        ],
+    )?;
+
+    ensure_equal(&result.exit_code, &0, "eval run pack-quality exit code")?;
+    ensure(
+        result.stderr.is_empty(),
+        "eval run pack-quality JSON response must keep stderr empty",
+    )?;
+    ensure_no_ansi(&result.stdout, "eval run pack-quality stdout")?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/schema",
+        json!("ee.response.v1"),
+        "eval run pack-quality response schema",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/success",
+        json!(true),
+        "eval run pack-quality success flag",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/command",
+        json!("eval run"),
+        "eval run pack-quality command label",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/mode",
+        json!("pack_quality"),
+        "eval run pack-quality mode",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/report/schema",
+        json!("ee.eval.pack_quality_report.v1"),
+        "eval run pack-quality report schema",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/report/fixture_id",
+        json!("fx.release_failure.v1"),
+        "eval run pack-quality fixture id",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/report/aggregate_verdict",
+        json!("within"),
+        "eval run pack-quality verdict",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/artifactPaths/0/stdout",
+        json!("target/ee-e2e/usr_pre_task_brief/<run-id>/04-context.stdout.json"),
+        "eval run pack-quality artifact path",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/degradedBranches/0/code",
+        json!("semantic_disabled"),
+        "eval run pack-quality lexical degraded branch",
+    )?;
+    ensure(
+        !result.stdout.contains("eval_fixtures_unavailable"),
+        "eval run pack-quality must not emit the removed unavailable sentinel",
+    )?;
+    ensure_no_fake_or_unsupported_claims("eval run", true, true, &result.stdout)?;
+
+    let log_text = fs::read_to_string(&result.log_path)
+        .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
+    let log_json: Value = serde_json::from_str(&log_text)
+        .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+    ensure_json_pointer(
+        &log_json,
+        "/commandBoundaryMatrixRow",
+        json!("eval"),
+        "logged eval run pack-quality boundary matrix row",
+    )?;
+    ensure_json_pointer(
+        &log_json,
+        "/sideEffectClass",
+        json!("read-only fixture discovery/evaluation report generation; no durable mutation"),
+        "logged eval run pack-quality side-effect class",
+    )?;
+    ensure_logged_contract_shape(&result, "eval run")?;
+
+    Ok(())
+}
+
+#[test]
 fn review_session_reports_storage_error_without_unavailable_sentinel() -> TestResult {
     let workspace_root = unique_artifact_dir("review-session-missing-db-workspace")?;
     let workspace = workspace_root.join("workspace");

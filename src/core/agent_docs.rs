@@ -299,6 +299,11 @@ pub const EXIT_CODES: &[ExitCodeEntry] = &[
         name: "migration",
         description: "Database migration required",
     },
+    ExitCodeEntry {
+        code: 9,
+        name: "eval_failure",
+        description: "Evaluation completed and found regressions",
+    },
 ];
 
 #[derive(Clone, Debug)]
@@ -885,6 +890,7 @@ mod tests {
             ("degraded", ProcessExitCode::UnsatisfiedDegradedMode),
             ("policy", ProcessExitCode::PolicyDenied),
             ("migration", ProcessExitCode::MigrationRequired),
+            ("eval_failure", ProcessExitCode::EvalFailure),
         ];
         ensure_equal(&EXIT_CODES.len(), &expected.len(), "exit code count")?;
         for (entry, (name, code)) in EXIT_CODES.iter().zip(expected) {

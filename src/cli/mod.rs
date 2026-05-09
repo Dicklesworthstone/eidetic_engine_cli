@@ -4295,12 +4295,18 @@ pub struct EideticLegacyImportArgs {
 pub enum EvalCommand {
     /// Run one or more evaluation scenarios.
     Run {
-        /// Scenario ID to run (e.g., "usr_pre_task_brief"). Omit for all scenarios.
-        #[arg(value_name = "SCENARIO_ID")]
+        /// Fixture ID or family to run. Omit for all fixtures.
+        #[arg(value_name = "FIXTURE_OR_FAMILY")]
         scenario_id: Option<String>,
         /// Path to fixture directory (defaults to tests/fixtures/eval/).
         #[arg(long, value_name = "PATH")]
         fixture_dir: Option<std::path::PathBuf>,
+        /// Run the pack-quality evaluator over fixture expectations.
+        #[arg(long = "pack-quality", action = ArgAction::SetTrue)]
+        pack_quality: bool,
+        /// Filter pack-quality cases by scenario ID or case ID.
+        #[arg(long, value_name = "ID")]
+        scenario: Option<String>,
         /// Include science-backed metrics in the eval report payload.
         #[arg(long, action = ArgAction::SetTrue)]
         science: bool,
@@ -5788,15 +5794,39 @@ where
             EvalCommand::Run {
                 scenario_id,
                 fixture_dir,
+                pack_quality,
+                scenario,
                 science,
-            } => handle_eval_run(
-                &cli,
-                scenario_id.as_deref(),
-                fixture_dir.as_deref(),
-                *science,
-                stdout,
-                stderr,
-            ),
+            } => {
+                if *pack_quality {
+                    handle_eval_pack_quality_run(
+                        &cli,
+                        scenario_id.as_deref(),
+                        scenario.as_deref(),
+                        fixture_dir.as_deref(),
+                        stdout,
+                        stderr,
+                    )
+                } else {
+                    if scenario.is_some() {
+                        let error = DomainError::Usage {
+                            message: "`ee eval run --scenario` requires `--pack-quality`.".into(),
+                            repair: Some(
+                                "Use `ee eval run --pack-quality --scenario <id>` or pass a fixture/family positional filter.".into(),
+                            ),
+                        };
+                        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                    }
+                    handle_eval_run(
+                        &cli,
+                        scenario_id.as_deref(),
+                        fixture_dir.as_deref(),
+                        *science,
+                        stdout,
+                        stderr,
+                    )
+                }
+            }
             EvalCommand::List => handle_eval_list(&cli, None, stdout, stderr),
         },
         Some(Command::Focus(ref focus_cmd)) => handle_focus(&cli, focus_cmd, stdout, stderr),
@@ -6442,6 +6472,467 @@ where
     ProcessExitCode::Success
 }
 
+fn handle_eval_pack_quality_run<W, E>(
+    cli: &Cli,
+    fixture_filter: Option<&str>,
+    case_filter: Option<&str>,
+    fixture_dir: Option<&std::path::Path>,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let default_dir = std::path::PathBuf::from(crate::eval::DEFAULT_FIXTURE_DIR);
+    let dir = fixture_dir.unwrap_or(&default_dir);
+
+    let fixtures = match crate::eval::discover_fixtures(dir) {
+        Ok(fixtures) => fixtures,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    if fixtures.is_empty() {
+        let error = DomainError::Configuration {
+            message: "No fixtures found in fixture directory".into(),
+            repair: Some(format!("Add fixtures to {}", dir.display())),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    let target_fixtures: Vec<_> = if let Some(filter) = fixture_filter {
+        fixtures
+            .into_iter()
+            .filter(|fixture| fixture.fixture_id == filter || fixture.fixture_family == filter)
+            .collect()
+    } else {
+        fixtures
+    };
+
+    if target_fixtures.is_empty() {
+        let error = DomainError::NotFound {
+            resource: "fixture".into(),
+            id: fixture_filter.unwrap_or("*").into(),
+            repair: Some("ee eval list --json".into()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    let mut reports = Vec::new();
+    let mut artifact_paths = Vec::new();
+    let mut degraded_branches = Vec::new();
+
+    for fixture in &target_fixtures {
+        let scenario = match crate::eval::load_scenario(&fixture.scenario_path) {
+            Ok(scenario) => scenario,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        let source = match crate::eval::load_source_memories(&fixture.source_memory_path) {
+            Ok(source) => source,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        if let Err(error) = crate::eval::validate_fixture_scenario(&scenario, &source) {
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+
+        let Some(expectations) = &scenario.pack_quality_expectations else {
+            continue;
+        };
+        let cases = expectations
+            .cases
+            .iter()
+            .filter(|case| {
+                case_filter
+                    .is_none_or(|filter| case.case_id == filter || case.scenario_id == filter)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if cases.is_empty() {
+            continue;
+        }
+
+        let materialized = match crate::eval::materialize_source_memories(&source) {
+            Ok(memories) => memories,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        let actuals = match pack_quality_actuals_for_cases(
+            &fixture.path,
+            &scenario,
+            &source,
+            &materialized,
+            &cases,
+        ) {
+            Ok(actuals) => actuals,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+
+        artifact_paths.extend(pack_quality_artifact_paths(fixture, &scenario, &cases));
+        degraded_branches.extend(pack_quality_degraded_branch_reports(
+            fixture, &scenario, &cases,
+        ));
+        reports.push(crate::eval::evaluate_pack_quality(
+            &fixture.fixture_id,
+            &cases,
+            &actuals,
+        ));
+    }
+
+    if reports.is_empty() {
+        let id = case_filter.or(fixture_filter).unwrap_or("*");
+        let error = DomainError::NotFound {
+            resource: "pack-quality case".into(),
+            id: id.into(),
+            repair: Some("ee eval run --pack-quality --json".into()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    let passed = reports
+        .iter()
+        .all(|report| report.aggregate_verdict.is_passing());
+    let has_regression = reports.iter().any(|report| report.cases_regression > 0);
+    let exit = if passed {
+        ProcessExitCode::Success
+    } else if has_regression {
+        ProcessExitCode::EvalFailure
+    } else {
+        ProcessExitCode::UnsatisfiedDegradedMode
+    };
+
+    if cli.wants_json() {
+        let data = if reports.len() == 1 {
+            serde_json::json!({
+                "command": "eval run",
+                "mode": "pack_quality",
+                "fixtureDir": dir.display().to_string(),
+                "scenarioFilter": case_filter,
+                "report": reports.first(),
+                "artifactPaths": artifact_paths,
+                "degradedBranches": degraded_branches
+            })
+        } else {
+            serde_json::json!({
+                "command": "eval run",
+                "mode": "pack_quality",
+                "fixtureDir": dir.display().to_string(),
+                "scenarioFilter": case_filter,
+                "reports": reports,
+                "fixtureCount": reports.len(),
+                "artifactPaths": artifact_paths,
+                "degradedBranches": degraded_branches
+            })
+        };
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": passed,
+            "data": data
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+    } else {
+        for report in &reports {
+            let _ = writeln!(stdout, "Fixture: {}", report.fixture_id);
+            let _ = writeln!(
+                stdout,
+                "  Pack quality: {}",
+                report.aggregate_verdict.as_str()
+            );
+            let _ = writeln!(stdout, "  Cases: {}", report.cases_total);
+            let _ = writeln!(stdout, "  Within: {}", report.cases_within);
+            let _ = writeln!(stdout, "  Drift: {}", report.cases_drift);
+            let _ = writeln!(stdout, "  Regression: {}", report.cases_regression);
+            let _ = writeln!(stdout, "  Inconclusive: {}", report.cases_inconclusive);
+            let _ = writeln!(stdout);
+        }
+    }
+
+    exit
+}
+
+fn pack_quality_actuals_for_cases(
+    fixture_path: &Path,
+    scenario: &crate::eval::FixtureScenario,
+    source: &crate::eval::SourceMemoryFile,
+    memories: &[crate::eval::SourceMemory],
+    cases: &[crate::eval::PackQualityCase],
+) -> Result<Vec<crate::eval::PackQualityActual>, DomainError> {
+    if memories.is_empty() {
+        return Err(DomainError::Configuration {
+            message: format!("eval fixture {} contains no memories", source.fixture_id),
+            repair: Some("Add source memories or generated tiers before running eval.".into()),
+        });
+    }
+
+    let tempdir = tempfile::Builder::new()
+        .prefix("ee-eval-pack-quality-")
+        .tempdir()
+        .map_err(|error| DomainError::Storage {
+            message: format!("failed to create pack-quality eval index tempdir: {error}"),
+            repair: Some("Check TMPDIR and filesystem permissions.".to_owned()),
+        })?;
+    let index_dir = tempdir.path().join("index");
+    build_eval_search_index_from_memories(&index_dir, &source.fixture_id, memories)?;
+    let workspace_path = tempdir.path().to_path_buf();
+
+    let mut actuals = Vec::with_capacity(cases.len());
+    for case in cases {
+        let query = pack_quality_case_query(fixture_path, case)?;
+        let degradation_codes = pack_quality_actual_degradation_codes(scenario, case);
+        let speed = if degradation_codes
+            .iter()
+            .any(|code| code == "semantic_disabled")
+        {
+            SpeedMode::Instant
+        } else {
+            SpeedMode::Default
+        };
+        let limit = pack_quality_selection_limit(case, memories.len());
+        let report = run_search(&SearchOptions {
+            workspace_path: workspace_path.clone(),
+            database_path: None,
+            index_dir: Some(index_dir.clone()),
+            query: query.clone(),
+            limit,
+            speed,
+            explain: false,
+        })
+        .map_err(|error| DomainError::SearchIndex {
+            message: format!("pack-quality eval search failed for `{query}`: {error}"),
+            repair: error.repair_hint().map(str::to_owned),
+        })?;
+        let selected_memory_ids = report
+            .results
+            .into_iter()
+            .map(|hit| hit.doc_id)
+            .collect::<Vec<_>>();
+
+        actuals.push(crate::eval::PackQualityActual {
+            tokens_used: estimate_pack_quality_tokens(&selected_memory_ids, memories),
+            provenance_density: pack_quality_provenance_density(&selected_memory_ids, memories),
+            redaction_leaks: detect_pack_quality_redaction_leaks(
+                &selected_memory_ids,
+                memories,
+                &case.forbidden_redaction_leaks,
+            ),
+            degradation_codes,
+            selected_memory_ids,
+        });
+    }
+
+    Ok(actuals)
+}
+
+fn pack_quality_case_query(
+    fixture_path: &Path,
+    case: &crate::eval::PackQualityCase,
+) -> Result<String, DomainError> {
+    match case.query_surface.kind.as_str() {
+        "inline_query" => case
+            .query_surface
+            .query
+            .as_ref()
+            .map(|query| query.trim().to_string())
+            .filter(|query| !query.is_empty())
+            .ok_or_else(|| DomainError::Configuration {
+                message: format!("pack-quality case `{}` has no inline query", case.case_id),
+                repair: Some("Fix the eval fixture query_surface.query field.".into()),
+            }),
+        "query_file" => {
+            let raw_path =
+                case.query_surface
+                    .path
+                    .as_ref()
+                    .ok_or_else(|| DomainError::Configuration {
+                        message: format!(
+                            "pack-quality case `{}` has no query file path",
+                            case.case_id
+                        ),
+                        repair: Some("Fix the eval fixture query_surface.path field.".into()),
+                    })?;
+            let query_path = resolve_pack_quality_query_path(fixture_path, raw_path);
+            load_query_file(&query_path)
+                .map(|request| request.query)
+                .map_err(query_file_error_to_domain)
+        }
+        other => Err(DomainError::Configuration {
+            message: format!(
+                "pack-quality case `{}` has unsupported query surface `{other}`",
+                case.case_id
+            ),
+            repair: Some("Use inline_query or query_file in pack-quality fixtures.".into()),
+        }),
+    }
+}
+
+fn resolve_pack_quality_query_path(fixture_path: &Path, raw_path: &str) -> PathBuf {
+    let path = PathBuf::from(raw_path);
+    if path.is_absolute() || path.exists() {
+        return path;
+    }
+    if let Some(file_name) = path.file_name() {
+        let sibling = fixture_path.join(file_name);
+        if sibling.exists() {
+            return sibling;
+        }
+    }
+    fixture_path.join(path)
+}
+
+fn query_file_error_to_domain(error: QueryFileError) -> DomainError {
+    DomainError::Configuration {
+        message: error.message,
+        repair: error.repair,
+    }
+}
+
+fn pack_quality_selection_limit(case: &crate::eval::PackQualityCase, memory_count: usize) -> u32 {
+    let requested = case
+        .expected_selected_memory_ids
+        .len()
+        .max(1)
+        .min(memory_count);
+    u32::try_from(requested).unwrap_or(u32::MAX)
+}
+
+fn pack_quality_actual_degradation_codes(
+    scenario: &crate::eval::FixtureScenario,
+    case: &crate::eval::PackQualityCase,
+) -> Vec<String> {
+    scenario
+        .degraded_branches
+        .iter()
+        .filter(|branch| branch.preserves_success_signal)
+        .filter(|branch| {
+            case.allowed_degradation_codes
+                .iter()
+                .any(|code| code == &branch.code)
+        })
+        .map(|branch| branch.code.clone())
+        .collect()
+}
+
+fn estimate_pack_quality_tokens(
+    selected_memory_ids: &[String],
+    memories: &[crate::eval::SourceMemory],
+) -> u32 {
+    let mut estimated: usize = 0;
+    for memory_id in selected_memory_ids {
+        if let Some(memory) = memories.iter().find(|memory| memory.id == *memory_id) {
+            estimated = estimated.saturating_add(memory.content.len().div_ceil(4));
+            estimated = estimated.saturating_add(24);
+        }
+    }
+    u32::try_from(estimated).unwrap_or(u32::MAX)
+}
+
+fn pack_quality_provenance_density(
+    selected_memory_ids: &[String],
+    memories: &[crate::eval::SourceMemory],
+) -> f64 {
+    if selected_memory_ids.is_empty() {
+        return 0.0;
+    }
+
+    let with_provenance = selected_memory_ids
+        .iter()
+        .filter(|memory_id| {
+            memories
+                .iter()
+                .find(|memory| memory.id == **memory_id)
+                .and_then(|memory| memory.provenance_uri.as_deref())
+                .is_some_and(|uri| !uri.trim().is_empty())
+        })
+        .count();
+    with_provenance as f64 / selected_memory_ids.len() as f64
+}
+
+fn detect_pack_quality_redaction_leaks(
+    selected_memory_ids: &[String],
+    memories: &[crate::eval::SourceMemory],
+    forbidden_leaks: &[String],
+) -> Vec<String> {
+    let mut leaks = BTreeSet::new();
+    for memory_id in selected_memory_ids {
+        let Some(memory) = memories.iter().find(|memory| memory.id == *memory_id) else {
+            continue;
+        };
+        for forbidden in forbidden_leaks {
+            if pack_quality_leak_present(&memory.content, forbidden) {
+                leaks.insert(forbidden.clone());
+            }
+        }
+    }
+    leaks.into_iter().collect()
+}
+
+fn pack_quality_leak_present(content: &str, forbidden: &str) -> bool {
+    let lower_content = content.to_ascii_lowercase();
+    match forbidden {
+        "systemPrompt" => lower_content.contains("system prompt"),
+        "ignorePreviousInstructions" => lower_content.contains("ignore previous instructions"),
+        other => lower_content.contains(&other.to_ascii_lowercase()),
+    }
+}
+
+fn pack_quality_artifact_paths(
+    fixture: &crate::eval::DiscoveredFixture,
+    scenario: &crate::eval::FixtureScenario,
+    cases: &[crate::eval::PackQualityCase],
+) -> Vec<serde_json::Value> {
+    cases
+        .iter()
+        .filter_map(|case| {
+            scenario
+                .command_sequence
+                .iter()
+                .find(|step| step.step == case.command_step)
+                .map(|step| {
+                    serde_json::json!({
+                        "fixtureId": fixture.fixture_id,
+                        "caseId": case.case_id,
+                        "scenarioId": case.scenario_id,
+                        "commandStep": case.command_step,
+                        "stdout": step.stdout_artifact_path,
+                        "stderr": step.stderr_artifact_path
+                    })
+                })
+        })
+        .collect()
+}
+
+fn pack_quality_degraded_branch_reports(
+    fixture: &crate::eval::DiscoveredFixture,
+    scenario: &crate::eval::FixtureScenario,
+    cases: &[crate::eval::PackQualityCase],
+) -> Vec<serde_json::Value> {
+    scenario
+        .degraded_branches
+        .iter()
+        .filter(|branch| {
+            cases.iter().any(|case| {
+                case.allowed_degradation_codes
+                    .iter()
+                    .any(|code| code == &branch.code)
+            })
+        })
+        .map(|branch| {
+            serde_json::json!({
+                "fixtureId": fixture.fixture_id,
+                "code": branch.code,
+                "description": branch.description,
+                "repairAction": branch.repair_action,
+                "preservesSuccessSignal": branch.preserves_success_signal,
+                "executed": true,
+                "mode": if branch.code == "semantic_disabled" {
+                    "lexical_only"
+                } else {
+                    "declared_fixture_branch"
+                }
+            })
+        })
+        .collect()
+}
+
 fn build_query_expectations(
     memories: &[crate::eval::SourceMemory],
 ) -> BTreeMap<String, Vec<String>> {
@@ -6461,7 +6952,8 @@ fn build_query_expectations(
 fn run_eval_retrieval_queries(
     source: &crate::eval::SourceMemoryFile,
 ) -> Result<Vec<crate::eval::QueryMetrics>, DomainError> {
-    let query_expectations = build_query_expectations(&source.memories);
+    let memories = crate::eval::materialize_source_memories(source)?;
+    let query_expectations = build_query_expectations(&memories);
     if query_expectations.is_empty() {
         return Ok(Vec::new());
     }
@@ -6477,7 +6969,7 @@ fn run_eval_retrieval_queries(
     build_eval_search_index(&index_dir, source)?;
 
     let workspace_path = tempdir.path().to_path_buf();
-    let limit = u32::try_from(source.memories.len().max(5)).unwrap_or(u32::MAX);
+    let limit = u32::try_from(memories.len().max(5)).unwrap_or(u32::MAX);
     let mut per_query = Vec::with_capacity(query_expectations.len());
     for (query, expected_ids) in query_expectations {
         let report = run_search(&SearchOptions {
@@ -6512,15 +7004,23 @@ fn build_eval_search_index(
     index_dir: &Path,
     source: &crate::eval::SourceMemoryFile,
 ) -> Result<(), DomainError> {
-    let documents = source
-        .memories
+    let memories = crate::eval::materialize_source_memories(source)?;
+    build_eval_search_index_from_memories(index_dir, &source.fixture_id, &memories)
+}
+
+fn build_eval_search_index_from_memories(
+    index_dir: &Path,
+    fixture_id: &str,
+    memories: &[crate::eval::SourceMemory],
+) -> Result<(), DomainError> {
+    let documents = memories
         .iter()
         .map(eval_source_memory_document)
         .map(CanonicalSearchDocument::into_indexable)
         .collect::<Vec<_>>();
     if documents.is_empty() {
         return Err(DomainError::Configuration {
-            message: format!("eval fixture {} contains no memories", source.fixture_id),
+            message: format!("eval fixture {fixture_id} contains no memories"),
             repair: Some(
                 "Add memories to source_memory.json before running retrieval eval.".into(),
             ),

@@ -245,6 +245,22 @@ pub struct SourceMemoryTier {
     pub expected_memory_count: u32,
     #[serde(default)]
     pub id_range: Option<SourceMemoryIdRange>,
+    #[serde(default)]
+    pub expected_query_match: Vec<String>,
+    #[serde(default)]
+    pub generator: Option<SourceMemoryTierGenerator>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct SourceMemoryTierGenerator {
+    #[serde(default)]
+    pub profile: String,
+    #[serde(default)]
+    pub template: String,
+    #[serde(default)]
+    pub relevant_every: u32,
+    #[serde(default)]
+    pub distractor_every: u32,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -418,6 +434,88 @@ pub fn load_source_memories(path: &Path) -> Result<SourceMemoryFile, DomainError
         message: format!("Failed to parse source memory JSON: {e}"),
         repair: Some("Check source_memory.json syntax".into()),
     })
+}
+
+/// Expand fixture memory sources into concrete records for deterministic eval runs.
+pub fn materialize_source_memories(
+    source: &SourceMemoryFile,
+) -> Result<Vec<SourceMemory>, DomainError> {
+    let mut memories = Vec::new();
+    let mut seen = HashSet::new();
+
+    for memory in &source.memories {
+        if seen.insert(memory.id.clone()) {
+            memories.push(memory.clone());
+        }
+    }
+
+    if let Some(seed_memory) = &source.seed_memory
+        && seen.insert(seed_memory.id.clone())
+    {
+        memories.push(seed_memory.clone());
+    }
+
+    for tier in &source.tiers {
+        let Some(range) = &tier.id_range else {
+            continue;
+        };
+        let ids = expand_source_id_range(range, &tier.name)?;
+        let take_count = if tier.expected_memory_count == 0 {
+            ids.len()
+        } else {
+            usize::try_from(tier.expected_memory_count)
+                .unwrap_or(usize::MAX)
+                .min(ids.len())
+        };
+
+        for (offset, id) in ids.into_iter().take(take_count).enumerate() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let ordinal = offset + 1;
+            memories.push(SourceMemory {
+                id: id.clone(),
+                level: "episodic".to_string(),
+                kind: "generated_fixture_memory".to_string(),
+                trust_class: "synthetic_generated".to_string(),
+                confidence: 0.8,
+                utility: 0.7,
+                importance: 0.6,
+                tags: vec![
+                    "eval".to_string(),
+                    "synthetic".to_string(),
+                    tier.name.clone(),
+                ],
+                content: tier_generated_content(tier, &id, ordinal),
+                provenance_uri: Some(format!(
+                    "fixture://{}/tiers/{}#{}",
+                    source.fixture_id, tier.name, id
+                )),
+                expected_query_match: tier.expected_query_match.clone(),
+            });
+        }
+    }
+
+    memories.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(memories)
+}
+
+fn tier_generated_content(tier: &SourceMemoryTier, id: &str, ordinal: usize) -> String {
+    let template = tier
+        .generator
+        .as_ref()
+        .map(|generator| generator.template.as_str())
+        .filter(|template| !template.trim().is_empty())
+        .unwrap_or("Synthetic {tier} eval memory {n}: deterministic source record {id}.");
+    let module = format!("module_{}", ordinal % 7);
+    let bucket = format!("{}", ordinal % 11);
+
+    template
+        .replace("{n}", &ordinal.to_string())
+        .replace("{id}", id)
+        .replace("{tier}", &tier.name)
+        .replace("{module}", &module)
+        .replace("{bucket}", &bucket)
 }
 
 /// Validate cross-file fixture expectations that cannot be checked by JSON syntax alone.
@@ -1621,7 +1719,11 @@ mod tests {
 
         ensure(result.verdict, PackQualityVerdict::Drift, "verdict")?;
         ensure(result.unexpected_ids.len(), 1, "one unexpected")?;
-        ensure(result.unexpected_ids[0].as_str(), "mem_extra", "unexpected id")
+        ensure(
+            result.unexpected_ids[0].as_str(),
+            "mem_extra",
+            "unexpected id",
+        )
     }
 
     #[test]
@@ -1637,11 +1739,7 @@ mod tests {
         let result = compare_pack_quality(&case, &actual);
 
         ensure(result.verdict, PackQualityVerdict::Regression, "verdict")?;
-        ensure(
-            result.omitted_critical_found.len(),
-            1,
-            "one critical found",
-        )?;
+        ensure(result.omitted_critical_found.len(), 1, "one critical found")?;
         ensure(
             result.omitted_critical_found[0].as_str(),
             "mem_secret",
@@ -1697,7 +1795,11 @@ mod tests {
         let result = compare_pack_quality(&case, &actual);
 
         ensure(result.verdict, PackQualityVerdict::Drift, "verdict")?;
-        ensure(result.unexpected_degradation_codes.len(), 1, "one unexpected")
+        ensure(
+            result.unexpected_degradation_codes.len(),
+            1,
+            "one unexpected",
+        )
     }
 
     #[test]
