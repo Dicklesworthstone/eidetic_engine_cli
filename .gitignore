@@ -85,6 +85,7 @@ Cargo.lock.bak
 .claude/
 .codex/
 .cursor/
+.stash_janitor_workspace/
 !tests/fixtures/agent_detect/remote_mirror/
 !tests/fixtures/agent_detect/remote_mirror/**
 !tests/fixtures/agent_detect/remote_mirror/**/.claude/

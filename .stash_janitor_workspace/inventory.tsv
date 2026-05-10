@@ -1,7 +1,0 @@
-idx	stash_sha	parent_sha	date	has_untracked	files	insertions	deletions	message
-0	6f07ddbc87017c3d57a9556f3aa3c161456709b6	98d9cd66a3c64742a5c17aa6008ebbfd64818498	2026-05-08 05:15:46 -0400	no	7	576	185	On main: other-agent-changes
-1	7065378ef436a4df98229c895d321bc5e78fe563	4a735b56edc8caa7a6ec8a27f3bf94148b92dff1	2026-05-08 01:42:11 -0400	no	5	255	201	On main: x8y2 full WIP: causal promotion changes
-2	d385d43be57912d2f3da0e6e0e694866ba344ef9	4a735b56edc8caa7a6ec8a27f3bf94148b92dff1	2026-05-08 01:22:19 -0400	no	2	228	741	On main: x8y2 WIP before 6wj5 verification
-3	cf183a208d4c395950c34d588d43b08f95e7416f	cbae2486ff3fedb3fcfc6519c6de2d2c7b46f254	2026-05-07 23:04:24 -0400	no	5	173	370	On main: t8em WIP: graph feature changes
-4	3775cb81ce4773964bb6cd8e09c0db082b462061	9a09fa41de537922fb5586dd2a303d8a85e81f8a	2026-05-04 00:52:02 -0400	no	3	243	383	WIP on main: 9a09fa4 docs(boundary): tighten degraded-error vocabulary on configuration-context-profiles row
-5	9806fe8074d5c529bfd2792469f9c5874b8f3a24	4b6c52b59337fa0910684f41a632a46316dce825	2026-04-29 19:44:43 -0400	no	10	23	30	On main: EE-002 format changes to review
