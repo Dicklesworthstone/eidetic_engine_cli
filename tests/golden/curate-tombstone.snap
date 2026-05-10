@@ -1,0 +1,20 @@
+---
+source: src/cli/mod.rs
+assertion: curate tombstone writes audit record without deleting memory row
+schema:
+  response: ee.response.v1
+  tombstone: ee.curate.tombstone.v1
+contracts:
+  - tombstone writes an audited record without deleting the memory
+  - dry-run preview reports what would be tombstoned
+  - missing memory returns NotFound with repair hint
+  - actor recorded in audit metadata when provided
+  - reason recorded in audit trail
+  - JSON stdout is ee.response.v1 envelope
+  - exit code 6 when degraded mode unavailable
+evidence:
+  - CurateTombstoneArgs.memory_id
+  - CurateTombstoneArgs.dry_run
+  - CurateTombstoneArgs.actor
+  - CurateTombstoneArgs.reason
+  - DomainError::UnsatisfiedDegradedMode

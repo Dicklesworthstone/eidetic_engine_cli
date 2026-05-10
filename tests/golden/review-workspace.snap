@@ -1,0 +1,20 @@
+---
+source: src/cli/mod.rs
+assertion: review workspace scopes evidence to workspace path with determinism
+schema:
+  response: ee.response.v1
+  review: ee.review.workspace.v1
+contracts:
+  - workspace scope filters evidence to path or current directory
+  - include-cass flag controls CASS-derived evidence inclusion
+  - propose flag generates curation candidates from workspace evidence
+  - dry-run preview without writing candidate records
+  - JSON stdout is ee.response.v1 envelope
+  - degrades honestly when CASS evidence unavailable
+  - exit code 6 when degraded mode unavailable
+evidence:
+  - ReviewWorkspaceArgs.scope
+  - ReviewWorkspaceArgs.include_cass
+  - ReviewWorkspaceArgs.propose
+  - ReviewWorkspaceArgs.dry_run
+  - DomainError::UnsatisfiedDegradedMode

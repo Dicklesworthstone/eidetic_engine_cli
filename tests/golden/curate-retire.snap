@@ -1,0 +1,20 @@
+---
+source: src/cli/mod.rs
+assertion: curate retire writes audited retirement record without deletion
+schema:
+  response: ee.response.v1
+  retire: ee.curate.retire.v1
+contracts:
+  - retire writes an audited state transition without deleting the candidate
+  - dry-run preview reports what would be retired
+  - missing candidate returns NotFound with repair hint
+  - actor recorded in audit metadata when provided
+  - reason recorded in audit trail
+  - JSON stdout is ee.response.v1 envelope
+  - exit code 6 when degraded mode unavailable
+evidence:
+  - CurateRetireArgs.candidate_id
+  - CurateRetireArgs.dry_run
+  - CurateRetireArgs.actor
+  - CurateRetireArgs.reason
+  - DomainError::UnsatisfiedDegradedMode

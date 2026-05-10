@@ -3835,6 +3835,8 @@ pub struct WorkspaceAliasArgs {
 pub enum WorkflowCommand {
     /// Close a workflow and promote eligible working memories.
     Close(WorkflowCloseArgs),
+    /// Create a new workflow lifecycle group.
+    Create(WorkflowCreateArgs),
 }
 
 /// Arguments for `ee workflow close`.
@@ -3847,6 +3849,26 @@ pub struct WorkflowCloseArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee workflow create`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct WorkflowCreateArgs {
+    /// Name for the new workflow lifecycle group.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+
+    /// Optional description for the workflow.
+    #[arg(long, value_name = "DESCRIPTION")]
+    pub description: Option<String>,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Preview without creating the workflow record.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 }
 
 /// Arguments for the remember command.
@@ -3916,6 +3938,10 @@ pub enum CurateCommand {
     Merge(CurateMergeArgs),
     /// Evaluate deterministic TTL disposition policies for the review queue.
     Disposition(CurateDispositionArgs),
+    /// Retire a curated item from the active review set with an audited record.
+    Retire(CurateRetireArgs),
+    /// Write a tombstone audit record for a memory without deleting the row.
+    Tombstone(CurateTombstoneArgs),
 }
 
 /// Arguments for `ee curate candidates`.
@@ -4078,6 +4104,52 @@ pub struct CurateDispositionArgs {
     /// Override the current time for deterministic replay and tests.
     #[arg(long, value_name = "RFC3339")]
     pub now: Option<String>,
+}
+
+/// Arguments for `ee curate retire`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct CurateRetireArgs {
+    /// Curation candidate ID to retire.
+    pub candidate_id: String,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Actor recorded in audit metadata.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+
+    /// Preview without writing audit record.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Retirement reason for audit trail.
+    #[arg(long, value_name = "REASON")]
+    pub reason: Option<String>,
+}
+
+/// Arguments for `ee curate tombstone`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct CurateTombstoneArgs {
+    /// Memory ID to tombstone.
+    pub memory_id: String,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Actor recorded in audit metadata.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+
+    /// Preview without writing tombstone record.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Tombstone reason for audit trail.
+    #[arg(long, value_name = "REASON")]
+    pub reason: Option<String>,
 }
 
 /// Direct procedural rule management commands.
@@ -5122,6 +5194,8 @@ pub struct ModelListArgs {
 pub enum ReviewCommand {
     /// Review a session and propose curation candidates.
     Session(ReviewSessionArgs),
+    /// Review workspace evidence with deterministic scope.
+    Workspace(ReviewWorkspaceArgs),
 }
 
 /// Arguments for `ee review session`.
@@ -5146,6 +5220,30 @@ pub struct ReviewSessionArgs {
     /// Maximum number of candidates to propose.
     #[arg(long, default_value_t = 10)]
     pub limit: u32,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee review workspace`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct ReviewWorkspaceArgs {
+    /// Filter to evidence from this workspace path. Defaults to current directory.
+    #[arg(long, value_name = "PATH")]
+    pub scope: Option<PathBuf>,
+
+    /// Include persisted CASS-derived evidence rows.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_cass: bool,
+
+    /// Generate and persist curation candidates from workspace evidence.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub propose: bool,
+
+    /// Preview proposals without writing curation candidate records.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -6338,6 +6436,9 @@ where
         Some(Command::Workflow(WorkflowCommand::Close(ref args))) => {
             handle_workflow_close(&cli, args, stdout, stderr)
         }
+        Some(Command::Workflow(WorkflowCommand::Create(ref args))) => {
+            handle_workflow_create(&cli, args, stdout, stderr)
+        }
         Some(Command::Index(IndexCommand::Rebuild(ref args))) => {
             handle_index_rebuild(&cli, args, stdout, stderr)
         }
@@ -6659,6 +6760,12 @@ where
         Some(Command::Curate(CurateCommand::Disposition(ref args))) => {
             handle_curate_disposition(&cli, args, stdout, stderr)
         }
+        Some(Command::Curate(CurateCommand::Retire(ref args))) => {
+            handle_curate_retire(&cli, args, stdout, stderr)
+        }
+        Some(Command::Curate(CurateCommand::Tombstone(ref args))) => {
+            handle_curate_tombstone(&cli, args, stdout, stderr)
+        }
         Some(Command::Rule(RuleCommand::Add(ref args))) => {
             handle_rule_add(&cli, args, stdout, stderr)
         }
@@ -6679,6 +6786,9 @@ where
         }
         Some(Command::Review(ReviewCommand::Session(ref args))) => {
             handle_review_session(&cli, args, stdout, stderr)
+        }
+        Some(Command::Review(ReviewCommand::Workspace(ref args))) => {
+            handle_review_workspace(&cli, args, stdout, stderr)
         }
         Some(Command::Search(ref args)) => handle_search(&cli, args, stdout, stderr),
         Some(Command::Situation(SituationCommand::Classify(ref args))) => {
@@ -19630,6 +19740,78 @@ where
     }
 }
 
+fn handle_curate_retire<W, E>(
+    cli: &Cli,
+    args: &CurateRetireArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let _ = args;
+    let error = DomainError::UnsatisfiedDegradedMode {
+        message: "curate retire: Curation retirement is not yet implemented.".to_string(),
+        repair: Some("Use `ee curate reject` to remove a candidate from the active queue.".to_string()),
+    };
+    write_domain_error(&error, cli.wants_json(), stdout, stderr)
+}
+
+fn handle_curate_tombstone<W, E>(
+    cli: &Cli,
+    args: &CurateTombstoneArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let _ = args;
+    let error = DomainError::UnsatisfiedDegradedMode {
+        message: "curate tombstone: Curation tombstone is not yet implemented.".to_string(),
+        repair: Some("Use `ee memory expire` to write an audited tombstone for a memory.".to_string()),
+    };
+    write_domain_error(&error, cli.wants_json(), stdout, stderr)
+}
+
+fn handle_review_workspace<W, E>(
+    cli: &Cli,
+    args: &ReviewWorkspaceArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let _ = args;
+    let error = DomainError::UnsatisfiedDegradedMode {
+        message: "review workspace: Workspace review is not yet implemented.".to_string(),
+        repair: Some("Use `ee review session` to review a specific session.".to_string()),
+    };
+    write_domain_error(&error, cli.wants_json(), stdout, stderr)
+}
+
+fn handle_workflow_create<W, E>(
+    cli: &Cli,
+    args: &WorkflowCreateArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let _ = args;
+    let error = DomainError::UnsatisfiedDegradedMode {
+        message: "workflow create: Workflow creation is not yet implemented.".to_string(),
+        repair: Some("Use `ee remember --workflow <name>` to implicitly create a workflow.".to_string()),
+    };
+    write_domain_error(&error, cli.wants_json(), stdout, stderr)
+}
+
 fn handle_playbook_extract<W, E>(
     cli: &Cli,
     args: &PlaybookExtractArgs,
@@ -24776,6 +24958,8 @@ impl NormalizedInvocation {
                     CurateCommand::Snooze(_) => "curate snooze".to_string(),
                     CurateCommand::Merge(_) => "curate merge".to_string(),
                     CurateCommand::Disposition(_) => "curate disposition".to_string(),
+                    CurateCommand::Retire(_) => "curate retire".to_string(),
+                    CurateCommand::Tombstone(_) => "curate tombstone".to_string(),
                 },
                 Command::Diag(diag) => match diag {
                     DiagCommand::Claims(_) => "diag claims".to_string(),
@@ -24967,6 +25151,7 @@ impl NormalizedInvocation {
                 },
                 Command::Review(review) => match review {
                     ReviewCommand::Session(_) => "review session".to_string(),
+                    ReviewCommand::Workspace(_) => "review workspace".to_string(),
                 },
                 Command::Rule(rule) => match rule {
                     RuleCommand::Add(_) => "rule add".to_string(),
@@ -25012,6 +25197,7 @@ impl NormalizedInvocation {
                 },
                 Command::Workflow(workflow) => match workflow {
                     WorkflowCommand::Close(_) => "workflow close".to_string(),
+                    WorkflowCommand::Create(_) => "workflow create".to_string(),
                 },
                 Command::Tripwire(tw) => match tw {
                     TripwireCommand::List(_) => "tripwire list".to_string(),

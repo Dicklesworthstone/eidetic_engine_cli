@@ -1,0 +1,18 @@
+---
+source: src/cli/mod.rs
+assertion: workflow create is local-first and idempotent
+schema:
+  response: ee.response.v1
+  workflow: ee.workflow.create.v1
+contracts:
+  - create workflow lifecycle group with name
+  - optional description for workflow metadata
+  - dry-run preview without creating record
+  - idempotent by workflow name
+  - JSON stdout is ee.response.v1 envelope
+  - exit code 6 when degraded mode unavailable
+evidence:
+  - WorkflowCreateArgs.name
+  - WorkflowCreateArgs.description
+  - WorkflowCreateArgs.dry_run
+  - DomainError::UnsatisfiedDegradedMode
