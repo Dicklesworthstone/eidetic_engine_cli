@@ -1,0 +1,29 @@
+---
+source: src/graph/mod.rs
+assertion: graph refresh rebuilds derived projection from FrankenSQLite source truth
+schema:
+  report: ee.graph.centrality_refresh.v1
+  snapshot: ee.graph.refresh_snapshot.v1
+contracts:
+  - refresh reads memory_links from FrankenSQLite as source of truth
+  - derived graph snapshot is persisted with version and source_generation
+  - snapshot content_hash is deterministic given same memory links
+  - dry-run reports what would be done without mutating snapshots
+  - stale or missing snapshot returns degraded status with repair hint
+  - min_weight and min_confidence options filter links before projection
+  - link_limit caps the maximum links processed for large graphs
+  - timing breakdown includes projection_ms, pagerank_ms, betweenness_ms
+  - concurrent writers are serialized via advisory lock
+  - lock contention returns SnapshotLockHeld error with holder info
+  - JSON stdout includes workspace_id and optional snapshot metadata
+  - GraphFeatureDisabled status when graph feature is not compiled in
+evidence:
+  - CentralityRefreshOptions.dry_run
+  - CentralityRefreshOptions.min_weight
+  - CentralityRefreshOptions.min_confidence
+  - CentralityRefreshOptions.link_limit
+  - GraphRefreshSnapshot.snapshot_version
+  - GraphRefreshSnapshot.source_generation
+  - GraphRefreshSnapshot.content_hash
+  - GraphRefreshJobReport.workspace_id
+  - CentralityRefreshStatus

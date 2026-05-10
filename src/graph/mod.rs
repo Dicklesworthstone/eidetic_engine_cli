@@ -5400,6 +5400,62 @@ mod tests {
 
     #[cfg(feature = "graph")]
     #[test]
+    fn refresh_centrality_handles_cyclic_link_graph() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000095",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000096",
+            MEMORY_B,
+            MEMORY_C,
+            true,
+            0.9,
+            0.9,
+        )?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000097",
+            MEMORY_C,
+            MEMORY_A,
+            true,
+            0.9,
+            0.9,
+        )?;
+
+        let report = graph_result(super::refresh_centrality(
+            &connection,
+            &super::CentralityRefreshOptions::default(),
+        ))?;
+
+        assert_eq!(report.status, super::CentralityRefreshStatus::Refreshed);
+        assert_eq!(report.node_count, 3);
+        assert_eq!(report.edge_count, 3);
+        assert_eq!(report.scores.len(), 3);
+
+        let pr_values: Vec<f64> = report.scores.iter().map(|s| s.pagerank).collect();
+        for pr in &pr_values {
+            assert!(pr.is_finite(), "pagerank should converge for cyclic graph");
+            assert!(*pr > 0.0, "pagerank should be positive for all nodes in cycle");
+        }
+
+        let bc_values: Vec<f64> = report.scores.iter().map(|s| s.betweenness).collect();
+        for bc in &bc_values {
+            assert!(bc.is_finite(), "betweenness should be finite for cyclic graph");
+        }
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
     fn refresh_graph_snapshot_persists_exportable_snapshot() -> TestResult {
         let connection = open_projection_db()?;
         insert_link(
