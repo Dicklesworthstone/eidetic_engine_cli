@@ -1,0 +1,14 @@
+---
+source: tests/error_envelope_golden.rs
+expression: value
+---
+{
+  "schema": "ee.error.v1",
+  "error": {
+    "code": "graph",
+    "message": "Graph projection outdated.",
+    "severity": "medium",
+    "repair": "ee graph refresh",
+    "details": {}
+  }
+}

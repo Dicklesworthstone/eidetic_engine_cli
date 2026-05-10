@@ -1,0 +1,17 @@
+---
+source: tests/error_envelope_golden.rs
+expression: value
+---
+{
+  "schema": "ee.error.v1",
+  "error": {
+    "code": "not_found",
+    "message": "memory not found: mem_00000000000000000000000099",
+    "severity": "low",
+    "repair": "ee search",
+    "details": {
+      "resource": "memory",
+      "id": "mem_00000000000000000000000099"
+    }
+  }
+}
