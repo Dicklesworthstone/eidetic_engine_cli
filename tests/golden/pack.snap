@@ -1,0 +1,97 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "command": "pack build",
+    "request": {
+      "query": "<QUERY>",
+      "profile": "compact",
+      "maxTokens": 4000,
+      "candidatePool": 10,
+      "sections": [
+        "procedural_rules",
+        "decisions",
+        "failures",
+        "evidence",
+        "artifacts"
+      ]
+    },
+    "pack": {
+      "query": "<QUERY>",
+      "hash": "<PACK_HASH>",
+      "budget": {
+        "maxTokens": 4000,
+        "usedTokens": "<USED_TOKENS>"
+      },
+      "advisoryBanner": {
+        "status": "<STATUS>",
+        "summary": "<SUMMARY>",
+        "authoritativeCount": 0,
+        "advisoryCount": 0,
+        "legacyCount": 0,
+        "degradationCount": 0,
+        "notes": []
+      },
+      "quality": {
+        "itemCount": 0,
+        "omittedCount": 0,
+        "usedTokens": "<USED_TOKENS>",
+        "maxTokens": 4000,
+        "budgetUtilization": 0.0,
+        "averageRelevance": 0.0,
+        "averageUtility": 0.0,
+        "provenanceSourceCount": 0,
+        "provenanceSourcesPerItem": 0.0,
+        "provenanceComplete": true,
+        "sections": [
+          {
+            "section": "procedural_rules",
+            "itemCount": 0,
+            "usedTokens": 0
+          },
+          {
+            "section": "decisions",
+            "itemCount": 0,
+            "usedTokens": 0
+          },
+          {
+            "section": "failures",
+            "itemCount": 0,
+            "usedTokens": 0
+          },
+          {
+            "section": "evidence",
+            "itemCount": 0,
+            "usedTokens": 0
+          },
+          {
+            "section": "artifacts",
+            "itemCount": 0,
+            "usedTokens": 0
+          }
+        ]
+      },
+      "items": [],
+      "provenance": {
+        "sources": [],
+        "citationHashes": []
+      }
+    },
+    "degraded": [],
+    "pagination": {
+      "offset": 0,
+      "limit": 50,
+      "total": 0,
+      "hasMore": false,
+      "nextCursor": null
+    },
+    "packRecord": {
+      "id": "<PACK_ID>",
+      "workspaceId": "<WORKSPACE_ID>",
+      "query": "<QUERY>",
+      "hash": "<PACK_HASH>",
+      "itemCount": 0,
+      "createdAt": "<TIMESTAMP>"
+    }
+  }
+}
