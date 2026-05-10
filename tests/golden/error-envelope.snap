@@ -1,0 +1,41 @@
+---
+source: tests/error_envelope_golden.rs
+assertion: all DomainError variants produce ee.error.v1 compliant JSON envelopes
+schema:
+  error: ee.error.v1
+contracts:
+  - error envelope includes schema field set to "ee.error.v1"
+  - error.code is lowercase_snake_case matching the DomainError variant
+  - error.message contains human-readable description
+  - error.severity is "low", "medium", or "high" per documented exit codes
+  - error.repair is optional but present when actionable fix is available
+  - error.details is always present (empty object {} for most variants)
+  - NotFound variant includes resource and id in details
+severity_mapping:
+  low:
+    - usage (exit code 1)
+    - not_found (exit code 1)
+  medium:
+    - configuration (exit code 2)
+    - search_index (exit code 4)
+    - graph (exit code 4)
+    - import (exit code 5)
+    - unsatisfied_degraded_mode (exit code 6)
+    - policy_denied (exit code 7)
+    - migration_required (exit code 8)
+  high:
+    - storage (exit code 3)
+    - migration_drift (exit code 8)
+evidence:
+  - tests/snapshots/error_envelope_golden__error_envelope_usage_with_repair.snap
+  - tests/snapshots/error_envelope_golden__error_envelope_usage_without_repair.snap
+  - tests/snapshots/error_envelope_golden__error_envelope_configuration.snap
+  - tests/snapshots/error_envelope_golden__error_envelope_storage.snap
+  - tests/snapshots/error_envelope_golden__error_envelope_search_index.snap
+  - tests/snapshots/error_envelope_golden__error_envelope_graph.snap
+  - tests/snapshots/error_envelope_golden__error_envelope_import.snap
+  - tests/snapshots/error_envelope_golden__error_envelope_not_found.snap
+  - tests/snapshots/error_envelope_golden__error_envelope_unsatisfied_degraded_mode.snap
+  - tests/snapshots/error_envelope_golden__error_envelope_policy_denied.snap
+  - tests/snapshots/error_envelope_golden__error_envelope_migration_required.snap
+  - tests/snapshots/error_envelope_golden__error_envelope_migration_drift.snap
