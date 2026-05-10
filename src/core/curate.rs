@@ -2559,6 +2559,44 @@ pub fn run_review_workspace(
             let candidate_id = format!("curate_{}", generate_audit_id());
             let content_hash = blake3::hash(memory.content.as_bytes()).to_hex().to_string();
 
+            let already_exists = connection
+                .get_curation_candidate(&prepared.workspace_id, &candidate_id)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to check existing curation candidate: {error}"),
+                    repair: Some("ee curate candidates --json".to_owned()),
+                })?
+                .is_some();
+
+            let persisted = if already_exists {
+                false
+            } else {
+                connection
+                    .insert_curation_candidate(
+                        &candidate_id,
+                        &CreateCurationCandidateInput {
+                            workspace_id: prepared.workspace_id.clone(),
+                            candidate_type: "review".to_owned(),
+                            target_memory_id: memory.id.clone(),
+                            proposed_content: Some(memory.content.clone()),
+                            proposed_confidence: Some(memory.confidence),
+                            proposed_trust_class: None,
+                            source_type: "workspace_review".to_owned(),
+                            source_id: Some(memory.id.clone()),
+                            reason: "Workspace evidence review".to_owned(),
+                            confidence: memory.confidence,
+                            status: Some(CandidateStatus::Pending.as_str().to_owned()),
+                            created_at: None,
+                            ttl_expires_at: None,
+                        },
+                    )
+                    .map_err(|error| DomainError::Storage {
+                        message: format!("Failed to insert curation candidate: {error}"),
+                        repair: Some("ee curate candidates --json".to_owned()),
+                    })?;
+                durable_mutation = true;
+                true
+            };
+
             let candidate = ReviewSessionCandidate {
                 candidate_id: candidate_id.clone(),
                 candidate_type: "review".to_owned(),
@@ -2572,11 +2610,10 @@ pub fn run_review_workspace(
                 reason: "Workspace evidence review".to_owned(),
                 confidence: memory.confidence,
                 content_hash,
-                persisted: false,
+                persisted,
             };
             candidates.push(candidate);
         }
-        durable_mutation = false;
     }
 
     Ok(ReviewWorkspaceReport {
