@@ -11,6 +11,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
+use serde::Serialize;
 
 use super::index::{
     DEFAULT_INDEX_SUBDIR, IndexProcessingJobReport, process_index_job_for_connection,
@@ -18,7 +19,7 @@ use super::index::{
 use crate::db::{
     CreateAuditInput, CreateMemoryInput, CreateMemoryLinkInput, CreateSearchIndexJobInput,
     CreateWorkspaceInput, DbConnection, MemoryLinkRelation, MemoryLinkSource, SearchIndexJobType,
-    StoredMemory, audit_actions, generate_audit_id,
+    StoredMemory, StoredMemoryLink, audit_actions, generate_audit_id,
 };
 use crate::models::{
     DomainError, MemoryContent, MemoryId, MemoryKind, MemoryLevel, ProvenanceUri, Tag, TrustClass,
@@ -1788,6 +1789,939 @@ pub fn list_memories(options: &ListMemoriesOptions<'_>) -> MemoryListReport {
     MemoryListReport::success(memories, total_count, truncated, filter)
 }
 
+/// Stable schema name for `ee memory expire` reports.
+pub const MEMORY_EXPIRE_SCHEMA_V1: &str = "ee.memory.expire.v1";
+
+/// Stable schema name for `ee memory tags` reports.
+pub const MEMORY_TAGS_SCHEMA_V1: &str = "ee.memory.tags.v1";
+
+/// Stable schema name for `ee memory link` reports.
+pub const MEMORY_LINK_SCHEMA_V1: &str = "ee.memory.link.v1";
+
+/// Options for expiring a memory without deleting it.
+#[derive(Clone, Debug)]
+pub struct ExpireMemoryOptions<'a> {
+    /// Workspace path used to derive the canonical workspace ID.
+    pub workspace_path: &'a Path,
+    /// Database path.
+    pub database_path: &'a Path,
+    /// Memory ID to expire.
+    pub memory_id: &'a str,
+    /// Optional operator-supplied reason.
+    pub reason: Option<&'a str>,
+    /// Actor recorded in the audit row.
+    pub actor: Option<&'a str>,
+    /// Preview without writing.
+    pub dry_run: bool,
+    /// Treat already-tombstoned memories as visible for idempotency reporting.
+    pub include_tombstoned: bool,
+}
+
+/// Report for `ee memory expire`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct MemoryExpireReport {
+    /// Report schema.
+    pub schema: &'static str,
+    /// Package version for stable output.
+    pub version: &'static str,
+    /// Memory ID.
+    pub memory_id: String,
+    /// Workspace ID.
+    pub workspace_id: String,
+    /// Operation status.
+    pub status: String,
+    /// Whether this was a dry run.
+    pub dry_run: bool,
+    /// Whether durable state changed.
+    pub persisted: bool,
+    /// Whether the command changed memory state or would change it in dry-run mode.
+    pub changed: bool,
+    /// Previous tombstone timestamp, if any.
+    pub previous_tombstoned_at: Option<String>,
+    /// Current tombstone timestamp after the operation, if known.
+    pub tombstoned_at: Option<String>,
+    /// Audit row ID when a tombstone was committed.
+    pub audit_id: Option<String>,
+    /// Search-index job ID queued after a committed change.
+    pub index_job_id: Option<String>,
+    /// Stable index status string.
+    pub index_status: String,
+    /// Idempotency posture.
+    pub idempotency: String,
+}
+
+/// Requested tag mutation mode for a memory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MemoryTagsMode {
+    /// No mutation; list existing tags.
+    List,
+    /// Add/remove the provided tag sets.
+    Patch {
+        /// Tags to add.
+        add: Vec<String>,
+        /// Tags to remove.
+        remove: Vec<String>,
+    },
+    /// Replace all tags with this exact set.
+    Set(Vec<String>),
+    /// Remove all tags.
+    Clear,
+}
+
+/// Options for listing or mutating memory tags.
+#[derive(Clone, Debug)]
+pub struct MemoryTagsOptions<'a> {
+    /// Workspace path used to derive the canonical workspace ID.
+    pub workspace_path: &'a Path,
+    /// Database path.
+    pub database_path: &'a Path,
+    /// Memory ID.
+    pub memory_id: &'a str,
+    /// Requested mode.
+    pub mode: MemoryTagsMode,
+    /// Actor recorded in audit rows.
+    pub actor: Option<&'a str>,
+    /// Preview without writing.
+    pub dry_run: bool,
+    /// Allow read-only listing for tombstoned memories.
+    pub include_tombstoned: bool,
+}
+
+/// Report for `ee memory tags`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct MemoryTagsReport {
+    /// Report schema.
+    pub schema: &'static str,
+    /// Package version for stable output.
+    pub version: &'static str,
+    /// Memory ID.
+    pub memory_id: String,
+    /// Workspace ID.
+    pub workspace_id: String,
+    /// Operation status.
+    pub status: String,
+    /// Whether this was a dry run.
+    pub dry_run: bool,
+    /// Whether durable state changed.
+    pub persisted: bool,
+    /// Whether the command changed memory state or would change it in dry-run mode.
+    pub changed: bool,
+    /// Previous canonical tags.
+    pub previous_tags: Vec<String>,
+    /// Final or previewed canonical tags.
+    pub tags: Vec<String>,
+    /// Effective tags added by the request.
+    pub added_tags: Vec<String>,
+    /// Effective tags removed by the request.
+    pub removed_tags: Vec<String>,
+    /// Audit row IDs when a change was committed.
+    pub audit_ids: Vec<String>,
+    /// Search-index job ID queued after a committed change.
+    pub index_job_id: Option<String>,
+    /// Stable index status string.
+    pub index_status: String,
+    /// Idempotency posture.
+    pub idempotency: String,
+}
+
+/// Requested link operation for a memory.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MemoryLinkMode {
+    /// List links incident to the memory, optionally filtered by relation.
+    List {
+        /// Optional relation filter.
+        relation: Option<MemoryLinkRelation>,
+    },
+    /// Create a link from the memory to a target memory.
+    Create {
+        /// Target memory ID.
+        target_memory_id: String,
+        /// Typed relation.
+        relation: MemoryLinkRelation,
+        /// Link weight from 0.0 to 1.0.
+        weight: f32,
+        /// Confidence from 0.0 to 1.0.
+        confidence: f32,
+        /// Whether the edge is directed.
+        directed: bool,
+        /// Count of supporting evidence spans.
+        evidence_count: u32,
+        /// Link source.
+        source: MemoryLinkSource,
+        /// Optional JSON metadata.
+        metadata_json: Option<String>,
+    },
+}
+
+/// Options for listing or creating memory links.
+#[derive(Clone, Debug)]
+pub struct MemoryLinkOptions<'a> {
+    /// Workspace path used to derive the canonical workspace ID.
+    pub workspace_path: &'a Path,
+    /// Database path.
+    pub database_path: &'a Path,
+    /// Source or incident memory ID.
+    pub memory_id: &'a str,
+    /// Requested operation.
+    pub mode: MemoryLinkMode,
+    /// Actor recorded in audit rows.
+    pub actor: Option<&'a str>,
+    /// Preview without writing.
+    pub dry_run: bool,
+    /// Allow read-only listing for tombstoned memories.
+    pub include_tombstoned: bool,
+}
+
+/// Stable memory-link item used by `ee memory link` output.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MemoryLinkItem {
+    /// Durable link ID. Dry-run planned links have no ID yet.
+    pub link_id: Option<String>,
+    /// Source memory ID.
+    pub source_memory_id: String,
+    /// Target memory ID.
+    pub target_memory_id: String,
+    /// Relation string.
+    pub relation: String,
+    /// Whether the link is directed.
+    pub directed: bool,
+    /// Link weight rounded for stable JSON output.
+    pub weight: f64,
+    /// Link confidence rounded for stable JSON output.
+    pub confidence: f64,
+    /// Evidence count.
+    pub evidence_count: u32,
+    /// Link source string.
+    pub source: String,
+    /// Created timestamp for persisted links.
+    pub created_at: Option<String>,
+    /// Creator recorded on the link row.
+    pub created_by: Option<String>,
+}
+
+/// Report for `ee memory link`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MemoryLinkReport {
+    /// Report schema.
+    pub schema: &'static str,
+    /// Package version for stable output.
+    pub version: &'static str,
+    /// Source or incident memory ID.
+    pub memory_id: String,
+    /// Workspace ID.
+    pub workspace_id: String,
+    /// Operation status.
+    pub status: String,
+    /// Whether this was a dry run.
+    pub dry_run: bool,
+    /// Whether durable state changed.
+    pub persisted: bool,
+    /// Whether the command changed state or would change it in dry-run mode.
+    pub changed: bool,
+    /// Incident or resulting links in deterministic order.
+    pub links: Vec<MemoryLinkItem>,
+    /// Created, planned, or existing link for create mode.
+    pub link: Option<MemoryLinkItem>,
+    /// Audit row ID when a link was committed.
+    pub audit_id: Option<String>,
+    /// Idempotency posture.
+    pub idempotency: String,
+}
+
+fn memory_command_storage_error(message: impl Into<String>) -> DomainError {
+    DomainError::Storage {
+        message: message.into(),
+        repair: Some("ee doctor".to_owned()),
+    }
+}
+
+fn memory_command_not_found(memory_id: &str) -> DomainError {
+    DomainError::NotFound {
+        resource: "memory".to_owned(),
+        id: memory_id.to_owned(),
+        repair: Some("ee memory list".to_owned()),
+    }
+}
+
+fn memory_command_workspace_id(workspace_path: &Path) -> String {
+    let workspace_path = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    stable_workspace_id(&workspace_path)
+}
+
+fn get_memory_for_workspace(
+    conn: &DbConnection,
+    memory_id: &str,
+    workspace_id: &str,
+) -> Result<StoredMemory, DomainError> {
+    let memory = conn
+        .get_memory(memory_id)
+        .map_err(|error| memory_command_storage_error(format!("Failed to query memory: {error}")))?
+        .ok_or_else(|| memory_command_not_found(memory_id))?;
+
+    if memory.workspace_id != workspace_id {
+        return Err(memory_command_not_found(memory_id));
+    }
+
+    Ok(memory)
+}
+
+fn expire_audit_details(reason: Option<&str>) -> String {
+    serde_json::json!({
+        "schema": "ee.audit.memory_expire.v1",
+        "reason": reason,
+        "deletion": "none_soft_tombstone_only",
+    })
+    .to_string()
+}
+
+/// Expire a memory by setting its tombstone timestamp. No files or rows are deleted.
+pub fn expire_memory(options: &ExpireMemoryOptions<'_>) -> Result<MemoryExpireReport, DomainError> {
+    let conn = open_migrated_memory_database(options.database_path)
+        .map_err(memory_command_storage_error)?;
+    let workspace_id = memory_command_workspace_id(options.workspace_path);
+    let memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
+
+    if memory.tombstoned_at.is_some() {
+        if !options.include_tombstoned {
+            return Err(DomainError::PolicyDenied {
+                message: "Memory is already expired.".to_owned(),
+                repair: Some(
+                    "Use ee memory show --include-tombstoned to inspect the expired memory."
+                        .to_owned(),
+                ),
+            });
+        }
+
+        return Ok(MemoryExpireReport {
+            schema: MEMORY_EXPIRE_SCHEMA_V1,
+            version: env!("CARGO_PKG_VERSION"),
+            memory_id: options.memory_id.to_owned(),
+            workspace_id,
+            status: "already_expired".to_owned(),
+            dry_run: options.dry_run,
+            persisted: false,
+            changed: false,
+            previous_tombstoned_at: memory.tombstoned_at.clone(),
+            tombstoned_at: memory.tombstoned_at,
+            audit_id: None,
+            index_job_id: None,
+            index_status: "not_scheduled".to_owned(),
+            idempotency: "no_change".to_owned(),
+        });
+    }
+
+    if options.dry_run {
+        return Ok(MemoryExpireReport {
+            schema: MEMORY_EXPIRE_SCHEMA_V1,
+            version: env!("CARGO_PKG_VERSION"),
+            memory_id: options.memory_id.to_owned(),
+            workspace_id,
+            status: "would_expire".to_owned(),
+            dry_run: true,
+            persisted: false,
+            changed: true,
+            previous_tombstoned_at: None,
+            tombstoned_at: None,
+            audit_id: None,
+            index_job_id: None,
+            index_status: "dry_run_not_queued".to_owned(),
+            idempotency: "would_change".to_owned(),
+        });
+    }
+
+    let audit_id = generate_audit_id();
+    let actor = options.actor.or(Some("ee memory expire"));
+    let details = expire_audit_details(options.reason);
+    let index_job_id = generate_search_index_job_id();
+    let index_input = CreateSearchIndexJobInput {
+        workspace_id: workspace_id.clone(),
+        job_type: SearchIndexJobType::SingleDocument,
+        document_source: Some("memory".to_owned()),
+        document_id: Some(options.memory_id.to_owned()),
+        documents_total: 1,
+    };
+
+    conn.with_transaction(|| {
+        let tombstoned = conn.tombstone_memory(options.memory_id)?;
+        if !tombstoned {
+            return Ok(None);
+        }
+        conn.insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(workspace_id.clone()),
+                actor: actor.map(str::to_owned),
+                action: audit_actions::MEMORY_TOMBSTONE.to_owned(),
+                target_type: Some("memory".to_owned()),
+                target_id: Some(options.memory_id.to_owned()),
+                details: Some(details.clone()),
+            },
+        )?;
+        conn.insert_search_index_job(&index_job_id, &index_input)?;
+        Ok(Some(()))
+    })
+    .map_err(|error| memory_command_storage_error(format!("Failed to expire memory: {error}")))?;
+
+    let refreshed = conn
+        .get_memory(options.memory_id)
+        .map_err(|error| {
+            memory_command_storage_error(format!("Failed to reload expired memory: {error}"))
+        })?
+        .ok_or_else(|| memory_command_not_found(options.memory_id))?;
+
+    Ok(MemoryExpireReport {
+        schema: MEMORY_EXPIRE_SCHEMA_V1,
+        version: env!("CARGO_PKG_VERSION"),
+        memory_id: options.memory_id.to_owned(),
+        workspace_id,
+        status: if refreshed.tombstoned_at.is_some() {
+            "expired".to_owned()
+        } else {
+            "already_expired".to_owned()
+        },
+        dry_run: false,
+        persisted: refreshed.tombstoned_at.is_some(),
+        changed: refreshed.tombstoned_at.is_some(),
+        previous_tombstoned_at: None,
+        tombstoned_at: refreshed.tombstoned_at,
+        audit_id: Some(audit_id),
+        index_job_id: Some(index_job_id),
+        index_status: "queued".to_owned(),
+        idempotency: "changed".to_owned(),
+    })
+}
+
+fn unique_sorted_tags(tags: impl IntoIterator<Item = String>) -> Vec<String> {
+    tags.into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn tag_difference(left: &[String], right: &[String]) -> Vec<String> {
+    let right: BTreeSet<&String> = right.iter().collect();
+    left.iter()
+        .filter(|tag| !right.contains(tag))
+        .cloned()
+        .collect()
+}
+
+fn tag_patch_result(current: &[String], add: &[String], remove: &[String]) -> Vec<String> {
+    let remove_set: BTreeSet<&String> = remove.iter().collect();
+    let kept = current
+        .iter()
+        .filter(|tag| !remove_set.contains(tag))
+        .cloned();
+    unique_sorted_tags(kept.chain(add.iter().cloned()))
+}
+
+fn tag_audit_action(mode: &MemoryTagsMode, added: &[String], removed: &[String]) -> String {
+    match mode {
+        MemoryTagsMode::Patch { .. } if !added.is_empty() && removed.is_empty() => {
+            audit_actions::MEMORY_TAG_ADD.to_owned()
+        }
+        MemoryTagsMode::Patch { .. } if added.is_empty() && !removed.is_empty() => {
+            audit_actions::MEMORY_TAG_REMOVE.to_owned()
+        }
+        _ => audit_actions::MEMORY_TAG_SET.to_owned(),
+    }
+}
+
+fn tag_audit_details(
+    previous: &[String],
+    next: &[String],
+    added: &[String],
+    removed: &[String],
+) -> String {
+    serde_json::json!({
+        "schema": "ee.audit.memory_tags.v1",
+        "previous_tags": previous,
+        "tags": next,
+        "added_tags": added,
+        "removed_tags": removed,
+    })
+    .to_string()
+}
+
+fn validate_memory_link_unit_score(label: &str, value: f32) -> Result<(), DomainError> {
+    if value.is_finite() && (0.0..=1.0).contains(&value) {
+        Ok(())
+    } else {
+        Err(DomainError::Usage {
+            message: format!("{label} must be a finite number from 0.0 to 1.0."),
+            repair: Some(format!("Use --{label} 0.8.")),
+        })
+    }
+}
+
+fn validate_memory_link_metadata(metadata_json: Option<&str>) -> Result<(), DomainError> {
+    if let Some(metadata_json) = metadata_json {
+        serde_json::from_str::<serde_json::Value>(metadata_json).map_err(|error| {
+            DomainError::Usage {
+                message: format!("Invalid memory link metadata JSON: {error}"),
+                repair: Some("Use --metadata '{\"reason\":\"explicit\"}'.".to_owned()),
+            }
+        })?;
+    }
+    Ok(())
+}
+
+fn memory_link_score_output(value: f32) -> f64 {
+    (f64::from(value) * 1_000_000.0).round() / 1_000_000.0
+}
+
+fn stored_memory_link_item(link: &StoredMemoryLink) -> MemoryLinkItem {
+    MemoryLinkItem {
+        link_id: Some(link.id.clone()),
+        source_memory_id: link.src_memory_id.clone(),
+        target_memory_id: link.dst_memory_id.clone(),
+        relation: link.relation.clone(),
+        directed: link.directed,
+        weight: memory_link_score_output(link.weight),
+        confidence: memory_link_score_output(link.confidence),
+        evidence_count: link.evidence_count,
+        source: link.source.clone(),
+        created_at: Some(link.created_at.clone()),
+        created_by: link.created_by.clone(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn planned_memory_link_item(
+    source_memory_id: &str,
+    target_memory_id: &str,
+    relation: MemoryLinkRelation,
+    directed: bool,
+    weight: f32,
+    confidence: f32,
+    evidence_count: u32,
+    source: MemoryLinkSource,
+    created_by: Option<&str>,
+) -> MemoryLinkItem {
+    MemoryLinkItem {
+        link_id: None,
+        source_memory_id: source_memory_id.to_owned(),
+        target_memory_id: target_memory_id.to_owned(),
+        relation: relation.as_str().to_owned(),
+        directed,
+        weight: memory_link_score_output(weight),
+        confidence: memory_link_score_output(confidence),
+        evidence_count,
+        source: source.as_str().to_owned(),
+        created_at: None,
+        created_by: created_by.map(str::to_owned),
+    }
+}
+
+fn existing_memory_link_for_create(
+    conn: &DbConnection,
+    source_memory_id: &str,
+    target_memory_id: &str,
+    relation: MemoryLinkRelation,
+    directed: bool,
+) -> Result<Option<StoredMemoryLink>, DomainError> {
+    let links = conn
+        .list_memory_links_for_memory(source_memory_id, Some(relation))
+        .map_err(|error| {
+            memory_command_storage_error(format!("Failed to query memory links: {error}"))
+        })?;
+
+    Ok(links.into_iter().find(|link| {
+        let exact_direction =
+            link.src_memory_id == source_memory_id && link.dst_memory_id == target_memory_id;
+        let undirected_equivalent = (!directed || !link.directed)
+            && link.src_memory_id == target_memory_id
+            && link.dst_memory_id == source_memory_id;
+        exact_direction || undirected_equivalent
+    }))
+}
+
+fn memory_link_audit_details(link: &MemoryLinkItem, metadata_json: Option<&str>) -> String {
+    serde_json::json!({
+        "schema": "ee.audit.memory_link.v1",
+        "linkId": link.link_id,
+        "sourceMemoryId": link.source_memory_id,
+        "targetMemoryId": link.target_memory_id,
+        "relation": link.relation,
+        "directed": link.directed,
+        "weight": link.weight,
+        "confidence": link.confidence,
+        "evidenceCount": link.evidence_count,
+        "source": link.source,
+        "metadata": metadata_json.and_then(|metadata| {
+            serde_json::from_str::<serde_json::Value>(metadata).ok()
+        }),
+    })
+    .to_string()
+}
+
+/// List or create durable memory links through the source-of-truth DB table.
+pub fn update_memory_link(
+    options: &MemoryLinkOptions<'_>,
+) -> Result<MemoryLinkReport, DomainError> {
+    let conn = open_migrated_memory_database(options.database_path)
+        .map_err(memory_command_storage_error)?;
+    let workspace_id = memory_command_workspace_id(options.workspace_path);
+    let source_memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
+
+    match &options.mode {
+        MemoryLinkMode::List { relation } => {
+            if source_memory.tombstoned_at.is_some() && !options.include_tombstoned {
+                return Err(DomainError::NotFound {
+                    resource: "memory".to_owned(),
+                    id: options.memory_id.to_owned(),
+                    repair: Some("Use ee memory link <id> --include-tombstoned.".to_owned()),
+                });
+            }
+
+            let links = conn
+                .list_memory_links_for_memory(options.memory_id, *relation)
+                .map_err(|error| {
+                    memory_command_storage_error(format!("Failed to query memory links: {error}"))
+                })?
+                .iter()
+                .map(stored_memory_link_item)
+                .collect::<Vec<_>>();
+
+            Ok(MemoryLinkReport {
+                schema: MEMORY_LINK_SCHEMA_V1,
+                version: env!("CARGO_PKG_VERSION"),
+                memory_id: options.memory_id.to_owned(),
+                workspace_id,
+                status: "listed".to_owned(),
+                dry_run: options.dry_run,
+                persisted: false,
+                changed: false,
+                links,
+                link: None,
+                audit_id: None,
+                idempotency: "read_only".to_owned(),
+            })
+        }
+        MemoryLinkMode::Create {
+            target_memory_id,
+            relation,
+            weight,
+            confidence,
+            directed,
+            evidence_count,
+            source,
+            metadata_json,
+        } => {
+            validate_memory_link_unit_score("weight", *weight)?;
+            validate_memory_link_unit_score("confidence", *confidence)?;
+            validate_memory_link_metadata(metadata_json.as_deref())?;
+
+            if options.memory_id == target_memory_id {
+                return Err(DomainError::Usage {
+                    message: "Memory links cannot target the same memory as their source."
+                        .to_owned(),
+                    repair: Some("Use two different memory IDs.".to_owned()),
+                });
+            }
+
+            let target_memory = get_memory_for_workspace(&conn, target_memory_id, &workspace_id)?;
+            if source_memory.tombstoned_at.is_some() || target_memory.tombstoned_at.is_some() {
+                return Err(DomainError::PolicyDenied {
+                    message: "Cannot create memory links involving expired memories.".to_owned(),
+                    repair: Some(
+                        "Use ee memory show --include-tombstoned to inspect them.".to_owned(),
+                    ),
+                });
+            }
+
+            if let Some(existing) = existing_memory_link_for_create(
+                &conn,
+                options.memory_id,
+                target_memory_id,
+                *relation,
+                *directed,
+            )? {
+                let item = stored_memory_link_item(&existing);
+                return Ok(MemoryLinkReport {
+                    schema: MEMORY_LINK_SCHEMA_V1,
+                    version: env!("CARGO_PKG_VERSION"),
+                    memory_id: options.memory_id.to_owned(),
+                    workspace_id,
+                    status: "already_exists".to_owned(),
+                    dry_run: options.dry_run,
+                    persisted: false,
+                    changed: false,
+                    links: vec![item.clone()],
+                    link: Some(item),
+                    audit_id: None,
+                    idempotency: "no_change".to_owned(),
+                });
+            }
+
+            let created_by = options.actor.or(Some("ee memory link"));
+            let planned = planned_memory_link_item(
+                options.memory_id,
+                target_memory_id,
+                *relation,
+                *directed,
+                *weight,
+                *confidence,
+                *evidence_count,
+                *source,
+                created_by,
+            );
+
+            if options.dry_run {
+                return Ok(MemoryLinkReport {
+                    schema: MEMORY_LINK_SCHEMA_V1,
+                    version: env!("CARGO_PKG_VERSION"),
+                    memory_id: options.memory_id.to_owned(),
+                    workspace_id,
+                    status: "would_create".to_owned(),
+                    dry_run: true,
+                    persisted: false,
+                    changed: true,
+                    links: vec![planned.clone()],
+                    link: Some(planned),
+                    audit_id: None,
+                    idempotency: "would_change".to_owned(),
+                });
+            }
+
+            let link_id = generate_memory_link_id();
+            let audit_id = generate_audit_id();
+            let input = CreateMemoryLinkInput {
+                src_memory_id: options.memory_id.to_owned(),
+                dst_memory_id: target_memory_id.clone(),
+                relation: *relation,
+                weight: *weight,
+                confidence: *confidence,
+                directed: *directed,
+                evidence_count: *evidence_count,
+                last_reinforced_at: None,
+                source: *source,
+                created_by: created_by.map(str::to_owned),
+                metadata_json: metadata_json.clone(),
+            };
+            let audit_link = MemoryLinkItem {
+                link_id: Some(link_id.clone()),
+                ..planned
+            };
+            let audit_details = memory_link_audit_details(&audit_link, metadata_json.as_deref());
+
+            conn.with_transaction(|| {
+                conn.insert_memory_link(&link_id, &input)?;
+                conn.insert_audit(
+                    &audit_id,
+                    &CreateAuditInput {
+                        workspace_id: Some(workspace_id.clone()),
+                        actor: created_by.map(str::to_owned),
+                        action: audit_actions::MEMORY_LINK_CREATE.to_owned(),
+                        target_type: Some("memory_link".to_owned()),
+                        target_id: Some(link_id.clone()),
+                        details: Some(audit_details.clone()),
+                    },
+                )
+            })
+            .map_err(|error| {
+                memory_command_storage_error(format!("Failed to create memory link: {error}"))
+            })?;
+
+            let created = conn
+                .get_memory_link(&link_id)
+                .map_err(|error| {
+                    memory_command_storage_error(format!("Failed to reload memory link: {error}"))
+                })?
+                .ok_or_else(|| {
+                    memory_command_storage_error("Failed to reload memory link after creation")
+                })?;
+            let item = stored_memory_link_item(&created);
+
+            Ok(MemoryLinkReport {
+                schema: MEMORY_LINK_SCHEMA_V1,
+                version: env!("CARGO_PKG_VERSION"),
+                memory_id: options.memory_id.to_owned(),
+                workspace_id,
+                status: "created".to_owned(),
+                dry_run: false,
+                persisted: true,
+                changed: true,
+                links: vec![item.clone()],
+                link: Some(item),
+                audit_id: Some(audit_id),
+                idempotency: "changed".to_owned(),
+            })
+        }
+    }
+}
+
+/// List or mutate tags for a memory.
+pub fn update_memory_tags(
+    options: &MemoryTagsOptions<'_>,
+) -> Result<MemoryTagsReport, DomainError> {
+    let conn = open_migrated_memory_database(options.database_path)
+        .map_err(memory_command_storage_error)?;
+    let workspace_id = memory_command_workspace_id(options.workspace_path);
+    let memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
+
+    if memory.tombstoned_at.is_some() {
+        if matches!(options.mode, MemoryTagsMode::List) {
+            if !options.include_tombstoned {
+                return Err(DomainError::NotFound {
+                    resource: "memory".to_owned(),
+                    id: options.memory_id.to_owned(),
+                    repair: Some("Use ee memory tags <id> --include-tombstoned.".to_owned()),
+                });
+            }
+        } else {
+            return Err(DomainError::PolicyDenied {
+                message: "Cannot mutate tags on an expired memory.".to_owned(),
+                repair: Some("Use ee memory show --include-tombstoned to inspect it.".to_owned()),
+            });
+        }
+    }
+
+    let current_tags = conn.get_memory_tags(options.memory_id).map_err(|error| {
+        memory_command_storage_error(format!("Failed to query memory tags: {error}"))
+    })?;
+
+    if matches!(options.mode, MemoryTagsMode::List) {
+        return Ok(MemoryTagsReport {
+            schema: MEMORY_TAGS_SCHEMA_V1,
+            version: env!("CARGO_PKG_VERSION"),
+            memory_id: options.memory_id.to_owned(),
+            workspace_id,
+            status: "listed".to_owned(),
+            dry_run: options.dry_run,
+            persisted: false,
+            changed: false,
+            previous_tags: current_tags.clone(),
+            tags: current_tags,
+            added_tags: Vec::new(),
+            removed_tags: Vec::new(),
+            audit_ids: Vec::new(),
+            index_job_id: None,
+            index_status: "not_scheduled".to_owned(),
+            idempotency: "read_only".to_owned(),
+        });
+    }
+
+    let next_tags = match &options.mode {
+        MemoryTagsMode::List => current_tags.clone(),
+        MemoryTagsMode::Patch { add, remove } => tag_patch_result(&current_tags, add, remove),
+        MemoryTagsMode::Set(tags) => tags.clone(),
+        MemoryTagsMode::Clear => Vec::new(),
+    };
+    let next_tags = unique_sorted_tags(next_tags);
+    let added_tags = tag_difference(&next_tags, &current_tags);
+    let removed_tags = tag_difference(&current_tags, &next_tags);
+    let changed = !added_tags.is_empty() || !removed_tags.is_empty();
+
+    if !changed {
+        return Ok(MemoryTagsReport {
+            schema: MEMORY_TAGS_SCHEMA_V1,
+            version: env!("CARGO_PKG_VERSION"),
+            memory_id: options.memory_id.to_owned(),
+            workspace_id,
+            status: "unchanged".to_owned(),
+            dry_run: options.dry_run,
+            persisted: false,
+            changed: false,
+            previous_tags: current_tags.clone(),
+            tags: current_tags,
+            added_tags,
+            removed_tags,
+            audit_ids: Vec::new(),
+            index_job_id: None,
+            index_status: if options.dry_run {
+                "dry_run_not_queued".to_owned()
+            } else {
+                "not_scheduled".to_owned()
+            },
+            idempotency: "no_change".to_owned(),
+        });
+    }
+
+    if options.dry_run {
+        return Ok(MemoryTagsReport {
+            schema: MEMORY_TAGS_SCHEMA_V1,
+            version: env!("CARGO_PKG_VERSION"),
+            memory_id: options.memory_id.to_owned(),
+            workspace_id,
+            status: "would_update".to_owned(),
+            dry_run: true,
+            persisted: false,
+            changed: true,
+            previous_tags: current_tags,
+            tags: next_tags,
+            added_tags,
+            removed_tags,
+            audit_ids: Vec::new(),
+            index_job_id: None,
+            index_status: "dry_run_not_queued".to_owned(),
+            idempotency: "would_change".to_owned(),
+        });
+    }
+
+    let audit_id = generate_audit_id();
+    let index_job_id = generate_search_index_job_id();
+    let audit_action = tag_audit_action(&options.mode, &added_tags, &removed_tags);
+    let audit_details = tag_audit_details(&current_tags, &next_tags, &added_tags, &removed_tags);
+    let actor = options.actor.or(Some("ee memory tags"));
+    let index_input = CreateSearchIndexJobInput {
+        workspace_id: workspace_id.clone(),
+        job_type: SearchIndexJobType::SingleDocument,
+        document_source: Some("memory".to_owned()),
+        document_id: Some(options.memory_id.to_owned()),
+        documents_total: 1,
+    };
+
+    conn.with_transaction(|| {
+        if !removed_tags.is_empty() {
+            conn.remove_memory_tags(options.memory_id, &removed_tags)?;
+        }
+        if !added_tags.is_empty() {
+            conn.add_memory_tags(options.memory_id, &added_tags)?;
+        }
+        conn.insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(workspace_id.clone()),
+                actor: actor.map(str::to_owned),
+                action: audit_action.clone(),
+                target_type: Some("memory".to_owned()),
+                target_id: Some(options.memory_id.to_owned()),
+                details: Some(audit_details.clone()),
+            },
+        )?;
+        conn.insert_search_index_job(&index_job_id, &index_input)
+    })
+    .map_err(|error| {
+        memory_command_storage_error(format!("Failed to update memory tags: {error}"))
+    })?;
+
+    let final_tags = conn.get_memory_tags(options.memory_id).map_err(|error| {
+        memory_command_storage_error(format!("Failed to reload memory tags: {error}"))
+    })?;
+
+    Ok(MemoryTagsReport {
+        schema: MEMORY_TAGS_SCHEMA_V1,
+        version: env!("CARGO_PKG_VERSION"),
+        memory_id: options.memory_id.to_owned(),
+        workspace_id,
+        status: "updated".to_owned(),
+        dry_run: false,
+        persisted: true,
+        changed: true,
+        previous_tags: current_tags,
+        tags: final_tags,
+        added_tags,
+        removed_tags,
+        audit_ids: vec![audit_id],
+        index_job_id: Some(index_job_id),
+        index_status: "queued".to_owned(),
+        idempotency: "changed".to_owned(),
+    })
+}
+
 /// Options for retrieving memory history.
 #[derive(Clone, Debug)]
 pub struct GetMemoryHistoryOptions<'a> {
@@ -2734,6 +3668,274 @@ mod tests {
         .map_err(|error| error.message())?;
 
         Ok((temp, created))
+    }
+
+    #[test]
+    fn expire_memory_dry_run_preserves_memory() -> TestResult {
+        let (temp, created) = remember_revisable_memory("Expire dry-run target.")?;
+        let report = expire_memory(&ExpireMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: &created.database_path,
+            memory_id: &created.memory_id.to_string(),
+            reason: Some("not needed"),
+            actor: Some("test"),
+            dry_run: true,
+            include_tombstoned: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(report.status, "would_expire".to_owned(), "dry-run status")?;
+        ensure(report.persisted, false, "dry-run persisted")?;
+        ensure(report.audit_id.is_none(), true, "dry-run audit absent")?;
+
+        let connection = crate::db::DbConnection::open_file(&created.database_path)
+            .map_err(|error| error.to_string())?;
+        let memory = connection
+            .get_memory(&created.memory_id.to_string())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory missing after dry-run".to_owned())?;
+        ensure(
+            memory.tombstoned_at.is_none(),
+            true,
+            "memory remains active",
+        )
+    }
+
+    #[test]
+    fn expire_memory_persists_tombstone_audit_and_index_job() -> TestResult {
+        let (temp, created) = remember_revisable_memory("Expire persisted target.")?;
+        let report = expire_memory(&ExpireMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: &created.database_path,
+            memory_id: &created.memory_id.to_string(),
+            reason: Some("obsolete"),
+            actor: Some("test"),
+            dry_run: false,
+            include_tombstoned: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(report.status, "expired".to_owned(), "expire status")?;
+        ensure(report.persisted, true, "expire persisted")?;
+        ensure(report.audit_id.is_some(), true, "audit ID present")?;
+        ensure(report.index_job_id.is_some(), true, "index job ID present")?;
+
+        let already = expire_memory(&ExpireMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: &created.database_path,
+            memory_id: &created.memory_id.to_string(),
+            reason: Some("again"),
+            actor: Some("test"),
+            dry_run: false,
+            include_tombstoned: true,
+        })
+        .map_err(|error| error.message())?;
+        ensure(
+            already.status,
+            "already_expired".to_owned(),
+            "idempotent status",
+        )?;
+        ensure(already.persisted, false, "idempotent persisted")
+    }
+
+    #[test]
+    fn memory_tags_updates_are_sorted_audited_and_idempotent() -> TestResult {
+        let (temp, created) = remember_revisable_memory("Tags mutation target.")?;
+        let memory_id = created.memory_id.to_string();
+
+        let dry_run = update_memory_tags(&MemoryTagsOptions {
+            workspace_path: temp.path(),
+            database_path: &created.database_path,
+            memory_id: &memory_id,
+            mode: MemoryTagsMode::Patch {
+                add: vec!["zeta".to_owned(), "alpha".to_owned()],
+                remove: vec!["checks".to_owned()],
+            },
+            actor: Some("test"),
+            dry_run: true,
+            include_tombstoned: false,
+        })
+        .map_err(|error| error.message())?;
+        ensure(dry_run.status, "would_update".to_owned(), "dry-run status")?;
+        ensure(
+            dry_run.tags,
+            vec!["alpha".to_owned(), "release".to_owned(), "zeta".to_owned()],
+            "dry-run sorted tags",
+        )?;
+
+        let applied = update_memory_tags(&MemoryTagsOptions {
+            workspace_path: temp.path(),
+            database_path: &created.database_path,
+            memory_id: &memory_id,
+            mode: MemoryTagsMode::Patch {
+                add: vec!["zeta".to_owned(), "alpha".to_owned()],
+                remove: vec!["checks".to_owned()],
+            },
+            actor: Some("test"),
+            dry_run: false,
+            include_tombstoned: false,
+        })
+        .map_err(|error| error.message())?;
+        ensure(applied.status, "updated".to_owned(), "apply status")?;
+        ensure(applied.audit_ids.len(), 1, "audit count")?;
+        ensure(applied.index_job_id.is_some(), true, "index job present")?;
+        let expected_tags = vec!["alpha".to_owned(), "release".to_owned(), "zeta".to_owned()];
+        ensure(
+            applied.tags.clone(),
+            expected_tags.clone(),
+            "applied sorted tags",
+        )?;
+
+        let unchanged = update_memory_tags(&MemoryTagsOptions {
+            workspace_path: temp.path(),
+            database_path: &created.database_path,
+            memory_id: &memory_id,
+            mode: MemoryTagsMode::Set(expected_tags),
+            actor: Some("test"),
+            dry_run: false,
+            include_tombstoned: false,
+        })
+        .map_err(|error| error.message())?;
+        ensure(
+            unchanged.status,
+            "unchanged".to_owned(),
+            "idempotent status",
+        )?;
+        ensure(
+            unchanged.audit_ids.is_empty(),
+            true,
+            "idempotent audit absent",
+        )
+    }
+
+    #[test]
+    fn memory_link_create_lists_and_reports_duplicate_idempotently() -> TestResult {
+        let (temp, source) = remember_revisable_memory("Memory link source.")?;
+        let target = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: Some(&source.database_path),
+            content: "Memory link target.",
+            workflow_id: None,
+            level: "semantic",
+            kind: "fact",
+            tags: Some("links"),
+            confidence: 0.8,
+            source: Some("file://README.md#L78-80"),
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: true,
+        })
+        .map_err(|error| error.message())?;
+        let source_id = source.memory_id.to_string();
+        let target_id = target.memory_id.to_string();
+
+        let dry_run = update_memory_link(&MemoryLinkOptions {
+            workspace_path: temp.path(),
+            database_path: &source.database_path,
+            memory_id: &source_id,
+            mode: MemoryLinkMode::Create {
+                target_memory_id: target_id.clone(),
+                relation: MemoryLinkRelation::Supports,
+                weight: 0.75,
+                confidence: 0.9,
+                directed: true,
+                evidence_count: 2,
+                source: MemoryLinkSource::Human,
+                metadata_json: Some(r#"{"reason":"explicit test"}"#.to_owned()),
+            },
+            actor: Some("test"),
+            dry_run: true,
+            include_tombstoned: false,
+        })
+        .map_err(|error| error.message())?;
+        ensure(dry_run.status, "would_create".to_owned(), "dry-run status")?;
+        ensure(dry_run.link.is_some(), true, "dry-run link present")?;
+        ensure(
+            dry_run.link.and_then(|link| link.link_id),
+            None,
+            "dry-run has no link id",
+        )?;
+
+        let applied = update_memory_link(&MemoryLinkOptions {
+            workspace_path: temp.path(),
+            database_path: &source.database_path,
+            memory_id: &source_id,
+            mode: MemoryLinkMode::Create {
+                target_memory_id: target_id.clone(),
+                relation: MemoryLinkRelation::Supports,
+                weight: 0.75,
+                confidence: 0.9,
+                directed: true,
+                evidence_count: 2,
+                source: MemoryLinkSource::Human,
+                metadata_json: Some(r#"{"reason":"explicit test"}"#.to_owned()),
+            },
+            actor: Some("test"),
+            dry_run: false,
+            include_tombstoned: false,
+        })
+        .map_err(|error| error.message())?;
+        ensure(applied.status, "created".to_owned(), "apply status")?;
+        ensure(applied.persisted, true, "link persisted")?;
+        ensure(applied.audit_id.is_some(), true, "audit ID present")?;
+        let applied_link_id = applied
+            .link
+            .as_ref()
+            .and_then(|link| link.link_id.clone())
+            .ok_or_else(|| "created link id missing".to_owned())?;
+
+        let listed = update_memory_link(&MemoryLinkOptions {
+            workspace_path: temp.path(),
+            database_path: &source.database_path,
+            memory_id: &source_id,
+            mode: MemoryLinkMode::List {
+                relation: Some(MemoryLinkRelation::Supports),
+            },
+            actor: None,
+            dry_run: false,
+            include_tombstoned: false,
+        })
+        .map_err(|error| error.message())?;
+        ensure(listed.status, "listed".to_owned(), "list status")?;
+        ensure(listed.links.len(), 1, "listed link count")?;
+        ensure(
+            listed.links[0].link_id.clone(),
+            Some(applied_link_id.clone()),
+            "listed link id",
+        )?;
+
+        let duplicate = update_memory_link(&MemoryLinkOptions {
+            workspace_path: temp.path(),
+            database_path: &source.database_path,
+            memory_id: &source_id,
+            mode: MemoryLinkMode::Create {
+                target_memory_id: target_id,
+                relation: MemoryLinkRelation::Supports,
+                weight: 0.75,
+                confidence: 0.9,
+                directed: true,
+                evidence_count: 2,
+                source: MemoryLinkSource::Human,
+                metadata_json: Some(r#"{"reason":"explicit test"}"#.to_owned()),
+            },
+            actor: Some("test"),
+            dry_run: false,
+            include_tombstoned: false,
+        })
+        .map_err(|error| error.message())?;
+        ensure(
+            duplicate.status,
+            "already_exists".to_owned(),
+            "duplicate status",
+        )?;
+        ensure(duplicate.persisted, false, "duplicate persisted")?;
+        ensure(duplicate.audit_id.is_none(), true, "duplicate audit absent")?;
+        ensure(
+            duplicate.link.and_then(|link| link.link_id),
+            Some(applied_link_id),
+            "duplicate reports existing link",
+        )
     }
 
     #[test]

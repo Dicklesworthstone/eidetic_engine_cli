@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Command;
 
 const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
-const NORMALIZED_CLI_COMMAND_COUNT: usize = 190;
+const NORMALIZED_CLI_COMMAND_COUNT: usize = 204;
 const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
     "daemon background",
     "daemon foreground decay_sweep",
@@ -580,7 +580,12 @@ fn effect_manifest_tracks_implemented_surfaces() -> TestResult {
 
     let manifest = EffectManifest::build();
 
-    for command in ["support inspect", "preflight show", "tripwire list"] {
+    for command in [
+        "support inspect",
+        "preflight show",
+        "tripwire list",
+        "playbook list",
+    ] {
         let effect = manifest
             .get(command)
             .ok_or_else(|| format!("{command} not in manifest"))?;
@@ -798,6 +803,7 @@ fn effect_manifest_tracks_handoff_and_eval_as_real_surfaces() -> TestResult {
         "claim show",
         "claim verify",
         "eval list",
+        "eval report",
         "eval run",
         "handoff inspect",
         "handoff preview",
@@ -892,12 +898,17 @@ fn effect_manifest_tracks_certificate_and_quarantine_as_real_read_only_surfaces(
 }
 
 #[test]
-fn effect_manifest_backup_restore_have_side_path_no_delete_contracts() -> TestResult {
+fn effect_manifest_side_path_exports_have_no_delete_contracts() -> TestResult {
     use ee::core::effect::{EffectClass, EffectManifest, SideEffectClass};
 
     let manifest = EffectManifest::build();
 
-    for command in ["backup create", "backup restore"] {
+    for command in [
+        "backup create",
+        "backup restore",
+        "export",
+        "playbook export",
+    ] {
         let effect = manifest
             .get(command)
             .ok_or_else(|| format!("{command} not in manifest"))?;
@@ -966,6 +977,102 @@ fn effect_manifest_backup_restore_have_side_path_no_delete_contracts() -> TestRe
         )?;
     }
 
+    Ok(())
+}
+
+#[test]
+fn effect_manifest_playbook_import_is_audited_dry_run_write() -> TestResult {
+    use ee::core::effect::{EffectClass, EffectManifest, SideEffectClass};
+
+    let manifest = EffectManifest::build();
+    let effect = manifest
+        .get("playbook import")
+        .ok_or_else(|| "playbook import not in manifest".to_string())?;
+
+    ensure(
+        effect.default_effect,
+        EffectClass::DurableMemoryWrite,
+        "playbook import may write procedural rules with --apply",
+    )?;
+    ensure(
+        effect.dry_run_effect,
+        Some(EffectClass::ReadOnly),
+        "playbook import dry-run is read-only",
+    )?;
+    ensure(
+        effect.mutation_contract.side_effect_class,
+        SideEffectClass::AuditedMutation,
+        "playbook import uses audited mutation contract",
+    )?;
+    ensure(
+        effect
+            .write_surfaces
+            .db_tables
+            .contains(&"procedural_rules"),
+        true,
+        "playbook import writes procedural rules",
+    )?;
+    ensure(
+        effect.write_surfaces.db_tables.contains(&"audit_log"),
+        true,
+        "playbook import writes audit_log",
+    )?;
+    ensure(
+        effect
+            .write_surfaces
+            .db_tables
+            .contains(&"search_index_jobs"),
+        true,
+        "playbook import queues search indexing",
+    )
+}
+
+#[test]
+fn effect_manifest_rule_mark_and_update_are_audited_writes() -> TestResult {
+    use ee::core::effect::{EffectClass, EffectManifest, SideEffectClass};
+
+    let manifest = EffectManifest::build();
+    for command in ["rule mark", "rule update"] {
+        let effect = manifest
+            .get(command)
+            .ok_or_else(|| format!("{command} not in manifest"))?;
+        ensure(
+            effect.default_effect,
+            EffectClass::DurableMemoryWrite,
+            &format!("{command} may mutate procedural rule state"),
+        )?;
+        ensure(
+            effect.dry_run_effect,
+            Some(EffectClass::ReadOnly),
+            &format!("{command} dry-run is read-only"),
+        )?;
+        ensure(
+            effect.mutation_contract.side_effect_class,
+            SideEffectClass::AuditedMutation,
+            &format!("{command} uses audited mutation contract"),
+        )?;
+        ensure(
+            effect
+                .write_surfaces
+                .db_tables
+                .contains(&"procedural_rules"),
+            true,
+            &format!("{command} writes procedural_rules"),
+        )?;
+        ensure(
+            effect.write_surfaces.db_tables.contains(&"audit_log"),
+            true,
+            &format!("{command} writes audit_log"),
+        )?;
+        ensure(
+            effect
+                .write_surfaces
+                .db_tables
+                .contains(&"search_index_jobs"),
+            true,
+            &format!("{command} queues search indexing when changed"),
+        )?;
+    }
     Ok(())
 }
 

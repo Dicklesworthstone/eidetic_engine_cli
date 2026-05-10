@@ -1,0 +1,48 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "command": "index_vacuum",
+    "schema": "ee.index.vacuum.v1",
+    "status": "missing",
+    "dryRun": true,
+    "previewOnly": true,
+    "mutationAllowed": false,
+    "databasePath": "<DATABASE>",
+    "indexDir": "<INDEX>",
+    "before": {
+      "path": "<INDEX>",
+      "exists": true,
+      "fileCount": 0,
+      "directoryCount": 1,
+      "sizeBytes": 0
+    },
+    "after": {
+      "path": "<INDEX>",
+      "exists": true,
+      "fileCount": 0,
+      "directoryCount": 1,
+      "sizeBytes": 0
+    },
+    "candidateCount": 0,
+    "reclaimableBytes": 0,
+    "candidates": [],
+    "degraded": [
+      {
+        "code": "index_missing",
+        "severity": "medium",
+        "message": "The derived search index is missing or empty.",
+        "repair": "ee index rebuild --workspace ."
+      }
+    ],
+    "lock": {
+      "held": false,
+      "lockId": "<LOCK_ID>",
+      "holderId": null,
+      "acquiredAt": null,
+      "expiresAt": null,
+      "reason": null
+    },
+    "elapsedMs": 0
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "schema": "ee.export.report.v1",
+    "command": "export",
+    "version": "0.1.0",
+    "status": "completed",
+    "dryRun": false,
+    "workspacePath": "<WORKSPACE>",
+    "workspaceId": "<WORKSPACE_ID>",
+    "databasePath": "<DATABASE>",
+    "outputPath": "<EXPORT_DIR>",
+    "manifestPath": "<MANIFEST>",
+    "recordsPath": "<RECORDS>",
+    "manifestHash": "<MANIFEST_HASH>",
+    "recordsHash": "<RECORDS_HASH>",
+    "redactionLevel": "standard",
+    "exportScope": "all",
+    "counts": {
+      "totalRecords": 6,
+      "memoryRecords": 1,
+      "linkRecords": 0,
+      "tagRecords": 0,
+      "auditRecords": 2
+    },
+    "provenance": {
+      "source": "backup_jsonl_export",
+      "backupSchema": "ee.backup.create.v1",
+      "backupId": "<BACKUP_ID>"
+    },
+    "verificationStatus": "verified",
+    "artifacts": [
+      {
+        "path": "records.jsonl",
+        "kind": "jsonl_export",
+        "hash": "<ARTIFACT_HASH>",
+        "sizeBytes": 0,
+        "required": true
+      },
+      {
+        "path": "manifest.json",
+        "kind": "manifest",
+        "hash": "<ARTIFACT_HASH>",
+        "sizeBytes": 0,
+        "required": true
+      }
+    ],
+    "degraded": [
+      {
+        "code": "index_manifest_missing",
+        "severity": "warning",
+        "message": "no workspace index manifest was found; backup includes the durable JSONL source of truth only",
+        "nextAction": "run ee index rebuild --workspace . before creating a backup that must include derived index metadata"
+      },
+      {
+        "code": "graph_snapshot_not_included",
+        "severity": "warning",
+        "message": "graph snapshots are derived assets and are not included in the EE-223 backup foundation slice",
+        "nextAction": "run ee graph refresh after restore, or complete EE-298 for richer backup inspection"
+      }
+    ]
+  }
+}

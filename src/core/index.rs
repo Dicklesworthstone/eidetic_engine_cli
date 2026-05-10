@@ -12,6 +12,7 @@ use crate::search::{
     CanonicalSearchDocument, Embedder, EmbedderStack, HashEmbedder, IndexBuilder,
     artifact_to_document, memory_to_document, session_to_document,
 };
+use sqlmodel_core::Value as SqlValue;
 
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";
 const INDEX_METADATA_FILE: &str = "meta.json";
@@ -1645,6 +1646,28 @@ impl IndexStatusOptions {
     }
 }
 
+/// Options for `ee index vacuum`.
+#[derive(Clone, Debug)]
+pub struct IndexVacuumOptions {
+    pub workspace_path: PathBuf,
+    pub database_path: Option<PathBuf>,
+    pub index_dir: Option<PathBuf>,
+}
+
+impl IndexVacuumOptions {
+    fn resolve_database_path(&self) -> PathBuf {
+        self.database_path
+            .clone()
+            .unwrap_or_else(|| self.workspace_path.join(".ee").join("ee.db"))
+    }
+
+    fn resolve_index_dir(&self) -> PathBuf {
+        self.index_dir
+            .clone()
+            .unwrap_or_else(|| self.workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR))
+    }
+}
+
 /// Health classification for the search index.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IndexHealth {
@@ -1677,6 +1700,263 @@ impl IndexHealth {
             Self::Missing => Some("index_missing"),
             Self::Corrupt => Some("index_corrupt"),
         }
+    }
+}
+
+/// Read-only outcome classification for `ee index vacuum`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IndexVacuumStatus {
+    Ready,
+    Preview,
+    Missing,
+    Stale,
+    Locked,
+    Corrupt,
+}
+
+impl IndexVacuumStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Preview => "preview",
+            Self::Missing => "missing",
+            Self::Stale => "stale",
+            Self::Locked => "locked",
+            Self::Corrupt => "corrupt",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IndexVacuumCandidateKind {
+    IncompleteStaging,
+    StagedGeneration,
+    RetainedGeneration,
+}
+
+impl IndexVacuumCandidateKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::IncompleteStaging => "incomplete_staging",
+            Self::StagedGeneration => "staged_generation",
+            Self::RetainedGeneration => "retained_generation",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexPathStats {
+    pub path: PathBuf,
+    pub exists: bool,
+    pub file_count: u32,
+    pub directory_count: u32,
+    pub size_bytes: u64,
+}
+
+impl IndexPathStats {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "path": self.path.to_string_lossy(),
+            "exists": self.exists,
+            "fileCount": self.file_count,
+            "directoryCount": self.directory_count,
+            "sizeBytes": self.size_bytes,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexVacuumCandidate {
+    pub path: PathBuf,
+    pub kind: IndexVacuumCandidateKind,
+    pub stats: IndexPathStats,
+}
+
+impl IndexVacuumCandidate {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "path": self.path.to_string_lossy(),
+            "kind": self.kind.as_str(),
+            "plannedAction": "report_reclaimable_derived_asset",
+            "requiresExplicitOperatorAction": true,
+            "stats": self.stats.data_json(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexVacuumDegradation {
+    pub code: &'static str,
+    pub severity: &'static str,
+    pub message: &'static str,
+    pub repair: &'static str,
+}
+
+impl IndexVacuumDegradation {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "code": self.code,
+            "severity": self.severity,
+            "message": self.message,
+            "repair": self.repair,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexVacuumLockReport {
+    pub held: bool,
+    pub lock_id: Option<String>,
+    pub holder_id: Option<String>,
+    pub acquired_at: Option<String>,
+    pub expires_at: Option<String>,
+    pub reason: Option<String>,
+}
+
+impl IndexVacuumLockReport {
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            held: false,
+            lock_id: None,
+            holder_id: None,
+            acquired_at: None,
+            expires_at: None,
+            reason: None,
+        }
+    }
+
+    #[must_use]
+    pub fn for_lock_id(lock_id: String) -> Self {
+        Self {
+            held: false,
+            lock_id: Some(lock_id),
+            holder_id: None,
+            acquired_at: None,
+            expires_at: None,
+            reason: None,
+        }
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "held": self.held,
+            "lockId": self.lock_id,
+            "holderId": self.holder_id,
+            "acquiredAt": self.acquired_at,
+            "expiresAt": self.expires_at,
+            "reason": self.reason,
+        })
+    }
+}
+
+/// Preview report for `ee index vacuum`.
+#[derive(Clone, Debug)]
+pub struct IndexVacuumReport {
+    pub status: IndexVacuumStatus,
+    pub database_path: PathBuf,
+    pub index_dir: PathBuf,
+    pub before: IndexPathStats,
+    pub after: IndexPathStats,
+    pub candidate_count: u32,
+    pub reclaimable_bytes: u64,
+    pub candidates: Vec<IndexVacuumCandidate>,
+    pub degraded: Vec<IndexVacuumDegradation>,
+    pub lock: IndexVacuumLockReport,
+    pub elapsed_ms: f64,
+}
+
+impl IndexVacuumReport {
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut output = String::new();
+        output.push_str(&format!(
+            "Index vacuum: {} (preview only)\n\n",
+            self.status.as_str().to_ascii_uppercase()
+        ));
+        output.push_str(&format!(
+            "  Index directory: {}\n",
+            self.index_dir.display()
+        ));
+        output.push_str(&format!("  Database: {}\n", self.database_path.display()));
+        output.push_str("  Mutation allowed: false\n");
+        output.push_str(&format!(
+            "  Active index files: {}\n",
+            self.before.file_count
+        ));
+        output.push_str(&format!(
+            "  Active index size: {}\n",
+            format_bytes(self.before.size_bytes)
+        ));
+        output.push_str(&format!("  Vacuum candidates: {}\n", self.candidate_count));
+        output.push_str(&format!(
+            "  Reclaimable preview: {}\n",
+            format_bytes(self.reclaimable_bytes)
+        ));
+        output.push_str(&format!("  Lock held: {}\n", self.lock.held));
+        output.push_str(&format!("  Elapsed: {:.1}ms\n", self.elapsed_ms));
+
+        if !self.degraded.is_empty() {
+            output.push_str("\nDegraded:\n");
+            for degraded in &self.degraded {
+                output.push_str(&format!(
+                    "  - {}: {} Repair: {}\n",
+                    degraded.code, degraded.message, degraded.repair
+                ));
+            }
+        }
+
+        if !self.candidates.is_empty() {
+            output.push_str("\nCandidates:\n");
+            for candidate in &self.candidates {
+                output.push_str(&format!(
+                    "  - {} {} ({})\n",
+                    candidate.kind.as_str(),
+                    candidate.path.display(),
+                    format_bytes(candidate.stats.size_bytes)
+                ));
+            }
+        }
+
+        output
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        let candidates = self
+            .candidates
+            .iter()
+            .map(IndexVacuumCandidate::data_json)
+            .collect::<Vec<_>>();
+        let degraded = self
+            .degraded
+            .iter()
+            .map(IndexVacuumDegradation::data_json)
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "command": "index_vacuum",
+            "schema": "ee.index.vacuum.v1",
+            "status": self.status.as_str(),
+            "dryRun": true,
+            "previewOnly": true,
+            "mutationAllowed": false,
+            "databasePath": self.database_path.to_string_lossy(),
+            "indexDir": self.index_dir.to_string_lossy(),
+            "before": self.before.data_json(),
+            "after": self.after.data_json(),
+            "candidateCount": self.candidate_count,
+            "reclaimableBytes": self.reclaimable_bytes,
+            "candidates": candidates,
+            "degraded": degraded,
+            "lock": self.lock.data_json(),
+            "elapsedMs": self.elapsed_ms,
+        })
     }
 }
 
@@ -1875,6 +2155,280 @@ pub fn get_index_status(
         repair_hint,
         elapsed_ms,
     })
+}
+
+/// Preview search-index vacuum work without mutating the source DB or derived assets.
+pub fn get_index_vacuum_report(
+    options: &IndexVacuumOptions,
+) -> Result<IndexVacuumReport, IndexStatusError> {
+    let start = Instant::now();
+    let database_path = options.resolve_database_path();
+    let index_dir = options.resolve_index_dir();
+    let status_report = get_index_status(&IndexStatusOptions {
+        workspace_path: options.workspace_path.clone(),
+        database_path: Some(database_path.clone()),
+        index_dir: Some(index_dir.clone()),
+    })?;
+
+    let before = collect_index_path_stats(&index_dir)?;
+    let after = before.clone();
+    let candidates = discover_index_vacuum_candidates(&index_dir)?;
+    let lock = inspect_index_vacuum_lock(&database_path)?;
+    let reclaimable_bytes = candidates.iter().fold(0_u64, |total, candidate| {
+        total.saturating_add(candidate.stats.size_bytes)
+    });
+    let candidate_count = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
+    let degraded = index_vacuum_degradations(status_report.health, lock.held);
+    let status = if lock.held {
+        IndexVacuumStatus::Locked
+    } else {
+        match status_report.health {
+            IndexHealth::Ready if candidates.is_empty() => IndexVacuumStatus::Ready,
+            IndexHealth::Ready => IndexVacuumStatus::Preview,
+            IndexHealth::Missing => IndexVacuumStatus::Missing,
+            IndexHealth::Stale => IndexVacuumStatus::Stale,
+            IndexHealth::Corrupt => IndexVacuumStatus::Corrupt,
+        }
+    };
+
+    Ok(IndexVacuumReport {
+        status,
+        database_path,
+        index_dir,
+        before,
+        after,
+        candidate_count,
+        reclaimable_bytes,
+        candidates,
+        degraded,
+        lock,
+        elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+    })
+}
+
+fn index_vacuum_degradations(health: IndexHealth, lock_held: bool) -> Vec<IndexVacuumDegradation> {
+    let mut degraded = Vec::new();
+    if lock_held {
+        degraded.push(IndexVacuumDegradation {
+            code: "index_locked",
+            severity: "medium",
+            message: "An index publish lock is currently held.",
+            repair: "Wait for the active index operation to finish, then retry ee index vacuum --workspace . --json.",
+        });
+    }
+    match health {
+        IndexHealth::Ready => {}
+        IndexHealth::Missing => degraded.push(IndexVacuumDegradation {
+            code: "index_missing",
+            severity: "medium",
+            message: "The derived search index is missing or empty.",
+            repair: "ee index rebuild --workspace .",
+        }),
+        IndexHealth::Stale => degraded.push(IndexVacuumDegradation {
+            code: "index_stale",
+            severity: "medium",
+            message: "The derived search index is behind the FrankenSQLite source generation.",
+            repair: "ee index rebuild --workspace .",
+        }),
+        IndexHealth::Corrupt => degraded.push(IndexVacuumDegradation {
+            code: "index_corrupt",
+            severity: "high",
+            message: "The derived search index metadata failed integrity checks.",
+            repair: "ee index rebuild --workspace .",
+        }),
+    }
+    degraded
+}
+
+fn collect_index_path_stats(path: &Path) -> Result<IndexPathStats, std::io::Error> {
+    let mut stats = IndexPathStats {
+        path: path.to_path_buf(),
+        exists: path.exists(),
+        file_count: 0,
+        directory_count: 0,
+        size_bytes: 0,
+    };
+    if !stats.exists {
+        return Ok(stats);
+    }
+    collect_index_path_stats_inner(path, &mut stats)?;
+    Ok(stats)
+}
+
+fn collect_index_path_stats_inner(
+    path: &Path,
+    stats: &mut IndexPathStats,
+) -> Result<(), std::io::Error> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.is_dir() {
+        stats.directory_count = stats.directory_count.saturating_add(1);
+        for entry in std::fs::read_dir(path)? {
+            collect_index_path_stats_inner(&entry?.path(), stats)?;
+        }
+    } else {
+        stats.file_count = stats.file_count.saturating_add(1);
+        stats.size_bytes = stats.size_bytes.saturating_add(metadata.len());
+    }
+    Ok(())
+}
+
+fn discover_index_vacuum_candidates(
+    index_dir: &Path,
+) -> Result<Vec<IndexVacuumCandidate>, std::io::Error> {
+    let parent = index_parent(index_dir);
+    if !parent.exists() {
+        return Ok(Vec::new());
+    }
+
+    let base = index_vacuum_base_name(index_dir)?;
+    let staging_prefix = format!(".{base}{INDEX_STAGING_PREFIX}");
+    let retained_prefix = format!("{base}{INDEX_RETAINED_SUFFIX}");
+    let mut candidates = Vec::new();
+
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        let entry_path = entry.path();
+        if entry_path == index_dir {
+            continue;
+        }
+        if !entry.file_type().map(|ty| ty.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let kind = if name.starts_with(&staging_prefix) {
+            if entry_path.join(INDEX_METADATA_FILE).is_file() {
+                IndexVacuumCandidateKind::StagedGeneration
+            } else {
+                IndexVacuumCandidateKind::IncompleteStaging
+            }
+        } else if name == retained_prefix
+            || name
+                .strip_prefix(&retained_prefix)
+                .is_some_and(|suffix| suffix.starts_with('.'))
+        {
+            IndexVacuumCandidateKind::RetainedGeneration
+        } else {
+            continue;
+        };
+        let stats = collect_index_path_stats(&entry_path)?;
+        candidates.push(IndexVacuumCandidate {
+            path: entry_path,
+            kind,
+            stats,
+        });
+    }
+
+    candidates.sort_by(|left, right| {
+        left.path
+            .to_string_lossy()
+            .cmp(&right.path.to_string_lossy())
+            .then_with(|| left.kind.as_str().cmp(right.kind.as_str()))
+    });
+    Ok(candidates)
+}
+
+fn index_vacuum_base_name(index_dir: &Path) -> Result<String, std::io::Error> {
+    index_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "index directory must have a final path component: {}",
+                    index_dir.display()
+                ),
+            )
+        })
+}
+
+fn inspect_index_vacuum_lock(
+    database_path: &Path,
+) -> Result<IndexVacuumLockReport, IndexStatusError> {
+    if !database_path.exists() {
+        return Ok(IndexVacuumLockReport::none());
+    }
+    let db = DbConnection::open_file(database_path)?;
+    let Some(workspace_id) = latest_workspace_id_for_vacuum(&db)? else {
+        return Ok(IndexVacuumLockReport::none());
+    };
+    let lock_id = AdvisoryLockId::index(&workspace_id);
+    let canonical_lock_id = lock_id.canonical_key();
+    let table_rows = db.query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ee_advisory_locks'",
+        &[],
+    )?;
+    if table_rows.is_empty() {
+        return Ok(IndexVacuumLockReport::for_lock_id(canonical_lock_id));
+    }
+
+    let rows = db.query(
+        "SELECT holder_id, acquired_at, expires_at, reason
+         FROM ee_advisory_locks
+         WHERE resource_type = ?1 AND resource_id = ?2
+         ORDER BY acquired_at DESC, resource_key ASC",
+        &[
+            SqlValue::Text(lock_id.resource_type().to_owned()),
+            SqlValue::Text(lock_id.resource_id().to_owned()),
+        ],
+    )?;
+
+    for row in rows {
+        let expires_at = row
+            .get(2)
+            .and_then(|value| value.as_str())
+            .map(str::to_owned);
+        if expires_at.as_deref().is_some_and(index_vacuum_lock_expired) {
+            continue;
+        }
+        return Ok(IndexVacuumLockReport {
+            held: true,
+            lock_id: Some(canonical_lock_id),
+            holder_id: row
+                .get(0)
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+            acquired_at: row
+                .get(1)
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+            expires_at,
+            reason: row
+                .get(3)
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+        });
+    }
+
+    Ok(IndexVacuumLockReport::for_lock_id(canonical_lock_id))
+}
+
+fn latest_workspace_id_for_vacuum(db: &DbConnection) -> Result<Option<String>, DbError> {
+    match db.query(
+        "SELECT id FROM workspaces ORDER BY created_at DESC LIMIT 1",
+        &[],
+    ) {
+        Ok(rows) => Ok(rows
+            .first()
+            .and_then(|row| row.get(0).and_then(|value| value.as_str()))
+            .map(str::to_owned)),
+        Err(error) if db_error_mentions_missing_table(&error, "workspaces") => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn db_error_mentions_missing_table(error: &DbError, table: &str) -> bool {
+    let message = error.to_string();
+    message.contains("no such table") && message.contains(table)
+}
+
+fn index_vacuum_lock_expired(expires_at: &str) -> bool {
+    chrono::DateTime::parse_from_rfc3339(expires_at)
+        .map(|expires_at| expires_at <= chrono::Utc::now())
+        .unwrap_or(false)
 }
 
 fn inspect_index_dir(index_dir: &Path) -> Result<(bool, u32, u64), std::io::Error> {
@@ -2916,6 +3470,157 @@ mod tests {
         ensure(
             report.data_json()["lastCheckError"].as_str().is_some(),
             "status JSON should expose lastCheckError for corrupt metadata",
+        )
+    }
+
+    #[test]
+    fn index_vacuum_status_as_str_is_stable() {
+        assert_eq!(IndexVacuumStatus::Ready.as_str(), "ready");
+        assert_eq!(IndexVacuumStatus::Preview.as_str(), "preview");
+        assert_eq!(IndexVacuumStatus::Missing.as_str(), "missing");
+        assert_eq!(IndexVacuumStatus::Stale.as_str(), "stale");
+        assert_eq!(IndexVacuumStatus::Locked.as_str(), "locked");
+        assert_eq!(IndexVacuumStatus::Corrupt.as_str(), "corrupt");
+    }
+
+    #[test]
+    fn index_vacuum_discovers_staging_and_retained_candidates() -> TestResult {
+        let root = unique_test_dir("vacuum-candidates");
+        let index_dir = root.join("index");
+        write_marker(
+            &root.join(".index.publish-200-000"),
+            "fragment.bin",
+            "partial",
+        )?;
+        write_marker(&root.join(".index.publish-300-000"), "meta.json", "{}")?;
+        write_marker(&root.join("index.previous"), "old.bin", "old")?;
+        write_marker(&root.join("index.previous.001"), "older.bin", "older")?;
+        write_marker(&index_dir, "meta.json", "{}")?;
+
+        let candidates =
+            discover_index_vacuum_candidates(&index_dir).map_err(|error| error.to_string())?;
+
+        ensure(candidates.len() == 4, "expected four vacuum candidates")?;
+        let kinds = candidates
+            .iter()
+            .map(|candidate| candidate.kind.as_str())
+            .collect::<Vec<_>>();
+        ensure(
+            kinds.contains(&"incomplete_staging"),
+            format!("candidate kinds should include incomplete staging: {kinds:?}"),
+        )?;
+        ensure(
+            kinds.contains(&"staged_generation"),
+            format!("candidate kinds should include staged generation: {kinds:?}"),
+        )?;
+        ensure(
+            kinds
+                .iter()
+                .filter(|kind| **kind == "retained_generation")
+                .count()
+                == 2,
+            format!("candidate kinds should include two retained generations: {kinds:?}"),
+        )?;
+        ensure(
+            candidates
+                .iter()
+                .all(|candidate| candidate.stats.exists && candidate.stats.file_count > 0),
+            "candidate stats should describe existing derived artifacts",
+        )
+    }
+
+    #[test]
+    fn index_vacuum_missing_index_reports_preview_only_degradation() -> TestResult {
+        let root = unique_test_dir("vacuum-missing");
+        let report = get_index_vacuum_report(&IndexVacuumOptions {
+            workspace_path: root.clone(),
+            database_path: Some(root.join(".ee").join("ee.db")),
+            index_dir: Some(root.join(".ee").join("index")),
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure(
+            report.status == IndexVacuumStatus::Missing,
+            format!("missing index should be reported as missing: {report:?}"),
+        )?;
+        ensure(!report.before.exists, "missing index before stats")?;
+        ensure(!report.after.exists, "missing index after stats")?;
+        ensure(
+            report.candidate_count == 0,
+            "missing index has no candidates",
+        )?;
+
+        let json = report.data_json();
+        ensure(json["command"] == "index_vacuum", "vacuum command JSON")?;
+        ensure(json["dryRun"] == true, "vacuum is always dry-run")?;
+        ensure(
+            json["mutationAllowed"] == false,
+            "vacuum never allows mutation",
+        )?;
+        ensure(
+            json["degraded"][0]["code"] == "index_missing",
+            "missing index degradation code",
+        )
+    }
+
+    #[test]
+    fn index_vacuum_reports_active_publish_lock_without_mutation() -> TestResult {
+        let root = unique_test_dir("vacuum-lock");
+        let database = root.join(".ee").join("ee.db");
+        let index_dir = root.join(".ee").join("index");
+        let parent = database
+            .parent()
+            .ok_or_else(|| "database path must have parent".to_string())?;
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&index_dir).map_err(|error| error.to_string())?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_00000000000000000000000001";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: root.to_string_lossy().into_owned(),
+                    name: Some("vacuum lock test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let lock_id = AdvisoryLockId::index(workspace_id);
+        let lock = connection
+            .acquire_advisory_lock(&lock_id, "agent_holding", Some(300), Some("unit test"))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            matches!(
+                lock,
+                AcquireLockResult::Acquired(_) | AcquireLockResult::Expired { .. }
+            ),
+            "test lock should be acquired",
+        )?;
+        write_index_metadata(&index_dir, 0, 0).map_err(|error| error.to_string())?;
+
+        let report = get_index_vacuum_report(&IndexVacuumOptions {
+            workspace_path: root,
+            database_path: Some(database),
+            index_dir: Some(index_dir),
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure(
+            report.status == IndexVacuumStatus::Locked,
+            format!("held publish lock should report locked status: {report:?}"),
+        )?;
+        ensure(report.lock.held, "lock report should mark held")?;
+        ensure(
+            report.lock.holder_id.as_deref() == Some("agent_holding"),
+            "lock report should identify holder",
+        )?;
+        ensure(
+            report
+                .degraded
+                .iter()
+                .any(|degraded| degraded.code == "index_locked"),
+            "lock degradation should be present",
         )
     }
 }

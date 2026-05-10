@@ -32,9 +32,9 @@ use crate::core::audit::{
     verify_audit as verify_audit_log,
 };
 use crate::core::backup::{
-    BackupCreateOptions, BackupInspectOptions, BackupListOptions, BackupRestoreOptions,
-    BackupVerifyOptions, create_backup, inspect_backup, list_backups, restore_backup_to_side_path,
-    verify_backup,
+    BackupCreateOptions, BackupCreateReport, BackupInspectOptions, BackupListOptions,
+    BackupRestoreOptions, BackupVerifyOptions, create_backup, inspect_backup, list_backups,
+    restore_backup_to_side_path, verify_backup,
 };
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::causal::{
@@ -78,7 +78,8 @@ use crate::core::handoff::{
 use crate::core::health::HealthReport;
 use crate::core::index::{
     INDEX_PUBLISH_LOCK_CONTENTION_CODE, IndexRebuildError, IndexRebuildOptions,
-    IndexReembedOptions, IndexStatusOptions, get_index_status, rebuild_index, reembed_index,
+    IndexReembedOptions, IndexStatusOptions, IndexVacuumOptions, get_index_status,
+    get_index_vacuum_report, rebuild_index, reembed_index,
 };
 use crate::core::init::{InitOptions, init_workspace};
 use crate::core::install::{
@@ -97,10 +98,12 @@ use crate::core::learn::{
 };
 use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_source};
 use crate::core::memory::{
-    GetMemoryOptions, ListMemoriesOptions, MemoryReviseReport, RememberMemoryOptions,
-    RememberMemoryReport, ReviseMemoryOptions, ReviseReason, WorkflowCloseOptions,
-    WorkflowCloseReport, close_workflow, get_memory_details, list_memories, remember_memory,
-    revise_memory,
+    ExpireMemoryOptions, GetMemoryOptions, ListMemoriesOptions, MemoryExpireReport, MemoryLinkMode,
+    MemoryLinkOptions, MemoryLinkReport, MemoryReviseReport, MemoryTagsMode, MemoryTagsOptions,
+    MemoryTagsReport, RememberMemoryOptions, RememberMemoryReport, ReviseMemoryOptions,
+    ReviseReason, WorkflowCloseOptions, WorkflowCloseReport, close_workflow, expire_memory,
+    get_memory_details, list_memories, remember_memory, revise_memory, update_memory_link,
+    update_memory_tags,
 };
 use crate::core::outcome::{
     DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
@@ -132,9 +135,13 @@ use crate::core::rehearse::{
     promote_plan_rehearsal, run_rehearsal,
 };
 use crate::core::rule::{
-    PlaybookExtractOptions, PlaybookExtractReport, RuleAddOptions, RuleAddReport, RuleListOptions,
-    RuleListReport, RuleProtectOptions, RuleProtectReport, RuleShowOptions, RuleShowReport,
-    add_rule, extract_playbook_candidates, list_rules, protect_rule, show_rule,
+    PlaybookExportOptions, PlaybookExportReport, PlaybookExtractOptions, PlaybookExtractReport,
+    PlaybookImportOptions, PlaybookImportReport, PlaybookListOptions, PlaybookListReport,
+    RuleAddOptions, RuleAddReport, RuleListOptions, RuleListReport, RuleMarkEvidenceOptions,
+    RuleMarkOptions, RuleMarkReport, RuleProtectOptions, RuleProtectReport, RuleShowOptions,
+    RuleShowReport, RuleUpdateOptions, RuleUpdateReport, add_rule, export_playbook,
+    extract_playbook_candidates, import_playbook, list_playbook_rules, list_rules, mark_rule,
+    protect_rule, show_rule, update_rule,
 };
 use crate::core::search::{SearchOptions, SearchReport, run_search};
 use crate::core::status::StatusReport;
@@ -162,7 +169,7 @@ use crate::models::{
     CertificateKind, CertificateStatus, DEMO_FILE_SCHEMA_V1, DEMO_RUN_RESULT_SCHEMA_V1, DemoEntry,
     DemoFile, DemoId, DemoStatus, DomainError, ExperimentOutcomeStatus, ExperimentSafetyBoundary,
     FilterOperator, InstallOperation, LearningObservationSignal, OutputVerification,
-    ProcessExitCode, QUERY_SCHEMA_V1, RedactionLevel, is_valid_demo_artifact_path,
+    ProcessExitCode, QUERY_SCHEMA_V1, RedactionLevel, Tag, is_valid_demo_artifact_path,
     parse_demo_file_yaml,
 };
 use crate::output;
@@ -343,6 +350,8 @@ thread_local! {
         const { Cell::new(output::ResponseSchemaVersion::V1) };
 }
 
+const EXPORT_REPORT_SCHEMA_V1: &str = "ee.export.report.v1";
+
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum Command {
     /// Detect and manage coding agent installations.
@@ -402,6 +411,8 @@ pub enum Command {
     /// Run evaluation scenarios against fixtures.
     #[command(subcommand)]
     Eval(EvalCommand),
+    /// Export redacted local memory records as a portable JSONL artifact.
+    Export(ExportArgs),
     /// Show and manage passive active-memory focus state.
     #[command(subcommand)]
     Focus(FocusCommand),
@@ -739,6 +750,30 @@ impl BackupRedaction {
             Self::Full => RedactionLevel::Full,
         }
     }
+}
+
+/// Arguments for `ee export`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ExportArgs {
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Directory where the export package is materialized.
+    #[arg(long = "output-dir", value_name = "PATH")]
+    pub output_dir: Option<PathBuf>,
+
+    /// Human label recorded in the export manifest.
+    #[arg(long, value_name = "LABEL")]
+    pub label: Option<String>,
+
+    /// Redaction level for exported records.
+    #[arg(long, value_enum, default_value_t = BackupRedaction::Standard)]
+    pub redaction: BackupRedaction,
+
+    /// Preview export paths, hashes, and counts without writing files.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 }
 
 /// Arguments for `ee agent status`.
@@ -1680,6 +1715,8 @@ pub enum IndexCommand {
     Reembed(IndexReembedArgs),
     /// Inspect search index health and generation state.
     Status(IndexStatusArgs),
+    /// Preview reclaimable derived search-index artifacts without deleting anything.
+    Vacuum(IndexVacuumArgs),
 }
 
 /// Arguments for `ee index rebuild`.
@@ -1717,6 +1754,18 @@ pub struct IndexReembedArgs {
 /// Arguments for `ee index status`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct IndexStatusArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Index output directory. Defaults to <workspace>/.ee/index/.
+    #[arg(long, value_name = "PATH")]
+    pub index_dir: Option<PathBuf>,
+}
+
+/// Arguments for `ee index vacuum`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct IndexVacuumArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
@@ -2909,6 +2958,12 @@ pub struct PlanRecommendArgs {
 pub enum PlaybookCommand {
     /// Extract repeated semantic memories into procedural-rule curation candidates.
     Extract(PlaybookExtractArgs),
+    /// List procedural rules in portable playbook form.
+    List(PlaybookListArgs),
+    /// Export procedural rules as a portable playbook artifact.
+    Export(PlaybookExportArgs),
+    /// Import a portable playbook artifact.
+    Import(PlaybookImportArgs),
 }
 
 /// Arguments for `ee playbook extract`.
@@ -2931,6 +2986,70 @@ pub struct PlaybookExtractArgs {
     pub dry_run: bool,
 
     /// Actor recorded in audit metadata.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+}
+
+/// Arguments for `ee playbook list`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct PlaybookListArgs {
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Include tombstoned rules.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_tombstoned: bool,
+
+    /// Maximum number of rules to list.
+    #[arg(long, default_value_t = 100)]
+    pub limit: u32,
+
+    /// Number of rules to skip after deterministic ordering.
+    #[arg(long, default_value_t = 0)]
+    pub offset: u32,
+}
+
+/// Arguments for `ee playbook export`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct PlaybookExportArgs {
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Destination playbook JSON file. Existing files are never overwritten.
+    #[arg(long = "out", value_name = "PATH")]
+    pub output_path: PathBuf,
+
+    /// Include tombstoned rules.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_tombstoned: bool,
+
+    /// Maximum number of rules to export.
+    #[arg(long, default_value_t = 1000)]
+    pub limit: u32,
+
+    /// Preview the export without writing files.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee playbook import`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct PlaybookImportArgs {
+    /// Source playbook JSON file.
+    #[arg(long = "source", value_name = "PATH")]
+    pub source_path: PathBuf,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Apply the import. Without this flag, import is a dry run.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub apply: bool,
+
+    /// Actor recorded in audit metadata when --apply is used.
     #[arg(long, value_name = "ACTOR")]
     pub actor: Option<String>,
 }
@@ -3970,8 +4089,12 @@ pub enum RuleCommand {
     List(RuleListArgs),
     /// Show one procedural rule.
     Show(RuleShowArgs),
+    /// Record lifecycle evidence for a procedural rule.
+    Mark(RuleMarkArgs),
     /// Protect or unprotect a procedural rule.
     Protect(RuleProtectArgs),
+    /// Update mutable procedural rule metadata.
+    Update(RuleUpdateArgs),
 }
 
 /// Arguments for `ee rule add`.
@@ -4082,6 +4205,66 @@ pub struct RuleShowArgs {
     pub include_tombstoned: bool,
 }
 
+/// Arguments for `ee rule mark`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct RuleMarkArgs {
+    /// Rule ID.
+    #[arg(value_name = "RULE_ID")]
+    pub rule_id: String,
+
+    /// Lifecycle trigger: propose_validation, outcome_helpful, outcome_harmful, validation_passed, validation_contradicted, review_approved, deprecate, or supersede.
+    #[arg(long)]
+    pub trigger: String,
+
+    /// Helpful outcome count to record with the trigger.
+    #[arg(long, default_value_t = 0)]
+    pub helpful_outcomes: u32,
+
+    /// Harmful outcome count to record with the trigger.
+    #[arg(long, default_value_t = 0)]
+    pub harmful_outcomes: u32,
+
+    /// Number of distinct harmful evidence sources.
+    #[arg(long, default_value_t = 0)]
+    pub distinct_harmful_sources: u32,
+
+    /// Confirm manual curation approval for protected harmful demotion.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub manual_curation_approved: bool,
+
+    /// Record that harmful sources later produced intervening helpful evidence.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub intervening_helpful_from_harmful_sources: bool,
+
+    /// Validation pass count to record with the trigger.
+    #[arg(long, default_value_t = 0)]
+    pub validation_passes: u32,
+
+    /// Validation contradiction count to record with the trigger.
+    #[arg(long, default_value_t = 0)]
+    pub validation_contradictions: u32,
+
+    /// Confirm explicit review approval.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub review_approved: bool,
+
+    /// Replacement rule ID for a supersede trigger.
+    #[arg(long, value_name = "RULE_ID")]
+    pub superseding_rule: Option<String>,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Audit actor.
+    #[arg(long)]
+    pub actor: Option<String>,
+
+    /// Validate and render without mutating storage.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
 /// Arguments for `ee rule protect`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct RuleProtectArgs {
@@ -4096,6 +4279,82 @@ pub struct RuleProtectArgs {
     /// Remove the protected marker instead of setting it.
     #[arg(long, action = ArgAction::SetTrue)]
     pub unprotect: bool,
+
+    /// Audit actor.
+    #[arg(long)]
+    pub actor: Option<String>,
+
+    /// Validate and render without mutating storage.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee rule update`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct RuleUpdateArgs {
+    /// Rule ID.
+    #[arg(value_name = "RULE_ID")]
+    pub rule_id: String,
+
+    /// Replacement rule content.
+    #[arg(long)]
+    pub content: Option<String>,
+
+    /// Replacement rule scope: global, workspace, project, directory, or file_pattern.
+    #[arg(long)]
+    pub scope: Option<String>,
+
+    /// Replacement scope pattern for directory and file_pattern scopes.
+    #[arg(long, value_name = "PATTERN")]
+    pub scope_pattern: Option<String>,
+
+    /// Clear the existing scope pattern.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub clear_scope_pattern: bool,
+
+    /// Replacement trust class.
+    #[arg(long)]
+    pub trust_class: Option<String>,
+
+    /// Replacement confidence score (0.0 to 1.0).
+    #[arg(long)]
+    pub confidence: Option<f32>,
+
+    /// Replacement utility score (0.0 to 1.0).
+    #[arg(long)]
+    pub utility: Option<f32>,
+
+    /// Replacement importance score (0.0 to 1.0).
+    #[arg(long)]
+    pub importance: Option<f32>,
+
+    /// Set the protected marker.
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "unprotect")]
+    pub protect: bool,
+
+    /// Remove the protected marker.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub unprotect: bool,
+
+    /// Replacement tags. May be repeated or comma-separated.
+    #[arg(long = "tag", short = 't')]
+    pub tags: Vec<String>,
+
+    /// Clear all rule tags.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub clear_tags: bool,
+
+    /// Replacement source memory evidence IDs. May be repeated or comma-separated.
+    #[arg(long = "source-memory", value_name = "MEMORY_ID")]
+    pub source_memory_ids: Vec<String>,
+
+    /// Clear all source-memory evidence IDs.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub clear_source_memories: bool,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 
     /// Audit actor.
     #[arg(long)]
@@ -4318,6 +4577,15 @@ pub enum EvalCommand {
         /// Include science-backed metrics in the eval report payload.
         #[arg(long, action = ArgAction::SetTrue)]
         science: bool,
+    },
+    /// Summarize deterministic evaluation fixture reports and first failures.
+    Report {
+        /// Fixture ID or family to report. Omit for all fixtures.
+        #[arg(value_name = "FIXTURE_OR_FAMILY")]
+        scenario_id: Option<String>,
+        /// Path to fixture directory (defaults to tests/fixtures/eval/).
+        #[arg(long, value_name = "PATH")]
+        fixture_dir: Option<std::path::PathBuf>,
     },
     /// List available evaluation scenarios.
     List,
@@ -4886,6 +5154,10 @@ pub struct ReviewSessionArgs {
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum MemoryCommand {
+    /// Expire a memory by writing an audited tombstone.
+    Expire(MemoryExpireArgs),
+    /// List or create durable links between memories.
+    Link(MemoryLinkArgs),
     /// List memories in the workspace.
     List(MemoryListArgs),
     /// Show details of a single memory by ID.
@@ -4894,6 +5166,92 @@ pub enum MemoryCommand {
     History(MemoryHistoryArgs),
     /// Preview or request an immutable memory revision.
     Revise(MemoryReviseArgs),
+    /// List or mutate tags on a memory.
+    Tags(MemoryTagsArgs),
+}
+
+/// Arguments for `ee memory expire`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MemoryExpireArgs {
+    /// Memory ID to expire.
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: String,
+
+    /// Optional audit reason.
+    #[arg(long, value_name = "REASON")]
+    pub reason: Option<String>,
+
+    /// Actor recorded in the audit row.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+
+    /// Preview without mutating durable state.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Include already-expired memories for idempotency reporting.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_tombstoned: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee memory link`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MemoryLinkArgs {
+    /// Source or incident memory ID.
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: String,
+
+    /// Target memory ID. Omit this to list links incident to MEMORY_ID.
+    #[arg(value_name = "TARGET_MEMORY_ID")]
+    pub target_memory_id: Option<String>,
+
+    /// Link relation. Required when creating; optional filter when listing.
+    #[arg(long, value_name = "RELATION")]
+    pub relation: Option<String>,
+
+    /// Link source recorded on created rows.
+    #[arg(long, value_name = "SOURCE", default_value = "human")]
+    pub source: String,
+
+    /// Link weight from 0.0 to 1.0.
+    #[arg(long, default_value = "1.0")]
+    pub weight: String,
+
+    /// Link confidence from 0.0 to 1.0.
+    #[arg(long, default_value = "1.0")]
+    pub confidence: String,
+
+    /// Store the link as undirected.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub undirected: bool,
+
+    /// Count of supporting evidence spans.
+    #[arg(long = "evidence-count", default_value_t = 1)]
+    pub evidence_count: u32,
+
+    /// Optional JSON metadata stored with the link row.
+    #[arg(long, value_name = "JSON")]
+    pub metadata: Option<String>,
+
+    /// Actor recorded in the audit row.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+
+    /// Preview without mutating durable state.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Include tombstoned memories for read-only listing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_tombstoned: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee memory list`.
@@ -4994,6 +5352,46 @@ pub struct MemoryReviseArgs {
     /// Preview the revision without writing. Required until revision storage is implemented.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee memory tags`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MemoryTagsArgs {
+    /// Memory ID whose tags should be listed or changed.
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: String,
+
+    /// Tags to add, comma-separated. May be repeated.
+    #[arg(long, value_name = "TAGS", action = ArgAction::Append)]
+    pub add: Vec<String>,
+
+    /// Tags to remove, comma-separated. May be repeated.
+    #[arg(long, value_name = "TAGS", action = ArgAction::Append)]
+    pub remove: Vec<String>,
+
+    /// Replace all tags with this comma-separated set.
+    #[arg(long, value_name = "TAGS")]
+    pub set: Option<String>,
+
+    /// Remove all tags.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub clear: bool,
+
+    /// Actor recorded in the audit row.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+
+    /// Preview without mutating durable state.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Allow read-only listing for tombstoned memories.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_tombstoned: bool,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -5871,7 +6269,18 @@ where
                 }
             }
             EvalCommand::List => handle_eval_list(&cli, None, stdout, stderr),
+            EvalCommand::Report {
+                scenario_id,
+                fixture_dir,
+            } => handle_eval_report(
+                &cli,
+                scenario_id.as_deref(),
+                fixture_dir.as_deref(),
+                stdout,
+                stderr,
+            ),
         },
+        Some(Command::Export(ref args)) => handle_export(&cli, args, stdout, stderr),
         Some(Command::Focus(ref focus_cmd)) => handle_focus(&cli, focus_cmd, stdout, stderr),
         Some(Command::TaskFrame(ref task_frame_cmd)) => {
             handle_task_frame(&cli, task_frame_cmd, stdout, stderr)
@@ -5905,6 +6314,12 @@ where
                 write_stdout(stdout, &(output::render_introspect_json() + "\n"))
             }
         },
+        Some(Command::Memory(MemoryCommand::Expire(ref args))) => {
+            handle_memory_expire(&cli, args, stdout, stderr)
+        }
+        Some(Command::Memory(MemoryCommand::Link(ref args))) => {
+            handle_memory_link(&cli, args, stdout, stderr)
+        }
         Some(Command::Memory(MemoryCommand::List(ref args))) => {
             handle_memory_list(&cli, args, stdout, stderr)
         }
@@ -5917,6 +6332,9 @@ where
         Some(Command::Memory(MemoryCommand::Revise(ref args))) => {
             handle_memory_revise(&cli, args, stdout, stderr)
         }
+        Some(Command::Memory(MemoryCommand::Tags(ref args))) => {
+            handle_memory_tags(&cli, args, stdout, stderr)
+        }
         Some(Command::Workflow(WorkflowCommand::Close(ref args))) => {
             handle_workflow_close(&cli, args, stdout, stderr)
         }
@@ -5928,6 +6346,9 @@ where
         }
         Some(Command::Index(IndexCommand::Status(ref args))) => {
             handle_index_status(&cli, args, stdout, stderr)
+        }
+        Some(Command::Index(IndexCommand::Vacuum(ref args))) => {
+            handle_index_vacuum(&cli, args, stdout, stderr)
         }
         Some(Command::Lab(LabCommand::Capture(ref args))) => {
             handle_lab_capture(&cli, args, stdout, stderr)
@@ -6036,6 +6457,15 @@ where
         }
         Some(Command::Playbook(PlaybookCommand::Extract(ref args))) => {
             handle_playbook_extract(&cli, args, stdout, stderr)
+        }
+        Some(Command::Playbook(PlaybookCommand::List(ref args))) => {
+            handle_playbook_list(&cli, args, stdout, stderr)
+        }
+        Some(Command::Playbook(PlaybookCommand::Export(ref args))) => {
+            handle_playbook_export(&cli, args, stdout, stderr)
+        }
+        Some(Command::Playbook(PlaybookCommand::Import(ref args))) => {
+            handle_playbook_import(&cli, args, stdout, stderr)
         }
         Some(Command::Profile(ref profile_cmd)) => {
             handle_profile_command(&cli, profile_cmd, stdout, stderr)
@@ -6238,8 +6668,14 @@ where
         Some(Command::Rule(RuleCommand::Show(ref args))) => {
             handle_rule_show(&cli, args, stdout, stderr)
         }
+        Some(Command::Rule(RuleCommand::Mark(ref args))) => {
+            handle_rule_mark(&cli, args, stdout, stderr)
+        }
         Some(Command::Rule(RuleCommand::Protect(ref args))) => {
             handle_rule_protect(&cli, args, stdout, stderr)
+        }
+        Some(Command::Rule(RuleCommand::Update(ref args))) => {
+            handle_rule_update(&cli, args, stdout, stderr)
         }
         Some(Command::Review(ReviewCommand::Session(ref args))) => {
             handle_review_session(&cli, args, stdout, stderr)
@@ -6380,66 +6816,40 @@ where
     }
 }
 
-fn handle_eval_run<W, E>(
-    cli: &Cli,
+fn collect_eval_run_reports(
     scenario_id: Option<&str>,
-    fixture_dir: Option<&std::path::Path>,
-    _science: bool,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    let default_dir = std::path::PathBuf::from(crate::eval::DEFAULT_FIXTURE_DIR);
-    let dir = fixture_dir.unwrap_or(&default_dir);
+    dir: &std::path::Path,
+) -> Result<Vec<crate::eval::EvalRunReport>, DomainError> {
     let start = std::time::Instant::now();
-
-    let fixtures = match crate::eval::discover_fixtures(dir) {
-        Ok(f) => f,
-        Err(e) => return write_domain_error(&e, cli.wants_json(), stdout, stderr),
-    };
-
+    let fixtures = crate::eval::discover_fixtures(dir)?;
     if fixtures.is_empty() {
-        let err = crate::models::DomainError::Configuration {
+        return Err(crate::models::DomainError::Configuration {
             message: "No fixtures found in fixture directory".into(),
             repair: Some(format!("Add fixtures to {}", dir.display())),
-        };
-        return write_domain_error(&err, cli.wants_json(), stdout, stderr);
+        });
     }
 
-    let target_fixtures: Vec<_> = if let Some(id) = scenario_id {
+    let target_fixtures = if let Some(id) = scenario_id {
         fixtures
             .into_iter()
-            .filter(|f| f.fixture_id == id || f.fixture_family == id)
-            .collect()
+            .filter(|fixture| fixture.fixture_id == id || fixture.fixture_family == id)
+            .collect::<Vec<_>>()
     } else {
         fixtures
     };
 
     if target_fixtures.is_empty() {
-        let err = crate::models::DomainError::NotFound {
+        return Err(crate::models::DomainError::NotFound {
             resource: "fixture".into(),
             id: scenario_id.unwrap_or("*").into(),
             repair: Some("ee eval list".into()),
-        };
-        return write_domain_error(&err, cli.wants_json(), stdout, stderr);
+        });
     }
 
-    let mut reports = Vec::new();
-
+    let mut reports = Vec::with_capacity(target_fixtures.len());
     for fixture in &target_fixtures {
-        let source = match crate::eval::load_source_memories(&fixture.source_memory_path) {
-            Ok(s) => s,
-            Err(e) => return write_domain_error(&e, cli.wants_json(), stdout, stderr),
-        };
-
-        let per_query = match run_eval_retrieval_queries(&source) {
-            Ok(metrics) => metrics,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
-        };
-
+        let source = crate::eval::load_source_memories(&fixture.source_memory_path)?;
+        let per_query = run_eval_retrieval_queries(&source)?;
         let fixture_metrics = crate::eval::compute_fixture_metrics(&fixture.fixture_id, per_query);
 
         let mut report = crate::eval::EvalRunReport::new(
@@ -6456,6 +6866,28 @@ where
         report.data_hash = crate::eval::compute_data_hash(&report);
         reports.push(report);
     }
+
+    Ok(reports)
+}
+
+fn handle_eval_run<W, E>(
+    cli: &Cli,
+    scenario_id: Option<&str>,
+    fixture_dir: Option<&std::path::Path>,
+    _science: bool,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let default_dir = std::path::PathBuf::from(crate::eval::DEFAULT_FIXTURE_DIR);
+    let dir = fixture_dir.unwrap_or(&default_dir);
+    let reports = match collect_eval_run_reports(scenario_id, dir) {
+        Ok(reports) => reports,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
 
     if cli.wants_json() {
         let json = if reports.len() == 1 {
@@ -6516,6 +6948,199 @@ where
     }
 
     ProcessExitCode::Success
+}
+
+fn handle_eval_report<W, E>(
+    cli: &Cli,
+    scenario_id: Option<&str>,
+    fixture_dir: Option<&std::path::Path>,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let default_dir = std::path::PathBuf::from(crate::eval::DEFAULT_FIXTURE_DIR);
+    let dir = fixture_dir.unwrap_or(&default_dir);
+    let reports = match collect_eval_run_reports(scenario_id, dir) {
+        Ok(reports) => reports,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let summary = eval_report_summary(&reports);
+    let data_hashes = reports
+        .iter()
+        .map(|report| {
+            serde_json::json!({
+                "fixtureId": report.fixture_id,
+                "fixtureFamily": report.fixture_family,
+                "dataHash": report.data_hash,
+            })
+        })
+        .collect::<Vec<_>>();
+    let first_failure = eval_report_first_failure(&reports);
+    let report_status = summary
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned();
+
+    if cli.wants_json() {
+        let json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": true,
+            "data": {
+                "command": "eval report",
+                "schema": "ee.eval.report_summary.v1",
+                "fixtureDir": dir.display().to_string(),
+                "scenarioFilter": scenario_id,
+                "status": report_status,
+                "fixtureCount": reports.len(),
+                "summary": summary,
+                "dataHashes": data_hashes,
+                "firstFailure": first_failure,
+                "reports": reports,
+            }
+        });
+        let _ = stdout.write_all(json.to_string().as_bytes());
+        let _ = stdout.write_all(b"\n");
+    } else {
+        let _ = writeln!(
+            stdout,
+            "Eval report: {}",
+            report_status.to_ascii_uppercase()
+        );
+        let _ = writeln!(stdout, "  Fixture dir: {}", dir.display());
+        let _ = writeln!(stdout, "  Fixtures: {}", reports.len());
+        for report in &reports {
+            let _ = writeln!(
+                stdout,
+                "  - {}: {} (data hash {})",
+                report.fixture_id,
+                report.status.as_str(),
+                report.data_hash
+            );
+        }
+        if let Some(first_failure) = first_failure {
+            let fixture = first_failure
+                .get("fixtureId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<unknown>");
+            let query = first_failure
+                .get("query")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<fixture>");
+            let _ = writeln!(stdout, "  First failure: {fixture} / {query}");
+        }
+    }
+
+    ProcessExitCode::Success
+}
+
+fn eval_report_summary(reports: &[crate::eval::EvalRunReport]) -> serde_json::Value {
+    let mut passed_count = 0_u32;
+    let mut failed_count = 0_u32;
+    let mut error_count = 0_u32;
+    let mut queries_evaluated = 0_u32;
+    let mut mean_precision_at_1 = 0.0;
+    let mut mean_precision_at_5 = 0.0;
+    let mut mean_ndcg_at_5 = 0.0;
+    let mut mean_mrr = 0.0;
+
+    for report in reports {
+        match report.status {
+            crate::eval::EvalRunStatus::Passed => passed_count += 1,
+            crate::eval::EvalRunStatus::Failed => failed_count += 1,
+            crate::eval::EvalRunStatus::Error => error_count += 1,
+            crate::eval::EvalRunStatus::Pending | crate::eval::EvalRunStatus::Running => {}
+        }
+        queries_evaluated = queries_evaluated.saturating_add(report.metrics.queries_evaluated);
+        mean_precision_at_1 += report.metrics.mean_precision_at_1;
+        mean_precision_at_5 += report.metrics.mean_precision_at_5;
+        mean_ndcg_at_5 += report.metrics.mean_ndcg_at_5;
+        mean_mrr += report.metrics.mean_mrr;
+    }
+
+    let fixture_count = reports.len() as f64;
+    if fixture_count > 0.0 {
+        mean_precision_at_1 /= fixture_count;
+        mean_precision_at_5 /= fixture_count;
+        mean_ndcg_at_5 /= fixture_count;
+        mean_mrr /= fixture_count;
+    }
+    let status = if error_count > 0 {
+        "error"
+    } else if failed_count > 0 {
+        "failed"
+    } else {
+        "passed"
+    };
+
+    serde_json::json!({
+        "status": status,
+        "passedCount": passed_count,
+        "failedCount": failed_count,
+        "errorCount": error_count,
+        "queriesEvaluated": queries_evaluated,
+        "meanPrecisionAt1": mean_precision_at_1,
+        "meanPrecisionAt5": mean_precision_at_5,
+        "meanNdcgAt5": mean_ndcg_at_5,
+        "meanMrr": mean_mrr,
+    })
+}
+
+fn eval_report_first_failure(reports: &[crate::eval::EvalRunReport]) -> Option<serde_json::Value> {
+    for report in reports {
+        if report.status == crate::eval::EvalRunStatus::Passed {
+            continue;
+        }
+        let query = report.metrics.per_query.iter().find(|query| {
+            query.precision_at_1 < 1.0 || query.recall_at_5 < 1.0 || query.mrr == 0.0
+        });
+        let reason_codes = eval_report_failure_reason_codes(report, query);
+        return Some(serde_json::json!({
+            "fixtureId": report.fixture_id,
+            "fixtureFamily": report.fixture_family,
+            "status": report.status.as_str(),
+            "dataHash": report.data_hash,
+            "query": query.map(|query| query.query.as_str()),
+            "expectedIds": query.map(|query| query.expected_ids.clone()).unwrap_or_default(),
+            "retrievedIds": query.map(|query| query.retrieved_ids.clone()).unwrap_or_default(),
+            "precisionAt1": query.map(|query| query.precision_at_1),
+            "recallAt5": query.map(|query| query.recall_at_5),
+            "mrr": query.map(|query| query.mrr),
+            "reasonCodes": reason_codes,
+        }));
+    }
+    None
+}
+
+fn eval_report_failure_reason_codes(
+    report: &crate::eval::EvalRunReport,
+    query: Option<&crate::eval::QueryMetrics>,
+) -> Vec<&'static str> {
+    let mut codes = Vec::new();
+    match report.status {
+        crate::eval::EvalRunStatus::Failed => codes.push("fixture_status_failed"),
+        crate::eval::EvalRunStatus::Error => codes.push("fixture_status_error"),
+        crate::eval::EvalRunStatus::Pending => codes.push("fixture_status_pending"),
+        crate::eval::EvalRunStatus::Running => codes.push("fixture_status_running"),
+        crate::eval::EvalRunStatus::Passed => {}
+    }
+    if let Some(query) = query {
+        if query.precision_at_1 < 1.0 {
+            codes.push("top_result_not_relevant");
+        }
+        if query.recall_at_5 < 1.0 {
+            codes.push("expected_memory_missing_from_top5");
+        }
+        if query.mrr == 0.0 {
+            codes.push("no_relevant_result_returned");
+        }
+    } else if report.metrics.queries_evaluated == 0 {
+        codes.push("no_queries_evaluated");
+    }
+    codes
 }
 
 fn handle_eval_pack_quality_run<W, E>(
@@ -7816,6 +8441,109 @@ where
     }
 }
 
+fn handle_export<W, E>(
+    cli: &Cli,
+    args: &ExportArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = BackupCreateOptions {
+        workspace_path,
+        database_path: args.database.clone(),
+        output_dir: args.output_dir.clone(),
+        label: args.label.clone(),
+        redaction_level: args.redaction.to_model(),
+        dry_run: args.dry_run,
+    };
+
+    match create_backup(&options) {
+        Ok(report) => write_export_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_export_report<W>(cli: &Cli, report: &BackupCreateReport, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &export_report_human(report))
+        }
+        output::Renderer::Toon => {
+            let data = export_report_data(report);
+            write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&data.to_string()) + "\n"),
+            )
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let data = export_report_data(report);
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": data,
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn export_report_human(report: &BackupCreateReport) -> String {
+    let prefix = if report.dry_run { "DRY RUN: " } else { "" };
+    format!(
+        "{prefix}export {status}: {records} records ({memories} memories)\n  records: {records_path}\n  manifest: {manifest_path}\n",
+        status = report.status,
+        records = report.total_records,
+        memories = report.memory_count,
+        records_path = report.records_path,
+        manifest_path = report.manifest_path,
+    )
+}
+
+fn export_report_data(report: &BackupCreateReport) -> serde_json::Value {
+    serde_json::json!({
+        "schema": EXPORT_REPORT_SCHEMA_V1,
+        "command": "export",
+        "version": env!("CARGO_PKG_VERSION"),
+        "status": report.status,
+        "dryRun": report.dry_run,
+        "workspacePath": report.workspace_path,
+        "workspaceId": report.workspace_id,
+        "databasePath": report.database_path,
+        "outputPath": report.backup_path,
+        "manifestPath": report.manifest_path,
+        "recordsPath": report.records_path,
+        "manifestHash": report.manifest_hash,
+        "recordsHash": report.records_hash,
+        "redactionLevel": report.redaction_level.as_str(),
+        "exportScope": report.export_scope.as_str(),
+        "counts": {
+            "totalRecords": report.total_records,
+            "memoryRecords": report.memory_count,
+            "linkRecords": report.link_count,
+            "tagRecords": report.tag_count,
+            "auditRecords": report.audit_count,
+        },
+        "provenance": {
+            "source": "backup_jsonl_export",
+            "backupSchema": report.schema,
+            "backupId": report.backup_id,
+        },
+        "verificationStatus": report.verification_status,
+        "artifacts": report.artifacts.iter().map(|artifact| artifact.data_json()).collect::<Vec<_>>(),
+        "degraded": report.degraded.iter().map(|degraded| degraded.data_json()).collect::<Vec<_>>(),
+    })
+}
+
 fn handle_backup_list<W, E>(
     cli: &Cli,
     args: &BackupListArgs,
@@ -9014,6 +9742,60 @@ where
                     report.index_exists,
                     report.db_memory_count,
                     report.db_session_count
+                ),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let json = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": true,
+                    "data": report.data_json(),
+                });
+                write_stdout(stdout, &(json.to_string() + "\n"))
+            }
+        },
+        Err(error) => {
+            let domain_error = DomainError::SearchIndex {
+                message: error.to_string(),
+                repair: error.repair_hint().map(str::to_string),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn handle_index_vacuum<W, E>(
+    cli: &Cli,
+    args: &IndexVacuumArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = IndexVacuumOptions {
+        workspace_path,
+        database_path: args.database.clone(),
+        index_dir: args.index_dir.clone(),
+    };
+
+    match get_index_vacuum_report(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &format!(
+                    "INDEX_VACUUM|{}|{}|{}|{}\n",
+                    report.status.as_str(),
+                    report.candidate_count,
+                    report.reclaimable_bytes,
+                    report.lock.held
                 ),
             ),
             output::Renderer::Json
@@ -14456,6 +15238,121 @@ where
     }
 }
 
+fn handle_memory_expire<W, E>(
+    cli: &Cli,
+    args: &MemoryExpireArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let options = ExpireMemoryOptions {
+        workspace_path: &workspace,
+        database_path: &database_path,
+        memory_id: &args.memory_id,
+        reason: args.reason.as_deref(),
+        actor: args.actor.as_deref(),
+        dry_run: args.dry_run,
+        include_tombstoned: args.include_tombstoned,
+    };
+
+    let report = match expire_memory(&options) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_output())
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
+    }
+}
+
+fn handle_memory_link<W, E>(
+    cli: &Cli,
+    args: &MemoryLinkArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let mode = match memory_link_mode_from_args(args) {
+        Ok(mode) => mode,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    let options = MemoryLinkOptions {
+        workspace_path: &workspace,
+        database_path: &database_path,
+        memory_id: &args.memory_id,
+        mode,
+        actor: args.actor.as_deref(),
+        dry_run: args.dry_run,
+        include_tombstoned: args.include_tombstoned,
+    };
+
+    let report = match update_memory_link(&options) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_output())
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
+    }
+}
+
 fn handle_memory_show<W, E>(
     cli: &Cli,
     args: &MemoryShowArgs,
@@ -14665,6 +15562,66 @@ where
     }
 }
 
+fn handle_memory_tags<W, E>(
+    cli: &Cli,
+    args: &MemoryTagsArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let mode = match memory_tags_mode_from_args(args) {
+        Ok(mode) => mode,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    let options = MemoryTagsOptions {
+        workspace_path: &workspace,
+        database_path: &database_path,
+        memory_id: &args.memory_id,
+        mode,
+        actor: args.actor.as_deref(),
+        dry_run: args.dry_run,
+        include_tombstoned: args.include_tombstoned,
+    };
+
+    let report = match update_memory_tags(&options) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_output())
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
+    }
+}
+
 fn handle_workflow_close<W, E>(
     cli: &Cli,
     args: &WorkflowCloseArgs,
@@ -14732,6 +15689,119 @@ fn parse_memory_revise_tags(raw: &str) -> Vec<String> {
         .filter(|tag| !tag.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+fn parse_memory_tags_values(values: &[String]) -> Result<Vec<String>, DomainError> {
+    let mut tags = BTreeSet::new();
+    for value in values {
+        for raw in value
+            .split(',')
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+        {
+            let tag = Tag::parse(raw).map_err(|error| DomainError::Usage {
+                message: error.to_string(),
+                repair: Some("Use lowercase tag names such as --add release,testing.".to_owned()),
+            })?;
+            tags.insert(tag.to_string());
+        }
+    }
+    Ok(tags.into_iter().collect())
+}
+
+fn parse_memory_tags_value(value: &str) -> Result<Vec<String>, DomainError> {
+    parse_memory_tags_values(&[value.to_owned()])
+}
+
+fn parse_memory_link_relation(raw: &str) -> Result<crate::db::MemoryLinkRelation, DomainError> {
+    crate::db::MemoryLinkRelation::parse(raw).ok_or_else(|| DomainError::Usage {
+        message: format!("Unknown memory link relation: {raw}"),
+        repair: Some(
+            "Use one of supports, contradicts, derived_from, supersedes, related, co_tag, co_mention."
+                .to_owned(),
+        ),
+    })
+}
+
+fn parse_memory_link_source(raw: &str) -> Result<crate::db::MemoryLinkSource, DomainError> {
+    crate::db::MemoryLinkSource::parse(raw).ok_or_else(|| DomainError::Usage {
+        message: format!("Unknown memory link source: {raw}"),
+        repair: Some("Use one of agent, auto, import, maintenance, human.".to_owned()),
+    })
+}
+
+fn parse_memory_link_score(label: &str, raw: &str) -> Result<f32, DomainError> {
+    match raw.parse::<f32>() {
+        Ok(value) if value.is_finite() && (0.0..=1.0).contains(&value) => Ok(value),
+        _ => Err(DomainError::Usage {
+            message: format!(
+                "Invalid memory link {label}: expected a finite number from 0.0 to 1.0"
+            ),
+            repair: Some(format!("Use --{label} 0.8.")),
+        }),
+    }
+}
+
+fn memory_link_mode_from_args(args: &MemoryLinkArgs) -> Result<MemoryLinkMode, DomainError> {
+    match &args.target_memory_id {
+        Some(target_memory_id) => {
+            let relation = args.relation.as_deref().ok_or_else(|| DomainError::Usage {
+                message: "Creating a memory link requires --relation.".to_owned(),
+                repair: Some(
+                    "Use ee memory link <source> <target> --relation supports.".to_owned(),
+                ),
+            })?;
+            Ok(MemoryLinkMode::Create {
+                target_memory_id: target_memory_id.clone(),
+                relation: parse_memory_link_relation(relation)?,
+                weight: parse_memory_link_score("weight", &args.weight)?,
+                confidence: parse_memory_link_score("confidence", &args.confidence)?,
+                directed: !args.undirected,
+                evidence_count: args.evidence_count,
+                source: parse_memory_link_source(&args.source)?,
+                metadata_json: args.metadata.clone(),
+            })
+        }
+        None => Ok(MemoryLinkMode::List {
+            relation: args
+                .relation
+                .as_deref()
+                .map(parse_memory_link_relation)
+                .transpose()?,
+        }),
+    }
+}
+
+fn memory_tags_mode_from_args(args: &MemoryTagsArgs) -> Result<MemoryTagsMode, DomainError> {
+    let patch_requested = !args.add.is_empty() || !args.remove.is_empty();
+    let set_requested = args.set.is_some();
+    let exclusive_count =
+        u8::from(patch_requested) + u8::from(set_requested) + u8::from(args.clear);
+
+    if exclusive_count > 1 {
+        return Err(DomainError::Usage {
+            message: "Choose only one memory tag mutation mode: --add/--remove, --set, or --clear."
+                .to_owned(),
+            repair: Some("Use ee memory tags <id> --add release,testing.".to_owned()),
+        });
+    }
+
+    if patch_requested {
+        return Ok(MemoryTagsMode::Patch {
+            add: parse_memory_tags_values(&args.add)?,
+            remove: parse_memory_tags_values(&args.remove)?,
+        });
+    }
+
+    if let Some(tags) = &args.set {
+        return Ok(MemoryTagsMode::Set(parse_memory_tags_value(tags)?));
+    }
+
+    if args.clear {
+        return Ok(MemoryTagsMode::Clear);
+    }
+
+    Ok(MemoryTagsMode::List)
 }
 
 fn memory_revise_error_to_domain(report: &MemoryReviseReport, memory_id: &str) -> DomainError {
@@ -17797,6 +18867,195 @@ impl MemoryReviseReport {
     }
 }
 
+impl MemoryExpireReport {
+    #[must_use]
+    pub fn human_output(&self) -> String {
+        if self.dry_run {
+            return format!(
+                "DRY RUN: Would expire memory {}\n  Status: {}\n",
+                self.memory_id, self.status
+            );
+        }
+
+        let mut output = format!(
+            "Memory expire: {}\n  Status: {}\n  Persisted: {}\n",
+            self.memory_id, self.status, self.persisted
+        );
+        if let Some(audit_id) = &self.audit_id {
+            output.push_str(&format!("  Audit: {audit_id}\n"));
+        }
+        if let Some(index_job_id) = &self.index_job_id {
+            output.push_str(&format!("  Index job: {index_job_id}\n"));
+        }
+        output
+    }
+
+    #[must_use]
+    pub fn toon_output(&self) -> String {
+        format!(
+            "memory_expire|{}|{}|{}|{}",
+            self.memory_id, self.status, self.persisted, self.index_status
+        )
+    }
+
+    #[must_use]
+    pub fn json_output(&self) -> String {
+        serde_json::json!({
+            "schema": "ee.response.v1",
+            "success": true,
+            "data": {
+                "command": "memory expire",
+                "schema": self.schema,
+                "version": self.version,
+                "memory_id": self.memory_id,
+                "workspace_id": self.workspace_id,
+                "status": self.status,
+                "dry_run": self.dry_run,
+                "persisted": self.persisted,
+                "changed": self.changed,
+                "previous_tombstoned_at": self.previous_tombstoned_at,
+                "tombstoned_at": self.tombstoned_at,
+                "audit_id": self.audit_id,
+                "index_job_id": self.index_job_id,
+                "index_status": self.index_status,
+                "idempotency": self.idempotency,
+            }
+        })
+        .to_string()
+    }
+}
+
+impl MemoryLinkReport {
+    #[must_use]
+    pub fn human_output(&self) -> String {
+        let mut output = format!(
+            "Memory links: {}\n  Status: {}\n  Links: {}\n",
+            self.memory_id,
+            self.status,
+            self.links.len()
+        );
+        if self.dry_run {
+            output.push_str("  Dry run: true\n");
+        }
+        if let Some(link) = &self.link {
+            output.push_str(&format!(
+                "  Link: {} -> {} ({})\n",
+                link.source_memory_id, link.target_memory_id, link.relation
+            ));
+        }
+        if let Some(audit_id) = &self.audit_id {
+            output.push_str(&format!("  Audit: {audit_id}\n"));
+        }
+        output
+    }
+
+    #[must_use]
+    pub fn toon_output(&self) -> String {
+        format!(
+            "memory_link|{}|{}|{}|{}",
+            self.memory_id,
+            self.status,
+            self.persisted,
+            self.links.len()
+        )
+    }
+
+    #[must_use]
+    pub fn json_output(&self) -> String {
+        serde_json::json!({
+            "schema": "ee.response.v1",
+            "success": true,
+            "data": {
+                "command": "memory link",
+                "schema": self.schema,
+                "version": self.version,
+                "memory_id": self.memory_id,
+                "workspace_id": self.workspace_id,
+                "status": self.status,
+                "dry_run": self.dry_run,
+                "persisted": self.persisted,
+                "changed": self.changed,
+                "links": self.links,
+                "link": self.link,
+                "audit_id": self.audit_id,
+                "idempotency": self.idempotency,
+            }
+        })
+        .to_string()
+    }
+}
+
+impl MemoryTagsReport {
+    #[must_use]
+    pub fn human_output(&self) -> String {
+        let tags = if self.tags.is_empty() {
+            "(none)".to_owned()
+        } else {
+            self.tags.join(", ")
+        };
+
+        let mut output = format!(
+            "Memory tags: {}\n  Status: {}\n  Tags: {}\n",
+            self.memory_id, self.status, tags
+        );
+        if self.dry_run {
+            output.push_str("  Dry run: true\n");
+        }
+        if !self.added_tags.is_empty() {
+            output.push_str(&format!("  Added: {}\n", self.added_tags.join(", ")));
+        }
+        if !self.removed_tags.is_empty() {
+            output.push_str(&format!("  Removed: {}\n", self.removed_tags.join(", ")));
+        }
+        if !self.audit_ids.is_empty() {
+            output.push_str(&format!("  Audit: {}\n", self.audit_ids.join(", ")));
+        }
+        if let Some(index_job_id) = &self.index_job_id {
+            output.push_str(&format!("  Index job: {index_job_id}\n"));
+        }
+        output
+    }
+
+    #[must_use]
+    pub fn toon_output(&self) -> String {
+        format!(
+            "memory_tags|{}|{}|{}|{}",
+            self.memory_id,
+            self.status,
+            self.persisted,
+            self.tags.join(",")
+        )
+    }
+
+    #[must_use]
+    pub fn json_output(&self) -> String {
+        serde_json::json!({
+            "schema": "ee.response.v1",
+            "success": true,
+            "data": {
+                "command": "memory tags",
+                "schema": self.schema,
+                "version": self.version,
+                "memory_id": self.memory_id,
+                "workspace_id": self.workspace_id,
+                "status": self.status,
+                "dry_run": self.dry_run,
+                "persisted": self.persisted,
+                "changed": self.changed,
+                "previous_tags": self.previous_tags,
+                "tags": self.tags,
+                "added_tags": self.added_tags,
+                "removed_tags": self.removed_tags,
+                "audit_ids": self.audit_ids,
+                "index_job_id": self.index_job_id,
+                "index_status": self.index_status,
+                "idempotency": self.idempotency,
+            }
+        })
+        .to_string()
+    }
+}
+
 impl RememberMemoryReport {
     #[must_use]
     pub fn human_output(&self) -> String {
@@ -18423,6 +19682,169 @@ where
     }
 }
 
+fn handle_playbook_list<W, E>(
+    cli: &Cli,
+    args: &PlaybookListArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = PlaybookListOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        include_tombstoned: args.include_tombstoned,
+        limit: args.limit,
+        offset: args.offset,
+    };
+
+    match list_playbook_rules(&options) {
+        Ok(report) => write_playbook_list_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_playbook_list_report<W>(
+    cli: &Cli,
+    report: &PlaybookListReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&report.data_json()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::ResponseEnvelope::success()
+                .data_raw(&report.data_json())
+                .finish()
+                + "\n"),
+        ),
+    }
+}
+
+fn handle_playbook_export<W, E>(
+    cli: &Cli,
+    args: &PlaybookExportArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = PlaybookExportOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        output_path: &args.output_path,
+        include_tombstoned: args.include_tombstoned,
+        limit: args.limit,
+        dry_run: args.dry_run,
+    };
+
+    match export_playbook(&options) {
+        Ok(report) => write_playbook_export_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_playbook_export_report<W>(
+    cli: &Cli,
+    report: &PlaybookExportReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&report.data_json()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::ResponseEnvelope::success()
+                .data_raw(&report.data_json())
+                .finish()
+                + "\n"),
+        ),
+    }
+}
+
+fn handle_playbook_import<W, E>(
+    cli: &Cli,
+    args: &PlaybookImportArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = PlaybookImportOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        source_path: &args.source_path,
+        dry_run: !args.apply,
+        actor: args.actor.as_deref(),
+    };
+
+    match import_playbook(&options) {
+        Ok(report) => write_playbook_import_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_playbook_import_report<W>(
+    cli: &Cli,
+    report: &PlaybookImportReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&report.data_json()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::ResponseEnvelope::success()
+                .data_raw(&report.data_json())
+                .finish()
+                + "\n"),
+        ),
+    }
+}
+
 fn handle_rule_add<W, E>(
     cli: &Cli,
     args: &RuleAddArgs,
@@ -18570,6 +19992,63 @@ where
     }
 }
 
+fn handle_rule_mark<W, E>(
+    cli: &Cli,
+    args: &RuleMarkArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let options = RuleMarkOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        rule_id: &args.rule_id,
+        trigger: &args.trigger,
+        evidence: RuleMarkEvidenceOptions {
+            helpful_outcomes: args.helpful_outcomes,
+            harmful_outcomes: args.harmful_outcomes,
+            distinct_harmful_sources: args.distinct_harmful_sources,
+            manual_curation_approved: args.manual_curation_approved,
+            intervening_helpful_from_harmful_sources: args.intervening_helpful_from_harmful_sources,
+            validation_passes: args.validation_passes,
+            validation_contradictions: args.validation_contradictions,
+            review_approved: args.review_approved,
+            superseding_rule_id: args.superseding_rule.as_deref(),
+        },
+        dry_run: args.dry_run,
+        actor: args.actor.as_deref(),
+    };
+
+    match mark_rule(&options) {
+        Ok(report) => write_rule_mark_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_rule_mark_report<W>(cli: &Cli, report: &RuleMarkReport, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_rule_mark_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_rule_mark_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_rule_mark_json(report) + "\n"))
+        }
+    }
+}
+
 fn handle_rule_protect<W, E>(
     cli: &Cli,
     args: &RuleProtectArgs,
@@ -18616,6 +20095,83 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             write_stdout(stdout, &(output::render_rule_protect_json(report) + "\n"))
+        }
+    }
+}
+
+fn handle_rule_update<W, E>(
+    cli: &Cli,
+    args: &RuleUpdateArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let protected = match (args.protect, args.unprotect) {
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        _ => None,
+    };
+    let tags = if args.tags.is_empty() {
+        None
+    } else {
+        Some(args.tags.as_slice())
+    };
+    let source_memory_ids = if args.source_memory_ids.is_empty() {
+        None
+    } else {
+        Some(args.source_memory_ids.as_slice())
+    };
+    let options = RuleUpdateOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        rule_id: &args.rule_id,
+        content: args.content.as_deref(),
+        scope: args.scope.as_deref(),
+        scope_pattern: args.scope_pattern.as_deref(),
+        clear_scope_pattern: args.clear_scope_pattern,
+        trust_class: args.trust_class.as_deref(),
+        confidence: args.confidence,
+        utility: args.utility,
+        importance: args.importance,
+        protected,
+        tags,
+        clear_tags: args.clear_tags,
+        source_memory_ids,
+        clear_source_memory_ids: args.clear_source_memories,
+        dry_run: args.dry_run,
+        actor: args.actor.as_deref(),
+    };
+
+    match update_rule(&options) {
+        Ok(report) => write_rule_update_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_rule_update_report<W>(
+    cli: &Cli,
+    report: &RuleUpdateReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_rule_update_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_rule_update_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_rule_update_json(report) + "\n"))
         }
     }
 }
@@ -22972,6 +24528,7 @@ const COMMAND_NAMES: &[&str] = &[
     "demo",
     "economy",
     "eval",
+    "export",
     "focus",
     "graph",
     "handoff",
@@ -23076,7 +24633,7 @@ const LEARN_SUBCOMMANDS: &[&str] = &[
 ];
 const LEARN_EXPERIMENT_SUBCOMMANDS: &[&str] = &["propose", "run"];
 const MAINTENANCE_SUBCOMMANDS: &[&str] = &["run", "status"];
-const MEMORY_SUBCOMMANDS: &[&str] = &["list", "show", "history"];
+const MEMORY_SUBCOMMANDS: &[&str] = &["expire", "list", "show", "history", "revise", "tags"];
 const MCP_SUBCOMMANDS: &[&str] = &["manifest"];
 const MODEL_SUBCOMMANDS: &[&str] = &["status", "list"];
 const OUTCOME_QUARANTINE_SUBCOMMANDS: &[&str] = &["list", "release"];
@@ -23084,7 +24641,7 @@ const PERF_SUBCOMMANDS: &[&str] = &["compare", "budget"];
 const PERF_BUDGET_SUBCOMMANDS: &[&str] = &["check"];
 const PLAN_SUBCOMMANDS: &[&str] = &["goal", "recipe", "explain"];
 const PLAN_RECIPE_SUBCOMMANDS: &[&str] = &["list", "show"];
-const PLAYBOOK_SUBCOMMANDS: &[&str] = &["extract"];
+const PLAYBOOK_SUBCOMMANDS: &[&str] = &["extract", "list", "export", "import"];
 const PREFLIGHT_SUBCOMMANDS: &[&str] = &["run", "show", "close"];
 const PROFILE_SUBCOMMANDS: &[&str] = &["config"];
 const PROFILE_CONFIG_SUBCOMMANDS: &[&str] = &["plan", "apply"];
@@ -23094,7 +24651,7 @@ const PROCEDURE_SUBCOMMANDS: &[&str] = &[
 const RECORDER_SUBCOMMANDS: &[&str] = &["start", "event", "finish", "tail", "import"];
 const REHEARSE_SUBCOMMANDS: &[&str] = &["plan", "run", "inspect", "promote-plan"];
 const REVIEW_SUBCOMMANDS: &[&str] = &["session"];
-const RULE_SUBCOMMANDS: &[&str] = &["add", "list", "show", "protect"];
+const RULE_SUBCOMMANDS: &[&str] = &["add", "list", "show", "mark", "protect", "update"];
 const SCHEMA_SUBCOMMANDS: &[&str] = &["list", "export"];
 const SITUATION_SUBCOMMANDS: &[&str] = &["classify", "compare", "link", "show", "explain"];
 const SUPPORT_SUBCOMMANDS: &[&str] = &["bundle", "inspect"];
@@ -23240,8 +24797,10 @@ impl NormalizedInvocation {
                 },
                 Command::Eval(eval) => match eval {
                     EvalCommand::Run { .. } => "eval run".to_string(),
+                    EvalCommand::Report { .. } => "eval report".to_string(),
                     EvalCommand::List => "eval list".to_string(),
                 },
+                Command::Export(_) => "export".to_string(),
                 Command::Focus(focus) => match focus {
                     FocusCommand::Show(_) => "focus show".to_string(),
                     FocusCommand::Set(_) => "focus set".to_string(),
@@ -23287,6 +24846,7 @@ impl NormalizedInvocation {
                     IndexCommand::Rebuild(_) => "index rebuild".to_string(),
                     IndexCommand::Reembed(_) => "index reembed".to_string(),
                     IndexCommand::Status(_) => "index status".to_string(),
+                    IndexCommand::Vacuum(_) => "index vacuum".to_string(),
                 },
                 Command::Introspect => "introspect".to_string(),
                 Command::Lab(lab) => match lab {
@@ -23308,10 +24868,13 @@ impl NormalizedInvocation {
                     LearnCommand::Summary(_) => "learn summary".to_string(),
                 },
                 Command::Memory(mem) => match mem {
+                    MemoryCommand::Expire(_) => "memory expire".to_string(),
+                    MemoryCommand::Link(_) => "memory link".to_string(),
                     MemoryCommand::List(_) => "memory list".to_string(),
                     MemoryCommand::Show(_) => "memory show".to_string(),
                     MemoryCommand::History(_) => "memory history".to_string(),
                     MemoryCommand::Revise(_) => "memory revise".to_string(),
+                    MemoryCommand::Tags(_) => "memory tags".to_string(),
                 },
                 Command::Mcp(mcp) => match mcp {
                     McpCommand::Manifest => "mcp manifest".to_string(),
@@ -23357,6 +24920,9 @@ impl NormalizedInvocation {
                 },
                 Command::Playbook(playbook) => match playbook {
                     PlaybookCommand::Extract(_) => "playbook extract".to_string(),
+                    PlaybookCommand::List(_) => "playbook list".to_string(),
+                    PlaybookCommand::Export(_) => "playbook export".to_string(),
+                    PlaybookCommand::Import(_) => "playbook import".to_string(),
                 },
                 Command::Profile(profile) => match profile {
                     ProfileCommand::Config(ProfileConfigCommand::Plan(_)) => {
@@ -23406,7 +24972,9 @@ impl NormalizedInvocation {
                     RuleCommand::Add(_) => "rule add".to_string(),
                     RuleCommand::List(_) => "rule list".to_string(),
                     RuleCommand::Show(_) => "rule show".to_string(),
+                    RuleCommand::Mark(_) => "rule mark".to_string(),
                     RuleCommand::Protect(_) => "rule protect".to_string(),
+                    RuleCommand::Update(_) => "rule update".to_string(),
                 },
                 Command::Schema(schema) => match schema {
                     SchemaCommand::List => "schema list".to_string(),
@@ -30659,6 +32227,43 @@ mod tests {
     }
 
     #[test]
+    fn rule_mark_command_parses_lifecycle_evidence() -> TestResult {
+        let rule_id = crate::models::RuleId::from_uuid(uuid::Uuid::from_u128(11)).to_string();
+        let replacement = crate::models::RuleId::from_uuid(uuid::Uuid::from_u128(12)).to_string();
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "rule",
+            "mark",
+            rule_id.as_str(),
+            "--trigger",
+            "supersede",
+            "--helpful-outcomes",
+            "2",
+            "--superseding-rule",
+            replacement.as_str(),
+            "--review-approved",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse rule mark: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Rule(RuleCommand::Mark(ref args))) => {
+                ensure_equal(&args.rule_id, &rule_id, "rule id")?;
+                ensure_equal(&args.trigger, &"supersede".to_string(), "trigger")?;
+                ensure_equal(&args.helpful_outcomes, &2, "helpful outcomes")?;
+                ensure_equal(
+                    &args.superseding_rule,
+                    &Some(replacement),
+                    "superseding rule",
+                )?;
+                ensure_equal(&args.review_approved, &true, "review approved")?;
+                ensure_equal(&args.dry_run, &true, "dry run")
+            }
+            _ => Err("expected Rule Mark command".to_string()),
+        }
+    }
+
+    #[test]
     fn rule_protect_command_parses_unprotect_and_dry_run() -> TestResult {
         let rule_id = crate::models::RuleId::from_uuid(uuid::Uuid::from_u128(10)).to_string();
         let parsed = Cli::try_parse_from([
@@ -30678,6 +32283,56 @@ mod tests {
                 ensure_equal(&args.dry_run, &true, "dry run")
             }
             _ => Err("expected Rule Protect command".to_string()),
+        }
+    }
+
+    #[test]
+    fn rule_update_command_parses_metadata_replacements() -> TestResult {
+        let rule_id = crate::models::RuleId::from_uuid(uuid::Uuid::from_u128(13)).to_string();
+        let source = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(14)).to_string();
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "rule",
+            "update",
+            rule_id.as_str(),
+            "--content",
+            "Run cargo clippy before release.",
+            "--scope",
+            "directory",
+            "--scope-pattern",
+            "src/**",
+            "--confidence",
+            "0.8",
+            "--protect",
+            "--tag",
+            "release,ci",
+            "--source-memory",
+            source.as_str(),
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse rule update: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Rule(RuleCommand::Update(ref args))) => {
+                ensure_equal(&args.rule_id, &rule_id, "rule id")?;
+                ensure_equal(
+                    &args.content,
+                    &Some("Run cargo clippy before release.".to_string()),
+                    "content",
+                )?;
+                ensure_equal(&args.scope, &Some("directory".to_string()), "scope")?;
+                ensure_equal(
+                    &args.scope_pattern,
+                    &Some("src/**".to_string()),
+                    "scope pattern",
+                )?;
+                ensure_equal(&args.confidence, &Some(0.8), "confidence")?;
+                ensure_equal(&args.protect, &true, "protect")?;
+                ensure_equal(&args.tags, &vec!["release,ci".to_string()], "tags")?;
+                ensure_equal(&args.source_memory_ids, &vec![source], "sources")?;
+                ensure_equal(&args.dry_run, &true, "dry run")
+            }
+            _ => Err("expected Rule Update command".to_string()),
         }
     }
 

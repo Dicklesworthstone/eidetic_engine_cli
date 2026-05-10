@@ -68,7 +68,9 @@ pub mod audit_actions {
     pub const CURATION_CANDIDATE_MERGE: &str = "curation_candidate.merge";
     pub const CURATION_CANDIDATE_DISPOSITION: &str = "curation_candidate.disposition";
     pub const RULE_CREATE: &str = "rule.create";
+    pub const RULE_MARK: &str = "rule.mark";
     pub const RULE_PROTECT: &str = "rule.protect";
+    pub const RULE_UPDATE: &str = "rule.update";
     pub const RATIONALE_TRACE_CREATE: &str = "rationale_trace.create";
     pub const TRIPWIRE_CHECK: &str = "tripwire.check";
     pub const TRIPWIRE_CREATE: &str = "tripwire.create";
@@ -8083,6 +8085,37 @@ pub struct CreateProceduralRuleInput {
     pub tags: Vec<String>,
 }
 
+/// Mutable procedural rule fields applied by `ee rule update`.
+#[derive(Debug, Clone)]
+pub struct UpdateProceduralRuleInput {
+    pub workspace_id: String,
+    pub content: String,
+    pub confidence: f32,
+    pub utility: f32,
+    pub importance: f32,
+    pub trust_class: String,
+    pub scope: String,
+    pub scope_pattern: Option<String>,
+    pub protected: bool,
+    pub source_memory_ids: Option<Vec<String>>,
+    pub tags: Option<Vec<String>>,
+    pub updated_at: String,
+}
+
+/// Mutable procedural rule lifecycle state applied by `ee rule mark`.
+#[derive(Debug, Clone)]
+pub struct UpdateProceduralRuleLifecycleInput {
+    pub workspace_id: String,
+    pub maturity: String,
+    pub confidence: f32,
+    pub utility: f32,
+    pub positive_feedback_delta: u32,
+    pub negative_feedback_delta: u32,
+    pub last_validated_at: Option<String>,
+    pub superseded_by: Option<String>,
+    pub updated_at: String,
+}
+
 /// A stored procedural rule row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredProceduralRule {
@@ -8714,6 +8747,103 @@ impl DbConnection {
             ],
         )?;
         Ok(affected > 0)
+    }
+
+    /// Apply lifecycle evidence to one active procedural rule.
+    pub fn update_procedural_rule_lifecycle(
+        &self,
+        rule_id: &str,
+        input: &UpdateProceduralRuleLifecycleInput,
+    ) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE procedural_rules SET maturity = ?1, confidence = ?2, utility = ?3, positive_feedback_count = positive_feedback_count + ?4, negative_feedback_count = negative_feedback_count + ?5, last_validated_at = COALESCE(?6, last_validated_at), superseded_by = ?7, updated_at = ?8 WHERE id = ?9 AND workspace_id = ?10 AND tombstoned_at IS NULL",
+            &[
+                Value::Text(input.maturity.clone()),
+                Value::Float(input.confidence),
+                Value::Float(input.utility),
+                Value::BigInt(i64::from(input.positive_feedback_delta)),
+                Value::BigInt(i64::from(input.negative_feedback_delta)),
+                input
+                    .last_validated_at
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .superseded_by
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(input.updated_at.clone()),
+                Value::Text(rule_id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Update mutable procedural rule metadata and optional evidence/tag sets.
+    pub fn update_procedural_rule_metadata(
+        &self,
+        rule_id: &str,
+        input: &UpdateProceduralRuleInput,
+    ) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE procedural_rules SET content = ?1, confidence = ?2, utility = ?3, importance = ?4, trust_class = ?5, scope = ?6, scope_pattern = ?7, protected = ?8, updated_at = ?9 WHERE id = ?10 AND workspace_id = ?11 AND tombstoned_at IS NULL",
+            &[
+                Value::Text(input.content.clone()),
+                Value::Float(input.confidence),
+                Value::Float(input.utility),
+                Value::Float(input.importance),
+                Value::Text(input.trust_class.clone()),
+                Value::Text(input.scope.clone()),
+                input
+                    .scope_pattern
+                    .as_ref()
+                    .map_or(Value::Null, |pattern| Value::Text(pattern.clone())),
+                bool_value(input.protected),
+                Value::Text(input.updated_at.clone()),
+                Value::Text(rule_id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+            ],
+        )?;
+        if affected == 0 {
+            return Ok(false);
+        }
+
+        if let Some(source_memory_ids) = &input.source_memory_ids {
+            self.execute_for(
+                DbOperation::Execute,
+                "DELETE FROM rule_source_memories WHERE rule_id = ?1",
+                &[Value::Text(rule_id.to_string())],
+            )?;
+            for memory_id in source_memory_ids {
+                self.execute_for(
+                    DbOperation::Execute,
+                    "INSERT INTO rule_source_memories (rule_id, memory_id) VALUES (?1, ?2)",
+                    &[
+                        Value::Text(rule_id.to_string()),
+                        Value::Text(memory_id.clone()),
+                    ],
+                )?;
+            }
+        }
+
+        if let Some(tags) = &input.tags {
+            self.execute_for(
+                DbOperation::Execute,
+                "DELETE FROM rule_tags WHERE rule_id = ?1",
+                &[Value::Text(rule_id.to_string())],
+            )?;
+            for tag in tags {
+                self.execute_for(
+                    DbOperation::Execute,
+                    "INSERT INTO rule_tags (rule_id, tag) VALUES (?1, ?2)",
+                    &[Value::Text(rule_id.to_string()), Value::Text(tag.clone())],
+                )?;
+            }
+        }
+
+        Ok(true)
     }
 
     /// Count protected active procedural rules in a workspace.

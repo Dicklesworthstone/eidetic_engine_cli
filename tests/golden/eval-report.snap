@@ -1,0 +1,159 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "command": "eval report",
+    "schema": "ee.eval.report_summary.v1",
+    "fixtureDir": "<FIXTURE_DIR>",
+    "scenarioFilter": "fx.release_failure.v1",
+    "status": "failed",
+    "fixtureCount": 1,
+    "summary": {
+      "status": "failed",
+      "passedCount": 0,
+      "failedCount": 1,
+      "errorCount": 0,
+      "queriesEvaluated": 5,
+      "meanPrecisionAt1": 0.4,
+      "meanPrecisionAt5": 0.6,
+      "meanNdcgAt5": 0.7785578521428744,
+      "meanMrr": 0.7
+    },
+    "dataHashes": [
+      {
+        "fixtureId": "fx.release_failure.v1",
+        "fixtureFamily": "release_failure",
+        "dataHash": "[data_hash]"
+      }
+    ],
+    "firstFailure": {
+      "fixtureId": "fx.release_failure.v1",
+      "fixtureFamily": "release_failure",
+      "status": "failed",
+      "dataHash": "[data_hash]",
+      "query": "clippy before release",
+      "expectedIds": [
+        "mem_00000000000000000000000101"
+      ],
+      "retrievedIds": [
+        "mem_00000000000000000000000102",
+        "mem_00000000000000000000000101"
+      ],
+      "precisionAt1": 0.0,
+      "recallAt5": 1.0,
+      "mrr": 0.5,
+      "reasonCodes": [
+        "fixture_status_failed",
+        "top_result_not_relevant"
+      ]
+    },
+    "reports": [
+      {
+        "schema": "ee.eval.report.v1",
+        "fixture_id": "fx.release_failure.v1",
+        "fixture_family": "release_failure",
+        "status": "failed",
+        "metrics": {
+          "fixture_id": "fx.release_failure.v1",
+          "queries_evaluated": 5,
+          "mean_precision_at_1": 0.4,
+          "mean_precision_at_3": 0.6,
+          "mean_precision_at_5": 0.6,
+          "mean_recall_at_5": 1.0,
+          "mean_ndcg_at_5": 0.7785578521428744,
+          "mean_mrr": 0.7,
+          "per_query": [
+            {
+              "query": "clippy before release",
+              "expected_ids": [
+                "mem_00000000000000000000000101"
+              ],
+              "retrieved_ids": [
+                "mem_00000000000000000000000102",
+                "mem_00000000000000000000000101"
+              ],
+              "precision_at_1": 0.0,
+              "precision_at_3": 0.5,
+              "precision_at_5": 0.5,
+              "recall_at_5": 1.0,
+              "ndcg_at_5": 0.6309297535714575,
+              "mrr": 0.5,
+              "first_relevant_rank": 2
+            },
+            {
+              "query": "failing release workflow",
+              "expected_ids": [
+                "mem_00000000000000000000000101"
+              ],
+              "retrieved_ids": [
+                "mem_00000000000000000000000102",
+                "mem_00000000000000000000000101"
+              ],
+              "precision_at_1": 0.0,
+              "precision_at_3": 0.5,
+              "precision_at_5": 0.5,
+              "recall_at_5": 1.0,
+              "ndcg_at_5": 0.6309297535714575,
+              "mrr": 0.5,
+              "first_relevant_rank": 2
+            },
+            {
+              "query": "prepare release",
+              "expected_ids": [
+                "mem_00000000000000000000000101",
+                "mem_00000000000000000000000102"
+              ],
+              "retrieved_ids": [
+                "mem_00000000000000000000000101",
+                "mem_00000000000000000000000102"
+              ],
+              "precision_at_1": 1.0,
+              "precision_at_3": 1.0,
+              "precision_at_5": 1.0,
+              "recall_at_5": 1.0,
+              "ndcg_at_5": 1.0,
+              "mrr": 1.0,
+              "first_relevant_rank": 1
+            },
+            {
+              "query": "release failure",
+              "expected_ids": [
+                "mem_00000000000000000000000102"
+              ],
+              "retrieved_ids": [
+                "mem_00000000000000000000000101",
+                "mem_00000000000000000000000102"
+              ],
+              "precision_at_1": 0.0,
+              "precision_at_3": 0.5,
+              "precision_at_5": 0.5,
+              "recall_at_5": 1.0,
+              "ndcg_at_5": 0.6309297535714575,
+              "mrr": 0.5,
+              "first_relevant_rank": 2
+            },
+            {
+              "query": "unused import",
+              "expected_ids": [
+                "mem_00000000000000000000000102"
+              ],
+              "retrieved_ids": [
+                "mem_00000000000000000000000102",
+                "mem_00000000000000000000000101"
+              ],
+              "precision_at_1": 1.0,
+              "precision_at_3": 0.5,
+              "precision_at_5": 0.5,
+              "recall_at_5": 1.0,
+              "ndcg_at_5": 1.0,
+              "mrr": 1.0,
+              "first_relevant_rank": 1
+            }
+          ]
+        },
+        "duration_ms": "[duration_ms]",
+        "data_hash": "[data_hash]"
+      }
+    ]
+  }
+}

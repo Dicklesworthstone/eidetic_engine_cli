@@ -1,0 +1,96 @@
+{
+  "expireDryRun": {
+    "schema": "ee.response.v1",
+    "success": true,
+    "data": {
+      "command": "memory expire",
+      "schema": "ee.memory.expire.v1",
+      "version": "0.1.0",
+      "memory_id": "<MEMORY_ID>",
+      "workspace_id": "<WORKSPACE_ID>",
+      "status": "would_expire",
+      "dry_run": true,
+      "persisted": false,
+      "changed": true,
+      "previous_tombstoned_at": null,
+      "tombstoned_at": null,
+      "audit_id": null,
+      "index_job_id": null,
+      "index_status": "dry_run_not_queued",
+      "idempotency": "would_change"
+    }
+  },
+  "expireApply": {
+    "schema": "ee.response.v1",
+    "success": true,
+    "data": {
+      "command": "memory expire",
+      "schema": "ee.memory.expire.v1",
+      "version": "0.1.0",
+      "memory_id": "<MEMORY_ID>",
+      "workspace_id": "<WORKSPACE_ID>",
+      "status": "expired",
+      "dry_run": false,
+      "persisted": true,
+      "changed": true,
+      "previous_tombstoned_at": null,
+      "tombstoned_at": "<TIMESTAMP>",
+      "audit_id": "<AUDIT_ID>",
+      "index_job_id": "<INDEX_JOB_ID>",
+      "index_status": "queued",
+      "idempotency": "changed"
+    }
+  },
+  "expireDuplicate": {
+    "schema": "ee.response.v1",
+    "success": true,
+    "data": {
+      "command": "memory expire",
+      "schema": "ee.memory.expire.v1",
+      "version": "0.1.0",
+      "memory_id": "<MEMORY_ID>",
+      "workspace_id": "<WORKSPACE_ID>",
+      "status": "already_expired",
+      "dry_run": false,
+      "persisted": false,
+      "changed": false,
+      "previous_tombstoned_at": "<TIMESTAMP>",
+      "tombstoned_at": "<TIMESTAMP>",
+      "audit_id": null,
+      "index_job_id": null,
+      "index_status": "not_scheduled",
+      "idempotency": "no_change"
+    }
+  },
+  "expiredTagList": {
+    "schema": "ee.response.v1",
+    "success": true,
+    "data": {
+      "command": "memory tags",
+      "schema": "ee.memory.tags.v1",
+      "version": "0.1.0",
+      "memory_id": "<MEMORY_ID>",
+      "workspace_id": "<WORKSPACE_ID>",
+      "status": "listed",
+      "dry_run": false,
+      "persisted": false,
+      "changed": false,
+      "previous_tags": [
+        "alpha",
+        "release",
+        "zeta"
+      ],
+      "tags": [
+        "alpha",
+        "release",
+        "zeta"
+      ],
+      "added_tags": [],
+      "removed_tags": [],
+      "audit_ids": [],
+      "index_job_id": null,
+      "index_status": "not_scheduled",
+      "idempotency": "read_only"
+    }
+  }
+}

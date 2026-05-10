@@ -25,8 +25,9 @@ use crate::core::outcome::{OutcomeQuarantineListReport, OutcomeQuarantineReviewR
 use crate::core::quarantine::{QuarantineDegradation, QuarantineEntry, QuarantineReport};
 use crate::core::recorder::RECORDER_EVENTS_LIST_SCHEMA_V1;
 use crate::core::rule::{
-    PlaybookExtractReport, RULE_ADD_SCHEMA_V1, RULE_LIST_SCHEMA_V1, RULE_SHOW_SCHEMA_V1,
-    RuleAddReport, RuleListReport, RuleProtectReport, RuleShowReport,
+    PlaybookExtractReport, RULE_ADD_SCHEMA_V1, RULE_LIST_SCHEMA_V1, RULE_MARK_SCHEMA_V1,
+    RULE_SHOW_SCHEMA_V1, RULE_UPDATE_SCHEMA_V1, RuleAddReport, RuleListReport, RuleMarkReport,
+    RuleProtectReport, RuleShowReport, RuleUpdateReport,
 };
 use crate::core::status::StatusReport;
 use crate::core::why::WhyReport;
@@ -3872,6 +3873,26 @@ pub fn render_rule_show_toon(report: &RuleShowReport) -> String {
     render_toon_from_json(&render_rule_show_json(report))
 }
 
+/// Render a procedural rule mark report as JSON (`ee.response.v1` envelope).
+#[must_use]
+pub fn render_rule_mark_json(report: &RuleMarkReport) -> String {
+    ResponseEnvelope::success()
+        .data_raw(&report.data_json())
+        .finish()
+}
+
+/// Render a procedural rule mark report as human-readable text.
+#[must_use]
+pub fn render_rule_mark_human(report: &RuleMarkReport) -> String {
+    report.human_summary()
+}
+
+/// Render a procedural rule mark report as TOON.
+#[must_use]
+pub fn render_rule_mark_toon(report: &RuleMarkReport) -> String {
+    render_toon_from_json(&render_rule_mark_json(report))
+}
+
 /// Render a procedural rule protection report as JSON (`ee.response.v1` envelope).
 #[must_use]
 pub fn render_rule_protect_json(report: &RuleProtectReport) -> String {
@@ -3890,6 +3911,26 @@ pub fn render_rule_protect_human(report: &RuleProtectReport) -> String {
 #[must_use]
 pub fn render_rule_protect_toon(report: &RuleProtectReport) -> String {
     render_toon_from_json(&render_rule_protect_json(report))
+}
+
+/// Render a procedural rule update report as JSON (`ee.response.v1` envelope).
+#[must_use]
+pub fn render_rule_update_json(report: &RuleUpdateReport) -> String {
+    ResponseEnvelope::success()
+        .data_raw(&report.data_json())
+        .finish()
+}
+
+/// Render a procedural rule update report as human-readable text.
+#[must_use]
+pub fn render_rule_update_human(report: &RuleUpdateReport) -> String {
+    report.human_summary()
+}
+
+/// Render a procedural rule update report as TOON.
+#[must_use]
+pub fn render_rule_update_toon(report: &RuleUpdateReport) -> String {
+    render_toon_from_json(&render_rule_update_json(report))
 }
 
 /// Render a playbook extraction report as JSON (`ee.response.v1` envelope).
@@ -4713,6 +4754,20 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: rule_show_schema_definition,
         },
         SchemaEntry {
+            id: RULE_MARK_SCHEMA_V1,
+            version: "1",
+            description: "Procedural rule lifecycle mark response data",
+            category: "domain",
+            definition: rule_mark_schema_definition,
+        },
+        SchemaEntry {
+            id: RULE_UPDATE_SCHEMA_V1,
+            version: "1",
+            description: "Procedural rule update response data",
+            category: "domain",
+            definition: rule_update_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.causal.schemas.v1",
             version: "1",
             description: "Causal exposure, decision trace, uplift, confounder, and promotion-plan schemas",
@@ -4999,6 +5054,82 @@ fn rule_show_schema_definition() -> String {
             "version": { "type": "string" },
             "workspaceId": { "type": "string" },
             "found": { "type": "boolean" },
+            "rule": { "type": "object" },
+            "degraded": { "type": "array", "items": { "type": "object" } }
+        }
+    })
+    .to_string()
+}
+
+fn rule_mark_schema_definition() -> String {
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": RULE_MARK_SCHEMA_V1,
+        "type": "object",
+        "required": [
+            "schema",
+            "command",
+            "version",
+            "status",
+            "ruleId",
+            "dryRun",
+            "persisted",
+            "changed",
+            "transition",
+            "evidence",
+            "previousRule",
+            "rule",
+            "degraded"
+        ],
+        "properties": {
+            "schema": { "const": RULE_MARK_SCHEMA_V1 },
+            "command": { "const": "rule mark" },
+            "version": { "type": "string" },
+            "status": { "type": "string" },
+            "ruleId": { "type": "string" },
+            "dryRun": { "type": "boolean" },
+            "persisted": { "type": "boolean" },
+            "changed": { "type": "boolean" },
+            "transition": { "type": "object" },
+            "evidence": { "type": "object" },
+            "previousRule": { "type": "object" },
+            "rule": { "type": "object" },
+            "degraded": { "type": "array", "items": { "type": "object" } }
+        }
+    })
+    .to_string()
+}
+
+fn rule_update_schema_definition() -> String {
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": RULE_UPDATE_SCHEMA_V1,
+        "type": "object",
+        "required": [
+            "schema",
+            "command",
+            "version",
+            "status",
+            "ruleId",
+            "dryRun",
+            "persisted",
+            "changed",
+            "changedFields",
+            "previousRule",
+            "rule",
+            "degraded"
+        ],
+        "properties": {
+            "schema": { "const": RULE_UPDATE_SCHEMA_V1 },
+            "command": { "const": "rule update" },
+            "version": { "type": "string" },
+            "status": { "type": "string" },
+            "ruleId": { "type": "string" },
+            "dryRun": { "type": "boolean" },
+            "persisted": { "type": "boolean" },
+            "changed": { "type": "boolean" },
+            "changedFields": { "type": "array", "items": { "type": "string" } },
+            "previousRule": { "type": "object" },
             "rule": { "type": "object" },
             "degraded": { "type": "array", "items": { "type": "object" } }
         }
@@ -5767,6 +5898,18 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
             SubcommandEntry {
                 name: "show",
                 description: "Show one procedural rule with evidence and lifecycle metadata",
+            },
+            SubcommandEntry {
+                name: "mark",
+                description: "Record lifecycle evidence for a procedural rule",
+            },
+            SubcommandEntry {
+                name: "protect",
+                description: "Protect or unprotect a procedural rule",
+            },
+            SubcommandEntry {
+                name: "update",
+                description: "Update procedural rule metadata",
             },
         ],
         args: &[],
@@ -9390,6 +9533,7 @@ pub fn render_handoff_preview_json(report: &HandoffPreviewReport) -> String {
         "omitted_sections": report.omitted_sections,
         "evidence_ids": report.evidence_ids,
         "active_focus": report.active_focus,
+        "swarm_brief_summary": report.swarm_brief_summary,
         "token_estimate": report.token_estimate,
         "byte_estimate": report.byte_estimate,
         "redaction_posture": report.redaction_posture,
@@ -9470,6 +9614,7 @@ pub fn render_handoff_create_json(report: &HandoffCreateReport) -> String {
         "sections_included": report.sections_included,
         "evidence_count": report.evidence_count,
         "active_focus": report.active_focus,
+        "swarm_brief_summary": report.swarm_brief_summary,
         "token_count": report.token_count,
         "byte_count": report.byte_count,
         "content_hash": report.content_hash,
@@ -9599,6 +9744,7 @@ pub fn render_handoff_resume_json(report: &HandoffResumeReport) -> String {
         "recent_outcomes": report.recent_outcomes,
         "selected_memories": report.selected_memories,
         "active_focus": report.active_focus,
+        "swarm_brief_summary": report.swarm_brief_summary,
         "artifact_pointers": report.artifact_pointers,
         "degradations": report.degradations,
         "resumed_at": report.resumed_at

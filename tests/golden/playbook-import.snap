@@ -1,0 +1,35 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "schema": "ee.playbook.import.v1",
+    "command": "playbook import",
+    "version": "0.1.0",
+    "status": "imported",
+    "dryRun": false,
+    "workspaceId": "<WORKSPACE_ID>",
+    "workspacePath": "<TARGET_WORKSPACE>",
+    "databasePath": "<TARGET_DATABASE>",
+    "sourcePath": "<PLAYBOOK>",
+    "sourceHash": "<SOURCE_HASH>",
+    "sourceSchema": "ee.playbook.portable.v1",
+    "sourceRuleCount": 1,
+    "importedCount": 1,
+    "duplicateCount": 0,
+    "skippedCount": 0,
+    "downgradedCount": 0,
+    "durableMutation": true,
+    "decisions": [
+      {
+        "sourceRuleId": "<SOURCE_RULE_ID>",
+        "contentHash": "blake3:d0e594644dd37e216ed775789552daaad067af4d5b3911fd916e832e987525e6",
+        "status": "imported",
+        "importedRuleId": "<IMPORTED_RULE_ID>",
+        "auditId": "<AUDIT_ID>",
+        "indexJobId": "<INDEX_JOB_ID>",
+        "issueCodes": []
+      }
+    ],
+    "degraded": []
+  }
+}

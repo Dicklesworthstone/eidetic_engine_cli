@@ -1015,6 +1015,7 @@ impl EffectManifest {
             CommandEffect::read_only("diag streams", "Show streams status"),
             CommandEffect::read_only("doctor", "Run health checks"),
             CommandEffect::read_only("eval list", "List evaluation scenarios"),
+            CommandEffect::read_only("eval report", "Summarize evaluation fixture reports"),
             CommandEffect::read_only("eval run", "Run evaluation (reads fixtures)"),
             CommandEffect::read_only("focus explain", "Explain passive active-memory focus state"),
             CommandEffect::read_only("focus show", "Show passive active-memory focus state"),
@@ -1044,6 +1045,10 @@ impl EffectManifest {
             CommandEffect::read_only("health", "Quick health check"),
             CommandEffect::read_only("help", "Print help"),
             CommandEffect::read_only("index status", "Show index status"),
+            CommandEffect::read_only(
+                "index vacuum",
+                "Preview reclaimable derived index artifacts without mutation",
+            ),
             CommandEffect::read_only("install check", "Inspect install posture"),
             CommandEffect::read_only("install plan", "Plan install without mutation"),
             CommandEffect::read_only("introspect", "Introspect ee metadata"),
@@ -1060,6 +1065,8 @@ impl EffectManifest {
             CommandEffect::read_only("model list", "List model registry entries"),
             CommandEffect::read_only("model status", "Inspect model registry status"),
             CommandEffect::read_only("outcome quarantine list", "List feedback quarantine rows"),
+            CommandEffect::read_only("pack diff", "Compare persisted pack ledgers"),
+            CommandEffect::read_only("pack replay", "Inspect persisted pack ledger"),
             CommandEffect::read_only(
                 "perf budget check",
                 "Check normalized performance artifact budget posture",
@@ -1074,6 +1081,7 @@ impl EffectManifest {
                 "preflight show",
                 "Read a persisted preflight run from the workspace-local store",
             ),
+            CommandEffect::read_only("playbook list", "List procedural rules in playbook form"),
             CommandEffect::read_only(
                 "procedure drift",
                 "Inspect procedure maturity and feedback drift signals",
@@ -1335,7 +1343,7 @@ impl EffectManifest {
                 "Import from legacy Eidetic export",
             ),
             CommandEffect::append_only_write(
-                "pack",
+                "pack build",
                 vec!["context_packs", "pack_items", "audit_log"],
                 "pack hash",
                 "Persist a context pack keyed by deterministic pack hash",
@@ -1387,6 +1395,17 @@ impl EffectManifest {
                 "playbook extract",
                 vec!["curation_candidates", "audit_log"],
                 "Extract procedural-rule candidates from repeated semantic memories",
+            ),
+            CommandEffect::durable_write(
+                "playbook import",
+                vec![
+                    "procedural_rules",
+                    "rule_source_memories",
+                    "rule_tags",
+                    "search_index_jobs",
+                    "audit_log",
+                ],
+                "Import portable playbook rules through audited procedural-rule writes",
             ),
             CommandEffect::durable_write(
                 "learn close",
@@ -1443,6 +1462,21 @@ impl EffectManifest {
                 vec!["memories", "memory_tags", "audit_log"],
                 "Store a new memory",
             ),
+            CommandEffect::durable_write(
+                "memory expire",
+                vec!["memories", "search_index_jobs", "audit_log"],
+                "Expire a memory through an audited tombstone without deleting data",
+            ),
+            CommandEffect::durable_write(
+                "memory link",
+                vec!["memory_links", "audit_log"],
+                "List or create explicit memory links with deterministic idempotent audits",
+            ),
+            CommandEffect::durable_write(
+                "memory tags",
+                vec!["memory_tags", "search_index_jobs", "audit_log"],
+                "List or mutate memory tags with deterministic idempotent audits",
+            ),
             CommandEffect::durable_state_write(
                 "recorder start",
                 vec!["recorder_runs"],
@@ -1486,9 +1520,25 @@ impl EffectManifest {
                 "Store a procedural rule",
             ),
             CommandEffect::durable_write(
+                "rule mark",
+                vec!["procedural_rules", "audit_log", "search_index_jobs"],
+                "Record lifecycle evidence for a procedural rule",
+            ),
+            CommandEffect::durable_write(
                 "rule protect",
                 vec!["procedural_rules", "audit_log"],
                 "Protect or unprotect a procedural rule",
+            ),
+            CommandEffect::durable_write(
+                "rule update",
+                vec![
+                    "procedural_rules",
+                    "rule_source_memories",
+                    "rule_tags",
+                    "audit_log",
+                    "search_index_jobs",
+                ],
+                "Update procedural rule metadata",
             ),
             CommandEffect::durable_state_write(
                 "tripwire check",
@@ -1542,6 +1592,11 @@ impl EffectManifest {
                 "Restore backup contents into an explicit side path",
             ),
             CommandEffect::workspace_file_write(
+                "export",
+                vec![".ee/backups/<backup-id>/ or <--output-dir>/<backup-id>/"],
+                "Export redacted JSONL records as side-path artifacts",
+            ),
+            CommandEffect::workspace_file_write(
                 "focus add",
                 vec![".ee/focus/state.json"],
                 "Add explicit memories to passive focus state without eviction",
@@ -1550,6 +1605,11 @@ impl EffectManifest {
                 "handoff create",
                 vec!["<--out path>"],
                 "Write a redacted continuity capsule to a user-specified output path",
+            ),
+            CommandEffect::workspace_file_write(
+                "playbook export",
+                vec!["<--out path>"],
+                "Write portable procedural rules to a no-overwrite playbook artifact",
             ),
             CommandEffect::workspace_state_write(
                 "preflight close",

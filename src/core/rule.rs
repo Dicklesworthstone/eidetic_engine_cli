@@ -6,21 +6,25 @@
 //! queue conventions used by `ee remember`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::curate::{CandidateSource, CandidateType, specificity_score};
 use crate::db::{
     CreateAuditInput, CreateCurationCandidateInput, CreateProceduralRuleInput,
     CreateSearchIndexJobInput, CreateWorkspaceInput, DbConnection, SearchIndexJobType,
-    StoredMemory, StoredProceduralRule, audit_actions, generate_audit_id,
+    StoredMemory, StoredProceduralRule, UpdateProceduralRuleInput,
+    UpdateProceduralRuleLifecycleInput, audit_actions, generate_audit_id,
 };
 use crate::models::{
-    CandidateId, DomainError, MemoryContent, MemoryId, RuleId, RuleMaturity, RuleScope, Tag,
-    TrustClass, UnitScore, WorkspaceId,
+    CandidateId, DomainError, MemoryContent, MemoryId, RuleId, RuleLifecycleEvidence,
+    RuleLifecycleTransition, RuleLifecycleTrigger, RuleMaturity, RuleScope, Tag, TrustClass,
+    UnitScore, WorkspaceId,
 };
 
 /// Stable schema for `ee rule add` response data.
@@ -29,10 +33,22 @@ pub const RULE_ADD_SCHEMA_V1: &str = "ee.rule.add.v1";
 pub const RULE_LIST_SCHEMA_V1: &str = "ee.rule.list.v1";
 /// Stable schema for `ee rule show` response data.
 pub const RULE_SHOW_SCHEMA_V1: &str = "ee.rule.show.v1";
+/// Stable schema for `ee rule mark` response data.
+pub const RULE_MARK_SCHEMA_V1: &str = "ee.rule.mark.v1";
 /// Stable schema for `ee rule protect` response data.
 pub const RULE_PROTECT_SCHEMA_V1: &str = "ee.rule.protect.v1";
+/// Stable schema for `ee rule update` response data.
+pub const RULE_UPDATE_SCHEMA_V1: &str = "ee.rule.update.v1";
 /// Stable schema for `ee playbook extract` response data.
 pub const PLAYBOOK_EXTRACT_SCHEMA_V1: &str = "ee.playbook.extract.v1";
+/// Stable schema for `ee playbook list` response data.
+pub const PLAYBOOK_LIST_SCHEMA_V1: &str = "ee.playbook.list.v1";
+/// Stable schema for `ee playbook export` response data.
+pub const PLAYBOOK_EXPORT_SCHEMA_V1: &str = "ee.playbook.export.v1";
+/// Stable schema for `ee playbook import` response data.
+pub const PLAYBOOK_IMPORT_SCHEMA_V1: &str = "ee.playbook.import.v1";
+/// Stable portable playbook document schema.
+pub const PLAYBOOK_PORTABLE_SCHEMA_V1: &str = "ee.playbook.portable.v1";
 
 const MAX_RULE_CONTENT_BYTES: usize = 8192;
 const MAX_RULE_LIST_LIMIT: u32 = 1000;
@@ -108,6 +124,39 @@ pub struct RuleShowOptions<'a> {
     pub include_tombstoned: bool,
 }
 
+/// Lifecycle evidence for `ee rule mark`.
+#[derive(Clone, Debug, Default)]
+pub struct RuleMarkEvidenceOptions<'a> {
+    pub helpful_outcomes: u32,
+    pub harmful_outcomes: u32,
+    pub distinct_harmful_sources: u32,
+    pub manual_curation_approved: bool,
+    pub intervening_helpful_from_harmful_sources: bool,
+    pub validation_passes: u32,
+    pub validation_contradictions: u32,
+    pub review_approved: bool,
+    pub superseding_rule_id: Option<&'a str>,
+}
+
+/// Options for recording lifecycle evidence with `ee rule mark`.
+#[derive(Clone, Debug)]
+pub struct RuleMarkOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Rule ID to mark.
+    pub rule_id: &'a str,
+    /// Lifecycle trigger.
+    pub trigger: &'a str,
+    /// Evidence counters and flags used by the lifecycle evaluator.
+    pub evidence: RuleMarkEvidenceOptions<'a>,
+    /// Validate and render the lifecycle plan without mutating storage.
+    pub dry_run: bool,
+    /// Optional audit actor.
+    pub actor: Option<&'a str>,
+}
+
 /// Options for toggling a procedural rule's protected marker.
 #[derive(Clone, Debug)]
 pub struct RuleProtectOptions<'a> {
@@ -125,6 +174,47 @@ pub struct RuleProtectOptions<'a> {
     pub actor: Option<&'a str>,
 }
 
+/// Options for updating mutable procedural rule metadata.
+#[derive(Clone, Debug)]
+pub struct RuleUpdateOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Rule ID to update.
+    pub rule_id: &'a str,
+    /// Replacement content, if supplied.
+    pub content: Option<&'a str>,
+    /// Replacement scope, if supplied.
+    pub scope: Option<&'a str>,
+    /// Replacement scope pattern, if supplied.
+    pub scope_pattern: Option<&'a str>,
+    /// Clear the existing scope pattern.
+    pub clear_scope_pattern: bool,
+    /// Replacement trust class, if supplied.
+    pub trust_class: Option<&'a str>,
+    /// Replacement confidence, if supplied.
+    pub confidence: Option<f32>,
+    /// Replacement utility, if supplied.
+    pub utility: Option<f32>,
+    /// Replacement importance, if supplied.
+    pub importance: Option<f32>,
+    /// Desired protected state, if supplied.
+    pub protected: Option<bool>,
+    /// Replacement tag set, if supplied.
+    pub tags: Option<&'a [String]>,
+    /// Clear the tag set.
+    pub clear_tags: bool,
+    /// Replacement source-memory evidence set, if supplied.
+    pub source_memory_ids: Option<&'a [String]>,
+    /// Clear the source-memory evidence set.
+    pub clear_source_memory_ids: bool,
+    /// Validate and render the update without mutating storage.
+    pub dry_run: bool,
+    /// Optional audit actor.
+    pub actor: Option<&'a str>,
+}
+
 /// Options for extracting rule candidates from repeated semantic memories.
 #[derive(Clone, Debug)]
 pub struct PlaybookExtractOptions<'a> {
@@ -137,6 +227,53 @@ pub struct PlaybookExtractOptions<'a> {
     /// Maximum number of semantic memories to scan.
     pub limit: u32,
     /// Preview candidate creation without mutating storage.
+    pub dry_run: bool,
+    /// Optional audit actor.
+    pub actor: Option<&'a str>,
+}
+
+/// Options for listing portable playbook rules through `ee playbook list`.
+#[derive(Clone, Debug)]
+pub struct PlaybookListOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Include tombstoned rules.
+    pub include_tombstoned: bool,
+    /// Maximum number of rules to return.
+    pub limit: u32,
+    /// Number of filtered rules to skip.
+    pub offset: u32,
+}
+
+/// Options for exporting portable playbook rules through `ee playbook export`.
+#[derive(Clone, Debug)]
+pub struct PlaybookExportOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Destination playbook JSON file.
+    pub output_path: &'a Path,
+    /// Include tombstoned rules.
+    pub include_tombstoned: bool,
+    /// Maximum number of rules to export.
+    pub limit: u32,
+    /// Preview the export without writing the side-path artifact.
+    pub dry_run: bool,
+}
+
+/// Options for importing portable playbook rules through `ee playbook import`.
+#[derive(Clone, Debug)]
+pub struct PlaybookImportOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Source playbook JSON file.
+    pub source_path: &'a Path,
+    /// Preview the import without writing rules, audit rows, or index jobs.
     pub dry_run: bool,
     /// Optional audit actor.
     pub actor: Option<&'a str>,
@@ -373,6 +510,107 @@ impl RuleShowReport {
     }
 }
 
+/// Result of recording lifecycle evidence for one procedural rule.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleMarkReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub status: String,
+    pub rule_id: String,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub dry_run: bool,
+    pub persisted: bool,
+    pub changed: bool,
+    pub audit_id: Option<String>,
+    pub index_job_id: Option<String>,
+    pub index_status: String,
+    pub transition: RuleMarkTransition,
+    pub evidence: RuleMarkEvidenceReport,
+    pub previous_rule: RuleDetails,
+    pub rule: RuleDetails,
+    pub degraded: Vec<RuleAddDegradation>,
+}
+
+impl RuleMarkReport {
+    /// Serialize response data without the outer response envelope.
+    #[must_use]
+    pub fn data_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            format!(
+                r#"{{"schema":"{}","command":"rule mark","status":"serialization_failed"}}"#,
+                RULE_MARK_SCHEMA_V1
+            )
+        })
+    }
+
+    /// Human-readable summary.
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let prefix = if self.dry_run { "DRY RUN: " } else { "" };
+        format!(
+            "{prefix}rule mark {status}\n  ID: {id}\n  Trigger: {trigger}\n  Maturity: {from} -> {to}\n  Changed: {changed}\n  Audit: {audit}\n",
+            status = self.status,
+            id = self.rule_id,
+            trigger = self.transition.trigger,
+            from = self.transition.prior_maturity,
+            to = self.transition.next_maturity,
+            changed = self.changed,
+            audit = self.audit_id.as_deref().unwrap_or("none"),
+        )
+    }
+
+    /// Compact TOON-like summary.
+    #[must_use]
+    pub fn toon_summary(&self) -> String {
+        format!(
+            "RULE_MARK|status={}|id={}|trigger={}|action={}|from={}|to={}|changed={}",
+            self.status,
+            self.rule_id,
+            self.transition.trigger,
+            self.transition.action,
+            self.transition.prior_maturity,
+            self.transition.next_maturity,
+            self.changed
+        )
+    }
+}
+
+/// Stable lifecycle transition data emitted by `ee rule mark`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleMarkTransition {
+    pub trigger: String,
+    pub action: String,
+    pub prior_maturity: String,
+    pub next_maturity: String,
+    pub allowed: bool,
+    pub requires_curation: bool,
+    pub audit_required: bool,
+    pub confidence_delta: f64,
+    pub utility_delta: f64,
+    pub reason: String,
+}
+
+/// Stable lifecycle evidence data emitted by `ee rule mark`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleMarkEvidenceReport {
+    pub helpful_outcomes: u32,
+    pub harmful_outcomes: u32,
+    pub distinct_harmful_sources: u32,
+    pub protected_rule: bool,
+    pub manual_curation_approved: bool,
+    pub intervening_helpful_from_harmful_sources: bool,
+    pub validation_passes: u32,
+    pub validation_contradictions: u32,
+    pub review_approved: bool,
+    pub superseding_rule_id: Option<String>,
+}
+
 /// Result of protecting or unprotecting one procedural rule.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -391,6 +629,73 @@ pub struct RuleProtectReport {
     pub dry_run: bool,
     pub audit_id: Option<String>,
     pub degraded: Vec<RuleAddDegradation>,
+}
+
+/// Result of updating one procedural rule.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleUpdateReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub status: String,
+    pub rule_id: String,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub dry_run: bool,
+    pub persisted: bool,
+    pub changed: bool,
+    pub changed_fields: Vec<String>,
+    pub audit_id: Option<String>,
+    pub index_job_id: Option<String>,
+    pub index_status: String,
+    pub previous_rule: RuleDetails,
+    pub rule: RuleDetails,
+    pub degraded: Vec<RuleAddDegradation>,
+}
+
+impl RuleUpdateReport {
+    /// Serialize response data without the outer response envelope.
+    #[must_use]
+    pub fn data_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            format!(
+                r#"{{"schema":"{}","command":"rule update","status":"serialization_failed"}}"#,
+                RULE_UPDATE_SCHEMA_V1
+            )
+        })
+    }
+
+    /// Human-readable summary.
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let prefix = if self.dry_run { "DRY RUN: " } else { "" };
+        let fields = if self.changed_fields.is_empty() {
+            "none".to_owned()
+        } else {
+            self.changed_fields.join(", ")
+        };
+        format!(
+            "{prefix}rule update {status}\n  ID: {id}\n  Changed: {changed}\n  Fields: {fields}\n  Audit: {audit}\n",
+            status = self.status,
+            id = self.rule_id,
+            changed = self.changed,
+            audit = self.audit_id.as_deref().unwrap_or("none"),
+        )
+    }
+
+    /// Compact TOON-like summary.
+    #[must_use]
+    pub fn toon_summary(&self) -> String {
+        format!(
+            "RULE_UPDATE|status={}|id={}|changed={}|fields={}",
+            self.status,
+            self.rule_id,
+            self.changed,
+            self.changed_fields.join(",")
+        )
+    }
 }
 
 /// Result of extracting playbook rule candidates.
@@ -466,6 +771,202 @@ pub struct PlaybookRuleCandidate {
     pub persisted: bool,
     pub duplicate: bool,
     pub audit_id: Option<String>,
+}
+
+/// Portable rule row used by playbook list/export/import.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybookPortableRule {
+    pub source_rule_id: Option<String>,
+    pub content: String,
+    pub maturity: String,
+    pub scope: String,
+    pub scope_pattern: Option<String>,
+    pub trust_class: String,
+    pub protected: bool,
+    pub confidence: f32,
+    pub utility: f32,
+    pub importance: f32,
+    pub tags: Vec<String>,
+    pub source_memory_ids: Vec<String>,
+    pub source_memory_count: usize,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// Portable playbook artifact written by `ee playbook export`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybookPortableDocument {
+    pub schema: String,
+    pub exported_at: String,
+    pub ee_version: String,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub rule_count: usize,
+    pub rules: Vec<PlaybookPortableRule>,
+}
+
+/// Result of listing playbook-portable rules.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybookListReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub total_count: usize,
+    pub returned_count: usize,
+    pub limit: u32,
+    pub offset: u32,
+    pub truncated: bool,
+    pub rules: Vec<PlaybookPortableRule>,
+    pub degraded: Vec<RuleAddDegradation>,
+}
+
+impl PlaybookListReport {
+    /// Serialize response data without the outer response envelope.
+    #[must_use]
+    pub fn data_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            format!(
+                r#"{{"schema":"{}","command":"playbook list","status":"serialization_failed"}}"#,
+                PLAYBOOK_LIST_SCHEMA_V1
+            )
+        })
+    }
+
+    /// Human-readable summary.
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut output = format!("Playbook rules ({} total)\n", self.total_count);
+        for rule in &self.rules {
+            output.push_str(&format!(
+                "  {} [{}] tags={}\n",
+                rule.source_rule_id.as_deref().unwrap_or("<portable>"),
+                rule.maturity,
+                rule.tags.len()
+            ));
+            output.push_str(&format!("    {}\n", truncate_rule_content(&rule.content)));
+        }
+        output
+    }
+}
+
+/// Result of exporting playbook-portable rules.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybookExportReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub status: String,
+    pub dry_run: bool,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub output_path: String,
+    pub artifact_hash: String,
+    pub total_count: usize,
+    pub exported_count: usize,
+    pub truncated: bool,
+    pub no_overwrite: bool,
+    pub redaction_status: String,
+    pub document: PlaybookPortableDocument,
+    pub degraded: Vec<RuleAddDegradation>,
+}
+
+impl PlaybookExportReport {
+    /// Serialize response data without the outer response envelope.
+    #[must_use]
+    pub fn data_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            format!(
+                r#"{{"schema":"{}","command":"playbook export","status":"serialization_failed"}}"#,
+                PLAYBOOK_EXPORT_SCHEMA_V1
+            )
+        })
+    }
+
+    /// Human-readable summary.
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let prefix = if self.dry_run { "DRY RUN: " } else { "" };
+        format!(
+            "{prefix}playbook export {status}: {count} rules\n  path: {path}\n  hash: {hash}\n",
+            status = self.status,
+            count = self.exported_count,
+            path = self.output_path,
+            hash = self.artifact_hash,
+        )
+    }
+}
+
+/// Per-rule import decision.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybookImportDecision {
+    pub source_rule_id: Option<String>,
+    pub content_hash: String,
+    pub status: String,
+    pub imported_rule_id: Option<String>,
+    pub audit_id: Option<String>,
+    pub index_job_id: Option<String>,
+    pub issue_codes: Vec<String>,
+}
+
+/// Result of importing playbook-portable rules.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybookImportReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub status: String,
+    pub dry_run: bool,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub source_path: String,
+    pub source_hash: String,
+    pub source_schema: String,
+    pub source_rule_count: usize,
+    pub imported_count: usize,
+    pub duplicate_count: usize,
+    pub skipped_count: usize,
+    pub downgraded_count: usize,
+    pub durable_mutation: bool,
+    pub decisions: Vec<PlaybookImportDecision>,
+    pub degraded: Vec<RuleAddDegradation>,
+}
+
+impl PlaybookImportReport {
+    /// Serialize response data without the outer response envelope.
+    #[must_use]
+    pub fn data_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            format!(
+                r#"{{"schema":"{}","command":"playbook import","status":"serialization_failed"}}"#,
+                PLAYBOOK_IMPORT_SCHEMA_V1
+            )
+        })
+    }
+
+    /// Human-readable summary.
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let prefix = if self.dry_run { "DRY RUN: " } else { "" };
+        format!(
+            "{prefix}playbook import {}: imported={}, duplicates={}, skipped={}\n  source: {}\n",
+            self.status,
+            self.imported_count,
+            self.duplicate_count,
+            self.skipped_count,
+            self.source_path
+        )
+    }
 }
 
 impl RuleProtectReport {
@@ -614,6 +1115,13 @@ struct PreparedRuleRead {
     workspace_id: String,
     workspace_path: PathBuf,
     database_path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedRuleUpdate {
+    input: UpdateProceduralRuleInput,
+    changed_fields: Vec<String>,
+    next_detail: RuleDetails,
 }
 
 /// Add a procedural rule or preview the write.
@@ -917,6 +1425,261 @@ pub fn protect_rule(options: &RuleProtectOptions<'_>) -> Result<RuleProtectRepor
     ))
 }
 
+/// Record lifecycle evidence for one procedural rule.
+pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, DomainError> {
+    let prepared = prepare_rule_read(
+        options.workspace_path,
+        options.database_path,
+        Some("ee rule mark <RULE_ID> --trigger <TRIGGER> --json"),
+    )?;
+    let rule_id = parse_rule_id_for_command(options.rule_id, "ee rule mark --help")?;
+    let trigger = RuleLifecycleTrigger::from_str(options.trigger)
+        .map_err(|error| rule_read_usage_error(error.to_string(), "ee rule mark --help"))?;
+    let connection = open_existing_database(&prepared.database_path)?;
+    let stored = load_active_rule(&connection, &prepared.workspace_id, &rule_id)?;
+    let previous_detail = load_rule_details(&connection, stored.clone())?;
+    let maturity = RuleMaturity::from_str(&stored.maturity).map_err(|error| {
+        DomainError::Storage {
+            message: format!("Stored procedural rule has invalid maturity: {error}"),
+            repair: Some("ee rule update <RULE_ID> --maturity is intentionally unavailable; repair the database or recreate the rule".to_owned()),
+        }
+    })?;
+    let evidence =
+        build_rule_lifecycle_evidence(&connection, &prepared.workspace_id, &stored, options)?;
+    let transition = maturity.evaluate_lifecycle_transition(trigger, &evidence);
+    if !transition.allowed {
+        return Err(DomainError::PolicyDenied {
+            message: format!("Rule lifecycle transition rejected: {}", transition.reason),
+            repair: Some(
+                "Use `ee rule show <RULE_ID> --json` and supply the required lifecycle evidence."
+                    .to_owned(),
+            ),
+        });
+    }
+
+    let marked_at = Utc::now().to_rfc3339();
+    let next_confidence = apply_score_delta(stored.confidence, transition.confidence_delta);
+    let next_utility = apply_score_delta(stored.utility, transition.utility_delta);
+    let next_maturity = transition.next_maturity.as_str().to_owned();
+    let next_superseded_by = evidence
+        .superseding_rule_id
+        .clone()
+        .or_else(|| stored.superseded_by.clone());
+    let positive_feedback_delta = positive_feedback_delta(trigger, &evidence);
+    let negative_feedback_delta = negative_feedback_delta(trigger, &evidence);
+    let last_validated_at = last_validated_marker(trigger, &marked_at);
+    let changed = stored.maturity != next_maturity
+        || score_changed(stored.confidence, next_confidence)
+        || score_changed(stored.utility, next_utility)
+        || stored.superseded_by != next_superseded_by
+        || positive_feedback_delta > 0
+        || negative_feedback_delta > 0
+        || last_validated_at.is_some();
+
+    let dry_rule = apply_mark_to_detail(
+        previous_detail.clone(),
+        &transition,
+        next_confidence,
+        next_utility,
+        next_superseded_by.clone(),
+        positive_feedback_delta,
+        negative_feedback_delta,
+        last_validated_at.clone(),
+        &marked_at,
+    );
+    if options.dry_run {
+        return Ok(rule_mark_report(
+            &prepared,
+            &rule_id,
+            true,
+            false,
+            changed,
+            None,
+            None,
+            &transition,
+            &evidence,
+            previous_detail,
+            dry_rule,
+        ));
+    }
+
+    let audit_id = generate_audit_id();
+    let index_job_id = if changed {
+        Some(generate_search_index_job_id())
+    } else {
+        None
+    };
+    let lifecycle_input = UpdateProceduralRuleLifecycleInput {
+        workspace_id: prepared.workspace_id.clone(),
+        maturity: next_maturity,
+        confidence: next_confidence,
+        utility: next_utility,
+        positive_feedback_delta,
+        negative_feedback_delta,
+        last_validated_at: last_validated_at.clone(),
+        superseded_by: next_superseded_by,
+        updated_at: marked_at,
+    };
+    let audit_details =
+        rule_mark_audit_details(&rule_id, &transition, &evidence, changed, &previous_detail);
+
+    connection
+        .with_transaction(|| {
+            if changed {
+                connection.update_procedural_rule_lifecycle(&rule_id, &lifecycle_input)?;
+            }
+            connection.insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(prepared.workspace_id.clone()),
+                    actor: options
+                        .actor
+                        .map(str::to_owned)
+                        .or_else(|| Some("ee rule mark".to_owned())),
+                    action: audit_actions::RULE_MARK.to_owned(),
+                    target_type: Some("rule".to_owned()),
+                    target_id: Some(rule_id.clone()),
+                    details: Some(audit_details.clone()),
+                },
+            )?;
+            if let Some(index_job_id) = &index_job_id {
+                connection.insert_search_index_job(
+                    index_job_id,
+                    &CreateSearchIndexJobInput {
+                        workspace_id: prepared.workspace_id.clone(),
+                        job_type: SearchIndexJobType::SingleDocument,
+                        document_source: Some("rule".to_owned()),
+                        document_id: Some(rule_id.clone()),
+                        documents_total: 1,
+                    },
+                )?;
+            }
+            Ok(())
+        })
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to mark procedural rule: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+
+    let updated = load_active_rule(&connection, &prepared.workspace_id, &rule_id)?;
+    let updated_detail = load_rule_details(&connection, updated)?;
+    Ok(rule_mark_report(
+        &prepared,
+        &rule_id,
+        false,
+        true,
+        changed,
+        Some(audit_id),
+        index_job_id,
+        &transition,
+        &evidence,
+        previous_detail,
+        updated_detail,
+    ))
+}
+
+/// Update mutable metadata for one procedural rule.
+pub fn update_rule(options: &RuleUpdateOptions<'_>) -> Result<RuleUpdateReport, DomainError> {
+    let prepared = prepare_rule_read(
+        options.workspace_path,
+        options.database_path,
+        Some("ee rule update <RULE_ID> --json"),
+    )?;
+    validate_rule_update_request(options)?;
+    let rule_id = parse_rule_id_for_command(options.rule_id, "ee rule update --help")?;
+    let connection = open_existing_database(&prepared.database_path)?;
+    let stored = load_active_rule(&connection, &prepared.workspace_id, &rule_id)?;
+    let previous_detail = load_rule_details(&connection, stored)?;
+    let prepared_update = prepare_rule_update(&connection, &prepared, &previous_detail, options)?;
+    let changed = !prepared_update.changed_fields.is_empty();
+
+    if options.dry_run {
+        return Ok(rule_update_report(
+            &prepared,
+            &rule_id,
+            true,
+            false,
+            changed,
+            prepared_update.changed_fields,
+            None,
+            None,
+            previous_detail,
+            prepared_update.next_detail,
+        ));
+    }
+
+    if !changed {
+        return Ok(rule_update_report(
+            &prepared,
+            &rule_id,
+            false,
+            false,
+            false,
+            Vec::new(),
+            None,
+            None,
+            previous_detail.clone(),
+            previous_detail,
+        ));
+    }
+
+    let audit_id = generate_audit_id();
+    let index_job_id = generate_search_index_job_id();
+    let audit_details = rule_update_audit_details(
+        &rule_id,
+        &prepared_update.changed_fields,
+        &previous_detail,
+        &prepared_update.next_detail,
+    );
+    connection
+        .with_transaction(|| {
+            connection.update_procedural_rule_metadata(&rule_id, &prepared_update.input)?;
+            connection.insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(prepared.workspace_id.clone()),
+                    actor: options
+                        .actor
+                        .map(str::to_owned)
+                        .or_else(|| Some("ee rule update".to_owned())),
+                    action: audit_actions::RULE_UPDATE.to_owned(),
+                    target_type: Some("rule".to_owned()),
+                    target_id: Some(rule_id.clone()),
+                    details: Some(audit_details.clone()),
+                },
+            )?;
+            connection.insert_search_index_job(
+                &index_job_id,
+                &CreateSearchIndexJobInput {
+                    workspace_id: prepared.workspace_id.clone(),
+                    job_type: SearchIndexJobType::SingleDocument,
+                    document_source: Some("rule".to_owned()),
+                    document_id: Some(rule_id.clone()),
+                    documents_total: 1,
+                },
+            )
+        })
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to update procedural rule: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+
+    let updated = load_active_rule(&connection, &prepared.workspace_id, &rule_id)?;
+    let updated_detail = load_rule_details(&connection, updated)?;
+    Ok(rule_update_report(
+        &prepared,
+        &rule_id,
+        false,
+        true,
+        true,
+        prepared_update.changed_fields,
+        Some(audit_id),
+        Some(index_job_id),
+        previous_detail,
+        updated_detail,
+    ))
+}
+
 /// Extract procedural-rule curation candidates from repeated semantic memories.
 pub fn extract_playbook_candidates(
     options: &PlaybookExtractOptions<'_>,
@@ -1111,6 +1874,424 @@ pub fn extract_playbook_candidates(
         degraded: Vec::new(),
         next_action,
     })
+}
+
+/// List procedural rules in the portable playbook shape.
+pub fn list_playbook_rules(
+    options: &PlaybookListOptions<'_>,
+) -> Result<PlaybookListReport, DomainError> {
+    validate_list_window(options.limit)?;
+    let prepared = prepare_rule_read(
+        options.workspace_path,
+        options.database_path,
+        Some("ee playbook list --help"),
+    )?;
+    let snapshot = load_playbook_snapshot(
+        &prepared,
+        options.include_tombstoned,
+        options.limit,
+        options.offset,
+    )?;
+
+    Ok(PlaybookListReport {
+        schema: PLAYBOOK_LIST_SCHEMA_V1,
+        command: "playbook list",
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_id: prepared.workspace_id,
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        total_count: snapshot.total_count,
+        returned_count: snapshot.rules.len(),
+        limit: options.limit,
+        offset: options.offset,
+        truncated: snapshot.truncated,
+        rules: snapshot.rules,
+        degraded: Vec::new(),
+    })
+}
+
+/// Export procedural rules as a portable, local playbook artifact.
+pub fn export_playbook(
+    options: &PlaybookExportOptions<'_>,
+) -> Result<PlaybookExportReport, DomainError> {
+    validate_list_window(options.limit)?;
+    let prepared = prepare_rule_read(
+        options.workspace_path,
+        options.database_path,
+        Some("ee playbook export --help"),
+    )?;
+    let snapshot = load_playbook_snapshot(&prepared, options.include_tombstoned, options.limit, 0)?;
+    let exported_at = Utc::now().to_rfc3339();
+    let document = PlaybookPortableDocument {
+        schema: PLAYBOOK_PORTABLE_SCHEMA_V1.to_owned(),
+        exported_at,
+        ee_version: env!("CARGO_PKG_VERSION").to_owned(),
+        workspace_id: prepared.workspace_id.clone(),
+        workspace_path: prepared.workspace_path.display().to_string(),
+        rule_count: snapshot.rules.len(),
+        rules: snapshot.rules,
+    };
+    let bytes = serde_json::to_vec_pretty(&document).map_err(|error| DomainError::Storage {
+        message: format!("failed to serialize playbook export: {error}"),
+        repair: Some("inspect rule content and retry".to_owned()),
+    })?;
+    let artifact_hash = hash_bytes(&bytes);
+    if !options.dry_run {
+        write_side_path_no_overwrite(options.output_path, &bytes)?;
+    }
+
+    Ok(PlaybookExportReport {
+        schema: PLAYBOOK_EXPORT_SCHEMA_V1,
+        command: "playbook export",
+        version: env!("CARGO_PKG_VERSION"),
+        status: if options.dry_run {
+            "dry_run".to_owned()
+        } else {
+            "exported".to_owned()
+        },
+        dry_run: options.dry_run,
+        workspace_id: prepared.workspace_id,
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        output_path: options.output_path.display().to_string(),
+        artifact_hash,
+        total_count: snapshot.total_count,
+        exported_count: document.rule_count,
+        truncated: snapshot.truncated,
+        no_overwrite: true,
+        redaction_status: "metadata_and_rule_text_only_no_memory_content".to_owned(),
+        document,
+        degraded: Vec::new(),
+    })
+}
+
+/// Import a portable playbook artifact into procedural rules.
+pub fn import_playbook(
+    options: &PlaybookImportOptions<'_>,
+) -> Result<PlaybookImportReport, DomainError> {
+    let prepared = prepare_rule_read(
+        options.workspace_path,
+        options.database_path,
+        Some("ee playbook import --help"),
+    )?;
+    let bytes = fs::read(options.source_path).map_err(|error| DomainError::Import {
+        message: format!(
+            "failed to read playbook source '{}': {error}",
+            options.source_path.display()
+        ),
+        repair: Some("choose a readable playbook JSON file".to_owned()),
+    })?;
+    let source_hash = hash_bytes(&bytes);
+    let document: PlaybookPortableDocument =
+        serde_json::from_slice(&bytes).map_err(|error| DomainError::Import {
+            message: format!("malformed playbook JSON: {error}"),
+            repair: Some(
+                "use `ee playbook export --out <path> --json` to create a supported file"
+                    .to_owned(),
+            ),
+        })?;
+    if document.schema != PLAYBOOK_PORTABLE_SCHEMA_V1 {
+        return Err(DomainError::Import {
+            message: format!("unsupported playbook schema `{}`", document.schema),
+            repair: Some(format!("expected schema `{PLAYBOOK_PORTABLE_SCHEMA_V1}`")),
+        });
+    }
+
+    let existing = load_playbook_snapshot(&prepared, true, MAX_RULE_LIST_LIMIT, 0)?;
+    let mut existing_contents = existing
+        .rules
+        .iter()
+        .map(|rule| normalize_rule_text(&rule.content))
+        .collect::<BTreeSet<_>>();
+    let actor = options
+        .actor
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("ee playbook import");
+
+    let mut imported_count = 0_usize;
+    let mut duplicate_count = 0_usize;
+    let mut skipped_count = 0_usize;
+    let mut downgraded_count = 0_usize;
+    let mut decisions = Vec::new();
+
+    for rule in &document.rules {
+        let content_hash = hash_str(&rule.content);
+        let mut issue_codes = Vec::new();
+        let normalized = normalize_rule_text(&rule.content);
+        if existing_contents.contains(&normalized) {
+            duplicate_count += 1;
+            decisions.push(PlaybookImportDecision {
+                source_rule_id: rule.source_rule_id.clone(),
+                content_hash,
+                status: "duplicate".to_owned(),
+                imported_rule_id: None,
+                audit_id: None,
+                index_job_id: None,
+                issue_codes,
+            });
+            continue;
+        }
+
+        let import_maturity = portable_import_maturity(rule, &mut issue_codes);
+        if import_maturity.is_none() {
+            skipped_count += 1;
+            decisions.push(PlaybookImportDecision {
+                source_rule_id: rule.source_rule_id.clone(),
+                content_hash,
+                status: "skipped".to_owned(),
+                imported_rule_id: None,
+                audit_id: None,
+                index_job_id: None,
+                issue_codes,
+            });
+            continue;
+        }
+        if issue_codes
+            .iter()
+            .any(|code| code == "validated_rule_imported_as_candidate")
+        {
+            downgraded_count += 1;
+        }
+        let maturity = import_maturity.unwrap_or(RuleMaturity::Candidate.as_str());
+
+        if options.dry_run {
+            existing_contents.insert(normalized);
+            decisions.push(PlaybookImportDecision {
+                source_rule_id: rule.source_rule_id.clone(),
+                content_hash,
+                status: "would_import".to_owned(),
+                imported_rule_id: None,
+                audit_id: None,
+                index_job_id: None,
+                issue_codes,
+            });
+            continue;
+        }
+
+        let add_options = RuleAddOptions {
+            workspace_path: &prepared.workspace_path,
+            database_path: Some(&prepared.database_path),
+            content: &rule.content,
+            scope: &rule.scope,
+            scope_pattern: rule.scope_pattern.as_deref(),
+            maturity,
+            confidence: Some(rule.confidence),
+            utility: rule.utility,
+            importance: rule.importance,
+            trust_class: &rule.trust_class,
+            protected: rule.protected,
+            tags: &rule.tags,
+            source_memory_ids: &[],
+            dry_run: false,
+            actor: Some(actor),
+        };
+        let add_report = add_rule(&add_options)?;
+        existing_contents.insert(normalized);
+        imported_count += 1;
+        decisions.push(PlaybookImportDecision {
+            source_rule_id: rule.source_rule_id.clone(),
+            content_hash,
+            status: "imported".to_owned(),
+            imported_rule_id: Some(add_report.rule_id),
+            audit_id: add_report.audit_id,
+            index_job_id: add_report.index_job_id,
+            issue_codes,
+        });
+    }
+
+    let would_import_count = decisions
+        .iter()
+        .filter(|decision| decision.status == "would_import")
+        .count();
+    let status = if options.dry_run {
+        "dry_run"
+    } else if imported_count > 0 {
+        "imported"
+    } else if duplicate_count > 0 && skipped_count == 0 {
+        "duplicates_only"
+    } else {
+        "no_changes"
+    };
+
+    Ok(PlaybookImportReport {
+        schema: PLAYBOOK_IMPORT_SCHEMA_V1,
+        command: "playbook import",
+        version: env!("CARGO_PKG_VERSION"),
+        status: status.to_owned(),
+        dry_run: options.dry_run,
+        workspace_id: prepared.workspace_id,
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        source_path: options.source_path.display().to_string(),
+        source_hash,
+        source_schema: document.schema,
+        source_rule_count: document.rules.len(),
+        imported_count: if options.dry_run {
+            would_import_count
+        } else {
+            imported_count
+        },
+        duplicate_count,
+        skipped_count,
+        downgraded_count,
+        durable_mutation: !options.dry_run && imported_count > 0,
+        decisions,
+        degraded: Vec::new(),
+    })
+}
+
+#[derive(Clone, Debug)]
+struct PlaybookSnapshot {
+    total_count: usize,
+    truncated: bool,
+    rules: Vec<PlaybookPortableRule>,
+}
+
+fn load_playbook_snapshot(
+    prepared: &PreparedRuleRead,
+    include_tombstoned: bool,
+    limit: u32,
+    offset: u32,
+) -> Result<PlaybookSnapshot, DomainError> {
+    validate_list_window(limit)?;
+    let connection = open_existing_database(&prepared.database_path)?;
+    let stored = connection
+        .list_procedural_rules(&prepared.workspace_id, None, None, include_tombstoned)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list playbook rules: {error}"),
+            repair: Some("ee rule list --json".to_owned()),
+        })?;
+    let mut rules = Vec::with_capacity(stored.len());
+    for rule in stored {
+        rules.push(playbook_rule_from_details(load_rule_details(
+            &connection,
+            rule,
+        )?));
+    }
+    rules.sort_by(|left, right| {
+        left.maturity
+            .cmp(&right.maturity)
+            .then_with(|| left.content.cmp(&right.content))
+            .then_with(|| left.source_rule_id.cmp(&right.source_rule_id))
+    });
+
+    let total_count = rules.len();
+    let offset = usize::try_from(offset).map_err(|_| {
+        rule_read_usage_error(
+            "playbook list offset is too large".to_owned(),
+            "ee playbook list --help",
+        )
+    })?;
+    let limit = usize::try_from(limit).map_err(|_| {
+        rule_read_usage_error(
+            "playbook list limit is too large".to_owned(),
+            "ee playbook list --help",
+        )
+    })?;
+    let rules = rules
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    let truncated = offset.saturating_add(rules.len()) < total_count;
+    Ok(PlaybookSnapshot {
+        total_count,
+        truncated,
+        rules,
+    })
+}
+
+fn playbook_rule_from_details(rule: RuleDetails) -> PlaybookPortableRule {
+    PlaybookPortableRule {
+        source_rule_id: Some(rule.id),
+        content: rule.content,
+        maturity: rule.maturity,
+        scope: rule.scope,
+        scope_pattern: rule.scope_pattern,
+        trust_class: rule.trust_class,
+        protected: rule.protected,
+        confidence: rule.confidence,
+        utility: rule.utility,
+        importance: rule.importance,
+        tags: rule.tags,
+        source_memory_count: rule.source_memory_ids.len(),
+        source_memory_ids: rule.source_memory_ids,
+        created_at: Some(rule.created_at),
+        updated_at: Some(rule.updated_at),
+    }
+}
+
+fn portable_import_maturity(
+    rule: &PlaybookPortableRule,
+    issue_codes: &mut Vec<String>,
+) -> Option<&'static str> {
+    let parsed = RuleMaturity::from_str(&rule.maturity).ok()?;
+    if parsed.is_terminal() {
+        issue_codes.push("terminal_maturity_not_imported".to_owned());
+        return None;
+    }
+    if parsed == RuleMaturity::Validated {
+        issue_codes.push("validated_rule_imported_as_candidate".to_owned());
+        return Some(RuleMaturity::Candidate.as_str());
+    }
+    Some(parsed.as_str())
+}
+
+fn write_side_path_no_overwrite(path: &Path, bytes: &[u8]) -> Result<(), DomainError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
+            message: format!(
+                "failed to create playbook export directory '{}': {error}",
+                parent.display()
+            ),
+            repair: Some("choose a writable --out path".to_owned()),
+        })?;
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "failed to create playbook export '{}': {error}",
+                path.display()
+            ),
+            repair: Some(
+                "choose a new --out path; ee never overwrites existing playbook exports".to_owned(),
+            ),
+        })?;
+    file.write_all(bytes)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "failed to write playbook export '{}': {error}",
+                path.display()
+            ),
+            repair: Some("inspect the partial side-path artifact before retrying".to_owned()),
+        })?;
+    file.write_all(b"\n")
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "failed to finish playbook export '{}': {error}",
+                path.display()
+            ),
+            repair: Some("inspect the partial side-path artifact before retrying".to_owned()),
+        })?;
+    file.flush().map_err(|error| DomainError::Storage {
+        message: format!(
+            "failed to flush playbook export '{}': {error}",
+            path.display()
+        ),
+        repair: Some("inspect disk health and retry".to_owned()),
+    })
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(bytes).to_hex())
+}
+
+fn hash_str(value: &str) -> String {
+    hash_bytes(value.as_bytes())
 }
 
 #[derive(Clone, Debug)]
@@ -1555,6 +2736,502 @@ fn rule_not_found(rule_id: &str) -> DomainError {
     }
 }
 
+fn parse_rule_id_for_command(raw: &str, repair: &str) -> Result<String, DomainError> {
+    RuleId::from_str(raw)
+        .map(|rule_id| rule_id.to_string())
+        .map_err(|error| rule_read_usage_error(format!("invalid rule ID: {error}"), repair))
+}
+
+fn load_active_rule(
+    connection: &DbConnection,
+    workspace_id: &str,
+    rule_id: &str,
+) -> Result<StoredProceduralRule, DomainError> {
+    let Some(rule) =
+        connection
+            .get_procedural_rule(rule_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to query procedural rule: {error}"),
+                repair: Some("ee doctor".to_owned()),
+            })?
+    else {
+        return Err(rule_not_found(rule_id));
+    };
+    if rule.workspace_id != workspace_id || rule.tombstoned_at.is_some() {
+        return Err(rule_not_found(rule_id));
+    }
+    Ok(rule)
+}
+
+fn build_rule_lifecycle_evidence(
+    connection: &DbConnection,
+    workspace_id: &str,
+    stored: &StoredProceduralRule,
+    options: &RuleMarkOptions<'_>,
+) -> Result<RuleLifecycleEvidence, DomainError> {
+    let mut evidence = RuleLifecycleEvidence::new()
+        .with_helpful_outcomes(options.evidence.helpful_outcomes)
+        .with_harmful_outcomes(
+            options.evidence.harmful_outcomes,
+            options.evidence.distinct_harmful_sources,
+        )
+        .with_protected_rule(stored.protected)
+        .with_manual_curation_approved(options.evidence.manual_curation_approved)
+        .with_intervening_helpful_from_harmful_sources(
+            options.evidence.intervening_helpful_from_harmful_sources,
+        )
+        .with_validation_passes(options.evidence.validation_passes)
+        .with_validation_contradictions(options.evidence.validation_contradictions)
+        .with_review_approved(options.evidence.review_approved);
+
+    if let Some(raw_superseding_rule_id) = options.evidence.superseding_rule_id {
+        let superseding_rule_id =
+            parse_rule_id_for_command(raw_superseding_rule_id, "ee rule mark --help")?;
+        if superseding_rule_id == stored.id {
+            return Err(rule_read_usage_error(
+                "a rule cannot supersede itself".to_owned(),
+                "ee rule mark --help",
+            ));
+        }
+        let superseding = load_active_rule(connection, workspace_id, &superseding_rule_id)?;
+        if superseding.maturity == RuleMaturity::Deprecated.as_str() {
+            return Err(rule_read_usage_error(
+                "a deprecated rule cannot be used as the superseding replacement".to_owned(),
+                "ee rule mark --help",
+            ));
+        }
+        evidence = evidence.with_superseding_rule(superseding_rule_id);
+    }
+
+    Ok(evidence)
+}
+
+fn positive_feedback_delta(trigger: RuleLifecycleTrigger, evidence: &RuleLifecycleEvidence) -> u32 {
+    match trigger {
+        RuleLifecycleTrigger::OutcomeHelpful => evidence.helpful_outcomes.max(1),
+        RuleLifecycleTrigger::ValidationPassed => evidence.validation_passes.max(1),
+        RuleLifecycleTrigger::ReviewApproved => u32::from(evidence.review_approved).max(1),
+        _ => 0,
+    }
+}
+
+fn negative_feedback_delta(trigger: RuleLifecycleTrigger, evidence: &RuleLifecycleEvidence) -> u32 {
+    match trigger {
+        RuleLifecycleTrigger::OutcomeHarmful => evidence.harmful_outcomes.max(1),
+        RuleLifecycleTrigger::ValidationContradicted => evidence.validation_contradictions.max(1),
+        _ => 0,
+    }
+}
+
+fn last_validated_marker(trigger: RuleLifecycleTrigger, timestamp: &str) -> Option<String> {
+    matches!(
+        trigger,
+        RuleLifecycleTrigger::ValidationPassed
+            | RuleLifecycleTrigger::ValidationContradicted
+            | RuleLifecycleTrigger::ReviewApproved
+    )
+    .then(|| timestamp.to_owned())
+}
+
+fn apply_score_delta(score: f32, delta: f64) -> f32 {
+    let adjusted = f64::from(score) + delta;
+    adjusted.clamp(0.0, 1.0) as f32
+}
+
+fn score_changed(previous: f32, next: f32) -> bool {
+    (previous - next).abs() > f32::EPSILON
+}
+
+fn apply_mark_to_detail(
+    mut detail: RuleDetails,
+    transition: &RuleLifecycleTransition,
+    confidence: f32,
+    utility: f32,
+    superseded_by: Option<String>,
+    positive_feedback_delta: u32,
+    negative_feedback_delta: u32,
+    last_validated_at: Option<String>,
+    updated_at: &str,
+) -> RuleDetails {
+    detail.maturity = transition.next_maturity.as_str().to_owned();
+    detail.confidence = confidence;
+    detail.utility = utility;
+    detail.lifecycle = rule_lifecycle(&detail.maturity, detail.source_memory_ids.len());
+    detail.evidence = rule_evidence(&detail.maturity, detail.source_memory_ids.len());
+    detail.positive_feedback_count = detail
+        .positive_feedback_count
+        .saturating_add(positive_feedback_delta);
+    detail.negative_feedback_count = detail
+        .negative_feedback_count
+        .saturating_add(negative_feedback_delta);
+    if last_validated_at.is_some() {
+        detail.last_validated_at = last_validated_at;
+    }
+    detail.superseded_by = superseded_by;
+    detail.updated_at = updated_at.to_owned();
+    detail
+}
+
+fn transition_report(transition: &RuleLifecycleTransition) -> RuleMarkTransition {
+    RuleMarkTransition {
+        trigger: transition.trigger.as_str().to_owned(),
+        action: transition.action.as_str().to_owned(),
+        prior_maturity: transition.prior_maturity.as_str().to_owned(),
+        next_maturity: transition.next_maturity.as_str().to_owned(),
+        allowed: transition.allowed,
+        requires_curation: transition.requires_curation,
+        audit_required: transition.audit_required,
+        confidence_delta: transition.confidence_delta,
+        utility_delta: transition.utility_delta,
+        reason: transition.reason.clone(),
+    }
+}
+
+fn lifecycle_evidence_report(evidence: &RuleLifecycleEvidence) -> RuleMarkEvidenceReport {
+    RuleMarkEvidenceReport {
+        helpful_outcomes: evidence.helpful_outcomes,
+        harmful_outcomes: evidence.harmful_outcomes,
+        distinct_harmful_sources: evidence.distinct_harmful_sources,
+        protected_rule: evidence.protected_rule,
+        manual_curation_approved: evidence.manual_curation_approved,
+        intervening_helpful_from_harmful_sources: evidence.intervening_helpful_from_harmful_sources,
+        validation_passes: evidence.validation_passes,
+        validation_contradictions: evidence.validation_contradictions,
+        review_approved: evidence.review_approved,
+        superseding_rule_id: evidence.superseding_rule_id.clone(),
+    }
+}
+
+fn rule_mark_report(
+    prepared: &PreparedRuleRead,
+    rule_id: &str,
+    dry_run: bool,
+    persisted: bool,
+    changed: bool,
+    audit_id: Option<String>,
+    index_job_id: Option<String>,
+    transition: &RuleLifecycleTransition,
+    evidence: &RuleLifecycleEvidence,
+    previous_rule: RuleDetails,
+    rule: RuleDetails,
+) -> RuleMarkReport {
+    let status = if dry_run {
+        if changed { "would_mark" } else { "unchanged" }
+    } else if changed {
+        "marked"
+    } else {
+        "recorded"
+    };
+    let index_status = if index_job_id.is_some() {
+        "queued"
+    } else if dry_run {
+        "dry_run_not_queued"
+    } else {
+        "not_queued_no_indexable_change"
+    };
+    RuleMarkReport {
+        schema: RULE_MARK_SCHEMA_V1,
+        command: "rule mark",
+        version: env!("CARGO_PKG_VERSION"),
+        status: status.to_owned(),
+        rule_id: rule_id.to_owned(),
+        workspace_id: prepared.workspace_id.clone(),
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        dry_run,
+        persisted,
+        changed,
+        audit_id,
+        index_job_id,
+        index_status: index_status.to_owned(),
+        transition: transition_report(transition),
+        evidence: lifecycle_evidence_report(evidence),
+        previous_rule,
+        rule,
+        degraded: Vec::new(),
+    }
+}
+
+fn validate_rule_update_request(options: &RuleUpdateOptions<'_>) -> Result<(), DomainError> {
+    if options.clear_scope_pattern && options.scope_pattern.is_some() {
+        return Err(rule_read_usage_error(
+            "`--scope-pattern` and `--clear-scope-pattern` cannot be used together".to_owned(),
+            "ee rule update --help",
+        ));
+    }
+    if options.protected.is_none()
+        && options.content.is_none()
+        && options.scope.is_none()
+        && options.scope_pattern.is_none()
+        && !options.clear_scope_pattern
+        && options.trust_class.is_none()
+        && options.confidence.is_none()
+        && options.utility.is_none()
+        && options.importance.is_none()
+        && options.tags.is_none()
+        && !options.clear_tags
+        && options.source_memory_ids.is_none()
+        && !options.clear_source_memory_ids
+    {
+        return Err(rule_read_usage_error(
+            "rule update requires at least one field to update".to_owned(),
+            "ee rule update --help",
+        ));
+    }
+    if options.tags.is_some() && options.clear_tags {
+        return Err(rule_read_usage_error(
+            "`--tag` and `--clear-tags` cannot be used together".to_owned(),
+            "ee rule update --help",
+        ));
+    }
+    if options.source_memory_ids.is_some() && options.clear_source_memory_ids {
+        return Err(rule_read_usage_error(
+            "`--source-memory` and `--clear-source-memories` cannot be used together".to_owned(),
+            "ee rule update --help",
+        ));
+    }
+    Ok(())
+}
+
+fn prepare_rule_update(
+    connection: &DbConnection,
+    prepared: &PreparedRuleRead,
+    previous: &RuleDetails,
+    options: &RuleUpdateOptions<'_>,
+) -> Result<PreparedRuleUpdate, DomainError> {
+    let content = match options.content {
+        Some(raw) => {
+            let content = MemoryContent::parse(raw)
+                .map_err(|error| rule_read_usage_error(error.to_string(), "ee rule update --help"))?
+                .as_str()
+                .to_owned();
+            if content.len() > MAX_RULE_CONTENT_BYTES {
+                return Err(rule_read_usage_error(
+                    format!(
+                        "rule content is too large: {} bytes > {} bytes",
+                        content.len(),
+                        MAX_RULE_CONTENT_BYTES
+                    ),
+                    "ee rule update --help",
+                ));
+            }
+            validate_rule_policy(&content)?;
+            content
+        }
+        None => previous.content.clone(),
+    };
+    let scope = options
+        .scope
+        .map(RuleScope::from_str)
+        .transpose()
+        .map_err(|error| rule_read_usage_error(error.to_string(), "ee rule update --help"))?
+        .unwrap_or_else(|| RuleScope::from_str(&previous.scope).unwrap_or(RuleScope::Workspace));
+    let candidate_scope_pattern = if options.clear_scope_pattern {
+        None
+    } else if let Some(pattern) = options.scope_pattern {
+        Some(pattern.to_owned())
+    } else if options.scope.is_some() && !scope.requires_pattern() {
+        None
+    } else {
+        previous.scope_pattern.clone()
+    };
+    let scope_pattern = prepare_scope_pattern(scope, candidate_scope_pattern.as_deref())?;
+    let trust_class = options
+        .trust_class
+        .map(TrustClass::from_str)
+        .transpose()
+        .map_err(|error| rule_read_usage_error(error.to_string(), "ee rule update --help"))?
+        .map_or_else(
+            || previous.trust_class.clone(),
+            |value| value.as_str().to_owned(),
+        );
+    let confidence = parse_update_score(options.confidence, previous.confidence, "confidence")?;
+    let utility = parse_update_score(options.utility, previous.utility, "utility")?;
+    let importance = parse_update_score(options.importance, previous.importance, "importance")?;
+    let protected = options.protected.unwrap_or(previous.protected);
+    let tags = if options.clear_tags {
+        Some(Vec::new())
+    } else {
+        options.tags.map(parse_tags).transpose()?
+    };
+    let source_memory_ids = if options.clear_source_memory_ids {
+        Some(Vec::new())
+    } else {
+        options
+            .source_memory_ids
+            .map(parse_source_memory_ids)
+            .transpose()?
+    };
+    let effective_source_memory_ids = source_memory_ids
+        .as_ref()
+        .unwrap_or(&previous.source_memory_ids);
+    if previous.maturity == RuleMaturity::Validated.as_str()
+        && effective_source_memory_ids.is_empty()
+    {
+        return Err(rule_read_usage_error(
+            "validated rules require at least one source-memory evidence ID".to_owned(),
+            "ee rule update --help",
+        ));
+    }
+    if let Some(ids) = &source_memory_ids {
+        verify_source_memories(connection, &prepared.workspace_id, ids)?;
+    }
+
+    let mut changed_fields = Vec::new();
+    push_changed(&mut changed_fields, "content", previous.content != content);
+    push_changed(
+        &mut changed_fields,
+        "scope",
+        previous.scope != scope.as_str(),
+    );
+    push_changed(
+        &mut changed_fields,
+        "scopePattern",
+        previous.scope_pattern != scope_pattern,
+    );
+    push_changed(
+        &mut changed_fields,
+        "trustClass",
+        previous.trust_class != trust_class,
+    );
+    push_changed(
+        &mut changed_fields,
+        "confidence",
+        score_changed(previous.confidence, confidence),
+    );
+    push_changed(
+        &mut changed_fields,
+        "utility",
+        score_changed(previous.utility, utility),
+    );
+    push_changed(
+        &mut changed_fields,
+        "importance",
+        score_changed(previous.importance, importance),
+    );
+    push_changed(
+        &mut changed_fields,
+        "protected",
+        previous.protected != protected,
+    );
+    if let Some(tags) = &tags {
+        push_changed(&mut changed_fields, "tags", previous.tags != *tags);
+    }
+    if let Some(source_memory_ids) = &source_memory_ids {
+        push_changed(
+            &mut changed_fields,
+            "sourceMemoryIds",
+            previous.source_memory_ids != *source_memory_ids,
+        );
+    }
+
+    let updated_at = if changed_fields.is_empty() {
+        previous.updated_at.clone()
+    } else {
+        Utc::now().to_rfc3339()
+    };
+    let mut next_detail = previous.clone();
+    next_detail.content = content.clone();
+    next_detail.scope = scope.as_str().to_owned();
+    next_detail.scope_pattern = scope_pattern.clone();
+    next_detail.trust_class = trust_class.clone();
+    next_detail.confidence = confidence;
+    next_detail.utility = utility;
+    next_detail.importance = importance;
+    next_detail.protected = protected;
+    if let Some(tags) = &tags {
+        next_detail.tags = tags.clone();
+    }
+    if let Some(source_memory_ids) = &source_memory_ids {
+        next_detail.source_memory_ids = source_memory_ids.clone();
+        next_detail.evidence = rule_evidence(&next_detail.maturity, source_memory_ids.len());
+        next_detail.lifecycle = rule_lifecycle(&next_detail.maturity, source_memory_ids.len());
+    }
+    next_detail.updated_at = updated_at.clone();
+
+    Ok(PreparedRuleUpdate {
+        input: UpdateProceduralRuleInput {
+            workspace_id: prepared.workspace_id.clone(),
+            content,
+            confidence,
+            utility,
+            importance,
+            trust_class,
+            scope: scope.as_str().to_owned(),
+            scope_pattern,
+            protected,
+            source_memory_ids,
+            tags,
+            updated_at,
+        },
+        changed_fields,
+        next_detail,
+    })
+}
+
+fn parse_update_score(raw: Option<f32>, previous: f32, field: &str) -> Result<f32, DomainError> {
+    raw.map(UnitScore::parse)
+        .transpose()
+        .map_err(|error| {
+            rule_read_usage_error(format!("invalid {field}: {error}"), "ee rule update --help")
+        })
+        .map(|score| score.map_or(previous, UnitScore::into_inner))
+}
+
+fn push_changed(changed_fields: &mut Vec<String>, field: &str, changed: bool) {
+    if changed {
+        changed_fields.push(field.to_owned());
+    }
+}
+
+fn rule_update_report(
+    prepared: &PreparedRuleRead,
+    rule_id: &str,
+    dry_run: bool,
+    persisted: bool,
+    changed: bool,
+    changed_fields: Vec<String>,
+    audit_id: Option<String>,
+    index_job_id: Option<String>,
+    previous_rule: RuleDetails,
+    rule: RuleDetails,
+) -> RuleUpdateReport {
+    let status = if dry_run {
+        if changed { "would_update" } else { "unchanged" }
+    } else if changed {
+        "updated"
+    } else {
+        "unchanged"
+    };
+    let index_status = if index_job_id.is_some() {
+        "queued"
+    } else if dry_run {
+        "dry_run_not_queued"
+    } else {
+        "not_queued_no_change"
+    };
+    RuleUpdateReport {
+        schema: RULE_UPDATE_SCHEMA_V1,
+        command: "rule update",
+        version: env!("CARGO_PKG_VERSION"),
+        status: status.to_owned(),
+        rule_id: rule_id.to_owned(),
+        workspace_id: prepared.workspace_id.clone(),
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        dry_run,
+        persisted,
+        changed,
+        changed_fields,
+        audit_id,
+        index_job_id,
+        index_status: index_status.to_owned(),
+        previous_rule,
+        rule,
+        degraded: Vec::new(),
+    }
+}
+
 fn prepare_rule_add(options: &RuleAddOptions<'_>) -> Result<PreparedRuleAdd, DomainError> {
     let workspace_path = resolve_workspace_path(options.workspace_path, options.dry_run)?;
     let database_path = options
@@ -1883,6 +3560,72 @@ fn rule_add_audit_details(rule_id: &str, input: &CreateProceduralRuleInput) -> S
         "importance": input.importance,
         "tagCount": input.tags.len(),
         "sourceMemoryCount": input.source_memory_ids.len(),
+    })
+    .to_string()
+}
+
+fn rule_mark_audit_details(
+    rule_id: &str,
+    transition: &RuleLifecycleTransition,
+    evidence: &RuleLifecycleEvidence,
+    changed: bool,
+    previous_rule: &RuleDetails,
+) -> String {
+    serde_json::json!({
+        "schema": "ee.audit.rule_mark.v1",
+        "command": "ee rule mark",
+        "ruleId": rule_id,
+        "trigger": transition.trigger.as_str(),
+        "action": transition.action.as_str(),
+        "priorMaturity": transition.prior_maturity.as_str(),
+        "nextMaturity": transition.next_maturity.as_str(),
+        "changed": changed,
+        "requiresCuration": transition.requires_curation,
+        "reason": &transition.reason,
+        "previousConfidence": previous_rule.confidence,
+        "previousUtility": previous_rule.utility,
+        "confidenceDelta": transition.confidence_delta,
+        "utilityDelta": transition.utility_delta,
+        "evidence": lifecycle_evidence_report(evidence),
+    })
+    .to_string()
+}
+
+fn rule_update_audit_details(
+    rule_id: &str,
+    changed_fields: &[String],
+    previous_rule: &RuleDetails,
+    rule: &RuleDetails,
+) -> String {
+    serde_json::json!({
+        "schema": "ee.audit.rule_update.v1",
+        "command": "ee rule update",
+        "ruleId": rule_id,
+        "changedFields": changed_fields,
+        "previous": {
+            "maturity": &previous_rule.maturity,
+            "scope": &previous_rule.scope,
+            "scopePattern": &previous_rule.scope_pattern,
+            "trustClass": &previous_rule.trust_class,
+            "protected": previous_rule.protected,
+            "confidence": previous_rule.confidence,
+            "utility": previous_rule.utility,
+            "importance": previous_rule.importance,
+            "tagCount": previous_rule.tags.len(),
+            "sourceMemoryCount": previous_rule.source_memory_ids.len(),
+        },
+        "next": {
+            "maturity": &rule.maturity,
+            "scope": &rule.scope,
+            "scopePattern": &rule.scope_pattern,
+            "trustClass": &rule.trust_class,
+            "protected": rule.protected,
+            "confidence": rule.confidence,
+            "utility": rule.utility,
+            "importance": rule.importance,
+            "tagCount": rule.tags.len(),
+            "sourceMemoryCount": rule.source_memory_ids.len(),
+        },
     })
     .to_string()
 }

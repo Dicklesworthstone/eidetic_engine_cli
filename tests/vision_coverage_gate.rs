@@ -183,8 +183,28 @@ fn vision_coverage_canonicalizes_known_command_aliases() -> TestResult {
     string_array_contains(&report, "/implemented_surfaces", "graph centrality-refresh")?;
     string_array_omits(&report, "/missing_surfaces", "graph refresh")?;
 
-    string_array_contains(&report, "/missing_surfaces", "index vacuum")?;
-    string_array_contains(&report, "/missing_surfaces", "eval report")?;
+    string_array_contains(&report, "/implemented_surfaces", "index vacuum")?;
+    string_array_omits(&report, "/missing_surfaces", "index vacuum")?;
+    string_array_contains(&report, "/implemented_surfaces", "eval report")?;
+    string_array_omits(&report, "/missing_surfaces", "eval report")?;
+    string_array_contains(&report, "/implemented_surfaces", "export")?;
+    string_array_omits(&report, "/missing_surfaces", "export")?;
+    string_array_contains(&report, "/implemented_surfaces", "playbook list")?;
+    string_array_omits(&report, "/missing_surfaces", "playbook list")?;
+    string_array_contains(&report, "/implemented_surfaces", "playbook export")?;
+    string_array_omits(&report, "/missing_surfaces", "playbook export")?;
+    string_array_contains(&report, "/implemented_surfaces", "playbook import")?;
+    string_array_omits(&report, "/missing_surfaces", "playbook import")?;
+    string_array_contains(&report, "/implemented_surfaces", "rule mark")?;
+    string_array_omits(&report, "/missing_surfaces", "rule mark")?;
+    string_array_contains(&report, "/implemented_surfaces", "rule update")?;
+    string_array_omits(&report, "/missing_surfaces", "rule update")?;
+    string_array_contains(&report, "/implemented_surfaces", "memory expire")?;
+    string_array_omits(&report, "/missing_surfaces", "memory expire")?;
+    string_array_contains(&report, "/implemented_surfaces", "memory link")?;
+    string_array_omits(&report, "/missing_surfaces", "memory link")?;
+    string_array_contains(&report, "/implemented_surfaces", "memory tags")?;
+    string_array_omits(&report, "/missing_surfaces", "memory tags")?;
     string_array_contains(&report, "/missing_surfaces", "completion")
 }
 

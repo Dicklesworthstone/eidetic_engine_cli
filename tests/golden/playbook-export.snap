@@ -1,0 +1,51 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "schema": "ee.playbook.export.v1",
+    "command": "playbook export",
+    "version": "0.1.0",
+    "status": "exported",
+    "dryRun": false,
+    "workspaceId": "<WORKSPACE_ID>",
+    "workspacePath": "<WORKSPACE>",
+    "databasePath": "<DATABASE>",
+    "outputPath": "<PLAYBOOK>",
+    "artifactHash": "<ARTIFACT_HASH>",
+    "totalCount": 1,
+    "exportedCount": 1,
+    "truncated": false,
+    "noOverwrite": true,
+    "redactionStatus": "metadata_and_rule_text_only_no_memory_content",
+    "document": {
+      "schema": "ee.playbook.portable.v1",
+      "exportedAt": "<TIMESTAMP>",
+      "eeVersion": "0.1.0",
+      "workspaceId": "<WORKSPACE_ID>",
+      "workspacePath": "<WORKSPACE>",
+      "ruleCount": 1,
+      "rules": [
+        {
+          "sourceRuleId": "<RULE_ID>",
+          "content": "Run cargo fmt --check before release.",
+          "maturity": "candidate",
+          "scope": "workspace",
+          "scopePattern": null,
+          "trustClass": "human_explicit",
+          "protected": false,
+          "confidence": 0.55,
+          "utility": 0.5,
+          "importance": 0.5,
+          "tags": [
+            "release"
+          ],
+          "sourceMemoryIds": [],
+          "sourceMemoryCount": 0,
+          "createdAt": "<TIMESTAMP>",
+          "updatedAt": "<TIMESTAMP>"
+        }
+      ]
+    },
+    "degraded": []
+  }
+}

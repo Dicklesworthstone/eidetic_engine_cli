@@ -343,7 +343,7 @@ Each gate reports exit code and elapsed time.
 | `ee remember "<text>" --level <l> [--kind <k>] [--tags a,b]` | Capture a durable memory |
 | `ee outcome <id> --signal helpful\|harmful [--reason "<reason>"]` | Record feedback, updating utility/confidence |
 | `ee why <memory-id> [--json]` | Explain why a memory was selected, scored, or curated the way it was |
-| `ee pack --query-file task.eeq.json --max-tokens N --format toon` | Build a pack from an explicit EQL query document |
+| `ee pack build --query-file task.eeq.json --max-tokens N --format toon` | Build a pack from an explicit EQL query document |
 | `ee pack replay <pack-id> --json` | Inspect the persisted, redaction-safe selection ledger for a historical pack |
 | `ee pack diff <old-pack-id> <new-pack-id> --json` | Compare two persisted pack ledgers and explain selection, freshness, redaction, or derived-asset changes |
 | `ee support bundle --out <dir> --json` | Create a redacted diagnostic bundle, including pack replay ledger summaries without raw query or memory content |
@@ -388,7 +388,10 @@ provenance text, and full ledger payloads.
 | `ee curate apply <id>` / `accept <id>` / `reject <id>` / `snooze <id>` / `merge <a> <b>` | Lifecycle transitions |
 | `ee curate disposition` | Evaluate TTL disposition policy without silent mutation (`--apply` is required to write) |
 | `ee playbook extract [--since <RFC3339>] [--dry-run]` | Propose procedural-rule candidates from repeated semantic memories |
-| `ee rule add` / `list` / `show <id>` / `protect <id>` | Direct rule management |
+| `ee playbook list [--limit N]` | List procedural rules in portable playbook form |
+| `ee playbook export --out <file> [--dry-run]` | Write a no-overwrite portable playbook artifact |
+| `ee playbook import --source <file> [--apply]` | Dry-run or apply a portable playbook import through audited rule writes |
+| `ee rule add` / `list` / `show <id>` / `mark <id>` / `protect <id>` / `update <id>` | Direct rule management |
 
 ### Memory inspection
 
@@ -397,6 +400,9 @@ provenance text, and full ledger payloads.
 | `ee memory show <id> [--json]` | Full record with provenance, links, audit trail |
 | `ee memory list [--workspace .] [--level <l>] [--tag <t>]` | Filtered listing |
 | `ee memory history <id>` | Audit trail for a memory |
+| `ee memory expire <id> [--dry-run]` | Audited soft expiration without deleting memory rows |
+| `ee memory link <id> [target-id] --relation <type> [--dry-run]` | Deterministic memory link listing and audited explicit link creation |
+| `ee memory tags <id> [--add <tags>] [--remove <tags>] [--set <tags>] [--clear]` | Deterministic audited tag listing and mutation |
 
 ### Graph
 
@@ -412,6 +418,7 @@ provenance text, and full ledger payloads.
 | Command | Purpose |
 |---|---|
 | `ee index status` / `rebuild` / `reembed` | Manage derived search indexes (Frankensearch owns model selection) |
+| `ee index vacuum` | Preview reclaimable derived search-index artifacts without deleting or rewriting files |
 
 ### Workspace, models, schemas
 
@@ -425,6 +432,7 @@ provenance text, and full ledger payloads.
 
 | Command | Purpose |
 |---|---|
+| `ee export [--output-dir <dir>] [--redaction standard]` | Export redacted JSONL records as a portable side-path artifact |
 | `ee backup create [--label <name>]` | Create a verified backup with manifest |
 | `ee backup list` / `verify <id>` / `inspect <id>` | Audit existing backups |
 | `ee backup restore <backup-id> --side-path <path>` | Restore into an isolated side path |
@@ -434,6 +442,7 @@ provenance text, and full ledger payloads.
 | Command | Purpose |
 |---|---|
 | `ee eval run` / `list` | Run or list retrieval-quality evaluation fixtures |
+| `ee eval report [fixture]` | Summarize fixture IDs, data hashes, aggregate retrieval metrics, and the first failing query |
 | `ee eval run <fixture> --pack-quality --json` | Check whether deterministic fixtures still select required context-pack evidence |
 | `ee analyze science-status --json` | Report optional science analytics feature posture and degradations |
 | `ee capabilities` / `check` / `health` | Inspect feature availability and readiness |
@@ -727,6 +736,9 @@ The trust pipeline flags suspicious patterns (fake instructions, role override a
 # Verified backup
 ee backup create --label pre-refactor
 ✓ backup bk_01HQ4… (32 MB) verified
+
+# Portable redacted JSONL export
+ee export --output-dir ./ee-export --redaction standard --json
 
 # List
 ee backup list

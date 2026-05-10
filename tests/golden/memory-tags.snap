@@ -1,0 +1,134 @@
+{
+  "tagList": {
+    "schema": "ee.response.v1",
+    "success": true,
+    "data": {
+      "command": "memory tags",
+      "schema": "ee.memory.tags.v1",
+      "version": "0.1.0",
+      "memory_id": "<MEMORY_ID>",
+      "workspace_id": "<WORKSPACE_ID>",
+      "status": "listed",
+      "dry_run": false,
+      "persisted": false,
+      "changed": false,
+      "previous_tags": [
+        "checks",
+        "release"
+      ],
+      "tags": [
+        "checks",
+        "release"
+      ],
+      "added_tags": [],
+      "removed_tags": [],
+      "audit_ids": [],
+      "index_job_id": null,
+      "index_status": "not_scheduled",
+      "idempotency": "read_only"
+    }
+  },
+  "tagDryRun": {
+    "schema": "ee.response.v1",
+    "success": true,
+    "data": {
+      "command": "memory tags",
+      "schema": "ee.memory.tags.v1",
+      "version": "0.1.0",
+      "memory_id": "<MEMORY_ID>",
+      "workspace_id": "<WORKSPACE_ID>",
+      "status": "would_update",
+      "dry_run": true,
+      "persisted": false,
+      "changed": true,
+      "previous_tags": [
+        "checks",
+        "release"
+      ],
+      "tags": [
+        "alpha",
+        "release",
+        "zeta"
+      ],
+      "added_tags": [
+        "alpha",
+        "zeta"
+      ],
+      "removed_tags": [
+        "checks"
+      ],
+      "audit_ids": [],
+      "index_job_id": null,
+      "index_status": "dry_run_not_queued",
+      "idempotency": "would_change"
+    }
+  },
+  "tagApply": {
+    "schema": "ee.response.v1",
+    "success": true,
+    "data": {
+      "command": "memory tags",
+      "schema": "ee.memory.tags.v1",
+      "version": "0.1.0",
+      "memory_id": "<MEMORY_ID>",
+      "workspace_id": "<WORKSPACE_ID>",
+      "status": "updated",
+      "dry_run": false,
+      "persisted": true,
+      "changed": true,
+      "previous_tags": [
+        "checks",
+        "release"
+      ],
+      "tags": [
+        "alpha",
+        "release",
+        "zeta"
+      ],
+      "added_tags": [
+        "alpha",
+        "zeta"
+      ],
+      "removed_tags": [
+        "checks"
+      ],
+      "audit_ids": [
+        "<AUDIT_ID>"
+      ],
+      "index_job_id": "<INDEX_JOB_ID>",
+      "index_status": "queued",
+      "idempotency": "changed"
+    }
+  },
+  "tagDuplicate": {
+    "schema": "ee.response.v1",
+    "success": true,
+    "data": {
+      "command": "memory tags",
+      "schema": "ee.memory.tags.v1",
+      "version": "0.1.0",
+      "memory_id": "<MEMORY_ID>",
+      "workspace_id": "<WORKSPACE_ID>",
+      "status": "unchanged",
+      "dry_run": false,
+      "persisted": false,
+      "changed": false,
+      "previous_tags": [
+        "alpha",
+        "release",
+        "zeta"
+      ],
+      "tags": [
+        "alpha",
+        "release",
+        "zeta"
+      ],
+      "added_tags": [],
+      "removed_tags": [],
+      "audit_ids": [],
+      "index_job_id": null,
+      "index_status": "not_scheduled",
+      "idempotency": "no_change"
+    }
+  }
+}

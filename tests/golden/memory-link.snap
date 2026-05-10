@@ -1,0 +1,189 @@
+{
+  "apply": {
+    "data": {
+      "audit_id": "<AUDIT_ID>",
+      "changed": true,
+      "command": "memory link",
+      "dry_run": false,
+      "idempotency": "changed",
+      "link": {
+        "confidence": 0.9,
+        "created_at": "<TIMESTAMP>",
+        "created_by": "memory-link-e2e",
+        "directed": true,
+        "evidence_count": 2,
+        "link_id": "<LINK_ID>",
+        "relation": "supports",
+        "source": "human",
+        "source_memory_id": "<SOURCE_MEMORY_ID>",
+        "target_memory_id": "<TARGET_MEMORY_ID>",
+        "weight": 0.75
+      },
+      "links": [
+        {
+          "confidence": 0.9,
+          "created_at": "<TIMESTAMP>",
+          "created_by": "memory-link-e2e",
+          "directed": true,
+          "evidence_count": 2,
+          "link_id": "<LINK_ID>",
+          "relation": "supports",
+          "source": "human",
+          "source_memory_id": "<SOURCE_MEMORY_ID>",
+          "target_memory_id": "<TARGET_MEMORY_ID>",
+          "weight": 0.75
+        }
+      ],
+      "memory_id": "<SOURCE_MEMORY_ID>",
+      "persisted": true,
+      "schema": "ee.memory.link.v1",
+      "status": "created",
+      "version": "0.1.0",
+      "workspace_id": "<WORKSPACE_ID>"
+    },
+    "schema": "ee.response.v1",
+    "success": true
+  },
+  "dryRun": {
+    "data": {
+      "audit_id": null,
+      "changed": true,
+      "command": "memory link",
+      "dry_run": true,
+      "idempotency": "would_change",
+      "link": {
+        "confidence": 0.9,
+        "created_at": null,
+        "created_by": "memory-link-e2e",
+        "directed": true,
+        "evidence_count": 2,
+        "link_id": null,
+        "relation": "supports",
+        "source": "human",
+        "source_memory_id": "<SOURCE_MEMORY_ID>",
+        "target_memory_id": "<TARGET_MEMORY_ID>",
+        "weight": 0.75
+      },
+      "links": [
+        {
+          "confidence": 0.9,
+          "created_at": null,
+          "created_by": "memory-link-e2e",
+          "directed": true,
+          "evidence_count": 2,
+          "link_id": null,
+          "relation": "supports",
+          "source": "human",
+          "source_memory_id": "<SOURCE_MEMORY_ID>",
+          "target_memory_id": "<TARGET_MEMORY_ID>",
+          "weight": 0.75
+        }
+      ],
+      "memory_id": "<SOURCE_MEMORY_ID>",
+      "persisted": false,
+      "schema": "ee.memory.link.v1",
+      "status": "would_create",
+      "version": "0.1.0",
+      "workspace_id": "<WORKSPACE_ID>"
+    },
+    "schema": "ee.response.v1",
+    "success": true
+  },
+  "duplicate": {
+    "data": {
+      "audit_id": null,
+      "changed": false,
+      "command": "memory link",
+      "dry_run": false,
+      "idempotency": "no_change",
+      "link": {
+        "confidence": 0.9,
+        "created_at": "<TIMESTAMP>",
+        "created_by": "memory-link-e2e",
+        "directed": true,
+        "evidence_count": 2,
+        "link_id": "<LINK_ID>",
+        "relation": "supports",
+        "source": "human",
+        "source_memory_id": "<SOURCE_MEMORY_ID>",
+        "target_memory_id": "<TARGET_MEMORY_ID>",
+        "weight": 0.75
+      },
+      "links": [
+        {
+          "confidence": 0.9,
+          "created_at": "<TIMESTAMP>",
+          "created_by": "memory-link-e2e",
+          "directed": true,
+          "evidence_count": 2,
+          "link_id": "<LINK_ID>",
+          "relation": "supports",
+          "source": "human",
+          "source_memory_id": "<SOURCE_MEMORY_ID>",
+          "target_memory_id": "<TARGET_MEMORY_ID>",
+          "weight": 0.75
+        }
+      ],
+      "memory_id": "<SOURCE_MEMORY_ID>",
+      "persisted": false,
+      "schema": "ee.memory.link.v1",
+      "status": "already_exists",
+      "version": "0.1.0",
+      "workspace_id": "<WORKSPACE_ID>"
+    },
+    "schema": "ee.response.v1",
+    "success": true
+  },
+  "initialList": {
+    "data": {
+      "audit_id": null,
+      "changed": false,
+      "command": "memory link",
+      "dry_run": false,
+      "idempotency": "read_only",
+      "link": null,
+      "links": [],
+      "memory_id": "<SOURCE_MEMORY_ID>",
+      "persisted": false,
+      "schema": "ee.memory.link.v1",
+      "status": "listed",
+      "version": "0.1.0",
+      "workspace_id": "<WORKSPACE_ID>"
+    },
+    "schema": "ee.response.v1",
+    "success": true
+  },
+  "relationList": {
+    "data": {
+      "audit_id": null,
+      "changed": false,
+      "command": "memory link",
+      "dry_run": false,
+      "idempotency": "read_only",
+      "link": null,
+      "links": [
+        {
+          "confidence": 0.9,
+          "created_at": "<TIMESTAMP>",
+          "created_by": "memory-link-e2e",
+          "directed": true,
+          "evidence_count": 2,
+          "link_id": "<LINK_ID>",
+          "relation": "supports",
+          "source": "human",
+          "source_memory_id": "<SOURCE_MEMORY_ID>",
+          "target_memory_id": "<TARGET_MEMORY_ID>",
+          "weight": 0.75
+        }
+      ],
+      "memory_id": "<SOURCE_MEMORY_ID>",
+      "persisted": false,
+      "schema": "ee.memory.link.v1",
+      "status": "listed",
+      "version": "0.1.0",
+      "workspace_id": "<WORKSPACE_ID>"
+    },
+    "schema": "ee.response.v1",
+    "success": true
+  }
+}

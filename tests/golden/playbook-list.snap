@@ -1,0 +1,39 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "schema": "ee.playbook.list.v1",
+    "command": "playbook list",
+    "version": "0.1.0",
+    "workspaceId": "<WORKSPACE_ID>",
+    "workspacePath": "<WORKSPACE>",
+    "databasePath": "<DATABASE>",
+    "totalCount": 1,
+    "returnedCount": 1,
+    "limit": 100,
+    "offset": 0,
+    "truncated": false,
+    "rules": [
+      {
+        "sourceRuleId": "<RULE_ID>",
+        "content": "Run cargo fmt --check before release.",
+        "maturity": "candidate",
+        "scope": "workspace",
+        "scopePattern": null,
+        "trustClass": "human_explicit",
+        "protected": false,
+        "confidence": 0.55,
+        "utility": 0.5,
+        "importance": 0.5,
+        "tags": [
+          "release"
+        ],
+        "sourceMemoryIds": [],
+        "sourceMemoryCount": 0,
+        "createdAt": "<TIMESTAMP>",
+        "updatedAt": "<TIMESTAMP>"
+      }
+    ],
+    "degraded": []
+  }
+}

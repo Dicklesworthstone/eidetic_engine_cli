@@ -99,7 +99,17 @@ const README_WORKFLOW_ROWS: &[(&str, &str, &str, &[&str])] = &[
         "### Core workflow",
         "Command Reference core workflow",
         &[
-            "init", "status", "doctor", "context", "search", "remember", "outcome", "why", "pack",
+            "init",
+            "status",
+            "doctor",
+            "context",
+            "search",
+            "remember",
+            "outcome",
+            "why",
+            "pack build",
+            "pack replay",
+            "pack diff",
         ],
     ),
     (
@@ -127,10 +137,15 @@ const README_WORKFLOW_ROWS: &[(&str, &str, &str, &[&str])] = &[
             "curate merge",
             "curate disposition",
             "playbook extract",
+            "playbook list",
+            "playbook export",
+            "playbook import",
             "rule add",
             "rule list",
             "rule show",
+            "rule mark",
             "rule protect",
+            "rule update",
         ],
     ),
     (
@@ -141,6 +156,9 @@ const README_WORKFLOW_ROWS: &[(&str, &str, &str, &[&str])] = &[
             "memory show",
             "memory list",
             "memory history",
+            "memory expire",
+            "memory link",
+            "memory tags",
             "memory revise",
             "why",
         ],
@@ -157,6 +175,7 @@ const README_WORKFLOW_ROWS: &[(&str, &str, &str, &[&str])] = &[
             "index status",
             "index rebuild",
             "index reembed",
+            "index vacuum",
         ],
     ),
     (
@@ -182,6 +201,7 @@ const README_WORKFLOW_ROWS: &[(&str, &str, &str, &[&str])] = &[
         "### Backup & restore",
         "Backup and Restore",
         &[
+            "export",
             "backup create",
             "backup list",
             "backup inspect",
@@ -207,6 +227,9 @@ const README_WORKFLOW_ROWS: &[(&str, &str, &str, &[&str])] = &[
             "diag streams",
             "eval run",
             "eval list",
+            "eval report",
+            "perf compare",
+            "perf budget check",
             "daemon",
             "analyze science-status",
         ],
@@ -215,7 +238,14 @@ const README_WORKFLOW_ROWS: &[(&str, &str, &str, &[&str])] = &[
         "configuration-context-profiles",
         "## Configuration",
         "Configuration and Context Profiles",
-        &["context", "pack", "status", "workspace resolve"],
+        &[
+            "context",
+            "pack build",
+            "status",
+            "workspace resolve",
+            "profile config plan",
+            "profile config apply",
+        ],
     ),
     (
         "cass-integration",
@@ -247,7 +277,9 @@ const README_WORKFLOW_ROWS: &[(&str, &str, &str, &[&str])] = &[
             "remember",
             "outcome",
             "curate candidates",
+            "rule mark",
             "rule protect",
+            "rule update",
             "handoff create",
             "handoff preview",
             "why",
@@ -301,6 +333,9 @@ const BASELINE_ACTUAL_COMMANDS: &[(&str, &[&str])] = &[
             "memory list",
             "memory show",
             "memory history",
+            "memory expire",
+            "memory link",
+            "memory tags",
             "memory revise",
         ],
     ),
@@ -318,11 +353,17 @@ const BASELINE_ACTUAL_COMMANDS: &[(&str, &[&str])] = &[
     ),
     (
         "derived search index",
-        &["index status", "index rebuild", "index reembed"],
+        &[
+            "index status",
+            "index rebuild",
+            "index reembed",
+            "index vacuum",
+        ],
     ),
     (
         "backup and restore side paths",
         &[
+            "export",
             "backup create",
             "backup list",
             "backup inspect",
@@ -332,11 +373,22 @@ const BASELINE_ACTUAL_COMMANDS: &[(&str, &[&str])] = &[
     ),
     (
         "export renderers currently present",
-        &["schema export", "graph export", "procedure export"],
+        &[
+            "schema export",
+            "graph export",
+            "procedure export",
+            "playbook export",
+        ],
     ),
     (
-        "deterministic evaluation entrypoint",
-        &["eval run", "eval list"],
+        "deterministic evaluation and performance entrypoints",
+        &[
+            "eval run",
+            "eval list",
+            "eval report",
+            "perf compare",
+            "perf budget check",
+        ],
     ),
     (
         "status, health, and config-sensitive probes",
@@ -377,10 +429,8 @@ const BASELINE_ABSENT_COMMANDS: &[&str] = &[
     "db migrate",
     "db check",
     "db backup",
-    "index vacuum",
     "restore",
     "export jsonl",
-    "eval report",
     "completion",
     "config",
 ];
@@ -418,7 +468,7 @@ fn mechanical_boundary_inventory_covers_all_cli_command_paths() -> Result<(), St
     let commands = command_paths_from_extract_function(CLI_SOURCE)?;
     assert_eq!(
         commands.len(),
-        187,
+        202,
         "unexpected CLI command count; update the mechanical boundary inventory"
     );
 
