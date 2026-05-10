@@ -5443,12 +5443,18 @@ mod tests {
         let pr_values: Vec<f64> = report.scores.iter().map(|s| s.pagerank).collect();
         for pr in &pr_values {
             assert!(pr.is_finite(), "pagerank should converge for cyclic graph");
-            assert!(*pr > 0.0, "pagerank should be positive for all nodes in cycle");
+            assert!(
+                *pr > 0.0,
+                "pagerank should be positive for all nodes in cycle"
+            );
         }
 
         let bc_values: Vec<f64> = report.scores.iter().map(|s| s.betweenness).collect();
         for bc in &bc_values {
-            assert!(bc.is_finite(), "betweenness should be finite for cyclic graph");
+            assert!(
+                bc.is_finite(),
+                "betweenness should be finite for cyclic graph"
+            );
         }
 
         connection.close().map_err(|error| error.to_string())

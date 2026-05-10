@@ -85,7 +85,11 @@ fn db_status_reports_missing_database_explicitly() {
         OsString::from(&database),
         OsString::from("--json"),
     ]);
-    assert_eq!(exit, ee::models::ProcessExitCode::Success, "stdout={stdout}");
+    assert_eq!(
+        exit,
+        ee::models::ProcessExitCode::Success,
+        "stdout={stdout}"
+    );
     let report = report(&stdout);
     assert_eq!(report["exists"], Value::Bool(false));
     assert!(
@@ -108,7 +112,11 @@ fn db_status_reports_real_schema_state_for_initialized_workspace() {
         OsString::from(&dir),
         OsString::from("--json"),
     ]);
-    assert_eq!(exit, ee::models::ProcessExitCode::Success, "stdout={stdout}");
+    assert_eq!(
+        exit,
+        ee::models::ProcessExitCode::Success,
+        "stdout={stdout}"
+    );
     let report = report(&stdout);
 
     assert_eq!(report["exists"], Value::Bool(true));
@@ -165,7 +173,11 @@ fn db_status_counts_includes_per_table_row_counts_when_requested() {
         OsString::from("--wal"),
         OsString::from("--json"),
     ]);
-    assert_eq!(exit, ee::models::ProcessExitCode::Success, "stdout={stdout}");
+    assert_eq!(
+        exit,
+        ee::models::ProcessExitCode::Success,
+        "stdout={stdout}"
+    );
     let report = report(&stdout);
 
     let counts = report["tableRowCounts"]
@@ -206,7 +218,11 @@ fn db_check_passes_for_freshly_initialized_database() {
         OsString::from("--full"),
         OsString::from("--json"),
     ]);
-    assert_eq!(exit, ee::models::ProcessExitCode::Success, "stdout={stdout}");
+    assert_eq!(
+        exit,
+        ee::models::ProcessExitCode::Success,
+        "stdout={stdout}"
+    );
     let report = report(&stdout);
     assert_eq!(report["passed"], Value::Bool(true));
     assert_eq!(report["checkType"], Value::String("integrity_check".into()));
@@ -235,7 +251,11 @@ fn db_check_quick_check_runs_without_foreign_key_check() {
         OsString::from(&dir),
         OsString::from("--json"),
     ]);
-    assert_eq!(exit, ee::models::ProcessExitCode::Success, "stdout={stdout}");
+    assert_eq!(
+        exit,
+        ee::models::ProcessExitCode::Success,
+        "stdout={stdout}"
+    );
     let report = report(&stdout);
     assert_eq!(report["passed"], Value::Bool(true));
     assert_eq!(report["checkType"], Value::String("quick_check".into()));
@@ -265,7 +285,10 @@ fn db_check_reports_missing_database_with_storage_exit_code() {
     let report = report(&stdout);
     assert_eq!(report["passed"], Value::Bool(false));
     assert!(
-        report["message"].as_str().unwrap_or("").contains("not found"),
+        report["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("not found"),
         "expected file-not-found message, got {report}"
     );
 }
@@ -283,13 +306,14 @@ fn db_migrations_lists_applied_and_pending_for_real_database() {
         OsString::from(&dir),
         OsString::from("--json"),
     ]);
-    assert_eq!(exit, ee::models::ProcessExitCode::Success, "stdout={stdout}");
+    assert_eq!(
+        exit,
+        ee::models::ProcessExitCode::Success,
+        "stdout={stdout}"
+    );
     let report = report(&stdout);
 
-    let applied = report["applied"]
-        .as_array()
-        .expect("applied list")
-        .clone();
+    let applied = report["applied"].as_array().expect("applied list").clone();
     assert!(!applied.is_empty(), "expected applied migrations");
     let first = &applied[0];
     assert!(first["version"].as_u64().unwrap_or(0) >= 1);
@@ -334,7 +358,11 @@ fn db_migrations_filter_applied_excludes_pending_section() {
         OsString::from("applied"),
         OsString::from("--json"),
     ]);
-    assert_eq!(exit, ee::models::ProcessExitCode::Success, "stdout={stdout}");
+    assert_eq!(
+        exit,
+        ee::models::ProcessExitCode::Success,
+        "stdout={stdout}"
+    );
     let report = report(&stdout);
     assert!(!report["applied"].as_array().unwrap().is_empty());
     assert!(
@@ -358,7 +386,11 @@ fn db_migrations_filter_pending_returns_empty_when_up_to_date() {
         OsString::from("pending"),
         OsString::from("--json"),
     ]);
-    assert_eq!(exit, ee::models::ProcessExitCode::Success, "stdout={stdout}");
+    assert_eq!(
+        exit,
+        ee::models::ProcessExitCode::Success,
+        "stdout={stdout}"
+    );
     let report = report(&stdout);
     assert!(
         report["pending"].as_array().unwrap().is_empty(),
@@ -385,7 +417,11 @@ fn db_migrations_invalid_status_returns_error() {
         OsString::from("nonsense"),
         OsString::from("--json"),
     ]);
-    assert_eq!(exit, ee::models::ProcessExitCode::Storage, "stdout={stdout}");
+    assert_eq!(
+        exit,
+        ee::models::ProcessExitCode::Storage,
+        "stdout={stdout}"
+    );
     let parsed = parse_response(&stdout);
     assert_eq!(parsed["success"], Value::Bool(false));
     let report = parsed["data"]["report"].clone();
@@ -413,7 +449,11 @@ fn db_migrations_missing_database_lists_compiled_pending() {
         OsString::from(&database),
         OsString::from("--json"),
     ]);
-    assert_eq!(exit, ee::models::ProcessExitCode::Storage, "stdout={stdout}");
+    assert_eq!(
+        exit,
+        ee::models::ProcessExitCode::Storage,
+        "stdout={stdout}"
+    );
     let parsed = parse_response(&stdout);
     assert_eq!(parsed["success"], Value::Bool(false));
     let report = parsed["data"]["report"].clone();
