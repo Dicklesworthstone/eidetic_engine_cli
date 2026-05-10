@@ -1,0 +1,31 @@
+---
+source: src/core/capabilities.rs, Cargo.toml
+assertion: serve adapter is feature-gated and unavailable in default build
+schema:
+  feature: serve
+  status: feature_disabled
+contracts:
+  - serve feature enables optional HTTP adapter for localhost access
+  - default build does not include serve feature
+  - serve feature must not pull tokio, hyper, axum, tower, or reqwest into default tree
+  - when serve feature disabled, capabilities report serve as unavailable
+  - serve adapter wraps existing CLI commands, does not add business logic
+  - localhost-only boundary enforced (no public network exposure)
+  - read-only or explicitly audited mutations
+  - JSON responses mirror CLI contracts
+  - HTTP endpoints follow ee_ naming convention from MCP tools
+feature_requirements:
+  - serve = [] feature flag in Cargo.toml
+  - BuildFeature::new("serve", cfg!(feature = "serve")) in capabilities
+  - FeatureEntry::new("serve", cfg!(feature = "serve"), "HTTP serve adapter")
+  - forbidden dependencies not pulled: tokio, hyper, axum, tower, reqwest
+  - no CLI command surface when feature disabled (adapter-only)
+evidence:
+  - Cargo.toml: serve = []
+  - src/core/mod.rs: BuildFeature::new("serve", cfg!(feature = "serve"))
+  - src/core/capabilities.rs: FeatureEntry for serve
+  - status --json includes serve in features array with enabled: false
+degraded_contract:
+  - serve surface unavailable in default build
+  - capabilities.features reports serve.enabled = false
+  - no HTTP server starts without explicit feature enablement

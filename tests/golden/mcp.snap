@@ -1,0 +1,31 @@
+---
+source: src/cli/mod.rs, src/output/mod.rs
+assertion: MCP adapter manifest exposes CLI commands as tools without separate business logic
+schema:
+  response: ee.response.v1
+  manifest: ee.mcp.manifest.v1
+contracts:
+  - mcp manifest lists all public CLI commands as MCP tools
+  - tools mirror CLI contract with ee_ prefix naming
+  - responseEnvelope and errorEnvelope reference stable schemas
+  - capabilities.resources and capabilities.prompts require mcp feature
+  - degraded array reports MCP_FEATURE_DISABLED when feature is off
+  - adapter.transport is stdio (no HTTP in MCP path)
+  - adapter.runtime is asupersync (no tokio in default tree)
+  - adapter.businessLogic is cli_core_services (adapter only, no separate logic)
+  - registry.commandSource and schemaSource are public manifests
+  - protocolVersion tracks MCP protocol compatibility
+  - default build has mcp feature disabled
+  - feature-gated code behind cfg!(feature = "mcp")
+feature_requirements:
+  - mcp feature enables full MCP server functionality
+  - default build omits mcp to avoid stdio adapter overhead
+  - MCP adapter wraps CLI commands, does not add business logic
+evidence:
+  - McpCommand::Manifest
+  - render_mcp_manifest_json()
+  - MCP_MANIFEST_SCHEMA_V1
+  - MCP_PROTOCOL_VERSION
+  - MCP_FEATURE_DISABLED_DEGRADATION
+  - COMMAND_MANIFEST
+  - cfg!(feature = "mcp")
