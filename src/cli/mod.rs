@@ -51,10 +51,12 @@ use crate::core::context::{
 };
 use crate::core::curate::{
     CurateApplyOptions, CurateApplyReport, CurateCandidatesOptions, CurateCandidatesReport,
-    CurateDispositionOptions, CurateDispositionReport, CurateReviewAction, CurateReviewOptions,
-    CurateReviewReport, CurateValidateOptions, CurateValidateReport, ReviewSessionOptions,
-    ReviewSessionReport, apply_curation_candidate, list_curation_candidates,
-    review_curation_candidate, review_session_proposals, run_curation_disposition,
+    CurateDispositionOptions, CurateDispositionReport, CurateRetireOptions, CurateRetireReport,
+    CurateReviewAction, CurateReviewOptions, CurateReviewReport, CurateTombstoneOptions,
+    CurateTombstoneReport, CurateValidateOptions, CurateValidateReport, ReviewSessionOptions,
+    ReviewSessionReport, ReviewWorkspaceOptions, ReviewWorkspaceReport, apply_curation_candidate,
+    list_curation_candidates, review_curation_candidate, review_session_proposals,
+    run_curate_retire, run_curate_tombstone, run_curation_disposition, run_review_workspace,
     validate_curation_candidate,
 };
 use crate::core::doctor::{
@@ -102,9 +104,9 @@ use crate::core::memory::{
     ExpireMemoryOptions, GetMemoryOptions, ListMemoriesOptions, MemoryExpireReport, MemoryLinkMode,
     MemoryLinkOptions, MemoryLinkReport, MemoryReviseReport, MemoryTagsMode, MemoryTagsOptions,
     MemoryTagsReport, RememberMemoryOptions, RememberMemoryReport, ReviseMemoryOptions,
-    ReviseReason, WorkflowCloseOptions, WorkflowCloseReport, close_workflow, expire_memory,
-    get_memory_details, list_memories, remember_memory, revise_memory, update_memory_link,
-    update_memory_tags,
+    ReviseReason, WorkflowCloseOptions, WorkflowCloseReport, WorkflowCreateOptions,
+    WorkflowCreateReport, close_workflow, create_workflow, expire_memory, get_memory_details,
+    list_memories, remember_memory, revise_memory, update_memory_link, update_memory_tags,
 };
 use crate::core::outcome::{
     DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
@@ -16380,8 +16382,7 @@ fn populate_db_status_from_connection(
     if let Ok(page_count) = conn.page_count() {
         report.page_count = Some(page_count);
     }
-    report.latest_compiled_schema_version =
-        crate::db::MIGRATIONS.last().map(|m| m.version());
+    report.latest_compiled_schema_version = crate::db::MIGRATIONS.last().map(|m| m.version());
 
     match conn.schema_version() {
         Ok(version) => report.schema_version = version,
@@ -16802,11 +16803,7 @@ struct DbCheckReport {
     message: String,
 }
 
-fn handle_db_migrations<W>(
-    cli: &Cli,
-    args: &DbMigrationsArgs,
-    stdout: &mut W,
-) -> ProcessExitCode
+fn handle_db_migrations<W>(cli: &Cli, args: &DbMigrationsArgs, stdout: &mut W) -> ProcessExitCode
 where
     W: Write,
 {
@@ -16828,9 +16825,7 @@ where
                 exists: database_path.exists(),
                 applied: vec![],
                 pending: vec![],
-                latest_compiled_schema_version: crate::db::MIGRATIONS
-                    .last()
-                    .map(|m| m.version()),
+                latest_compiled_schema_version: crate::db::MIGRATIONS.last().map(|m| m.version()),
                 schema_version: None,
                 needs_migration: None,
                 error: Some(format!(
@@ -20643,12 +20638,33 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    let error = DomainError::UnsatisfiedDegradedMode {
-        message: "curate retire: Curation retirement is not yet implemented.".to_string(),
-        repair: Some("Use `ee curate reject` to remove a candidate from the active queue.".to_string()),
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let options = CurateRetireOptions {
+        workspace_path: &workspace,
+        database_path: args.database.as_deref(),
+        candidate_id: &args.candidate_id,
+        actor: args.actor.as_deref(),
+        dry_run: args.dry_run,
+        reason: args.reason.as_deref(),
     };
-    write_domain_error(&error, cli.wants_json(), stdout, stderr)
+
+    match run_curate_retire(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_output())
+            }
+            output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_curate_tombstone<W, E>(
@@ -20661,12 +20677,33 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    let error = DomainError::UnsatisfiedDegradedMode {
-        message: "curate tombstone: Curation tombstone is not yet implemented.".to_string(),
-        repair: Some("Use `ee memory expire` to write an audited tombstone for a memory.".to_string()),
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let options = CurateTombstoneOptions {
+        workspace_path: &workspace,
+        database_path: args.database.as_deref(),
+        memory_id: &args.memory_id,
+        actor: args.actor.as_deref(),
+        dry_run: args.dry_run,
+        reason: args.reason.as_deref(),
     };
-    write_domain_error(&error, cli.wants_json(), stdout, stderr)
+
+    match run_curate_tombstone(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_output())
+            }
+            output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_review_workspace<W, E>(
@@ -20679,12 +20716,33 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    let error = DomainError::UnsatisfiedDegradedMode {
-        message: "review workspace: Workspace review is not yet implemented.".to_string(),
-        repair: Some("Use `ee review session` to review a specific session.".to_string()),
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let options = ReviewWorkspaceOptions {
+        workspace_path: &workspace,
+        database_path: args.database.as_deref(),
+        scope: args.scope.as_deref(),
+        include_cass: args.include_cass,
+        propose: args.propose,
+        dry_run: args.dry_run,
     };
-    write_domain_error(&error, cli.wants_json(), stdout, stderr)
+
+    match run_review_workspace(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_output())
+            }
+            output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_workflow_create<W, E>(
@@ -20697,12 +20755,32 @@ where
     W: Write,
     E: Write,
 {
-    let _ = args;
-    let error = DomainError::UnsatisfiedDegradedMode {
-        message: "workflow create: Workflow creation is not yet implemented.".to_string(),
-        repair: Some("Use `ee remember --workflow <name>` to implicitly create a workflow.".to_string()),
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let options = WorkflowCreateOptions {
+        workspace_path: &workspace,
+        database_path: args.database.as_deref(),
+        name: &args.name,
+        description: args.description.as_deref(),
+        dry_run: args.dry_run,
     };
-    write_domain_error(&error, cli.wants_json(), stdout, stderr)
+
+    match create_workflow(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_output())
+            }
+            output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_playbook_extract<W, E>(

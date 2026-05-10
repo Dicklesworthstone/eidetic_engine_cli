@@ -11,10 +11,12 @@ contracts:
   - dry-run preview without writing candidate records
   - JSON stdout is ee.response.v1 envelope
   - degrades honestly when CASS evidence unavailable
-  - exit code 6 when degraded mode unavailable
 evidence:
   - ReviewWorkspaceArgs.scope
   - ReviewWorkspaceArgs.include_cass
   - ReviewWorkspaceArgs.propose
   - ReviewWorkspaceArgs.dry_run
-  - DomainError::UnsatisfiedDegradedMode
+  - ReviewWorkspaceReport.schema
+  - ReviewWorkspaceReport.memory_count
+  - ReviewWorkspaceReport.evidence_count
+  - ReviewWorkspaceReport.candidates

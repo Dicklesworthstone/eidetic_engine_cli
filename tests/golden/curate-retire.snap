@@ -11,10 +11,12 @@ contracts:
   - actor recorded in audit metadata when provided
   - reason recorded in audit trail
   - JSON stdout is ee.response.v1 envelope
-  - exit code 6 when degraded mode unavailable
 evidence:
   - CurateRetireArgs.candidate_id
   - CurateRetireArgs.dry_run
   - CurateRetireArgs.actor
   - CurateRetireArgs.reason
-  - DomainError::UnsatisfiedDegradedMode
+  - CurateRetireReport.schema
+  - CurateRetireReport.from_status
+  - CurateRetireReport.to_status
+  - CurateRetireReport.audit_id

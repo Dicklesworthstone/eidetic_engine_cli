@@ -164,6 +164,95 @@ pub struct WorkflowCloseReport {
     pub audit_ids: Vec<String>,
 }
 
+/// Stable schema for workflow create response.
+pub const WORKFLOW_CREATE_SCHEMA_V1: &str = "ee.workflow.create.v1";
+
+/// Options for creating a workflow lifecycle group through `ee workflow create`.
+#[derive(Clone, Debug)]
+pub struct WorkflowCreateOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Name for the new workflow lifecycle group.
+    pub name: &'a str,
+    /// Optional description for the workflow.
+    pub description: Option<&'a str>,
+    /// Preview without creating the workflow record.
+    pub dry_run: bool,
+}
+
+/// Result of creating a workflow lifecycle group.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowCreateReport {
+    /// Stable schema identifier for contract tests.
+    pub schema: &'static str,
+    /// Command that produced this report.
+    pub command: &'static str,
+    /// Package version for stable output.
+    pub version: &'static str,
+    /// Canonical workspace ID.
+    pub workspace_id: String,
+    /// Canonical workspace path.
+    pub workspace_path: String,
+    /// Database path used.
+    pub database_path: String,
+    /// Workflow ID (same as name, used as the lifecycle key).
+    pub workflow_id: String,
+    /// Optional description.
+    pub description: Option<String>,
+    /// RFC 3339 timestamp when the workflow was created.
+    pub created_at: String,
+    /// Whether this was a dry run.
+    pub dry_run: bool,
+    /// Whether the workflow record was persisted.
+    pub persisted: bool,
+    /// Audit ID for the creation event.
+    pub audit_id: Option<String>,
+    /// Next action hint for agents.
+    pub next_action: String,
+}
+
+impl WorkflowCreateReport {
+    /// JSON output for machine consumers.
+    #[must_use]
+    pub fn json_output(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            format!(
+                r#"{{"schema":"{}","command":"workflow create","error":"serialization_failed"}}"#,
+                WORKFLOW_CREATE_SCHEMA_V1
+            )
+        })
+    }
+
+    /// Human-readable output.
+    #[must_use]
+    pub fn human_output(&self) -> String {
+        let mode = if self.dry_run { "DRY RUN" } else { "CREATED" };
+        let mut output = format!("{mode}: workflow `{}`\n\n", self.workflow_id);
+        if let Some(desc) = &self.description {
+            output.push_str(&format!("  description: {desc}\n"));
+        }
+        output.push_str(&format!("  workspace: {}\n", self.workspace_id));
+        output.push_str(&format!("  created_at: {}\n", self.created_at));
+        output.push_str(&format!("  persisted: {}\n", self.persisted));
+        output.push_str("\nNext:\n  ");
+        output.push_str(&self.next_action);
+        output.push('\n');
+        output
+    }
+
+    /// TOON-formatted output.
+    #[must_use]
+    pub fn toon_output(&self) -> String {
+        format!(
+            "WORKFLOW_CREATE|id={}|workspace={}|dry_run={}|persisted={}",
+            self.workflow_id, self.workspace_id, self.dry_run, self.persisted
+        )
+    }
+}
+
 /// Stable schema name for remember-time staged link suggestions.
 pub const REMEMBER_SUGGESTED_LINK_SCHEMA_V1: &str = "ee.remember.suggested_link.v1";
 
@@ -486,6 +575,99 @@ pub fn close_workflow(
         expired_count: 0,
         promoted_memory_ids,
         audit_ids,
+    })
+}
+
+/// Create a new workflow lifecycle group.
+///
+/// Workflows are lightweight lifecycle markers that group related memories.
+/// They are created explicitly (this function) or implicitly when using
+/// `ee remember --workflow <name>`. This function is idempotent: creating
+/// a workflow that already has memories is a no-op success.
+pub fn create_workflow(
+    options: &WorkflowCreateOptions<'_>,
+) -> Result<WorkflowCreateReport, DomainError> {
+    let workspace_path = resolve_workspace_path(options.workspace_path, options.dry_run)?;
+    let database_path = options
+        .database_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    let workflow_id = parse_workflow_id(Some(options.name))?
+        .ok_or_else(|| remember_usage_error("workflow name cannot be empty".to_owned()))?;
+    let workspace_id = stable_workspace_id(&workspace_path);
+    let created_at = Utc::now().to_rfc3339();
+    let description = options.description.map(str::to_owned);
+
+    let next_action = format!(
+        "ee remember --workflow {} \"<content>\" --level working",
+        workflow_id
+    );
+
+    if options.dry_run {
+        return Ok(WorkflowCreateReport {
+            schema: WORKFLOW_CREATE_SCHEMA_V1,
+            command: "workflow create",
+            version: env!("CARGO_PKG_VERSION"),
+            workspace_id,
+            workspace_path: workspace_path.display().to_string(),
+            database_path: database_path.display().to_string(),
+            workflow_id,
+            description,
+            created_at,
+            dry_run: true,
+            persisted: false,
+            audit_id: None,
+            next_action,
+        });
+    }
+
+    let connection =
+        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open database: {error}"),
+            repair: Some("ee init --workspace .".to_string()),
+        })?;
+    connection.migrate().map_err(|error| DomainError::Storage {
+        message: format!("Failed to migrate database: {error}"),
+        repair: Some("ee doctor".to_string()),
+    })?;
+
+    let audit_id = generate_audit_id();
+    let details = serde_json::json!({
+        "workflow_id": workflow_id,
+        "description": description,
+        "created_at": created_at,
+    })
+    .to_string();
+    let audit_input = CreateAuditInput {
+        workspace_id: Some(workspace_id.clone()),
+        actor: None,
+        action: audit_actions::WORKFLOW_CREATE.to_string(),
+        target_type: Some("workflow".to_string()),
+        target_id: Some(workflow_id.clone()),
+        details: Some(details),
+    };
+
+    connection
+        .insert_audit(&audit_id, &audit_input)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to create audit record: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+
+    Ok(WorkflowCreateReport {
+        schema: WORKFLOW_CREATE_SCHEMA_V1,
+        command: "workflow create",
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_id,
+        workspace_path: workspace_path.display().to_string(),
+        database_path: database_path.display().to_string(),
+        workflow_id,
+        description,
+        created_at,
+        dry_run: false,
+        persisted: true,
+        audit_id: Some(audit_id),
+        next_action,
     })
 }
 

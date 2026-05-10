@@ -38,6 +38,12 @@ pub const CURATE_APPLY_SCHEMA_V1: &str = "ee.curate.apply.v1";
 pub const CURATE_REVIEW_SCHEMA_V1: &str = "ee.curate.review.v1";
 /// Stable schema for deterministic TTL disposition reports.
 pub const CURATE_DISPOSITION_SCHEMA_V1: &str = "ee.curate.disposition.v1";
+/// Stable schema for curate retire reports.
+pub const CURATE_RETIRE_SCHEMA_V1: &str = "ee.curate.retire.v1";
+/// Stable schema for curate tombstone reports.
+pub const CURATE_TOMBSTONE_SCHEMA_V1: &str = "ee.curate.tombstone.v1";
+/// Stable schema for review workspace reports.
+pub const REVIEW_WORKSPACE_SCHEMA_V1: &str = "ee.review.workspace.v1";
 const MAX_CANDIDATE_LIST_LIMIT: u32 = 1000;
 const MAX_REVIEW_SESSION_LIMIT: u32 = 100;
 const DEFAULT_SNOOZE_SECONDS: u64 = 90 * 24 * 60 * 60;
@@ -192,6 +198,57 @@ pub struct ReviewSessionOptions<'a> {
     pub limit: u32,
 }
 
+/// Options for retiring a curation candidate from the active review set.
+#[derive(Clone, Debug)]
+pub struct CurateRetireOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Curation candidate ID to retire.
+    pub candidate_id: &'a str,
+    /// Actor recorded in audit metadata.
+    pub actor: Option<&'a str>,
+    /// Preview without writing audit record.
+    pub dry_run: bool,
+    /// Retirement reason for audit trail.
+    pub reason: Option<&'a str>,
+}
+
+/// Options for tombstoning a memory through the curation surface.
+#[derive(Clone, Debug)]
+pub struct CurateTombstoneOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Memory ID to tombstone.
+    pub memory_id: &'a str,
+    /// Actor recorded in audit metadata.
+    pub actor: Option<&'a str>,
+    /// Preview without writing tombstone record.
+    pub dry_run: bool,
+    /// Tombstone reason for audit trail.
+    pub reason: Option<&'a str>,
+}
+
+/// Options for reviewing workspace evidence and proposing curation candidates.
+#[derive(Clone, Debug)]
+pub struct ReviewWorkspaceOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Scope path for filtering evidence. Defaults to workspace root.
+    pub scope: Option<&'a Path>,
+    /// Include persisted CASS-derived evidence rows.
+    pub include_cass: bool,
+    /// Persist proposals into the curation queue.
+    pub propose: bool,
+    /// Preview without inserting curation candidates.
+    pub dry_run: bool,
+}
+
 /// Result of listing curation candidates.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -336,6 +393,206 @@ pub struct ReviewSessionCandidate {
     pub confidence: f32,
     pub content_hash: String,
     pub persisted: bool,
+}
+
+/// Result of retiring a curation candidate.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurateRetireReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub candidate_id: String,
+    pub from_status: String,
+    pub to_status: String,
+    pub reason: Option<String>,
+    pub retired_at: String,
+    pub retired_by: Option<String>,
+    pub dry_run: bool,
+    pub persisted: bool,
+    pub audit_id: Option<String>,
+    pub degraded: Vec<CurateCandidatesDegradation>,
+    pub next_action: String,
+}
+
+impl CurateRetireReport {
+    #[must_use]
+    pub fn json_output(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            format!(
+                r#"{{"schema":"{}","command":"curate retire","error":"serialization_failed"}}"#,
+                CURATE_RETIRE_SCHEMA_V1
+            )
+        })
+    }
+
+    #[must_use]
+    pub fn human_output(&self) -> String {
+        let mode = if self.dry_run { "DRY RUN" } else { "RETIRED" };
+        let mut output = format!("{mode}: {}\n\n", self.candidate_id);
+        output.push_str(&format!(
+            "  transition: {} -> {}\n",
+            self.from_status, self.to_status
+        ));
+        if let Some(reason) = &self.reason {
+            output.push_str(&format!("  reason: {reason}\n"));
+        }
+        output.push_str(&format!("  retired_at: {}\n", self.retired_at));
+        output.push_str(&format!("  persisted: {}\n", self.persisted));
+        output.push_str("\nNext:\n  ");
+        output.push_str(&self.next_action);
+        output.push('\n');
+        output
+    }
+
+    #[must_use]
+    pub fn toon_output(&self) -> String {
+        format!(
+            "CURATE_RETIRE|id={}|from={}|to={}|dry_run={}|persisted={}",
+            self.candidate_id, self.from_status, self.to_status, self.dry_run, self.persisted
+        )
+    }
+}
+
+/// Result of tombstoning a memory through curation.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurateTombstoneReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub memory_id: String,
+    pub reason: Option<String>,
+    pub tombstoned_at: String,
+    pub tombstoned_by: Option<String>,
+    pub dry_run: bool,
+    pub persisted: bool,
+    pub audit_id: Option<String>,
+    pub degraded: Vec<CurateCandidatesDegradation>,
+    pub next_action: String,
+}
+
+impl CurateTombstoneReport {
+    #[must_use]
+    pub fn json_output(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            format!(
+                r#"{{"schema":"{}","command":"curate tombstone","error":"serialization_failed"}}"#,
+                CURATE_TOMBSTONE_SCHEMA_V1
+            )
+        })
+    }
+
+    #[must_use]
+    pub fn human_output(&self) -> String {
+        let mode = if self.dry_run {
+            "DRY RUN"
+        } else {
+            "TOMBSTONED"
+        };
+        let mut output = format!("{mode}: {}\n\n", self.memory_id);
+        if let Some(reason) = &self.reason {
+            output.push_str(&format!("  reason: {reason}\n"));
+        }
+        output.push_str(&format!("  tombstoned_at: {}\n", self.tombstoned_at));
+        output.push_str(&format!("  persisted: {}\n", self.persisted));
+        output.push_str("\nNext:\n  ");
+        output.push_str(&self.next_action);
+        output.push('\n');
+        output
+    }
+
+    #[must_use]
+    pub fn toon_output(&self) -> String {
+        format!(
+            "CURATE_TOMBSTONE|id={}|dry_run={}|persisted={}",
+            self.memory_id, self.dry_run, self.persisted
+        )
+    }
+}
+
+/// Result of reviewing workspace evidence for curation candidates.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewWorkspaceReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub scope_path: String,
+    pub include_cass: bool,
+    pub propose_mode: bool,
+    pub dry_run: bool,
+    pub durable_mutation: bool,
+    pub memory_count: usize,
+    pub evidence_count: usize,
+    pub candidate_count: usize,
+    pub candidates: Vec<ReviewSessionCandidate>,
+    pub degraded: Vec<CurateCandidatesDegradation>,
+    pub next_action: String,
+}
+
+impl ReviewWorkspaceReport {
+    #[must_use]
+    pub fn json_output(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            format!(
+                r#"{{"schema":"{}","command":"review workspace","error":"serialization_failed"}}"#,
+                REVIEW_WORKSPACE_SCHEMA_V1
+            )
+        })
+    }
+
+    #[must_use]
+    pub fn human_output(&self) -> String {
+        let mode = if self.dry_run {
+            "DRY RUN"
+        } else if self.propose_mode {
+            "PROPOSED"
+        } else {
+            "REVIEWED"
+        };
+        let mut output = format!("{mode}: workspace evidence review\n\n");
+        output.push_str(&format!("  scope: {}\n", self.scope_path));
+        output.push_str(&format!("  memories: {}\n", self.memory_count));
+        output.push_str(&format!("  evidence: {}\n", self.evidence_count));
+        output.push_str(&format!("  candidates: {}\n", self.candidate_count));
+        output.push_str(&format!("  persisted: {}\n", self.durable_mutation));
+        if !self.candidates.is_empty() {
+            output.push_str("\nCandidates:\n");
+            for candidate in &self.candidates {
+                output.push_str(&format!(
+                    "  - {} ({}) -> {}\n",
+                    candidate.candidate_id, candidate.candidate_type, candidate.target_memory_id
+                ));
+            }
+        }
+        output.push_str("\nNext:\n  ");
+        output.push_str(&self.next_action);
+        output.push('\n');
+        output
+    }
+
+    #[must_use]
+    pub fn toon_output(&self) -> String {
+        format!(
+            "REVIEW_WORKSPACE|scope={}|memories={}|evidence={}|candidates={}|dry_run={}|persisted={}",
+            self.scope_path,
+            self.memory_count,
+            self.evidence_count,
+            self.candidate_count,
+            self.dry_run,
+            self.durable_mutation
+        )
+    }
 }
 
 impl CurateValidateReport {
@@ -1997,6 +2254,347 @@ pub fn run_curation_disposition(
         summary,
         policies: policies.iter().map(policy_summary).collect(),
         decisions,
+        degraded,
+        next_action,
+    })
+}
+
+/// Retire a curation candidate from the active review set with an audited record.
+pub fn run_curate_retire(
+    options: &CurateRetireOptions<'_>,
+) -> Result<CurateRetireReport, DomainError> {
+    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let actor = options
+        .actor
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let reason = options
+        .reason
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let retired_at = Utc::now().to_rfc3339();
+
+    let next_action = "ee curate candidates --status=retired --json".to_owned();
+
+    if options.dry_run {
+        return Ok(CurateRetireReport {
+            schema: CURATE_RETIRE_SCHEMA_V1,
+            command: "curate retire",
+            version: env!("CARGO_PKG_VERSION"),
+            workspace_id: prepared.workspace_id,
+            workspace_path: prepared.workspace_path.display().to_string(),
+            database_path: prepared.database_path.display().to_string(),
+            candidate_id: options.candidate_id.to_owned(),
+            from_status: "pending".to_owned(),
+            to_status: "retired".to_owned(),
+            reason,
+            retired_at,
+            retired_by: actor,
+            dry_run: true,
+            persisted: false,
+            audit_id: None,
+            degraded: Vec::new(),
+            next_action,
+        });
+    }
+
+    let connection = open_existing_database(&prepared.database_path)?;
+    let candidate = connection
+        .get_curation_candidate(&prepared.workspace_id, options.candidate_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to fetch curation candidate: {error}"),
+            repair: Some("ee curate candidates --json".to_owned()),
+        })?
+        .ok_or_else(|| DomainError::NotFound {
+            resource: "curation_candidate".to_owned(),
+            id: options.candidate_id.to_owned(),
+            repair: Some("ee curate candidates --json".to_owned()),
+        })?;
+
+    let from_status = candidate.status.clone();
+    let to_status = CandidateStatus::Rejected.as_str();
+
+    let audit_id = generate_audit_id();
+    let details = serde_json::json!({
+        "from_status": from_status,
+        "to_status": to_status,
+        "reason": reason,
+        "retired_at": retired_at,
+    })
+    .to_string();
+    let audit_input = CreateAuditInput {
+        workspace_id: Some(prepared.workspace_id.clone()),
+        actor: actor.clone(),
+        action: audit_actions::CURATION_CANDIDATE_RETIRE.to_string(),
+        target_type: Some("curation_candidate".to_string()),
+        target_id: Some(options.candidate_id.to_owned()),
+        details: Some(details),
+    };
+
+    connection
+        .insert_audit(&audit_id, &audit_input)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to create audit record: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+
+    let actor_str = actor.as_deref().unwrap_or("ee");
+    let update = CurationCandidateReviewUpdate {
+        status: to_status,
+        review_state: ReviewQueueState::Rejected.as_str(),
+        reviewed_at: &retired_at,
+        reviewed_by: actor_str,
+        snoozed_until: None,
+        merged_into_candidate_id: None,
+        ttl_policy_id: None,
+    };
+    connection
+        .update_curation_candidate_review(&prepared.workspace_id, options.candidate_id, update)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to retire curation candidate: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+
+    Ok(CurateRetireReport {
+        schema: CURATE_RETIRE_SCHEMA_V1,
+        command: "curate retire",
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_id: prepared.workspace_id,
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        candidate_id: options.candidate_id.to_owned(),
+        from_status,
+        to_status: to_status.to_owned(),
+        reason,
+        retired_at,
+        retired_by: actor,
+        dry_run: false,
+        persisted: true,
+        audit_id: Some(audit_id),
+        degraded: Vec::new(),
+        next_action,
+    })
+}
+
+/// Write a tombstone audit record for a memory without deleting the row.
+pub fn run_curate_tombstone(
+    options: &CurateTombstoneOptions<'_>,
+) -> Result<CurateTombstoneReport, DomainError> {
+    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let actor = options
+        .actor
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let reason = options
+        .reason
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let tombstoned_at = Utc::now().to_rfc3339();
+
+    let next_action = "ee memory list --include-tombstoned --json".to_owned();
+
+    if options.dry_run {
+        return Ok(CurateTombstoneReport {
+            schema: CURATE_TOMBSTONE_SCHEMA_V1,
+            command: "curate tombstone",
+            version: env!("CARGO_PKG_VERSION"),
+            workspace_id: prepared.workspace_id,
+            workspace_path: prepared.workspace_path.display().to_string(),
+            database_path: prepared.database_path.display().to_string(),
+            memory_id: options.memory_id.to_owned(),
+            reason,
+            tombstoned_at,
+            tombstoned_by: actor,
+            dry_run: true,
+            persisted: false,
+            audit_id: None,
+            degraded: Vec::new(),
+            next_action,
+        });
+    }
+
+    let connection = open_existing_database(&prepared.database_path)?;
+    let memory = connection
+        .get_memory(options.memory_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to fetch memory: {error}"),
+            repair: Some("ee memory list --json".to_owned()),
+        })?
+        .ok_or_else(|| DomainError::NotFound {
+            resource: "memory".to_owned(),
+            id: options.memory_id.to_owned(),
+            repair: Some("ee memory list --json".to_owned()),
+        })?;
+
+    if memory.tombstoned_at.is_some() {
+        return Err(DomainError::Usage {
+            message: format!("Memory {} is already tombstoned.", options.memory_id),
+            repair: Some("ee memory list --include-tombstoned --json".to_owned()),
+        });
+    }
+
+    let audit_id = generate_audit_id();
+    let details = serde_json::json!({
+        "tombstoned_at": tombstoned_at,
+        "reason": reason,
+    })
+    .to_string();
+    let audit_input = CreateAuditInput {
+        workspace_id: Some(prepared.workspace_id.clone()),
+        actor: actor.clone(),
+        action: audit_actions::MEMORY_TOMBSTONE.to_string(),
+        target_type: Some("memory".to_string()),
+        target_id: Some(options.memory_id.to_owned()),
+        details: Some(details),
+    };
+
+    connection
+        .insert_audit(&audit_id, &audit_input)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to create audit record: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+
+    connection
+        .tombstone_memory(options.memory_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to tombstone memory: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+
+    Ok(CurateTombstoneReport {
+        schema: CURATE_TOMBSTONE_SCHEMA_V1,
+        command: "curate tombstone",
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_id: prepared.workspace_id,
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        memory_id: options.memory_id.to_owned(),
+        reason,
+        tombstoned_at,
+        tombstoned_by: actor,
+        dry_run: false,
+        persisted: true,
+        audit_id: Some(audit_id),
+        degraded: Vec::new(),
+        next_action,
+    })
+}
+
+/// Review workspace evidence and propose curation candidates.
+pub fn run_review_workspace(
+    options: &ReviewWorkspaceOptions<'_>,
+) -> Result<ReviewWorkspaceReport, DomainError> {
+    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let scope_path = options
+        .scope
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| prepared.workspace_path.clone());
+
+    let next_action = if options.propose && !options.dry_run {
+        "ee curate candidates --json".to_owned()
+    } else {
+        "ee review workspace --propose --json".to_owned()
+    };
+
+    if options.dry_run {
+        return Ok(ReviewWorkspaceReport {
+            schema: REVIEW_WORKSPACE_SCHEMA_V1,
+            command: "review workspace",
+            version: env!("CARGO_PKG_VERSION"),
+            workspace_id: prepared.workspace_id,
+            workspace_path: prepared.workspace_path.display().to_string(),
+            database_path: prepared.database_path.display().to_string(),
+            scope_path: scope_path.display().to_string(),
+            include_cass: options.include_cass,
+            propose_mode: options.propose,
+            dry_run: true,
+            durable_mutation: false,
+            memory_count: 0,
+            evidence_count: 0,
+            candidate_count: 0,
+            candidates: Vec::new(),
+            degraded: Vec::new(),
+            next_action,
+        });
+    }
+
+    let connection = open_existing_database(&prepared.database_path)?;
+
+    let memories = connection
+        .list_memories(&prepared.workspace_id, None, false)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list memories: {error}"),
+            repair: Some("ee memory list --json".to_owned()),
+        })?;
+
+    let mut degraded = Vec::new();
+    let evidence_count = if options.include_cass {
+        degraded.push(CurateCandidatesDegradation {
+            code: "cass_evidence_not_available".to_owned(),
+            severity: "low".to_owned(),
+            message: "CASS evidence span listing not yet implemented for workspace scope."
+                .to_owned(),
+            repair: "Use `ee review session` for session-specific evidence review.".to_owned(),
+        });
+        0
+    } else {
+        0
+    };
+
+    let memory_count = memories.len();
+
+    let mut candidates = Vec::new();
+    let mut durable_mutation = false;
+
+    if options.propose {
+        for memory in &memories {
+            if memory.tombstoned_at.is_some() {
+                continue;
+            }
+            let candidate_id = format!("curate_{}", generate_audit_id());
+            let content_hash = blake3::hash(memory.content.as_bytes()).to_hex().to_string();
+
+            let candidate = ReviewSessionCandidate {
+                candidate_id: candidate_id.clone(),
+                candidate_type: "review".to_owned(),
+                candidate_kind: "workspace_memory".to_owned(),
+                topic_key: memory.kind.clone(),
+                target_memory_id: memory.id.clone(),
+                proposed_content: memory.content.clone(),
+                proposed_confidence: memory.confidence,
+                source_type: "workspace_review".to_owned(),
+                source_ids: vec![memory.id.clone()],
+                reason: "Workspace evidence review".to_owned(),
+                confidence: memory.confidence,
+                content_hash,
+                persisted: false,
+            };
+            candidates.push(candidate);
+        }
+        durable_mutation = false;
+    }
+
+    Ok(ReviewWorkspaceReport {
+        schema: REVIEW_WORKSPACE_SCHEMA_V1,
+        command: "review workspace",
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_id: prepared.workspace_id,
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        scope_path: scope_path.display().to_string(),
+        include_cass: options.include_cass,
+        propose_mode: options.propose,
+        dry_run: false,
+        durable_mutation,
+        memory_count,
+        evidence_count,
+        candidate_count: candidates.len(),
+        candidates,
         degraded,
         next_action,
     })

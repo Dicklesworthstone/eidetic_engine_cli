@@ -11,10 +11,11 @@ contracts:
   - actor recorded in audit metadata when provided
   - reason recorded in audit trail
   - JSON stdout is ee.response.v1 envelope
-  - exit code 6 when degraded mode unavailable
 evidence:
   - CurateTombstoneArgs.memory_id
   - CurateTombstoneArgs.dry_run
   - CurateTombstoneArgs.actor
   - CurateTombstoneArgs.reason
-  - DomainError::UnsatisfiedDegradedMode
+  - CurateTombstoneReport.schema
+  - CurateTombstoneReport.tombstoned_at
+  - CurateTombstoneReport.audit_id

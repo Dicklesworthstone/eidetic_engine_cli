@@ -67,6 +67,8 @@ pub mod audit_actions {
     pub const CURATION_CANDIDATE_SNOOZE: &str = "curation_candidate.snooze";
     pub const CURATION_CANDIDATE_MERGE: &str = "curation_candidate.merge";
     pub const CURATION_CANDIDATE_DISPOSITION: &str = "curation_candidate.disposition";
+    pub const CURATION_CANDIDATE_RETIRE: &str = "curation_candidate.retire";
+    pub const WORKFLOW_CREATE: &str = "workflow.create";
     pub const RULE_CREATE: &str = "rule.create";
     pub const RULE_MARK: &str = "rule.mark";
     pub const RULE_PROTECT: &str = "rule.protect";
@@ -566,9 +568,7 @@ impl DbConnection {
                 .next()
                 .map(|c| c.is_ascii_alphabetic() || c == '_')
                 .unwrap_or(false)
-            || !table
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || !table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         {
             return Err(DbError::InvalidPath {
                 operation: DbOperation::Query,

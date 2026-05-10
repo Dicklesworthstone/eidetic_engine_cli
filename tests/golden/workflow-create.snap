@@ -10,9 +10,11 @@ contracts:
   - dry-run preview without creating record
   - idempotent by workflow name
   - JSON stdout is ee.response.v1 envelope
-  - exit code 6 when degraded mode unavailable
 evidence:
   - WorkflowCreateArgs.name
   - WorkflowCreateArgs.description
   - WorkflowCreateArgs.dry_run
-  - DomainError::UnsatisfiedDegradedMode
+  - WorkflowCreateReport.schema
+  - WorkflowCreateReport.workflow_id
+  - WorkflowCreateReport.created_at
+  - WorkflowCreateReport.audit_id
