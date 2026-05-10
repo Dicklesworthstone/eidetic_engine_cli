@@ -123,6 +123,13 @@ const CASS_ROBOT_REQUIREMENTS: &[ContractRequirement] = &[
         description: "stdout data and stderr diagnostics preserve success/degraded/failure classes",
         tested_by: &["cass_outcome_stream_contract_preserves_degraded_data"],
     },
+    ContractRequirement {
+        id: "CASS-DOCTOR-001",
+        section: "doctor",
+        level: RequirementLevel::Should,
+        description: "doctor JSON fixture pins check names, status codes, and quarantine summary fields",
+        tested_by: &["cass_doctor_fixture_pins_health_check_contract"],
+    },
 ];
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -948,4 +955,105 @@ fn tiny_fixture_session_set_is_idempotency_ready() -> TestResult {
         ],
     )?;
     ensure_env_overrides(&invocation)
+}
+
+#[test]
+fn cass_doctor_fixture_pins_health_check_contract() -> TestResult {
+    let doctor = fixture("doctor.json")?;
+    let root = object(&doctor, "doctor")?;
+
+    ensure(
+        string(root, "status")? == "healthy" || string(root, "status")? == "unhealthy",
+        "doctor status must be healthy or unhealthy",
+    )?;
+    ensure(
+        root.contains_key("healthy"),
+        "doctor must have boolean healthy field",
+    )?;
+    ensure(
+        root.contains_key("initialized"),
+        "doctor must have boolean initialized field",
+    )?;
+    ensure(
+        root.contains_key("issues_found"),
+        "doctor must report issues_found count",
+    )?;
+    ensure(
+        root.contains_key("failures"),
+        "doctor must report failures count",
+    )?;
+    ensure(
+        root.contains_key("warnings"),
+        "doctor must report warnings count",
+    )?;
+    ensure(
+        root.contains_key("needs_rebuild"),
+        "doctor must report needs_rebuild flag",
+    )?;
+
+    let checks = array(root, "checks")?;
+    ensure(!checks.is_empty(), "doctor must include at least one check")?;
+    let first_check = object(
+        checks
+            .first()
+            .ok_or_else(|| "checks array unexpectedly empty".to_string())?,
+        "checks[0]",
+    )?;
+    ensure(
+        first_check.contains_key("name"),
+        "check must have name field",
+    )?;
+    ensure(
+        first_check.contains_key("status"),
+        "check must have status field",
+    )?;
+    ensure(
+        first_check.contains_key("message"),
+        "check must have message field",
+    )?;
+    ensure(
+        first_check.contains_key("fix_available"),
+        "check must have fix_available field",
+    )?;
+
+    let check_names: BTreeSet<&str> = checks
+        .iter()
+        .filter_map(|c| c.get("name").and_then(Value::as_str))
+        .collect();
+    for required_check in ["data_directory", "database", "index"] {
+        ensure(
+            check_names.contains(required_check),
+            format!("doctor must include '{required_check}' check"),
+        )?;
+    }
+
+    ensure(
+        root.contains_key("quarantine"),
+        "doctor must include quarantine summary",
+    )?;
+    let quarantine = object(
+        root.get("quarantine")
+            .ok_or_else(|| "quarantine field missing".to_string())?,
+        "quarantine",
+    )?;
+    ensure(
+        quarantine.contains_key("summary"),
+        "quarantine must have summary",
+    )?;
+
+    ensure(root.contains_key("_meta"), "doctor must include _meta")?;
+    let meta = object(
+        root.get("_meta")
+            .ok_or_else(|| "_meta field missing".to_string())?,
+        "_meta",
+    )?;
+    ensure(
+        meta.contains_key("elapsed_ms"),
+        "_meta must include elapsed_ms",
+    )?;
+    ensure(meta.contains_key("data_dir"), "_meta must include data_dir")?;
+    ensure(meta.contains_key("db_path"), "_meta must include db_path")?;
+    ensure(meta.contains_key("fix_mode"), "_meta must include fix_mode")?;
+
+    Ok(())
 }

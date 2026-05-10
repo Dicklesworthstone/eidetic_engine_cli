@@ -1,0 +1,180 @@
+{
+  "status": "healthy",
+  "healthy": true,
+  "initialized": true,
+  "explanation": null,
+  "recommended_action": null,
+  "issues_found": 0,
+  "issues_fixed": 0,
+  "failures": 0,
+  "warnings": 0,
+  "needs_rebuild": false,
+  "auto_fix_applied": false,
+  "auto_fix_actions": [],
+  "checks": [
+    {
+      "name": "data_directory",
+      "status": "pass",
+      "message": "Data directory exists: /home/user/.local/share/coding-agent-search",
+      "fix_available": false,
+      "fix_applied": false
+    },
+    {
+      "name": "lock_file",
+      "status": "pass",
+      "message": "No stale lock files",
+      "fix_available": false,
+      "fix_applied": false
+    },
+    {
+      "name": "database",
+      "status": "pass",
+      "message": "Database OK (10 conversations, 100 messages)",
+      "fix_available": false,
+      "fix_applied": false
+    },
+    {
+      "name": "fts_table",
+      "status": "pass",
+      "message": "FTS search table (fts_messages) is queryable via frankensqlite",
+      "fix_available": false,
+      "fix_applied": false
+    },
+    {
+      "name": "index",
+      "status": "pass",
+      "message": "Search index OK (100 documents)",
+      "fix_available": false,
+      "fix_applied": false
+    },
+    {
+      "name": "config",
+      "status": "pass",
+      "message": "No config file (using defaults)",
+      "fix_available": false,
+      "fix_applied": false
+    },
+    {
+      "name": "sources_config",
+      "status": "pass",
+      "message": "No remote sources configured",
+      "fix_available": false,
+      "fix_applied": false
+    },
+    {
+      "name": "sessions",
+      "status": "pass",
+      "message": "Found 2 agent session directories",
+      "fix_available": false,
+      "fix_applied": false
+    }
+  ],
+  "quarantine": {
+    "summary": {
+      "failed_seed_bundle_count": 0,
+      "retained_publish_backup_count": 0,
+      "retained_publish_backup_retention_limit": 1,
+      "lexical_generation_count": 0,
+      "lexical_generation_build_state_counts": {
+        "building": 0,
+        "built": 0,
+        "failed": 0,
+        "scratch": 0,
+        "validated": 0,
+        "validating": 0
+      },
+      "lexical_generation_publish_state_counts": {
+        "published": 0,
+        "quarantined": 0,
+        "staged": 0,
+        "superseded": 0
+      },
+      "lexical_quarantined_generation_count": 0,
+      "lexical_quarantined_shard_count": 0,
+      "total_retained_bytes": 0,
+      "gc_eligible_asset_count": 0,
+      "gc_eligible_bytes": 0,
+      "inspection_required_asset_count": 0,
+      "inspection_required_bytes": 0,
+      "cleanup_dry_run_generation_count": 0,
+      "cleanup_dry_run_reclaim_candidate_count": 0,
+      "cleanup_dry_run_reclaimable_bytes": 0,
+      "cleanup_dry_run_retained_bytes": 0,
+      "cleanup_dry_run_protected_generation_count": 0,
+      "cleanup_dry_run_active_generation_count": 0,
+      "cleanup_dry_run_inspection_required_count": 0,
+      "cleanup_dry_run_approval_fingerprint": "cleanup-v1-fixture-fingerprint",
+      "cleanup_apply_allowed": false
+    },
+    "quarantined_artifacts": [],
+    "failed_seed_bundle_files": [],
+    "retained_publish_backups": [],
+    "lexical_generations": [],
+    "lexical_cleanup_dry_run": {
+      "dry_run": true,
+      "approval_fingerprint": "cleanup-v1-fixture-fingerprint",
+      "generation_count": 0,
+      "total_artifact_bytes": 0,
+      "total_reclaimable_bytes": 0,
+      "total_retained_bytes": 0,
+      "reclaim_candidates": [],
+      "reclaimable_generation_ids": [],
+      "fully_retained_generation_ids": [],
+      "protected_generation_ids": [],
+      "protected_retained_bytes": 0,
+      "quarantined_generation_ids": [],
+      "active_generation_ids": [],
+      "disposition_counts": {},
+      "generation_disposition_summaries": {},
+      "inspection_items": [],
+      "inspection_required_generation_ids": [],
+      "inspection_required_count": 0,
+      "inspection_required_retained_bytes": 0,
+      "shard_disposition_summaries": {},
+      "inventories": []
+    },
+    "lexical_cleanup_apply_gate": {
+      "apply_allowed": false,
+      "dry_run": true,
+      "explicit_operator_approval": false,
+      "approval_fingerprint": "cleanup-v1-fixture-fingerprint",
+      "provided_approval_fingerprint": null,
+      "approval_fingerprint_status": "not_requested",
+      "approval_fingerprint_matches": false,
+      "generation_count": 0,
+      "total_artifact_bytes": 0,
+      "total_retained_bytes": 0,
+      "candidate_count": 0,
+      "reclaimable_bytes": 0,
+      "disposition_counts": {},
+      "generation_disposition_summaries": {},
+      "shard_disposition_summaries": {},
+      "candidate_previews": [],
+      "reclaimable_generation_ids": [],
+      "fully_retained_generation_ids": [],
+      "quarantined_generation_ids": [],
+      "blocker_codes": [
+        "no_reclaimable_candidates",
+        "operator_approval_required"
+      ],
+      "blocked_reasons": [
+        "no reclaimable cleanup candidates",
+        "destructive cleanup requires explicit operator approval after dry-run"
+      ],
+      "active_generation_ids": [],
+      "protected_generation_ids": [],
+      "protected_retained_bytes": 0,
+      "inspection_previews": [],
+      "inspection_required_count": 0,
+      "inspection_required_retained_bytes": 0,
+      "inspection_required_generation_ids": []
+    },
+    "warnings": []
+  },
+  "_meta": {
+    "elapsed_ms": 50,
+    "data_dir": "/home/user/.local/share/coding-agent-search",
+    "db_path": "/home/user/.local/share/coding-agent-search/agent_search.db",
+    "fix_mode": false
+  }
+}
