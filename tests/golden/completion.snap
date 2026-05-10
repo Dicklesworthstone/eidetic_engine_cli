@@ -1,0 +1,18 @@
+---
+source: src/cli/mod.rs
+assertion: completion generates deterministic shell completion scripts
+schema:
+  output: shell-completion-script
+  supported_shells: bash, zsh, fish, powershell, elvish
+contracts:
+  - completion generates shell-specific completion scripts via clap_complete
+  - bash completions include complete -F bindings
+  - zsh completions include compdef and _arguments
+  - fish completions include complete -c bindings
+  - output is deterministic for a given shell type
+  - no JSON output (raw shell script text)
+  - exit code 0 on success
+evidence:
+  - CompletionArgs.shell
+  - clap_complete::generate()
+  - Shell::Bash, Shell::Zsh, Shell::Fish, Shell::PowerShell, Shell::Elvish

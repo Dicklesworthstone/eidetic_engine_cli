@@ -1,0 +1,32 @@
+---
+source: src/cli/mod.rs
+assertion: db commands report database health without destructive operations
+schema:
+  status: DbStatusReport
+  check: DbCheckReport
+  migrations: DbMigrationsReport
+contracts:
+  - db status reports database existence, size, WAL state, schema version
+  - db status returns error field when database not found or unreadable
+  - db check runs quick_check or integrity_check based on --full flag
+  - db check reports foreign key violations when --fk flag set
+  - db check passed:false when integrity issues found
+  - db migrations lists applied and pending migrations
+  - db migrations filter supports 'all', 'applied', 'pending'
+  - db migrations shows compiled vs actual schema version delta
+  - no destructive operations (no DELETE, DROP, or data modification)
+  - JSON output is machine-parseable with stable field names
+  - exit code 0 on successful report (even if issues reported)
+evidence:
+  - DbStatusReport.database_path
+  - DbStatusReport.exists
+  - DbStatusReport.schema_version
+  - DbStatusReport.needs_migration
+  - DbStatusReport.table_row_counts
+  - DbCheckReport.check_type
+  - DbCheckReport.passed
+  - DbCheckReport.integrity_passed
+  - DbCheckReport.foreign_key_passed
+  - DbMigrationsReport.applied
+  - DbMigrationsReport.pending
+  - DbMigrationsReport.needs_migration
