@@ -17,6 +17,10 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::core::focus::{focus_state_hash, read_active_focus_state};
+use crate::core::swarm_brief::{
+    collect_swarm_brief_summary, render_swarm_brief_summary_for_handoff,
+    swarm_brief_summary_evidence_id,
+};
 use crate::core::task_frame::{
     NON_EXECUTING_CONTRACT, TaskFrameRecord, TaskFrameShowOptions, show_task_frame,
 };
@@ -379,6 +383,7 @@ pub struct PreviewReport {
     pub evidence_ids: Vec<String>,
     pub active_focus: Option<serde_json::Value>,
     pub task_frame: Option<serde_json::Value>,
+    pub swarm_brief_summary: Option<serde_json::Value>,
     pub token_estimate: usize,
     pub byte_estimate: usize,
     pub redaction_posture: String,
@@ -416,6 +421,7 @@ impl PreviewReport {
             evidence_ids: Vec::new(),
             active_focus: None,
             task_frame: None,
+            swarm_brief_summary: None,
             token_estimate: 0,
             byte_estimate: 0,
             redaction_posture: "standard".to_owned(),
@@ -482,6 +488,7 @@ pub struct CreateReport {
     pub evidence_count: usize,
     pub active_focus: Option<serde_json::Value>,
     pub task_frame: Option<serde_json::Value>,
+    pub swarm_brief_summary: Option<serde_json::Value>,
     pub token_count: usize,
     pub byte_count: usize,
     pub content_hash: String,
@@ -503,6 +510,7 @@ impl CreateReport {
             evidence_count: 0,
             active_focus: None,
             task_frame: None,
+            swarm_brief_summary: None,
             token_count: 0,
             byte_count: 0,
             content_hash: String::new(),
@@ -679,6 +687,7 @@ pub struct ResumeReport {
     pub selected_memories: Vec<SelectedMemory>,
     pub active_focus: Option<serde_json::Value>,
     pub task_frame: Option<serde_json::Value>,
+    pub swarm_brief_summary: Option<serde_json::Value>,
     pub artifact_pointers: Vec<ArtifactPointer>,
     pub degradations: Vec<DegradationInfo>,
     pub resumed_at: String,
@@ -718,6 +727,7 @@ impl ResumeReport {
             selected_memories: Vec::new(),
             active_focus: None,
             task_frame: None,
+            swarm_brief_summary: None,
             artifact_pointers: Vec::new(),
             degradations: Vec::new(),
             resumed_at: Utc::now().to_rfc3339(),
@@ -963,6 +973,64 @@ fn add_task_frame_to_resume(report: &mut ResumeReport, task_frame: serde_json::V
     report.task_frame = Some(task_frame);
 }
 
+fn add_swarm_brief_summary_to_resume(report: &mut ResumeReport, summary: &serde_json::Value) {
+    let counts = summary.get("counts").unwrap_or(&serde_json::Value::Null);
+    let ready = counts
+        .get("readyWorkCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let blocked = counts
+        .get("blockedWorkCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let conflicts = counts
+        .get("activeConflictCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let degraded = counts
+        .get("degradedCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let pressure = summary
+        .get("resourcePressurePosture")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let evidence_id = swarm_brief_summary_evidence_id(summary);
+    let posture = format!(
+        "Embedded swarm brief summary: ready={ready}, blocked={blocked}, active_conflicts={conflicts}, resource_pressure={pressure}, degraded_sources={degraded}; diagnostic_not_live=true."
+    );
+    report.status_summary = Some(match report.status_summary.take() {
+        Some(existing) => format!("{existing}\n{posture}"),
+        None => posture,
+    });
+    report.artifact_pointers.push(ArtifactPointer {
+        id: evidence_id.clone(),
+        path: None,
+        description: "Redacted read-only swarm brief summary embedded in the handoff capsule."
+            .to_owned(),
+    });
+    report.next_actions.push(
+        NextAction::new(2, "Refresh live coordination posture before claiming work.")
+            .with_reason("Embedded swarm brief summaries are diagnostic handoff context only.")
+            .with_command("ee swarm brief --json"),
+    );
+
+    if let Some(codes) = summary
+        .get("degradedCodes")
+        .and_then(serde_json::Value::as_array)
+    {
+        for code in codes.iter().filter_map(serde_json::Value::as_str).take(8) {
+            report.degradations.push(
+                DegradationInfo::new(
+                    format!("swarm_brief_{code}"),
+                    "Embedded swarm brief summary reported a degraded coordination source.",
+                )
+                .with_next_action("ee swarm brief --json"),
+            );
+        }
+    }
+}
+
 /// Preview a handoff capsule without writing it.
 pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, DomainError> {
     let mut report = PreviewReport::new(options.workspace.clone(), options.profile);
@@ -1001,6 +1069,22 @@ pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, Domain
         confidence: actions_section.confidence.as_str().to_owned(),
         evidence_count: 0,
         token_estimate: actions_section.token_estimate,
+    });
+
+    let swarm_brief_summary = collect_swarm_brief_summary(&options.workspace);
+    let swarm_brief_evidence = vec![swarm_brief_summary_evidence_id(&swarm_brief_summary)];
+    let swarm_brief_section = CapsuleSection::new("swarm_brief_summary", "Swarm Brief Summary")
+        .with_content(render_swarm_brief_summary_for_handoff(&swarm_brief_summary))
+        .with_confidence(EvidenceConfidence::Verified)
+        .with_evidence(swarm_brief_evidence.clone());
+    report.evidence_ids.extend(swarm_brief_evidence);
+    report.swarm_brief_summary = Some(swarm_brief_summary);
+    report.planned_sections.push(PlannedSection {
+        id: swarm_brief_section.id.clone(),
+        title: swarm_brief_section.title.clone(),
+        confidence: swarm_brief_section.confidence.as_str().to_owned(),
+        evidence_count: swarm_brief_section.evidence_ids.len(),
+        token_estimate: swarm_brief_section.token_estimate,
     });
 
     match read_active_focus_state(&options.workspace) {
@@ -1152,6 +1236,19 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
     }
     report.task_frame = task_frame_json.clone();
 
+    let swarm_brief_summary = collect_swarm_brief_summary(&options.workspace);
+    let swarm_brief_evidence = vec![swarm_brief_summary_evidence_id(&swarm_brief_summary)];
+    sections.push(
+        CapsuleSection::new("swarm_brief_summary", "Swarm Brief Summary")
+            .with_content(render_swarm_brief_summary_for_handoff(&swarm_brief_summary))
+            .with_confidence(EvidenceConfidence::Verified)
+            .with_evidence(swarm_brief_evidence.clone()),
+    );
+    report.evidence_count = report
+        .evidence_count
+        .saturating_add(swarm_brief_evidence.len());
+    report.swarm_brief_summary = Some(swarm_brief_summary.clone());
+
     if options.profile.include_full_evidence() {
         sections.push(
             CapsuleSection::new("decisions", "Recent Decisions")
@@ -1172,6 +1269,7 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         "sections": sections,
         "active_focus": active_focus,
         "task_frame": task_frame_json,
+        "swarm_brief_summary": swarm_brief_summary,
         "created_at": Utc::now().to_rfc3339(),
     });
 
@@ -1350,6 +1448,14 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
     };
     if let Some(task_frame) = task_frame {
         add_task_frame_to_resume(&mut report, task_frame);
+    }
+
+    report.swarm_brief_summary = capsule
+        .get("swarm_brief_summary")
+        .cloned()
+        .filter(|value| !value.is_null());
+    if let Some(summary) = report.swarm_brief_summary.clone() {
+        add_swarm_brief_summary_to_resume(&mut report, &summary);
     }
 
     if let Some(sections) = capsule.get("sections").and_then(|v| v.as_array()) {

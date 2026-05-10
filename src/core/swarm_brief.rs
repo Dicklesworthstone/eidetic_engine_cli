@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::core::agent_detect::{AgentInventoryStatus, AgentStatusOptions, gather_agent_status};
 use crate::core::profile::{HostResourceProbeReport, recommend_operating_profile};
@@ -19,6 +19,9 @@ use crate::policy::redact_secret_like_content;
 
 pub const SWARM_BRIEF_SCHEMA_V1: &str = "ee.swarm.brief.v1";
 pub const SWARM_BRIEF_REDACTION_STATUS: &str = "paths_counts_subjects_only_no_content";
+pub const SWARM_BRIEF_SUMMARY_SCHEMA_V1: &str = "ee.support_bundle.swarm_brief_summary.v1";
+pub const SWARM_BRIEF_SUMMARY_REDACTION_STATUS: &str =
+    "counts_hashes_codes_ids_only_no_mail_body_no_raw_queries_no_file_listings";
 
 const GIT_UNAVAILABLE_CODE: &str = "git_unavailable";
 const BEADS_UNAVAILABLE_CODE: &str = "beads_unavailable";
@@ -26,6 +29,7 @@ const BV_UNAVAILABLE_CODE: &str = "bv_unavailable";
 const AGENT_MAIL_UNAVAILABLE_CODE: &str = "agent_mail_unavailable";
 const RCH_UNAVAILABLE_CODE: &str = "rch_unavailable";
 const AGENT_STATUS_UNAVAILABLE_CODE: &str = "agent_status_unavailable";
+const MAX_SWARM_BRIEF_SUMMARY_RECOMMENDATIONS: usize = 5;
 
 /// Options used by the internal source collection layer.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1306,6 +1310,329 @@ pub fn apply_swarm_brief_advice(report: &mut SwarmBriefReport) {
     report.recommendations = recommend_swarm_brief_actions(report);
 }
 
+/// Collect a compact redaction-safe summary suitable for support bundles and handoff capsules.
+#[must_use]
+pub fn collect_swarm_brief_summary(workspace: &Path) -> Value {
+    let options = SwarmBriefCollectOptions::for_workspace(workspace);
+    let runner = SystemSwarmBriefCommandRunner;
+    let report = collect_swarm_brief(&options, &runner);
+    summarize_swarm_brief_report(&report)
+}
+
+/// Summarize a full brief without exposing raw mail bodies, query text, provenance text, or file lists.
+#[must_use]
+pub fn summarize_swarm_brief_report(report: &SwarmBriefReport) -> Value {
+    let redacted_report = serde_json::to_value(report)
+        .map(|value| redact_summary_value(&value))
+        .unwrap_or(Value::Null);
+    let redacted_report_json = stable_summary_json(&redacted_report);
+    let report_hash = blake3_summary_hash(&redacted_report_json);
+    let degraded_codes = swarm_brief_degraded_codes(report);
+    let source_status_counts = swarm_brief_source_status_counts(report);
+    let active_conflict_count = report
+        .file_surface_risks
+        .iter()
+        .filter(|risk| {
+            risk.risk_factors
+                .iter()
+                .any(|factor| factor.contains("reservation_overlap"))
+                || risk
+                    .risk_factors
+                    .iter()
+                    .any(|factor| factor == "active_exclusive_reservation")
+        })
+        .count();
+
+    json!({
+        "schema": SWARM_BRIEF_SUMMARY_SCHEMA_V1,
+        "sourceSchema": SWARM_BRIEF_SCHEMA_V1,
+        "source": "read_only_swarm_brief_report",
+        "status": "available",
+        "redactionStatus": SWARM_BRIEF_SUMMARY_REDACTION_STATUS,
+        "reportHash": report_hash,
+        "workspaceHash": blake3_summary_hash(&report.workspace),
+        "limits": {
+            "maxRecommendations": MAX_SWARM_BRIEF_SUMMARY_RECOMMENDATIONS,
+        },
+        "counts": {
+            "sourceCount": report.sources.len(),
+            "dirtyFileCount": report.dirty_files.len(),
+            "recentCommitCount": report.recent_commits.len(),
+            "readyWorkCount": report.beads.ready.len(),
+            "blockedWorkCount": report.beads.blocked.len(),
+            "inProgressWorkCount": report.beads.in_progress.len(),
+            "deferredWorkCount": report.beads.deferred.len(),
+            "activeReservationCount": report.file_reservations.len(),
+            "exclusiveReservationCount": report.file_reservations.iter().filter(|reservation| reservation.exclusive).count(),
+            "activeConflictCount": active_conflict_count,
+            "fileSurfaceRiskCount": report.file_surface_risks.len(),
+            "inboxMailboxCount": report.inbox.len(),
+            "unreadCount": report.inbox.iter().map(|item| item.unread_count).sum::<u64>(),
+            "ackRequiredCount": report.inbox.iter().map(|item| item.ack_required_count).sum::<u64>(),
+            "threadCount": report.threads.len(),
+            "resourcePressureHintCount": report.resource_pressure.len(),
+            "degradedCount": report.degraded.len(),
+            "recommendationCount": report.recommendations.len(),
+        },
+        "bv": {
+            "actionableCount": report.bv.as_ref().and_then(|summary| summary.actionable_count),
+            "blockedCount": report.bv.as_ref().and_then(|summary| summary.blocked_count),
+            "inProgressCount": report.bv.as_ref().and_then(|summary| summary.in_progress_count),
+            "trackCount": report.bv.as_ref().and_then(|summary| summary.track_count),
+            "topPickIds": report.bv.as_ref().map(|summary| {
+                summary.top_picks.iter().take(5).map(|pick| pick.id.clone()).collect::<Vec<_>>()
+            }).unwrap_or_default(),
+        },
+        "sourceStatusCounts": source_status_counts,
+        "sourceStatuses": swarm_brief_source_status_summaries(report),
+        "resourcePressurePosture": swarm_brief_resource_pressure_posture(report),
+        "degradedCodes": degraded_codes,
+        "topRecommendations": swarm_brief_summary_recommendations(report),
+        "provenance": {
+            "underlyingReportHash": report_hash,
+            "sideEffectFree": true,
+            "rawCommandTextIncluded": false,
+            "sourceProvenance": swarm_brief_source_provenance_summaries(report),
+        },
+        "redaction": {
+            "rawMailBodiesIncluded": false,
+            "rawQueryTextIncluded": false,
+            "rawProvenanceTextIncluded": false,
+            "fullFileListingsIncluded": false,
+            "recommendationEvidenceIncluded": "hashes_only",
+        },
+    })
+}
+
+/// Render the compact posture as section text for handoff capsules.
+#[must_use]
+pub fn render_swarm_brief_summary_for_handoff(summary: &Value) -> String {
+    let counts = summary.get("counts").unwrap_or(&Value::Null);
+    let ready = counts
+        .get("readyWorkCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let blocked = counts
+        .get("blockedWorkCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let in_progress = counts
+        .get("inProgressWorkCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let conflicts = counts
+        .get("activeConflictCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let degraded = counts
+        .get("degradedCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let pressure = summary
+        .get("resourcePressurePosture")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let hash = summary
+        .get("reportHash")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let top_recommendations = summary
+        .get("topRecommendations")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("id").and_then(Value::as_str))
+                .take(3)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut lines = vec![
+        format!(
+            "Swarm brief summary: ready={ready}, blocked={blocked}, in_progress={in_progress}, active_conflicts={conflicts}, resource_pressure={pressure}, degraded_sources={degraded}."
+        ),
+        format!("Source report hash: {hash}."),
+        "Diagnostic posture only; run a fresh live brief before claiming or coordinating work."
+            .to_owned(),
+    ];
+    if !top_recommendations.is_empty() {
+        lines.push(format!(
+            "Top recommendation ids: {}.",
+            top_recommendations.join(", ")
+        ));
+    }
+    lines.join("\n")
+}
+
+#[must_use]
+pub fn swarm_brief_summary_evidence_id(summary: &Value) -> String {
+    let hash = summary
+        .get("reportHash")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .trim_start_matches("blake3:");
+    let short_hash = hash.get(..12).unwrap_or(hash);
+    format!("swarm_brief_summary:{short_hash}")
+}
+
+fn swarm_brief_degraded_codes(report: &SwarmBriefReport) -> Vec<String> {
+    let mut codes = report
+        .degraded
+        .iter()
+        .map(|degradation| degradation.code.clone())
+        .collect::<Vec<_>>();
+    codes.sort();
+    codes.dedup();
+    codes
+}
+
+fn swarm_brief_source_status_counts(report: &SwarmBriefReport) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for source in &report.sources {
+        *counts.entry(source.status.as_str().to_owned()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn swarm_brief_source_status_summaries(report: &SwarmBriefReport) -> Vec<Value> {
+    report
+        .sources
+        .iter()
+        .map(|source| {
+            let mut degraded_codes = source
+                .degraded
+                .iter()
+                .map(|degradation| degradation.code.clone())
+                .collect::<Vec<_>>();
+            degraded_codes.sort();
+            degraded_codes.dedup();
+            json!({
+                "source": source.source.as_str(),
+                "status": source.status.as_str(),
+                "itemCount": source.item_count,
+                "degradedCodes": degraded_codes,
+                "sideEffectFree": source.provenance.side_effect_free,
+                "provenanceHash": blake3_summary_hash(
+                    &stable_summary_json(
+                        &serde_json::to_value(&source.provenance).unwrap_or(Value::Null)
+                    )
+                ),
+                "rawProvenanceIncluded": false,
+            })
+        })
+        .collect()
+}
+
+fn swarm_brief_source_provenance_summaries(report: &SwarmBriefReport) -> Vec<Value> {
+    report
+        .sources
+        .iter()
+        .map(|source| {
+            json!({
+                "source": source.source.as_str(),
+                "status": source.status.as_str(),
+                "itemCount": source.item_count,
+                "provenanceHash": blake3_summary_hash(
+                    &stable_summary_json(
+                        &serde_json::to_value(&source.provenance).unwrap_or(Value::Null)
+                    )
+                ),
+                "commandIncluded": false,
+                "sideEffectFree": source.provenance.side_effect_free,
+            })
+        })
+        .collect()
+}
+
+fn swarm_brief_resource_pressure_posture(report: &SwarmBriefReport) -> &'static str {
+    if report
+        .resource_pressure
+        .iter()
+        .any(|hint| hint.level == "high")
+    {
+        return "high";
+    }
+    if report
+        .resource_pressure
+        .iter()
+        .any(|hint| hint.level == "medium")
+    {
+        return "medium";
+    }
+    if report.resource_pressure.is_empty() && report.host_profile.is_none() {
+        return "unknown";
+    }
+    "low"
+}
+
+fn swarm_brief_summary_recommendations(report: &SwarmBriefReport) -> Vec<Value> {
+    let mut recommendations = report.recommendations.iter().collect::<Vec<_>>();
+    recommendations.sort_by(|left, right| {
+        recommendation_severity_rank(&right.severity)
+            .cmp(&recommendation_severity_rank(&left.severity))
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    recommendations
+        .into_iter()
+        .take(MAX_SWARM_BRIEF_SUMMARY_RECOMMENDATIONS)
+        .map(|recommendation| {
+            json!({
+                "id": recommendation.id,
+                "kind": recommendation.kind,
+                "confidence": recommendation.confidence,
+                "severity": recommendation.severity,
+                "reasonCodes": recommendation.reason_codes,
+                "evidenceHashes": recommendation.evidence.iter().map(|value| blake3_summary_hash(value)).collect::<Vec<_>>(),
+                "suggestedCommandHashes": recommendation.suggested_commands.iter().map(|value| blake3_summary_hash(value)).collect::<Vec<_>>(),
+                "mustNotDoHashes": recommendation.must_not_do.iter().map(|value| blake3_summary_hash(value)).collect::<Vec<_>>(),
+                "rawEvidenceIncluded": false,
+                "rawCommandsIncluded": false,
+            })
+        })
+        .collect()
+}
+
+fn recommendation_severity_rank(severity: &str) -> u8 {
+    match severity {
+        "critical" => 4,
+        "high" => 3,
+        "medium" => 2,
+        "low" => 1,
+        _ => 0,
+    }
+}
+
+fn redact_summary_value(value: &Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(redact_brief_text(text)),
+        Value::Array(items) => Value::Array(items.iter().map(redact_summary_value).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), redact_summary_value(value)))
+                .collect(),
+        ),
+        Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
+    }
+}
+
+fn stable_summary_json(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|error| {
+        json!({
+            "schema": "ee.swarm.brief_summary.serialization_error.v1",
+            "message": error.to_string(),
+        })
+        .to_string()
+    })
+}
+
+fn blake3_summary_hash(value: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(value.as_bytes());
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SurfaceObservationKind {
     Bead,
@@ -2506,6 +2833,87 @@ mod tests {
                 .find(|recommendation| recommendation.id == id),
             id,
         )
+    }
+
+    #[test]
+    fn summary_redacts_raw_content_and_hashes_underlying_brief() {
+        let raw_secret = format!("{}{}", "api_key=sk-live-", "A".repeat(32));
+        let mut report = report_with_ready_sources();
+        report.beads.ready.push(bead(
+            "eidetic_engine_cli-pswb",
+            &format!("[swarm-brief] Support bundle handoff {raw_secret}"),
+            "ready",
+        ));
+        report.dirty_files.push(SwarmBriefDirtyFile {
+            path: format!("src/core/support_bundle.rs {raw_secret}"),
+            status: "M".to_string(),
+        });
+        apply_swarm_brief_advice(&mut report);
+        report.finalize();
+
+        let summary = summarize_swarm_brief_report(&report);
+        let rendered = stable_summary_json(&summary);
+        assert_eq!(
+            summary.pointer("/schema"),
+            Some(&json!(SWARM_BRIEF_SUMMARY_SCHEMA_V1))
+        );
+        assert_eq!(
+            summary.pointer("/redaction/rawMailBodiesIncluded"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            summary.pointer("/redaction/fullFileListingsIncluded"),
+            Some(&json!(false))
+        );
+        assert!(
+            !rendered.contains(&raw_secret),
+            "summary must not expose raw secret-like bead titles or file paths"
+        );
+        assert!(
+            summary
+                .pointer("/reportHash")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "summary must hash the underlying brief"
+        );
+        assert!(
+            summary
+                .pointer("/topRecommendations/0/evidenceHashes")
+                .and_then(Value::as_array)
+                .is_some_and(|hashes| !hashes.is_empty()),
+            "summary must expose recommendation evidence as hashes"
+        );
+    }
+
+    #[test]
+    fn summary_hash_changes_when_underlying_brief_changes() {
+        let mut first = report_with_ready_sources();
+        first.beads.ready.push(bead(
+            "eidetic_engine_cli-a111",
+            "[swarm-brief] First ready bead",
+            "ready",
+        ));
+        apply_swarm_brief_advice(&mut first);
+        first.finalize();
+
+        let mut second = first.clone();
+        second.beads.ready.push(bead(
+            "eidetic_engine_cli-b222",
+            "[swarm-brief] Second ready bead",
+            "ready",
+        ));
+        apply_swarm_brief_advice(&mut second);
+        second.finalize();
+
+        let first_hash = summarize_swarm_brief_report(&first)
+            .pointer("/reportHash")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let second_hash = summarize_swarm_brief_report(&second)
+            .pointer("/reportHash")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        assert_ne!(first_hash, second_hash);
     }
 
     #[test]

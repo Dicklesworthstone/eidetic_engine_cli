@@ -1063,6 +1063,42 @@ fn readme_workflow_parity_matrix_covers_advertised_surfaces() -> Result<(), Stri
 }
 
 #[test]
+fn readme_pins_swarm_brief_operator_workflow() -> Result<(), String> {
+    for required in [
+        "### Swarm brief workflow",
+        "ee swarm brief --workspace . --json",
+        "ee --fields full swarm brief --workspace . --include-rch --json",
+        "ee swarm brief --workspace . --sources git,beads,bv,agent-mail --require-sources --json",
+        "ee swarm brief --workspace . --agent-mail-snapshot <snapshot.json> --json",
+        ".data.topRecommendations[]",
+        "safe_surface_candidate",
+        ".data.beads.blocked[]",
+        ".data.fileSurfaceRisks[]",
+        "active_exclusive_reservation",
+        ".data.degraded[]",
+        "rec.resource_pressure.use_rch_for_cargo",
+        "rec.work_selection.no_ready_beads",
+        "br ready --json",
+        "bv --robot-triage",
+        "swarm_brief_summary.json",
+        "never claims work",
+        "never reserves files",
+        "never runs builds",
+        "never mutates Beads",
+        "never schedules agents",
+        "paths_counts_subjects_only_no_content",
+    ] {
+        if !README_SOURCE.contains(required) {
+            return Err(format!(
+                "README swarm brief workflow docs missing required marker `{required}`"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn skill_only_matrix_rows_have_skill_handoff_and_boundary_coverage() -> Result<(), String> {
     for row in matrix_rows(INVENTORY)?.iter().skip(2) {
         let classification = row_cell(row, 1, "classification")?;

@@ -1182,6 +1182,10 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
         bundle_dir.join("pack_replay_summary.json").is_file(),
         "bundle must contain pack_replay_summary.json".to_owned(),
     )?;
+    ensure(
+        bundle_dir.join("swarm_brief_summary.json").is_file(),
+        "bundle must contain swarm_brief_summary.json".to_owned(),
+    )?;
     let pack_replay_summary = fs::read_to_string(bundle_dir.join("pack_replay_summary.json"))
         .map_err(|error| format!("failed to read pack replay support summary: {error}"))?;
     let pack_replay_summary_json: Value = serde_json::from_str(&pack_replay_summary)
@@ -1197,6 +1201,65 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
         "/redactionStatus",
         json!("ids_hashes_counts_codes_only_no_query_text_no_memory_content"),
         "support bundle pack replay summary redaction posture",
+    )?;
+    let swarm_brief_summary = fs::read_to_string(bundle_dir.join("swarm_brief_summary.json"))
+        .map_err(|error| format!("failed to read swarm brief support summary: {error}"))?;
+    let swarm_brief_summary_json: Value = serde_json::from_str(&swarm_brief_summary)
+        .map_err(|error| format!("swarm brief support summary must parse: {error}"))?;
+    ensure_json_pointer(
+        &swarm_brief_summary_json,
+        "/schema",
+        json!("ee.support_bundle.swarm_brief_summary.v1"),
+        "support bundle swarm brief summary schema",
+    )?;
+    ensure_json_pointer(
+        &swarm_brief_summary_json,
+        "/redactionStatus",
+        json!("counts_hashes_codes_ids_only_no_mail_body_no_raw_queries_no_file_listings"),
+        "support bundle swarm brief summary redaction posture",
+    )?;
+    ensure_json_pointer(
+        &swarm_brief_summary_json,
+        "/redaction/rawMailBodiesIncluded",
+        json!(false),
+        "support bundle swarm brief summary omits raw mail bodies",
+    )?;
+    ensure_json_pointer(
+        &swarm_brief_summary_json,
+        "/redaction/rawQueryTextIncluded",
+        json!(false),
+        "support bundle swarm brief summary omits raw query text",
+    )?;
+    ensure_json_pointer(
+        &swarm_brief_summary_json,
+        "/redaction/rawProvenanceTextIncluded",
+        json!(false),
+        "support bundle swarm brief summary omits raw provenance text",
+    )?;
+    ensure_json_pointer(
+        &swarm_brief_summary_json,
+        "/redaction/fullFileListingsIncluded",
+        json!(false),
+        "support bundle swarm brief summary omits full file listings",
+    )?;
+    ensure(
+        swarm_brief_summary_json
+            .pointer("/reportHash")
+            .and_then(Value::as_str)
+            .is_some_and(|hash| hash.starts_with("blake3:")),
+        "swarm brief summary must include reportHash".to_owned(),
+    )?;
+    ensure(
+        swarm_brief_summary_json
+            .pointer("/counts/readyWorkCount")
+            .is_some(),
+        "swarm brief summary must include ready work count".to_owned(),
+    )?;
+    ensure(
+        swarm_brief_summary_json
+            .pointer("/counts/activeConflictCount")
+            .is_some(),
+        "swarm brief summary must include active conflict count".to_owned(),
     )?;
 
     let inspect_result = run_ee_logged(

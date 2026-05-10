@@ -64,8 +64,9 @@ const PERFORMANCE_EXPLAIN_SAMPLE_DIR: &str = "performance-explain";
 const MAX_PERFORMANCE_EXPLAIN_SAMPLES: usize = 16;
 const PACK_REPLAY_SUMMARY_FILE: &str = "pack_replay_summary.json";
 const MAX_PACK_REPLAY_SUMMARY_RECORDS: usize = 16;
+const SWARM_BRIEF_SUMMARY_FILE: &str = "swarm_brief_summary.json";
 const TRIAGE_SUMMARY_FILE: &str = "scale_triage_summary.json";
-const PERF_COMPARE_BUNDLE_SECTIONS: [(&str, &str); 7] = [
+const PERF_COMPARE_BUNDLE_SECTIONS: [(&str, &str); 8] = [
     ("profile_evidence", PROFILE_EVIDENCE_FILE),
     ("benchmark_summary", SCALE_BENCHMARK_SUMMARY_FILE),
     ("fixture_manifest", SCALE_FIXTURE_MANIFEST_FILE),
@@ -75,6 +76,7 @@ const PERF_COMPARE_BUNDLE_SECTIONS: [(&str, &str); 7] = [
         "performance_explain_samples",
         PERFORMANCE_EXPLAIN_SAMPLES_FILE,
     ),
+    ("swarm_brief_summary", SWARM_BRIEF_SUMMARY_FILE),
     ("swarm_contention_reports", SCALE_BENCHMARK_SUMMARY_FILE),
 ];
 const SWARM_SCALE_WORKLOADS_MANIFEST: &str =
@@ -222,6 +224,7 @@ struct CollectedDiagnostics {
     write_queue_report_json: String,
     performance_explain_samples_json: String,
     pack_replay_summary_json: String,
+    swarm_brief_summary_json: String,
     triage_summary_json: String,
 }
 
@@ -309,6 +312,10 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         (
             PACK_REPLAY_SUMMARY_FILE,
             &diagnostics.pack_replay_summary_json,
+        ),
+        (
+            SWARM_BRIEF_SUMMARY_FILE,
+            &diagnostics.swarm_brief_summary_json,
         ),
         (TRIAGE_SUMMARY_FILE, &diagnostics.triage_summary_json),
     ];
@@ -740,6 +747,7 @@ fn collect_diagnostics(
     let write_queue_report_json = write_queue_report_json();
     let performance_explain_samples_json = performance_explain_samples_json(workspace);
     let pack_replay_summary_json = pack_replay_summary_json(workspace);
+    let swarm_brief_summary_json = swarm_brief_summary_json(workspace);
     let triage_summary_json = triage_summary_json(&status, &swarm_reports);
 
     Ok(CollectedDiagnostics {
@@ -755,6 +763,7 @@ fn collect_diagnostics(
         write_queue_report_json,
         performance_explain_samples_json,
         pack_replay_summary_json,
+        swarm_brief_summary_json,
         triage_summary_json,
     })
 }
@@ -1338,6 +1347,10 @@ fn pack_replay_summary_json(workspace: &Path) -> String {
     stable_json(&collect_pack_replay_summary(workspace))
 }
 
+fn swarm_brief_summary_json(workspace: &Path) -> String {
+    stable_json(&super::swarm_brief::collect_swarm_brief_summary(workspace))
+}
+
 fn collect_pack_replay_summary(workspace: &Path) -> Value {
     let database_path = workspace.join(".ee").join("ee.db");
     let mut database = json!({
@@ -1836,6 +1849,7 @@ fn planned_files() -> Vec<String> {
         WRITE_QUEUE_REPORT_FILE.to_owned(),
         PERFORMANCE_EXPLAIN_SAMPLES_FILE.to_owned(),
         PACK_REPLAY_SUMMARY_FILE.to_owned(),
+        SWARM_BRIEF_SUMMARY_FILE.to_owned(),
         TRIAGE_SUMMARY_FILE.to_owned(),
         MANIFEST_FILE.to_owned(),
     ]
@@ -1949,6 +1963,7 @@ mod tests {
             WRITE_QUEUE_REPORT_FILE,
             PERFORMANCE_EXPLAIN_SAMPLES_FILE,
             PACK_REPLAY_SUMMARY_FILE,
+            SWARM_BRIEF_SUMMARY_FILE,
             TRIAGE_SUMMARY_FILE,
         ] {
             assert!(
@@ -2362,6 +2377,12 @@ mod tests {
                 .contains(&PACK_REPLAY_SUMMARY_FILE.to_owned()),
             "support bundle must include pack replay summary"
         );
+        assert!(
+            report
+                .files_collected
+                .contains(&SWARM_BRIEF_SUMMARY_FILE.to_owned()),
+            "support bundle must include swarm brief summary"
+        );
         let bundle_dir = report
             .output_path
             .clone()
@@ -2429,6 +2450,40 @@ mod tests {
                     code.as_str() == Some("context_evidence_freshness_changed_source")
                 })),
             "pack replay summary must expose freshness degradation codes"
+        );
+
+        let swarm_summary_text = fs::read_to_string(bundle_dir.join(SWARM_BRIEF_SUMMARY_FILE))
+            .map_err(|error| format!("failed to read swarm brief summary: {error}"))?;
+        let swarm_summary: Value = serde_json::from_str(&swarm_summary_text)
+            .map_err(|error| format!("swarm brief summary must parse: {error}"))?;
+        assert_eq!(
+            swarm_summary.pointer("/schema"),
+            Some(&json!(
+                super::super::swarm_brief::SWARM_BRIEF_SUMMARY_SCHEMA_V1
+            ))
+        );
+        assert_eq!(
+            swarm_summary.pointer("/redaction/rawMailBodiesIncluded"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            swarm_summary.pointer("/redaction/rawQueryTextIncluded"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            swarm_summary.pointer("/redaction/rawProvenanceTextIncluded"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            swarm_summary.pointer("/redaction/fullFileListingsIncluded"),
+            Some(&json!(false))
+        );
+        assert!(
+            swarm_summary
+                .pointer("/reportHash")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "swarm brief summary must hash the underlying brief"
         );
 
         Ok(())

@@ -135,6 +135,15 @@ mod tests {
         AuditVerifyReport, LinkedSnapshot, TimelinePagination, VerificationIssue,
     };
     use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
+    use ee::core::swarm_brief::{
+        SWARM_BRIEF_REDACTION_STATUS, SWARM_BRIEF_SCHEMA_V1, SwarmBriefAgentInventorySummary,
+        SwarmBriefBead, SwarmBriefBvPick, SwarmBriefBvSummary, SwarmBriefCommit,
+        SwarmBriefDegradation, SwarmBriefDirtyFile, SwarmBriefFileReservation,
+        SwarmBriefHostProfileSummary, SwarmBriefRecommendation, SwarmBriefReport,
+        SwarmBriefResourcePressureHint, SwarmBriefSourceFreshness, SwarmBriefSourceKind,
+        SwarmBriefSourceProvenance, SwarmBriefSourceSnapshot, SwarmBriefSourceStatus,
+        apply_swarm_brief_advice, parse_agent_mail_snapshot_json, parse_beads_json, parse_git_log,
+    };
     use ee::db::{
         CreateCurationCandidateInput, CreateMemoryInput, CreateMemoryLinkInput,
         CreateWorkspaceInput, DbConnection, MemoryLinkRelation, MemoryLinkSource,
@@ -236,6 +245,402 @@ mod tests {
             haystack.contains(needle),
             format!("{context}: expected to contain {needle:?}, got {haystack:?}"),
         )
+    }
+
+    fn swarm_source_ready(
+        source: SwarmBriefSourceKind,
+        command: Option<(&'static str, &'static [&'static str])>,
+        item_count: usize,
+    ) -> SwarmBriefSourceSnapshot {
+        let provenance = match command {
+            Some((program, args)) => SwarmBriefSourceProvenance::command(program, args),
+            None => SwarmBriefSourceProvenance::local_probe(),
+        };
+        SwarmBriefSourceSnapshot::ready(source, provenance, item_count)
+    }
+
+    fn swarm_source_degraded(
+        source: SwarmBriefSourceKind,
+        code: &str,
+        message: &str,
+        repair: &str,
+    ) -> SwarmBriefSourceSnapshot {
+        SwarmBriefSourceSnapshot {
+            source,
+            status: SwarmBriefSourceStatus::Degraded,
+            freshness: SwarmBriefSourceFreshness::unknown(),
+            provenance: SwarmBriefSourceProvenance::local_probe(),
+            item_count: 0,
+            degraded: vec![SwarmBriefDegradation::warning(
+                source,
+                code,
+                message,
+                Some(repair.to_string()),
+            )],
+        }
+    }
+
+    fn swarm_source_unavailable(
+        source: SwarmBriefSourceKind,
+        code: &str,
+        message: &str,
+        repair: &str,
+    ) -> SwarmBriefSourceSnapshot {
+        SwarmBriefSourceSnapshot::unavailable(
+            source,
+            SwarmBriefSourceProvenance::local_probe(),
+            SwarmBriefDegradation::warning(source, code, message, Some(repair.to_string())),
+        )
+    }
+
+    fn swarm_bead(id: &str, title: &str, status: &str) -> SwarmBriefBead {
+        SwarmBriefBead {
+            id: id.to_string(),
+            title: title.to_string(),
+            status: status.to_string(),
+            priority: Some(1),
+            assignee: None,
+            source_bucket: status.to_string(),
+        }
+    }
+
+    fn base_swarm_brief_report() -> SwarmBriefReport {
+        let mut report = SwarmBriefReport::empty(Path::new("."));
+        report.sources = vec![
+            swarm_source_ready(SwarmBriefSourceKind::AgentInventory, None, 1),
+            swarm_source_ready(SwarmBriefSourceKind::AgentMail, None, 1),
+            swarm_source_ready(
+                SwarmBriefSourceKind::Beads,
+                Some(("br", &["ready", "--json"])),
+                1,
+            ),
+            swarm_source_ready(
+                SwarmBriefSourceKind::Bv,
+                Some(("bv", &["--robot-triage", "--robot-triage-by-track"])),
+                1,
+            ),
+            swarm_source_ready(
+                SwarmBriefSourceKind::Git,
+                Some((
+                    "git",
+                    &["status", "--short", "--branch", "--untracked-files=all"],
+                )),
+                1,
+            ),
+            swarm_source_ready(SwarmBriefSourceKind::HostProfile, None, 1),
+            swarm_source_ready(
+                SwarmBriefSourceKind::Rch,
+                Some(("rch", &["status", "--json"])),
+                1,
+            ),
+        ];
+        report.host_profile = Some(SwarmBriefHostProfileSummary {
+            recommended_profile: "workstation".to_string(),
+            confidence: "high".to_string(),
+            logical_cores: Some(16),
+            memory_total_bytes: Some(64 * 1024 * 1024 * 1024),
+            memory_available_bytes: Some(48 * 1024 * 1024 * 1024),
+            rch_hint_configured: true,
+        });
+        report.agent_inventory = Some(SwarmBriefAgentInventorySummary {
+            status: "ready".to_string(),
+            detected_count: 1,
+            total_count: 1,
+        });
+        report
+    }
+
+    fn finalize_swarm_brief_case(mut report: SwarmBriefReport) -> SwarmBriefReport {
+        apply_swarm_brief_advice(&mut report);
+        report.finalize();
+        report
+    }
+
+    fn replace_swarm_source(report: &mut SwarmBriefReport, replacement: SwarmBriefSourceSnapshot) {
+        report
+            .sources
+            .retain(|source| source.source != replacement.source);
+        report.sources.push(replacement);
+    }
+
+    fn swarm_recommendation_case_json(
+        recommendation: &SwarmBriefRecommendation,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": recommendation.id,
+            "kind": recommendation.kind,
+            "severity": recommendation.severity,
+            "confidence": recommendation.confidence,
+            "reasonCodes": recommendation.reason_codes,
+            "evidence": recommendation.evidence,
+            "suggestedCommands": recommendation.suggested_commands,
+            "mustNotDo": recommendation.must_not_do,
+        })
+    }
+
+    fn swarm_brief_contract_case(
+        name: &str,
+        report: SwarmBriefReport,
+    ) -> Result<serde_json::Value, String> {
+        let report = finalize_swarm_brief_case(report);
+        let degraded_codes = report
+            .degraded
+            .iter()
+            .map(|degradation| degradation.code.clone())
+            .collect::<Vec<_>>();
+        ensure_sorted_strings(&degraded_codes, &format!("{name} degraded code ordering"))?;
+        let recommendation_ids = report
+            .recommendations
+            .iter()
+            .map(|recommendation| recommendation.id.clone())
+            .collect::<Vec<_>>();
+        ensure_sorted_strings(
+            &recommendation_ids,
+            &format!("{name} recommendation id ordering"),
+        )?;
+
+        Ok(serde_json::json!({
+            "case": name,
+            "schema": report.schema,
+            "workspace": report.workspace,
+            "redactionStatus": report.redaction_status,
+            "sources": report.sources.iter().map(|source| {
+                serde_json::json!({
+                    "source": source.source.as_str(),
+                    "status": source.status.as_str(),
+                    "freshness": source.freshness.state,
+                    "itemCount": source.item_count,
+                    "command": source.provenance.command,
+                    "sideEffectFree": source.provenance.side_effect_free,
+                    "redaction": source.provenance.redaction,
+                    "degradedCodes": source.degraded.iter().map(|item| item.code.clone()).collect::<Vec<_>>(),
+                })
+            }).collect::<Vec<_>>(),
+            "degraded": report.degraded.iter().map(|degradation| {
+                serde_json::json!({
+                    "source": degradation.source.as_str(),
+                    "code": degradation.code,
+                    "severity": degradation.severity,
+                    "message": degradation.message,
+                    "repair": degradation.repair,
+                })
+            }).collect::<Vec<_>>(),
+            "fileSurfaceRisks": report.file_surface_risks.iter().map(|risk| {
+                serde_json::json!({
+                    "pathPattern": risk.path_pattern,
+                    "severity": risk.severity,
+                    "score": risk.score,
+                    "riskFactors": risk.risk_factors,
+                    "evidence": risk.evidence,
+                })
+            }).collect::<Vec<_>>(),
+            "recommendations": report
+                .recommendations
+                .iter()
+                .map(swarm_recommendation_case_json)
+                .collect::<Vec<_>>(),
+        }))
+    }
+
+    fn ensure_sorted_strings(values: &[String], context: &str) -> TestResult {
+        ensure(
+            values.windows(2).all(|window| window[0] <= window[1]),
+            format!("{context}: expected sorted values, got {values:?}"),
+        )
+    }
+
+    fn swarm_brief_contract_cases() -> Result<Vec<serde_json::Value>, String> {
+        let mut all_sources = base_swarm_brief_report();
+        all_sources.beads.ready.push(swarm_bead(
+            "eidetic_engine_cli-pdav",
+            "[swarm-brief][contracts] Freeze schema and goldens",
+            "ready",
+        ));
+        all_sources.bv = Some(SwarmBriefBvSummary {
+            actionable_count: Some(1),
+            blocked_count: Some(0),
+            in_progress_count: Some(0),
+            track_count: Some(1),
+            top_picks: vec![SwarmBriefBvPick {
+                id: "eidetic_engine_cli-pdav".to_string(),
+                title: "[swarm-brief][contracts] Freeze schema and goldens".to_string(),
+                score_milli: Some(970),
+            }],
+        });
+        all_sources.recent_commits.push(SwarmBriefCommit {
+            hash: "aaaaaaaaaaaa".to_string(),
+            authored_at_epoch_seconds: Some(1_778_351_000),
+            subject: "implement swarm brief contract".to_string(),
+        });
+
+        let no_ready_work = base_swarm_brief_report();
+
+        let mut reservation_conflict = base_swarm_brief_report();
+        reservation_conflict.beads.ready.push(swarm_bead(
+            "eidetic_engine_cli-u7r5",
+            "[swarm-brief][advisor] Add non-overlap recommendations",
+            "ready",
+        ));
+        reservation_conflict
+            .file_reservations
+            .push(SwarmBriefFileReservation {
+                path_pattern: "src/core/swarm_brief.rs".to_string(),
+                holder: "IndigoBrook".to_string(),
+                exclusive: true,
+                expires_at: Some("2026-05-09T20:00:00Z".to_string()),
+            });
+
+        let mut dirty_conflict = base_swarm_brief_report();
+        dirty_conflict.beads.ready.push(swarm_bead(
+            "eidetic_engine_cli-u7r5",
+            "[swarm-brief][advisor] Add non-overlap recommendations",
+            "ready",
+        ));
+        dirty_conflict.dirty_files.push(SwarmBriefDirtyFile {
+            path: "src/core/swarm_brief.rs".to_string(),
+            status: "M".to_string(),
+        });
+
+        let mut stale_in_progress = base_swarm_brief_report();
+        stale_in_progress.beads.in_progress.push(swarm_bead(
+            "eidetic_engine_cli-w0xy",
+            "[vision-coverage][graph] Implement graph centrality and graph refresh surfaces",
+            "in_progress",
+        ));
+
+        let mut bv_unavailable = base_swarm_brief_report();
+        replace_swarm_source(
+            &mut bv_unavailable,
+            swarm_source_unavailable(
+                SwarmBriefSourceKind::Bv,
+                "bv_unavailable",
+                "bv --robot-triage timed out before returning graph-aware recommendations.",
+                "bv --robot-triage --robot-triage-by-track",
+            ),
+        );
+
+        let mut agent_mail_unavailable = base_swarm_brief_report();
+        replace_swarm_source(
+            &mut agent_mail_unavailable,
+            swarm_source_unavailable(
+                SwarmBriefSourceKind::AgentMail,
+                "agent_mail_unavailable",
+                "Agent Mail snapshot was unavailable, so reservations and unread mail are unknown.",
+                "Provide --agent-mail-snapshot with a redacted snapshot file.",
+            ),
+        );
+
+        let mut beads_stale_locked = base_swarm_brief_report();
+        replace_swarm_source(
+            &mut beads_stale_locked,
+            swarm_source_degraded(
+                SwarmBriefSourceKind::Beads,
+                "beads_unavailable",
+                "Beads JSON was stale or locked during read-only collection.",
+                "br ready --json",
+            ),
+        );
+
+        let mut rch_unavailable = base_swarm_brief_report();
+        replace_swarm_source(
+            &mut rch_unavailable,
+            swarm_source_unavailable(
+                SwarmBriefSourceKind::Rch,
+                "rch_unavailable",
+                "RCH status was unavailable, so remote build pressure is unknown.",
+                "rch status --json",
+            ),
+        );
+
+        let mut high_resource_pressure = base_swarm_brief_report();
+        high_resource_pressure
+            .resource_pressure
+            .push(SwarmBriefResourcePressureHint {
+                source: SwarmBriefSourceKind::Rch,
+                level: "high".to_string(),
+                message: "rch queue depth: 9".to_string(),
+            });
+        high_resource_pressure.host_profile = Some(SwarmBriefHostProfileSummary {
+            recommended_profile: "constrained".to_string(),
+            confidence: "high".to_string(),
+            logical_cores: Some(2),
+            memory_total_bytes: Some(4 * 1024 * 1024 * 1024),
+            memory_available_bytes: Some(512 * 1024 * 1024),
+            rch_hint_configured: true,
+        });
+
+        let mut workspace_ambiguity = base_swarm_brief_report();
+        workspace_ambiguity.workspace = "ambiguous-workspace".to_string();
+        replace_swarm_source(
+            &mut workspace_ambiguity,
+            swarm_source_unavailable(
+                SwarmBriefSourceKind::Git,
+                "workspace_ambiguous",
+                "Workspace selection matched multiple candidate roots.",
+                "Pass an explicit --workspace path.",
+            ),
+        );
+
+        let mut secret_redaction = base_swarm_brief_report();
+        secret_redaction.beads.ready = parse_beads_json(
+            r#"[{"id":"eidetic_engine_cli-secret","title":"Use token ghp_abcdefghijklmnopqrstuvwxyz1234567890 in swarm brief","status":"open","priority":1}]"#,
+            "ready",
+        )?;
+        let mail_snapshot = parse_agent_mail_snapshot_json(
+            r#"{
+                "file_reservations": [
+                    {"path_pattern":"src/core/swarm_brief.rs","holder":"Agent ghp_abcdefghijklmnopqrstuvwxyz1234567890","exclusive":true,"expires_ts":"2026-05-09T20:00:00Z"}
+                ],
+                "threads": [
+                    {"thread_id":"eidetic_engine_cli-secret","subject":"token ghp_abcdefghijklmnopqrstuvwxyz1234567890","message_count":2,"body_md":"raw secret body"}
+                ]
+            }"#,
+        )?;
+        secret_redaction.file_reservations = mail_snapshot.file_reservations;
+        secret_redaction.threads = mail_snapshot.threads;
+        secret_redaction.recent_commits = parse_git_log(
+            "bbbbbbbbbbbbbbbb\x1f1778352000\x1favoid token ghp_abcdefghijklmnopqrstuvwxyz1234567890\n",
+        );
+
+        Ok(vec![
+            swarm_brief_contract_case("all_sources_available", all_sources)?,
+            swarm_brief_contract_case("no_ready_work", no_ready_work)?,
+            swarm_brief_contract_case("active_reservation_conflict", reservation_conflict)?,
+            swarm_brief_contract_case("dirty_worktree_conflict", dirty_conflict)?,
+            swarm_brief_contract_case("stale_in_progress_bead", stale_in_progress)?,
+            swarm_brief_contract_case("bv_unavailable", bv_unavailable)?,
+            swarm_brief_contract_case("agent_mail_unavailable", agent_mail_unavailable)?,
+            swarm_brief_contract_case("beads_stale_locked", beads_stale_locked)?,
+            swarm_brief_contract_case("rch_unavailable", rch_unavailable)?,
+            swarm_brief_contract_case("high_resource_pressure", high_resource_pressure)?,
+            swarm_brief_contract_case("workspace_ambiguity", workspace_ambiguity)?,
+            swarm_brief_contract_case("secret_redaction", secret_redaction)?,
+        ])
+    }
+
+    #[test]
+    fn swarm_brief_contract_matrix_matches_golden() -> TestResult {
+        let cases = swarm_brief_contract_cases()?;
+        ensure_equal(&cases.len(), &12, "swarm brief contract case count")?;
+        let matrix = serde_json::json!({
+            "schema": "ee.swarm.brief.contract_matrix.v1",
+            "payloadSchema": SWARM_BRIEF_SCHEMA_V1,
+            "redactionStatus": SWARM_BRIEF_REDACTION_STATUS,
+            "cases": cases,
+        });
+        let pretty = serde_json::to_string_pretty(&matrix)
+            .map_err(|error| format!("failed to serialize swarm brief matrix: {error}"))?
+            + "\n";
+
+        ensure(
+            !pretty.contains("ghp_"),
+            "swarm brief golden must not expose GitHub-like tokens",
+        )?;
+        ensure(
+            !pretty.contains("body_md") && !pretty.contains("raw secret body"),
+            "swarm brief golden must not expose Agent Mail bodies",
+        )?;
+        assert_golden("swarm", "brief_contract_matrix.json", &pretty)
     }
 
     fn compute_stable_workspace_id(path: &Path) -> String {

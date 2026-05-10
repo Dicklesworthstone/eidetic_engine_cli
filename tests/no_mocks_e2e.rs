@@ -12,6 +12,8 @@ use std::env;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -229,6 +231,9 @@ fn run_step_with_env(
     let start = Instant::now();
     let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
     command.args(&spec.args);
+    if !envs.iter().any(|(key, _)| *key == "PATH") {
+        command.env("PATH", default_tool_path()?);
+    }
     for (key, value) in envs {
         command.env(key, value);
     }
@@ -649,6 +654,690 @@ fn ensure_step_omits_secret_probes(
 }
 
 #[cfg(unix)]
+#[derive(Clone, Debug)]
+struct SwarmBriefE2eCase {
+    id: &'static str,
+    workspace: PathBuf,
+    args: Vec<String>,
+    envs: Vec<(&'static str, OsString)>,
+    agent_mail_snapshot_path: Option<PathBuf>,
+    expected_degraded_codes: Vec<&'static str>,
+    expected_recommendation_ids: Vec<String>,
+    expected_recommendation_kinds: Vec<&'static str>,
+    expected_reason_codes: Vec<&'static str>,
+    expected_ready_source_reason_codes: Vec<(&'static str, &'static str)>,
+    expected_source_statuses: Vec<(&'static str, &'static str)>,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq)]
+struct CoordinationSnapshot {
+    beads_status_digest: Option<Vec<String>>,
+    git_status_digest: Option<String>,
+    agent_mail_snapshot_hash: Option<String>,
+    ee_db_exists: bool,
+    support_bundle_exists: bool,
+}
+
+#[cfg(unix)]
+fn run_tool(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    envs: &[(&str, OsString)],
+    context: &str,
+) -> Result<String, String> {
+    let mut command = Command::new(tool_program(program));
+    command.current_dir(cwd).args(args).env("CI", "1");
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to run {program} for {context}: {error}"))?;
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("{program} {context} stdout was not UTF-8: {error}"))?;
+    let stderr = String::from_utf8(output.stderr)
+        .map_err(|error| format!("{program} {context} stderr was not UTF-8: {error}"))?;
+    ensure(
+        output.status.success(),
+        format!(
+            "{program} {context} failed with exit {:?}; stdout={}; stderr={}",
+            output.status.code(),
+            stream_snippet(&stdout),
+            stream_snippet(&stderr)
+        ),
+    )?;
+    Ok(stdout)
+}
+
+#[cfg(unix)]
+fn tool_program(program: &str) -> OsString {
+    if program == "br" {
+        let local_br = Path::new("/home/ubuntu/.local/bin/br");
+        if local_br.is_file() {
+            return local_br.as_os_str().to_os_string();
+        }
+    }
+    OsString::from(program)
+}
+
+#[cfg(unix)]
+fn default_tool_path() -> Result<OsString, String> {
+    let mut entries = vec![PathBuf::from("/home/ubuntu/.local/bin")];
+    if let Some(existing) = env::var_os("PATH") {
+        entries.extend(env::split_paths(&existing));
+    }
+    env::join_paths(entries).map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
+fn path_with_front(front: &Path) -> Result<OsString, String> {
+    let mut entries = vec![
+        front.to_path_buf(),
+        PathBuf::from("/home/ubuntu/.local/bin"),
+    ];
+    if let Some(existing) = env::var_os("PATH") {
+        entries.extend(env::split_paths(&existing));
+    }
+    env::join_paths(entries).map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
+fn write_fixture_executable(bin_dir: &Path, name: &str, body: &str) -> Result<PathBuf, String> {
+    fs::create_dir_all(bin_dir).map_err(|error| {
+        format!(
+            "failed to create fixture bin {}: {error}",
+            bin_dir.display()
+        )
+    })?;
+    let path = bin_dir.join(name);
+    write_text(&path, body)?;
+    let mut permissions = fs::metadata(&path)
+        .map_err(|error| {
+            format!(
+                "failed to stat fixture executable {}: {error}",
+                path.display()
+            )
+        })?
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).map_err(|error| {
+        format!(
+            "failed to chmod fixture executable {}: {error}",
+            path.display()
+        )
+    })?;
+    Ok(path)
+}
+
+#[cfg(unix)]
+fn setup_git_workspace(workspace: &Path) -> TestResult {
+    fs::create_dir_all(workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+    run_tool("git", &["init", "-q"], workspace, &[], "init workspace git")?;
+    run_tool(
+        "git",
+        &["config", "user.email", "swarm-brief-e2e@example.invalid"],
+        workspace,
+        &[],
+        "configure git email",
+    )?;
+    run_tool(
+        "git",
+        &["config", "user.name", "Swarm Brief E2E"],
+        workspace,
+        &[],
+        "configure git user",
+    )?;
+    write_text(
+        &workspace.join(".gitignore"),
+        "# bv (beads viewer) local config and caches\n.bv/\n",
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn commit_workspace_state(workspace: &Path, message: &str) -> TestResult {
+    run_tool(
+        "git",
+        &["add", "-A"],
+        workspace,
+        &[],
+        "stage workspace baseline",
+    )?;
+    run_tool(
+        "git",
+        &["commit", "--allow-empty", "-q", "-m", message],
+        workspace,
+        &[],
+        "commit workspace baseline",
+    )
+    .map(|_| ())
+}
+
+#[cfg(unix)]
+fn init_beads_workspace(workspace: &Path) -> TestResult {
+    run_tool(
+        "br",
+        &["init", "--prefix", "swarm"],
+        workspace,
+        &[],
+        "init beads",
+    )
+    .map(|_| ())
+}
+
+#[cfg(unix)]
+fn create_bead(workspace: &Path, title: &str, status: Option<&str>) -> Result<String, String> {
+    let mut args = vec![
+        "create",
+        title,
+        "--type",
+        "test",
+        "--priority",
+        "1",
+        "--description",
+        "swarm brief e2e fixture bead",
+        "--json",
+    ];
+    if let Some(status) = status {
+        args.push("--status");
+        args.push(status);
+    }
+    let output = run_tool("br", &args, workspace, &[], "create bead")?;
+    let value = serde_json::from_str::<JsonValue>(&output)
+        .map_err(|error| format!("br create output was not JSON: {error}; output={output}"))?;
+    string_at(&value, "/id", "created bead")
+}
+
+#[cfg(unix)]
+fn seed_ready_bead(workspace: &Path, title: &str) -> Result<String, String> {
+    init_beads_workspace(workspace)?;
+    create_bead(workspace, title, None)
+}
+
+#[cfg(unix)]
+fn seed_blocked_beads(workspace: &Path) -> Result<(String, String), String> {
+    init_beads_workspace(workspace)?;
+    let blocker = create_bead(
+        workspace,
+        "[swarm-brief][owner] Active owner follow-up",
+        None,
+    )?;
+    run_tool(
+        "br",
+        &["update", &blocker, "--status", "in_progress", "--json"],
+        workspace,
+        &[],
+        "mark blocker in progress",
+    )?;
+    let blocked = create_bead(
+        workspace,
+        "[swarm-brief][critical] Blocked critical path",
+        None,
+    )?;
+    run_tool(
+        "br",
+        &["dep", "add", &blocked, &blocker, "--json"],
+        workspace,
+        &[],
+        "add blocked dependency",
+    )?;
+    Ok((blocked, blocker))
+}
+
+#[cfg(unix)]
+fn write_agent_mail_snapshot(
+    path: &Path,
+    reservation_path: Option<&str>,
+    include_secret_probe: bool,
+) -> TestResult {
+    let subject = if include_secret_probe {
+        "token ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+    } else {
+        "swarm brief handoff"
+    };
+    let holder = if include_secret_probe {
+        "Agent ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+    } else {
+        "IndigoBrook"
+    };
+    let body = if include_secret_probe {
+        r#""body_md":"raw secret body","#
+    } else {
+        ""
+    };
+    let reservations = reservation_path.map_or_else(
+        || "[]".to_string(),
+        |path| {
+            format!(
+                r#"[{{"path_pattern":"{path}","holder":"{holder}","exclusive":true,"expires_ts":"2026-05-09T20:00:00Z"}}]"#
+            )
+        },
+    );
+    write_text(
+        path,
+        &format!(
+            r#"{{
+  "file_reservations": {reservations},
+  "inbox": [{{"mailbox":"QuietFrog","unread_count":1,"ack_required_count":0}}],
+  "threads": [{{"thread_id":"eidetic_engine_cli-8x4x","subject":"{subject}",{body}"message_count":2,"last_activity_at":"2026-05-09T19:00:00Z"}}]
+}}"#
+        ),
+    )
+}
+
+#[cfg(unix)]
+fn file_hash(path: &Path) -> Result<Option<String>, String> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes =
+        fs::read(path).map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    Ok(Some(format!("blake3:{}", blake3::hash(&bytes).to_hex())))
+}
+
+#[cfg(unix)]
+fn beads_status_digest(workspace: &Path) -> Result<Option<Vec<String>>, String> {
+    if !workspace.join(".beads").is_dir() {
+        return Ok(None);
+    }
+    let output = run_tool(
+        "br",
+        &["list", "--json"],
+        workspace,
+        &[],
+        "read beads digest",
+    )?;
+    let value = serde_json::from_str::<JsonValue>(&output)
+        .map_err(|error| format!("br list output was not JSON: {error}"))?;
+    let issues = value
+        .as_array()
+        .or_else(|| value.get("issues").and_then(JsonValue::as_array))
+        .ok_or_else(|| "br list output must contain an issues array".to_string())?;
+    let mut digest = issues
+        .iter()
+        .map(|item| {
+            let id = item.get("id").and_then(JsonValue::as_str).unwrap_or("");
+            let status = item.get("status").and_then(JsonValue::as_str).unwrap_or("");
+            let title = item.get("title").and_then(JsonValue::as_str).unwrap_or("");
+            format!("{id}:{status}:{title}")
+        })
+        .collect::<Vec<_>>();
+    digest.sort();
+    Ok(Some(digest))
+}
+
+#[cfg(unix)]
+fn git_status_digest(workspace: &Path) -> Result<Option<String>, String> {
+    if !workspace.join(".git").is_dir() {
+        return Ok(None);
+    }
+    run_tool(
+        "git",
+        &["status", "--short", "--untracked-files=all"],
+        workspace,
+        &[],
+        "read git digest",
+    )
+    .map(Some)
+}
+
+#[cfg(unix)]
+fn coordination_snapshot(
+    workspace: &Path,
+    agent_mail_snapshot_path: Option<&Path>,
+) -> Result<CoordinationSnapshot, String> {
+    Ok(CoordinationSnapshot {
+        beads_status_digest: beads_status_digest(workspace)?,
+        git_status_digest: git_status_digest(workspace)?,
+        agent_mail_snapshot_hash: agent_mail_snapshot_path
+            .map(file_hash)
+            .transpose()?
+            .flatten(),
+        ee_db_exists: workspace.join(".ee").join("ee.db").exists(),
+        support_bundle_exists: workspace.join(".ee").join("support").exists()
+            || workspace.join("support-bundles").exists(),
+    })
+}
+
+#[cfg(unix)]
+fn swarm_brief_degraded_codes(value: &JsonValue) -> Vec<String> {
+    let mut codes = value
+        .pointer("/data/degraded")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("code").and_then(JsonValue::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    codes.sort();
+    codes
+}
+
+#[cfg(unix)]
+fn swarm_brief_recommendations(value: &JsonValue) -> Result<&Vec<JsonValue>, String> {
+    value
+        .pointer("/data/recommendations")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| "swarm brief output missing /data/recommendations".to_string())
+}
+
+#[cfg(unix)]
+fn swarm_brief_recommendation_ids(value: &JsonValue) -> Result<Vec<String>, String> {
+    let mut ids = swarm_brief_recommendations(value)?
+        .iter()
+        .filter_map(|item| item.get("id").and_then(JsonValue::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    ids.sort();
+    Ok(ids)
+}
+
+#[cfg(unix)]
+fn swarm_brief_recommendation_kinds(value: &JsonValue) -> Result<Vec<String>, String> {
+    let mut kinds = swarm_brief_recommendations(value)?
+        .iter()
+        .filter_map(|item| item.get("kind").and_then(JsonValue::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    kinds.sort();
+    kinds.dedup();
+    Ok(kinds)
+}
+
+#[cfg(unix)]
+fn swarm_brief_reason_codes(value: &JsonValue) -> Result<Vec<String>, String> {
+    let mut codes = Vec::new();
+    for recommendation in swarm_brief_recommendations(value)? {
+        if let Some(items) = recommendation
+            .get("reasonCodes")
+            .and_then(JsonValue::as_array)
+        {
+            codes.extend(
+                items
+                    .iter()
+                    .filter_map(JsonValue::as_str)
+                    .map(str::to_owned),
+            );
+        }
+    }
+    codes.sort();
+    codes.dedup();
+    Ok(codes)
+}
+
+#[cfg(unix)]
+fn swarm_brief_source_statuses(value: &JsonValue) -> Result<Vec<(String, String)>, String> {
+    let mut statuses = value
+        .pointer("/data/sources")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| "swarm brief output missing /data/sources".to_string())?
+        .iter()
+        .map(|source| {
+            let name = source
+                .get("source")
+                .and_then(JsonValue::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let status = source
+                .get("status")
+                .and_then(JsonValue::as_str)
+                .unwrap_or("")
+                .to_owned();
+            (name, status)
+        })
+        .collect::<Vec<_>>();
+    statuses.sort();
+    Ok(statuses)
+}
+
+#[cfg(unix)]
+fn swarm_brief_source_log(value: &JsonValue) -> Result<Vec<JsonValue>, String> {
+    value
+        .pointer("/data/sources")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| "swarm brief output missing /data/sources".to_string())
+        .map(|sources| {
+            sources
+                .iter()
+                .map(|source| {
+                    json!({
+                        "source": source.get("source").cloned().unwrap_or(JsonValue::Null),
+                        "status": source.get("status").cloned().unwrap_or(JsonValue::Null),
+                        "freshness": source.get("freshness").cloned().unwrap_or(JsonValue::Null),
+                        "provenance": source.get("provenance").cloned().unwrap_or(JsonValue::Null),
+                        "itemCount": source.get("itemCount").cloned().unwrap_or(JsonValue::Null),
+                    })
+                })
+                .collect()
+        })
+}
+
+#[cfg(unix)]
+fn ensure_contains_strings(
+    actual: &[String],
+    expected: &[impl AsRef<str>],
+    context: &str,
+) -> TestResult {
+    for expected_item in expected {
+        let expected_item = expected_item.as_ref();
+        ensure(
+            actual
+                .iter()
+                .any(|actual_item| actual_item == expected_item),
+            format!("{context}: expected {expected_item:?} in {actual:?}"),
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_source_statuses(
+    actual: &[(String, String)],
+    expected: &[(&str, &str)],
+    reason_codes: &[String],
+    context: &str,
+) -> TestResult {
+    for (source, status) in expected {
+        if *status == "ready_or_skipped" {
+            let matched_status = actual
+                .iter()
+                .find(|(actual_source, _)| actual_source == source)
+                .map(|(_, actual_status)| actual_status.as_str());
+            ensure(
+                matches!(matched_status, Some("ready" | "skipped")),
+                format!("{context}: expected source {source}:ready_or_skipped in {actual:?}"),
+            )?;
+            if matched_status == Some("skipped") {
+                ensure(
+                    reason_codes
+                        .iter()
+                        .any(|reason_code| reason_code == "source_status:skipped"),
+                    format!(
+                        "{context}: skipped source {source} missing source_status:skipped reason code in {reason_codes:?}"
+                    ),
+                )?;
+            }
+            continue;
+        }
+        ensure(
+            actual.iter().any(|(actual_source, actual_status)| {
+                actual_source == source && actual_status == status
+            }),
+            format!("{context}: expected source {source}:{status} in {actual:?}"),
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_swarm_stdout_is_machine_only(
+    event: &CommandEvent,
+    value: &JsonValue,
+    probes: &[SecretProbe],
+) -> TestResult {
+    ensure_no_ansi(&event.stdout, "swarm brief stdout")?;
+    ensure_no_ansi(&event.stderr, "swarm brief stderr")?;
+    ensure_step_omits_secret_probes("swarm brief", event, value, probes)?;
+    ensure(
+        !event.stdout.contains("error:") && !event.stdout.contains("\nNext:\n"),
+        "swarm brief JSON stdout must not contain human diagnostics",
+    )?;
+    ensure(
+        event.stderr.is_empty(),
+        "swarm brief JSON stderr must remain empty",
+    )
+}
+
+#[cfg(unix)]
+fn run_swarm_brief_case(
+    case: SwarmBriefE2eCase,
+    events_path: &Path,
+    artifact_dir: &Path,
+    probes: &[SecretProbe],
+) -> TestResult {
+    let before = coordination_snapshot(&case.workspace, case.agent_mail_snapshot_path.as_deref())?;
+    let (event, value) = run_step_with_env(
+        "swarm_brief_logged_coordination",
+        events_path,
+        artifact_dir,
+        &case.workspace,
+        StepSpec {
+            name: case.id,
+            args: case.args,
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v1",
+            expect_clean_stderr: true,
+        },
+        &case.envs,
+    )?;
+    ensure_swarm_stdout_is_machine_only(&event, &value, probes)?;
+    ensure_equal(
+        &value.pointer("/data/schema"),
+        &Some(&json!("ee.swarm.brief.v1")),
+        "swarm brief data schema",
+    )?;
+    ensure_equal(
+        &value.pointer("/data/redactionStatus"),
+        &Some(&json!("paths_counts_subjects_only_no_content")),
+        "swarm brief redaction status",
+    )?;
+
+    let degraded_codes = swarm_brief_degraded_codes(&value);
+    ensure_contains_strings(
+        &degraded_codes,
+        &case.expected_degraded_codes,
+        &format!("{} degraded codes", case.id),
+    )?;
+    let recommendation_ids = swarm_brief_recommendation_ids(&value)?;
+    ensure_contains_strings(
+        &recommendation_ids,
+        &case.expected_recommendation_ids,
+        &format!("{} recommendation ids", case.id),
+    )?;
+    let recommendation_kinds = swarm_brief_recommendation_kinds(&value)?;
+    ensure_contains_strings(
+        &recommendation_kinds,
+        &case.expected_recommendation_kinds,
+        &format!("{} recommendation kinds", case.id),
+    )?;
+    let reason_codes = swarm_brief_reason_codes(&value)?;
+    ensure_contains_strings(
+        &reason_codes,
+        &case.expected_reason_codes,
+        &format!("{} reason codes", case.id),
+    )?;
+    let source_statuses = swarm_brief_source_statuses(&value)?;
+    ensure_source_statuses(
+        &source_statuses,
+        &case.expected_source_statuses,
+        &reason_codes,
+        &format!("{} source statuses", case.id),
+    )?;
+    for (source, reason_code) in &case.expected_ready_source_reason_codes {
+        if source_statuses
+            .iter()
+            .any(|(actual_source, actual_status)| {
+                actual_source == source && actual_status == "ready"
+            })
+        {
+            ensure_contains_strings(
+                &reason_codes,
+                &[*reason_code],
+                &format!("{} ready source reason codes", case.id),
+            )?;
+        }
+    }
+
+    let after = coordination_snapshot(&case.workspace, case.agent_mail_snapshot_path.as_deref())?;
+    ensure_equal(
+        &after.beads_status_digest,
+        &before.beads_status_digest,
+        "swarm brief must not mutate Beads statuses",
+    )?;
+    ensure_equal(
+        &after.git_status_digest,
+        &before.git_status_digest,
+        "swarm brief must not mutate git state",
+    )?;
+    ensure_equal(
+        &after.agent_mail_snapshot_hash,
+        &before.agent_mail_snapshot_hash,
+        "swarm brief must not mutate Agent Mail snapshot fixture",
+    )?;
+    ensure_equal(
+        &after.ee_db_exists,
+        &before.ee_db_exists,
+        "swarm brief must not create or mutate EE DB rows",
+    )?;
+    ensure_equal(
+        &after.support_bundle_exists,
+        &before.support_bundle_exists,
+        "swarm brief must not create support bundles",
+    )?;
+    ensure(
+        !Path::new(&event.stdout_artifact_path).starts_with(&case.workspace)
+            && !Path::new(&event.stderr_artifact_path).starts_with(&case.workspace),
+        "swarm brief harness artifacts must stay outside the tested workspace",
+    )?;
+
+    append_jsonl(
+        events_path,
+        &json!({
+            "schema": "ee.e2e.swarm_brief_scenario.v1",
+            "scenarioId": case.id,
+            "commandEventLog": events_path.display().to_string(),
+            "workspace": case.workspace.display().to_string(),
+            "stdoutArtifactPath": event.stdout_artifact_path,
+            "stderrArtifactPath": event.stderr_artifact_path,
+            "schemaValidationStatus": event.schema_validation_status,
+            "goldenValidationStatus": "not_applicable",
+            "redactionStatus": value.pointer("/data/redactionStatus").and_then(JsonValue::as_str).unwrap_or("missing"),
+            "sourceFreshness": swarm_brief_source_log(&value)?,
+            "degradationCodes": degraded_codes,
+            "recommendationIds": recommendation_ids,
+            "recommendationKinds": recommendation_kinds,
+            "reasonCodes": reason_codes,
+            "mutationChecks": {
+                "beadsStatus": before.beads_status_digest == after.beads_status_digest,
+                "gitStatus": before.git_status_digest == after.git_status_digest,
+                "agentMailSnapshot": before.agent_mail_snapshot_hash == after.agent_mail_snapshot_hash,
+                "eeDbExists": before.ee_db_exists == after.ee_db_exists,
+                "supportBundleExists": before.support_bundle_exists == after.support_bundle_exists,
+                "artifactPathsOutsideWorkspace": true
+            },
+            "firstFailureDiagnosis": event.first_failure,
+        }),
+    )
+}
+
+#[cfg(unix)]
 fn real_cass_binary_path() -> Result<PathBuf, String> {
     if let Some(path) = env::var_os("EE_CASS_BINARY") {
         let path = PathBuf::from(path);
@@ -775,6 +1464,454 @@ fn run_cass_json(
     )?;
     serde_json::from_slice(&output.stdout)
         .map_err(|error| format!("cass {context} stdout must be JSON: {error}"))
+}
+
+#[cfg(unix)]
+#[test]
+fn no_mocks_swarm_brief_logged_coordination_scenarios() -> TestResult {
+    let scenario_id = "swarm_brief_logged_coordination";
+    let log_dir = unique_log_dir(scenario_id)?;
+    let artifact_dir = log_dir.join("artifacts");
+    fs::create_dir_all(&artifact_dir)
+        .map_err(|error| format!("failed to create artifact dir: {error}"))?;
+    let events_path = log_dir.join("commands.jsonl");
+    let workspaces_dir = log_dir.join("workspaces");
+    fs::create_dir_all(&workspaces_dir)
+        .map_err(|error| format!("failed to create workspaces dir: {error}"))?;
+
+    let rch_low_bin = log_dir.join("fixture-bin-rch-low");
+    write_fixture_executable(
+        &rch_low_bin,
+        "rch",
+        "#!/bin/sh\nprintf '%s\\n' '{\"queue_depth\":0,\"active_builds\":0}'\n",
+    )?;
+    let rch_low_path = path_with_front(&rch_low_bin)?;
+
+    let rch_high_bin = log_dir.join("fixture-bin-rch-high");
+    write_fixture_executable(
+        &rch_high_bin,
+        "rch",
+        "#!/bin/sh\nprintf '%s\\n' '{\"queue_depth\":9,\"active_builds\":12}'\n",
+    )?;
+    let rch_high_path = path_with_front(&rch_high_bin)?;
+
+    let rch_unavailable_bin = log_dir.join("fixture-bin-rch-unavailable");
+    write_fixture_executable(
+        &rch_unavailable_bin,
+        "rch",
+        "#!/bin/sh\necho 'fixture rch unavailable' >&2\nexit 127\n",
+    )?;
+    let rch_unavailable_path = path_with_front(&rch_unavailable_bin)?;
+
+    let bv_unavailable_bin = log_dir.join("fixture-bin-bv-unavailable");
+    write_fixture_executable(
+        &bv_unavailable_bin,
+        "bv",
+        "#!/bin/sh\necho 'fixture bv unavailable' >&2\nexit 127\n",
+    )?;
+    let bv_unavailable_path = path_with_front(&bv_unavailable_bin)?;
+
+    let br_locked_bin = log_dir.join("fixture-bin-br-locked");
+    write_fixture_executable(
+        &br_locked_bin,
+        "br",
+        "#!/bin/sh\nprintf '%s\\n' '{\"error\":\"database is locked\"}'\n",
+    )?;
+    let br_locked_path = path_with_front(&br_locked_bin)?;
+
+    let make_args = |workspace: &Path, sources: &str, snapshot: Option<&Path>, timeout_ms: u64| {
+        let mut args = vec![
+            "--workspace".to_owned(),
+            workspace.display().to_string(),
+            "--json".to_owned(),
+            "--fields".to_owned(),
+            "full".to_owned(),
+            "swarm".to_owned(),
+            "brief".to_owned(),
+            "--sources".to_owned(),
+            sources.to_owned(),
+            "--command-timeout-ms".to_owned(),
+            timeout_ms.to_string(),
+        ];
+        if let Some(snapshot) = snapshot {
+            args.push("--agent-mail-snapshot".to_owned());
+            args.push(snapshot.display().to_string());
+        }
+        args
+    };
+
+    let clean_workspace = workspaces_dir.join("clean-ready");
+    setup_git_workspace(&clean_workspace)?;
+    let clean_bead_id = seed_ready_bead(
+        &clean_workspace,
+        "[swarm-brief][e2e] Clean ready coordination work",
+    )?;
+    let clean_mail = clean_workspace.join("agent-mail-snapshot.json");
+    write_agent_mail_snapshot(&clean_mail, None, false)?;
+    commit_workspace_state(&clean_workspace, "seed clean swarm brief baseline")?;
+
+    let blocked_workspace = workspaces_dir.join("blocked-critical-path");
+    setup_git_workspace(&blocked_workspace)?;
+    let (_blocked_bead_id, blocker_bead_id) = seed_blocked_beads(&blocked_workspace)?;
+    commit_workspace_state(&blocked_workspace, "seed blocked swarm brief baseline")?;
+
+    let reservation_workspace = workspaces_dir.join("reservation-conflict");
+    setup_git_workspace(&reservation_workspace)?;
+    let reservation_bead_id = seed_ready_bead(
+        &reservation_workspace,
+        "[swarm-brief][e2e] Reservation conflict on swarm brief core",
+    )?;
+    let reservation_mail = reservation_workspace.join("agent-mail-snapshot.json");
+    write_agent_mail_snapshot(&reservation_mail, Some("src/core/swarm_brief.rs"), false)?;
+    commit_workspace_state(
+        &reservation_workspace,
+        "seed reservation swarm brief baseline",
+    )?;
+
+    let dirty_workspace = workspaces_dir.join("dirty-worktree");
+    setup_git_workspace(&dirty_workspace)?;
+    let dirty_bead_id = seed_ready_bead(
+        &dirty_workspace,
+        "[swarm-brief][e2e] Dirty worktree overlap on swarm brief core",
+    )?;
+    let dirty_surface = dirty_workspace
+        .join("src")
+        .join("core")
+        .join("swarm_brief.rs");
+    write_text(&dirty_surface, "baseline swarm brief fixture\n")?;
+    run_tool(
+        "git",
+        &["add", "-f", "src/core/swarm_brief.rs"],
+        &dirty_workspace,
+        &[],
+        "force-add dirty surface baseline",
+    )?;
+    commit_workspace_state(&dirty_workspace, "seed dirty swarm brief baseline")?;
+    write_text(&dirty_surface, "dirty swarm brief fixture\n")?;
+
+    let bv_unavailable_workspace = workspaces_dir.join("bv-unavailable");
+    setup_git_workspace(&bv_unavailable_workspace)?;
+    let bv_unavailable_bead_id = seed_ready_bead(
+        &bv_unavailable_workspace,
+        "[swarm-brief][e2e] BV unavailable still reports ready Beads",
+    )?;
+    commit_workspace_state(
+        &bv_unavailable_workspace,
+        "seed bv unavailable swarm brief baseline",
+    )?;
+
+    let beads_locked_workspace = workspaces_dir.join("beads-locked");
+    setup_git_workspace(&beads_locked_workspace)?;
+    let _locked_bead_id = seed_ready_bead(
+        &beads_locked_workspace,
+        "[swarm-brief][e2e] Beads locked fixture",
+    )?;
+    commit_workspace_state(
+        &beads_locked_workspace,
+        "seed beads locked swarm brief baseline",
+    )?;
+
+    let agent_mail_unavailable_workspace = workspaces_dir.join("agent-mail-unavailable");
+    setup_git_workspace(&agent_mail_unavailable_workspace)?;
+    commit_workspace_state(
+        &agent_mail_unavailable_workspace,
+        "seed agent mail unavailable swarm brief baseline",
+    )?;
+
+    let rch_unavailable_workspace = workspaces_dir.join("rch-unavailable");
+    setup_git_workspace(&rch_unavailable_workspace)?;
+    commit_workspace_state(
+        &rch_unavailable_workspace,
+        "seed rch unavailable swarm brief baseline",
+    )?;
+
+    let high_pressure_workspace = workspaces_dir.join("high-resource-pressure");
+    setup_git_workspace(&high_pressure_workspace)?;
+    commit_workspace_state(
+        &high_pressure_workspace,
+        "seed high pressure swarm brief baseline",
+    )?;
+
+    let ambiguous_selected_workspace = workspaces_dir.join("ambiguous-selected");
+    setup_git_workspace(&ambiguous_selected_workspace)?;
+    let ambiguous_selected_bead_id = seed_ready_bead(
+        &ambiguous_selected_workspace,
+        "[swarm-brief][e2e] Explicit workspace wins ambiguous environment",
+    )?;
+    commit_workspace_state(
+        &ambiguous_selected_workspace,
+        "seed selected ambiguous swarm brief baseline",
+    )?;
+
+    let ambiguous_env_workspace = workspaces_dir.join("ambiguous-env");
+    setup_git_workspace(&ambiguous_env_workspace)?;
+    let _ambiguous_env_bead_id = seed_ready_bead(
+        &ambiguous_env_workspace,
+        "[swarm-brief][e2e] Wrong environment workspace candidate",
+    )?;
+    commit_workspace_state(
+        &ambiguous_env_workspace,
+        "seed environment ambiguous swarm brief baseline",
+    )?;
+
+    let redaction_workspace = workspaces_dir.join("redaction-probe");
+    setup_git_workspace(&redaction_workspace)?;
+    let redaction_bead_id = seed_ready_bead(
+        &redaction_workspace,
+        "Use token ghp_abcdefghijklmnopqrstuvwxyz1234567890 in swarm brief",
+    )?;
+    let redaction_mail = redaction_workspace.join("agent-mail-snapshot.json");
+    write_agent_mail_snapshot(&redaction_mail, Some("src/core/swarm_brief.rs"), true)?;
+    commit_workspace_state(&redaction_workspace, "seed redaction swarm brief baseline")?;
+
+    let probes = vec![
+        SecretProbe {
+            class: "github_token",
+            raw: "ghp_abcdefghijklmnopqrstuvwxyz1234567890",
+        },
+        SecretProbe {
+            class: "agent_mail_body",
+            raw: "raw secret body",
+        },
+    ];
+
+    let cases = vec![
+        SwarmBriefE2eCase {
+            id: "clean_workspace_ready_work",
+            workspace: clean_workspace.clone(),
+            args: make_args(
+                &clean_workspace,
+                "git,beads,bv,agent-mail,rch,host-profile",
+                Some(&clean_mail),
+                2_000,
+            ),
+            envs: vec![("PATH", rch_low_path.clone())],
+            agent_mail_snapshot_path: Some(clean_mail),
+            expected_degraded_codes: Vec::new(),
+            expected_recommendation_ids: vec![format!("rec.candidate.{clean_bead_id}")],
+            expected_recommendation_kinds: vec!["safe_surface_candidate"],
+            expected_reason_codes: vec!["ready_bead_available"],
+            expected_ready_source_reason_codes: Vec::new(),
+            expected_source_statuses: vec![
+                ("agent_mail", "ready"),
+                ("beads", "ready"),
+                ("bv", "ready_or_skipped"),
+                ("git", "ready"),
+                ("rch", "ready"),
+            ],
+        },
+        SwarmBriefE2eCase {
+            id: "no_ready_work_blocked_critical_path",
+            workspace: blocked_workspace.clone(),
+            args: make_args(&blocked_workspace, "beads,bv", None, 2_000),
+            envs: Vec::new(),
+            agent_mail_snapshot_path: None,
+            expected_degraded_codes: Vec::new(),
+            expected_recommendation_ids: vec![
+                "rec.work_selection.no_ready_beads".to_owned(),
+                format!("rec.in_progress_follow_up.{blocker_bead_id}"),
+            ],
+            expected_recommendation_kinds: vec!["stale_in_progress_follow_up", "work_selection"],
+            expected_reason_codes: vec![
+                "no_ready_work",
+                "in_progress_owner_follow_up",
+                "in_progress_without_assignee",
+            ],
+            expected_ready_source_reason_codes: Vec::new(),
+            expected_source_statuses: vec![("beads", "ready"), ("bv", "ready_or_skipped")],
+        },
+        SwarmBriefE2eCase {
+            id: "active_reservation_conflict",
+            workspace: reservation_workspace.clone(),
+            args: make_args(
+                &reservation_workspace,
+                "git,beads,bv,agent-mail",
+                Some(&reservation_mail),
+                2_000,
+            ),
+            envs: Vec::new(),
+            agent_mail_snapshot_path: Some(reservation_mail),
+            expected_degraded_codes: Vec::new(),
+            expected_recommendation_ids: vec![format!("rec.candidate.{reservation_bead_id}")],
+            expected_recommendation_kinds: vec![
+                "candidate_blocked_by_surface_conflict",
+                "file_surface_conflict",
+            ],
+            expected_reason_codes: vec![
+                "active_exclusive_reservation",
+                "bead_reservation_overlap",
+                "candidate_blocked_by_surface_conflict",
+            ],
+            expected_ready_source_reason_codes: Vec::new(),
+            expected_source_statuses: vec![
+                ("agent_mail", "ready"),
+                ("beads", "ready"),
+                ("bv", "ready_or_skipped"),
+            ],
+        },
+        SwarmBriefE2eCase {
+            id: "dirty_worktree_overlap",
+            workspace: dirty_workspace.clone(),
+            args: make_args(&dirty_workspace, "git,beads,bv", None, 2_000),
+            envs: Vec::new(),
+            agent_mail_snapshot_path: None,
+            expected_degraded_codes: Vec::new(),
+            expected_recommendation_ids: vec![format!("rec.candidate.{dirty_bead_id}")],
+            expected_recommendation_kinds: vec!["candidate_blocked_by_surface_conflict"],
+            expected_reason_codes: vec![
+                "dirty_worktree_path",
+                "dirty_bead_overlap",
+                "candidate_blocked_by_surface_conflict",
+            ],
+            expected_ready_source_reason_codes: Vec::new(),
+            expected_source_statuses: vec![
+                ("beads", "ready"),
+                ("bv", "ready_or_skipped"),
+                ("git", "ready"),
+            ],
+        },
+        SwarmBriefE2eCase {
+            id: "bv_unavailable",
+            workspace: bv_unavailable_workspace.clone(),
+            args: make_args(&bv_unavailable_workspace, "beads,bv", None, 2_000),
+            envs: vec![("PATH", bv_unavailable_path)],
+            agent_mail_snapshot_path: None,
+            expected_degraded_codes: vec!["bv_unavailable"],
+            expected_recommendation_ids: vec![
+                format!("rec.candidate.{bv_unavailable_bead_id}"),
+                "rec.degraded.bv.bv_unavailable".to_owned(),
+            ],
+            expected_recommendation_kinds: vec!["safe_surface_candidate", "degraded_capability"],
+            expected_reason_codes: vec!["bv_unavailable", "ready_bead_available"],
+            expected_ready_source_reason_codes: Vec::new(),
+            expected_source_statuses: vec![("beads", "ready"), ("bv", "unavailable")],
+        },
+        SwarmBriefE2eCase {
+            id: "beads_stale_locked",
+            workspace: beads_locked_workspace.clone(),
+            args: make_args(&beads_locked_workspace, "beads", None, 250),
+            envs: vec![("PATH", br_locked_path)],
+            agent_mail_snapshot_path: None,
+            expected_degraded_codes: vec!["beads_unavailable"],
+            expected_recommendation_ids: vec!["rec.degraded.beads.beads_unavailable".to_owned()],
+            expected_recommendation_kinds: vec!["degraded_capability"],
+            expected_reason_codes: vec!["beads_unavailable"],
+            expected_ready_source_reason_codes: Vec::new(),
+            expected_source_statuses: vec![("beads", "unavailable")],
+        },
+        SwarmBriefE2eCase {
+            id: "agent_mail_unavailable",
+            workspace: agent_mail_unavailable_workspace.clone(),
+            args: make_args(&agent_mail_unavailable_workspace, "agent-mail", None, 2_000),
+            envs: Vec::new(),
+            agent_mail_snapshot_path: None,
+            expected_degraded_codes: vec!["agent_mail_unavailable"],
+            expected_recommendation_ids: vec![
+                "rec.degraded.agent_mail.agent_mail_unavailable".to_owned(),
+            ],
+            expected_recommendation_kinds: vec!["degraded_capability"],
+            expected_reason_codes: vec!["agent_mail_unavailable"],
+            expected_ready_source_reason_codes: Vec::new(),
+            expected_source_statuses: vec![("agent_mail", "not_configured")],
+        },
+        SwarmBriefE2eCase {
+            id: "rch_unavailable",
+            workspace: rch_unavailable_workspace.clone(),
+            args: make_args(&rch_unavailable_workspace, "rch", None, 2_000),
+            envs: vec![("PATH", rch_unavailable_path)],
+            agent_mail_snapshot_path: None,
+            expected_degraded_codes: vec!["rch_unavailable"],
+            expected_recommendation_ids: vec!["rec.degraded.rch.rch_unavailable".to_owned()],
+            expected_recommendation_kinds: vec!["degraded_capability"],
+            expected_reason_codes: vec!["rch_unavailable"],
+            expected_ready_source_reason_codes: Vec::new(),
+            expected_source_statuses: vec![("rch", "unavailable")],
+        },
+        SwarmBriefE2eCase {
+            id: "high_resource_pressure",
+            workspace: high_pressure_workspace.clone(),
+            args: make_args(&high_pressure_workspace, "rch,host-profile", None, 2_000),
+            envs: vec![("PATH", rch_high_path)],
+            agent_mail_snapshot_path: None,
+            expected_degraded_codes: Vec::new(),
+            expected_recommendation_ids: vec!["rec.resource_pressure.use_rch_for_cargo".to_owned()],
+            expected_recommendation_kinds: vec!["resource_pressure"],
+            expected_reason_codes: vec![
+                "cargo_verification_must_use_rch",
+                "resource_pressure_high",
+            ],
+            expected_ready_source_reason_codes: Vec::new(),
+            expected_source_statuses: vec![("rch", "ready"), ("host_profile", "ready")],
+        },
+        SwarmBriefE2eCase {
+            id: "workspace_ambiguity_explicit_wins",
+            workspace: ambiguous_selected_workspace.clone(),
+            args: make_args(&ambiguous_selected_workspace, "git,beads", None, 2_000),
+            envs: vec![(
+                "EE_WORKSPACE",
+                ambiguous_env_workspace.as_os_str().to_os_string(),
+            )],
+            agent_mail_snapshot_path: None,
+            expected_degraded_codes: Vec::new(),
+            expected_recommendation_ids: vec![format!(
+                "rec.candidate.{ambiguous_selected_bead_id}"
+            )],
+            expected_recommendation_kinds: vec!["safe_surface_candidate"],
+            expected_reason_codes: vec!["ready_bead_available"],
+            expected_ready_source_reason_codes: Vec::new(),
+            expected_source_statuses: vec![("beads", "ready"), ("git", "ready")],
+        },
+        SwarmBriefE2eCase {
+            id: "redaction_probe_coordination_text",
+            workspace: redaction_workspace.clone(),
+            args: make_args(
+                &redaction_workspace,
+                "beads,agent-mail",
+                Some(&redaction_mail),
+                2_000,
+            ),
+            envs: Vec::new(),
+            agent_mail_snapshot_path: Some(redaction_mail),
+            expected_degraded_codes: Vec::new(),
+            expected_recommendation_ids: vec![format!("rec.candidate.{redaction_bead_id}")],
+            expected_recommendation_kinds: vec![
+                "candidate_blocked_by_surface_conflict",
+                "file_surface_conflict",
+            ],
+            expected_reason_codes: vec![
+                "active_exclusive_reservation",
+                "bead_reservation_overlap",
+                "candidate_blocked_by_surface_conflict",
+                "ready_bead_available",
+            ],
+            expected_ready_source_reason_codes: Vec::new(),
+            expected_source_statuses: vec![("agent_mail", "ready"), ("beads", "ready")],
+        },
+    ];
+    let case_count = cases.len();
+    ensure_equal(&case_count, &11_usize, "swarm brief scenario count")?;
+    for case in cases {
+        run_swarm_brief_case(case, &events_path, &artifact_dir, &probes)?;
+    }
+
+    let events_text = fs::read_to_string(&events_path).map_err(|error| {
+        format!(
+            "failed to read swarm brief JSONL log {}: {error}",
+            events_path.display()
+        )
+    })?;
+    ensure_equal(
+        &events_text
+            .matches("\"schema\":\"ee.e2e.swarm_brief_scenario.v1\"")
+            .count(),
+        &case_count,
+        "swarm brief scenario JSONL event count",
+    )?;
+    ensure(
+        !events_text.contains("ghp_") && !events_text.contains("raw secret body"),
+        "swarm brief E2E logs must be safe for support-bundle inclusion",
+    )?;
+    Ok(())
 }
 
 #[test]

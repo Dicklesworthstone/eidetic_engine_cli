@@ -346,7 +346,7 @@ Each gate reports exit code and elapsed time.
 | `ee pack build --query-file task.eeq.json --max-tokens N --format toon` | Build a pack from an explicit EQL query document |
 | `ee pack replay <pack-id> --json` | Inspect the persisted, redaction-safe selection ledger for a historical pack |
 | `ee pack diff <old-pack-id> <new-pack-id> --json` | Compare two persisted pack ledgers and explain selection, freshness, redaction, or derived-asset changes |
-| `ee support bundle --out <dir> --json` | Create a redacted diagnostic bundle, including pack replay ledger summaries without raw query or memory content |
+| `ee support bundle --out <dir> --json` | Create a redacted diagnostic bundle, including pack replay and swarm-brief summaries without raw query, mail body, memory, or full file-listing content |
 
 ### Pack replay evidence
 
@@ -369,6 +369,98 @@ For bug reports and handoffs, attach the output of
 freshness counts, degradation codes, redaction classes, and derived-asset
 metadata, while hashing query text and omitting raw memory content, `why` text,
 provenance text, and full ledger payloads.
+
+Bundles also include `swarm_brief_summary.json`, a compact coordination posture
+snapshot for support and handoff triage. It keeps source statuses, ready/blocked
+work counts, active-conflict counts, resource-pressure posture, degraded codes,
+top recommendation IDs, and hashes/provenance for the underlying brief. It
+omits raw Agent Mail bodies, raw query text, raw provenance text, and full file
+listings. Treat it as diagnostic context only; it is not a substitute for a
+fresh `ee swarm brief` before claiming work or coordinating edits.
+
+### Swarm brief workflow
+
+`ee swarm brief` is the read-only coordination preflight for crowded repos. Run
+it before claiming a bead, after large dirty-state or reservation changes, and
+before using handoff or support-bundle evidence as the basis for new work.
+
+Start with the compact operator view:
+
+```bash
+ee swarm brief --workspace . --json
+```
+
+Use full output when a harness needs every source array, including file-surface
+risks and resource-pressure hints:
+
+```bash
+ee --fields full swarm brief --workspace . --include-rch --json
+```
+
+Require selected live coordination sources when degraded output is unacceptable:
+
+```bash
+ee swarm brief --workspace . --sources git,beads,bv,agent-mail --require-sources --json
+```
+
+If live Agent Mail is unavailable, provide a redacted snapshot instead of raw
+mail bodies:
+
+```bash
+ee swarm brief --workspace . --agent-mail-snapshot <snapshot.json> --json
+```
+
+Useful JSON checks:
+
+```bash
+ee --fields summary swarm brief --workspace . --json \
+  | jq '.data.topRecommendations[] | select(.kind == "safe_surface_candidate") | {id,severity,confidence,reasonCodes,suggestedCommands}'
+
+ee --fields full swarm brief --workspace . --json \
+  | jq '.data.beads.blocked[] | {id,title,priority,sourceBucket}'
+
+ee --fields full swarm brief --workspace . --json \
+  | jq '.data.fileSurfaceRisks[] | select((.riskFactors // []) | any(. == "active_exclusive_reservation" or contains("reservation_overlap"))) | {pathPattern,severity,score,riskFactors}'
+
+ee swarm brief --workspace . --json \
+  | jq '.data.degraded[] | {source,code,severity,repair}'
+
+ee --fields full swarm brief --workspace . --include-rch --json \
+  | jq '.data.recommendations[] | select(.id == "rec.resource_pressure.use_rch_for_cargo") | .suggestedCommands[]'
+
+ee --fields full swarm brief --workspace . --json \
+  | jq '.data.recommendations[] | select(.id == "rec.work_selection.no_ready_beads") | {reasonCodes,suggestedCommands}'
+```
+
+Operator workflow for crowded repos:
+
+1. Run `ee swarm brief --workspace . --json`.
+2. Inspect recommendations, blocked beads, degraded sources, and file-surface risks.
+3. Reserve edit surfaces through Agent Mail, then mark the bead with `br update <id> --status in_progress --json`.
+4. Use RCH for Cargo verification, especially when the brief reports `rec.resource_pressure.use_rch_for_cargo`.
+5. Rerun the brief after large edits, after reservation changes, and before handoff.
+
+The brief complements existing tools; it does not replace their authority.
+`br ready --json` remains the source of ready-work records, and
+`bv --robot-triage` remains the graph-aware ranking engine. Agent Mail remains
+the authority for reservations and coordination messages. Handoff capsules and
+support bundles carry diagnostic snapshots such as `swarm_brief_summary.json`,
+but a live brief is still the preflight before new claims. Profile reports and
+performance forensics diagnose host behavior in detail; the brief only surfaces
+enough posture to steer choices such as routing Cargo through RCH.
+
+The command never claims work, never reserves files, never releases files,
+never sends mail, never runs builds, never edits files, never mutates Beads,
+never mutates the EE store, never mutates git, and never schedules agents.
+
+Privacy is intentionally conservative. The redaction status
+`paths_counts_subjects_only_no_content` means the brief and support-bundle
+summary keep paths, counts, source statuses, subject-like metadata, hashes, and
+recommendation identifiers while omitting raw mail bodies, raw query text, raw
+memory content, raw provenance text, environment dumps, and full file listings.
+Attach `swarm_brief_summary.json` in support bundles and handoffs when you need
+coordination posture without leaking content; attach fresh live output only when
+the recipient is allowed to see the underlying repo and coordination metadata.
 
 ### Import & ingestion
 
