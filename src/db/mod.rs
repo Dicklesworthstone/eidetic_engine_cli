@@ -486,6 +486,120 @@ impl DbConnection {
         })
     }
 
+    /// Run SQLite PRAGMA quick_check and return results. Cheaper than
+    /// `check_integrity` because it skips constraint validation.
+    pub fn quick_check(&self) -> Result<IntegrityCheckResult> {
+        let rows = self.query_for(DbOperation::IntegrityCheck, "PRAGMA quick_check", &[])?;
+
+        let mut issues = Vec::new();
+        for row in &rows {
+            if let Some(msg) = row.get(0).and_then(|v| v.as_str()) {
+                if !text_matches(msg, "ok")
+                    && !integrity_issue_is_freelist_accounting_false_positive(msg)
+                {
+                    issues.push(msg.to_string());
+                }
+            }
+        }
+
+        Ok(IntegrityCheckResult {
+            passed: issues.is_empty(),
+            issues,
+        })
+    }
+
+    /// Return the active SQLite journal mode (e.g., "wal", "delete").
+    pub fn journal_mode(&self) -> Result<String> {
+        let rows = self.query_for(DbOperation::Query, "PRAGMA journal_mode", &[])?;
+        Ok(rows
+            .first()
+            .and_then(|row| row.get(0).and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string())
+    }
+
+    /// Return the SQLite page size in bytes.
+    pub fn page_size(&self) -> Result<u32> {
+        let rows = self.query_for(DbOperation::Query, "PRAGMA page_size", &[])?;
+        let value = rows
+            .first()
+            .and_then(|row| row.get(0).and_then(|v| v.as_i64()))
+            .unwrap_or(0);
+        Ok(u32::try_from(value).unwrap_or(0))
+    }
+
+    /// Return the SQLite page count (number of pages in the main database).
+    pub fn page_count(&self) -> Result<u64> {
+        let rows = self.query_for(DbOperation::Query, "PRAGMA page_count", &[])?;
+        let value = rows
+            .first()
+            .and_then(|row| row.get(0).and_then(|v| v.as_i64()))
+            .unwrap_or(0);
+        Ok(u64::try_from(value).unwrap_or(0))
+    }
+
+    /// List user-defined table names (excluding internal `sqlite_*` tables).
+    pub fn list_user_tables(&self) -> Result<Vec<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC",
+            &[],
+        )?;
+
+        let mut names = Vec::with_capacity(rows.len());
+        for row in &rows {
+            if let Some(name) = row.get(0).and_then(|v| v.as_str()) {
+                names.push(name.to_string());
+            }
+        }
+        Ok(names)
+    }
+
+    /// Count rows in a table identified by name. The table name MUST come from
+    /// `list_user_tables` (or otherwise be validated) — this method rejects any
+    /// name that is not a SQL identifier (`[A-Za-z_][A-Za-z0-9_]*`) because
+    /// SQLite cannot bind identifiers as parameters.
+    pub fn count_table_rows(&self, table: &str) -> Result<i64> {
+        if table.is_empty()
+            || !table
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_alphabetic() || c == '_')
+                .unwrap_or(false)
+            || !table
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(DbError::InvalidPath {
+                operation: DbOperation::Query,
+                path: PathBuf::from(table),
+                message: format!("invalid table name {table:?} for row-count query"),
+            });
+        }
+
+        let sql = format!("SELECT COUNT(*) FROM \"{table}\"");
+        let rows = self.query_for(DbOperation::Query, &sql, &[])?;
+        Ok(rows
+            .first()
+            .and_then(|row| row.get(0).and_then(|v| v.as_i64()))
+            .unwrap_or(0))
+    }
+
+    /// Return the list of compiled migration versions that have not yet been
+    /// applied to this database.
+    pub fn pending_migrations(&self) -> Result<Vec<u32>> {
+        if !self.migration_table_exists()? {
+            return Ok(MIGRATIONS.iter().map(|m| m.version()).collect());
+        }
+        let mut pending = Vec::new();
+        for migration in MIGRATIONS {
+            if !self.has_migration(migration.version())? {
+                pending.push(migration.version());
+            }
+        }
+        Ok(pending)
+    }
+
     /// Run a full database integrity report.
     pub fn integrity_report(&self) -> Result<IntegrityReport> {
         let integrity = self.check_integrity()?;

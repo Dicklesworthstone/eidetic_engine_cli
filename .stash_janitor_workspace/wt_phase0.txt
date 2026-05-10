@@ -1,0 +1,4 @@
+ M .beads/issues.jsonl
+ M tests/no_mocks_e2e.rs
+?? .stash_janitor_workspace/
+?? src/core/swarm_brief.rs

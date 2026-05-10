@@ -16307,62 +16307,246 @@ where
     W: Write,
 {
     let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-    let database_path = args.database.clone().unwrap_or_else(|| {
-        workspace_path.join(".ee").join("ee.db")
-    });
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
 
-    let (exists, file_size) = if database_path.exists() {
-        let size = fs::metadata(&database_path).map(|m| m.len()).ok();
-        (true, size)
-    } else {
-        (false, None)
-    };
-
-    let wal_path = database_path.with_extension("db-wal");
-    let wal_exists = wal_path.exists();
-
-    let report = DbStatusReport {
+    let mut report = DbStatusReport {
         database_path: database_path.display().to_string(),
-        exists,
-        file_size_bytes: file_size,
-        wal_exists: if args.wal { Some(wal_exists) } else { None },
-        error: if !exists { Some("Database file not found".to_string()) } else { None },
+        exists: database_path.exists(),
+        file_size_bytes: None,
+        wal_path: None,
+        wal_file_exists: None,
+        wal_size_bytes: None,
+        shm_file_exists: None,
+        journal_mode: None,
+        page_size_bytes: None,
+        page_count: None,
+        schema_version: None,
+        latest_compiled_schema_version: None,
+        needs_migration: None,
+        applied_migration_count: None,
+        pending_migration_versions: None,
+        table_count: None,
+        table_row_counts: None,
+        error: None,
     };
+
+    if !report.exists {
+        report.error = Some("Database file not found".to_string());
+        return write_db_status_output(cli, &report, stdout);
+    }
+
+    if let Ok(meta) = fs::metadata(&database_path) {
+        report.file_size_bytes = Some(meta.len());
+    }
+
+    let wal_path = wal_sidecar_path(&database_path);
+    let shm_path = shm_sidecar_path(&database_path);
+    if args.wal {
+        report.wal_path = Some(wal_path.display().to_string());
+        let wal_present = wal_path.exists();
+        report.wal_file_exists = Some(wal_present);
+        report.shm_file_exists = Some(shm_path.exists());
+        if wal_present {
+            report.wal_size_bytes = fs::metadata(&wal_path).ok().map(|m| m.len());
+        }
+    }
+
+    let conn = match crate::db::DbConnection::open_schema_only(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            report.error = Some(format!("Failed to open database: {error}"));
+            return write_db_status_output(cli, &report, stdout);
+        }
+    };
+
+    populate_db_status_from_connection(&conn, args, &mut report);
     write_db_status_output(cli, &report, stdout)
 }
 
-fn write_db_status_output<W: Write>(cli: &Cli, report: &DbStatusReport, stdout: &mut W) -> ProcessExitCode {
+fn populate_db_status_from_connection(
+    conn: &crate::db::DbConnection,
+    args: &DbStatusArgs,
+    report: &mut DbStatusReport,
+) {
+    if let Ok(mode) = conn.journal_mode() {
+        report.journal_mode = Some(mode);
+    }
+    if let Ok(page_size) = conn.page_size() {
+        report.page_size_bytes = Some(page_size);
+    }
+    if let Ok(page_count) = conn.page_count() {
+        report.page_count = Some(page_count);
+    }
+    report.latest_compiled_schema_version =
+        crate::db::MIGRATIONS.last().map(|m| m.version());
+
+    match conn.schema_version() {
+        Ok(version) => report.schema_version = version,
+        Err(error) => {
+            if report.error.is_none() {
+                report.error = Some(format!("Failed to read schema version: {error}"));
+            }
+        }
+    }
+    match conn.needs_migration() {
+        Ok(value) => report.needs_migration = Some(value),
+        Err(error) => {
+            if report.error.is_none() {
+                report.error = Some(format!("Failed to inspect migrations: {error}"));
+            }
+        }
+    }
+    if let Ok(applied) = conn.applied_migrations() {
+        report.applied_migration_count = Some(applied.len());
+    }
+    if let Ok(pending) = conn.pending_migrations() {
+        report.pending_migration_versions = Some(pending);
+    }
+
+    let tables = match conn.list_user_tables() {
+        Ok(tables) => tables,
+        Err(error) => {
+            if report.error.is_none() {
+                report.error = Some(format!("Failed to list tables: {error}"));
+            }
+            return;
+        }
+    };
+    report.table_count = Some(tables.len());
+
+    if args.counts {
+        let mut counts: Vec<DbTableRowCount> = Vec::with_capacity(tables.len());
+        for table in &tables {
+            let entry = match conn.count_table_rows(table) {
+                Ok(value) => DbTableRowCount {
+                    table: table.clone(),
+                    rows: Some(value),
+                    error: None,
+                },
+                Err(error) => DbTableRowCount {
+                    table: table.clone(),
+                    rows: None,
+                    error: Some(error.to_string()),
+                },
+            };
+            counts.push(entry);
+        }
+        report.table_row_counts = Some(counts);
+    }
+}
+
+fn write_db_status_output<W: Write>(
+    cli: &Cli,
+    report: &DbStatusReport,
+    stdout: &mut W,
+) -> ProcessExitCode {
+    let success = report.error.is_none();
     match cli.renderer() {
-        output::Renderer::Json | output::Renderer::Jsonl | output::Renderer::Compact | output::Renderer::Hook => {
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
             let json = serde_json::json!({
                 "schema": "ee.response.v1",
-                "success": report.error.is_none(),
+                "success": success,
                 "data": {
                     "command": "db status",
                     "report": {
                         "databasePath": report.database_path,
                         "exists": report.exists,
                         "fileSizeBytes": report.file_size_bytes,
-                        "walExists": report.wal_exists,
+                        "walPath": report.wal_path,
+                        "walFileExists": report.wal_file_exists,
+                        "walSizeBytes": report.wal_size_bytes,
+                        "shmFileExists": report.shm_file_exists,
+                        "journalMode": report.journal_mode,
+                        "pageSizeBytes": report.page_size_bytes,
+                        "pageCount": report.page_count,
+                        "schemaVersion": report.schema_version,
+                        "latestCompiledSchemaVersion": report.latest_compiled_schema_version,
+                        "needsMigration": report.needs_migration,
+                        "appliedMigrationCount": report.applied_migration_count,
+                        "pendingMigrationVersions": report.pending_migration_versions,
+                        "tableCount": report.table_count,
+                        "tableRowCounts": report.table_row_counts,
                         "error": report.error,
                     }
                 },
                 "degraded": []
             });
-            write_stdout(stdout, &(serde_json::to_string(&json).unwrap_or_default() + "\n"))
+            write_stdout(
+                stdout,
+                &(serde_json::to_string(&json).unwrap_or_default() + "\n"),
+            )
         }
         _ => {
             let mut out = String::new();
             out.push_str(&format!("Database: {}\n", report.database_path));
             out.push_str(&format!("Exists: {}\n", report.exists));
             if let Some(size) = report.file_size_bytes {
-                out.push_str(&format!("Size: {} bytes\n", size));
+                out.push_str(&format!("Size: {size} bytes\n"));
             }
-            if let Some(wal) = report.wal_exists {
-                out.push_str(&format!("WAL exists: {}\n", wal));
+            if let Some(version) = report.schema_version {
+                out.push_str(&format!("Schema version: {version}\n"));
+            }
+            if let Some(latest) = report.latest_compiled_schema_version {
+                out.push_str(&format!("Latest compiled schema version: {latest}\n"));
+            }
+            if let Some(needs) = report.needs_migration {
+                out.push_str(&format!("Needs migration: {needs}\n"));
+            }
+            if let Some(applied) = report.applied_migration_count {
+                out.push_str(&format!("Applied migrations: {applied}\n"));
+            }
+            if let Some(pending) = &report.pending_migration_versions {
+                if pending.is_empty() {
+                    out.push_str("Pending migrations: none\n");
+                } else {
+                    out.push_str(&format!("Pending migrations: {pending:?}\n"));
+                }
+            }
+            if let Some(mode) = &report.journal_mode {
+                out.push_str(&format!("Journal mode: {mode}\n"));
+            }
+            if let Some(page_size) = report.page_size_bytes {
+                out.push_str(&format!("Page size: {page_size} bytes\n"));
+            }
+            if let Some(page_count) = report.page_count {
+                out.push_str(&format!("Page count: {page_count}\n"));
+            }
+            if let Some(table_count) = report.table_count {
+                out.push_str(&format!("Tables: {table_count}\n"));
+            }
+            if let Some(wal) = report.wal_file_exists {
+                out.push_str(&format!("WAL file exists: {wal}\n"));
+            }
+            if let Some(shm) = report.shm_file_exists {
+                out.push_str(&format!("SHM file exists: {shm}\n"));
+            }
+            if let Some(wal_size) = report.wal_size_bytes {
+                out.push_str(&format!("WAL size: {wal_size} bytes\n"));
+            }
+            if let Some(rows) = &report.table_row_counts {
+                out.push_str("Row counts:\n");
+                for row in rows {
+                    match (row.rows, row.error.as_deref()) {
+                        (Some(count), _) => {
+                            out.push_str(&format!("  {}: {count}\n", row.table));
+                        }
+                        (None, Some(err)) => {
+                            out.push_str(&format!("  {}: error: {err}\n", row.table));
+                        }
+                        (None, None) => {
+                            out.push_str(&format!("  {}: unknown\n", row.table));
+                        }
+                    }
+                }
             }
             if let Some(ref e) = report.error {
-                out.push_str(&format!("Error: {}\n", e));
+                out.push_str(&format!("Error: {e}\n"));
             }
             write_stdout(stdout, &out)
         }
@@ -16374,8 +16558,40 @@ struct DbStatusReport {
     database_path: String,
     exists: bool,
     file_size_bytes: Option<u64>,
-    wal_exists: Option<bool>,
+    wal_path: Option<String>,
+    wal_file_exists: Option<bool>,
+    wal_size_bytes: Option<u64>,
+    shm_file_exists: Option<bool>,
+    journal_mode: Option<String>,
+    page_size_bytes: Option<u32>,
+    page_count: Option<u64>,
+    schema_version: Option<u32>,
+    latest_compiled_schema_version: Option<u32>,
+    needs_migration: Option<bool>,
+    applied_migration_count: Option<usize>,
+    pending_migration_versions: Option<Vec<u32>>,
+    table_count: Option<usize>,
+    table_row_counts: Option<Vec<DbTableRowCount>>,
     error: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DbTableRowCount {
+    table: String,
+    rows: Option<i64>,
+    error: Option<String>,
+}
+
+fn wal_sidecar_path(database_path: &Path) -> PathBuf {
+    let mut wal = database_path.as_os_str().to_os_string();
+    wal.push("-wal");
+    PathBuf::from(wal)
+}
+
+fn shm_sidecar_path(database_path: &Path) -> PathBuf {
+    let mut shm = database_path.as_os_str().to_os_string();
+    shm.push("-shm");
+    PathBuf::from(shm)
 }
 
 fn handle_db_check<W>(cli: &Cli, args: &DbCheckArgs, stdout: &mut W) -> ProcessExitCode
@@ -16383,32 +16599,134 @@ where
     W: Write,
 {
     let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-    let database_path = args.database.clone().unwrap_or_else(|| {
-        workspace_path.join(".ee").join("ee.db")
-    });
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
 
-    let check_type = if args.full { "integrity_check" } else { "quick_check" };
+    let check_type = if args.full {
+        "integrity_check"
+    } else {
+        "quick_check"
+    };
 
     if !database_path.exists() {
         let report = DbCheckReport {
             database_path: database_path.display().to_string(),
             check_type: check_type.to_string(),
             passed: false,
+            integrity_passed: None,
+            integrity_issues: None,
+            foreign_key_passed: None,
+            foreign_key_violations: None,
             message: "Database file not found".to_string(),
         };
         return write_db_check_output(cli, &report, stdout);
     }
 
-    let report = DbCheckReport {
+    let conn = match crate::db::DbConnection::open_schema_only(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let report = DbCheckReport {
+                database_path: database_path.display().to_string(),
+                check_type: check_type.to_string(),
+                passed: false,
+                integrity_passed: None,
+                integrity_issues: None,
+                foreign_key_passed: None,
+                foreign_key_violations: None,
+                message: format!("Failed to open database: {error}"),
+            };
+            return write_db_check_output(cli, &report, stdout);
+        }
+    };
+
+    let integrity = if args.full {
+        conn.check_integrity()
+    } else {
+        conn.quick_check()
+    };
+
+    let mut report = DbCheckReport {
         database_path: database_path.display().to_string(),
         check_type: check_type.to_string(),
-        passed: true,
-        message: "File exists (full integrity check requires direct DB access)".to_string(),
+        passed: false,
+        integrity_passed: None,
+        integrity_issues: None,
+        foreign_key_passed: None,
+        foreign_key_violations: None,
+        message: String::new(),
     };
+
+    let integrity = match integrity {
+        Ok(result) => result,
+        Err(error) => {
+            report.message = format!("Integrity check failed: {error}");
+            return write_db_check_output(cli, &report, stdout);
+        }
+    };
+
+    report.integrity_passed = Some(integrity.passed);
+    if !integrity.issues.is_empty() {
+        report.integrity_issues = Some(integrity.issues.clone());
+    }
+
+    let mut messages: Vec<String> = Vec::new();
+
+    if args.full {
+        match conn.check_foreign_keys() {
+            Ok(fk) => {
+                report.foreign_key_passed = Some(fk.passed);
+                if !fk.violations.is_empty() {
+                    let serialized: Vec<serde_json::Value> = fk
+                        .violations
+                        .iter()
+                        .map(|violation| {
+                            serde_json::json!({
+                                "table": violation.table,
+                                "rowid": violation.rowid,
+                                "parent": violation.parent,
+                                "fkid": violation.fkid,
+                            })
+                        })
+                        .collect();
+                    report.foreign_key_violations = Some(serialized);
+                }
+            }
+            Err(error) => {
+                messages.push(format!("foreign key check failed: {error}"));
+            }
+        }
+    }
+
+    let integrity_ok = integrity.passed;
+    let fk_ok = report.foreign_key_passed.unwrap_or(true);
+    report.passed = integrity_ok && fk_ok && messages.is_empty();
+
+    if integrity_ok {
+        messages.insert(0, format!("{check_type} passed"));
+    } else {
+        let count = integrity.issues.len();
+        messages.insert(0, format!("{check_type} found {count} issue(s)"));
+    }
+    if args.full && !fk_ok {
+        let count = report
+            .foreign_key_violations
+            .as_ref()
+            .map(Vec::len)
+            .unwrap_or(0);
+        messages.push(format!("foreign key check found {count} violation(s)"));
+    }
+    report.message = messages.join("; ");
+
     write_db_check_output(cli, &report, stdout)
 }
 
-fn write_db_check_output<W: Write>(cli: &Cli, report: &DbCheckReport, stdout: &mut W) -> ProcessExitCode {
+fn write_db_check_output<W: Write>(
+    cli: &Cli,
+    report: &DbCheckReport,
+    stdout: &mut W,
+) -> ProcessExitCode {
     let exit_code = if report.passed {
         ProcessExitCode::Success
     } else {
@@ -16416,7 +16734,10 @@ fn write_db_check_output<W: Write>(cli: &Cli, report: &DbCheckReport, stdout: &m
     };
 
     match cli.renderer() {
-        output::Renderer::Json | output::Renderer::Jsonl | output::Renderer::Compact | output::Renderer::Hook => {
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
             let json = serde_json::json!({
                 "schema": "ee.response.v1",
                 "success": report.passed,
@@ -16426,12 +16747,19 @@ fn write_db_check_output<W: Write>(cli: &Cli, report: &DbCheckReport, stdout: &m
                         "databasePath": report.database_path,
                         "checkType": report.check_type,
                         "passed": report.passed,
+                        "integrityPassed": report.integrity_passed,
+                        "integrityIssues": report.integrity_issues,
+                        "foreignKeyPassed": report.foreign_key_passed,
+                        "foreignKeyViolations": report.foreign_key_violations,
                         "message": report.message,
                     }
                 },
                 "degraded": []
             });
-            let _ = write_stdout(stdout, &(serde_json::to_string(&json).unwrap_or_default() + "\n"));
+            let _ = write_stdout(
+                stdout,
+                &(serde_json::to_string(&json).unwrap_or_default() + "\n"),
+            );
             exit_code
         }
         _ => {
@@ -16440,6 +16768,22 @@ fn write_db_check_output<W: Write>(cli: &Cli, report: &DbCheckReport, stdout: &m
             out.push_str(&format!("Check: {}\n", report.check_type));
             out.push_str(&format!("Passed: {}\n", report.passed));
             out.push_str(&format!("Message: {}\n", report.message));
+            if let Some(issues) = &report.integrity_issues {
+                if !issues.is_empty() {
+                    out.push_str("Integrity issues:\n");
+                    for issue in issues {
+                        out.push_str(&format!("  - {issue}\n"));
+                    }
+                }
+            }
+            if let Some(violations) = &report.foreign_key_violations {
+                if !violations.is_empty() {
+                    out.push_str(&format!(
+                        "Foreign key violations: {} entries\n",
+                        violations.len()
+                    ));
+                }
+            }
             let _ = write_stdout(stdout, &out);
             exit_code
         }
@@ -16451,57 +16795,265 @@ struct DbCheckReport {
     database_path: String,
     check_type: String,
     passed: bool,
+    integrity_passed: Option<bool>,
+    integrity_issues: Option<Vec<String>>,
+    foreign_key_passed: Option<bool>,
+    foreign_key_violations: Option<Vec<serde_json::Value>>,
     message: String,
 }
 
-fn handle_db_migrations<W>(cli: &Cli, args: &DbMigrationsArgs, stdout: &mut W) -> ProcessExitCode
+fn handle_db_migrations<W>(
+    cli: &Cli,
+    args: &DbMigrationsArgs,
+    stdout: &mut W,
+) -> ProcessExitCode
 where
     W: Write,
 {
     let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-    let database_path = args.database.clone().unwrap_or_else(|| {
-        workspace_path.join(".ee").join("ee.db")
-    });
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
 
-    let report = DbMigrationsReport {
-        database_path: database_path.display().to_string(),
-        filter: args.status.clone(),
-        exists: database_path.exists(),
-        message: if database_path.exists() {
-            "Database exists (migration listing requires direct DB access)".to_string()
-        } else {
-            "Database file not found".to_string()
-        },
+    let normalized_filter = args.status.trim().to_ascii_lowercase();
+    let filter_kind = match normalized_filter.as_str() {
+        "all" | "" => DbMigrationsFilter::All,
+        "applied" => DbMigrationsFilter::Applied,
+        "pending" => DbMigrationsFilter::Pending,
+        other => {
+            let report = DbMigrationsReport {
+                database_path: database_path.display().to_string(),
+                filter: other.to_string(),
+                exists: database_path.exists(),
+                applied: vec![],
+                pending: vec![],
+                latest_compiled_schema_version: crate::db::MIGRATIONS
+                    .last()
+                    .map(|m| m.version()),
+                schema_version: None,
+                needs_migration: None,
+                error: Some(format!(
+                    "invalid --status value '{other}'; expected 'all', 'applied', or 'pending'"
+                )),
+            };
+            return write_db_migrations_output(cli, &report, stdout, false);
+        }
     };
-    write_db_migrations_output(cli, &report, stdout)
+
+    let mut report = DbMigrationsReport {
+        database_path: database_path.display().to_string(),
+        filter: normalized_filter.clone(),
+        exists: database_path.exists(),
+        applied: vec![],
+        pending: vec![],
+        latest_compiled_schema_version: crate::db::MIGRATIONS.last().map(|m| m.version()),
+        schema_version: None,
+        needs_migration: None,
+        error: None,
+    };
+
+    if !report.exists {
+        if matches!(
+            filter_kind,
+            DbMigrationsFilter::All | DbMigrationsFilter::Pending
+        ) {
+            report.pending = compiled_pending_summaries();
+        }
+        report.error = Some("Database file not found".to_string());
+        return write_db_migrations_output(cli, &report, stdout, false);
+    }
+
+    let conn = match crate::db::DbConnection::open_schema_only(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            report.error = Some(format!("Failed to open database: {error}"));
+            return write_db_migrations_output(cli, &report, stdout, false);
+        }
+    };
+
+    let applied = match conn.applied_migrations() {
+        Ok(records) => records,
+        Err(error) => {
+            report.error = Some(format!("Failed to list applied migrations: {error}"));
+            return write_db_migrations_output(cli, &report, stdout, false);
+        }
+    };
+
+    if matches!(
+        filter_kind,
+        DbMigrationsFilter::All | DbMigrationsFilter::Applied
+    ) {
+        let mut entries: Vec<DbAppliedMigration> = applied
+            .iter()
+            .map(|record| DbAppliedMigration {
+                version: record.version(),
+                name: record.name().to_string(),
+                checksum: record.checksum().to_string(),
+                applied_at: record.applied_at().to_string(),
+            })
+            .collect();
+        entries.sort_by_key(|entry| entry.version);
+        report.applied = entries;
+    }
+
+    if matches!(
+        filter_kind,
+        DbMigrationsFilter::All | DbMigrationsFilter::Pending
+    ) {
+        match conn.pending_migrations() {
+            Ok(versions) => {
+                report.pending = versions
+                    .into_iter()
+                    .filter_map(compiled_summary_for_version)
+                    .collect();
+            }
+            Err(error) => {
+                report.error = Some(format!("Failed to compute pending migrations: {error}"));
+            }
+        }
+    }
+
+    report.schema_version = applied.last().map(|m| m.version());
+    let pending_present = !report.pending.is_empty();
+    report.needs_migration = Some(
+        pending_present
+            || (matches!(filter_kind, DbMigrationsFilter::Applied)
+                && conn.needs_migration().unwrap_or(false)),
+    );
+
+    write_db_migrations_output(cli, &report, stdout, true)
 }
 
-fn write_db_migrations_output<W: Write>(cli: &Cli, report: &DbMigrationsReport, stdout: &mut W) -> ProcessExitCode {
+fn compiled_pending_summaries() -> Vec<DbPendingMigration> {
+    crate::db::MIGRATIONS
+        .iter()
+        .map(|m| DbPendingMigration {
+            version: m.version(),
+            name: m.name().to_string(),
+            checksum: m.checksum(),
+        })
+        .collect()
+}
+
+fn compiled_summary_for_version(version: u32) -> Option<DbPendingMigration> {
+    crate::db::MIGRATIONS
+        .iter()
+        .find(|m| m.version() == version)
+        .map(|m| DbPendingMigration {
+            version: m.version(),
+            name: m.name().to_string(),
+            checksum: m.checksum(),
+        })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DbMigrationsFilter {
+    All,
+    Applied,
+    Pending,
+}
+
+fn write_db_migrations_output<W: Write>(
+    cli: &Cli,
+    report: &DbMigrationsReport,
+    stdout: &mut W,
+    db_open_succeeded: bool,
+) -> ProcessExitCode {
+    let success = db_open_succeeded && report.error.is_none();
+    let exit_code = if success {
+        ProcessExitCode::Success
+    } else {
+        ProcessExitCode::Storage
+    };
+
     match cli.renderer() {
-        output::Renderer::Json | output::Renderer::Jsonl | output::Renderer::Compact | output::Renderer::Hook => {
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let applied: Vec<serde_json::Value> = report
+                .applied
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "version": m.version,
+                        "name": m.name,
+                        "checksum": m.checksum,
+                        "appliedAt": m.applied_at,
+                    })
+                })
+                .collect();
+            let pending: Vec<serde_json::Value> = report
+                .pending
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "version": m.version,
+                        "name": m.name,
+                        "checksum": m.checksum,
+                    })
+                })
+                .collect();
             let json = serde_json::json!({
                 "schema": "ee.response.v1",
-                "success": report.exists,
+                "success": success,
                 "data": {
                     "command": "db migrations",
                     "report": {
                         "databasePath": report.database_path,
                         "filter": report.filter,
                         "exists": report.exists,
-                        "message": report.message,
+                        "schemaVersion": report.schema_version,
+                        "latestCompiledSchemaVersion": report.latest_compiled_schema_version,
+                        "needsMigration": report.needs_migration,
+                        "applied": applied,
+                        "pending": pending,
+                        "error": report.error,
                     }
                 },
                 "degraded": []
             });
-            write_stdout(stdout, &(serde_json::to_string(&json).unwrap_or_default() + "\n"))
+            let _ = write_stdout(
+                stdout,
+                &(serde_json::to_string(&json).unwrap_or_default() + "\n"),
+            );
+            exit_code
         }
         _ => {
             let mut out = String::new();
             out.push_str(&format!("Database: {}\n", report.database_path));
             out.push_str(&format!("Filter: {}\n", report.filter));
             out.push_str(&format!("Exists: {}\n", report.exists));
-            out.push_str(&format!("Message: {}\n", report.message));
-            write_stdout(stdout, &out)
+            if let Some(version) = report.schema_version {
+                out.push_str(&format!("Schema version: {version}\n"));
+            }
+            if let Some(latest) = report.latest_compiled_schema_version {
+                out.push_str(&format!("Latest compiled schema version: {latest}\n"));
+            }
+            if let Some(needs) = report.needs_migration {
+                out.push_str(&format!("Needs migration: {needs}\n"));
+            }
+            if !report.applied.is_empty() {
+                out.push_str(&format!("Applied ({}):\n", report.applied.len()));
+                for m in &report.applied {
+                    out.push_str(&format!(
+                        "  v{} {} (applied {})\n",
+                        m.version, m.name, m.applied_at
+                    ));
+                }
+            }
+            if !report.pending.is_empty() {
+                out.push_str(&format!("Pending ({}):\n", report.pending.len()));
+                for m in &report.pending {
+                    out.push_str(&format!("  v{} {}\n", m.version, m.name));
+                }
+            }
+            if let Some(ref e) = report.error {
+                out.push_str(&format!("Error: {e}\n"));
+            }
+            let _ = write_stdout(stdout, &out);
+            exit_code
         }
     }
 }
@@ -16511,7 +17063,27 @@ struct DbMigrationsReport {
     database_path: String,
     filter: String,
     exists: bool,
-    message: String,
+    applied: Vec<DbAppliedMigration>,
+    pending: Vec<DbPendingMigration>,
+    schema_version: Option<u32>,
+    latest_compiled_schema_version: Option<u32>,
+    needs_migration: Option<bool>,
+    error: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DbAppliedMigration {
+    version: u32,
+    name: String,
+    checksum: String,
+    applied_at: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DbPendingMigration {
+    version: u32,
+    name: String,
+    checksum: String,
 }
 
 fn handle_pack_command<W, E>(
