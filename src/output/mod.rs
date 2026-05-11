@@ -11293,10 +11293,15 @@ mod tests {
 
         let markdown = render_context_response_markdown(&response);
 
+        // Bead bd-17c65.8.1 (H1) — spec-minimal escapes. The security
+        // boundary is still met (brackets escape, so the link can't
+        // fire; HTML chars become entities), but mid-text `-`, `(`, `)`
+        // no longer escape unnecessarily. Verify the bracket-escaped
+        // shape + HTML entitization explicitly.
         ensure_contains(
             &markdown,
-            "\\[query\\-link\\]\\(javascript:alert\\(1\\)\\) &lt;img src=x&gt;",
-            "escaped heading link and raw html",
+            "\\[query-link\\](javascript:alert(1)) &lt;img src=x&gt;",
+            "escaped brackets + HTML entitization neutralize injection",
         )?;
         ensure_contains(
             &markdown,
@@ -11305,8 +11310,8 @@ mod tests {
         )?;
         ensure_contains(
             &markdown,
-            "\\[why\\-link\\]\\(javascript:alert\\(2\\)\\) &lt;em&gt;why\\-html&lt;/em&gt;",
-            "escaped why link and html",
+            "\\[why-link\\](javascript:alert(2)) &lt;em&gt;why-html&lt;/em&gt;",
+            "escaped why link brackets and HTML",
         )?;
         ensure(
             !markdown.contains("[query-link](javascript")

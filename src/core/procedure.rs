@@ -3536,16 +3536,21 @@ mod tests {
         let markdown_report = export_procedure_from_records(&markdown_options, &[record.clone()])
             .map_err(|e| e.message())?;
 
+        // Bead bd-17c65.8.1 (H1) — spec-minimal escapes. Brackets and
+        // backticks still escape (the security boundary); HTML chars
+        // still become entities. Mid-text `-`, `(`, `)` no longer
+        // escape because they aren't markdown syntax outside link
+        // destinations.
         assert!(markdown_report.content.contains(
-            "# Stored \\[title\\-link\\]\\(javascript:alert\\(1\\)\\) &lt;strong&gt;html&lt;/strong&gt;"
+            "# Stored \\[title-link\\](javascript:alert(1)) &lt;strong&gt;html&lt;/strong&gt;"
         ));
         assert!(markdown_report.content.contains(
-            "Summary with \\[summary\\-link\\]\\(javascript:alert\\(2\\)\\) &lt;script&gt;bad\\(\\)&lt;/script&gt;"
+            "Summary with \\[summary-link\\](javascript:alert(2)) &lt;script&gt;bad()&lt;/script&gt;"
         ));
         assert!(
             markdown_report
                 .content
-                .contains("Prepare \\`unsafe\\` \\[step\\-link\\]\\(javascript:alert\\(4\\)\\)")
+                .contains("Prepare \\`unsafe\\` \\[step-link\\](javascript:alert(4))")
         );
         assert!(markdown_report.content.contains("\\`\\`\\`"));
         assert!(
@@ -3571,10 +3576,11 @@ mod tests {
         let capsule_report =
             export_procedure_from_records(&capsule_options, &[record]).map_err(|e| e.message())?;
 
+        // H1: brackets escape; `-`, `(`, `)` mid-text do not.
         assert!(
             capsule_report
                 .content
-                .contains("\\[title\\-link\\]\\(javascript:alert\\(1\\)\\)")
+                .contains("\\[title-link\\](javascript:alert(1))")
         );
         assert!(
             !capsule_report.content.contains("[title-link](javascript")
