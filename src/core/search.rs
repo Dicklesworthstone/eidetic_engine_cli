@@ -307,6 +307,23 @@ impl SearchDegradation {
         }
     }
 
+    /// Search produced duplicate hits on the same `docId` that were
+    /// collapsed (highest score retained). Informational so callers
+    /// understand why the raw retrieval count > the returned count.
+    /// Bead bd-17c65.2.3 (B3).
+    #[must_use]
+    fn duplicates_collapsed(collapsed: usize) -> Self {
+        Self {
+            code: "duplicates_collapsed".to_string(),
+            severity: "low".to_string(),
+            message: format!(
+                "Collapsed {collapsed} duplicate hit{plural} on docId after fusion; only the highest-scoring occurrence was kept.",
+                plural = if collapsed == 1 { "" } else { "s" },
+            ),
+            repair: None,
+        }
+    }
+
     /// Most candidates dropped below the floor (informational signal so
     /// an agent can decide whether to retry with a different strategy).
     /// Bead bd-17c65.2.1 (B1).
@@ -1098,6 +1115,41 @@ impl ScoreExplanation {
     }
 }
 
+/// Dedupe a hit list on `docId`, keeping the highest-scoring occurrence
+/// of each distinct id. Stable: the position of the first occurrence is
+/// preserved; only the score / source / explanation fields are upgraded
+/// in place when a higher-scoring duplicate is found later in the list.
+///
+/// Returns `(deduped, collapsed_count)`. Bead bd-17c65.2.3 (B3).
+fn dedupe_hits_on_doc_id(hits: Vec<SearchHit>) -> (Vec<SearchHit>, usize) {
+    // Use a HashMap to track first-seen index per doc_id. Iterate in
+    // input order so the first occurrence's index is stable. For each
+    // duplicate, compare scores and (only if strictly higher) overwrite
+    // the stored hit in place — preserving ordering.
+    let mut seen: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::with_capacity(hits.len());
+    let mut deduped: Vec<SearchHit> = Vec::with_capacity(hits.len());
+    let mut collapsed = 0_usize;
+    for hit in hits {
+        if let Some(&index) = seen.get(&hit.doc_id) {
+            collapsed += 1;
+            // Upgrade only on strictly higher score so ties keep the
+            // first-seen entry (deterministic).
+            //
+            // Both `hit.score` and the stored score may be NaN if the
+            // upstream search ever produced them; for NaN we never
+            // upgrade — `NaN > x` is always false.
+            if hit.score > deduped[index].score {
+                deduped[index] = hit;
+            }
+        } else {
+            seen.insert(hit.doc_id.clone(), deduped.len());
+            deduped.push(hit);
+        }
+    }
+    (deduped, collapsed)
+}
+
 pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> {
     let start = Instant::now();
     let index_dir = options.resolve_index_dir();
@@ -1129,6 +1181,15 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
 
     match search_result {
         Ok((raw_hits, errors)) => {
+            // Bead bd-17c65.2.3 (B3): dedupe on docId BEFORE the floor
+            // filter so the floor metrics reflect the deduped pool.
+            // After fusion, the same docId can appear multiple times
+            // (different arms promoting it, MMR rescoring tied
+            // candidates, etc.). Keep the highest-scoring occurrence
+            // and discard the rest. Stable ordering is preserved (first
+            // occurrence's position wins among ties).
+            let (raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(raw_hits);
+
             // Bead bd-17c65.2.1 (B1): apply relevance floor.
             let floor = options
                 .relevance_floor
@@ -1144,6 +1205,16 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
                 .partition(|hit| hit.score.is_finite() && hit.score >= floor);
             let kept = above_floor.len();
             let dropped = below_floor.len();
+
+            // Surface dedupe count as a low-severity info signal when
+            // it fired; agents reading the metrics can correlate with
+            // raw retrieve-arm output (B7 surface, future bead) for
+            // debugging.
+            if duplicates_collapsed > 0 {
+                degraded.push(SearchDegradation::duplicates_collapsed(
+                    duplicates_collapsed,
+                ));
+            }
 
             // Emit no_relevant_results when everything got filtered out
             // (and there were candidates to begin with). Empty workspace
@@ -2329,5 +2400,86 @@ mod tests {
         let json = metrics.data_json();
         assert_eq!(json["qualityAssessment"], "empty");
         assert!(json["honestQualityScore"].is_null());
+    }
+
+    // ========================================================================
+    // Bead bd-17c65.2.3 (B3) — dedupe_hits_on_doc_id
+    // ========================================================================
+
+    #[test]
+    fn dedupe_keeps_unique_doc_ids_unchanged() {
+        let hits = vec![
+            synthetic_hit("a", 0.4),
+            synthetic_hit("b", 0.3),
+            synthetic_hit("c", 0.2),
+        ];
+        let (deduped, collapsed) = dedupe_hits_on_doc_id(hits);
+        assert_eq!(deduped.len(), 3);
+        assert_eq!(collapsed, 0);
+        assert_eq!(deduped[0].doc_id, "a");
+        assert_eq!(deduped[1].doc_id, "b");
+        assert_eq!(deduped[2].doc_id, "c");
+    }
+
+    #[test]
+    fn dedupe_collapses_duplicate_doc_ids_keeping_higher_score() {
+        let hits = vec![
+            synthetic_hit("a", 0.2),
+            synthetic_hit("b", 0.3),
+            synthetic_hit("a", 0.5), // higher dup → should replace position 0
+            synthetic_hit("b", 0.1), // lower dup → no replace
+        ];
+        let (deduped, collapsed) = dedupe_hits_on_doc_id(hits);
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(collapsed, 2);
+        // Position-preserving: first-seen index for `a` is 0, for `b` is 1.
+        assert_eq!(deduped[0].doc_id, "a");
+        assert!((deduped[0].score - 0.5).abs() < 1e-5);
+        assert_eq!(deduped[1].doc_id, "b");
+        assert!((deduped[1].score - 0.3).abs() < 1e-5);
+    }
+
+    #[test]
+    fn dedupe_ties_keep_first_seen() {
+        let hits = vec![
+            synthetic_hit("a", 0.5),
+            synthetic_hit("a", 0.5), // tie → no replace (only strict >)
+        ];
+        let (deduped, collapsed) = dedupe_hits_on_doc_id(hits);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(collapsed, 1);
+        assert!((deduped[0].score - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn dedupe_nan_score_does_not_replace() {
+        let hits = vec![
+            synthetic_hit("a", 0.4),
+            synthetic_hit("a", f32::NAN),
+        ];
+        let (deduped, collapsed) = dedupe_hits_on_doc_id(hits);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(collapsed, 1);
+        assert!(
+            (deduped[0].score - 0.4).abs() < 1e-5,
+            "NaN must not overwrite a finite higher score"
+        );
+    }
+
+    #[test]
+    fn dedupe_empty_input_is_empty_output() {
+        let hits: Vec<SearchHit> = Vec::new();
+        let (deduped, collapsed) = dedupe_hits_on_doc_id(hits);
+        assert!(deduped.is_empty());
+        assert_eq!(collapsed, 0);
+    }
+
+    #[test]
+    fn duplicates_collapsed_degradation_uses_correct_grammar() {
+        let one = SearchDegradation::duplicates_collapsed(1);
+        assert!(one.message.contains("1 duplicate hit "), "got {}", one.message);
+        assert!(!one.message.contains("hits"), "singular for n=1: {}", one.message);
+        let many = SearchDegradation::duplicates_collapsed(5);
+        assert!(many.message.contains("5 duplicate hits"), "got {}", many.message);
     }
 }
