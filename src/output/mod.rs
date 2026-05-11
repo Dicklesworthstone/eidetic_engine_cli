@@ -1636,15 +1636,26 @@ pub fn render_context_response_markdown(response: &ContextResponse) -> String {
             by_section.entry(section).or_default().push(item);
         }
 
+        // Bead bd-17c65.1.7 (A7) — render with a contiguous 1..N
+        // displayIndex that counts across all emitted items so the
+        // markdown numbering is monotonic. The 2026-05-10 walkthrough
+        // exposed jumps (### 1. then ### 4. then ### 7.) when MMR
+        // filtered intermediate ranks; that's correct in JSON
+        // (`rank` preserves the original) but distracting in the
+        // rendered prompt fragment. The renderer uses display_index;
+        // the underlying `item.rank` stays available for callers
+        // reading the structured JSON.
+        let mut display_index: u32 = 0;
         for section in section_order {
             let Some(items) = by_section.get(section) else {
                 continue;
             };
             output.push_str(&format!("## {}\n\n", section_display_name(section)));
             for item in items {
+                display_index += 1;
                 output.push_str(&format!(
                     "### {}. {} ({} tokens)\n\n",
-                    item.rank,
+                    display_index,
                     markdown::escape_text(&item.memory_id.to_string()),
                     item.estimated_tokens
                 ));
@@ -11318,6 +11329,56 @@ mod tests {
                 && !markdown.contains("[why-link](javascript")
                 && !markdown.contains("<em>why-html</em>"),
             "markdown should not contain active injected links or raw why HTML",
+        )
+    }
+
+    #[test]
+    fn context_markdown_renders_contiguous_display_index_per_a7() -> TestResult {
+        // Bead bd-17c65.1.7 (A7) — even when MMR has filtered some
+        // intermediate ranks (so item.rank skips numbers), the markdown
+        // render must show contiguous 1..N. The 2026-05-10 walkthrough
+        // showed "### 1." then "### 4." then "### 7." after filtering;
+        // post-A7 we expect "### 1.", "### 2.", "### 3.".
+        let request = ContextRequest::from_query("prepare release")
+            .map_err(|error| format!("request rejected: {error:?}"))?;
+        let budget =
+            TokenBudget::new(500).map_err(|error| format!("budget rejected: {error:?}"))?;
+
+        // Three candidates — assemble_draft assigns ranks contiguously.
+        // The A7 invariant is that the rendered markdown headers count
+        // 1..N contiguously regardless of what `rank` lands on (in
+        // practice MMR can produce non-contiguous ranks). For this
+        // unit-level test we trust assemble_draft and verify the
+        // renderer emits ### 1, ### 2, ### 3.
+        let mut candidates = Vec::new();
+        for (i, suffix) in [(1u128, "first"), (2u128, "second"), (3u128, "third")] {
+            let candidate = PackCandidate::new(PackCandidateInput {
+                memory_id: memory_id(i),
+                section: PackSection::ProceduralRules,
+                content: format!("Content for {suffix} item."),
+                estimated_tokens: 5,
+                relevance: score(0.5)?,
+                utility: score(0.5)?,
+                provenance: vec![pack_provenance("file://x")?],
+                why: format!("matched 'prepare release' via lexical (relevance 0.5{i}, utility 0.5000)"),
+            })
+            .map_err(|error| format!("candidate rejected: {error:?}"))?;
+            candidates.push(candidate);
+        }
+        let draft = assemble_draft(&request.query, budget, candidates)
+            .map_err(|error| format!("draft rejected: {error:?}"))?;
+        let response = ContextResponse::new(request, draft, Vec::new())
+            .map_err(|error| format!("response rejected: {error:?}"))?;
+
+        let markdown = render_context_response_markdown(&response);
+        // Verify contiguous 1..N section headers (the items count is 3).
+        ensure_contains(&markdown, "### 1.", "first display index")?;
+        ensure_contains(&markdown, "### 2.", "second display index")?;
+        ensure_contains(&markdown, "### 3.", "third display index")?;
+        // No higher indices should appear (this is the contiguous guarantee).
+        ensure(
+            !markdown.contains("### 4."),
+            "rendered markdown shouldn't contain index beyond N=3",
         )
     }
 
