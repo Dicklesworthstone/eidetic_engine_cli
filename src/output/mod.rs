@@ -4322,6 +4322,14 @@ pub fn render_capabilities_json(report: &CapabilitiesReport) -> String {
             obj.field_bool("available", cmd.available);
             obj.field_str("description", cmd.description);
         });
+        // Bead bd-17c65.6.4 (F4) — discovered binaries (cass + others as
+        // they're added) and EE_* env-var registry. Lite version: just
+        // cass + EE_CASS_BINARY for now; F5 will expand to the full
+        // registry. Agents reading capabilities can determine which
+        // discovery source produced each binary, so error.recovery
+        // hints from F1 are reproducible / verifiable.
+        write_capabilities_binaries_block(d);
+        write_capabilities_env_overrides_block(d);
         write_capabilities_output_metadata(d, report, true);
         d.field_object("summary", |s| {
             s.field_raw(
@@ -4342,6 +4350,72 @@ pub fn render_capabilities_json(report: &CapabilitiesReport) -> String {
         });
     });
     b.finish()
+}
+
+/// Emit `binaries` capability block (F4).
+///
+/// Reports each external binary ee may discover. For each entry:
+/// - `name`: stable identifier (e.g. "cass")
+/// - `discoveredAt`: the absolute path resolved, or null
+/// - `source`: which mechanism resolved it ("env_EE_CASS_BINARY",
+///   "config", "PATH_allowlist", or "missing")
+/// - `trusted`: whether the discovered path passed the safety
+///   ownership / permission checks
+///
+/// Future bead F5 expands this with `recovery[]` (matching F1) when
+/// `discoveredAt` is null.
+fn write_capabilities_binaries_block(builder: &mut JsonBuilder) {
+    builder.field_object("binaries", |bins| {
+        bins.field_object("cass", |cass| {
+            let discovery = crate::cass::discover_import_binary(None);
+            match discovery {
+                Ok(found) => {
+                    cass.field_str("discoveredAt", &found.path.display().to_string());
+                    cass.field_str("source", source_label(found.source));
+                    cass.field_bool("trusted", true);
+                }
+                Err(error) => {
+                    // Honest null + source = "missing" so an agent reading
+                    // the response knows what's happening without parsing
+                    // the error message.
+                    cass.field_str("source", "missing");
+                    cass.field_str("error", &error.to_string());
+                    cass.field_bool("trusted", false);
+                }
+            }
+        });
+    });
+}
+
+/// Map a `DiscoverySource` to a stable wire-form string.
+fn source_label(source: crate::cass::DiscoverySource) -> &'static str {
+    use crate::cass::DiscoverySource;
+    match source {
+        DiscoverySource::EnvVar => "env_EE_CASS_BINARY",
+        DiscoverySource::Config => "config_cass_binary",
+        DiscoverySource::Path => "trusted_allowlist",
+    }
+}
+
+/// Emit `envOverrides` capability block (F4).
+///
+/// Each entry lists an `EE_*` environment variable ee honors, what it
+/// controls, and whether it's currently set. Lite version covers
+/// EE_CASS_BINARY; F5 will expand to a registry-backed full list.
+fn write_capabilities_env_overrides_block(builder: &mut JsonBuilder) {
+    let cass_env = std::env::var("EE_CASS_BINARY").ok();
+    builder.field_array_of_objects(
+        "envOverrides",
+        &[("EE_CASS_BINARY", "Override for the cass import binary path"); 1],
+        |obj, (name, controls)| {
+            obj.field_str("name", name);
+            obj.field_str("controls", controls);
+            obj.field_bool("isSet", cass_env.is_some());
+            if let Some(ref value) = cass_env {
+                obj.field_str("currentValue", value);
+            }
+        },
+    );
 }
 
 fn write_capabilities_output_metadata(
@@ -6828,6 +6902,11 @@ pub fn render_capabilities_json_filtered(
                     obj.field_str("description", cmd.description);
                 }
             });
+            // Bead bd-17c65.6.4 (F4) — binaries + envOverrides in
+            // capabilities. Always emit regardless of profile (lite vs
+            // full) since these are critical for agent discoverability.
+            write_capabilities_binaries_block(d);
+            write_capabilities_env_overrides_block(d);
             write_capabilities_output_metadata(d, report, true);
         }
 
