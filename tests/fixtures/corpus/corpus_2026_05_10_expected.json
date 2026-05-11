@@ -1,0 +1,105 @@
+{
+  "$schema": "https://eidetic-engine/schemas/ee.fixture.corpus_expected.v1.json",
+  "comment": "Declared expected behaviors for the 2026-05-10 reference corpus. Used by per-epic e2e scripts to assert post-overhaul behavior. Memory identities referenced by content_hash (BLAKE3 of normalized content) so this file survives ULID changes across reseeds. Bead bd-17c65.10.2 (J2).",
+  "corpus_meta": {
+    "version": "2026-05-10",
+    "source": "Live walkthrough of v0.1.0 ee binary at /Users/jemanuel/projects/eidetic_engine_cli on 2026-05-10",
+    "total_memories": 15,
+    "comment_on_rejections": "Three memories in this corpus are CURRENTLY REJECTED by the pre-overhaul binary (memories 13, 15 by secret detector; 9, 10 by tag validator). Post-C1 + C3, they all persist. Seed helper falls back to --allow-secret-mention for memories tagged 'requires_overhaul' so the seed loop reaches 15/15.",
+    "content_hash_algo": "blake3_of_lowercase_trimmed_nfc"
+  },
+  "queries": {
+    "forbidden dependencies": {
+      "expected_top_content_phrase": "forbidden deps",
+      "expected_source_at_least_one_of": ["lexical", "hybrid"],
+      "expected_min_top_score": 0.10,
+      "expected_degraded_absent": ["no_relevant_results"],
+      "rationale": "Literal lexical overlap with stored memory 3. Pre-overhaul: 10 results, all score 0.000, top result is unrelated. Post-B1+B2: literal-match memory ranks top with non-zero score and source=lexical or hybrid.",
+      "tests": ["B1", "B2", "B5"]
+    },
+    "how do I cut a release safely": {
+      "expected_top_kinds": ["procedural/rule"],
+      "expected_min_top_score": 0.10,
+      "expected_top_n_contains_phrases": ["cargo fmt", "cargo clippy"],
+      "rationale": "Semantic match to release procedural rules. Pre-overhaul: returned 10 hits, top was clippy rule (correct). Post-overhaul: same shape but with relevance floor honored.",
+      "tests": ["B1"]
+    },
+    "where does JSON go on stdout": {
+      "expected_top_content_phrase": "json output goes to stdout",
+      "expected_min_top_score": 0.10,
+      "expected_top_kinds": ["semantic/fact"],
+      "rationale": "Strong semantic match to CLI conventions memory.",
+      "tests": ["B1"]
+    },
+    "what runtime are we on": {
+      "expected_top_content_phrase": "asupersync",
+      "expected_min_top_score": 0.10,
+      "rationale": "Pre-overhaul top result was FrankenSQLite (storage layer; wrong domain). The expectation is that semantic match should prefer the Asupersync runtime memory; if embed-fast can't distinguish, B5 (synonym blind spots) documents this and emits degraded.weak_query_recall.",
+      "tests": ["B5"],
+      "known_blindspot": true
+    },
+    "what broke in the last release": {
+      "expected_top_kinds": ["episodic/failure"],
+      "expected_min_top_score": 0.10,
+      "rationale": "Pre-overhaul top was Asupersync runtime fact (irrelevant). Post-overhaul: failure-type memories should rank top OR weak_query_recall surfaces.",
+      "tests": ["B5"],
+      "known_blindspot": true
+    }
+  },
+  "policy_acceptance": [
+    {
+      "content_phrase": "Context packs must never include secrets",
+      "pre_overhaul_accepted": false,
+      "pre_overhaul_reason": "secret_detector_keyword: secret",
+      "post_overhaul_accepted": true,
+      "rationale": "Meta-policy rule must be storable. C1 value-shape detector lets plain-English mentions through.",
+      "tests": ["C1"]
+    },
+    {
+      "content_phrase": "Cancellation test for ee context hung once because Scope::spawn",
+      "pre_overhaul_accepted": false,
+      "pre_overhaul_reason": "secret_detector_keyword: token (in 'cancel token')",
+      "post_overhaul_accepted": true,
+      "rationale": "Cancellation tokens in async runtimes are NOT secrets. C1 detector recognizes only high-entropy value-shapes.",
+      "tests": ["C1"]
+    }
+  ],
+  "policy_tag_acceptance": [
+    {"tag": "release", "should_accept": true, "tests": ["C3"]},
+    {"tag": "v0.1.0", "should_accept": true, "rationale": "Version-string tag must be accepted post-C3.", "tests": ["C3"]},
+    {"tag": "v0.2.0", "should_accept": true, "tests": ["C3"]},
+    {"tag": "release:0.1.0", "should_accept": true, "tests": ["C3"]},
+    {"tag": "policy.detector", "should_accept": true, "rationale": "Namespace-dot tag must be accepted post-C3.", "tests": ["C3"]},
+    {"tag": "test", "should_accept": true, "tests": ["C3"]},
+    {"tag": "with space", "should_accept": false, "rationale": "Spaces are delimiters and remain rejected.", "tests": ["C3"]},
+    {"tag": "a,b", "should_accept": false, "rationale": "Comma is the tag-list delimiter, rejected.", "tests": ["C3"]},
+    {"tag": "a=b", "should_accept": false, "tests": ["C3"]},
+    {"tag": "a/b", "should_accept": false, "rationale": "Slash is path separator in storage, rejected.", "tests": ["C3"]},
+    {"tag": "", "should_accept": false, "rationale": "Empty tag is invalid.", "tests": ["C3"]},
+    {"tag": "mémoire", "should_accept": true, "rationale": "Unicode letter is acceptable after NFC normalize.", "tests": ["C3"]}
+  ],
+  "pack_expectations": {
+    "for_query": "prepare release v0.2.0",
+    "max_tokens": 1000,
+    "expected_min_used_tokens": 200,
+    "expected_max_used_tokens": 950,
+    "expected_min_item_count": 5,
+    "expected_max_item_count": 13,
+    "expected_top_item_content_phrase": "cargo fmt",
+    "expected_pack_json_max_bytes": 12000,
+    "rationale": "Post-Epic A (pack densification), a 1000-token pack of ~13 items should produce ≤12KB JSON (was ~28KB pre-overhaul). Tests A1, A3, A6.",
+    "tests": ["A1", "A2", "A3", "A5", "A6"]
+  },
+  "curation_expectations": {
+    "min_candidates_after_seed": 1,
+    "candidate_should_cluster": "cargo rules cluster",
+    "expected_cluster_member_phrases": ["cargo fmt", "cargo clippy"],
+    "rationale": "After seeding multiple procedural/rule memories with shared 'cargo' tag and similar level/kind, G3 candidate proposer surfaces ≥1 candidate. The cluster includes the cargo fmt and clippy rules.",
+    "tests": ["G3", "G4"]
+  },
+  "auto_link_expectations": {
+    "default_status": "no_workflow_required",
+    "rationale": "Per G7 decision (honest documentation): auto-link only fires inside workflows. Outside, status is no_workflow_required (a non-failure honest state).",
+    "tests": ["G7"]
+  }
+}

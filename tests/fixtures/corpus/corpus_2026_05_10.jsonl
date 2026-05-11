@@ -1,0 +1,15 @@
+{"content":"Run cargo fmt --check before cutting any release tag; CI rejects unformatted code.","level":"procedural","kind":"rule","tags":["release","cargo"],"confidence":0.9}
+{"content":"Run cargo clippy --all-targets -- -D warnings before pushing; pedantic + nursery lints are gating.","level":"procedural","kind":"rule","tags":["release","cargo"],"confidence":0.9}
+{"content":"Forbidden deps: tokio, rusqlite, petgraph, hyper, axum, tower, reqwest, sqlx, diesel, sea-orm — CI greps for them.","level":"procedural","kind":"rule","tags":["release","deps"],"confidence":0.95}
+{"content":"Integration tests must hit a real FrankenSQLite DB; mocking the storage layer hides migration drift.","level":"procedural","kind":"rule","tags":["test","db"],"confidence":0.85}
+{"content":"All work lands on main. No worktrees. No feature branches. No interactive rebase.","level":"procedural","kind":"rule","tags":["git"],"confidence":1.0}
+{"content":"ee's core jobs are Ingest, Retrieve, Pack, Learn, Maintain — anything outside this set is scope creep.","level":"semantic","kind":"fact","tags":["architecture"],"confidence":0.8}
+{"content":"FrankenSQLite via sqlmodel is source of truth; Frankensearch indexes are derived/rebuildable assets.","level":"semantic","kind":"fact","tags":["architecture"],"confidence":0.8}
+{"content":"Asupersync is the only runtime — Cx/Scope/Outcome — no Tokio anywhere in the dep tree.","level":"semantic","kind":"fact","tags":["runtime"],"confidence":0.8}
+{"content":"2026-04-22: cut v0.1.0 as walking skeleton; init+remember+search+context+why+status only.","level":"episodic","kind":"decision","tags":["release","v0.1.0"],"confidence":0.9}
+{"content":"Defer CASS import MVP to v0.2.0; ee-cass should consume robot/JSON and never duplicate the store.","level":"episodic","kind":"decision","tags":["release","v0.2.0"],"confidence":0.7}
+{"content":"Golden tests broke when timestamps weren't scrubbed; always canonicalize RFC 3339 fields in fixtures.","level":"episodic","kind":"failure","tags":["test","golden"],"confidence":0.85}
+{"content":"2026-04-30: release workflow tried to push with --no-verify; hook failed silently. Never skip hooks.","level":"episodic","kind":"failure","tags":["release","actions"],"confidence":0.8}
+{"content":"Cancellation test for ee context hung once because Scope::spawn didn't propagate the cancel token; fixed via budget.","level":"episodic","kind":"event","tags":["debugging"],"confidence":0.6}
+{"content":"JSON output goes to stdout; human diagnostics go to stderr. Long-running commands use stderr-only progress on TTY.","level":"semantic","kind":"fact","tags":["cli"],"confidence":0.85}
+{"content":"Context packs must never include secrets. Redaction is enforced at the policy layer, not at output time.","level":"procedural","kind":"rule","tags":["secrets"],"confidence":1.0}
