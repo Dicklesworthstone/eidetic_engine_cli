@@ -5,7 +5,7 @@
 //! diagram renderers offline and text-only while protecting stable node labels
 //! and edge ordering.
 
-use ee::core::doctor::{CheckResult, CheckSeverity, DoctorReport};
+use ee::core::doctor::{CheckResult, CheckSeverity, DoctorReport, Posture};
 use ee::core::procedure::{
     PROCEDURE_PROMOTE_REPORT_SCHEMA_V1, PROCEDURE_PROMOTION_AUDIT_SCHEMA_V1,
     PROCEDURE_PROMOTION_CURATION_SCHEMA_V1, ProcedurePromoteReport, ProcedurePromotionAuditPlan,
@@ -185,6 +185,7 @@ fn doctor_fixture() -> DoctorReport {
     DoctorReport {
         version: env!("CARGO_PKG_VERSION"),
         overall_healthy: false,
+            posture: Posture::DegradedRecoverable,
         checks: vec![
             CheckResult {
                 name: "database",

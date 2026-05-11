@@ -70,6 +70,80 @@ impl CheckSeverity {
     }
 }
 
+/// Three-state aggregate posture for `ee doctor` / `ee status`.
+///
+/// Bead bd-17c65.5.1 (E1). Replaces the boolean `healthy` field that
+/// conflated "everything is perfect" with "the operation succeeded but a
+/// fallback was taken". `healthy: bool` is kept alongside `posture` for
+/// the v0.1 → v0.2 transition window (consumers reading `healthy` can
+/// continue; new consumers should read `posture`).
+///
+/// Aggregation rule (`Posture::from_checks`):
+/// - any check `severity == Error` (critical) → [`Posture::Blocked`]
+/// - any check `severity == Warning` (and not marked transient) →
+///   [`Posture::DegradedRecoverable`]
+/// - else → [`Posture::Ok`]
+///
+/// Transient warnings (e.g. an index that is 100ms behind writes and
+/// resolves itself on the next sync) are marked at the check site;
+/// they DO NOT downgrade the aggregate posture below `ok`. The check
+/// remains visible in `checks[]` with `severity: "info"` and
+/// `transient: true` for diagnostic readers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Posture {
+    /// Every check is `ok` (or `info` with `transient: true`).
+    Ok,
+    /// At least one non-transient warning; no critical errors. The
+    /// operation completed and produced honest results, but a fallback
+    /// or repair signal is active.
+    DegradedRecoverable,
+    /// At least one critical error. The operation could not complete.
+    Blocked,
+}
+
+impl Posture {
+    /// Stable lowercase wire form. Do not rename without contract bump.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::DegradedRecoverable => "degraded_recoverable",
+            Self::Blocked => "blocked",
+        }
+    }
+
+    /// Aggregate checks into a single posture.
+    ///
+    /// `transient_predicate` returns `true` for checks that are
+    /// transient and should not downgrade the aggregate (e.g. stale
+    /// indexes that auto-resolve). When `None`, every warning counts.
+    #[must_use]
+    pub fn from_checks(
+        checks: &[CheckResult],
+        transient_predicate: Option<&dyn Fn(&CheckResult) -> bool>,
+    ) -> Self {
+        let mut any_warning = false;
+        for check in checks {
+            match check.severity {
+                CheckSeverity::Error => return Self::Blocked,
+                CheckSeverity::Warning => {
+                    let is_transient =
+                        transient_predicate.is_some_and(|pred| pred(check));
+                    if !is_transient {
+                        any_warning = true;
+                    }
+                }
+                CheckSeverity::Ok => {}
+            }
+        }
+        if any_warning {
+            Self::DegradedRecoverable
+        } else {
+            Self::Ok
+        }
+    }
+}
+
 /// Result of a single health check.
 #[derive(Clone, Debug)]
 pub struct CheckResult {
@@ -119,7 +193,12 @@ impl CheckResult {
 #[derive(Clone, Debug)]
 pub struct DoctorReport {
     pub version: &'static str,
+    /// Legacy boolean (`true` when every check is `ok`). Kept for the
+    /// v0.1 → v0.2 transition window. New consumers should read
+    /// `posture` instead. Bead bd-17c65.5.1 (E1).
     pub overall_healthy: bool,
+    /// Three-state aggregate posture (E1). Authoritative going forward.
+    pub posture: Posture,
     pub checks: Vec<CheckResult>,
 }
 
@@ -147,10 +226,17 @@ impl DoctorReport {
         ];
 
         let overall_healthy = checks.iter().all(|c| c.severity.is_healthy());
+        // E1: aggregate into three-state posture. For now no transient
+        // predicate (the existing severity calibration already moves
+        // truly transient signals to `Ok`); future bead E2 / E3 can
+        // refine which check codes are transient (e.g. search_index
+        // stale that auto-resolves on next sync).
+        let posture = Posture::from_checks(&checks, None);
 
         Self {
             version: env!("CARGO_PKG_VERSION"),
             overall_healthy,
+            posture,
             checks,
         }
     }
@@ -1888,6 +1974,7 @@ mod tests {
         let report = DoctorReport {
             version: "0.1.0",
             overall_healthy: true,
+            posture: Posture::Ok,
             checks: vec![
                 CheckResult::ok("test1", "All good"),
                 CheckResult::ok("test2", "Also good"),
@@ -1905,6 +1992,7 @@ mod tests {
         let report = DoctorReport {
             version: "0.1.0",
             overall_healthy: true,
+            posture: Posture::Ok,
             checks: vec![],
         };
         let plan = report.to_fix_plan();
@@ -1937,6 +2025,7 @@ mod tests {
         let report = DoctorReport {
             version: "0.1.0",
             overall_healthy: false,
+            posture: Posture::DegradedRecoverable,
             checks: vec![CheckResult::warning(
                 "cass",
                 "CASS import dry-run recommended.",
@@ -2406,5 +2495,117 @@ mod tests {
             .find(|dependency| dependency.name == "franken_networkx")
             .ok_or_else(|| "franken_networkx health row missing".to_string())?;
         ensure(graph.readiness, "feature_gated", "graph readiness")
+    }
+
+    // ========================================================================
+    // Bead bd-17c65.5.1 (E1) — Posture aggregation
+    // ========================================================================
+
+    #[test]
+    fn posture_as_str_is_stable() {
+        // These string forms are the JSON wire enum. Do not rename.
+        assert_eq!(Posture::Ok.as_str(), "ok");
+        assert_eq!(
+            Posture::DegradedRecoverable.as_str(),
+            "degraded_recoverable"
+        );
+        assert_eq!(Posture::Blocked.as_str(), "blocked");
+    }
+
+    #[test]
+    fn posture_ok_when_all_checks_pass() {
+        let checks = vec![
+            CheckResult::ok("runtime", "ok"),
+            CheckResult::ok("workspace", "ok"),
+        ];
+        assert_eq!(Posture::from_checks(&checks, None), Posture::Ok);
+    }
+
+    #[test]
+    fn posture_blocked_on_any_error() {
+        let checks = vec![
+            CheckResult::ok("runtime", "ok"),
+            CheckResult::error(
+                "database",
+                "corrupted",
+                crate::models::error_codes::DATABASE_CORRUPTED,
+            ),
+        ];
+        assert_eq!(Posture::from_checks(&checks, None), Posture::Blocked);
+    }
+
+    #[test]
+    fn posture_degraded_when_warning_present_and_no_errors() {
+        let checks = vec![
+            CheckResult::ok("runtime", "ok"),
+            CheckResult::warning(
+                "search_index",
+                "stale",
+                crate::models::error_codes::INDEX_STALE,
+            ),
+        ];
+        assert_eq!(
+            Posture::from_checks(&checks, None),
+            Posture::DegradedRecoverable
+        );
+    }
+
+    #[test]
+    fn posture_warning_does_not_downgrade_when_transient_predicate_marks_it() {
+        let checks = vec![
+            CheckResult::ok("runtime", "ok"),
+            CheckResult::warning(
+                "search_index",
+                "stale",
+                crate::models::error_codes::INDEX_STALE,
+            ),
+        ];
+        let transient = |c: &CheckResult| c.name == "search_index";
+        assert_eq!(
+            Posture::from_checks(&checks, Some(&transient)),
+            Posture::Ok
+        );
+    }
+
+    #[test]
+    fn posture_blocked_overrides_warning_aggregation() {
+        // Even when the only warning is "transient", an Error elsewhere
+        // promotes to Blocked.
+        let checks = vec![
+            CheckResult::warning(
+                "search_index",
+                "stale",
+                crate::models::error_codes::INDEX_STALE,
+            ),
+            CheckResult::error(
+                "database",
+                "corrupted",
+                crate::models::error_codes::DATABASE_CORRUPTED,
+            ),
+        ];
+        let transient = |c: &CheckResult| c.name == "search_index";
+        assert_eq!(
+            Posture::from_checks(&checks, Some(&transient)),
+            Posture::Blocked
+        );
+    }
+
+    #[test]
+    fn posture_empty_check_set_is_ok() {
+        let checks: Vec<CheckResult> = Vec::new();
+        assert_eq!(Posture::from_checks(&checks, None), Posture::Ok);
+    }
+
+    #[test]
+    fn doctor_report_struct_carries_posture_alongside_overall_healthy() {
+        // Regression: the new `posture` field is wired into the report.
+        let report = DoctorReport {
+            version: "0.1.0",
+            overall_healthy: true,
+            posture: Posture::Ok,
+            checks: vec![CheckResult::ok("runtime", "ok")],
+        };
+        assert_eq!(report.posture, Posture::Ok);
+        assert!(report.overall_healthy);
     }
 }

@@ -2303,6 +2303,9 @@ pub fn render_doctor_json(report: &DoctorReport) -> String {
     b.field_object("data", |d| {
         d.field_str("command", "doctor");
         d.field_str("version", report.version);
+        // Bead bd-17c65.5.1 (E1) — three-state posture. `healthy` is
+        // kept alongside for the v0.1 → v0.2 transition window.
+        d.field_str("posture", report.posture.as_str());
         d.field_bool("healthy", report.overall_healthy);
         d.field_array_of_objects("checks", &report.checks, |obj, check| {
             obj.field_str("name", check.name);
@@ -6861,6 +6864,8 @@ pub fn render_doctor_json_filtered(report: &DoctorReport, profile: FieldProfile)
     b.field_object("data", |d| {
         d.field_str("command", "doctor");
         d.field_str("version", report.version);
+        // Bead bd-17c65.5.1 (E1) — three-state posture.
+        d.field_str("posture", report.posture.as_str());
         d.field_bool("healthy", report.overall_healthy);
 
         if profile.include_arrays() {
