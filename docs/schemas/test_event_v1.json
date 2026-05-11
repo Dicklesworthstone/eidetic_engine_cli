@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.test_event.v1.json",
+  "title": "ee.test_event.v1",
+  "description": "Structured test event emitted by the J1 logging harness. Both the Rust harness in src/obs/test_log.rs and the bash harness in scripts/lib/e2e_logger.sh produce events matching this schema, written one-per-line to the path in EE_TEST_LOG_PATH. Bead bd-17c65.10.1.",
+  "type": "object",
+  "required": ["schema", "ts", "test_id", "kind"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.test_event.v1"
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp with sub-second precision."
+    },
+    "test_id": {
+      "type": "string",
+      "description": "Stable identifier for the test (typically test name + parameter hash). Used to filter events across a multi-test run."
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "command_start",
+        "command_end",
+        "assert_ok",
+        "assert_fail",
+        "golden_compare",
+        "timer_lap",
+        "note"
+      ]
+    },
+    "command": {
+      "type": "string",
+      "description": "argv[0] of the command being recorded. Optional; mainly populated by CommandRecorder."
+    },
+    "args": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "stdin_hash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$",
+      "description": "BLAKE3 hash of the stdin bytes piped to the command. We hash rather than log bytes so the log never carries secret content."
+    },
+    "stdout_hash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    },
+    "stderr_excerpt": {
+      "type": "string",
+      "description": "First N bytes of stderr (default cap 4096) as a lossy UTF-8 string. Diagnostic excerpt only."
+    },
+    "exit_code": {
+      "type": "integer"
+    },
+    "elapsed_ms": {
+      "type": "number",
+      "minimum": 0
+    },
+    "fields": {
+      "type": "object",
+      "description": "Free-form per-test fields (label, expected/actual for asserts, blob_size, ...). Schema-flexible by design.",
+      "additionalProperties": true
+    }
+  }
+}
