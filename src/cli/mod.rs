@@ -3811,7 +3811,11 @@ pub struct RehearsePromotePlanArgs {
 }
 
 /// Arguments for `ee search`.
-#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+///
+/// Eq is dropped because `relevance_floor: Option<f32>` (B1) cannot satisfy
+/// it. PartialEq is preserved — sufficient for clap derive needs and
+/// existing tests that compare arg structs.
+#[derive(Clone, Debug, Parser, PartialEq)]
 pub struct SearchArgs {
     /// Query string to search for.
     #[arg(value_name = "QUERY")]
@@ -3840,6 +3844,13 @@ pub struct SearchArgs {
     /// Emit a redaction-safe query performance report instead of search hits.
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain_performance: bool,
+
+    /// Minimum score (0.0..=1.0) for a hit to be included in `results`.
+    /// Below-floor candidates are dropped and counted in
+    /// `metrics.candidatesBelowFloor`. Default is `0.05`. Pass `0.0` to
+    /// disable filtering. Bead bd-17c65.2.1 (B1).
+    #[arg(long, value_name = "FLOAT")]
+    pub relevance_floor: Option<f32>,
 }
 
 /// Arguments for `ee doctor`.
@@ -7577,6 +7588,7 @@ fn pack_quality_actuals_for_cases(
             limit,
             speed,
             explain: false,
+            relevance_floor: None,
         })
         .map_err(|error| DomainError::SearchIndex {
             message: format!("pack-quality eval search failed for `{query}`: {error}"),
@@ -7862,6 +7874,7 @@ fn run_eval_retrieval_queries(
             limit,
             speed: SpeedMode::Default,
             explain: false,
+            relevance_floor: None,
         })
         .map_err(|error| DomainError::SearchIndex {
             message: format!("eval fixture search failed for `{query}`: {error}"),
@@ -19080,6 +19093,7 @@ where
         limit: args.limit,
         speed: args.speed,
         explain: args.explain,
+        relevance_floor: args.relevance_floor,
     };
 
     match run_search(&options) {
@@ -27445,6 +27459,8 @@ mod tests {
                 crate::core::profile::OperatingProfile::Workstation,
                 "test_fixture",
             ),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
         }
     }
 

@@ -477,6 +477,7 @@ pub fn run_context_pack_with_performance(
         limit: request.candidate_pool,
         speed: options.speed,
         explain: false,
+        relevance_floor: None,
     }) {
         Ok(report) => report,
         Err(SearchError::NoIndex) => missing_index_search_report(
@@ -966,6 +967,8 @@ fn missing_index_search_report(
             repair: Some("ee index rebuild --workspace .".to_owned()),
         }],
         runtime_profile,
+        relevance_floor_applied: None,
+        candidates_below_floor: 0,
     }
 }
 
@@ -2990,6 +2993,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
         };
         let mut degraded = Vec::new();
 
@@ -3120,6 +3125,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
         };
 
         let mut first_degraded = Vec::new();
@@ -3277,6 +3284,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
         };
         let options = super::ContextPackOptions {
             workspace_path: PathBuf::from("/tmp/ee-explain"),

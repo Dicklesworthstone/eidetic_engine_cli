@@ -52,7 +52,19 @@ pub struct SearchOptions {
     pub limit: u32,
     pub speed: SpeedMode,
     pub explain: bool,
+    /// Minimum score (0.0..=1.0) for a hit to be returned. `None` falls
+    /// back to [`DEFAULT_RELEVANCE_FLOOR`]. Set to `Some(0.0)` to disable.
+    /// Bead bd-17c65.2.1 (B1).
+    pub relevance_floor: Option<f32>,
 }
+
+/// Default relevance floor (bead bd-17c65.2.1 / B1).
+///
+/// Calibrated against the 2026-05-10 corpus where junk semantic_fast hits
+/// scored `< 0.03` and meaningful hits scored `0.10..=0.50`. Configurable
+/// per-call via `--relevance-floor` and per-workspace via
+/// `search.relevance_floor` config.
+pub const DEFAULT_RELEVANCE_FLOOR: f32 = 0.05;
 
 impl SearchOptions {
     fn resolve_index_dir(&self) -> PathBuf {
@@ -88,6 +100,13 @@ pub struct SearchReport {
     pub errors: Vec<String>,
     pub degraded: Vec<SearchDegradation>,
     pub runtime_profile: RuntimeProfileReport,
+    /// Relevance floor that was applied to this search (B1 bd-17c65.2.1).
+    /// `None` only for error cases where no search ran.
+    pub relevance_floor_applied: Option<f32>,
+    /// Number of candidates dropped because they scored below the floor
+    /// (B1). Informational; agents can use this to decide whether to
+    /// retry with a lower floor or different query.
+    pub candidates_below_floor: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -99,6 +118,15 @@ pub struct RetrievalMetrics {
     pub source_counts: RetrievalSourceCounts,
     pub score_distribution: RetrievalScoreDistribution,
     pub field_coverage: RetrievalFieldCoverage,
+    /// Floor applied to the retrieval (bead bd-17c65.2.1 / B1).
+    pub relevance_floor: Option<f32>,
+    /// Candidates that passed the floor and made it into `results`.
+    pub candidates_above_floor: usize,
+    /// Candidates dropped because they scored below the floor.
+    /// `returned_count = candidates_above_floor` after filtering;
+    /// `candidates_below_floor` is informational for agents that want
+    /// to understand recall.
+    pub candidates_below_floor: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -198,6 +226,54 @@ impl SearchDegradation {
             message: "Search index metadata or files are missing; results may be unavailable until the index is rebuilt."
                 .to_string(),
             repair: Some("ee index rebuild --workspace .".to_string()),
+        }
+    }
+
+    /// All candidates scored below the relevance floor — no relevant
+    /// results to return. Bead bd-17c65.2.1 (B1).
+    #[must_use]
+    fn no_relevant_results(
+        query: &str,
+        floor: f32,
+        considered: usize,
+        top_score: Option<f32>,
+    ) -> Self {
+        let top_note = top_score
+            .map(|score| format!(" Top candidate scored {score:.4}."))
+            .unwrap_or_default();
+        Self {
+            code: "no_relevant_results".to_string(),
+            severity: "medium".to_string(),
+            message: format!(
+                "No memories scored above relevance floor {floor:.4} for query `{query}` (considered {considered} candidate{plural}).{top_note}",
+                plural = if considered == 1 { "" } else { "s" },
+            ),
+            repair: Some(
+                "Broaden the query, lower --relevance-floor, or use --source-mode lexical_only when implemented (B6)."
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// Most candidates dropped below the floor (informational signal so
+    /// an agent can decide whether to retry with a different strategy).
+    /// Bead bd-17c65.2.1 (B1).
+    #[must_use]
+    fn low_recall_after_floor(
+        floor: f32,
+        kept: usize,
+        considered: usize,
+    ) -> Self {
+        Self {
+            code: "low_recall_after_floor".to_string(),
+            severity: "low".to_string(),
+            message: format!(
+                "Only {kept} of {considered} candidates passed relevance floor {floor:.4}; consider broadening query or rephrasing.",
+            ),
+            repair: Some(
+                "Rephrase with concrete words present in stored memories, or use --source-mode lexical_only when implemented (B6)."
+                    .to_string(),
+            ),
         }
     }
 
@@ -305,11 +381,13 @@ impl SearchStatus {
 impl SearchReport {
     #[must_use]
     pub fn retrieval_metrics(&self) -> RetrievalMetrics {
-        RetrievalMetrics::from_hits(
+        RetrievalMetrics::from_hits_with_floor(
             self.requested_limit,
             self.elapsed_ms,
             &self.results,
             self.errors.len(),
+            self.relevance_floor_applied,
+            self.candidates_below_floor,
         )
     }
 
@@ -562,6 +640,23 @@ impl RetrievalMetrics {
         hits: &[SearchHit],
         error_count: usize,
     ) -> Self {
+        Self::from_hits_with_floor(requested_limit, elapsed_ms, hits, error_count, None, 0)
+    }
+
+    /// Build metrics with the post-floor view of recall.
+    ///
+    /// Bead bd-17c65.2.1 (B1). `hits` are the post-floor results (those
+    /// that survived); `below_floor_count` is the number of pre-floor
+    /// candidates that were dropped.
+    #[must_use]
+    pub fn from_hits_with_floor(
+        requested_limit: u32,
+        elapsed_ms: f64,
+        hits: &[SearchHit],
+        error_count: usize,
+        relevance_floor: Option<f32>,
+        below_floor_count: usize,
+    ) -> Self {
         let mut source_counts = RetrievalSourceCounts::default();
         let mut field_coverage = RetrievalFieldCoverage::default();
         let mut min_score: Option<f32> = None;
@@ -595,6 +690,9 @@ impl RetrievalMetrics {
                 mean,
             },
             field_coverage,
+            relevance_floor,
+            candidates_above_floor: hits.len(),
+            candidates_below_floor: below_floor_count,
         }
     }
 
@@ -626,6 +724,10 @@ impl RetrievalMetrics {
                 "metadataCount": self.field_coverage.metadata_count,
                 "explanationCount": self.field_coverage.explanation_count,
             },
+            // Bead bd-17c65.2.1 (B1): floor + candidate counts.
+            "relevanceFloor": optional_score_json(self.relevance_floor),
+            "candidatesAboveFloor": self.candidates_above_floor,
+            "candidatesBelowFloor": self.candidates_below_floor,
         })
     }
 }
@@ -920,8 +1022,48 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     match search_result {
-        Ok((hits, errors)) => {
-            let status = if hits.is_empty() {
+        Ok((raw_hits, errors)) => {
+            // Bead bd-17c65.2.1 (B1): apply relevance floor.
+            let floor = options
+                .relevance_floor
+                .unwrap_or(DEFAULT_RELEVANCE_FLOOR);
+            let pre_floor_count = raw_hits.len();
+            let pre_floor_top_score = raw_hits.first().map(|hit| hit.score);
+
+            // Partition into above-floor (kept) and below-floor (dropped).
+            // Floor of 0.0 is "disabled" — keep everything. NaN scores are
+            // always dropped because NaN >= floor is false.
+            let (above_floor, below_floor): (Vec<_>, Vec<_>) = raw_hits
+                .into_iter()
+                .partition(|hit| hit.score.is_finite() && hit.score >= floor);
+            let kept = above_floor.len();
+            let dropped = below_floor.len();
+
+            // Emit no_relevant_results when everything got filtered out
+            // (and there were candidates to begin with). Empty workspace
+            // is a different scenario — pre_floor_count == 0 — and we
+            // leave it as plain SearchStatus::NoResults without an extra
+            // degradation since "no memories" is honest by itself.
+            if kept == 0 && pre_floor_count > 0 {
+                degraded.push(SearchDegradation::no_relevant_results(
+                    &options.query,
+                    floor,
+                    pre_floor_count,
+                    pre_floor_top_score,
+                ));
+            }
+            // Low-recall informational signal when significant drop.
+            // Threshold: kept < 30% of considered AND ≥ 3 candidates total
+            // (avoid spurious signal for tiny corpora).
+            if kept > 0 && pre_floor_count >= 3 && (kept * 10) < (pre_floor_count * 3) {
+                degraded.push(SearchDegradation::low_recall_after_floor(
+                    floor,
+                    kept,
+                    pre_floor_count,
+                ));
+            }
+
+            let status = if above_floor.is_empty() {
                 SearchStatus::NoResults
             } else {
                 SearchStatus::Success
@@ -931,11 +1073,13 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
                 status,
                 query: options.query.clone(),
                 requested_limit: options.limit,
-                results: hits,
+                results: above_floor,
                 elapsed_ms,
                 errors,
                 degraded,
                 runtime_profile,
+                relevance_floor_applied: Some(floor),
+                candidates_below_floor: dropped,
             })
         }
         Err(e) => {
@@ -956,6 +1100,8 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
                 errors: vec![e],
                 degraded,
                 runtime_profile,
+                relevance_floor_applied: None,
+                candidates_below_floor: 0,
             })
         }
     }
@@ -1169,6 +1315,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
         };
 
         let json = report.data_json();
@@ -1207,6 +1355,8 @@ mod tests {
             errors: Vec::new(),
             degraded: vec![SearchDegradation::stale_index(Some(12), Some(9))],
             runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
         };
 
         let json = report.performance_explain_json(SpeedMode::Instant, false);
@@ -1236,6 +1386,7 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Default,
             explain: false,
+            relevance_floor: None,
         };
 
         let degraded = search_degradations(&options, &index_dir);
@@ -1265,6 +1416,7 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Default,
             explain: false,
+            relevance_floor: None,
         };
 
         let degraded = search_degradations(&options, &index_dir);
@@ -1290,6 +1442,7 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Default,
             explain: false,
+            relevance_floor: None,
         };
 
         let degraded = search_degradations(&options, &index_dir);
@@ -1315,6 +1468,7 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Default,
             explain: false,
+            relevance_floor: None,
         };
 
         assert_eq!(
@@ -1333,6 +1487,7 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Quality,
             explain: true,
+            relevance_floor: None,
         };
         let config = options.two_tier_config();
         assert!(!config.fast_only);
@@ -1365,6 +1520,7 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Default,
             explain: false,
+            relevance_floor: None,
         };
 
         assert_eq!(options.resolve_index_dir(), PathBuf::from("/custom/index"));
@@ -1412,6 +1568,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
         };
 
         let json = report.data_json();
@@ -1455,6 +1613,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
         };
 
         let json = report.data_json();
@@ -1500,6 +1660,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
         };
 
         let json = report.data_json();
@@ -1550,6 +1712,8 @@ mod tests {
             errors: vec!["semantic tier unavailable".to_string()],
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
         };
 
         let metrics = report.retrieval_metrics();
@@ -1593,6 +1757,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
         };
 
         let json = report.data_json();
@@ -1713,6 +1879,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
         };
 
         let json = report.data_json();
@@ -1767,6 +1935,8 @@ mod tests {
             errors: Vec::new(),
             degraded: Vec::new(),
             runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
         };
 
         let summary = report.human_summary();
@@ -1822,5 +1992,117 @@ mod tests {
         assert_eq!(json["severity"], "high");
         assert!(json["message"].as_str().is_some_and(|m| !m.is_empty()));
         assert!(json["repair"].as_str().is_some());
+    }
+
+    // ========================================================================
+    // Bead bd-17c65.2.1 (B1) — Relevance floor tests
+    // ========================================================================
+
+    /// Helper: synthesize a `SearchHit` with a given score for the floor tests.
+    fn synthetic_hit(doc_id: &str, score: f32) -> SearchHit {
+        SearchHit {
+            doc_id: doc_id.to_string(),
+            score,
+            source: ScoreSource::SemanticFast,
+            fast_score: Some(score),
+            quality_score: None,
+            lexical_score: None,
+            rerank_score: None,
+            metadata: None,
+            explanation: None,
+        }
+    }
+
+    #[test]
+    fn default_relevance_floor_is_one_in_twenty() {
+        // 0.05 is the documented default (calibrated against the 2026-05-10
+        // corpus where junk scored < 0.03 and meaningful hits scored 0.10+).
+        // Changing this default is a contract change — agents downstream
+        // rely on the value.
+        assert!((DEFAULT_RELEVANCE_FLOOR - 0.05).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn retrieval_metrics_records_floor_and_candidate_counts() {
+        let hits = vec![
+            synthetic_hit("a", 0.30),
+            synthetic_hit("b", 0.20),
+            synthetic_hit("c", 0.10),
+        ];
+        let metrics = RetrievalMetrics::from_hits_with_floor(
+            10, 5.0, &hits, 0, Some(0.05), 4,
+        );
+        assert_eq!(metrics.relevance_floor, Some(0.05));
+        assert_eq!(metrics.candidates_above_floor, 3);
+        assert_eq!(metrics.candidates_below_floor, 4);
+        assert_eq!(metrics.returned_count, 3);
+    }
+
+    #[test]
+    fn retrieval_metrics_data_json_emits_floor_fields() {
+        let hits = vec![synthetic_hit("a", 0.4)];
+        let metrics = RetrievalMetrics::from_hits_with_floor(
+            10, 5.0, &hits, 0, Some(0.05), 2,
+        );
+        let json = metrics.data_json();
+        // f32 -> f64 widening introduces sub-epsilon drift (0.0500000007…);
+        // compare with tolerance instead of exact equality.
+        let floor = json["relevanceFloor"].as_f64().expect("floor present");
+        assert!(
+            (floor - 0.05).abs() < 1e-5,
+            "floor mismatch: got {floor}"
+        );
+        assert_eq!(json["candidatesAboveFloor"], 1);
+        assert_eq!(json["candidatesBelowFloor"], 2);
+    }
+
+    #[test]
+    fn retrieval_metrics_emits_null_floor_when_none() {
+        let hits: Vec<SearchHit> = Vec::new();
+        let metrics = RetrievalMetrics::from_hits_with_floor(10, 5.0, &hits, 0, None, 0);
+        let json = metrics.data_json();
+        assert!(json["relevanceFloor"].is_null());
+        assert_eq!(json["candidatesAboveFloor"], 0);
+        assert_eq!(json["candidatesBelowFloor"], 0);
+    }
+
+    #[test]
+    fn no_relevant_results_degradation_includes_floor_and_consideration() {
+        let degradation =
+            SearchDegradation::no_relevant_results("test query", 0.05, 12, Some(0.02));
+        assert_eq!(degradation.code, "no_relevant_results");
+        assert_eq!(degradation.severity, "medium");
+        assert!(degradation.message.contains("0.0500"));
+        assert!(degradation.message.contains("test query"));
+        assert!(degradation.message.contains("12 candidate"));
+        assert!(degradation.message.contains("0.0200"));
+        assert!(degradation.repair.is_some());
+    }
+
+    #[test]
+    fn no_relevant_results_handles_singular_candidate() {
+        let degradation =
+            SearchDegradation::no_relevant_results("q", 0.05, 1, Some(0.01));
+        // Singular: "1 candidate" not "1 candidates".
+        assert!(degradation.message.contains("1 candidate"));
+        assert!(!degradation.message.contains("1 candidates"));
+    }
+
+    #[test]
+    fn low_recall_degradation_is_informational() {
+        let degradation = SearchDegradation::low_recall_after_floor(0.05, 2, 10);
+        assert_eq!(degradation.code, "low_recall_after_floor");
+        assert_eq!(degradation.severity, "low");
+        assert!(degradation.message.contains("2 of 10"));
+        assert!(degradation.message.contains("0.0500"));
+    }
+
+    #[test]
+    fn no_relevant_results_data_json_round_trips() {
+        let degradation = SearchDegradation::no_relevant_results("q", 0.05, 5, Some(0.0));
+        let json = degradation.data_json();
+        assert_eq!(json["code"], "no_relevant_results");
+        assert_eq!(json["severity"], "medium");
+        assert!(json["repair"].is_string());
     }
 }

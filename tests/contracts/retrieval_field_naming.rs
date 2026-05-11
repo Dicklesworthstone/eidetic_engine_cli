@@ -72,6 +72,8 @@ fn search_report_data_json_uses_camel_case_fields() -> TestResult {
         errors: Vec::new(),
         degraded: Vec::new(),
         runtime_profile: test_runtime_profile(),
+        relevance_floor_applied: None,
+        candidates_below_floor: 0,
     };
 
     let json = report.data_json();
@@ -213,6 +215,8 @@ fn search_hit_fields_are_camel_case_when_populated() -> TestResult {
         errors: Vec::new(),
         degraded: Vec::new(),
         runtime_profile: test_runtime_profile(),
+        relevance_floor_applied: None,
+        candidates_below_floor: 0,
     };
 
     let json = report.data_json();
@@ -295,6 +299,8 @@ fn field_naming_contract_is_stable() -> TestResult {
         errors: Vec::new(),
         degraded: Vec::new(),
         runtime_profile: test_runtime_profile(),
+        relevance_floor_applied: None,
+        candidates_below_floor: 0,
     };
 
     let json = report.data_json();
@@ -377,6 +383,8 @@ fn optional_hit_fields_absent_when_none() -> TestResult {
         errors: Vec::new(),
         degraded: Vec::new(),
         runtime_profile: test_runtime_profile(),
+        relevance_floor_applied: None,
+        candidates_below_floor: 0,
     };
 
     let json = report.data_json();
