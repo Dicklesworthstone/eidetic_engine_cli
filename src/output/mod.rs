@@ -6645,6 +6645,41 @@ fn domain_error_details(details: &mut JsonBuilder, error: &DomainError) {
         details.field_str("resource", resource);
         details.field_str("id", id);
     }
+    // Bead bd-17c65.6.1 (F1): structured recovery actions. Empty vector
+    // collapses to an absent `recovery` field so unmapped errors stay
+    // shape-compatible with the v1 schema.
+    let recoveries = error.recovery_actions();
+    if !recoveries.is_empty() {
+        details.field_array_of_objects("recovery", &recoveries, |obj, action| {
+            obj.field_u32("priority", u32::from(action.priority));
+            obj.field_str("kind", action.kind.as_str());
+            obj.field_str("rationale", &action.rationale);
+            if let Some(name) = &action.env_name {
+                obj.field_str("envName", name);
+            }
+            if let Some(hint) = &action.value_hint {
+                obj.field_str("valueHint", hint);
+            }
+            if let Some(path) = &action.config_path {
+                obj.field_str("configPath", path);
+            }
+            if let Some(key) = &action.config_key {
+                obj.field_str("configKey", key);
+            }
+            if let Some(flag) = &action.flag_name {
+                obj.field_str("flagName", flag);
+            }
+            if let Some(command) = &action.command {
+                obj.field_str("command", command);
+            }
+            if let Some(results) = &action.results_in {
+                obj.field_str("resultsIn", results);
+            }
+            if let Some(example) = &action.example {
+                obj.field_str("example", example);
+            }
+        });
+    }
 }
 
 fn escape_mermaid_label(value: &str) -> String {
@@ -11388,7 +11423,13 @@ mod tests {
         ensure_contains(&json, "\"code\":\"search_index\"", "code")?;
         ensure_contains(&json, "generation 9", "message contains details")?;
         ensure_contains(&json, "\"severity\":\"medium\"", "severity")?;
-        ensure_contains(&json, "\"details\":{}", "details")?;
+        // Bead bd-17c65.6.1 (F1): search-index errors carry recovery[] in
+        // details. Verify the structure is well-formed; specific contents
+        // are covered by the unit tests in models::tests.
+        ensure_contains(&json, "\"details\":{", "details opens")?;
+        ensure_contains(&json, "\"recovery\":[", "recovery array present")?;
+        ensure_contains(&json, "\"kind\":\"migration\"", "recovery kind")?;
+        ensure_contains(&json, "ee index rebuild", "recovery command")?;
         ensure_contains(&json, "\"repair\":\"ee index rebuild\"", "repair")
     }
 
@@ -11460,7 +11501,12 @@ mod tests {
         ensure_contains(&json, "\"code\":\"migration_required\"", "code")?;
         ensure_contains(&json, "version 3", "message contains version")?;
         ensure_contains(&json, "\"severity\":\"medium\"", "severity")?;
-        ensure_contains(&json, "\"details\":{}", "details")?;
+        // Bead bd-17c65.6.1 (F1): migration_required carries a recovery[]
+        // pointing at `ee migrate run`. Verify structure.
+        ensure_contains(&json, "\"details\":{", "details opens")?;
+        ensure_contains(&json, "\"recovery\":[", "recovery array present")?;
+        ensure_contains(&json, "\"kind\":\"migration\"", "recovery kind")?;
+        ensure_contains(&json, "ee migrate run", "recovery command")?;
         ensure_contains(&json, "\"repair\":\"ee init --workspace .\"", "repair")
     }
 

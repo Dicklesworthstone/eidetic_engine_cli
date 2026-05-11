@@ -418,6 +418,230 @@ impl DomainErrorSeverity {
     }
 }
 
+// ============================================================================
+// Bead bd-17c65.6.1 (F1) — structured error recovery actions
+// ============================================================================
+//
+// Pre-overhaul errors carried only a prose `repair` string ("install cass
+// or set [cass.binary] in config"). The 2026-05-10 walkthrough surfaced
+// that those hints lie: neither the suggested config-key path nor the
+// (only-documented-in-source) EE_CASS_BINARY env var were obvious to a
+// caller reading the error. F1 makes `recovery[]` a structured array
+// agents can iterate without parsing English prose.
+
+/// Categories of recovery action an agent can take in response to an error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoveryKind {
+    /// Set an environment variable.
+    Env,
+    /// Edit a TOML config file at a specific key.
+    Config,
+    /// Re-run with an additional CLI flag.
+    Flag,
+    /// Install a missing tool / binary into a trusted location.
+    Install,
+    /// Rebuild ee with different features.
+    Rebuild,
+    /// Fix file or directory permissions.
+    Permission,
+    /// Run a one-time data migration.
+    Migration,
+    /// Broaden a query (search-specific).
+    Broaden,
+    /// Narrow / filter a query.
+    Narrow,
+    /// Add seed data via `ee remember` or similar.
+    Seed,
+    /// This error has no recovery path; the caller cannot make progress.
+    None,
+}
+
+impl RecoveryKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Env => "env",
+            Self::Config => "config",
+            Self::Flag => "flag",
+            Self::Install => "install",
+            Self::Rebuild => "rebuild",
+            Self::Permission => "permission",
+            Self::Migration => "migration",
+            Self::Broaden => "broaden",
+            Self::Narrow => "narrow",
+            Self::Seed => "seed",
+            Self::None => "none",
+        }
+    }
+}
+
+/// One concrete recovery action attached to an error envelope.
+///
+/// Fields are intentionally optional: each `RecoveryKind` populates only
+/// the fields meaningful to it (`Env` → `name` + `value_hint`; `Install`
+/// → `command` + `results_in`; etc.). Agents inspect `kind` and read the
+/// appropriate fields.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryAction {
+    /// Lower number = try first. Ties allowed (agent picks any).
+    pub priority: u8,
+    pub kind: RecoveryKind,
+    /// One-sentence rationale: WHY this option vs others. Distinct from
+    /// the outer `repair` prose which describes WHAT to do.
+    pub rationale: String,
+    /// Env var name (kind == Env).
+    pub env_name: Option<String>,
+    /// Hint value or shape (kind == Env, Config, Flag).
+    pub value_hint: Option<String>,
+    /// Config file path (kind == Config).
+    pub config_path: Option<String>,
+    /// Dotted config key (kind == Config).
+    pub config_key: Option<String>,
+    /// CLI flag name with leading `--` (kind == Flag).
+    pub flag_name: Option<String>,
+    /// Concrete shell command (kind == Install, Migration, Rebuild).
+    pub command: Option<String>,
+    /// What running the command produces (kind == Install).
+    pub results_in: Option<String>,
+    /// Ready-to-copy example invocation.
+    pub example: Option<String>,
+}
+
+impl RecoveryAction {
+    /// Construct an env-var-set recovery.
+    #[must_use]
+    pub fn env(
+        priority: u8,
+        name: impl Into<String>,
+        value_hint: impl Into<String>,
+        rationale: impl Into<String>,
+    ) -> Self {
+        Self {
+            priority,
+            kind: RecoveryKind::Env,
+            rationale: rationale.into(),
+            env_name: Some(name.into()),
+            value_hint: Some(value_hint.into()),
+            config_path: None,
+            config_key: None,
+            flag_name: None,
+            command: None,
+            results_in: None,
+            example: None,
+        }
+    }
+
+    /// Construct a config-edit recovery.
+    #[must_use]
+    pub fn config(
+        priority: u8,
+        path: impl Into<String>,
+        key: impl Into<String>,
+        value_hint: impl Into<String>,
+        rationale: impl Into<String>,
+    ) -> Self {
+        Self {
+            priority,
+            kind: RecoveryKind::Config,
+            rationale: rationale.into(),
+            env_name: None,
+            value_hint: Some(value_hint.into()),
+            config_path: Some(path.into()),
+            config_key: Some(key.into()),
+            flag_name: None,
+            command: None,
+            results_in: None,
+            example: None,
+        }
+    }
+
+    /// Construct an install-binary recovery.
+    #[must_use]
+    pub fn install(
+        priority: u8,
+        command: impl Into<String>,
+        results_in: impl Into<String>,
+        rationale: impl Into<String>,
+    ) -> Self {
+        Self {
+            priority,
+            kind: RecoveryKind::Install,
+            rationale: rationale.into(),
+            env_name: None,
+            value_hint: None,
+            config_path: None,
+            config_key: None,
+            flag_name: None,
+            command: Some(command.into()),
+            results_in: Some(results_in.into()),
+            example: None,
+        }
+    }
+
+    /// Construct a CLI-flag recovery.
+    #[must_use]
+    pub fn flag(
+        priority: u8,
+        name: impl Into<String>,
+        value_hint: impl Into<String>,
+        rationale: impl Into<String>,
+    ) -> Self {
+        Self {
+            priority,
+            kind: RecoveryKind::Flag,
+            rationale: rationale.into(),
+            env_name: None,
+            value_hint: Some(value_hint.into()),
+            config_path: None,
+            config_key: None,
+            flag_name: Some(name.into()),
+            command: None,
+            results_in: None,
+            example: None,
+        }
+    }
+
+    /// Construct a migration-run recovery.
+    #[must_use]
+    pub fn migration(
+        priority: u8,
+        command: impl Into<String>,
+        rationale: impl Into<String>,
+    ) -> Self {
+        Self {
+            priority,
+            kind: RecoveryKind::Migration,
+            rationale: rationale.into(),
+            env_name: None,
+            value_hint: None,
+            config_path: None,
+            config_key: None,
+            flag_name: None,
+            command: Some(command.into()),
+            results_in: None,
+            example: None,
+        }
+    }
+
+    /// Construct a broaden-query recovery (search-specific).
+    #[must_use]
+    pub fn broaden(priority: u8, hint: impl Into<String>) -> Self {
+        Self {
+            priority,
+            kind: RecoveryKind::Broaden,
+            rationale: hint.into(),
+            env_name: None,
+            value_hint: None,
+            config_path: None,
+            config_key: None,
+            flag_name: None,
+            command: None,
+            results_in: None,
+            example: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DomainErrorSituation {
     Usage,
@@ -509,6 +733,147 @@ impl DomainError {
             | Self::PolicyDenied { repair, .. }
             | Self::MigrationRequired { repair, .. }
             | Self::MigrationDrift { repair, .. } => repair.as_deref(),
+        }
+    }
+
+    /// Derive structured recovery actions from this error.
+    ///
+    /// Bead bd-17c65.6.1 (F1). The default returns an empty vector;
+    /// specific code/message combinations match heuristically to
+    /// well-known recovery paths (cass binary, search index, migration).
+    /// Agents iterate the result and pick actions by `priority`.
+    ///
+    /// This is intentionally heuristic — it does NOT require every error
+    /// site to be plumbed with extra fields. Specific error sites that
+    /// want richer recovery should add a `recovery_overrides` field in a
+    /// follow-up; for now the canonical cases below cover the surfaces
+    /// exercised in the 2026-05-10 walkthrough.
+    #[must_use]
+    pub fn recovery_actions(&self) -> Vec<RecoveryAction> {
+        let message = self.message().to_lowercase();
+        match self {
+            // Cass binary not found in trusted locations.
+            Self::Import { .. } if message.contains("cass binary not found") => vec![
+                RecoveryAction::env(
+                    1,
+                    "EE_CASS_BINARY",
+                    "<absolute path to executable cass binary>",
+                    "Fastest fix when cass is installed under ~/.local/bin or another non-trusted location",
+                ),
+                RecoveryAction::config(
+                    2,
+                    ".ee/config.toml",
+                    "cass.binary",
+                    "<absolute path>",
+                    "Persists across sessions; survives shell restart and CI",
+                ),
+                RecoveryAction::install(
+                    3,
+                    "brew install cass",
+                    "/opt/homebrew/bin/cass (auto-discovered)",
+                    "Permanent system-wide solution; preferred for developer workstations",
+                ),
+            ],
+            // Search index missing / corrupt / stale.
+            Self::SearchIndex { .. } if message.contains("index") => vec![
+                RecoveryAction {
+                    priority: 1,
+                    kind: RecoveryKind::Migration,
+                    rationale: "Rebuild the index from current memory state; idempotent.".to_owned(),
+                    env_name: None,
+                    value_hint: None,
+                    config_path: None,
+                    config_key: None,
+                    flag_name: None,
+                    command: Some("ee index rebuild --workspace .".to_owned()),
+                    results_in: None,
+                    example: None,
+                },
+                RecoveryAction {
+                    priority: 2,
+                    kind: RecoveryKind::Migration,
+                    rationale: "Inspect index state before rebuilding (faster diagnosis).".to_owned(),
+                    env_name: None,
+                    value_hint: None,
+                    config_path: None,
+                    config_key: None,
+                    flag_name: None,
+                    command: Some("ee index status --workspace . --json".to_owned()),
+                    results_in: None,
+                    example: None,
+                },
+            ],
+            // Migration required.
+            Self::MigrationRequired { .. } => vec![RecoveryAction::migration(
+                1,
+                "ee migrate run --workspace . --to v0.2",
+                "Apply outstanding migrations; idempotent and audit-logged.",
+            )],
+            // Migration drift.
+            Self::MigrationDrift { .. } => vec![
+                RecoveryAction {
+                    priority: 1,
+                    kind: RecoveryKind::Migration,
+                    rationale: "Inspect drift details before deciding repair path.".to_owned(),
+                    env_name: None,
+                    value_hint: None,
+                    config_path: None,
+                    config_key: None,
+                    flag_name: None,
+                    command: Some("ee migrate status --workspace . --json".to_owned()),
+                    results_in: None,
+                    example: None,
+                },
+            ],
+            // Policy denied: secret-bearing content. Recovery is to
+            // redact-then-retry. No flag bypass yet (C2 is a separate
+            // bead).
+            Self::PolicyDenied { .. } if message.contains("secret") => vec![
+                RecoveryAction {
+                    priority: 1,
+                    kind: RecoveryKind::Broaden,
+                    rationale: "Replace the value-bearing substring with a placeholder (e.g. <REDACTED>) before retrying.".to_owned(),
+                    env_name: None,
+                    value_hint: None,
+                    config_path: None,
+                    config_key: None,
+                    flag_name: None,
+                    command: None,
+                    results_in: None,
+                    example: None,
+                },
+            ],
+            // No workspace found (planned in D7; here we cover the
+            // existing usage-error variant for symmetry).
+            Self::Usage { .. } if message.contains("workspace") && message.contains("not found")
+            => vec![
+                RecoveryAction::flag(
+                    1,
+                    "--workspace",
+                    "<path>",
+                    "Point at an explicit workspace; the simplest fix when running from outside an .ee/ directory.",
+                ),
+                RecoveryAction::env(
+                    2,
+                    "EE_WORKSPACE",
+                    "<absolute path>",
+                    "Persists for the current shell; useful for scripts that always operate on one workspace.",
+                ),
+                RecoveryAction {
+                    priority: 3,
+                    kind: RecoveryKind::Seed,
+                    rationale: "Create a new workspace at cwd if one doesn't exist yet.".to_owned(),
+                    env_name: None,
+                    value_hint: None,
+                    config_path: None,
+                    config_key: None,
+                    flag_name: None,
+                    command: Some("ee init --workspace .".to_owned()),
+                    results_in: None,
+                    example: None,
+                },
+            ],
+            _ => Vec::new(),
         }
     }
 
@@ -747,5 +1112,142 @@ mod tests {
             &"ee.eval.tail_budget_config.v1",
             "tail budget config schema",
         )
+    }
+
+    // ========================================================================
+    // Bead bd-17c65.6.1 (F1) — RecoveryAction construction + DomainError
+    // recovery_actions() heuristic mapping
+    // ========================================================================
+
+    #[test]
+    fn recovery_kind_as_str_is_stable() {
+        // These string forms are the JSON wire enum — changing any of them
+        // is a contract change consumers (agents, schemas) depend on.
+        assert_eq!(super::RecoveryKind::Env.as_str(), "env");
+        assert_eq!(super::RecoveryKind::Config.as_str(), "config");
+        assert_eq!(super::RecoveryKind::Flag.as_str(), "flag");
+        assert_eq!(super::RecoveryKind::Install.as_str(), "install");
+        assert_eq!(super::RecoveryKind::Rebuild.as_str(), "rebuild");
+        assert_eq!(super::RecoveryKind::Permission.as_str(), "permission");
+        assert_eq!(super::RecoveryKind::Migration.as_str(), "migration");
+        assert_eq!(super::RecoveryKind::Broaden.as_str(), "broaden");
+        assert_eq!(super::RecoveryKind::Narrow.as_str(), "narrow");
+        assert_eq!(super::RecoveryKind::Seed.as_str(), "seed");
+        assert_eq!(super::RecoveryKind::None.as_str(), "none");
+    }
+
+    #[test]
+    fn recovery_action_env_constructor_populates_only_relevant_fields() {
+        let action = super::RecoveryAction::env(
+            1,
+            "EE_CASS_BINARY",
+            "/abs/path",
+            "Try this first",
+        );
+        assert_eq!(action.priority, 1);
+        assert_eq!(action.kind, super::RecoveryKind::Env);
+        assert_eq!(action.env_name.as_deref(), Some("EE_CASS_BINARY"));
+        assert_eq!(action.value_hint.as_deref(), Some("/abs/path"));
+        assert_eq!(action.rationale, "Try this first");
+        // Non-Env fields stay None
+        assert!(action.config_path.is_none());
+        assert!(action.flag_name.is_none());
+        assert!(action.command.is_none());
+    }
+
+    #[test]
+    fn recovery_action_config_constructor() {
+        let action = super::RecoveryAction::config(
+            2,
+            ".ee/config.toml",
+            "cass.binary",
+            "<absolute path>",
+            "Persists across sessions",
+        );
+        assert_eq!(action.kind, super::RecoveryKind::Config);
+        assert_eq!(action.config_path.as_deref(), Some(".ee/config.toml"));
+        assert_eq!(action.config_key.as_deref(), Some("cass.binary"));
+    }
+
+    #[test]
+    fn recovery_action_install_constructor() {
+        let action = super::RecoveryAction::install(
+            3,
+            "brew install cass",
+            "/opt/homebrew/bin/cass",
+            "System-wide solution",
+        );
+        assert_eq!(action.kind, super::RecoveryKind::Install);
+        assert_eq!(action.command.as_deref(), Some("brew install cass"));
+        assert_eq!(action.results_in.as_deref(), Some("/opt/homebrew/bin/cass"));
+    }
+
+    #[test]
+    fn domain_error_recovery_for_cass_binary_emits_three_options() {
+        let error = super::DomainError::Import {
+            message: "cass binary not found at '/usr/local/bin/cass'".to_owned(),
+            repair: Some("install cass".to_owned()),
+        };
+        let actions = error.recovery_actions();
+        assert_eq!(actions.len(), 3, "expected 3 options, got {actions:?}");
+        // Priority ascending: env (1), config (2), install (3)
+        assert_eq!(actions[0].kind, super::RecoveryKind::Env);
+        assert_eq!(actions[0].priority, 1);
+        assert_eq!(actions[0].env_name.as_deref(), Some("EE_CASS_BINARY"));
+        assert_eq!(actions[1].kind, super::RecoveryKind::Config);
+        assert_eq!(actions[1].priority, 2);
+        assert_eq!(actions[2].kind, super::RecoveryKind::Install);
+        assert_eq!(actions[2].priority, 3);
+    }
+
+    #[test]
+    fn domain_error_recovery_for_search_index_includes_rebuild() {
+        let error = super::DomainError::SearchIndex {
+            message: "Search index is stale or missing.".to_owned(),
+            repair: Some("ee index rebuild".to_owned()),
+        };
+        let actions = error.recovery_actions();
+        assert!(!actions.is_empty());
+        assert!(actions.iter().any(|a| a
+            .command
+            .as_deref()
+            .is_some_and(|cmd| cmd.contains("ee index rebuild"))));
+    }
+
+    #[test]
+    fn domain_error_recovery_for_migration_required_emits_migrate_run() {
+        let error = super::DomainError::MigrationRequired {
+            message: "Workspace is v0.1; current binary expects v0.2.".to_owned(),
+            repair: None,
+        };
+        let actions = error.recovery_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, super::RecoveryKind::Migration);
+        assert!(actions[0]
+            .command
+            .as_deref()
+            .is_some_and(|cmd| cmd.contains("ee migrate run")));
+    }
+
+    #[test]
+    fn domain_error_recovery_unmapped_returns_empty() {
+        let error = super::DomainError::Graph {
+            message: "graph node not in projection".to_owned(),
+            repair: None,
+        };
+        // We haven't mapped a recovery for unrelated graph errors.
+        assert!(error.recovery_actions().is_empty());
+    }
+
+    #[test]
+    fn domain_error_recovery_for_policy_secret_recommends_redact() {
+        let error = super::DomainError::PolicyDenied {
+            message: "Refusing to persist memory content that contains secrets: openai_sk_prefix.".to_owned(),
+            repair: None,
+        };
+        let actions = error.recovery_actions();
+        assert!(!actions.is_empty());
+        assert_eq!(actions[0].kind, super::RecoveryKind::Broaden);
+        assert!(actions[0].rationale.to_lowercase().contains("redact"));
     }
 }
