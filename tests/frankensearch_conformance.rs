@@ -51,10 +51,7 @@ fn scored_result_has_required_fields() -> TestResult {
     };
 
     ensure_equal(&result.doc_id, &"test-doc-001".to_owned(), "doc_id")?;
-    ensure(
-        (result.score - 0.75).abs() < 0.001,
-        "score should be 0.75",
-    )?;
+    ensure((result.score - 0.75).abs() < 0.001, "score should be 0.75")?;
     ensure_equal(&result.source, &ScoreSource::Hybrid, "source")?;
     ensure_equal(&result.index, &Some(0), "index")?;
     ensure(result.fast_score.is_some(), "fast_score should be Some")?;
@@ -66,10 +63,7 @@ fn scored_result_has_required_fields() -> TestResult {
         result.lexical_score.is_some(),
         "lexical_score should be Some",
     )?;
-    ensure(
-        result.rerank_score.is_some(),
-        "rerank_score should be Some",
-    )?;
+    ensure(result.rerank_score.is_some(), "rerank_score should be Some")?;
     ensure(result.metadata.is_some(), "metadata should be Some")?;
     Ok(())
 }
@@ -320,7 +314,10 @@ fn search_score_explanation_includes_primary_score_component() -> TestResult {
         .iter()
         .any(|c| c.name == "primary_score");
 
-    ensure(has_primary, "explanation must include primary_score component")?;
+    ensure(
+        has_primary,
+        "explanation must include primary_score component",
+    )?;
     Ok(())
 }
 

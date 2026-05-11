@@ -159,16 +159,17 @@ fn expected_phrases_appear_in_corpus() -> TestResult {
     let expected = read_expected()?;
 
     // policy_acceptance phrases must each appear in the corpus.
-    if let Some(items) = expected.pointer("/policy_acceptance").and_then(Value::as_array) {
+    if let Some(items) = expected
+        .pointer("/policy_acceptance")
+        .and_then(Value::as_array)
+    {
         for (i, item) in items.iter().enumerate() {
             let phrase = item
                 .pointer("/content_phrase")
                 .and_then(Value::as_str)
                 .ok_or_else(|| format!("policy_acceptance[{i}] missing content_phrase"))?
                 .to_lowercase();
-            let matched = contents
-                .iter()
-                .any(|c| c.contains(&phrase));
+            let matched = contents.iter().any(|c| c.contains(&phrase));
             if !matched {
                 return Err(format!(
                     "policy_acceptance[{i}] phrase not in corpus: {phrase}"
@@ -324,10 +325,7 @@ fn cargo_cluster_has_enough_members_for_g3_proposal() -> TestResult {
                 && r.pointer("/kind").and_then(Value::as_str) == Some("rule")
                 && r.pointer("/tags")
                     .and_then(Value::as_array)
-                    .map(|arr| {
-                        arr.iter()
-                            .any(|t| t.as_str() == Some("cargo"))
-                    })
+                    .map(|arr| arr.iter().any(|t| t.as_str() == Some("cargo")))
                     .unwrap_or(false)
         })
         .collect();
