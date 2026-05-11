@@ -2508,6 +2508,29 @@ fn focus_candidate_why(
     )
 }
 
+/// Generate a per-item `why` string for a context pack candidate.
+///
+/// Bead bd-17c65.1.3 (A3) — replaced the previous 350-character math-
+/// identity boilerplate ("Deterministic retrieval explanation for query
+/// `...`: source=memory search_source=...; score_components=[relevance=
+/// unit_score(search_hit.score)...]; formula=unit_score(field)=clamp(...);
+/// inputs are stored memory/link fields and the explicit search hit,
+/// not agent reasoning.") with a one-line actionable reason.
+///
+/// The old form was byte-identical across all items in a pack except
+/// for the score number — 350 chars × 13 items = 4.5KB of pure
+/// repetition. The new form retains the same information per item
+/// (query, source, score, utility, artifact provenance) in a compact
+/// shape an LLM agent can read at a glance:
+///
+///   matched 'query' via <source> (relevance <score>, utility <util>)
+///   matched 'query' via <source> (relevance <score>, utility <util>); via artifact <id>
+///
+/// The math identity (`unit_score(field) = clamp(field, 0.0, 1.0)`)
+/// applies to every item identically and belongs in pack-level metadata
+/// — not repeated per item. A future bead (A2) moves it to
+/// `pack.meta.algorithm.scoringFormula`; for now the per-item why is
+/// information-complete on its own.
 fn candidate_selection_why(
     query: &str,
     search_source: &str,
@@ -2515,22 +2538,24 @@ fn candidate_selection_why(
     memory_utility: f32,
     artifact_id: Option<&str>,
 ) -> String {
-    let (source_reference, utility_field) = match artifact_id {
-        Some(artifact_id) => (
-            format!(
-                "source=registered_artifact artifact_id={artifact_id} search_source={search_source}; linked via registered artifact"
-            ),
-            "linked_memory.utility",
-        ),
-        None => (
-            format!("source=memory search_source={search_source}"),
-            "memory.utility",
-        ),
+    // Trim the query for readability; over-long queries get the
+    // characteristic "..." truncation so the why line stays short.
+    let display_query = if query.chars().count() > 80 {
+        let mut truncated: String = query.chars().take(77).collect();
+        truncated.push_str("...");
+        truncated
+    } else {
+        query.to_owned()
     };
 
-    format!(
-        "Deterministic retrieval explanation for query `{query}`: {source_reference}; score_components=[relevance=unit_score(search_hit.score) with search_hit.score={search_score:.4}, utility=unit_score({utility_field}) with {utility_field}={memory_utility:.4}]; formula=unit_score(field)=clamp(field, 0.0, 1.0) for finite fields, otherwise 0.0; inputs are stored memory/link fields and the explicit search hit, not agent reasoning."
-    )
+    let base = format!(
+        "matched '{display_query}' via {search_source} (relevance {search_score:.4}, utility {memory_utility:.4})",
+    );
+    if let Some(artifact_id) = artifact_id {
+        format!("{base}; via registered artifact {artifact_id}")
+    } else {
+        base
+    }
 }
 
 fn artifact_linked_memory_id(
@@ -3629,26 +3654,25 @@ mod tests {
         assert_eq!(context.budget().io_used_bytes(), 1024);
     }
 
-    #[test]
-    fn candidate_selection_why_names_direct_source_fields() {
-        let why = candidate_selection_why("prepare release", "lexical", 0.812_34, 0.456_78, None);
+    // Bead bd-17c65.1.3 (A3) — per-item `why` is a one-line actionable
+    // reason, not the old 350-char math identity. The math identity
+    // (unit_score(field) = clamp(field, 0.0, 1.0)) applies uniformly to
+    // every item and moves to pack.meta.algorithm in a future bead (A2);
+    // here we lock in the new compact shape.
 
-        assert!(why.contains(
-            "Deterministic retrieval explanation for query `prepare release`: source=memory search_source=lexical"
-        ));
-        assert!(why.contains("relevance=unit_score(search_hit.score)"));
-        assert!(why.contains("search_hit.score=0.8123"));
-        assert!(why.contains("utility=unit_score(memory.utility)"));
-        assert!(why.contains("memory.utility=0.4568"));
-        assert!(
-            why.contains(
-                "unit_score(field)=clamp(field, 0.0, 1.0) for finite fields, otherwise 0.0"
-            )
+    #[test]
+    fn candidate_selection_why_is_one_line_reason() {
+        let why = candidate_selection_why("prepare release", "lexical", 0.812_34, 0.456_78, None);
+        // Compact single-line shape with the same numerical content as
+        // the old paragraph.
+        assert_eq!(
+            why,
+            "matched 'prepare release' via lexical (relevance 0.8123, utility 0.4568)"
         );
     }
 
     #[test]
-    fn candidate_selection_why_names_artifact_link_source_fields() {
+    fn candidate_selection_why_appends_artifact_provenance() {
         let why = candidate_selection_why(
             "prepare release",
             "hybrid",
@@ -3656,26 +3680,27 @@ mod tests {
             0.556_78,
             Some("art_0123456789abcdef01234567"),
         );
-
-        assert!(why.contains(
-            "source=registered_artifact artifact_id=art_0123456789abcdef01234567 search_source=hybrid"
-        ));
-        assert!(why.contains("relevance=unit_score(search_hit.score)"));
-        assert!(why.contains("search_hit.score=0.9123"));
-        assert!(why.contains("utility=unit_score(linked_memory.utility)"));
-        assert!(why.contains("linked_memory.utility=0.5568"));
+        assert_eq!(
+            why,
+            "matched 'prepare release' via hybrid (relevance 0.9123, utility 0.5568); via registered artifact art_0123456789abcdef01234567"
+        );
     }
 
     #[test]
-    fn candidate_selection_why_declares_deterministic_inputs() {
+    fn candidate_selection_why_truncates_long_queries() {
+        let long_query = "abcdefghij".repeat(15); // 150 chars
+        let why = candidate_selection_why(&long_query, "lexical", 0.5, 0.5, None);
+        // Truncation marker present; total why stays under 200 chars
+        // (well below the bead's 120-char per-item target — extra
+        // room for the source + scores).
+        assert!(why.contains("..."));
+        assert!(why.len() < 200, "got {} chars: {why}", why.len());
+    }
+
+    #[test]
+    fn candidate_selection_why_excludes_qualitative_terms() {
+        // AGENTS.md determinism principle: no "believes", "thinks", etc.
         let why = candidate_selection_why("prepare release", "lexical", 0.812_34, 0.456_78, None);
-
-        assert!(
-            why.contains("inputs are stored memory/link fields and the explicit search hit"),
-            "{why}"
-        );
-        assert!(why.contains("not agent reasoning"), "{why}");
-
         let lower = why.to_ascii_lowercase();
         for forbidden in [
             "believes",
@@ -3686,9 +3711,27 @@ mod tests {
         ] {
             assert!(
                 !lower.contains(forbidden),
-                "explanation used qualitative reasoning term `{forbidden}`: {why}"
+                "why used qualitative term `{forbidden}`: {why}"
             );
         }
+    }
+
+    #[test]
+    fn candidate_selection_why_per_item_size_is_compact() {
+        // Lock in the token-savings target: per-item why ≤ 120 chars
+        // for typical queries. The old form averaged ~350 chars.
+        let why = candidate_selection_why(
+            "how do I cut a release safely",
+            "semantic_fast",
+            0.149,
+            0.5,
+            None,
+        );
+        assert!(
+            why.len() < 120,
+            "per-item why exceeds 120 char budget: {} chars\n  {why}",
+            why.len()
+        );
     }
 
     #[test]

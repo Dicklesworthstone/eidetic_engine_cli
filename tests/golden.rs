@@ -2315,10 +2315,19 @@ mod tests {
             "**Why:**",
             "markdown selection rationale header",
         )?;
+        // Bead bd-17c65.1.3 (A3) — per-item why is now a one-line
+        // reason starting "matched '<query>' via <source>". The old
+        // "Deterministic retrieval explanation..." paragraph moved to
+        // pack-level metadata.
         ensure_contains(
             &stdout_md,
-            "Deterministic retrieval explanation",
-            "markdown selection rationale text",
+            "matched '",
+            "markdown selection rationale (A3 one-liner shape)",
+        )?;
+        ensure_contains(
+            &stdout_md,
+            "relevance ",
+            "markdown selection rationale relevance score",
         )?;
 
         // Verify trust class is documented.
