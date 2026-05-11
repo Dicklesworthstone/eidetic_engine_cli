@@ -217,17 +217,51 @@ mod contract_verification {
     #[test]
     fn all_error_codes_are_lowercase_snake_case() -> TestResult {
         let errors: Vec<DomainError> = vec![
-            DomainError::Usage { message: "m".into(), repair: None },
-            DomainError::Configuration { message: "m".into(), repair: None },
-            DomainError::Storage { message: "m".into(), repair: None },
-            DomainError::SearchIndex { message: "m".into(), repair: None },
-            DomainError::Graph { message: "m".into(), repair: None },
-            DomainError::Import { message: "m".into(), repair: None },
-            DomainError::NotFound { resource: "r".into(), id: "i".into(), repair: None },
-            DomainError::UnsatisfiedDegradedMode { message: "m".into(), repair: None },
-            DomainError::PolicyDenied { message: "m".into(), repair: None },
-            DomainError::MigrationRequired { message: "m".into(), repair: None },
-            DomainError::MigrationDrift { message: "m".into(), repair: None },
+            DomainError::Usage {
+                message: "m".into(),
+                repair: None,
+            },
+            DomainError::Configuration {
+                message: "m".into(),
+                repair: None,
+            },
+            DomainError::Storage {
+                message: "m".into(),
+                repair: None,
+            },
+            DomainError::SearchIndex {
+                message: "m".into(),
+                repair: None,
+            },
+            DomainError::Graph {
+                message: "m".into(),
+                repair: None,
+            },
+            DomainError::Import {
+                message: "m".into(),
+                repair: None,
+            },
+            DomainError::NotFound {
+                resource: "r".into(),
+                id: "i".into(),
+                repair: None,
+            },
+            DomainError::UnsatisfiedDegradedMode {
+                message: "m".into(),
+                repair: None,
+            },
+            DomainError::PolicyDenied {
+                message: "m".into(),
+                repair: None,
+            },
+            DomainError::MigrationRequired {
+                message: "m".into(),
+                repair: None,
+            },
+            DomainError::MigrationDrift {
+                message: "m".into(),
+                repair: None,
+            },
         ];
 
         for error in errors {
@@ -245,23 +279,92 @@ mod contract_verification {
     #[test]
     fn severity_matches_documented_exit_codes() -> TestResult {
         let test_cases = [
-            (DomainError::Usage { message: "m".into(), repair: None }, "low"),
-            (DomainError::Configuration { message: "m".into(), repair: None }, "medium"),
-            (DomainError::Storage { message: "m".into(), repair: None }, "high"),
-            (DomainError::SearchIndex { message: "m".into(), repair: None }, "medium"),
-            (DomainError::Graph { message: "m".into(), repair: None }, "medium"),
-            (DomainError::Import { message: "m".into(), repair: None }, "medium"),
-            (DomainError::NotFound { resource: "r".into(), id: "i".into(), repair: None }, "low"),
-            (DomainError::UnsatisfiedDegradedMode { message: "m".into(), repair: None }, "medium"),
-            (DomainError::PolicyDenied { message: "m".into(), repair: None }, "medium"),
-            (DomainError::MigrationRequired { message: "m".into(), repair: None }, "medium"),
-            (DomainError::MigrationDrift { message: "m".into(), repair: None }, "high"),
+            (
+                DomainError::Usage {
+                    message: "m".into(),
+                    repair: None,
+                },
+                "low",
+            ),
+            (
+                DomainError::Configuration {
+                    message: "m".into(),
+                    repair: None,
+                },
+                "medium",
+            ),
+            (
+                DomainError::Storage {
+                    message: "m".into(),
+                    repair: None,
+                },
+                "high",
+            ),
+            (
+                DomainError::SearchIndex {
+                    message: "m".into(),
+                    repair: None,
+                },
+                "medium",
+            ),
+            (
+                DomainError::Graph {
+                    message: "m".into(),
+                    repair: None,
+                },
+                "medium",
+            ),
+            (
+                DomainError::Import {
+                    message: "m".into(),
+                    repair: None,
+                },
+                "medium",
+            ),
+            (
+                DomainError::NotFound {
+                    resource: "r".into(),
+                    id: "i".into(),
+                    repair: None,
+                },
+                "low",
+            ),
+            (
+                DomainError::UnsatisfiedDegradedMode {
+                    message: "m".into(),
+                    repair: None,
+                },
+                "medium",
+            ),
+            (
+                DomainError::PolicyDenied {
+                    message: "m".into(),
+                    repair: None,
+                },
+                "medium",
+            ),
+            (
+                DomainError::MigrationRequired {
+                    message: "m".into(),
+                    repair: None,
+                },
+                "medium",
+            ),
+            (
+                DomainError::MigrationDrift {
+                    message: "m".into(),
+                    repair: None,
+                },
+                "high",
+            ),
         ];
 
         for (error, expected_severity) in test_cases {
             let json = error_response_json(&error);
             let value: Value = parse_error_json(&json)?;
-            let actual = value["error"]["severity"].as_str().ok_or("missing severity")?;
+            let actual = value["error"]["severity"]
+                .as_str()
+                .ok_or("missing severity")?;
             if actual != expected_severity {
                 let code = value["error"]["code"].as_str().unwrap_or("?");
                 return Err(format!(
