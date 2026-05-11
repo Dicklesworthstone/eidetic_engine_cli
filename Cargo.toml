@@ -75,6 +75,9 @@ toon = { package = "tru", version = "0.2.2", path = "/data/projects/toon_rust", 
 toml_edit = { version = "0.25.11", default-features = false, features = ["parse", "display"] }
 tracing = { version = "0.1.44" }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+# NFC normalization for policy tag/secret detection (bd-17c65.3.3 / C3).
+# Already in dep tree transitively; explicit dep documents the contract.
+unicode-normalization = { version = "0.1" }
 uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]

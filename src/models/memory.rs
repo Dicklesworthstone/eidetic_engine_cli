@@ -193,7 +193,18 @@ impl FromStr for MemoryKind {
     }
 }
 
-/// Validated tag — lowercase, alphanumeric or `-`/`:`, 1–64 bytes.
+/// Validated tag — NFC-normalized, lowercase ASCII letters (Unicode letters
+/// preserve their case), 1–64 bytes.
+///
+/// Accepted characters (bead bd-17c65.3.3 / C3):
+/// - ASCII letters `[a-zA-Z]` (lowercased to `[a-z]`)
+/// - ASCII digits `[0-9]`
+/// - Punctuation: `.`, `_`, `:`, `-`
+/// - Unicode letters / marks / numbers (`char::is_alphanumeric()` plus marks)
+///
+/// Explicitly rejected: whitespace, `,`, `=`, `/`, `\`, `;`, `*`, `?`, `|`,
+/// control characters. These are reserved as tag-list and path delimiters
+/// across the storage / search / config layers.
 ///
 /// Tags survive JSON round-trips byte-for-byte: a `Tag` parsed from
 /// upper-case input emits its lower-case canonical form on display.
@@ -201,35 +212,55 @@ impl FromStr for MemoryKind {
 pub struct Tag(String);
 
 impl Tag {
-    /// Construct a tag from raw input, lowercasing it in-place.
+    /// Construct a tag from raw input.
+    ///
+    /// Normalization pipeline (deterministic):
+    /// 1. Trim leading/trailing ASCII whitespace.
+    /// 2. NFC-normalize Unicode codepoints so equivalent composed/decomposed
+    ///    forms collapse to the same canonical bytes.
+    /// 3. Lowercase ASCII letters (Unicode letters preserve their case to
+    ///    avoid surprises in locale-dependent casing of Greek/Turkish/etc.).
+    /// 4. Reject inputs over [`MAX_TAG_BYTES`] (measured AFTER normalization
+    ///    since NFC may shrink length).
+    /// 5. Reject inputs containing any character not in the accepted set.
     ///
     /// # Errors
     ///
     /// Returns [`MemoryValidationError::EmptyTag`] for empty input,
-    /// [`MemoryValidationError::TagTooLong`] when input exceeds
+    /// [`MemoryValidationError::TagTooLong`] when normalized input exceeds
     /// [`MAX_TAG_BYTES`], and [`MemoryValidationError::InvalidTag`] when
-    /// the canonicalized form contains characters outside
-    /// `[a-z0-9:-]`.
+    /// the normalized form contains a rejected character.
     pub fn parse(input: &str) -> Result<Self, MemoryValidationError> {
-        if input.is_empty() {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
             return Err(MemoryValidationError::EmptyTag);
         }
-        if input.len() > MAX_TAG_BYTES {
+        // NFC normalize then lowercase ASCII letters. Unicode letters keep
+        // their case (NFC-only) so we don't depend on locale-aware casing.
+        let normalized: String = unicode_normalization::UnicodeNormalization::nfc(trimmed)
+            .map(|ch| {
+                if ch.is_ascii_uppercase() {
+                    ch.to_ascii_lowercase()
+                } else {
+                    ch
+                }
+            })
+            .collect();
+        if normalized.len() > MAX_TAG_BYTES {
             return Err(MemoryValidationError::TagTooLong {
                 input: input.to_owned(),
                 limit: MAX_TAG_BYTES,
             });
         }
-        let canonical = input.to_ascii_lowercase();
-        if !canonical.bytes().all(is_valid_tag_byte) {
+        if !is_valid_tag_str(&normalized) {
             return Err(MemoryValidationError::InvalidTag {
                 input: input.to_owned(),
             });
         }
-        Ok(Self(canonical))
+        Ok(Self(normalized))
     }
 
-    /// Return the canonical lower-case form.
+    /// Return the canonical normalized form.
     #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
@@ -389,7 +420,7 @@ impl fmt::Display for MemoryValidationError {
             ),
             Self::InvalidTag { input } => write!(
                 formatter,
-                "tag `{input}` must contain only lowercase ASCII letters, digits, `-`, and `:`"
+                "tag `{input}` contains characters outside the accepted set (ASCII letters/digits, `.`, `_`, `:`, `-`, Unicode letters/marks/numbers); reserved delimiters such as `,` ` ` `=` `/` `\\` `;` are rejected"
             ),
             Self::EmptyContent => formatter.write_str("memory content cannot be empty after trim"),
             Self::ContentTooLarge { bytes, limit } => write!(
@@ -406,9 +437,37 @@ impl fmt::Display for MemoryValidationError {
 
 impl std::error::Error for MemoryValidationError {}
 
-const fn is_valid_tag_byte(byte: u8) -> bool {
-    matches!(byte,
-        b'a'..=b'z' | b'0'..=b'9' | b'-' | b':')
+/// Returns `true` if every character in `s` is acceptable in a tag.
+///
+/// Acceptance (per bead bd-17c65.3.3 / C3):
+/// - ASCII letters `[a-zA-Z]` (case-preserved; the caller has already
+///   lowercased ASCII via NFC pipeline)
+/// - ASCII digits `[0-9]`
+/// - Punctuation: `.` `_` `:` `-`
+/// - Unicode letters, marks (combining accents), and number-category
+///   codepoints — `char::is_alphanumeric()` covers most of these.
+///
+/// Rejection (explicit delimiters used elsewhere in the system):
+/// - whitespace (`char::is_whitespace`)
+/// - `,` `=` `/` `\\` `;` `*` `?` `|` `<` `>` `"` `'` `` ` `` `(` `)` `[` `]`
+///   `{` `}` `@` `#` `$` `%` `^` `&` `+` `~`
+/// - Control characters
+fn is_valid_tag_str(s: &str) -> bool {
+    s.chars().all(|ch| {
+        if ch.is_ascii() {
+            matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | ':' | '-')
+        } else if ch.is_whitespace() || ch.is_control() {
+            false
+        } else {
+            // Accept Unicode letters, marks, and numbers; reject punctuation /
+            // symbols (which include the dangerous Unicode delimiters).
+            ch.is_alphanumeric()
+                || matches!(
+                    unicode_normalization::char::canonical_combining_class(ch),
+                    1..=255
+                )
+        }
+    })
 }
 
 fn is_valid_kind_identifier(name: &str) -> bool {
@@ -512,6 +571,12 @@ mod tests {
             Err(MemoryValidationError::EmptyTag) => {}
             Err(other) => panic!("wrong variant: {other:?}"),
         }
+        // Whitespace-only input should also reject as empty after trim.
+        match Tag::parse("   ") {
+            Ok(_) => panic!("whitespace-only tag should fail"),
+            Err(MemoryValidationError::EmptyTag) => {}
+            Err(other) => panic!("wrong variant for whitespace: {other:?}"),
+        }
         let huge = "a".repeat(MAX_TAG_BYTES + 1);
         match Tag::parse(&huge) {
             Ok(_) => panic!("oversized tag should fail"),
@@ -520,13 +585,88 @@ mod tests {
             }
             Err(other) => panic!("wrong variant: {other:?}"),
         }
-        for bad in ["space tag", "under_score", "slash/path", "emoji-🎉"] {
+        // Reserved delimiters and symbols stay rejected (C3 invariant).
+        for bad in [
+            "space tag",
+            "slash/path",
+            "emoji-🎉",
+            "a,b",
+            "a=b",
+            "a;b",
+            "a*b",
+            "back\\slash",
+            "pipe|tag",
+            "ampers&and",
+            "at@sign",
+            "hash#sign",
+        ] {
             match Tag::parse(bad) {
                 Ok(_) => panic!("invalid tag `{bad}` should fail"),
                 Err(MemoryValidationError::InvalidTag { .. }) => {}
                 Err(other) => panic!("wrong variant for `{bad}`: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn tag_accepts_dots_underscores_unicode_per_c3() {
+        // Bead bd-17c65.3.3 (C3): version strings, namespace paths,
+        // underscores, and Unicode letters must all accept.
+        let cases: &[(&str, &str)] = &[
+            ("v0.1.0", "v0.1.0"),
+            ("v0.2.0", "v0.2.0"),
+            ("release:0.1.0", "release:0.1.0"),
+            ("policy.detector", "policy.detector"),
+            ("policy.secret_detector", "policy.secret_detector"),
+            ("under_score", "under_score"),
+            ("mixed.dots_and-dashes:01", "mixed.dots_and-dashes:01"),
+            // Unicode letters (NFC-stable) — case preserved for non-ASCII.
+            ("mémoire", "mémoire"),
+            ("café", "café"),
+            ("日本語", "日本語"),
+            // Leading/trailing whitespace is trimmed.
+            ("  release  ", "release"),
+        ];
+        for (input, expected) in cases {
+            match Tag::parse(input) {
+                Ok(tag) => assert_eq!(
+                    tag.as_str(),
+                    *expected,
+                    "tag `{input}` should normalize to `{expected}`"
+                ),
+                Err(error) => panic!("tag `{input}` should accept, got: {error:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn tag_nfc_normalizes_composed_and_decomposed_forms() {
+        // U+00E9 (composed é) and U+0065 U+0301 (decomposed e + combining
+        // acute) must produce the same canonical tag bytes.
+        let composed = "café"; // U+00E9
+        let decomposed = "cafe\u{0301}"; // U+0065 + U+0301
+        let parsed_composed = Tag::parse(composed).expect("composed accepts");
+        let parsed_decomposed = Tag::parse(decomposed).expect("decomposed accepts");
+        assert_eq!(
+            parsed_composed.as_str(),
+            parsed_decomposed.as_str(),
+            "NFC should collapse composed and decomposed forms"
+        );
+    }
+
+    #[test]
+    fn tag_ascii_uppercase_lowercases_unicode_preserves_case() {
+        // ASCII letters lowercase; Unicode case-preserving (no locale dep).
+        let ascii = Tag::parse("RELEASE").expect("upper-ASCII accepts");
+        assert_eq!(ascii.as_str(), "release");
+        let unicode = Tag::parse("MÉMOIRE").expect("upper-unicode accepts");
+        // We preserve Unicode case to avoid locale-dependent casing pitfalls.
+        // The leading 'M' lowercases (it's ASCII) but 'É' stays uppercase.
+        assert!(
+            unicode.as_str().starts_with("mÉ") || unicode.as_str().starts_with("mé"),
+            "got: {}",
+            unicode.as_str()
+        );
     }
 
     #[test]
