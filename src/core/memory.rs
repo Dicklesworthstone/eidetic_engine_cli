@@ -1097,24 +1097,16 @@ fn parse_workflow_id(workflow_id: Option<&str>) -> Result<Option<String>, Domain
     Ok(Some(trimmed.to_owned()))
 }
 
-const REMEMBER_SECRET_PATTERNS: &[&str] = &[
-    "password",
-    "secret",
-    "api_key",
-    "apikey",
-    "api-key",
-    "token",
-    "bearer",
-    "authorization",
-    "credential",
-    "private_key",
-    "access_key",
-    "secret_key",
-    "database_url",
-    "connection_string",
-    "-----begin",
-];
-
+/// Validate that a memory's content is safe to persist.
+///
+/// Bead bd-17c65.3.1 (C1): the previous implementation also rejected any
+/// content containing the keywords `password`, `secret`, `token`,
+/// `credential`, etc. as substrings. This blocked legitimate meta-policy
+/// memories like "context packs must never include secrets" and async-
+/// runtime memories that mentioned "cancel token". The value-shape
+/// detector (`policy::redact_secret_like_content`) already catches real
+/// secret VALUES (API keys, JWTs, PEM blocks, high-entropy tokens) without
+/// flagging plain-English mentions. The keyword fallthrough is removed.
 fn validate_remember_policy(content: &str) -> Result<(), DomainError> {
     let redaction_report = crate::policy::redact_secret_like_content(content);
     if redaction_report.redacted {
@@ -1123,20 +1115,6 @@ fn validate_remember_policy(content: &str) -> Result<(), DomainError> {
                 "Refusing to persist memory content that contains secrets: {}.",
                 redaction_report.redacted_reasons.join(", ")
             ),
-            repair: Some(
-                "Redact the secret and run `ee remember` again with only durable evidence."
-                    .to_owned(),
-            ),
-        });
-    }
-    let lowered = content.to_ascii_lowercase();
-    if REMEMBER_SECRET_PATTERNS
-        .iter()
-        .any(|pattern| lowered.contains(pattern))
-    {
-        return Err(DomainError::PolicyDenied {
-            message: "Refusing to persist memory content that looks like it contains a secret."
-                .to_owned(),
             repair: Some(
                 "Redact the secret and run `ee remember` again with only durable evidence."
                     .to_owned(),
@@ -5550,5 +5528,83 @@ mod tests {
     fn dedupe_check_report_version_matches_package() -> TestResult {
         let report = DedupeCheckReport::no_duplicates(0);
         ensure(report.version, env!("CARGO_PKG_VERSION"), "version")
+    }
+
+    // ========================================================================
+    // Bead bd-17c65.3.1 (C1) — Validate remember policy: value-shape, not keyword
+    // ========================================================================
+
+    /// Plain-English mentions of secret/token/credentials must persist.
+    /// The 2026-05-10 walkthrough surfaced these as the worst false-
+    /// positives in the old keyword detector. Lock them in as accepted
+    /// post-C1.
+    ///
+    /// Note: we deliberately do NOT include phrases like "Bearer auth"
+    /// or "Authorization header" here — those still trip the existing
+    /// value-shape detector's key-value patterns (`bearer <value>`,
+    /// `authorization: ...`). The value-shape detector's tuning is its
+    /// own scope (potentially C2 bypass flag or C5 corpora calibration).
+    /// C1's contract is narrower: free-text mentions of `secret`,
+    /// `token`, `credentials` as nouns must pass.
+    #[test]
+    fn validate_remember_policy_accepts_meta_policy_phrases() {
+        let acceptable = [
+            // The four 2026-05-10 walkthrough cases that the keyword
+            // detector blocked:
+            "Context packs must never include secrets. Redaction is enforced.",
+            "Never embed credentials in stored memories.",
+            "Cancellation test for ee context hung once because Scope::spawn didn't propagate the cancel token; fixed via budget.",
+            // Additional plain-English mentions that the keyword detector
+            // would have caught but value-shape lets through:
+            "PEM-encoded keys live in the keystore module.",
+        ];
+        for content in acceptable {
+            match validate_remember_policy(content) {
+                Ok(()) => {}
+                Err(error) => panic!("C1 false positive: `{content}` rejected: {error:?}"),
+            }
+        }
+    }
+
+    /// Real secret VALUES must still be rejected. These are synthetic
+    /// look-alikes (never real keys) covering format-prefix patterns the
+    /// existing value-shape detector definitively catches.
+    #[test]
+    fn validate_remember_policy_rejects_real_secret_values() {
+        let must_reject = [
+            // OpenAI-style — covered by raw_api_tokens regex
+            "API_KEY=sk-FAKEabc123def456ghi789jkl012",
+            // AWS access key — covered by key=value with AWS_ prefix
+            "Set AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE for the build.",
+            // PEM block — covered by redact_pem_blocks
+            "-----BEGIN PRIVATE KEY-----\nMIIEvQIB...synthetic body...\n-----END PRIVATE KEY-----",
+            // URL with embedded password — covered by redact_url_passwords
+            "DATABASE_URL=postgres://admin:SuperSecretPass123!@db.example.com/prod",
+        ];
+        for content in must_reject {
+            match validate_remember_policy(content) {
+                Ok(()) => panic!("C1 false negative: `{content}` should reject"),
+                Err(DomainError::PolicyDenied { .. }) => {}
+                Err(other) => panic!("wrong error variant for `{content}`: {other:?}"),
+            }
+        }
+    }
+
+    /// Structurally-fine content from the 2026-05-10 reference corpus
+    /// must not trip the detector (regression guard).
+    #[test]
+    fn validate_remember_policy_accepts_benign_corpus_content() {
+        for content in [
+            "Run cargo fmt --check before cutting any release tag; CI rejects unformatted code.",
+            "Forbidden deps: tokio, rusqlite, petgraph, hyper, axum, tower, reqwest, sqlx, diesel, sea-orm — CI greps for them.",
+            "ee's core jobs are Ingest, Retrieve, Pack, Learn, Maintain.",
+            "JSON output goes to stdout; human diagnostics go to stderr.",
+            "All work lands on main. No worktrees. No feature branches.",
+        ] {
+            match validate_remember_policy(content) {
+                Ok(()) => {}
+                Err(error) => panic!("benign content `{content}` rejected: {error:?}"),
+            }
+        }
     }
 }

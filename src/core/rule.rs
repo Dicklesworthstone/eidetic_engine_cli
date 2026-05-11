@@ -3689,33 +3689,23 @@ fn rule_read_usage_error(message: String, repair: &str) -> DomainError {
     }
 }
 
-const RULE_SECRET_PATTERNS: &[&str] = &[
-    "password",
-    "secret",
-    "api_key",
-    "apikey",
-    "api-key",
-    "token",
-    "bearer",
-    "authorization",
-    "credential",
-    "private_key",
-    "access_key",
-    "secret_key",
-    "database_url",
-    "connection_string",
-    "-----begin",
-];
-
+/// Validate that a rule's content is safe to persist.
+///
+/// Bead bd-17c65.3.1 (C1): the previous implementation rejected on any
+/// occurrence of the keywords `password`, `secret`, `token`, etc. as
+/// substrings, blocking legitimate meta-policy rules and rules that
+/// referenced async cancellation tokens. Replaced with the value-shape
+/// detector `policy::redact_secret_like_content` which catches real
+/// secret values (API keys, JWTs, PEM blocks, high-entropy tokens)
+/// without flagging plain-English mentions.
 fn validate_rule_policy(content: &str) -> Result<(), DomainError> {
-    let lowered = content.to_ascii_lowercase();
-    if RULE_SECRET_PATTERNS
-        .iter()
-        .any(|pattern| lowered.contains(pattern))
-    {
+    let redaction_report = crate::policy::redact_secret_like_content(content);
+    if redaction_report.redacted {
         return Err(DomainError::PolicyDenied {
-            message: "Refusing to persist rule content that looks like it contains a secret."
-                .to_owned(),
+            message: format!(
+                "Refusing to persist rule content that contains secrets: {}.",
+                redaction_report.redacted_reasons.join(", ")
+            ),
             repair: Some(
                 "Redact the secret and run `ee rule add` again with only durable guidance."
                     .to_owned(),
