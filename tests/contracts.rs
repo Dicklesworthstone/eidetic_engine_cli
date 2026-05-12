@@ -126,3 +126,6 @@ mod schema_roundtrip;
 
 #[path = "contracts/audit_event_coverage.rs"]
 mod audit_event_coverage;
+
+#[path = "contracts/migrate_command_surface.rs"]
+mod migrate_command_surface;
