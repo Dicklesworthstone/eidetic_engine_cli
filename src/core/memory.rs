@@ -5699,7 +5699,7 @@ mod tests {
         let result = remember_memory(&RememberMemoryOptions {
             workspace_path: temp.path(),
             database_path: None,
-            content: &secret_like_content,
+            content: secret_like_content,
             workflow_id: None,
             level: "procedural",
             kind: "rule",
