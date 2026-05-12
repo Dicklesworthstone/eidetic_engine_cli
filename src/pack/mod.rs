@@ -20,6 +20,7 @@ pub const DEFAULT_MMR_RELEVANCE_WEIGHT: f32 = 0.75;
 pub const FACILITY_LOCATION_RELEVANCE_WEIGHT: f32 = 0.70;
 pub const FACILITY_LOCATION_UTILITY_WEIGHT: f32 = 0.30;
 pub const FACILITY_LOCATION_EPSILON: f32 = 0.000_001;
+pub const DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR: f32 = 0.05;
 pub const MAX_PACK_SKIPPED_ITEMS: usize = 50;
 
 /// Similarity floor applied when two candidates share the same `diversity_key`
@@ -689,6 +690,7 @@ pub struct PackCandidate {
     pub why: String,
     pub diversity_key: Option<String>,
     pub trust: PackTrustSignal,
+    pub tombstoned_at: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -799,6 +801,7 @@ impl PackCandidate {
             why,
             diversity_key: None,
             trust: PackTrustSignal::default(),
+            tombstoned_at: None,
         })
     }
 
@@ -814,6 +817,15 @@ impl PackCandidate {
     #[must_use]
     pub fn with_trust_signal(mut self, trust: PackTrustSignal) -> Self {
         self.trust = trust;
+        self
+    }
+
+    #[must_use]
+    pub fn with_tombstoned_at(mut self, tombstoned_at: impl Into<String>) -> Self {
+        let value = tombstoned_at.into();
+        if !value.trim().is_empty() {
+            self.tombstoned_at = Some(value.trim().to_string());
+        }
         self
     }
 }
@@ -934,6 +946,7 @@ impl PackDraft {
 
         let mut token_budget_exceeded = 0_usize;
         let mut redundant_candidates = 0_usize;
+        let mut below_relevance_floor = 0_usize;
         for omission in &self.omitted {
             match omission.reason {
                 PackOmissionReason::TokenBudgetExceeded => {
@@ -942,9 +955,10 @@ impl PackDraft {
                 PackOmissionReason::RedundantCandidate => {
                     redundant_candidates = redundant_candidates.saturating_add(1);
                 }
-                PackOmissionReason::BelowRelevanceFloor
-                | PackOmissionReason::ExcludedByPolicy
-                | PackOmissionReason::ExcludedByFilter => {}
+                PackOmissionReason::BelowRelevanceFloor => {
+                    below_relevance_floor = below_relevance_floor.saturating_add(1);
+                }
+                PackOmissionReason::ExcludedByPolicy | PackOmissionReason::ExcludedByFilter => {}
             }
         }
 
@@ -959,6 +973,7 @@ impl PackDraft {
             provenance_source_count,
             provenance_sources_per_item: count_ratio(provenance_source_count, item_count),
             provenance_complete: self.items.iter().all(|item| !item.provenance.is_empty()),
+            coverage_fill_count: self.coverage_fill_count(),
             sections: PackSection::all()
                 .into_iter()
                 .map(|section| self.section_quality_metric(section))
@@ -966,6 +981,7 @@ impl PackDraft {
             omissions: PackOmissionMetrics {
                 token_budget_exceeded,
                 redundant_candidates,
+                below_relevance_floor,
             },
         }
     }
@@ -1009,6 +1025,14 @@ impl PackDraft {
         skipped.sort_by(|left, right| compare_omissions_for_output(left, right));
         skipped.truncate(MAX_PACK_SKIPPED_ITEMS);
         skipped
+    }
+
+    #[must_use]
+    pub fn coverage_fill_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| item.selected_in == PackSelectionPhase::CoverageFill)
+            .count()
     }
 
     #[must_use]
@@ -1134,6 +1158,7 @@ pub struct PackQualityMetrics {
     pub provenance_source_count: usize,
     pub provenance_sources_per_item: f32,
     pub provenance_complete: bool,
+    pub coverage_fill_count: usize,
     pub sections: Vec<PackSectionMetric>,
     pub omissions: PackOmissionMetrics,
 }
@@ -1149,6 +1174,7 @@ pub struct PackSectionMetric {
 pub struct PackOmissionMetrics {
     pub token_budget_exceeded: usize,
     pub redundant_candidates: usize,
+    pub below_relevance_floor: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1742,6 +1768,30 @@ impl fmt::Display for ContextResponseSeverity {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackSelectionPhase {
+    StrictMmr,
+    CoverageFill,
+    FacilityLocation,
+}
+
+impl PackSelectionPhase {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StrictMmr => "strict_mmr",
+            Self::CoverageFill => "coverage_fill",
+            Self::FacilityLocation => "facility_location",
+        }
+    }
+}
+
+impl fmt::Display for PackSelectionPhase {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PackDraftItem {
     pub rank: u32,
@@ -1756,6 +1806,8 @@ pub struct PackDraftItem {
     pub diversity_key: Option<String>,
     pub trust: PackTrustSignal,
     pub redactions: Vec<PackItemRedaction>,
+    pub tombstoned_at: Option<String>,
+    pub selected_in: PackSelectionPhase,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1780,6 +1832,7 @@ impl PackDraftItem {
         rank: u32,
         candidate: PackCandidate,
         redactions: Vec<PackItemRedaction>,
+        selected_in: PackSelectionPhase,
     ) -> Self {
         let PackCandidate {
             memory_id,
@@ -1792,6 +1845,7 @@ impl PackDraftItem {
             why,
             diversity_key,
             trust,
+            tombstoned_at,
         } = candidate;
         Self {
             rank,
@@ -1806,6 +1860,8 @@ impl PackDraftItem {
             diversity_key,
             trust,
             redactions,
+            tombstoned_at,
+            selected_in,
         }
     }
 
@@ -1830,6 +1886,7 @@ fn redact_pack_candidate(candidate: PackCandidate) -> (PackCandidate, Vec<PackIt
         why,
         diversity_key,
         trust,
+        tombstoned_at,
     } = candidate;
     let (content, redactions) = redact_pack_item_content(content);
     let estimated_tokens = if redactions.is_empty() {
@@ -1849,6 +1906,7 @@ fn redact_pack_candidate(candidate: PackCandidate) -> (PackCandidate, Vec<PackIt
             why,
             diversity_key,
             trust,
+            tombstoned_at,
         },
         redactions,
     )
@@ -1885,13 +1943,27 @@ impl PackOmission {
         reason: PackOmissionReason,
         could_fit_with_budget: Option<u32>,
     ) -> Self {
+        Self::from_candidate_at(
+            candidate,
+            reason,
+            PackRejectionStage::Selection,
+            could_fit_with_budget,
+        )
+    }
+
+    fn from_candidate_at(
+        candidate: &PackCandidate,
+        reason: PackOmissionReason,
+        rejected_at: PackRejectionStage,
+        could_fit_with_budget: Option<u32>,
+    ) -> Self {
         Self {
             memory_id: candidate.memory_id,
             estimated_tokens: candidate.estimated_tokens,
             relevance: candidate.relevance,
             utility: candidate.utility,
             reason,
-            rejected_at: PackRejectionStage::Selection,
+            rejected_at,
             feasible: false,
             could_fit_with_budget,
         }
@@ -2207,63 +2279,77 @@ fn assemble_mmr_draft(
     let quotas = SectionQuotas::for_profile(profile, budget.max_tokens());
 
     let mut used_tokens = 0_u32;
+    let mut section_usage = SectionTokenUsage::default();
     let mut next_rank = 1_u32;
     let mut selected_signatures = Vec::new();
     let mut items: Vec<PackDraftItem> = Vec::new();
     let mut omitted = Vec::new();
     let mut steps = Vec::new();
     let mut objective_value = 0.0_f32;
+    let mut coverage_fill_candidates = Vec::new();
 
     while !candidates.is_empty() {
         let candidate_index = select_next_candidate_index(&candidates, &selected_signatures);
         let selection = candidates.remove(candidate_index);
-        if is_redundant(&selection.signature, &selected_signatures) {
-            omitted.push(PackOmission::from_candidate(
-                &selection.candidate,
-                PackOmissionReason::RedundantCandidate,
-                None,
-            ));
+        let marginal_gain = strict_mmr_marginal_gain(&selection, &selected_signatures);
+        if marginal_gain <= 0.0 {
+            coverage_fill_candidates.push(selection);
             continue;
         }
 
-        let section_used: u32 = items
-            .iter()
-            .filter(|i| i.section == selection.candidate.section)
-            .map(|i| i.estimated_tokens)
-            .sum();
+        let section_used = section_usage.tokens_for(selection.candidate.section);
 
-        let section_has_room = quotas.has_room(
-            selection.candidate.section,
-            section_used,
-            selection.candidate.estimated_tokens,
-        );
-
-        match used_tokens.checked_add(selection.candidate.estimated_tokens) {
-            Some(total) if total <= budget.max_tokens() && section_has_room => {
-                let rank = next_rank;
-                next_rank = next_rank
-                    .checked_add(1)
-                    .ok_or(PackValidationError::CandidateRankOverflow)?;
-                let marginal_gain = redundancy_adjusted_score(&selection, &selected_signatures);
-                objective_value += marginal_gain.max(0.0);
-                steps.push(PackSelectionStep {
-                    rank,
-                    memory_id: selection.candidate.memory_id,
-                    marginal_gain,
-                    objective_value,
-                    token_cost: selection.candidate.estimated_tokens,
-                    feasible: true,
-                    covered_features: certificate_features(&selection.candidate),
-                });
-                used_tokens = total;
-                let candidate = selection.candidate;
-                let redactions = selection.redactions;
-                selected_signatures.push(selection.signature);
-                items.push(PackDraftItem::from_selected_candidate(
-                    rank, candidate, redactions,
-                ));
+        if facility_candidate_is_feasible(
+            &selection.candidate,
+            used_tokens,
+            budget,
+            &quotas,
+            &section_usage,
+        ) {
+            match used_tokens.checked_add(selection.candidate.estimated_tokens) {
+                Some(total) => {
+                    let rank = next_rank;
+                    next_rank = next_rank
+                        .checked_add(1)
+                        .ok_or(PackValidationError::CandidateRankOverflow)?;
+                    objective_value += marginal_gain.max(0.0);
+                    steps.push(PackSelectionStep {
+                        rank,
+                        memory_id: selection.candidate.memory_id,
+                        marginal_gain,
+                        objective_value,
+                        token_cost: selection.candidate.estimated_tokens,
+                        feasible: true,
+                        covered_features: certificate_features(&selection.candidate),
+                    });
+                    used_tokens = total;
+                    let candidate = selection.candidate;
+                    let redactions = selection.redactions;
+                    section_usage.add_candidate(&candidate);
+                    selected_signatures.push(selection.signature);
+                    items.push(PackDraftItem::from_selected_candidate(
+                        rank,
+                        candidate,
+                        redactions,
+                        PackSelectionPhase::StrictMmr,
+                    ));
+                }
+                None => {
+                    omitted.push(PackOmission::from_candidate(
+                        &selection.candidate,
+                        PackOmissionReason::TokenBudgetExceeded,
+                        Some(minimal_budget_for_candidate(
+                            profile,
+                            used_tokens,
+                            section_used,
+                            selection.candidate.section,
+                            selection.candidate.estimated_tokens,
+                        )),
+                    ));
+                }
             }
-            _ => omitted.push(PackOmission::from_candidate(
+        } else {
+            omitted.push(PackOmission::from_candidate(
                 &selection.candidate,
                 PackOmissionReason::TokenBudgetExceeded,
                 Some(minimal_budget_for_candidate(
@@ -2273,7 +2359,96 @@ fn assemble_mmr_draft(
                     selection.candidate.section,
                     selection.candidate.estimated_tokens,
                 )),
-            )),
+            ));
+        }
+    }
+
+    coverage_fill_candidates
+        .sort_by(|left, right| compare_candidates(&left.candidate, &right.candidate));
+    let coverage_fill_limit = items.len();
+    let mut coverage_fill_count = 0_usize;
+    for selection in coverage_fill_candidates {
+        if selection.candidate.relevance.into_inner() < DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR {
+            omitted.push(PackOmission::from_candidate_at(
+                &selection.candidate,
+                PackOmissionReason::BelowRelevanceFloor,
+                PackRejectionStage::CandidateFilter,
+                None,
+            ));
+            continue;
+        }
+        if coverage_fill_count >= coverage_fill_limit {
+            omitted.push(PackOmission::from_candidate(
+                &selection.candidate,
+                PackOmissionReason::RedundantCandidate,
+                None,
+            ));
+            continue;
+        }
+
+        let section_used = section_usage.tokens_for(selection.candidate.section);
+        if facility_candidate_is_feasible(
+            &selection.candidate,
+            used_tokens,
+            budget,
+            &quotas,
+            &section_usage,
+        ) {
+            match used_tokens.checked_add(selection.candidate.estimated_tokens) {
+                Some(total) => {
+                    let rank = next_rank;
+                    next_rank = next_rank
+                        .checked_add(1)
+                        .ok_or(PackValidationError::CandidateRankOverflow)?;
+                    let marginal_gain = strict_mmr_marginal_gain(&selection, &selected_signatures);
+                    steps.push(PackSelectionStep {
+                        rank,
+                        memory_id: selection.candidate.memory_id,
+                        marginal_gain,
+                        objective_value,
+                        token_cost: selection.candidate.estimated_tokens,
+                        feasible: true,
+                        covered_features: certificate_features(&selection.candidate),
+                    });
+                    used_tokens = total;
+                    let candidate = selection.candidate;
+                    let redactions = selection.redactions;
+                    section_usage.add_candidate(&candidate);
+                    selected_signatures.push(selection.signature);
+                    coverage_fill_count = coverage_fill_count.saturating_add(1);
+                    items.push(PackDraftItem::from_selected_candidate(
+                        rank,
+                        candidate,
+                        redactions,
+                        PackSelectionPhase::CoverageFill,
+                    ));
+                }
+                None => {
+                    omitted.push(PackOmission::from_candidate(
+                        &selection.candidate,
+                        PackOmissionReason::TokenBudgetExceeded,
+                        Some(minimal_budget_for_candidate(
+                            profile,
+                            used_tokens,
+                            section_used,
+                            selection.candidate.section,
+                            selection.candidate.estimated_tokens,
+                        )),
+                    ));
+                }
+            }
+        } else {
+            omitted.push(PackOmission::from_candidate(
+                &selection.candidate,
+                PackOmissionReason::TokenBudgetExceeded,
+                Some(minimal_budget_for_candidate(
+                    profile,
+                    used_tokens,
+                    section_used,
+                    selection.candidate.section,
+                    selection.candidate.estimated_tokens,
+                )),
+            ));
         }
     }
 
@@ -2405,7 +2580,10 @@ fn assemble_facility_location_draft(
             covered_features,
         });
         items.push(PackDraftItem::from_selected_candidate(
-            rank, candidate, redactions,
+            rank,
+            candidate,
+            redactions,
+            PackSelectionPhase::FacilityLocation,
         ));
     }
 
@@ -2629,11 +2807,19 @@ fn compare_candidates_with_redundancy(
     right: &MmrCandidate,
     selected: &[CandidateSignature],
 ) -> Ordering {
-    let left_score = redundancy_adjusted_score(left, selected);
-    let right_score = redundancy_adjusted_score(right, selected);
+    let left_score = strict_mmr_marginal_gain(left, selected);
+    let right_score = strict_mmr_marginal_gain(right, selected);
     right_score
         .total_cmp(&left_score)
         .then_with(|| compare_candidates(&left.candidate, &right.candidate))
+}
+
+fn strict_mmr_marginal_gain(candidate: &MmrCandidate, selected: &[CandidateSignature]) -> f32 {
+    if is_redundant(&candidate.signature, selected) {
+        0.0
+    } else {
+        redundancy_adjusted_score(candidate, selected)
+    }
 }
 
 fn redundancy_adjusted_score(candidate: &MmrCandidate, selected: &[CandidateSignature]) -> f32 {
@@ -3798,8 +3984,9 @@ mod tests {
         ContextResponseDegradation, ContextResponseSeverity, DEFAULT_CHARS_PER_TOKEN,
         FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR, PackCacheGovernor, PackCacheStatus,
         PackCandidate, PackCandidateInput, PackHotset, PackHotsetEntry, PackItemRedaction,
-        PackOmissionReason, PackProvenance, PackSection, PackSelectionObjective, PackTrustSignal,
-        PackValidationError, SectionQuota, SectionQuotas, TokenBudget, TokenEstimationStrategy,
+        PackOmissionReason, PackProvenance, PackRejectionStage, PackSection,
+        PackSelectionObjective, PackSelectionPhase, PackTrustSignal, PackValidationError,
+        SectionQuota, SectionQuotas, TokenBudget, TokenEstimationStrategy,
         WORD_HEURISTIC_TOKEN_MULTIPLIER_DENOMINATOR, WORD_HEURISTIC_TOKEN_MULTIPLIER_NUMERATOR,
         assemble_draft, assemble_draft_with_cache_governor, assemble_draft_with_profile,
         candidate_similarity, estimate_character_heuristic_tokens, estimate_tokens,
@@ -5256,14 +5443,14 @@ mod tests {
         )?
         .with_diversity_key("release-formatting");
         let redundant =
-            candidate_in_section(2, PackSection::ProceduralRules, 0.9, 0.6, 5, shared_content)?
+            candidate_in_section(2, PackSection::ProceduralRules, 0.9, 0.6, 4, shared_content)?
                 .with_diversity_key("release-formatting");
         let evidence = candidate_in_section(
             3,
             PackSection::Evidence,
             0.8,
             0.7,
-            12,
+            9,
             "The release checklist includes formatting evidence.",
         )?;
         let over_budget = candidate_in_section(
@@ -5276,7 +5463,7 @@ mod tests {
         )?;
 
         let draft = assemble_draft_with_profile(
-            ContextPackProfile::Thorough,
+            ContextPackProfile::Balanced,
             "prepare release",
             budget,
             vec![redundant, over_budget, evidence, first],
@@ -5284,20 +5471,20 @@ mod tests {
         .map_err(|error| format!("draft rejected: {error:?}"))?;
         let metrics = draft.quality_metrics();
 
-        ensure_equal(&metrics.item_count, &2, "metric item count")?;
-        ensure_equal(&metrics.omitted_count, &2, "metric omitted count")?;
-        ensure_equal(&metrics.used_tokens, &22, "metric used tokens")?;
+        ensure_equal(&metrics.item_count, &3, "metric item count")?;
+        ensure_equal(&metrics.omitted_count, &1, "metric omitted count")?;
+        ensure_equal(&metrics.used_tokens, &23, "metric used tokens")?;
         ensure_equal(&metrics.max_tokens, &48, "metric max tokens")?;
         ensure_close(
             metrics.budget_utilization,
-            22.0_f32 / 48.0_f32,
+            23.0_f32 / 48.0_f32,
             "budget utilization",
         )?;
         ensure_close(metrics.average_relevance, 0.9, "average relevance")?;
         ensure_close(metrics.average_utility, 0.6, "average utility")?;
         ensure_equal(
             &metrics.provenance_source_count,
-            &2,
+            &3,
             "provenance source count",
         )?;
         ensure_close(
@@ -5309,14 +5496,19 @@ mod tests {
             metrics.provenance_complete,
             "selected items have provenance",
         )?;
+        ensure_equal(
+            &metrics.coverage_fill_count,
+            &1,
+            "coverage fill metric count",
+        )?;
 
         let procedural = metrics
             .sections
             .iter()
             .find(|metric| metric.section == PackSection::ProceduralRules)
             .ok_or_else(|| "missing procedural section metric".to_string())?;
-        ensure_equal(&procedural.item_count, &1, "procedural item count")?;
-        ensure_equal(&procedural.used_tokens, &10, "procedural tokens")?;
+        ensure_equal(&procedural.item_count, &2, "procedural item count")?;
+        ensure_equal(&procedural.used_tokens, &14, "procedural tokens")?;
 
         let evidence = metrics
             .sections
@@ -5324,7 +5516,7 @@ mod tests {
             .find(|metric| metric.section == PackSection::Evidence)
             .ok_or_else(|| "missing evidence section metric".to_string())?;
         ensure_equal(&evidence.item_count, &1, "evidence item count")?;
-        ensure_equal(&evidence.used_tokens, &12, "evidence tokens")?;
+        ensure_equal(&evidence.used_tokens, &9, "evidence tokens")?;
 
         ensure_equal(
             &metrics.omissions.token_budget_exceeded,
@@ -5333,8 +5525,13 @@ mod tests {
         )?;
         ensure_equal(
             &metrics.omissions.redundant_candidates,
-            &1,
+            &0,
             "redundant omission count",
+        )?;
+        ensure_equal(
+            &metrics.omissions.below_relevance_floor,
+            &0,
+            "below-floor omission count",
         )
     }
 
@@ -5363,6 +5560,11 @@ mod tests {
             0.0,
             "empty provenance density",
         )?;
+        ensure_equal(
+            &metrics.coverage_fill_count,
+            &0,
+            "empty coverage fill count",
+        )?;
         ensure(
             metrics.provenance_complete,
             "empty packs have no missing provenance entries",
@@ -5389,6 +5591,11 @@ mod tests {
             &metrics.omissions.redundant_candidates,
             &0,
             "empty redundant omissions",
+        )?;
+        ensure_equal(
+            &metrics.omissions.below_relevance_floor,
+            &0,
+            "empty below-floor omissions",
         )
     }
 
@@ -5660,28 +5867,61 @@ mod tests {
         let ids: Vec<MemoryId> = draft.items.iter().map(|item| item.memory_id).collect();
         ensure_equal(
             &ids,
-            &vec![memory_id(1), memory_id(3)],
-            "MMR should select the best candidate, then the diverse candidate",
+            &vec![memory_id(1), memory_id(3), memory_id(2)],
+            "MMR should select strict candidates first, then fill with the redundant candidate",
         )?;
-        ensure_equal(&draft.used_tokens, &20, "used tokens after redundancy")?;
-        ensure_equal(&draft.omitted.len(), &1, "one redundant candidate omitted")?;
+        ensure_equal(&draft.used_tokens, &30, "used tokens after coverage fill")?;
+        ensure_equal(
+            &draft.items.get(2).map(|item| item.selected_in),
+            &Some(PackSelectionPhase::CoverageFill),
+            "redundant candidate selected by coverage fill",
+        )?;
+        ensure_equal(
+            &draft.omitted.len(),
+            &0,
+            "no candidate omitted when fill can use budget",
+        )
+    }
+
+    #[test]
+    fn coverage_fill_respects_relevance_floor() -> TestResult {
+        let budget =
+            TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let shared_content = "Run cargo fmt --check before release.";
+        let first = candidate_with_content(1, 1.0, 0.5, 10, shared_content)?;
+        let below_floor_duplicate = candidate_with_content(2, 0.04, 0.5, 10, shared_content)?;
+
+        let draft = assemble_draft(
+            "prepare release",
+            budget,
+            vec![below_floor_duplicate, first],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        ensure_equal(&draft.items.len(), &1, "below-floor duplicate not filled")?;
+        ensure_equal(&draft.omitted.len(), &1, "below-floor duplicate skipped")?;
         ensure_equal(
             &draft.omitted.first().map(|omission| omission.memory_id),
             &Some(memory_id(2)),
-            "redundant candidate id",
+            "below-floor duplicate id",
         )?;
         ensure_equal(
             &draft.omitted.first().map(|omission| omission.reason),
-            &Some(PackOmissionReason::RedundantCandidate),
-            "redundant omission reason",
+            &Some(PackOmissionReason::BelowRelevanceFloor),
+            "below-floor omission reason",
         )?;
         ensure_equal(
             &draft
                 .omitted
                 .first()
                 .map(|omission| omission.reason.as_str()),
-            &Some("redundant_candidate"),
-            "redundant omission reason wire name",
+            &Some("below_relevance_floor"),
+            "below-floor omission reason wire name",
+        )?;
+        ensure_equal(
+            &draft.omitted.first().map(|omission| omission.rejected_at),
+            &Some(PackRejectionStage::CandidateFilter),
+            "below-floor rejection stage",
         )
     }
 
@@ -6098,6 +6338,7 @@ mod tests {
                 offset.saturating_add(1),
                 candidate,
                 Vec::new(),
+                PackSelectionPhase::StrictMmr,
             ));
         }
 
@@ -6209,7 +6450,7 @@ mod tests {
     }
 
     #[test]
-    fn assemble_draft_deduplicates_exact_normalized_content_without_key() -> TestResult {
+    fn assemble_draft_routes_exact_normalized_duplicate_to_coverage_fill() -> TestResult {
         let budget = match TokenBudget::new(100) {
             Ok(budget) => budget,
             Err(error) => return Err(format!("budget rejected: {error:?}")),
@@ -6227,17 +6468,26 @@ mod tests {
         let draft = assemble_draft("prepare release", budget, vec![duplicate, first])
             .map_err(|error| format!("draft rejected: {error:?}"))?;
 
-        ensure_equal(&draft.items.len(), &1, "only one exact duplicate selected")?;
+        ensure_equal(&draft.items.len(), &2, "duplicate selected in fill pass")?;
         ensure_equal(
             &draft.items.first().map(|item| item.memory_id),
             &Some(memory_id(1)),
             "highest relevance duplicate selected",
         )?;
-        ensure_equal(&draft.omitted.len(), &1, "one exact duplicate omitted")?;
         ensure_equal(
-            &draft.omitted.first().map(|omission| omission.reason),
-            &Some(PackOmissionReason::RedundantCandidate),
-            "exact duplicate omission reason",
+            &draft.items.get(1).map(|item| item.memory_id),
+            &Some(memory_id(2)),
+            "lower relevance duplicate selected by coverage fill",
+        )?;
+        ensure_equal(
+            &draft.items.get(1).map(|item| item.selected_in),
+            &Some(PackSelectionPhase::CoverageFill),
+            "duplicate selection phase",
+        )?;
+        ensure_equal(
+            &draft.omitted.len(),
+            &0,
+            "no exact duplicate omitted when fill can use budget",
         )
     }
 

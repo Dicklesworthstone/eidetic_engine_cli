@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
+
 use crate::db::{CreateAuditInput, DbConnection, audit_actions, generate_audit_id};
 use crate::obs::audit_events::query_hash as audit_query_hash;
 
@@ -59,6 +61,10 @@ pub struct SearchOptions {
     pub limit: u32,
     pub speed: SpeedMode,
     pub explain: bool,
+    /// Include tombstoned memories in result hits. Default command behavior
+    /// excludes tombstoned memories so stale search-index documents cannot
+    /// silently re-enter active retrieval.
+    pub include_tombstoned: bool,
     /// Minimum score (0.0..=1.0) for a hit to be returned. `None` falls
     /// back to [`DEFAULT_RELEVANCE_FLOOR`]. Set to `Some(0.0)` to disable.
     /// Bead bd-17c65.2.1 (B1).
@@ -451,6 +457,59 @@ impl SearchDegradation {
     }
 
     #[must_use]
+    fn tombstoned_filtered(filtered: usize) -> Self {
+        Self {
+            code: "tombstoned_filtered".to_string(),
+            severity: "low".to_string(),
+            message: format!(
+                "Excluded {filtered} tombstoned memor{suffix} from search results. Pass --include-tombstoned to inspect them.",
+                suffix = if filtered == 1 { "y" } else { "ies" },
+            ),
+            repair: Some("ee search <query> --include-tombstoned --json".to_string()),
+        }
+    }
+
+    #[must_use]
+    fn tombstoned_in_results(included: usize) -> Self {
+        Self {
+            code: "tombstoned_in_results".to_string(),
+            severity: "low".to_string(),
+            message: format!(
+                "Search results include {included} tombstoned memor{suffix} because --include-tombstoned was requested.",
+                suffix = if included == 1 { "y" } else { "ies" },
+            ),
+            repair: None,
+        }
+    }
+
+    #[must_use]
+    fn expired_filtered(filtered: usize) -> Self {
+        Self {
+            code: "expired_filtered".to_string(),
+            severity: "low".to_string(),
+            message: format!(
+                "Excluded {filtered} expired memor{suffix} from search results because valid_to is in the past.",
+                suffix = if filtered == 1 { "y" } else { "ies" },
+            ),
+            repair: Some(
+                "Use `ee why <memory-id> --json` to inspect validity metadata.".to_string(),
+            ),
+        }
+    }
+
+    #[must_use]
+    fn tombstone_visibility_unavailable(error: &str) -> Self {
+        Self {
+            code: "tombstone_visibility_unavailable".to_string(),
+            severity: "medium".to_string(),
+            message: format!(
+                "Search could not verify tombstone visibility against the memory database: {error}"
+            ),
+            repair: Some("ee doctor --json".to_string()),
+        }
+    }
+
+    #[must_use]
     fn data_json(&self) -> serde_json::Value {
         serde_json::json!({
             "code": self.code,
@@ -624,6 +683,15 @@ impl SearchReport {
                     }
                     if let Some(ref meta) = hit.metadata {
                         obj_map.insert("metadata".to_string(), meta.clone());
+                        if metadata_bool(meta, "tombstoned").unwrap_or(false) {
+                            obj_map.insert("tombstoned".to_string(), serde_json::json!(true));
+                            if let Some(tombstoned_at) = metadata_string(meta, "tombstoned_at") {
+                                obj_map.insert(
+                                    "tombstonedAt".to_string(),
+                                    serde_json::json!(tombstoned_at),
+                                );
+                            }
+                        }
                     }
                     if let Some(ref explanation) = hit.explanation {
                         let factors: Vec<serde_json::Value> = explanation
@@ -852,6 +920,10 @@ fn metadata_string<'a>(metadata: &'a serde_json::Value, key: &str) -> Option<&'a
         .get(key)
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty())
+}
+
+fn metadata_bool(metadata: &serde_json::Value, key: &str) -> Option<bool> {
+    metadata.get(key).and_then(serde_json::Value::as_bool)
 }
 
 impl RetrievalMetrics {
@@ -1391,8 +1463,9 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
             let (above_floor, below_floor): (Vec<_>, Vec<_>) = raw_hits
                 .into_iter()
                 .partition(|hit| hit.score.is_finite() && hit.score >= floor);
-            let kept = above_floor.len();
             let dropped = below_floor.len();
+            let above_floor = apply_tombstone_visibility(options, above_floor, &mut degraded);
+            let kept = above_floor.len();
 
             // Surface dedupe count as a low-severity info signal when
             // it fired; agents reading the metrics can correlate with
@@ -2122,6 +2195,95 @@ fn search_sync(
     }
 }
 
+fn apply_tombstone_visibility(
+    options: &SearchOptions,
+    hits: Vec<SearchHit>,
+    degraded: &mut Vec<SearchDegradation>,
+) -> Vec<SearchHit> {
+    if hits.is_empty() {
+        return hits;
+    }
+
+    let explicit_database_path = options.database_path.is_some();
+    let database_path = options
+        .database_path
+        .clone()
+        .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
+    if !explicit_database_path && !database_path.exists() {
+        return hits;
+    }
+    let connection = match DbConnection::open_file(&database_path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            degraded.push(SearchDegradation::tombstone_visibility_unavailable(
+                &error.to_string(),
+            ));
+            return hits;
+        }
+    };
+
+    let mut visible_hits = Vec::with_capacity(hits.len());
+    let mut filtered = 0usize;
+    let mut expired_filtered = 0usize;
+    let mut included = 0usize;
+
+    for mut hit in hits {
+        match connection.get_memory(&hit.doc_id) {
+            Ok(Some(memory)) if memory.tombstoned_at.is_some() => {
+                if options.include_tombstoned {
+                    mark_hit_tombstoned(&mut hit, memory.tombstoned_at.as_deref());
+                    included = included.saturating_add(1);
+                    visible_hits.push(hit);
+                } else {
+                    filtered = filtered.saturating_add(1);
+                }
+            }
+            Ok(Some(memory)) if memory_is_expired(memory.valid_to.as_deref()) => {
+                expired_filtered = expired_filtered.saturating_add(1);
+            }
+            Ok(_) => visible_hits.push(hit),
+            Err(error) => {
+                degraded.push(SearchDegradation::tombstone_visibility_unavailable(
+                    &error.to_string(),
+                ));
+                visible_hits.push(hit);
+            }
+        }
+    }
+
+    if filtered > 0 {
+        degraded.push(SearchDegradation::tombstoned_filtered(filtered));
+    }
+    if expired_filtered > 0 {
+        degraded.push(SearchDegradation::expired_filtered(expired_filtered));
+    }
+    if included > 0 {
+        degraded.push(SearchDegradation::tombstoned_in_results(included));
+    }
+
+    visible_hits
+}
+
+fn memory_is_expired(valid_to: Option<&str>) -> bool {
+    valid_to
+        .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
+        .is_some_and(|timestamp| Utc::now() > timestamp.with_timezone(&Utc))
+}
+
+fn mark_hit_tombstoned(hit: &mut SearchHit, tombstoned_at: Option<&str>) {
+    let mut metadata = hit.metadata.take().unwrap_or_else(|| serde_json::json!({}));
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert("tombstoned".to_string(), serde_json::json!(true));
+        if let Some(tombstoned_at) = tombstoned_at {
+            object.insert(
+                "tombstoned_at".to_string(),
+                serde_json::json!(tombstoned_at),
+            );
+        }
+    }
+    hit.metadata = Some(metadata);
+}
+
 #[cfg(feature = "lexical-bm25")]
 fn attach_lexical_searcher(
     mut searcher: TwoTierSearcher,
@@ -2165,6 +2327,7 @@ fn open_lexical_searcher(index_dir: &Path) -> Result<Option<Arc<dyn LexicalSearc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
     #[cfg(feature = "lexical-bm25")]
     use crate::search::{EmbedderStack, IndexBuilder, IndexableDocument};
 
@@ -2236,6 +2399,103 @@ mod tests {
     }
 
     #[test]
+    fn tombstone_visibility_excludes_by_default_and_marks_opt_in_results() -> TestResult {
+        let workspace = unique_test_dir("tombstone-visibility");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let database_path = workspace.join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                "wsp_01234567890123456789012345",
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("tombstone visibility".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000001",
+                &CreateMemoryInput {
+                    workspace_id: "wsp_01234567890123456789012345".to_string(),
+                    level: "procedural".to_string(),
+                    kind: "rule".to_string(),
+                    content: "Run cargo fmt before release.".to_string(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "agent_assertion".to_string(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .tombstone_memory("mem_00000000000000000000000001")
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        let hit = SearchHit {
+            doc_id: "mem_00000000000000000000000001".to_string(),
+            score: 0.9,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(0.9),
+            rerank_score: None,
+            metadata: None,
+            explanation: None,
+        };
+        let base_options = SearchOptions {
+            workspace_path: workspace,
+            database_path: Some(database_path),
+            index_dir: None,
+            query: "cargo fmt".to_string(),
+            limit: 10,
+            speed: SpeedMode::Default,
+            explain: false,
+            include_tombstoned: false,
+            relevance_floor: None,
+        };
+
+        let mut degraded = Vec::new();
+        let visible = apply_tombstone_visibility(&base_options, vec![hit.clone()], &mut degraded);
+        assert!(visible.is_empty());
+        assert_eq!(degraded[0].code, "tombstoned_filtered");
+
+        let mut include_options = base_options.clone();
+        include_options.include_tombstoned = true;
+        let mut degraded = Vec::new();
+        let visible = apply_tombstone_visibility(&include_options, vec![hit], &mut degraded);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(degraded[0].code, "tombstoned_in_results");
+
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "cargo fmt".to_string(),
+            requested_limit: 10,
+            results: visible,
+            elapsed_ms: 1.0,
+            errors: Vec::new(),
+            degraded,
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+        };
+        let json = report.data_json();
+        assert_eq!(json["results"][0]["tombstoned"], true);
+        assert!(json["results"][0]["tombstonedAt"].is_string());
+        assert_eq!(json["results"][0]["metadata"]["tombstoned"], true);
+        Ok(())
+    }
+
+    #[test]
     fn search_performance_explain_report_is_redaction_safe_and_pins_fallbacks() {
         let report = SearchReport {
             status: SearchStatus::Success,
@@ -2289,6 +2549,7 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Default,
             explain: false,
+            include_tombstoned: false,
             relevance_floor: None,
         };
 
@@ -2319,6 +2580,7 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Default,
             explain: false,
+            include_tombstoned: false,
             relevance_floor: None,
         };
 
@@ -2345,6 +2607,7 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Default,
             explain: false,
+            include_tombstoned: false,
             relevance_floor: None,
         };
 
@@ -2470,6 +2733,7 @@ mod tests {
             limit: 5,
             speed: SpeedMode::Default,
             explain: true,
+            include_tombstoned: false,
             relevance_floor: Some(0.0),
         })
         .map_err(|error| error.to_string())?;
@@ -2563,6 +2827,7 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Default,
             explain: false,
+            include_tombstoned: false,
             relevance_floor: None,
         };
 
@@ -2582,6 +2847,7 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Quality,
             explain: true,
+            include_tombstoned: false,
             relevance_floor: None,
         };
         let config = options.two_tier_config();
@@ -2615,6 +2881,7 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Default,
             explain: false,
+            include_tombstoned: false,
             relevance_floor: None,
         };
 

@@ -245,7 +245,7 @@ fn normalize_content(content: &str) -> String {
 }
 
 #[test]
-fn pack_selection_certificate_has_gate13_frontier_fields() -> TestResult {
+fn pack_skipped_list_replaces_rejected_frontier() -> TestResult {
     let draft = submodular_draft()?;
     let certificate = &draft.selection_certificate;
     ensure(
@@ -253,8 +253,8 @@ fn pack_selection_certificate_has_gate13_frontier_fields() -> TestResult {
         "selected items present",
     )?;
     ensure(
-        !certificate.rejected_frontier.is_empty(),
-        "rejected frontier present",
+        !draft.skipped_for_output().is_empty(),
+        "skipped items present",
     )?;
     ensure(
         certificate.steps.iter().all(|step| step.token_cost > 0),
@@ -265,16 +265,55 @@ fn pack_selection_certificate_has_gate13_frontier_fields() -> TestResult {
         "selected steps are feasible",
     )?;
     ensure(
-        certificate
-            .rejected_frontier
-            .iter()
-            .all(|item| !item.feasible),
-        "rejected frontier records infeasible candidates",
-    )?;
-    ensure(
         certificate.guarantee_status.as_str() == "conditional",
         "certificate has guarantee status",
-    )
+    )?;
+    let request = ContextRequest::new(ContextRequestInput {
+        query: "prepare release".to_string(),
+        profile: Some(ContextPackProfile::Submodular),
+        max_tokens: Some(100),
+        candidate_pool: Some(3),
+        max_results: None,
+        sections: vec![PackSection::ProceduralRules],
+    })
+    .map_err(|error| format!("{error:?}"))?;
+    let response =
+        ContextResponse::new(request, draft, Vec::new()).map_err(|error| format!("{error:?}"))?;
+    let rendered = render_context_response_json(&response);
+    let value: Value = serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+    ensure(
+        value
+            .pointer("/data/pack/selectionCertificate/rejectedFrontier")
+            .is_none(),
+        "selection certificate no longer emits rejectedFrontier",
+    )?;
+    ensure(
+        value.pointer("/data/pack/omitted").is_none(),
+        "pack no longer emits omitted",
+    )?;
+    let skipped = value
+        .pointer("/data/pack/skipped")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "pack skipped array missing".to_string())?;
+    ensure(!skipped.is_empty(), "pack skipped array has entries")?;
+    ensure(
+        skipped.iter().all(|item| {
+            item.get("memoryId").is_some()
+                && item.get("tokens").is_some()
+                && item.get("reason").is_some()
+                && item.get("rejectedAt").is_some()
+                && item.get("feasible").is_some()
+        }),
+        "skipped entries carry canonical fields",
+    )?;
+    ensure(
+        value
+            .pointer("/data/pack/skippedTotal")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count >= skipped.len() as u64),
+        "skippedTotal reports uncapped skipped count",
+    )?;
+    Ok(())
 }
 
 #[test]

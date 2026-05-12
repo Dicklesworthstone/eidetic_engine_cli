@@ -4,13 +4,5 @@
   "omittedCount": 1,
   "budgetLimit": 100,
   "budgetUsed": 20,
-  "totalObjectiveValue": 1.784,
-  "rejectedFrontier": [
-    {
-      "memoryId": "mem_00000000000000000000000002",
-      "tokenCost": 10,
-      "reason": "token_budget_exceeded",
-      "feasible": false
-    }
-  ]
+  "totalObjectiveValue": 1.784
 }

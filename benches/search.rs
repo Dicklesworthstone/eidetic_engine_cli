@@ -247,6 +247,7 @@ fn quick_stats_for_scale(count: usize) -> QuickStats {
         limit: 20,
         speed: SpeedMode::Default,
         explain: false,
+        include_tombstoned: false,
         relevance_floor: None,
     };
 
@@ -413,6 +414,7 @@ fn run_criterion_mode() {
                 limit: 20,
                 speed: SpeedMode::Default,
                 explain: false,
+                include_tombstoned: false,
                 relevance_floor: None,
             };
 

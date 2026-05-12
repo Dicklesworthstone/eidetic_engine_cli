@@ -1410,6 +1410,10 @@ pub struct ContextArgs {
     /// Suppress data.pack.text in JSON output for structured-only consumers.
     #[arg(long = "no-rendered-text", action = ArgAction::SetTrue)]
     pub no_rendered_text: bool,
+
+    /// Include tombstoned memories in context results with lifecycle metadata.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_tombstoned: bool,
 }
 
 /// Arguments for `ee completion`.
@@ -1760,6 +1764,10 @@ pub struct GraphAlgorithmArgs {
     /// Maximum number of rows, nodes, or communities to emit.
     #[arg(long, value_name = "COUNT")]
     pub limit: Option<usize>,
+
+    /// Include tombstoned memory nodes in graph computation.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_tombstoned: bool,
 }
 
 /// Arguments for `ee graph louvain`.
@@ -4030,6 +4038,10 @@ pub struct SearchArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain: bool,
 
+    /// Include tombstoned memories in search results.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_tombstoned: bool,
+
     /// Emit a redaction-safe query performance report instead of search hits.
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain_performance: bool,
@@ -5676,9 +5688,6 @@ pub struct ShowAliasArgs {
     /// that accept it).
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
-    /// Include tombstoned memories in the lookup (passed to `memory show`).
-    #[arg(long, action = ArgAction::SetTrue)]
-    pub include_tombstoned: bool,
 }
 
 /// Arguments for `ee link <A> <B> --relation X` (F2 top-level alias).
@@ -5819,9 +5828,9 @@ pub struct MemoryListArgs {
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 
-    /// Include tombstoned memories in the list.
-    #[arg(long, action = ArgAction::SetTrue)]
-    pub include_tombstoned: bool,
+    /// Exclude tombstoned memories from the list.
+    #[arg(long = "no-tombstoned", action = ArgAction::SetTrue)]
+    pub no_tombstoned: bool,
 }
 
 /// Arguments for `ee memory show`.
@@ -5834,10 +5843,6 @@ pub struct MemoryShowArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
-
-    /// Include tombstoned memories in the lookup.
-    #[arg(long, action = ArgAction::SetTrue)]
-    pub include_tombstoned: bool,
 }
 
 /// Arguments for `ee memory history`.
@@ -7932,6 +7937,7 @@ fn pack_quality_actuals_for_cases(
             limit,
             speed,
             explain: false,
+            include_tombstoned: false,
             relevance_floor: None,
         })
         .map_err(|error| DomainError::SearchIndex {
@@ -8218,6 +8224,7 @@ fn run_eval_retrieval_queries(
             limit,
             speed: SpeedMode::Default,
             explain: false,
+            include_tombstoned: false,
             relevance_floor: None,
         })
         .map_err(|error| DomainError::SearchIndex {
@@ -14089,6 +14096,7 @@ where
         limit: args.limit,
         speed: args.speed,
         explain: true,
+        include_tombstoned: false,
         relevance_floor: args.relevance_floor,
     };
 
@@ -14277,6 +14285,7 @@ struct GraphReadOptions<'a> {
     min_confidence: Option<f32>,
     link_limit: Option<u32>,
     limit: Option<usize>,
+    include_tombstoned: bool,
 }
 
 impl<'a> From<&'a GraphAlgorithmArgs> for GraphReadOptions<'a> {
@@ -14287,6 +14296,7 @@ impl<'a> From<&'a GraphAlgorithmArgs> for GraphReadOptions<'a> {
             min_confidence: args.min_confidence,
             link_limit: args.link_limit,
             limit: args.limit,
+            include_tombstoned: args.include_tombstoned,
         }
     }
 }
@@ -14299,6 +14309,7 @@ impl<'a> From<&'a GraphLouvainArgs> for GraphReadOptions<'a> {
             min_confidence: args.min_confidence,
             link_limit: args.link_limit,
             limit: args.limit,
+            include_tombstoned: false,
         }
     }
 }
@@ -14311,6 +14322,7 @@ impl<'a> From<&'a GraphKCoreArgs> for GraphReadOptions<'a> {
             min_confidence: args.min_confidence,
             link_limit: args.link_limit,
             limit: None,
+            include_tombstoned: false,
         }
     }
 }
@@ -14323,6 +14335,7 @@ impl<'a> From<&'a GraphPathArgs> for GraphReadOptions<'a> {
             min_confidence: args.min_confidence,
             link_limit: args.link_limit,
             limit: None,
+            include_tombstoned: false,
         }
     }
 }
@@ -14335,6 +14348,7 @@ impl<'a> From<&'a GraphExplainLinkArgs> for GraphReadOptions<'a> {
             min_confidence: args.min_confidence,
             link_limit: args.link_limit,
             limit: None,
+            include_tombstoned: false,
         }
     }
 }
@@ -14783,6 +14797,7 @@ where
 fn validate_graph_read_options(options: GraphReadOptions<'_>) -> Result<(), DomainError> {
     let _ = options.database;
     let _ = options.link_limit;
+    let _ = options.include_tombstoned;
     if matches!(options.limit, Some(0)) {
         return Err(DomainError::Usage {
             message: "--limit must be greater than zero".to_string(),
@@ -14843,6 +14858,7 @@ struct GraphAlgorithmInput {
     directed: fnx_classes::digraph::DiGraph,
     undirected: fnx_classes::Graph,
     links: Vec<crate::db::StoredMemoryLink>,
+    excluded_tombstoned_nodes: Vec<String>,
 }
 
 #[cfg(feature = "graph")]
@@ -14880,6 +14896,8 @@ fn graph_algorithm_input(
         .into_iter()
         .filter(|link| graph_link_matches_read_options(link, options))
         .collect::<Vec<_>>();
+    let (links, excluded_tombstoned_nodes) =
+        graph_filter_tombstoned_links(&conn, links, options.include_tombstoned)?;
 
     let mut directed = DiGraph::strict();
     let mut undirected = Graph::strict();
@@ -14945,7 +14963,47 @@ fn graph_algorithm_input(
         directed,
         undirected,
         links,
+        excluded_tombstoned_nodes,
     })
+}
+
+#[cfg(feature = "graph")]
+fn graph_filter_tombstoned_links(
+    conn: &crate::db::DbConnection,
+    links: Vec<crate::db::StoredMemoryLink>,
+    include_tombstoned: bool,
+) -> Result<(Vec<crate::db::StoredMemoryLink>, Vec<String>), DomainError> {
+    if include_tombstoned || links.is_empty() {
+        return Ok((links, Vec::new()));
+    }
+
+    let memory_ids = links
+        .iter()
+        .flat_map(|link| [link.src_memory_id.as_str(), link.dst_memory_id.as_str()])
+        .collect::<BTreeSet<_>>();
+    let memory_refs = memory_ids.iter().copied().collect::<Vec<_>>();
+    let memories = conn
+        .get_memories_batch(&memory_refs)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query graph memory endpoints: {error}"),
+            repair: Some("ee doctor --json".to_string()),
+        })?;
+    let tombstoned = memories
+        .into_iter()
+        .filter(|(_, memory)| memory.tombstoned_at.is_some())
+        .map(|(_, memory)| memory.id)
+        .collect::<BTreeSet<_>>();
+    if tombstoned.is_empty() {
+        return Ok((links, Vec::new()));
+    }
+
+    let filtered = links
+        .into_iter()
+        .filter(|link| {
+            !tombstoned.contains(&link.src_memory_id) && !tombstoned.contains(&link.dst_memory_id)
+        })
+        .collect::<Vec<_>>();
+    Ok((filtered, tombstoned.into_iter().collect()))
 }
 
 #[cfg(feature = "graph")]
@@ -15005,6 +15063,7 @@ fn graph_metric_data_with_status(
             "nodeCount": input.node_count(),
             "edgeCount": input.edge_count(),
             "sourceLinkCount": input.links.len(),
+            "excludedNodes": input.excluded_tombstoned_nodes.clone(),
         },
     });
     if let (Some(object), Some(extra)) = (data.as_object_mut(), extra.as_object()) {
@@ -15840,7 +15899,7 @@ where
         level: args.level.as_deref(),
         tag: args.tag.as_deref(),
         limit: args.limit,
-        include_tombstoned: args.include_tombstoned,
+        include_tombstoned: !args.no_tombstoned,
     };
 
     let report = list_memories(&options);
@@ -16056,7 +16115,6 @@ where
             let memory_args = MemoryShowArgs {
                 memory_id: args.id.clone(),
                 database: args.database.clone(),
-                include_tombstoned: args.include_tombstoned,
             };
             handle_memory_show(cli, &memory_args, stdout, stderr)
         }
@@ -16245,7 +16303,7 @@ where
     let options = GetMemoryOptions {
         database_path: &database_path,
         memory_id: &args.memory_id,
-        include_tombstoned: args.include_tombstoned,
+        include_tombstoned: true,
     };
 
     let report = get_memory_details(&options);
@@ -16800,6 +16858,7 @@ where
         max_tokens: Some(args.max_tokens),
         candidate_pool: Some(args.candidate_pool),
         max_results: None,
+        include_tombstoned: args.include_tombstoned,
         pagination: None,
         filters: crate::models::QueryFilters::default(),
     };
@@ -18032,6 +18091,7 @@ where
             index_dir: args.index_dir.clone(),
             explain_performance: args.explain_performance,
             no_rendered_text: false,
+            include_tombstoned: false,
         };
         return handle_context(cli, &context_args, stdout, stderr);
     }
@@ -18139,6 +18199,7 @@ where
         max_tokens: args.max_tokens.or(request.max_tokens),
         candidate_pool: args.candidate_pool.or(request.candidate_pool),
         max_results: request.max_results,
+        include_tombstoned: false,
         pagination,
     };
     let renderer = effective_pack_renderer(cli, request.renderer);
@@ -20025,6 +20086,7 @@ where
         limit: args.limit,
         speed: args.speed,
         explain: args.explain,
+        include_tombstoned: args.include_tombstoned,
         relevance_floor: args.relevance_floor,
     };
 
@@ -20365,6 +20427,18 @@ fn format_why_human(report: &crate::core::why::WhyReport) -> String {
         output.push('\n');
     }
 
+    if let Some(ref lifecycle) = report.lifecycle {
+        output.push_str("Lifecycle:\n");
+        output.push_str(&format!("  Status: {}\n", lifecycle.status));
+        if let Some(ref tombstoned_at) = lifecycle.tombstoned_at {
+            output.push_str(&format!("  Tombstoned at: {tombstoned_at}\n"));
+        }
+        if let Some(ref reason) = lifecycle.tombstoned_reason {
+            output.push_str(&format!("  Tombstoned reason: {reason}\n"));
+        }
+        output.push('\n');
+    }
+
     if let Some(ref graph) = report.graph_retrieval {
         output.push_str("Graph retrieval features:\n");
         output.push_str(&format!("  Status: {}\n", graph.status));
@@ -20653,6 +20727,14 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
         })
     });
 
+    let lifecycle = report.lifecycle.as_ref().map(|lifecycle| {
+        serde_json::json!({
+            "status": lifecycle.status,
+            "tombstoned_at": lifecycle.tombstoned_at,
+            "tombstoned_reason": lifecycle.tombstoned_reason,
+        })
+    });
+
     let degraded: Vec<serde_json::Value> = report
         .degraded
         .iter()
@@ -20734,6 +20816,7 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             "retrieval": retrieval,
             "graphRetrievalFeatures": graph_retrieval,
             "selection": selection,
+            "lifecycle": lifecycle,
             "contradictions": contradictions,
             "links": links,
             "history": history,
@@ -20880,6 +20963,9 @@ impl MemoryExpireReport {
             "Memory expire: {}\n  Status: {}\n  Persisted: {}\n",
             self.memory_id, self.status, self.persisted
         );
+        if let Some(valid_to) = &self.valid_to {
+            output.push_str(&format!("  Valid to: {valid_to}\n"));
+        }
         if let Some(audit_id) = &self.audit_id {
             output.push_str(&format!("  Audit: {audit_id}\n"));
         }
@@ -20912,6 +20998,8 @@ impl MemoryExpireReport {
                 "dry_run": self.dry_run,
                 "persisted": self.persisted,
                 "changed": self.changed,
+                "previous_valid_to": self.previous_valid_to,
+                "valid_to": self.valid_to,
                 "previous_tombstoned_at": self.previous_tombstoned_at,
                 "tombstoned_at": self.tombstoned_at,
                 "audit_id": self.audit_id,
@@ -28686,6 +28774,11 @@ mod tests {
                 }),
             },
         )
+        .with_lifecycle(crate::core::why::LifecycleExplanation {
+            status: "active",
+            tombstoned_at: None,
+            tombstoned_reason: None,
+        })
     }
 
     #[test]
@@ -33438,6 +33531,50 @@ mod tests {
     }
 
     #[test]
+    fn search_command_accepts_include_tombstoned() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "search", "test", "--include-tombstoned"])
+            .map_err(|e| format!("failed to parse search with tombstones: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Search(ref args)) => {
+                ensure_equal(&args.include_tombstoned, &true, "include tombstoned")
+            }
+            _ => Err("expected Search command".to_string()),
+        }
+    }
+
+    #[test]
+    fn context_command_accepts_include_tombstoned() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "context", "test", "--include-tombstoned"])
+            .map_err(|e| format!("failed to parse context with tombstones: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Context(ref args)) => {
+                ensure_equal(&args.include_tombstoned, &true, "include tombstoned")
+            }
+            _ => Err("expected Context command".to_string()),
+        }
+    }
+
+    #[test]
+    fn graph_pagerank_command_accepts_include_tombstoned() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "graph", "pagerank", "--include-tombstoned"])
+            .map_err(|e| {
+                format!(
+                    "failed to parse graph pagerank with tombstones: {:?}",
+                    e.kind()
+                )
+            })?;
+
+        match parsed.command {
+            Some(Command::Graph(GraphCommand::Pagerank(ref args))) => {
+                ensure_equal(&args.include_tombstoned, &true, "include tombstoned")
+            }
+            _ => Err("expected Graph Pagerank command".to_string()),
+        }
+    }
+
+    #[test]
     fn search_command_accepts_short_limit_flag() -> TestResult {
         let parsed = Cli::try_parse_from(["ee", "search", "test", "-n", "5"])
             .map_err(|e| format!("failed to parse search with -n: {:?}", e.kind()))?;
@@ -33563,34 +33700,53 @@ mod tests {
 
         match parsed.command {
             Some(Command::Memory(MemoryCommand::Show(ref args))) => {
-                ensure_equal(&args.memory_id, &"mem_test123".to_string(), "memory id")?;
-                ensure_equal(&args.include_tombstoned, &false, "include_tombstoned")
+                ensure_equal(&args.memory_id, &"mem_test123".to_string(), "memory id")
             }
             _ => Err("expected Memory Show command".to_string()),
         }
     }
 
     #[test]
-    fn memory_show_command_accepts_include_tombstoned() -> TestResult {
-        let parsed = Cli::try_parse_from([
+    fn memory_show_command_rejects_include_tombstoned() -> TestResult {
+        let error = Cli::try_parse_from([
             "ee",
             "memory",
             "show",
             "mem_test123",
             "--include-tombstoned",
         ])
-        .map_err(|e| {
-            format!(
-                "failed to parse memory show with tombstoned: {:?}",
-                e.kind()
-            )
-        })?;
+        .expect_err("memory show should not expose include tombstoned flag");
+
+        ensure_equal(
+            &error.kind(),
+            &ErrorKind::UnknownArgument,
+            "memory show tombstone flag error",
+        )
+    }
+
+    #[test]
+    fn memory_list_command_defaults_to_tombstoned_visible() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "memory", "list"])
+            .map_err(|e| format!("failed to parse memory list: {:?}", e.kind()))?;
 
         match parsed.command {
-            Some(Command::Memory(MemoryCommand::Show(ref args))) => {
-                ensure_equal(&args.include_tombstoned, &true, "include_tombstoned")
+            Some(Command::Memory(MemoryCommand::List(ref args))) => {
+                ensure_equal(&args.no_tombstoned, &false, "no_tombstoned")
             }
-            _ => Err("expected Memory Show command".to_string()),
+            _ => Err("expected Memory List command".to_string()),
+        }
+    }
+
+    #[test]
+    fn memory_list_command_accepts_no_tombstoned() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "memory", "list", "--no-tombstoned"])
+            .map_err(|e| format!("failed to parse memory list no tombstoned: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Memory(MemoryCommand::List(ref args))) => {
+                ensure_equal(&args.no_tombstoned, &true, "no_tombstoned")
+            }
+            _ => Err("expected Memory List command".to_string()),
         }
     }
 

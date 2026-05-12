@@ -97,6 +97,7 @@ fn ee_search_writes_search_executed_and_returned_mem_rows() -> TestResult {
         limit: 10,
         speed: SpeedMode::Default,
         explain: false,
+        include_tombstoned: false,
         relevance_floor: Some(0.0),
     })
     .map_err(|error| format!("run_search: {error:?}"))?;
@@ -138,6 +139,7 @@ fn ee_search_audit_row_carries_query_hash_not_raw_query() -> TestResult {
         limit: 10,
         speed: SpeedMode::Default,
         explain: false,
+        include_tombstoned: false,
         relevance_floor: Some(0.0),
     })
     .map_err(|error| format!("run_search: {error:?}"))?;
@@ -176,6 +178,7 @@ fn ee_context_writes_pack_assembled_and_included_mem_rows() -> TestResult {
         max_results: None,
         speed: SpeedMode::Default,
         filters: Default::default(),
+        include_tombstoned: false,
         pagination: None,
     })
     .map_err(|error| format!("run_context_pack: {error:?}"))?;

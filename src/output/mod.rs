@@ -39,8 +39,8 @@ use crate::models::{
     RESPONSE_SCHEMA_V1,
 };
 use crate::pack::{
-    ContextResponse, PackAdvisoryBanner, PackAdvisoryNote, PackItemProvenance, PackOmissionMetrics,
-    PackQualityMetrics, PackRejectedFrontierItem, PackSectionMetric, PackSelectedItem,
+    ContextResponse, PackAdvisoryBanner, PackAdvisoryNote, PackItemProvenance, PackOmission,
+    PackOmissionMetrics, PackQualityMetrics, PackSectionMetric, PackSelectedItem,
     PackSelectionCertificate, PackSelectionStep, RenderedPackProvenance,
 };
 use crate::steward::{
@@ -1463,10 +1463,21 @@ pub fn render_context_response_json_with_options(
                         &response.data.pack.selection_certificate,
                     );
                 });
+                meta.field_raw(
+                    "coverageFillCount",
+                    &response.data.pack.coverage_fill_count().to_string(),
+                );
             });
             pack.field_object("budget", |budget| {
                 budget.field_u32("maxTokens", response.data.pack.budget.max_tokens());
                 budget.field_u32("usedTokens", response.data.pack.used_tokens);
+                budget.field_raw(
+                    "utilization",
+                    &score_json(
+                        response.data.pack.used_tokens as f32
+                            / response.data.pack.budget.max_tokens() as f32,
+                    ),
+                );
             });
             let advisory_banner = response.data.advisory_banner();
             pack.field_object("advisoryBanner", |banner| {
@@ -1486,11 +1497,10 @@ pub fn render_context_response_json_with_options(
             // four parallel pack structures (`items[]`, `selectionCertificate
             // .selected_items[]`, `selectionCertificate.steps[]`,
             // `provenanceFooter.entries[]`) onto each `items[]` entry. The
-            // legacy parallel structures still emit for backwards compatibility
-            // with downstream tests and harnesses; removal is tracked in a
-            // follow-up phase. After phase 1, an agent reading `items[i]`
-            // gets the union of fields and no longer has to walk three more
-            // arrays to find tokenCost / feasibility / step trace data.
+            // legacy selected structures no longer emit in JSON. After phase
+            // 2, an agent reading `items[i]` gets the union of fields and no
+            // longer has to walk three more arrays to find tokenCost /
+            // feasibility / step trace data.
             let selected_by_rank: std::collections::BTreeMap<u32, &PackSelectedItem> = response
                 .data
                 .pack
@@ -1552,6 +1562,13 @@ pub fn render_context_response_json_with_options(
                     );
                 }
                 obj.field_str("why", &item.why);
+                obj.field_str("selectedIn", item.selected_in.as_str());
+                if let Some(tombstoned_at) = &item.tombstoned_at {
+                    obj.field_object("lifecycle", |lifecycle| {
+                        lifecycle.field_str("status", "tombstoned");
+                        lifecycle.field_str("tombstonedAt", tombstoned_at);
+                    });
+                }
                 if let Some(diversity_key) = &item.diversity_key {
                     obj.field_str("diversityKey", diversity_key);
                 }
@@ -1578,10 +1595,13 @@ pub fn render_context_response_json_with_options(
                     obj.field_u32("sourceIndex", footer_entry.source_index);
                 }
             });
-            pack.field_array_of_objects("omitted", &response.data.pack.omitted, |obj, omission| {
-                obj.field_str("memoryId", &omission.memory_id.to_string());
-                obj.field_u32("estimatedTokens", omission.estimated_tokens);
-                obj.field_str("reason", omission.reason.as_str());
+            pack.field_raw(
+                "skippedTotal",
+                &response.data.pack.skipped_total().to_string(),
+            );
+            let skipped = response.data.pack.skipped_for_output();
+            pack.field_array_of_objects("skipped", &skipped, |obj, omission| {
+                build_pack_skipped_item(obj, omission);
             });
             let footer = response.data.pack.provenance_footer();
             // Bead bd-2pe1z (A1 phase 2): drop provenanceFooter.entries[]. Each
@@ -1730,6 +1750,10 @@ fn build_pack_quality_metrics(obj: &mut JsonBuilder, metrics: &PackQualityMetric
         &score_json(metrics.provenance_sources_per_item),
     );
     obj.field_bool("provenanceComplete", metrics.provenance_complete);
+    obj.field_raw(
+        "coverageFillCount",
+        &metrics.coverage_fill_count.to_string(),
+    );
     obj.field_array_of_objects("sections", &metrics.sections, build_pack_section_metric);
     obj.field_object("omissions", |omissions| {
         build_pack_omission_metrics(omissions, &metrics.omissions);
@@ -1750,6 +1774,10 @@ fn build_pack_omission_metrics(obj: &mut JsonBuilder, metrics: &PackOmissionMetr
     obj.field_raw(
         "redundantCandidates",
         &metrics.redundant_candidates.to_string(),
+    );
+    obj.field_raw(
+        "belowRelevanceFloor",
+        &metrics.below_relevance_floor.to_string(),
     );
 }
 
@@ -1791,21 +1819,8 @@ fn build_pack_selection_certificate(obj: &mut JsonBuilder, certificate: &PackSel
         "totalObjectiveValue",
         &score_json(certificate.total_objective_value),
     );
-    // Bead bd-2pe1z (A1 phase 2): drop selectionCertificate.selectedItems[]
-    // and selectionCertificate.steps[]. Every per-item field they carried
-    // (tokenCost, feasible, marginalGain, objectiveValue, coveredFeatures)
-    // is now emitted inline on each items[] entry by
-    // render_context_response_json (A1 phase 1).
-    //
-    // rejectedFrontier[] stays here: it describes items that were considered
-    // but NOT selected, so they have no items[] entry to attach to. A future
-    // A5 bead consolidates rejectedFrontier[] with pack.omitted[] into a
-    // single pack.skipped[] list.
-    obj.field_array_of_objects(
-        "rejectedFrontier",
-        &certificate.rejected_frontier,
-        build_pack_rejected_frontier_item,
-    );
+    // Bead bd-17c65.1.5 (A5): selectionCertificate.rejectedFrontier[] moved
+    // to the canonical pack.skipped[] list beside selected pack.items[].
 }
 
 // Bead bd-2pe1z (A1 phase 2): build_pack_selected_item and
@@ -1822,11 +1837,15 @@ fn build_pack_selected_item(obj: &mut JsonBuilder, item: &PackSelectedItem) {
     obj.field_bool("feasible", item.feasible);
 }
 
-fn build_pack_rejected_frontier_item(obj: &mut JsonBuilder, item: &PackRejectedFrontierItem) {
+fn build_pack_skipped_item(obj: &mut JsonBuilder, item: &PackOmission) {
     obj.field_str("memoryId", &item.memory_id.to_string());
-    obj.field_u32("tokenCost", item.token_cost);
+    obj.field_u32("tokens", item.estimated_tokens);
     obj.field_str("reason", item.reason.as_str());
+    obj.field_str("rejectedAt", item.rejected_at.as_str());
     obj.field_bool("feasible", item.feasible);
+    if let Some(could_fit_with_budget) = item.could_fit_with_budget {
+        obj.field_u32("couldFitWithBudget", could_fit_with_budget);
+    }
 }
 
 #[allow(dead_code)]

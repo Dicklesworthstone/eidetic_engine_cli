@@ -168,6 +168,17 @@ pub struct SelectionExplanation {
     pub latest_pack_selection: Option<PackSelectionExplanation>,
 }
 
+/// Memory lifecycle state surfaced by `ee why`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LifecycleExplanation {
+    /// Stable lifecycle status.
+    pub status: &'static str,
+    /// Tombstone timestamp when the memory was hard-tombstoned.
+    pub tombstoned_at: Option<String>,
+    /// Operator-supplied tombstone reason when present in audit history.
+    pub tombstoned_reason: Option<String>,
+}
+
 /// A persisted context-pack selection involving the memory.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PackSelectionExplanation {
@@ -376,6 +387,8 @@ pub struct WhyReport {
     pub graph_retrieval: Option<GraphRetrievalExplanation>,
     /// Selection explanation.
     pub selection: Option<SelectionExplanation>,
+    /// Lifecycle explanation.
+    pub lifecycle: Option<LifecycleExplanation>,
     /// Contradiction feedback recorded against this memory (EE-263).
     pub contradictions: Vec<ContradictionMetadata>,
     /// Memory links: supports, contradicts, derived_from, etc. (EE-LINK-USAGE-001).
@@ -408,6 +421,7 @@ impl WhyReport {
             retrieval: Some(retrieval),
             graph_retrieval: None,
             selection: Some(selection),
+            lifecycle: None,
             contradictions: Vec::new(),
             links: Vec::new(),
             history: None,
@@ -437,6 +451,7 @@ impl WhyReport {
             retrieval: None,
             graph_retrieval: None,
             selection: None,
+            lifecycle: None,
             contradictions: Vec::new(),
             links: Vec::new(),
             history: None,
@@ -458,6 +473,7 @@ impl WhyReport {
             retrieval: None,
             graph_retrieval: None,
             selection: None,
+            lifecycle: None,
             contradictions: Vec::new(),
             links: Vec::new(),
             history: None,
@@ -514,6 +530,13 @@ impl WhyReport {
     #[must_use]
     pub fn with_degradations(mut self, degraded: Vec<WhyDegradation>) -> Self {
         self.degraded.extend(degraded);
+        self
+    }
+
+    /// Add memory lifecycle metadata to the report.
+    #[must_use]
+    pub fn with_lifecycle(mut self, lifecycle: LifecycleExplanation) -> Self {
+        self.lifecycle = Some(lifecycle);
         self
     }
 
@@ -660,6 +683,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
     let contradictions = contradiction_fetch.items;
     let links = link_fetch.items;
     let history = history_fetch.items.into_iter().next();
+    let lifecycle = lifecycle_for_memory(&memory, history.as_ref());
     let rationale_traces = rationale_trace_fetch.items;
 
     let validity = memory_validity(&memory.valid_from, &memory.valid_to);
@@ -710,6 +734,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
                     selection_score,
                     above_threshold,
                     latest_pack_selection: None,
+                    lifecycle,
                     contradictions,
                     links,
                     history,
@@ -737,6 +762,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
             selection_score,
             above_threshold,
             latest_pack_selection,
+            lifecycle,
             contradictions,
             links,
             history,
@@ -979,6 +1005,7 @@ struct ReportSelectionInputs {
     selection_score: f32,
     above_threshold: bool,
     latest_pack_selection: Option<PackSelectionExplanation>,
+    lifecycle: LifecycleExplanation,
     contradictions: Vec<ContradictionMetadata>,
     links: Vec<MemoryLinkSummary>,
     history: Option<MemoryHistorySummary>,
@@ -1008,12 +1035,52 @@ fn build_report(
     };
 
     WhyReport::found(memory_id.to_string(), storage, retrieval, selection)
+        .with_lifecycle(selection_inputs.lifecycle)
         .with_contradictions(selection_inputs.contradictions)
         .with_links(selection_inputs.links)
         .with_optional_history(selection_inputs.history)
         .with_graph_retrieval(selection_inputs.graph_retrieval)
         .with_rationale_traces(selection_inputs.rationale_traces)
         .with_degradations(selection_inputs.degraded)
+}
+
+fn lifecycle_for_memory(
+    memory: &crate::db::StoredMemory,
+    history: Option<&MemoryHistorySummary>,
+) -> LifecycleExplanation {
+    let tombstoned_at = memory.tombstoned_at.clone();
+    let tombstoned_reason = tombstoned_at
+        .as_ref()
+        .and_then(|_| tombstone_reason_from_history(history));
+    LifecycleExplanation {
+        status: if tombstoned_at.is_some() {
+            "tombstoned"
+        } else {
+            "active"
+        },
+        tombstoned_at,
+        tombstoned_reason,
+    }
+}
+
+fn tombstone_reason_from_history(history: Option<&MemoryHistorySummary>) -> Option<String> {
+    history?
+        .entries
+        .iter()
+        .find(|entry| entry.action == crate::db::audit_actions::MEMORY_TOMBSTONE)
+        .and_then(|entry| entry.details.as_deref())
+        .and_then(|details| {
+            serde_json::from_str::<serde_json::Value>(details)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|reason| !reason.is_empty())
+                        .map(str::to_owned)
+                })
+        })
 }
 
 fn build_graph_retrieval_explanation(
@@ -1652,6 +1719,11 @@ mod tests {
                 selection_score: 0.83,
                 above_threshold: true,
                 latest_pack_selection: Some(selection),
+                lifecycle: LifecycleExplanation {
+                    status: "active",
+                    tombstoned_at: None,
+                    tombstoned_reason: None,
+                },
                 contradictions: Vec::new(),
                 links: Vec::new(),
                 history: None,

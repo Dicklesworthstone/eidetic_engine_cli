@@ -35,7 +35,7 @@
           {
             "code": "degraded_context",
             "severity": "low",
-            "message": "1 degraded context signal present; inspect degraded[] repairs before relying on omitted or fallback sources.",
+            "message": "1 degraded context signal present; inspect degraded[] repairs before relying on skipped or fallback sources.",
             "memoryIds": [],
             "action": "inspect_degraded_repairs"
           }
@@ -112,7 +112,6 @@
             "feasible": true
           }
         ],
-        "rejectedFrontier": [],
         "steps": [
           {
             "rank": 1,
@@ -158,7 +157,8 @@
           "diversityKey": "procedural:rule:cargo"
         }
       ],
-      "omitted": [],
+      "skippedTotal": 0,
+      "skipped": [],
       "provenanceFooter": {
         "memoryCount": 1,
         "sourceCount": 1,

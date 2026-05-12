@@ -1800,6 +1800,7 @@ fn remember_search_neighbor_ids(
         limit: u32::try_from(REMEMBER_CURATION_NEIGHBOR_LIMIT + 1).unwrap_or(u32::MAX),
         speed: crate::search::SpeedMode::Default,
         explain: false,
+        include_tombstoned: false,
         relevance_floor: Some(0.0),
     })
     .map_err(|error| error.to_string())?;

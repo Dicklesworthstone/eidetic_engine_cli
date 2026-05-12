@@ -103,7 +103,6 @@
             "feasible": true
           }
         ],
-        "rejectedFrontier": [],
         "steps": [
           {
             "rank": 1,
@@ -149,7 +148,8 @@
           "diversityKey": "procedural:rule:cargo"
         }
       ],
-      "omitted": [],
+      "skippedTotal": 0,
+      "skipped": [],
       "provenanceFooter": {
         "memoryCount": 1,
         "sourceCount": 1,

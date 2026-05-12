@@ -58,7 +58,7 @@ expression: context
           {
             "code": "degraded_context",
             "severity": "low",
-            "message": "1 degraded context signal present; inspect degraded[] repairs before relying on omitted or fallback sources.",
+            "message": "1 degraded context signal present; inspect degraded[] repairs before relying on skipped or fallback sources.",
             "memoryIds": [],
             "action": "inspect_degraded_repairs"
           }
@@ -113,8 +113,7 @@ expression: context
         "omittedCount": 0,
         "budgetLimit": 4000,
         "budgetUsed": 8,
-        "totalObjectiveValue": 0.306154,
-        "rejectedFrontier": []
+        "totalObjectiveValue": 0.306154
       },
       "items": [
         {
@@ -155,7 +154,8 @@ expression: context
           "sourceIndex": 1
         }
       ],
-      "omitted": [],
+      "skippedTotal": 0,
+      "skipped": [],
       "provenanceFooter": {
         "memoryCount": 1,
         "sourceCount": 1,

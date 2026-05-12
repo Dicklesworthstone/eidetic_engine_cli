@@ -281,6 +281,7 @@ pub struct ContextPackOptions {
     pub max_tokens: Option<u32>,
     pub candidate_pool: Option<u32>,
     pub max_results: Option<u32>,
+    pub include_tombstoned: bool,
     pub pagination: Option<ContextPagination>,
 }
 
@@ -477,6 +478,7 @@ pub fn run_context_pack_with_performance(
         limit: request.candidate_pool,
         speed: options.speed,
         explain: false,
+        include_tombstoned: options.include_tombstoned,
         // Context packing owns relevance and budget filtering after retrieval.
         // Keep the candidate pool broad so an exact single-memory match is not
         // dropped by the interactive search command's presentation floor.
@@ -503,6 +505,7 @@ pub fn run_context_pack_with_performance(
             &options.workspace_path,
             &request.query,
             request.candidate_pool,
+            options.include_tombstoned,
             &mut degraded,
         );
         let fallback_count = fallback_hits.len();
@@ -564,6 +567,7 @@ pub fn run_context_pack_with_performance(
         &options.workspace_path,
         &search_report,
         &options.filters,
+        options.include_tombstoned,
         &mut degraded,
     );
     if candidate_metrics.tag_filtered_candidates > 0 {
@@ -632,6 +636,7 @@ pub fn run_context_pack_with_performance(
         &connection,
         &options.workspace_path,
         &options.filters,
+        options.include_tombstoned,
         &mut candidates,
         &mut degraded,
     );
@@ -651,6 +656,7 @@ pub fn run_context_pack_with_performance(
                 &connection,
                 &options.workspace_path,
                 &focus_state,
+                options.include_tombstoned,
                 &mut degraded,
             );
             trace.focus_candidate_count = focus_candidates.len();
@@ -740,6 +746,32 @@ pub fn run_context_pack_with_performance(
     let mut draft =
         assemble_draft_with_profile(request.profile, request.query.clone(), budget, candidates)
             .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    let tombstoned_item_count = draft
+        .items
+        .iter()
+        .filter(|item| item.tombstoned_at.is_some())
+        .count();
+    if options.include_tombstoned
+        && tombstoned_item_count > 0
+        && !degraded
+            .iter()
+            .any(|entry| entry.code == "tombstoned_in_results")
+    {
+        push_degradation(
+            &mut degraded,
+            "tombstoned_in_results",
+            ContextResponseSeverity::Low,
+            format!(
+                "Context pack includes {tombstoned_item_count} tombstoned memor{suffix} because --include-tombstoned was requested.",
+                suffix = if tombstoned_item_count == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
+            ),
+            None,
+        );
+    }
 
     draft.hash = Some(compute_pack_hash(&request, &draft, &degraded));
     trace.record_elapsed("packAssembly", pack_start);
@@ -958,6 +990,7 @@ fn context_pack_json(draft: &crate::pack::PackDraft) -> serde_json::Value {
         "selectedCount": draft.selection_certificate.selected_count,
         "omittedCount": draft.selection_certificate.omitted_count,
         "selectionSteps": draft.selection_certificate.steps.len(),
+        "coverageFillCount": draft.coverage_fill_count(),
         "tokenBudget": {
             "limit": draft.selection_certificate.budget_limit,
             "used": draft.selection_certificate.budget_used,
@@ -1065,6 +1098,7 @@ fn lexical_memory_fallback_hits(
     workspace_path: &Path,
     query: &str,
     limit: u32,
+    include_tombstoned: bool,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Vec<SearchHit> {
     let query_terms = lexical_terms(query);
@@ -1072,7 +1106,8 @@ fn lexical_memory_fallback_hits(
         return Vec::new();
     }
 
-    let memories = fallback_memories_for_workspace(connection, workspace_path, degraded);
+    let memories =
+        fallback_memories_for_workspace(connection, workspace_path, include_tombstoned, degraded);
     let mut scored: Vec<(StoredMemory, f32)> = memories
         .into_values()
         .filter_map(|memory| {
@@ -1106,11 +1141,12 @@ fn lexical_memory_fallback_hits(
 fn fallback_memories_for_workspace(
     connection: &DbConnection,
     workspace_path: &Path,
+    include_tombstoned: bool,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> BTreeMap<String, StoredMemory> {
     let mut memories = BTreeMap::new();
     for workspace_id in context_workspace_ids(connection, workspace_path, degraded) {
-        match connection.list_memories(&workspace_id, None, false) {
+        match connection.list_memories(&workspace_id, None, include_tombstoned) {
             Ok(rows) => {
                 for memory in rows {
                     memories.insert(memory.id.clone(), memory);
@@ -1459,6 +1495,7 @@ fn compute_pack_hash(
         hasher.update(&item.relevance.into_inner().to_le_bytes());
         hasher.update(&item.utility.into_inner().to_le_bytes());
         hasher.update(item.why.as_bytes());
+        hasher.update(item.selected_in.as_str().as_bytes());
         for provenance in &item.provenance {
             hasher.update(provenance.uri.to_string().as_bytes());
             hasher.update(provenance.note.as_bytes());
@@ -1469,6 +1506,9 @@ fn compute_pack_hash(
         hasher.update(item.trust.class.as_str().as_bytes());
         if let Some(subclass) = &item.trust.subclass {
             hasher.update(subclass.as_bytes());
+        }
+        if let Some(tombstoned_at) = &item.tombstoned_at {
+            hasher.update(tombstoned_at.as_bytes());
         }
         for redaction in &item.redactions {
             hasher.update(redaction.reason.as_bytes());
@@ -1497,6 +1537,7 @@ fn candidates_from_search_with_metrics(
     workspace_path: &Path,
     search_report: &crate::core::search::SearchReport,
     filters: &crate::models::QueryFilters,
+    include_tombstoned: bool,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> (Vec<PackCandidate>, CandidateResolutionMetrics) {
     let mut metrics = CandidateResolutionMetrics {
@@ -1569,7 +1610,7 @@ fn candidates_from_search_with_metrics(
                         );
                         continue;
                     };
-                    if memory.tombstoned_at.is_some() {
+                    if memory.tombstoned_at.is_some() && !include_tombstoned {
                         metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
                         push_degradation(
                             degraded,
@@ -1624,6 +1665,7 @@ fn candidates_from_search_with_metrics(
                     tags_map: &tags_map,
                     workspace_path,
                     query: &search_report.query,
+                    include_tombstoned,
                 };
                 match candidate_from_hit_preloaded(preloaded, hit, memory_id, artifact_id, degraded)
                 {
@@ -1686,6 +1728,7 @@ fn apply_graph_hints(
     connection: &DbConnection,
     workspace_path: &Path,
     filters: &crate::models::QueryFilters,
+    include_tombstoned: bool,
     candidates: &mut Vec<PackCandidate>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> GraphHintApplicationMetrics {
@@ -1698,8 +1741,13 @@ fn apply_graph_hints(
     push_graph_snapshot_posture(connection, &workspace_ids, degraded);
 
     let mut metrics = GraphHintApplicationMetrics::default();
-    let (graph_nodes, traversed_edges, missing_seeds) =
-        graph_hint_nodes(connection, graph, &workspace_ids, degraded);
+    let (graph_nodes, traversed_edges, missing_seeds) = graph_hint_nodes(
+        connection,
+        graph,
+        &workspace_ids,
+        include_tombstoned,
+        degraded,
+    );
     metrics.traversed_edges = traversed_edges;
     metrics.missing_seeds = missing_seeds;
 
@@ -1787,7 +1835,7 @@ fn apply_graph_hints(
             }
             continue;
         };
-        if memory.tombstoned_at.is_some() {
+        if memory.tombstoned_at.is_some() && !include_tombstoned {
             continue;
         }
         if !workspace_ids.contains(&memory.workspace_id) {
@@ -1928,6 +1976,7 @@ fn graph_hint_nodes(
     connection: &DbConnection,
     graph: &crate::models::QueryGraphHints,
     workspace_ids: &BTreeSet<String>,
+    include_tombstoned: bool,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> (BTreeMap<String, GraphHintEvidence>, usize, usize) {
     let mut nodes = BTreeMap::new();
@@ -1980,7 +2029,7 @@ fn graph_hint_nodes(
             );
             continue;
         }
-        if seed_memory.tombstoned_at.is_some() {
+        if seed_memory.tombstoned_at.is_some() && !include_tombstoned {
             continue;
         }
         nodes.insert(
@@ -2050,7 +2099,7 @@ fn graph_hint_nodes(
             let Some(neighbor_memory) = neighbor_memories.get(&neighbor_id) else {
                 continue;
             };
-            if neighbor_memory.tombstoned_at.is_some() {
+            if neighbor_memory.tombstoned_at.is_some() && !include_tombstoned {
                 continue;
             }
             if !workspace_ids.contains(&neighbor_memory.workspace_id) {
@@ -2238,11 +2287,14 @@ fn graph_candidate_from_memory(
         ),
     })
     .ok()?;
-    Some(
-        candidate
-            .with_diversity_key(diversity_key_for_memory(memory, tags))
-            .with_trust_signal(trust_signal_for_memory(memory, memory_id, degraded)),
-    )
+    let candidate = candidate
+        .with_diversity_key(diversity_key_for_memory(memory, tags))
+        .with_trust_signal(trust_signal_for_memory(memory, memory_id, degraded));
+    let candidate = match memory.tombstoned_at.as_ref() {
+        Some(tombstoned_at) => candidate.with_tombstoned_at(tombstoned_at.clone()),
+        None => candidate,
+    };
+    Some(candidate)
 }
 
 fn graph_expansion_relevance(depth: u32) -> Option<UnitScore> {
@@ -2401,6 +2453,16 @@ struct PreloadedCandidateSource<'a> {
     tags_map: &'a BTreeMap<String, Vec<String>>,
     workspace_path: &'a Path,
     query: &'a str,
+    include_tombstoned: bool,
+}
+
+struct FocusCandidateSource<'a> {
+    connection: &'a DbConnection,
+    focus_state: &'a crate::models::FocusState,
+    workspace_path: &'a Path,
+    focus_hash: &'a str,
+    storage_path: &'a str,
+    include_tombstoned: bool,
 }
 
 fn candidate_from_hit_preloaded(
@@ -2412,6 +2474,7 @@ fn candidate_from_hit_preloaded(
 ) -> Option<PackCandidate> {
     let memory = match source.memories.get(&memory_id.to_string()) {
         Some(memory) if memory.tombstoned_at.is_none() => memory,
+        Some(memory) if source.include_tombstoned => memory,
         _ => return None,
     };
     let tags = source.tags_map.get(&memory.id).cloned().unwrap_or_default();
@@ -2438,32 +2501,36 @@ fn candidate_from_hit_preloaded(
     })
     .ok()?;
 
-    Some(
-        candidate
-            .with_diversity_key(diversity_key_for_memory(memory, &tags))
-            .with_trust_signal(trust_signal_for_memory(memory, memory_id, degraded)),
-    )
+    let candidate = candidate
+        .with_diversity_key(diversity_key_for_memory(memory, &tags))
+        .with_trust_signal(trust_signal_for_memory(memory, memory_id, degraded));
+    let candidate = match memory.tombstoned_at.as_ref() {
+        Some(tombstoned_at) => candidate.with_tombstoned_at(tombstoned_at.clone()),
+        None => candidate,
+    };
+    Some(candidate)
 }
 
 fn focus_candidates_from_state(
     connection: &DbConnection,
     workspace_path: &Path,
     focus_state: &crate::models::FocusState,
+    include_tombstoned: bool,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Vec<PackCandidate> {
     let mut candidates = Vec::new();
     let focus_hash = focus_state_hash(focus_state);
     let storage_path = focus_state_path(workspace_path).display().to_string();
+    let source = FocusCandidateSource {
+        connection,
+        focus_state,
+        workspace_path,
+        focus_hash: &focus_hash,
+        storage_path: &storage_path,
+        include_tombstoned,
+    };
     for item in &focus_state.items {
-        match focus_candidate_from_item(
-            connection,
-            item,
-            focus_state,
-            workspace_path,
-            &focus_hash,
-            &storage_path,
-            degraded,
-        ) {
+        match focus_candidate_from_item(&source, item, degraded) {
             Some(candidate) => candidates.push(candidate),
             None => push_degradation(
                 degraded,
@@ -2481,16 +2548,13 @@ fn focus_candidates_from_state(
 }
 
 fn focus_candidate_from_item(
-    connection: &DbConnection,
+    source: &FocusCandidateSource<'_>,
     item: &crate::models::FocusItem,
-    focus_state: &crate::models::FocusState,
-    workspace_path: &Path,
-    focus_hash: &str,
-    storage_path: &str,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<PackCandidate> {
-    let memory = match connection.get_memory(&item.memory_id.to_string()) {
+    let memory = match source.connection.get_memory(&item.memory_id.to_string()) {
         Ok(Some(memory)) if memory.tombstoned_at.is_none() => memory,
+        Ok(Some(memory)) if source.include_tombstoned => memory,
         Ok(Some(_)) => {
             push_degradation(
                 degraded,
@@ -2531,22 +2595,24 @@ fn focus_candidate_from_item(
             return None;
         }
     };
-    let tags = connection
+    let tags = source
+        .connection
         .get_memory_tags(&memory.id)
         .unwrap_or_else(|_| Vec::new());
     let mut provenance = Vec::new();
     if let Some(memory_provenance) =
-        provenance_for_memory(&memory, item.memory_id, workspace_path, degraded)
+        provenance_for_memory(&memory, item.memory_id, source.workspace_path, degraded)
     {
         provenance.push(memory_provenance);
     }
     if let Ok(focus_provenance) = PackProvenance::new(
         ProvenanceUri::File {
-            path: storage_path.to_owned(),
+            path: source.storage_path.to_owned(),
             span: None,
         },
         format!(
-            "Passive focus state {focus_hash} included memory {}; reason={}; provenance={}",
+            "Passive focus state {} included memory {}; reason={}; provenance={}",
+            source.focus_hash,
             item.memory_id,
             item.reason,
             item.provenance.join(",")
@@ -2554,9 +2620,9 @@ fn focus_candidate_from_item(
     ) {
         provenance.push(focus_provenance);
     }
-    let relevance = focus_relevance(item, focus_state)?;
+    let relevance = focus_relevance(item, source.focus_state)?;
     let utility = unit_score(memory.utility.max(0.75))?;
-    let why = focus_candidate_why(item, focus_state, focus_hash);
+    let why = focus_candidate_why(item, source.focus_state, source.focus_hash);
     let candidate = PackCandidate::new(PackCandidateInput {
         memory_id: item.memory_id,
         section: section_for_memory(&memory),
@@ -2569,11 +2635,14 @@ fn focus_candidate_from_item(
     })
     .ok()?;
 
-    Some(
-        candidate
-            .with_diversity_key(diversity_key_for_memory(&memory, &tags))
-            .with_trust_signal(trust_signal_for_memory(&memory, item.memory_id, degraded)),
-    )
+    let candidate = candidate
+        .with_diversity_key(diversity_key_for_memory(&memory, &tags))
+        .with_trust_signal(trust_signal_for_memory(&memory, item.memory_id, degraded));
+    let candidate = match memory.tombstoned_at.as_ref() {
+        Some(tombstoned_at) => candidate.with_tombstoned_at(tombstoned_at.clone()),
+        None => candidate,
+    };
+    Some(candidate)
 }
 
 fn focus_relevance(
@@ -3123,6 +3192,7 @@ mod tests {
             Path::new("/tmp/ee-context-test"),
             &search_report,
             &crate::models::QueryFilters::default(),
+            false,
             &mut degraded,
         );
 
@@ -3255,6 +3325,7 @@ mod tests {
             workspace_path,
             &search_report,
             &crate::models::QueryFilters::default(),
+            false,
             &mut first_degraded,
         );
         let mut second_degraded = Vec::new();
@@ -3263,6 +3334,7 @@ mod tests {
             workspace_path,
             &search_report,
             &crate::models::QueryFilters::default(),
+            false,
             &mut second_degraded,
         );
 
@@ -3418,6 +3490,7 @@ mod tests {
             max_tokens: Some(60),
             candidate_pool: Some(2),
             max_results: None,
+            include_tombstoned: false,
             pagination: None,
         };
         let trace = ContextPerformanceTrace {
@@ -3526,6 +3599,7 @@ mod tests {
             max_tokens: Some(400),
             candidate_pool: Some(10),
             max_results: None,
+            include_tombstoned: false,
             pagination: None,
         })
         .map_err(|error| error.to_string())?;
@@ -3549,6 +3623,115 @@ mod tests {
             .collect();
         assert!(degraded_codes.contains("index_missing"));
         assert!(degraded_codes.contains("context_lexical_fallback"));
+        Ok(())
+    }
+
+    #[test]
+    fn context_pack_tombstone_visibility_is_opt_in() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let db_path = ee_dir.join("ee.db");
+        let empty_index_dir = tempdir.path().join("empty-index");
+        std::fs::create_dir_all(&empty_index_dir).map_err(|error| error.to_string())?;
+
+        let connection = DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = super::stable_context_workspace_id(&workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("workspace".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(43)).to_string();
+        connection
+            .insert_memory(
+                &memory_id,
+                &CreateMemoryInput {
+                    workspace_id,
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Run cargo clippy before release candidate signoff.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.95,
+                    utility: 0.80,
+                    importance: 0.70,
+                    provenance_uri: None,
+                    trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                    trust_subclass: Some("test".to_owned()),
+                    tags: vec!["release".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .tombstone_memory(&memory_id)
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        let base_options = super::ContextPackOptions {
+            workspace_path: workspace,
+            database_path: Some(db_path),
+            index_dir: Some(empty_index_dir),
+            query: "clippy release candidate".to_owned(),
+            speed: crate::search::SpeedMode::Default,
+            filters: crate::models::QueryFilters::default(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(400),
+            candidate_pool: Some(10),
+            max_results: None,
+            include_tombstoned: false,
+            pagination: None,
+        };
+
+        let default_response = super::run_context_pack(&base_options)
+            .map_err(|error| format!("default context pack failed: {error:?}"))?;
+        assert!(
+            default_response
+                .data
+                .pack
+                .items
+                .iter()
+                .all(|item| item.memory_id.to_string() != memory_id),
+            "default context pack should exclude tombstoned memories"
+        );
+
+        let mut include_options = base_options.clone();
+        include_options.include_tombstoned = true;
+        let included_response = super::run_context_pack(&include_options)
+            .map_err(|error| format!("include tombstoned context pack failed: {error:?}"))?;
+        let included_item = included_response
+            .data
+            .pack
+            .items
+            .iter()
+            .find(|item| item.memory_id.to_string() == memory_id)
+            .ok_or_else(|| "opt-in context pack should include tombstoned memory".to_owned())?;
+        let tombstoned_at = included_item.tombstoned_at.as_deref().ok_or_else(|| {
+            "included tombstoned item should carry lifecycle timestamp".to_owned()
+        })?;
+
+        let rendered = crate::output::render_context_response_json(&included_response);
+        let json: serde_json::Value = serde_json::from_str(&rendered)
+            .map_err(|error| format!("context JSON should parse: {error}"))?;
+        assert_eq!(
+            json["data"]["pack"]["items"][0]["lifecycle"]["status"],
+            "tombstoned"
+        );
+        assert_eq!(
+            json["data"]["pack"]["items"][0]["lifecycle"]["tombstonedAt"],
+            tombstoned_at
+        );
         Ok(())
     }
 
@@ -3917,11 +4100,12 @@ mod tests {
     #[test]
     fn pack_hash_includes_content_provenance_and_degradation() -> Result<(), String> {
         use super::{ContextResponseDegradation, ContextResponseSeverity, compute_pack_hash};
-        use crate::models::{ProvenanceUri, TrustClass};
+        use crate::models::{ProvenanceUri, TrustClass, UnitScore};
         use crate::pack::{
             ContextRequest, PackDraft, PackDraftItem, PackGuaranteeStatus, PackOmission,
-            PackOmissionReason, PackProvenance, PackSection, PackSelectionCertificate,
-            PackSelectionObjective, PackTrustSignal, TokenBudget,
+            PackOmissionReason, PackProvenance, PackRejectionStage, PackSection,
+            PackSelectionCertificate, PackSelectionObjective, PackSelectionPhase, PackTrustSignal,
+            TokenBudget,
         };
 
         let request =
@@ -3949,6 +4133,8 @@ mod tests {
             diversity_key: None,
             trust: PackTrustSignal::new(TrustClass::AgentAssertion, None),
             redactions: Vec::new(),
+            tombstoned_at: None,
+            selected_in: PackSelectionPhase::StrictMmr,
         };
 
         let base_draft = PackDraft {
@@ -3973,7 +4159,6 @@ mod tests {
                 monotone: false,
                 submodular: false,
                 selected_items: Vec::new(),
-                rejected_frontier: Vec::new(),
                 steps: Vec::new(),
             },
             hash: None,
@@ -4031,7 +4216,12 @@ mod tests {
         draft_omission.omitted = vec![PackOmission {
             memory_id: mem_d,
             estimated_tokens: 50,
+            relevance: UnitScore::parse(0.5).map_err(|error| error.to_string())?,
+            utility: UnitScore::parse(0.4).map_err(|error| error.to_string())?,
             reason: PackOmissionReason::TokenBudgetExceeded,
+            rejected_at: PackRejectionStage::Selection,
+            feasible: false,
+            could_fit_with_budget: Some(60),
         }];
         let hash_omission = compute_pack_hash(&request, &draft_omission, &base_degraded);
         assert_ne!(hash_base, hash_omission, "omission change must alter hash");

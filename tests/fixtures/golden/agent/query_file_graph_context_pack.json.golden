@@ -35,7 +35,7 @@
           {
             "code": "degraded_context",
             "severity": "low",
-            "message": "2 degraded context signals present; inspect degraded[] repairs before relying on omitted or fallback sources.",
+            "message": "2 degraded context signals present; inspect degraded[] repairs before relying on skipped or fallback sources.",
             "memoryIds": [],
             "action": "inspect_degraded_repairs"
           }
@@ -118,7 +118,6 @@
             "feasible": true
           }
         ],
-        "rejectedFrontier": [],
         "steps": [
           {
             "rank": 1,
@@ -204,7 +203,8 @@
           "diversityKey": "procedural:rule:graph"
         }
       ],
-      "omitted": [],
+      "skippedTotal": 0,
+      "skipped": [],
       "provenanceFooter": {
         "memoryCount": 2,
         "sourceCount": 2,
