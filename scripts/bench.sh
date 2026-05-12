@@ -62,9 +62,7 @@ BASELINE_FILE="$PROJECT_ROOT/benches/baselines/v0.1.json"
 WORKLOAD_FILE="$PROJECT_ROOT/tests/fixtures/swarm_scale/workloads.json"
 if [ -d "$DEFAULT_AGENT_BUILD_ROOT" ]; then
     mkdir -p "$DEFAULT_AGENT_BUILD_ROOT/cargo-target" "$DEFAULT_AGENT_BUILD_ROOT/tmp" 2>/dev/null || true
-    if [ -z "${TMPDIR:-}" ]; then
-        export TMPDIR="$DEFAULT_AGENT_BUILD_ROOT/tmp"
-    fi
+    export TMPDIR="${EE_AGENT_TMPDIR:-$DEFAULT_AGENT_BUILD_ROOT/tmp}"
 fi
 if [ -n "${CARGO_TARGET_DIR:-}" ]; then
     TARGET_ROOT="$CARGO_TARGET_DIR"

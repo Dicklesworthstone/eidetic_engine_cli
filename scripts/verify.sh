@@ -55,12 +55,8 @@ echo ""
 
 if [ -d "${DEFAULT_AGENT_BUILD_ROOT}" ]; then
     mkdir -p "${DEFAULT_AGENT_BUILD_ROOT}/cargo-target" "${DEFAULT_AGENT_BUILD_ROOT}/tmp" 2>/dev/null || true
-    if [ -z "${CARGO_TARGET_DIR:-}" ]; then
-        export CARGO_TARGET_DIR="${DEFAULT_AGENT_BUILD_ROOT}/cargo-target"
-    fi
-    if [ -z "${TMPDIR:-}" ]; then
-        export TMPDIR="${DEFAULT_AGENT_BUILD_ROOT}/tmp"
-    fi
+    export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${DEFAULT_AGENT_BUILD_ROOT}/cargo-target}"
+    export TMPDIR="${EE_AGENT_TMPDIR:-${DEFAULT_AGENT_BUILD_ROOT}/tmp}"
 fi
 
 ARTIFACT_DIRS=""
