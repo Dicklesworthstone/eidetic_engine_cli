@@ -237,9 +237,13 @@ fn capsule_sections_id_set_covers_canonical_resume_topics() -> TestResult {
         .collect();
 
     // Per src/core/handoff.rs create_handoff: workspace, objective,
-    // next_actions, decisions are always synthesized (decisions even
-    // emits a placeholder when none are recorded).
-    for canonical_id in ["workspace", "objective", "next_actions", "decisions"] {
+    // and next_actions are always synthesized. `decisions` is
+    // conditional (only emitted when the workspace has recorded
+    // recent decisions), and `swarm_brief_summary` is conditional
+    // (only emitted when a swarm brief is configured). We assert the
+    // unconditional set here; conditional sections get their own
+    // golden coverage if/when this audit needs to expand.
+    for canonical_id in ["workspace", "objective", "next_actions"] {
         if !ids.iter().any(|id| id == canonical_id) {
             return Err(format!(
                 "resume capsule missing canonical section `{canonical_id}`; got ids={ids:?}"
