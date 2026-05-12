@@ -1923,9 +1923,9 @@ mod tests {
             "context request candidate pool",
         )?;
         ensure_equal(
-            &value["data"]["pack"]["selectionCertificate"]["objective"],
+            &value["data"]["pack"]["meta"]["algorithm"]["objective"],
             &serde_json::json!("mmr_redundancy"),
-            "context selection certificate objective",
+            "context algorithm objective",
         )?;
         // Bead bd-2pe1z (A1 phase 2): selectionCertificate.steps[] is gone;
         // the per-item rank trace is now inline on items[]. Read from the

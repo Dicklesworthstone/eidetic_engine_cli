@@ -2,24 +2,13 @@
   "schema": "ee.response.v1",
   "success": true,
   "data": {
-    "candidateCount": 1,
     "command": "curate candidates",
+    "candidateCount": 1,
     "selectedCandidate": {
-      "evidenceTypes": [
-        "agent_inference",
-        "agent_inference",
-        "agent_inference",
-        "agent_inference",
-        "agent_inference",
-        "agent_inference",
-        "agent_inference",
-        "agent_inference",
-        "agent_inference",
-        "agent_inference",
-        "agent_inference"
-      ],
       "id": "CANDIDATE",
-      "memberMemoryIdCount": 11,
+      "type": "rule",
+      "status": "pending",
+      "reviewState": "new",
       "memberMemoryIds": [
         "MEMORY_01",
         "MEMORY_02",
@@ -33,14 +22,25 @@
         "MEMORY_10",
         "MEMORY_11"
       ],
-      "proposedContentMentionsCargo": true,
-      "reasonMentionsCargo": true,
-      "requiresApply": false,
-      "requiresValidate": true,
-      "reviewState": "new",
+      "memberMemoryIdCount": 11,
       "sourceType": "agent_inference",
-      "status": "pending",
-      "type": "rule"
+      "evidenceTypes": [
+        "agent_inference",
+        "agent_inference",
+        "agent_inference",
+        "agent_inference",
+        "agent_inference",
+        "agent_inference",
+        "agent_inference",
+        "agent_inference",
+        "agent_inference",
+        "agent_inference",
+        "agent_inference"
+      ],
+      "requiresValidate": true,
+      "requiresApply": false,
+      "reasonMentionsCargo": true,
+      "proposedContentMentionsCargo": true
     }
   }
 }

@@ -1,23 +1,10 @@
 {
-  "profile": "submodular",
-  "objective": "facility_location",
-  "algorithm": "deterministic_greedy_facility_location_gain_per_token",
-  "guarantee": "monotone submodular facility-location objective; deterministic budgeted greedy certificate, exact optimum not claimed",
-  "guaranteeStatus": "conditional",
-  "guaranteeEvidence": {
-    "status": "conditional",
-    "certificateId": null,
-    "identityValid": true,
-    "summary": "monotone submodular facility-location objective; deterministic budgeted greedy certificate, exact optimum not claimed"
-  },
   "candidateCount": 3,
   "selectedCount": 2,
   "omittedCount": 1,
   "budgetLimit": 100,
   "budgetUsed": 20,
   "totalObjectiveValue": 1.784,
-  "monotone": true,
-  "submodular": true,
   "rejectedFrontier": [
     {
       "memoryId": "mem_00000000000000000000000002",

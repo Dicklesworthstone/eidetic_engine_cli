@@ -185,8 +185,8 @@
       {
         "code": "query_output_explain_already_included",
         "severity": "low",
-        "message": "output.explain was accepted; JSON context packs already include selection certificates and per-item why explanations.",
-        "repair": "Inspect data.pack.selectionCertificate and data.pack.items[].why."
+        "message": "output.explain was accepted; JSON context packs already include algorithm metadata, selection certificates, and per-item why explanations.",
+        "repair": "Inspect data.pack.meta.algorithm, data.pack.selectionCertificate, and data.pack.items[].why."
       }
     ]
   }

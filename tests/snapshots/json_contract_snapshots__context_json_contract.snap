@@ -23,6 +23,26 @@ expression: context
     "pack": {
       "query": "format before release",
       "hash": "[HASH]",
+      "meta": {
+        "algorithm": {
+          "profile": "compact",
+          "objective": "mmr_redundancy",
+          "name": "deterministic_greedy_mmr",
+          "guarantee": "deterministic redundancy-controlled greedy ranking; no submodular guarantee claimed",
+          "guaranteeStatus": "conditional",
+          "scoringFormula": "unit_score(field)=clamp(field, 0.0, 1.0) for finite fields, otherwise 0.0",
+          "guaranteeEvidence": {
+            "status": "conditional",
+            "certificateId": null,
+            "identityValid": true,
+            "summary": "deterministic redundancy-controlled greedy ranking; no submodular guarantee claimed"
+          },
+          "properties": {
+            "monotone": false,
+            "submodular": false
+          }
+        }
+      },
       "budget": {
         "maxTokens": 4000,
         "usedTokens": 8
@@ -88,25 +108,12 @@ expression: context
         }
       },
       "selectionCertificate": {
-        "profile": "compact",
-        "objective": "mmr_redundancy",
-        "algorithm": "deterministic_greedy_mmr",
-        "guarantee": "deterministic redundancy-controlled greedy ranking; no submodular guarantee claimed",
-        "guaranteeStatus": "conditional",
-        "guaranteeEvidence": {
-          "status": "conditional",
-          "certificateId": null,
-          "identityValid": true,
-          "summary": "deterministic redundancy-controlled greedy ranking; no submodular guarantee claimed"
-        },
         "candidateCount": 1,
         "selectedCount": 1,
         "omittedCount": 0,
         "budgetLimit": 4000,
         "budgetUsed": 8,
         "totalObjectiveValue": 0.306154,
-        "monotone": false,
-        "submodular": false,
         "rejectedFrontier": []
       },
       "items": [

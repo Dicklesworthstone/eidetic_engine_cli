@@ -337,7 +337,7 @@ fn cli_loop_init_remember_search_context_why_full_cycle() -> TestResult {
         )?;
     }
     ensure(
-        context_json["data"]["pack"]["selectionCertificate"]["algorithm"]
+        context_json["data"]["pack"]["meta"]["algorithm"]["name"]
             .as_str()
             .is_some_and(|algorithm| !algorithm.is_empty()),
         "context pack must include deterministic algorithm name",

@@ -1624,10 +1624,10 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
         "context pack quality must report complete provenance",
     )?;
     ensure(
-        context_json["data"]["pack"]["selectionCertificate"]["algorithm"]
+        context_json["data"]["pack"]["meta"]["algorithm"]["name"]
             .as_str()
             .is_some_and(|algorithm| !algorithm.is_empty()),
-        "context pack selection certificate must name the deterministic algorithm",
+        "context pack metadata must name the deterministic algorithm",
     )?;
     // Bead bd-2pe1z (A1 phase 2): selectionCertificate.selectedItems and
     // selectionCertificate.steps were collapsed into the canonical items[]

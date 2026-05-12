@@ -295,6 +295,25 @@ fn pack_selection_certificate_golden_is_stable() -> TestResult {
     let certificate = value
         .pointer("/data/pack/selectionCertificate")
         .ok_or_else(|| "selection certificate missing".to_string())?;
+    let algorithm = value
+        .pointer("/data/pack/meta/algorithm")
+        .ok_or_else(|| "pack algorithm metadata missing".to_string())?;
+    ensure(
+        algorithm["name"]
+            .as_str()
+            .is_some_and(|name| !name.is_empty()),
+        "pack meta algorithm names the deterministic algorithm",
+    )?;
+    ensure(
+        algorithm["scoringFormula"]
+            .as_str()
+            .is_some_and(|formula| formula.contains("unit_score(field)=clamp")),
+        "pack meta algorithm carries the shared scoring formula",
+    )?;
+    ensure(
+        certificate.get("algorithm").is_none(),
+        "selection certificate no longer repeats pack meta algorithm",
+    )?;
     assert_golden("pack_selection", &pretty(certificate)?)
 }
 
