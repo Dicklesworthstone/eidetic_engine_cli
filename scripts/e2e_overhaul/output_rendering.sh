@@ -61,7 +61,9 @@ else
 fi
 
 # ANSI escape sequences must never appear in --format markdown output.
-if printf '%s' "$MD_OUTPUT" | grep -qP '\x1b\['; then
+# BSD grep on macOS does not implement -P (Perl regex), so use a small Python
+# helper rather than rely on the host grep flavor.
+if printf '%s' "$MD_OUTPUT" | python3 -c "import sys; sys.exit(0 if '\x1b[' in sys.stdin.read() else 1)"; then
     e2e_log_assert_eq "ansi_present" "no_ansi" "h3_markdown_has_no_ansi_escapes"
 else
     e2e_log_assert_eq "true" "true" "h3_markdown_has_no_ansi_escapes"

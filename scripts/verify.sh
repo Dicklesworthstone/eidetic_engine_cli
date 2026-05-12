@@ -19,6 +19,7 @@ set -euo pipefail
 #   4. Vision Coverage         - report documented implemented/stubbed/missing surfaces
 #   5. Unit/Contract/Golden    - cargo test --workspace --lib --bins --tests --examples
 #   6. Basic E2E               - scripts/e2e_test.sh
+#   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
 #   7. Advanced E2E            - scripts/e2e_advanced.sh
 #   8. Boundary Migration      - scripts/e2e_boundary_migration.sh
 #   9. Benchmarks (optional)   - scripts/bench.sh --check-regression
@@ -230,6 +231,12 @@ run_stage "Unit, Contract, and Golden Tests" "cargo test --workspace --lib --bin
 
 # Gate 6: Basic End-to-End
 run_stage "Basic E2E Scripts" "./scripts/e2e_test.sh"
+
+# Gate 6.5: Overhaul Integration (J4). Gated behind VERIFY_OVERHAUL=1
+# until enough implementation beads ship to make the suite reliably
+# pass across CI. The driver itself respects VERIFY_OVERHAUL=0 and
+# exits 0 without running, so this stage stays fast in default CI.
+run_stage "Overhaul Integration E2E (J4)" "./scripts/e2e_overhaul.sh"
 
 # Gate 7: Advanced End-to-End
 run_stage "Advanced E2E Scripts" "./scripts/e2e_advanced.sh"

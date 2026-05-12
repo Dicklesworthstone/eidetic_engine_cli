@@ -109,3 +109,7 @@ node_modules/
 .bv/
 .env
 .claude/settings.local.json
+
+# Per-run e2e overhaul suite logs (J3/J4). Each run writes a timestamped
+# directory under tests/logs/; keep them off git.
+tests/logs/
