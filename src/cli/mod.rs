@@ -15712,9 +15712,79 @@ where
 // error that documents the supported prefixes — agents iterate the
 // error details to pick the correct alias / explicit form.
 
+/// Levenshtein edit distance between two ASCII-ish strings.
+///
+/// Bead bd-17c65.6.7 (F7). Standard iterative DP; case-insensitive
+/// for short prefix-shaped inputs. Used only to compute a
+/// `didYouMean` hint when an ID prefix doesn't match any known
+/// alias prefix.
+pub(crate) fn ascii_edit_distance(a: &str, b: &str) -> usize {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    if a_bytes.is_empty() {
+        return b_bytes.len();
+    }
+    if b_bytes.is_empty() {
+        return a_bytes.len();
+    }
+    let mut prev: Vec<usize> = (0..=b_bytes.len()).collect();
+    let mut curr: Vec<usize> = vec![0; b_bytes.len() + 1];
+    for i in 1..=a_bytes.len() {
+        curr[0] = i;
+        for j in 1..=b_bytes.len() {
+            let cost = if a_bytes[i - 1].to_ascii_lowercase()
+                == b_bytes[j - 1].to_ascii_lowercase()
+            {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b_bytes.len()]
+}
+
+/// Return the unique closest match within `max_distance`, or `None` if
+/// no candidate is close enough OR multiple candidates tie for closest.
+///
+/// Bead bd-17c65.6.7 (F7). Tied suggestions are dropped to avoid
+/// hallucinating "did you mean X" when X is just as far away as Y.
+pub(crate) fn closest_prefix<'a>(
+    provided: &str,
+    candidates: &[&'a str],
+    max_distance: usize,
+) -> Option<&'a str> {
+    let mut best: Option<(&str, usize)> = None;
+    let mut tied = false;
+    for &cand in candidates {
+        let d = ascii_edit_distance(provided, cand);
+        match best {
+            None => best = Some((cand, d)),
+            Some((_, current)) if d < current => {
+                best = Some((cand, d));
+                tied = false;
+            }
+            Some((_, current)) if d == current => {
+                tied = true;
+            }
+            _ => {}
+        }
+    }
+    match best {
+        Some((cand, d)) if d <= max_distance && !tied => Some(cand),
+        _ => None,
+    }
+}
+
 /// Emit the canonical "wrong id prefix" error used by all F2 aliases
 /// when the caller supplies an ID that doesn't route to the current
 /// alias surface.
+///
+/// Bead bd-17c65.6.7 (F7) adds a `didYouMean` clause to the error
+/// message when the supplied prefix is within Levenshtein distance 2
+/// of a single supported prefix (e.g. `mam_…` → suggest `mem_…`).
 fn alias_id_prefix_error<W, E>(
     cli: &Cli,
     stdout: &mut W,
@@ -15728,9 +15798,14 @@ where
     E: Write,
 {
     let extracted = extract_id_prefix(provided_id);
+    let suggestion = extracted.and_then(|prefix| closest_prefix(prefix, expected_prefixes, 2));
+    let suggestion_clause = match suggestion {
+        Some(close) => format!(" Did you mean `{close}_…`?"),
+        None => String::new(),
+    };
     let detail_intro = match extracted {
         Some(prefix) => format!(
-            "Unknown ID prefix `{prefix}` for `ee {command}`; expected one of: {}.",
+            "Unknown ID prefix `{prefix}` for `ee {command}`; expected one of: {}.{suggestion_clause}",
             expected_prefixes.join(", ")
         ),
         None => format!(
@@ -34649,6 +34724,47 @@ mod tests {
             found.is_none(),
             format!("no .ee/ in tree should return None, got {found:?}"),
         )
+    }
+
+    // ========================================================================
+    // Bead bd-17c65.6.7 (F7) — Levenshtein + closest_prefix
+    // ========================================================================
+
+    #[test]
+    fn ascii_edit_distance_basic_cases() {
+        assert_eq!(super::ascii_edit_distance("", ""), 0);
+        assert_eq!(super::ascii_edit_distance("mem", ""), 3);
+        assert_eq!(super::ascii_edit_distance("", "wsp"), 3);
+        assert_eq!(super::ascii_edit_distance("mem", "mem"), 0);
+        // Single substitution
+        assert_eq!(super::ascii_edit_distance("mem", "men"), 1);
+        // Case-insensitive
+        assert_eq!(super::ascii_edit_distance("MEM", "mem"), 0);
+        // Common typo patterns
+        assert_eq!(super::ascii_edit_distance("mam", "mem"), 1);
+        assert_eq!(super::ascii_edit_distance("memm", "mem"), 1);
+        assert_eq!(super::ascii_edit_distance("wsp", "mem"), 3);
+    }
+
+    #[test]
+    fn closest_prefix_returns_unique_close_match() {
+        let candidates = &["mem", "wsp", "cand", "audit"];
+        assert_eq!(super::closest_prefix("mam", candidates, 2), Some("mem"));
+        assert_eq!(super::closest_prefix("memm", candidates, 2), Some("mem"));
+        // Distance > max
+        assert_eq!(super::closest_prefix("xyzzy", candidates, 2), None);
+        // Exact match
+        assert_eq!(super::closest_prefix("mem", candidates, 2), Some("mem"));
+    }
+
+    #[test]
+    fn closest_prefix_returns_none_on_tie() {
+        // `mac` is dist 1 from both `mem` (mac vs mem: 2 subs = 2)
+        // Hmm — let me pick a real tie.
+        // `xat` vs `cat` and `xax` would tie at distance 1 each.
+        let candidates = &["cat", "xax"];
+        // dist("xat", "cat") = 1 (x->c); dist("xat", "xax") = 1 (t->x)
+        assert_eq!(super::closest_prefix("xat", candidates, 2), None);
     }
 
     #[test]
