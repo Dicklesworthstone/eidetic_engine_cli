@@ -15,7 +15,7 @@
 //!
 //! All files except `LEGAL.md` are required for a valid repro pack.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
@@ -57,9 +57,9 @@ pub struct ReproEnv {
     /// Timestamp when the environment was captured (RFC 3339).
     pub captured_at: String,
     /// Sanitized environment variables relevant to reproduction.
-    pub env_vars: HashMap<String, String>,
+    pub env_vars: BTreeMap<String, String>,
     /// Additional tool versions (e.g., "cargo", "ee").
-    pub tool_versions: HashMap<String, String>,
+    pub tool_versions: BTreeMap<String, String>,
 }
 
 impl ReproEnv {

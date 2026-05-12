@@ -3,7 +3,7 @@
 //! Provides plan, run, inspect, and promote-plan operations for rehearsing
 //! EE command sequences in an isolated side-path copy before real execution.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -290,7 +290,7 @@ pub struct RehearseRunReport {
     pub redaction_status: String,
     pub elapsed_ms: u64,
     pub overall_result: String,
-    pub artifact_paths: HashMap<String, String>,
+    pub artifact_paths: BTreeMap<String, String>,
     pub next_actions: Vec<String>,
     pub created_at: String,
 }
@@ -503,7 +503,7 @@ pub fn run_rehearsal(options: &RehearseRunOptions) -> Result<RehearseRunReport, 
     }
     .to_string();
 
-    let mut artifact_paths = HashMap::new();
+    let mut artifact_paths: BTreeMap<String, String> = BTreeMap::new();
     let manifest_path = artifact_root.join(MANIFEST_FILE);
     artifact_paths.insert("manifest".to_string(), manifest_path.display().to_string());
     artifact_paths.insert(
