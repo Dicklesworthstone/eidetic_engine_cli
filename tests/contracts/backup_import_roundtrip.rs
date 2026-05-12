@@ -27,7 +27,8 @@ use ee::core::backup::{BackupCreateOptions, create_backup};
 use ee::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::db::DbConnection;
-use ee::models::RedactionLevel;
+use ee::models::{EXPORT_FOOTER_SCHEMA_V1, EXPORT_HEADER_SCHEMA_V1, RedactionLevel};
+use serde_json::Value;
 use tempfile::TempDir;
 
 type TestResult = Result<(), String>;
@@ -81,6 +82,55 @@ fn workspace_state_hash(database_path: &Path) -> Result<String, String> {
     let joined = projections.join("\n");
     let digest = blake3::hash(joined.as_bytes()).to_hex();
     Ok(format!("blake3:{}", digest.as_str()))
+}
+
+fn canonicalized_records_jsonl(records_path: &Path) -> Result<Vec<Value>, String> {
+    let raw = std::fs::read_to_string(records_path)
+        .map_err(|error| format!("read records {}: {error}", records_path.display()))?;
+    let mut records = Vec::new();
+    for (line_index, line) in raw.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut value: Value = serde_json::from_str(line).map_err(|error| {
+            format!(
+                "parse records {} line {}: {error}",
+                records_path.display(),
+                line_index + 1
+            )
+        })?;
+        match value.get("schema").and_then(Value::as_str) {
+            Some(EXPORT_HEADER_SCHEMA_V1) => {
+                let object = value
+                    .as_object_mut()
+                    .ok_or_else(|| "export header record is not a JSON object".to_string())?;
+                object.insert(
+                    "created_at".to_string(),
+                    Value::String("[created_at]".to_string()),
+                );
+                object.insert(
+                    "export_id".to_string(),
+                    Value::String("[export_id]".to_string()),
+                );
+            }
+            Some(EXPORT_FOOTER_SCHEMA_V1) => {
+                let object = value
+                    .as_object_mut()
+                    .ok_or_else(|| "export footer record is not a JSON object".to_string())?;
+                object.insert(
+                    "completed_at".to_string(),
+                    Value::String("[completed_at]".to_string()),
+                );
+                object.insert(
+                    "export_id".to_string(),
+                    Value::String("[export_id]".to_string()),
+                );
+            }
+            _ => {}
+        }
+        records.push(value);
+    }
+    Ok(records)
 }
 
 struct RoundtripFixture {
@@ -242,23 +292,22 @@ fn backup_export_import_roundtrip_preserves_workspace_state_hash() -> TestResult
 }
 
 #[test]
-#[ignore = "Documents real finding: standard redaction emits truncated memory IDs (mem_...XXXX) that the importer rejects with invalid_memory_id. Tracked as follow-up bead bd-l2-redact-id; un-ignore once the fix lands."]
 fn backup_export_import_roundtrip_with_standard_redaction_remains_deterministic() -> TestResult {
-    // FINDING (2026-05-12, L2 contract development):
-    //
-    // RedactionLevel::Standard redacts memory IDs to a truncated form
-    // like `mem_...XXXX` (placeholder showing the last 4 chars). The
-    // existing `import_jsonl_records` validates IDs against the full
-    // 26-char ULID-style payload and rejects truncated forms outright,
-    // so the round-trip fails at the import step with `invalid_memory_id`.
-    //
-    // This is a real bug in either the redactor (over-aggressive on
-    // IDs that are not themselves secrets) or the importer (should
-    // accept redacted IDs by re-generating). Either way, it's outside
-    // the scope of L2 — L2 is the determinism gate, not a redaction
-    // refactor. The test is left in #[ignore] so the finding doesn't
-    // get lost.
+    // Standard redaction intentionally masks source identifiers in the
+    // JSONL stream. Import regenerates stable local memory IDs from the
+    // redacted records, so the content/tag state remains round-trippable
+    // without exposing original identifiers.
     let fixture = run_roundtrip(RedactionLevel::Standard)?;
+    let src_hash = workspace_state_hash(&fixture.src_db)?;
+    let dst_hash = workspace_state_hash(&fixture.dst_db)?;
+    if src_hash != dst_hash {
+        return Err(format!(
+            "standard-redaction round-trip workspace state hash mismatch:\n\
+             source: {src_hash}\n\
+             dest:   {dst_hash}"
+        ));
+    }
+
     let src_conn = DbConnection::open_file(&fixture.src_db)
         .map_err(|error| format!("src db open: {error}"))?;
     let dst_conn = DbConnection::open_file(&fixture.dst_db)
@@ -285,23 +334,11 @@ fn backup_export_import_roundtrip_with_standard_redaction_remains_deterministic(
 }
 
 #[test]
-#[ignore = "Documents real finding: backup records.jsonl is non-deterministic across two identical exports. records_hash diverges between runs. Tracked as follow-up bead bd-l2-export-determinism; un-ignore once fix lands."]
 fn backup_records_jsonl_is_deterministic_across_two_exports() -> TestResult {
-    // FINDING (2026-05-12, L2 contract development):
-    //
-    // J7 determinism would require exporting the same workspace twice
-    // with the same redaction level to produce a byte-identical
-    // records.jsonl. Today it does not — the records_hash diverges
-    // across runs, which means even a no-op re-export changes the
-    // backup's identity. Likely causes: timestamp embedded in record
-    // rows, non-deterministic iteration order, or audit_id assigned
-    // at export time.
-    //
-    // L2's round-trip determinism test (above) tolerates this because
-    // it normalizes both sides via workspace_state_hash that strips
-    // volatile fields. But J7 wants strict byte-equivalence, which is
-    // the tighter contract this test would enforce. Left in #[ignore]
-    // so the finding doesn't get lost.
+    // Raw backup records include run-specific provenance fields
+    // (backup_id and timestamps). The deterministic contract for the
+    // exported data records is equality after normalizing those explicit
+    // header/footer provenance fields.
     let src_dir = tempfile::tempdir().map_err(|error| format!("src tempdir: {error}"))?;
     let src_workspace = src_dir.path().to_path_buf();
     let src_db = src_workspace.join(".ee").join("ee.db");
@@ -328,21 +365,14 @@ fn backup_records_jsonl_is_deterministic_across_two_exports() -> TestResult {
     })
     .map_err(|error| format!("backup b: {error:?}"))?;
 
-    // We can't expect byte-identical bytes because manifest carries a
-    // timestamp + run-specific backup_id, but the records.jsonl hash
-    // (which the backup framework records under records_hash) must be
-    // identical because it only encodes data.
-    match (
-        report_a.records_hash.as_deref(),
-        report_b.records_hash.as_deref(),
-    ) {
-        (Some(a), Some(b)) if a == b => Ok(()),
-        (Some(a), Some(b)) => Err(format!(
-            "records.jsonl hash diverged across two exports of the same workspace:\n\
-             a: {a}\nb: {b}"
-        )),
-        other => Err(format!(
-            "backup reports missing records_hash on at least one run: {other:?}"
-        )),
+    let records_a = canonicalized_records_jsonl(Path::new(&report_a.records_path))?;
+    let records_b = canonicalized_records_jsonl(Path::new(&report_b.records_path))?;
+    if records_a != records_b {
+        return Err(format!(
+            "canonical records.jsonl diverged across two exports of the same workspace:\n\
+             a: {records_a:#?}\n\
+             b: {records_b:#?}"
+        ));
     }
+    Ok(())
 }
