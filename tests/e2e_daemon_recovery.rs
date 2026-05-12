@@ -296,7 +296,8 @@ fn maintenance_job_decay_sweep_persists_history_and_mutates_db() -> TestResult {
 }
 
 fn unique_artifact_dir(name: &str) -> Result<PathBuf, String> {
-    let target_dir = env::var_os("CARGO_TARGET_DIR")
+    let target_dir = env::var_os("CARGO_TARGET_TMPDIR")
+        .or_else(|| env::var_os("CARGO_TARGET_DIR"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
     let dir = target_dir

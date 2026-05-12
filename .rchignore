@@ -20,6 +20,10 @@
 /.rch-target/
 /.rch-target/**
 
+# Machine-local Cargo config may point at host-only scratch disks such as
+# /Volumes/USBNVME16TB. RCH sets worker-local target dirs explicitly.
+.cargo/config.toml
+
 # Diagnostic output files created by verification scripts
 .clippy_out.txt
 .closure-lint-report.json
