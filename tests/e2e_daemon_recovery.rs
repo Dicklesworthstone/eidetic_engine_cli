@@ -14,7 +14,7 @@ use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use ee::db::DbConnection;
+use ee::db::{CreateFeedbackEventInput, DbConnection, audit_actions};
 use ee::serve::DaemonJobRow;
 use serde_json::Value;
 
@@ -128,6 +128,171 @@ fn daemon_supervised_job_recovery_after_kill_restart() -> TestResult {
 #[test]
 fn daemon_supervised_job_recovery_after_kill_restart() {
     eprintln!("daemon kill/restart recovery E2E is Unix-only");
+}
+
+#[test]
+fn maintenance_job_decay_sweep_persists_history_and_mutates_db() -> TestResult {
+    let artifact_dir = unique_artifact_dir("maintenance-decay-sweep")?;
+    let workspace = artifact_dir.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+
+    let init = run_ee_json(&workspace, ["init"], "init")?;
+    assert_success(&init, "init")?;
+    let database_path = PathBuf::from(json_string(&init.json, "/data/databasePath", "init")?);
+
+    let remembered = run_ee_json(
+        &workspace,
+        [
+            "remember",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--confidence",
+            "0.8",
+            "Decay sweep e2e fixture should lose confidence after harmful feedback.",
+        ],
+        "remember decay fixture",
+    )?;
+    assert_success(&remembered, "remember decay fixture")?;
+    let memory_id = json_string(&remembered.json, "/data/memory_id", "remember")?;
+    let workspace_id = json_string(&remembered.json, "/data/workspace_id", "remember")?;
+
+    {
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection
+            .insert_feedback_event(
+                "fb_e1234567890123456789012345",
+                &CreateFeedbackEventInput {
+                    workspace_id: workspace_id.clone(),
+                    target_type: "memory".to_owned(),
+                    target_id: memory_id.clone(),
+                    signal: "harmful".to_owned(),
+                    weight: 1.0,
+                    source_type: "outcome_observed".to_owned(),
+                    source_id: Some("maintenance-decay-sweep-e2e".to_owned()),
+                    reason: Some("force real decay_sweep mutation path".to_owned()),
+                    evidence_json: Some(r#"{"fixture":"maintenance_decay_sweep"}"#.to_owned()),
+                    session_id: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+    }
+
+    let run = run_ee_json(
+        &workspace,
+        ["job", "run", "decay_sweep"],
+        "job run decay_sweep",
+    )?;
+    assert_success(&run, "job run decay_sweep")?;
+    ensure_equal(
+        &run.json.pointer("/data/schema"),
+        &Some(&Value::String("ee.maintenance.run.v1".to_owned())),
+        "maintenance run schema",
+    )?;
+    ensure_equal(
+        &run.json.pointer("/data/requestedJob"),
+        &Some(&Value::String("decay_sweep".to_owned())),
+        "requested job",
+    )?;
+    ensure_equal(
+        &run.json.pointer("/data/durableMutation"),
+        &Some(&Value::Bool(true)),
+        "durable mutation",
+    )?;
+    ensure_equal(
+        &run.json.pointer("/data/history/persisted"),
+        &Some(&Value::Bool(true)),
+        "history persisted",
+    )?;
+    ensure_equal(
+        &run.json
+            .pointer("/data/results/0/details/summary/appliedCount"),
+        &Some(&Value::from(1_u64)),
+        "decay applied count",
+    )?;
+
+    let job_row_id = json_string(&run.json, "/data/history/rowId", "job run")?;
+    let history_path = PathBuf::from(json_string(&run.json, "/data/history/path", "job run")?);
+    ensure(
+        history_path.exists(),
+        format!(
+            "maintenance history path should exist: {}",
+            history_path.display()
+        ),
+    )?;
+
+    let list = run_ee_json(
+        &workspace,
+        ["job", "list", "--kind", "decay_sweep"],
+        "job list decay_sweep",
+    )?;
+    assert_success(&list, "job list decay_sweep")?;
+    ensure_equal(
+        &list.json.pointer("/data/jobCount"),
+        &Some(&Value::from(1_u64)),
+        "job list count",
+    )?;
+    ensure_equal(
+        &list.json.pointer("/data/jobs/0/id"),
+        &Some(&Value::String(job_row_id.clone())),
+        "job list row id",
+    )?;
+    ensure_equal(
+        &list.json.pointer("/data/jobs/0/outcome"),
+        &Some(&Value::String("success".to_owned())),
+        "job list outcome",
+    )?;
+    ensure_equal(
+        &list.json.pointer("/data/jobs/0/durableMutation"),
+        &Some(&Value::Bool(true)),
+        "job list durable mutation",
+    )?;
+
+    let shown = run_ee_json(&workspace, ["job", "show", &job_row_id], "job show")?;
+    assert_success(&shown, "job show")?;
+    ensure_equal(
+        &shown.json.pointer("/data/job/id"),
+        &Some(&Value::String(job_row_id)),
+        "job show row id",
+    )?;
+
+    let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+    let memory = connection
+        .get_memory(&memory_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "decay fixture memory missing after job".to_owned())?;
+    ensure(
+        memory.confidence < 0.8,
+        format!(
+            "decay_sweep should reduce confidence below 0.8, got {}",
+            memory.confidence
+        ),
+    )?;
+    let feedback = connection
+        .list_feedback_events_for_target("memory", &memory_id)
+        .map_err(|error| error.to_string())?;
+    ensure(
+        feedback.iter().all(|event| event.applied_at.is_some()),
+        format!("decay_sweep should mark feedback applied: {feedback:?}"),
+    )?;
+    let audit = connection
+        .list_audit_by_target("memory", &memory_id, None)
+        .map_err(|error| error.to_string())?;
+    ensure(
+        audit
+            .iter()
+            .any(|entry| entry.action == audit_actions::MEMORY_SCORE_DECAY),
+        format!("decay_sweep should write memory score decay audit row: {audit:?}"),
+    )?;
+    connection.close().map_err(|error| error.to_string())
 }
 
 fn unique_artifact_dir(name: &str) -> Result<PathBuf, String> {
