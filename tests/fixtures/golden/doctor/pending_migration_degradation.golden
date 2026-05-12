@@ -1,0 +1,36 @@
+{
+  "schema": "ee.response.v1",
+  "success": false,
+  "data": {
+    "command": "doctor",
+    "version": "0.1.0",
+    "posture": "blocked",
+    "healthy": false,
+    "checks": [
+      {
+        "name": "runtime",
+        "severity": "ok",
+        "message": "Asupersync runtime initialized successfully."
+      },
+      {
+        "name": "workspace",
+        "severity": "ok",
+        "message": "Workspace inspected at /workspace."
+      },
+      {
+        "name": "database",
+        "severity": "error",
+        "message": "Database schema requires migration before use.",
+        "errorCode": "EE-E700",
+        "repair": "ee init --workspace ."
+      },
+      {
+        "name": "search_index",
+        "severity": "warning",
+        "message": "Search index cannot be trusted until migrations complete.",
+        "errorCode": "EE-E301",
+        "repair": "ee index rebuild"
+      }
+    ]
+  }
+}

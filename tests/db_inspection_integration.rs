@@ -4,7 +4,7 @@
 //! actually open the database via SQLModel/FrankenSQLite and report real
 //! schema, integrity, and migration state instead of file-based stubs.
 
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::ffi::OsString;
 use std::fs;
@@ -197,9 +197,8 @@ fn db_status_counts_includes_per_table_row_counts_when_requested() {
         report["walPath"].as_str().is_some(),
         "expected walPath when --wal is passed"
     );
-    assert_eq!(
+    assert!(
         report["walFileExists"].is_boolean(),
-        true,
         "walFileExists should be reported"
     );
 }

@@ -1,0 +1,45 @@
+{
+  "schema": "ee.response.v1",
+  "success": false,
+  "data": {
+    "command": "doctor",
+    "version": "0.1.0",
+    "posture": "degraded_recoverable",
+    "healthy": false,
+    "checks": [
+      {
+        "name": "runtime",
+        "severity": "ok",
+        "message": "Asupersync runtime initialized successfully."
+      },
+      {
+        "name": "workspace",
+        "severity": "warning",
+        "message": "Selected workspace has no .ee state at /workspace.",
+        "errorCode": "EE-E004",
+        "repair": "ee --workspace . <command>"
+      },
+      {
+        "name": "database",
+        "severity": "warning",
+        "message": "Database file not found at /workspace/.ee/ee.db.",
+        "errorCode": "EE-E200",
+        "repair": "ee init --workspace ."
+      },
+      {
+        "name": "search_index",
+        "severity": "warning",
+        "message": "Search index is missing for the current workspace.",
+        "errorCode": "EE-E300",
+        "repair": "ee index rebuild"
+      },
+      {
+        "name": "cass",
+        "severity": "warning",
+        "message": "CASS binary not found in trusted locations.",
+        "errorCode": "EE-E506",
+        "repair": "Install cass in a trusted system path or set EE_CASS_BINARY to an absolute trusted path"
+      }
+    ]
+  }
+}

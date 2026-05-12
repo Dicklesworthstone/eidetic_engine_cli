@@ -1,0 +1,63 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "command": "status",
+    "capabilities": {
+      "runtime": "ready",
+      "storage": "degraded",
+      "search": "degraded",
+      "agentDetection": "ready"
+    },
+    "memoryHealth": {
+      "status": "unavailable"
+    },
+    "curationHealth": {
+      "status": "unavailable"
+    },
+    "feedbackHealth": {
+      "status": "unavailable",
+      "nextDeterministicAction": "run ee init --workspace ."
+    },
+    "derivedAssets": [
+      {
+        "name": "search_index",
+        "status": "unavailable",
+        "sourceHighWatermark": null,
+        "assetHighWatermark": null,
+        "highWatermarkLag": null,
+        "path": ".ee/index",
+        "repair": "Run `ee doctor --json` to inspect storage and filesystem access."
+      },
+      {
+        "name": "graph_snapshot",
+        "status": "unimplemented",
+        "sourceHighWatermark": null,
+        "assetHighWatermark": null,
+        "highWatermarkLag": null,
+        "path": ".ee/graph",
+        "repair": "Implement the persistent derived asset before reporting a watermark."
+      }
+    ],
+    "degraded": [
+      {
+        "code": "storage_degraded",
+        "severity": "medium",
+        "message": "Workspace storage exists but could not be opened or needs migration.",
+        "repair": "Run `ee doctor --json`."
+      },
+      {
+        "code": "search_index_degraded",
+        "severity": "medium",
+        "message": "Search is compiled but the selected workspace index is missing, stale, corrupt, or unreadable.",
+        "repair": "Run `ee index status --workspace . --json`."
+      },
+      {
+        "code": "memory_health_unavailable",
+        "severity": "medium",
+        "message": "Memory health is unavailable because the database could not be opened.",
+        "repair": "Run `ee doctor --json`."
+      }
+    ]
+  }
+}

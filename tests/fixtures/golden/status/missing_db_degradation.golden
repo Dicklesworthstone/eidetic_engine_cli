@@ -1,0 +1,62 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "command": "status",
+    "capabilities": {
+      "runtime": "ready",
+      "storage": "pending",
+      "search": "pending",
+      "agentDetection": "ready"
+    },
+    "memoryHealth": {
+      "status": "unavailable"
+    },
+    "curationHealth": {
+      "status": "unavailable"
+    },
+    "feedbackHealth": {
+      "status": "unavailable",
+      "nextDeterministicAction": "run ee init --workspace ."
+    },
+    "derivedAssets": [
+      {
+        "name": "search_index",
+        "status": "missing",
+        "sourceHighWatermark": null,
+        "assetHighWatermark": null,
+        "highWatermarkLag": null,
+        "path": ".ee/index"
+      },
+      {
+        "name": "graph_snapshot",
+        "status": "unimplemented",
+        "sourceHighWatermark": null,
+        "assetHighWatermark": null,
+        "highWatermarkLag": null,
+        "path": ".ee/graph",
+        "repair": "Implement the persistent derived asset before reporting a watermark."
+      }
+    ],
+    "degraded": [
+      {
+        "code": "storage_not_initialized",
+        "severity": "medium",
+        "message": "Workspace storage is unavailable because .ee/ee.db is missing.",
+        "repair": "Run `ee init --workspace .`."
+      },
+      {
+        "code": "search_waiting_for_storage",
+        "severity": "medium",
+        "message": "Search readiness is pending until workspace storage is initialized.",
+        "repair": "Run `ee init --workspace .`."
+      },
+      {
+        "code": "memory_health_unavailable",
+        "severity": "low",
+        "message": "Memory health is unavailable because the workspace database is missing.",
+        "repair": "Run `ee init --workspace .` before inspecting memory health."
+      }
+    ]
+  }
+}

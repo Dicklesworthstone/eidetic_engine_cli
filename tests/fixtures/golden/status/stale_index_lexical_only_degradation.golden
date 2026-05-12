@@ -1,0 +1,51 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "command": "status",
+    "capabilities": {
+      "runtime": "ready",
+      "storage": "ready",
+      "search": "degraded",
+      "agentDetection": "ready"
+    },
+    "memoryHealth": {
+      "status": "healthy"
+    },
+    "curationHealth": {
+      "status": "not_inspected"
+    },
+    "feedbackHealth": {
+      "status": "healthy",
+      "nextDeterministicAction": "monitor harmful feedback rates"
+    },
+    "derivedAssets": [
+      {
+        "name": "search_index",
+        "status": "stale",
+        "sourceHighWatermark": 5,
+        "assetHighWatermark": 3,
+        "highWatermarkLag": 2,
+        "path": ".ee/index",
+        "repair": "ee index rebuild --workspace ."
+      },
+      {
+        "name": "graph_snapshot",
+        "status": "unimplemented",
+        "sourceHighWatermark": null,
+        "assetHighWatermark": null,
+        "highWatermarkLag": null,
+        "path": ".ee/graph",
+        "repair": "Implement the persistent derived asset before reporting a watermark."
+      }
+    ],
+    "degraded": [
+      {
+        "code": "search_index_degraded",
+        "severity": "medium",
+        "message": "Search is compiled but the selected workspace index is missing, stale, corrupt, or unreadable.",
+        "repair": "Run `ee index status --workspace . --json`."
+      }
+    ]
+  }
+}

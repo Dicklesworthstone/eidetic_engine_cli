@@ -1,0 +1,51 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "command": "status",
+    "capabilities": {
+      "runtime": "ready",
+      "storage": "ready",
+      "search": "unimplemented",
+      "agentDetection": "ready"
+    },
+    "memoryHealth": {
+      "status": "healthy"
+    },
+    "curationHealth": {
+      "status": "not_inspected"
+    },
+    "feedbackHealth": {
+      "status": "healthy",
+      "nextDeterministicAction": "monitor harmful feedback rates"
+    },
+    "derivedAssets": [
+      {
+        "name": "search_index",
+        "status": "unavailable",
+        "sourceHighWatermark": null,
+        "assetHighWatermark": null,
+        "highWatermarkLag": null,
+        "path": ".ee/index",
+        "repair": "Use a binary built with search support enabled."
+      },
+      {
+        "name": "graph_snapshot",
+        "status": "unimplemented",
+        "sourceHighWatermark": null,
+        "assetHighWatermark": null,
+        "highWatermarkLag": null,
+        "path": ".ee/graph",
+        "repair": "Implement the persistent derived asset before reporting a watermark."
+      }
+    ],
+    "degraded": [
+      {
+        "code": "search_unimplemented",
+        "severity": "high",
+        "message": "Search has no compiled implementation in this binary.",
+        "repair": "Use a binary built with search support enabled."
+      }
+    ]
+  }
+}
