@@ -14,10 +14,8 @@
 //! - every item memory_id appears in both projections,
 //! - the markdown index labels are contiguous 1..N (A7 invariant — verified
 //!   indirectly: count of "### N." labels equals the item count).
-//!
-//! Byte-equivalence between `pack.text` (in JSON) and the standalone markdown
-//! body lands in A4 — when A4 ships, an additional assertion lands here
-//! comparing them. This test stays the regression guard until then.
+//! - `pack.text` in JSON is byte-identical to the standalone markdown body
+//!   (A4 invariant).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -25,7 +23,10 @@ use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use ee::models::{MemoryId, ProvenanceUri, TrustClass, UnitScore};
-use ee::output::{render_context_response_json, render_context_response_markdown};
+use ee::output::{
+    ContextJsonRenderOptions, render_context_response_json,
+    render_context_response_json_with_options, render_context_response_markdown,
+};
 use ee::pack::{
     ContextRequest, ContextResponse, PackCandidate, PackCandidateInput, PackProvenance,
     PackSection, PackTrustSignal, TokenBudget, assemble_draft,
@@ -300,6 +301,46 @@ fn dual_render_markdown_item_indices_are_contiguous_1_to_n() -> TestResult {
             "markdown item indices must be contiguous 1..N. got {indices:?}, expected {expected:?}"
         ));
     }
+    Ok(())
+}
+
+#[test]
+fn json_pack_text_matches_standalone_markdown_byte_for_byte() -> TestResult {
+    let response = multi_section_fixture();
+    let json_str = render_context_response_json(&response);
+    let markdown = render_context_response_markdown(&response);
+
+    let json: Value =
+        serde_json::from_str(&json_str).map_err(|error| format!("JSON did not parse: {error}"))?;
+    let pack_text = json
+        .pointer("/data/pack/text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing /data/pack/text in JSON".to_string())?;
+    if pack_text != markdown {
+        return Err(format!(
+            "pack.text must equal markdown render byte-for-byte.\npack.text:\n{pack_text}\nmarkdown:\n{markdown}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn json_pack_text_can_be_suppressed_for_structured_only_consumers() -> TestResult {
+    let response = multi_section_fixture();
+    let json_str = render_context_response_json_with_options(
+        &response,
+        ContextJsonRenderOptions {
+            include_rendered_text: false,
+        },
+    );
+
+    let json: Value =
+        serde_json::from_str(&json_str).map_err(|error| format!("JSON did not parse: {error}"))?;
+    if json.pointer("/data/pack/text").is_some() {
+        return Err("pack.text should be omitted when include_rendered_text=false".to_string());
+    }
+    json.pointer("/data/pack/items/0/memoryId")
+        .ok_or_else(|| "structured pack items should remain present".to_string())?;
     Ok(())
 }
 

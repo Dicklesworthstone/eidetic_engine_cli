@@ -11,7 +11,18 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
-use serde_json::Value;
+use ee::config::{WorkspaceDiagnosticSeverity, WorkspaceResolutionSource};
+use ee::core::agent_detect::AgentInventoryReport;
+use ee::core::doctor::{CheckResult, DoctorReport, Posture};
+use ee::core::status::{
+    CapabilityReport, CurationHealthReport, DegradationReport, DerivedAssetReport,
+    DerivedAssetStatus, FeedbackHealthReport, FeedbackHealthStatus, MemoryHealthReport,
+    MemoryHealthStatus, RuntimeReport, StatusReport, WorkspaceDiagnosticReport,
+    WorkspaceStatusReport,
+};
+use ee::models::{CapabilityStatus, error_codes};
+use ee::output::{render_doctor_json, render_status_json};
+use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
 
@@ -64,6 +75,13 @@ fn ensure_starts_with(haystack: &str, prefix: &str, context: &str) -> TestResult
         haystack.starts_with(prefix),
         format!("{context}: expected output to start with {prefix:?}"),
     )
+}
+
+fn pretty_json(value: &Value) -> Result<String, String> {
+    let mut rendered =
+        serde_json::to_string_pretty(value).map_err(|error| format!("render JSON: {error}"))?;
+    rendered.push('\n');
+    Ok(rendered)
 }
 
 /// Normalize JSON for comparison by removing volatile fields like timestamps and UUIDs.
@@ -960,6 +978,349 @@ fn capabilities_toon_output_matches_golden() -> TestResult {
 // Status command
 // =============================================================================
 
+fn fixture_runtime_report() -> RuntimeReport {
+    RuntimeReport {
+        engine: "asupersync",
+        profile: "current_thread",
+        worker_threads: 1,
+        async_boundary: "core",
+    }
+}
+
+fn fixture_workspace_status(marker_present: bool) -> WorkspaceStatusReport {
+    WorkspaceStatusReport {
+        source: WorkspaceResolutionSource::Explicit,
+        root: PathBuf::from("/workspace"),
+        config_dir: PathBuf::from("/workspace/.ee"),
+        marker_present,
+        canonical_root: PathBuf::from("/workspace"),
+        fingerprint: "fixture-workspace-fingerprint".to_owned(),
+        scope_kind: "repository".to_owned(),
+        repository_root: Some(PathBuf::from("/workspace")),
+        repository_fingerprint: Some("repo:fixture-workspace-fingerprint".to_owned()),
+        subproject_path: None,
+        diagnostics: vec![WorkspaceDiagnosticReport {
+            code: "fixture_workspace_resolution",
+            severity: WorkspaceDiagnosticSeverity::Info,
+            message: "Fixture workspace selected for degradation golden coverage.".to_owned(),
+            repair: "No repair needed for fixture workspace.".to_owned(),
+            selected_source: Some(WorkspaceResolutionSource::Explicit),
+            selected_root: Some(PathBuf::from("/workspace")),
+            conflicting_source: None,
+            conflicting_root: None,
+            marker_roots: Vec::new(),
+        }],
+    }
+}
+
+fn unavailable_memory_health() -> MemoryHealthReport {
+    MemoryHealthReport {
+        status: MemoryHealthStatus::Unavailable,
+        total_count: 0,
+        active_count: 0,
+        tombstoned_count: 0,
+        stale_count: 0,
+        average_confidence: None,
+        provenance_coverage: None,
+        health_score: None,
+        score_components: None,
+    }
+}
+
+fn healthy_memory_health() -> MemoryHealthReport {
+    MemoryHealthReport {
+        status: MemoryHealthStatus::Healthy,
+        total_count: 2,
+        active_count: 2,
+        tombstoned_count: 0,
+        stale_count: 0,
+        average_confidence: Some(0.90),
+        provenance_coverage: Some(1.0),
+        health_score: None,
+        score_components: None,
+    }
+}
+
+fn unavailable_feedback_health() -> FeedbackHealthReport {
+    FeedbackHealthReport::unavailable()
+}
+
+fn healthy_feedback_health() -> FeedbackHealthReport {
+    FeedbackHealthReport {
+        status: FeedbackHealthStatus::Healthy,
+        harmful_per_source_per_hour: 5,
+        harmful_burst_window_seconds: 3600,
+        per_source_harmful_counts: Vec::new(),
+        quarantine_queue_depth: 0,
+        protected_rule_count: 1,
+        last_inversion_event: None,
+        next_deterministic_action: "monitor harmful feedback rates".to_owned(),
+    }
+}
+
+fn graph_unimplemented_asset() -> DerivedAssetReport {
+    DerivedAssetReport::unimplemented("graph_snapshot", ".ee/graph")
+}
+
+fn status_missing_db_report() -> StatusReport {
+    StatusReport {
+        version: env!("CARGO_PKG_VERSION"),
+        workspace: Some(fixture_workspace_status(false)),
+        capabilities: CapabilityReport {
+            runtime: CapabilityStatus::Ready,
+            storage: CapabilityStatus::Pending,
+            search: CapabilityStatus::Pending,
+            agent_detection: CapabilityStatus::Ready,
+        },
+        runtime: fixture_runtime_report(),
+        memory_health: unavailable_memory_health(),
+        curation_health: CurationHealthReport::unavailable(),
+        feedback_health: unavailable_feedback_health(),
+        derived_assets: vec![
+            DerivedAssetReport {
+                name: "search_index",
+                status: DerivedAssetStatus::Missing,
+                source_high_watermark: None,
+                asset_high_watermark: None,
+                high_watermark_lag: None,
+                path: ".ee/index",
+                repair: None,
+            },
+            graph_unimplemented_asset(),
+        ],
+        agent_inventory: AgentInventoryReport::not_inspected(),
+        degradations: vec![
+            DegradationReport {
+                code: "storage_not_initialized",
+                severity: "medium",
+                message: "Workspace storage is unavailable because .ee/ee.db is missing.",
+                repair: "Run `ee init --workspace .`.",
+            },
+            DegradationReport {
+                code: "search_waiting_for_storage",
+                severity: "medium",
+                message: "Search readiness is pending until workspace storage is initialized.",
+                repair: "Run `ee init --workspace .`.",
+            },
+            DegradationReport {
+                code: "memory_health_unavailable",
+                severity: "low",
+                message: "Memory health is unavailable because the workspace database is missing.",
+                repair: "Run `ee init --workspace .` before inspecting memory health.",
+            },
+        ],
+    }
+}
+
+fn status_pending_migration_report() -> StatusReport {
+    StatusReport {
+        version: env!("CARGO_PKG_VERSION"),
+        workspace: Some(fixture_workspace_status(true)),
+        capabilities: CapabilityReport {
+            runtime: CapabilityStatus::Ready,
+            storage: CapabilityStatus::Degraded,
+            search: CapabilityStatus::Degraded,
+            agent_detection: CapabilityStatus::Ready,
+        },
+        runtime: fixture_runtime_report(),
+        memory_health: unavailable_memory_health(),
+        curation_health: CurationHealthReport::unavailable(),
+        feedback_health: unavailable_feedback_health(),
+        derived_assets: vec![
+            DerivedAssetReport {
+                name: "search_index",
+                status: DerivedAssetStatus::Unavailable,
+                source_high_watermark: None,
+                asset_high_watermark: None,
+                high_watermark_lag: None,
+                path: ".ee/index",
+                repair: Some("Run `ee doctor --json` to inspect storage and filesystem access."),
+            },
+            graph_unimplemented_asset(),
+        ],
+        agent_inventory: AgentInventoryReport::not_inspected(),
+        degradations: vec![
+            DegradationReport {
+                code: "storage_degraded",
+                severity: "medium",
+                message: "Workspace storage exists but could not be opened or needs migration.",
+                repair: "Run `ee doctor --json`.",
+            },
+            DegradationReport {
+                code: "search_index_degraded",
+                severity: "medium",
+                message: "Search is compiled but the selected workspace index is missing, stale, corrupt, or unreadable.",
+                repair: "Run `ee index status --workspace . --json`.",
+            },
+            DegradationReport {
+                code: "memory_health_unavailable",
+                severity: "medium",
+                message: "Memory health is unavailable because the database could not be opened.",
+                repair: "Run `ee doctor --json`.",
+            },
+        ],
+    }
+}
+
+fn status_stale_index_lexical_only_report() -> StatusReport {
+    StatusReport {
+        version: env!("CARGO_PKG_VERSION"),
+        workspace: Some(fixture_workspace_status(true)),
+        capabilities: CapabilityReport {
+            runtime: CapabilityStatus::Ready,
+            storage: CapabilityStatus::Ready,
+            search: CapabilityStatus::Degraded,
+            agent_detection: CapabilityStatus::Ready,
+        },
+        runtime: fixture_runtime_report(),
+        memory_health: healthy_memory_health(),
+        curation_health: CurationHealthReport::not_inspected(),
+        feedback_health: healthy_feedback_health(),
+        derived_assets: vec![
+            DerivedAssetReport {
+                name: "search_index",
+                status: DerivedAssetStatus::Stale,
+                source_high_watermark: Some(5),
+                asset_high_watermark: Some(3),
+                high_watermark_lag: Some(2),
+                path: ".ee/index",
+                repair: Some("ee index rebuild --workspace ."),
+            },
+            graph_unimplemented_asset(),
+        ],
+        agent_inventory: AgentInventoryReport::not_inspected(),
+        degradations: vec![DegradationReport {
+            code: "search_index_degraded",
+            severity: "medium",
+            message: "Search is compiled but the selected workspace index is missing, stale, corrupt, or unreadable.",
+            repair: "Run `ee index status --workspace . --json`.",
+        }],
+    }
+}
+
+fn status_search_unimplemented_report() -> StatusReport {
+    StatusReport {
+        version: env!("CARGO_PKG_VERSION"),
+        workspace: Some(fixture_workspace_status(true)),
+        capabilities: CapabilityReport {
+            runtime: CapabilityStatus::Ready,
+            storage: CapabilityStatus::Ready,
+            search: CapabilityStatus::Unimplemented,
+            agent_detection: CapabilityStatus::Ready,
+        },
+        runtime: fixture_runtime_report(),
+        memory_health: healthy_memory_health(),
+        curation_health: CurationHealthReport::not_inspected(),
+        feedback_health: healthy_feedback_health(),
+        derived_assets: vec![
+            DerivedAssetReport {
+                name: "search_index",
+                status: DerivedAssetStatus::Unavailable,
+                source_high_watermark: None,
+                asset_high_watermark: None,
+                high_watermark_lag: None,
+                path: ".ee/index",
+                repair: Some("Use a binary built with search support enabled."),
+            },
+            graph_unimplemented_asset(),
+        ],
+        agent_inventory: AgentInventoryReport::not_inspected(),
+        degradations: vec![DegradationReport {
+            code: "search_unimplemented",
+            severity: "high",
+            message: "Search has no compiled implementation in this binary.",
+            repair: "Use a binary built with search support enabled.",
+        }],
+    }
+}
+
+fn status_degradation_projection(report: &StatusReport) -> Result<String, String> {
+    let value: Value = serde_json::from_str(&render_status_json(report))
+        .map_err(|error| format!("parse rendered status JSON: {error}"))?;
+    let data = value
+        .get("data")
+        .ok_or_else(|| "status JSON missing data object".to_owned())?;
+    pretty_json(&json!({
+        "schema": value.get("schema"),
+        "success": value.get("success"),
+        "data": {
+            "command": data.get("command"),
+            "capabilities": data.get("capabilities"),
+            "memoryHealth": {
+                "status": data.pointer("/memoryHealth/status"),
+            },
+            "curationHealth": {
+                "status": data.pointer("/curationHealth/status"),
+            },
+            "feedbackHealth": {
+                "status": data.pointer("/feedbackHealth/status"),
+                "nextDeterministicAction": data.pointer("/feedbackHealth/nextDeterministicAction"),
+            },
+            "derivedAssets": data.get("derivedAssets"),
+            "degraded": data.get("degraded"),
+        }
+    }))
+}
+
+fn doctor_missing_db_report() -> DoctorReport {
+    DoctorReport {
+        version: env!("CARGO_PKG_VERSION"),
+        overall_healthy: false,
+        posture: Posture::DegradedRecoverable,
+        checks: vec![
+            CheckResult::ok("runtime", "Asupersync runtime initialized successfully."),
+            CheckResult::warning(
+                "workspace",
+                "Selected workspace has no .ee state at /workspace.",
+                error_codes::WORKSPACE_NOT_SPECIFIED,
+            ),
+            CheckResult::warning(
+                "database",
+                "Database file not found at /workspace/.ee/ee.db.",
+                error_codes::DATABASE_NOT_FOUND,
+            ),
+            CheckResult::warning(
+                "search_index",
+                "Search index is missing for the current workspace.",
+                error_codes::INDEX_NOT_FOUND,
+            ),
+            CheckResult::warning(
+                "cass",
+                "CASS binary not found in trusted locations.",
+                error_codes::CASS_NOT_FOUND,
+            ),
+        ],
+    }
+}
+
+fn doctor_pending_migration_report() -> DoctorReport {
+    DoctorReport {
+        version: env!("CARGO_PKG_VERSION"),
+        overall_healthy: false,
+        posture: Posture::Blocked,
+        checks: vec![
+            CheckResult::ok("runtime", "Asupersync runtime initialized successfully."),
+            CheckResult::ok("workspace", "Workspace inspected at /workspace."),
+            CheckResult::error(
+                "database",
+                "Database schema requires migration before use.",
+                error_codes::MIGRATION_REQUIRED,
+            ),
+            CheckResult::warning(
+                "search_index",
+                "Search index cannot be trusted until migrations complete.",
+                error_codes::INDEX_STALE,
+            ),
+        ],
+    }
+}
+
+fn doctor_degradation_projection(report: &DoctorReport) -> Result<String, String> {
+    let value: Value = serde_json::from_str(&render_doctor_json(report))
+        .map_err(|error| format!("parse rendered doctor JSON: {error}"))?;
+    pretty_json(&value)
+}
+
 #[test]
 fn status_json_output_matches_golden() -> TestResult {
     let output = run_ee(&["status", "--json"])?;
@@ -979,6 +1340,44 @@ fn status_json_output_matches_golden() -> TestResult {
     ensure_contains(&stdout, "\"command\":\"status\"", "status JSON command")?;
 
     assert_golden("status", "status_json", &stdout)
+}
+
+#[test]
+fn status_degradation_scenario_projections_match_goldens() -> TestResult {
+    for (name, report) in [
+        ("missing_db_degradation", status_missing_db_report()),
+        (
+            "pending_migration_degradation",
+            status_pending_migration_report(),
+        ),
+        (
+            "stale_index_lexical_only_degradation",
+            status_stale_index_lexical_only_report(),
+        ),
+        (
+            "search_unimplemented_degradation",
+            status_search_unimplemented_report(),
+        ),
+    ] {
+        let projection = status_degradation_projection(&report)?;
+        assert_golden("status", name, &projection)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn doctor_degradation_scenario_projections_match_goldens() -> TestResult {
+    for (name, report) in [
+        ("missing_db_degradation", doctor_missing_db_report()),
+        (
+            "pending_migration_degradation",
+            doctor_pending_migration_report(),
+        ),
+    ] {
+        let projection = doctor_degradation_projection(&report)?;
+        assert_golden("doctor", name, &projection)?;
+    }
+    Ok(())
 }
 
 // =============================================================================

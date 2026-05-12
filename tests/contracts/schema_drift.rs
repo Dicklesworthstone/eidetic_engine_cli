@@ -895,6 +895,174 @@ mod tests {
         },
     ];
 
+    struct CanonicalFieldRule {
+        logical_name: &'static str,
+        canonical_key: &'static str,
+        forbidden_aliases: &'static [&'static str],
+    }
+
+    struct CanonicalFieldSurface {
+        surface: &'static str,
+        logical_name: &'static str,
+        canonical_path: &'static str,
+        forbidden_paths: &'static [&'static str],
+    }
+
+    const RESERVED_FIELD_SUFFIXES: &[&str] = &["_preview", "_hash", "_truncated", "_format"];
+
+    const CANONICAL_FIELD_RULES: &[CanonicalFieldRule] = &[
+        CanonicalFieldRule {
+            logical_name: "memory body text",
+            canonical_key: "content",
+            forbidden_aliases: &["body", "text", "memory_body", "memory_text"],
+        },
+        CanonicalFieldRule {
+            logical_name: "memory level",
+            canonical_key: "level",
+            forbidden_aliases: &["memory_level"],
+        },
+        CanonicalFieldRule {
+            logical_name: "memory kind",
+            canonical_key: "kind",
+            forbidden_aliases: &["memory_kind", "type"],
+        },
+        CanonicalFieldRule {
+            logical_name: "workspace id",
+            canonical_key: "workspace_id",
+            forbidden_aliases: &["workspaceId", "workspace"],
+        },
+        CanonicalFieldRule {
+            logical_name: "workspace path",
+            canonical_key: "workspace_path",
+            forbidden_aliases: &["workspacePath"],
+        },
+        CanonicalFieldRule {
+            logical_name: "memory creation timestamp",
+            canonical_key: "created_at",
+            forbidden_aliases: &["createdAt", "created"],
+        },
+        CanonicalFieldRule {
+            logical_name: "relevance score",
+            canonical_key: "scores.relevance",
+            forbidden_aliases: &["relevanceScore", "relevance_score"],
+        },
+    ];
+
+    const CANONICAL_FIELD_SURFACES: &[CanonicalFieldSurface] = &[
+        CanonicalFieldSurface {
+            surface: "ee memory list",
+            logical_name: "memory body text",
+            canonical_path: "data.memories[].content",
+            forbidden_paths: &["data.memories[].body", "data.memories[].text"],
+        },
+        CanonicalFieldSurface {
+            surface: "ee memory list",
+            logical_name: "memory level",
+            canonical_path: "data.memories[].level",
+            forbidden_paths: &["data.memories[].memory_level"],
+        },
+        CanonicalFieldSurface {
+            surface: "ee memory list",
+            logical_name: "memory kind",
+            canonical_path: "data.memories[].kind",
+            forbidden_paths: &["data.memories[].memory_kind", "data.memories[].type"],
+        },
+        CanonicalFieldSurface {
+            surface: "ee memory list",
+            logical_name: "memory creation timestamp",
+            canonical_path: "data.memories[].created_at",
+            forbidden_paths: &["data.memories[].createdAt", "data.memories[].created"],
+        },
+        CanonicalFieldSurface {
+            surface: "ee search",
+            logical_name: "relevance score",
+            canonical_path: "data.results[].scores.relevance",
+            forbidden_paths: &[
+                "data.results[].relevanceScore",
+                "data.results[].relevance_score",
+            ],
+        },
+        CanonicalFieldSurface {
+            surface: "ee context",
+            logical_name: "memory body text",
+            canonical_path: "data.pack.items[].content",
+            forbidden_paths: &["data.pack.items[].body", "data.pack.items[].text"],
+        },
+        CanonicalFieldSurface {
+            surface: "ee context",
+            logical_name: "relevance score",
+            canonical_path: "data.pack.items[].scores.relevance",
+            forbidden_paths: &[
+                "data.pack.items[].relevanceScore",
+                "data.pack.items[].relevance_score",
+            ],
+        },
+        CanonicalFieldSurface {
+            surface: "ee why",
+            logical_name: "memory body text",
+            canonical_path: "data.content",
+            forbidden_paths: &["data.body", "data.text"],
+        },
+        CanonicalFieldSurface {
+            surface: "ee why",
+            logical_name: "memory level",
+            canonical_path: "data.retrieval.level",
+            forbidden_paths: &["data.retrieval.memory_level"],
+        },
+        CanonicalFieldSurface {
+            surface: "ee learn uncertainty",
+            logical_name: "memory body text",
+            canonical_path: "items[].content",
+            forbidden_paths: &["items[].body", "items[].text"],
+        },
+    ];
+
+    fn canonical_field_rule(logical_name: &str) -> Option<&'static CanonicalFieldRule> {
+        CANONICAL_FIELD_RULES
+            .iter()
+            .find(|rule| rule.logical_name == logical_name)
+    }
+
+    fn is_reserved_modifier_for(field_name: &str, canonical_key: &str) -> bool {
+        let Some(base_key) = canonical_key.rsplit('.').next() else {
+            return false;
+        };
+        let Some(suffix) = field_name.strip_prefix(base_key) else {
+            return false;
+        };
+        RESERVED_FIELD_SUFFIXES.contains(&suffix)
+    }
+
+    fn check_canonical_field_key(logical_name: &str, observed_key: &str) -> Result<(), String> {
+        let rule = canonical_field_rule(logical_name)
+            .ok_or_else(|| format!("missing canonical field rule for {logical_name}"))?;
+        if observed_key == rule.canonical_key
+            || is_reserved_modifier_for(observed_key, rule.canonical_key)
+        {
+            return Ok(());
+        }
+        if rule.forbidden_aliases.contains(&observed_key) {
+            return Err(format!(
+                "field `{observed_key}` drifts from canonical `{}` for {logical_name}",
+                rule.canonical_key
+            ));
+        }
+        Ok(())
+    }
+
+    fn field_key_from_path(path: &str) -> &str {
+        path.rsplit('.').next().unwrap_or(path)
+    }
+
+    fn observed_key_for_path(path: &str, rule: &CanonicalFieldRule) -> String {
+        let key = field_key_from_path(path);
+        if rule.canonical_key.contains('.') && key == field_key_from_path(rule.canonical_key) {
+            rule.canonical_key.to_owned()
+        } else {
+            key.to_owned()
+        }
+    }
+
     fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
         if condition {
             Ok(())
@@ -1358,5 +1526,151 @@ mod tests {
             count <= 200,
             format!("unexpectedly high schema count {count} - review for duplicates"),
         )
+    }
+
+    #[test]
+    fn canonical_field_map_covers_agent_facing_memory_concepts() -> TestResult {
+        let required = [
+            ("memory body text", "content"),
+            ("memory level", "level"),
+            ("memory kind", "kind"),
+            ("workspace id", "workspace_id"),
+            ("workspace path", "workspace_path"),
+            ("memory creation timestamp", "created_at"),
+            ("relevance score", "scores.relevance"),
+        ];
+
+        for (logical_name, canonical_key) in required {
+            let rule = canonical_field_rule(logical_name)
+                .ok_or_else(|| format!("missing canonical rule for {logical_name}"))?;
+            ensure_equal(
+                &rule.canonical_key,
+                &canonical_key,
+                &format!("canonical key for {logical_name}"),
+            )?;
+            ensure(
+                !rule.forbidden_aliases.is_empty(),
+                format!("{logical_name} must declare drift aliases"),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_field_audit_declares_agent_facing_surfaces() -> TestResult {
+        let required_surfaces = [
+            "ee memory list",
+            "ee search",
+            "ee context",
+            "ee why",
+            "ee learn uncertainty",
+        ];
+
+        for surface in required_surfaces {
+            ensure(
+                CANONICAL_FIELD_SURFACES
+                    .iter()
+                    .any(|entry| entry.surface == surface),
+                format!("canonical field audit must cover {surface}"),
+            )?;
+        }
+
+        for entry in CANONICAL_FIELD_SURFACES {
+            let rule = canonical_field_rule(entry.logical_name)
+                .ok_or_else(|| format!("missing canonical rule for {}", entry.logical_name))?;
+            let observed = observed_key_for_path(entry.canonical_path, rule);
+            check_canonical_field_key(entry.logical_name, &observed).map_err(|error| {
+                format!(
+                    "{} canonical path `{}` should satisfy {}: {error}",
+                    entry.surface, entry.canonical_path, entry.logical_name
+                )
+            })?;
+            ensure(
+                !entry.forbidden_paths.is_empty(),
+                format!(
+                    "{} {} audit must include at least one forbidden alias path",
+                    entry.surface, entry.logical_name
+                ),
+            )?;
+            for forbidden_path in entry.forbidden_paths {
+                let forbidden_key = observed_key_for_path(forbidden_path, rule);
+                let error = match check_canonical_field_key(entry.logical_name, &forbidden_key) {
+                    Ok(()) => {
+                        return Err(format!(
+                            "forbidden surface alias should fail: {} {forbidden_path}",
+                            entry.surface
+                        ));
+                    }
+                    Err(error) => error,
+                };
+                ensure(
+                    error.contains(&forbidden_key),
+                    format!(
+                        "{} forbidden path `{forbidden_path}` should name `{forbidden_key}`: {error}",
+                        entry.surface
+                    ),
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_field_rules_reject_known_drift_aliases() -> TestResult {
+        let drift_cases = [
+            ("memory body text", "body"),
+            ("memory body text", "text"),
+            ("memory kind", "type"),
+            ("workspace id", "workspaceId"),
+            ("workspace path", "workspacePath"),
+            ("memory creation timestamp", "createdAt"),
+            ("relevance score", "relevanceScore"),
+        ];
+
+        for (logical_name, observed_key) in drift_cases {
+            let error = match check_canonical_field_key(logical_name, observed_key) {
+                Ok(()) => {
+                    return Err(format!(
+                        "drift alias should fail: {logical_name} {observed_key}"
+                    ));
+                }
+                Err(error) => error,
+            };
+            ensure(
+                error.contains(observed_key),
+                format!("error should name observed key {observed_key}: {error}"),
+            )?;
+            ensure(
+                error.contains("canonical"),
+                format!("error should explain canonical replacement: {error}"),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_field_rules_allow_canonical_keys_and_reserved_modifiers() -> TestResult {
+        let allowed_cases = [
+            ("memory body text", "content"),
+            ("memory body text", "content_preview"),
+            ("memory body text", "content_hash"),
+            ("memory body text", "content_truncated"),
+            ("memory body text", "content_format"),
+            ("workspace id", "workspace_id"),
+            ("workspace id", "workspace_id_hash"),
+            ("relevance score", "scores.relevance"),
+            ("relevance score", "relevance_hash"),
+        ];
+
+        for (logical_name, observed_key) in allowed_cases {
+            check_canonical_field_key(logical_name, observed_key).map_err(|error| {
+                format!("{logical_name} should allow `{observed_key}` but got {error}")
+            })?;
+        }
+
+        Ok(())
     }
 }

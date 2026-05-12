@@ -39,9 +39,9 @@ use crate::models::{
     RESPONSE_SCHEMA_V1,
 };
 use crate::pack::{
-    ContextResponse, PackAdvisoryBanner, PackAdvisoryNote, PackDraftItem, PackItemProvenance,
-    PackOmissionMetrics, PackQualityMetrics, PackRejectedFrontierItem, PackSectionMetric,
-    PackSelectedItem, PackSelectionCertificate, PackSelectionStep, RenderedPackProvenance,
+    ContextResponse, PackAdvisoryBanner, PackAdvisoryNote, PackItemProvenance, PackOmissionMetrics,
+    PackQualityMetrics, PackRejectedFrontierItem, PackSectionMetric, PackSelectedItem,
+    PackSelectionCertificate, PackSelectionStep, RenderedPackProvenance,
 };
 use crate::steward::{
     MAINTENANCE_JOB_LIST_SCHEMA_V1, MAINTENANCE_JOB_ROW_SCHEMA_V1, MAINTENANCE_JOB_SHOW_SCHEMA_V1,
@@ -1396,11 +1396,35 @@ pub fn compute_representative_size_diagnostics() -> Vec<(&'static str, OutputSiz
     diagnostics
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContextJsonRenderOptions {
+    pub include_rendered_text: bool,
+}
+
+impl Default for ContextJsonRenderOptions {
+    fn default() -> Self {
+        Self {
+            include_rendered_text: true,
+        }
+    }
+}
+
 /// Render a context response as JSON (ee.response.v1 envelope).
 #[must_use]
 pub fn render_context_response_json(response: &ContextResponse) -> String {
-    let rendered_text = render_context_response_markdown(response);
-    let mut b = JsonBuilder::with_capacity(2048 + rendered_text.len());
+    render_context_response_json_with_options(response, ContextJsonRenderOptions::default())
+}
+
+/// Render a context response as JSON with caller-selected optional fields.
+#[must_use]
+pub fn render_context_response_json_with_options(
+    response: &ContextResponse,
+    options: ContextJsonRenderOptions,
+) -> String {
+    let rendered_text = options
+        .include_rendered_text
+        .then(|| render_context_response_markdown(response));
+    let mut b = JsonBuilder::with_capacity(2048 + rendered_text.as_ref().map_or(0, String::len));
     b.field_str("schema", response.schema);
     b.field_bool("success", response.success);
     b.field_object("data", |d| {
@@ -1429,7 +1453,17 @@ pub fn render_context_response_json(response: &ContextResponse) -> String {
                 Some(hash) => pack.field_str("hash", hash),
                 None => pack.field_raw("hash", "null"),
             };
-            pack.field_str("text", &rendered_text);
+            if let Some(text) = &rendered_text {
+                pack.field_str("text", text);
+            }
+            pack.field_object("meta", |meta| {
+                meta.field_object("algorithm", |algorithm| {
+                    build_pack_algorithm_metadata(
+                        algorithm,
+                        &response.data.pack.selection_certificate,
+                    );
+                });
+            });
             pack.field_object("budget", |budget| {
                 budget.field_u32("maxTokens", response.data.pack.budget.max_tokens());
                 budget.field_u32("usedTokens", response.data.pack.used_tokens);
@@ -1652,165 +1686,7 @@ pub fn render_context_response_toon(response: &ContextResponse) -> String {
 /// pack section, with provenance and why explanations preserved.
 #[must_use]
 pub fn render_context_response_markdown(response: &ContextResponse) -> String {
-    let mut output = String::new();
-
-    output.push_str(&format!(
-        "# Context Pack: {}\n\n",
-        markdown::escape_heading(&response.data.request.query)
-    ));
-
-    output.push_str(&format!(
-        "**Profile:** {} | **Budget:** {}/{} tokens\n\n",
-        response.data.request.profile.as_str(),
-        response.data.pack.used_tokens,
-        response.data.pack.budget.max_tokens()
-    ));
-
-    let advisory_banner = response.data.advisory_banner();
-    output.push_str("## Advisory Memory Banner\n\n");
-    output.push_str(&format!(
-        "**Status:** `{}`\n\n",
-        advisory_banner.status.as_str()
-    ));
-    output.push_str(&markdown::escape_text(&advisory_banner.summary));
-    output.push_str("\n\n");
-    if !advisory_banner.notes.is_empty() {
-        for note in &advisory_banner.notes {
-            output.push_str(&format!(
-                "- **{}** {} {} Action: {}\n",
-                note.severity.as_str(),
-                markdown::inline_code(note.code),
-                markdown::escape_text(&note.message),
-                markdown::inline_code(note.action)
-            ));
-        }
-        output.push('\n');
-    }
-
-    if response.data.pack.items.is_empty() {
-        output.push_str("*No items in pack.*\n\n");
-    } else {
-        // Group items by section while preserving pack rank order.
-        // Sections appear in order of their first item's rank, not alphabetically.
-        let mut by_section: std::collections::HashMap<&str, Vec<&PackDraftItem>> =
-            std::collections::HashMap::new();
-        let mut section_order: Vec<&str> = Vec::new();
-        for item in &response.data.pack.items {
-            let section = item.section.as_str();
-            if !by_section.contains_key(section) {
-                section_order.push(section);
-            }
-            by_section.entry(section).or_default().push(item);
-        }
-
-        // Bead bd-17c65.1.7 (A7) — render with a contiguous 1..N
-        // displayIndex that counts across all emitted items so the
-        // markdown numbering is monotonic. The 2026-05-10 walkthrough
-        // exposed jumps (### 1. then ### 4. then ### 7.) when MMR
-        // filtered intermediate ranks; that's correct in JSON
-        // (`rank` preserves the original) but distracting in the
-        // rendered prompt fragment. The renderer uses display_index;
-        // the underlying `item.rank` stays available for callers
-        // reading the structured JSON.
-        let mut display_index: u32 = 0;
-        for section in section_order {
-            let Some(items) = by_section.get(section) else {
-                continue;
-            };
-            output.push_str(&format!("## {}\n\n", section_display_name(section)));
-            for item in items {
-                display_index += 1;
-                output.push_str(&format!(
-                    "### {}. {} ({} tokens)\n\n",
-                    display_index,
-                    markdown::escape_text(&item.memory_id.to_string()),
-                    item.estimated_tokens
-                ));
-
-                if !item.content.is_empty() {
-                    output.push_str(&markdown::fenced_code_block(&item.content));
-                    output.push('\n');
-                }
-
-                if !item.why.is_empty() {
-                    output.push_str(&format!(
-                        "**Why:** {}\n\n",
-                        markdown::escape_text(&item.why)
-                    ));
-                }
-
-                output.push_str(&format!(
-                    "**Trust:** `{}` / `{}`\n\n",
-                    item.trust.class.as_str(),
-                    item.trust.posture().as_str()
-                ));
-
-                if !item.provenance.is_empty() {
-                    output.push_str("**Provenance:**\n");
-                    for prov in item.rendered_provenance() {
-                        output.push_str(&format!(
-                            "- {} ({})\n",
-                            markdown::inline_code(&prov.uri),
-                            markdown::escape_text(prov.scheme)
-                        ));
-                    }
-                    output.push('\n');
-                }
-            }
-        }
-    }
-
-    if !response.data.pack.omitted.is_empty() {
-        output.push_str("## Omitted\n\n");
-        for omission in &response.data.pack.omitted {
-            output.push_str(&format!(
-                "- {} ({} tokens) — {}\n",
-                markdown::escape_text(&omission.memory_id.to_string()),
-                omission.estimated_tokens,
-                markdown::escape_text(omission.reason.as_str())
-            ));
-        }
-        output.push('\n');
-    }
-
-    if !response.data.degraded.is_empty() {
-        output.push_str("## Degradations\n\n");
-        for d in &response.data.degraded {
-            output.push_str(&format!(
-                "- **[{}]** {}\n",
-                d.severity.as_str(),
-                markdown::escape_text(&d.message)
-            ));
-            if let Some(repair) = &d.repair {
-                output.push_str(&format!(
-                    "  - *Repair:* {}\n",
-                    markdown::inline_code(repair)
-                ));
-            }
-        }
-        output.push('\n');
-    }
-
-    output.push_str("---\n\n");
-    let escaped_query = markdown::escape_text(&response.data.request.query);
-    let command = format!("ee context \"{}\" --format markdown", escaped_query);
-    output.push_str(&format!(
-        "*Generated by {}*\n",
-        markdown::inline_code(&command)
-    ));
-
-    output
-}
-
-fn section_display_name(section: &str) -> &str {
-    match section {
-        "core" => "Core",
-        "supporting" => "Supporting",
-        "procedural" => "Procedural",
-        "background" => "Background",
-        "example" => "Example",
-        other => other,
-    }
+    crate::pack::render_context_response_markdown(response)
 }
 
 fn build_pack_advisory_banner(obj: &mut JsonBuilder, banner: &PackAdvisoryBanner) {
@@ -1877,15 +1753,16 @@ fn build_pack_omission_metrics(obj: &mut JsonBuilder, metrics: &PackOmissionMetr
     );
 }
 
-fn build_pack_selection_certificate(obj: &mut JsonBuilder, certificate: &PackSelectionCertificate) {
-    if let Some(certificate_id) = &certificate.certificate_id {
-        obj.field_str("certificateId", certificate_id);
-    }
+fn build_pack_algorithm_metadata(obj: &mut JsonBuilder, certificate: &PackSelectionCertificate) {
     obj.field_str("profile", certificate.profile.as_str());
     obj.field_str("objective", certificate.objective.as_str());
-    obj.field_str("algorithm", certificate.algorithm);
+    obj.field_str("name", certificate.algorithm);
     obj.field_str("guarantee", certificate.guarantee);
     obj.field_str("guaranteeStatus", certificate.guarantee_status.as_str());
+    obj.field_str(
+        "scoringFormula",
+        "unit_score(field)=clamp(field, 0.0, 1.0) for finite fields, otherwise 0.0",
+    );
     obj.field_object("guaranteeEvidence", |guarantee| {
         guarantee.field_str("status", certificate.guarantee_status.as_str());
         match &certificate.certificate_id {
@@ -1895,6 +1772,16 @@ fn build_pack_selection_certificate(obj: &mut JsonBuilder, certificate: &PackSel
         guarantee.field_bool("identityValid", certificate.has_valid_guarantee_identity());
         guarantee.field_str("summary", certificate.guarantee);
     });
+    obj.field_object("properties", |properties| {
+        properties.field_bool("monotone", certificate.monotone);
+        properties.field_bool("submodular", certificate.submodular);
+    });
+}
+
+fn build_pack_selection_certificate(obj: &mut JsonBuilder, certificate: &PackSelectionCertificate) {
+    if let Some(certificate_id) = &certificate.certificate_id {
+        obj.field_str("certificateId", certificate_id);
+    }
     obj.field_raw("candidateCount", &certificate.candidate_count.to_string());
     obj.field_raw("selectedCount", &certificate.selected_count.to_string());
     obj.field_raw("omittedCount", &certificate.omitted_count.to_string());
@@ -1904,8 +1791,6 @@ fn build_pack_selection_certificate(obj: &mut JsonBuilder, certificate: &PackSel
         "totalObjectiveValue",
         &score_json(certificate.total_objective_value),
     );
-    obj.field_bool("monotone", certificate.monotone);
-    obj.field_bool("submodular", certificate.submodular);
     // Bead bd-2pe1z (A1 phase 2): drop selectionCertificate.selectedItems[]
     // and selectionCertificate.steps[]. Every per-item field they carried
     // (tokenCost, feasible, marginalGain, objectiveValue, coveredFeatures)

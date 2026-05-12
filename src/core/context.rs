@@ -477,7 +477,10 @@ pub fn run_context_pack_with_performance(
         limit: request.candidate_pool,
         speed: options.speed,
         explain: false,
-        relevance_floor: None,
+        // Context packing owns relevance and budget filtering after retrieval.
+        // Keep the candidate pool broad so an exact single-memory match is not
+        // dropped by the interactive search command's presentation floor.
+        relevance_floor: Some(0.0),
     }) {
         Ok(report) => report,
         Err(SearchError::NoIndex) => missing_index_search_report(
@@ -1380,6 +1383,8 @@ fn compute_pack_hash(
     hasher.update(request.profile.as_str().as_bytes());
     hasher.update(&request.budget.max_tokens().to_le_bytes());
     hasher.update(&draft.used_tokens.to_le_bytes());
+    let rendered_text = crate::pack::render_context_markdown(request, draft, degraded);
+    hasher.update(rendered_text.as_bytes());
     for item in &draft.items {
         hasher.update(item.memory_id.to_string().as_bytes());
         hasher.update(&item.rank.to_le_bytes());
@@ -2554,10 +2559,8 @@ fn focus_candidate_why(
 ///   matched 'query' via <source> (relevance <score>, utility <util>); via artifact <id>
 ///
 /// The math identity (`unit_score(field) = clamp(field, 0.0, 1.0)`)
-/// applies to every item identically and belongs in pack-level metadata
-/// — not repeated per item. A future bead (A2) moves it to
-/// `pack.meta.algorithm.scoringFormula`; for now the per-item why is
-/// information-complete on its own.
+/// applies to every item identically and lives in the pack-level
+/// `pack.meta.algorithm.scoringFormula`, not repeated per item.
 fn candidate_selection_why(
     query: &str,
     search_source: &str,
@@ -3684,8 +3687,7 @@ mod tests {
     // Bead bd-17c65.1.3 (A3) — per-item `why` is a one-line actionable
     // reason, not the old 350-char math identity. The math identity
     // (unit_score(field) = clamp(field, 0.0, 1.0)) applies uniformly to
-    // every item and moves to pack.meta.algorithm in a future bead (A2);
-    // here we lock in the new compact shape.
+    // every item and is emitted once at pack.meta.algorithm.scoringFormula.
 
     #[test]
     fn candidate_selection_why_is_one_line_reason() {
@@ -3915,11 +3917,23 @@ mod tests {
         let base_degraded: Vec<ContextResponseDegradation> = vec![];
 
         let hash_base = compute_pack_hash(&request, &base_draft, &base_degraded);
+        let rendered_base =
+            crate::pack::render_context_markdown(&request, &base_draft, &base_degraded);
+        assert!(
+            rendered_base.contains("original content"),
+            "pack hash fixture should render item content into markdown text"
+        );
 
         // Different content produces different hash.
         let mut draft_content = base_draft.clone();
         draft_content.items[0].content = "different content".to_string();
         let hash_content = compute_pack_hash(&request, &draft_content, &base_degraded);
+        let rendered_content =
+            crate::pack::render_context_markdown(&request, &draft_content, &base_degraded);
+        assert_ne!(
+            rendered_base, rendered_content,
+            "rendered pack text change must be visible to the hash input"
+        );
         assert_ne!(hash_base, hash_content, "content change must alter hash");
 
         // Different provenance produces different hash.

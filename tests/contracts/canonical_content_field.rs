@@ -9,10 +9,10 @@
 //! Surfaces covered:
 //! - `ee memory list`  : each item must have `content` + `content_truncated`
 //! - `ee rule list`    : each item must have `content` + `contentTruncated`
-//!                       (RuleSummary serializes camelCase via serde)
+//!   (RuleSummary serializes camelCase via serde)
 //! - `ee why`          : top-level `content: <full body>` (no truncation flag —
-//!                       why returns the full body so an agent does not need
-//!                       to chain `ee memory show`)
+//!   why returns the full body so an agent does not need
+//!   to chain `ee memory show`)
 //! - `ee learn uncertainty` : each item must have `content` + `content_truncated`
 //!
 //! Counter-assertion: the legacy `content_preview` name must not appear in

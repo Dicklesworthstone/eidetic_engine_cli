@@ -1259,6 +1259,390 @@ impl ContextResponseData {
     }
 }
 
+/// Render a context response as the canonical Markdown prompt fragment.
+#[must_use]
+pub fn render_context_response_markdown(response: &ContextResponse) -> String {
+    render_context_markdown(
+        &response.data.request,
+        &response.data.pack,
+        &response.data.degraded,
+    )
+}
+
+/// Render the canonical Markdown prompt fragment from context pack parts.
+#[must_use]
+pub fn render_context_markdown(
+    request: &ContextRequest,
+    pack: &PackDraft,
+    degraded: &[ContextResponseDegradation],
+) -> String {
+    let mut output = String::new();
+
+    output.push_str(&format!(
+        "# Context Pack: {}\n\n",
+        escape_markdown_heading(&request.query)
+    ));
+
+    output.push_str(&format!(
+        "**Profile:** {} | **Budget:** {}/{} tokens\n\n",
+        request.profile.as_str(),
+        pack.used_tokens,
+        pack.budget.max_tokens()
+    ));
+
+    let advisory_banner = context_advisory_banner(pack, degraded);
+    output.push_str("## Advisory Memory Banner\n\n");
+    output.push_str(&format!(
+        "**Status:** `{}`\n\n",
+        advisory_banner.status.as_str()
+    ));
+    output.push_str(&escape_markdown_text(&advisory_banner.summary));
+    output.push_str("\n\n");
+    if !advisory_banner.notes.is_empty() {
+        for note in &advisory_banner.notes {
+            output.push_str(&format!(
+                "- **{}** {} {} Action: {}\n",
+                note.severity.as_str(),
+                markdown_inline_code(note.code),
+                escape_markdown_text(&note.message),
+                markdown_inline_code(note.action)
+            ));
+        }
+        output.push('\n');
+    }
+
+    if pack.items.is_empty() {
+        output.push_str("*No items in pack.*\n\n");
+    } else {
+        let mut by_section: std::collections::HashMap<&str, Vec<&PackDraftItem>> =
+            std::collections::HashMap::new();
+        let mut section_order: Vec<&str> = Vec::new();
+        for item in &pack.items {
+            let section = item.section.as_str();
+            if !by_section.contains_key(section) {
+                section_order.push(section);
+            }
+            by_section.entry(section).or_default().push(item);
+        }
+
+        let mut display_index: u32 = 0;
+        for section in section_order {
+            let Some(items) = by_section.get(section) else {
+                continue;
+            };
+            output.push_str(&format!("## {}\n\n", context_section_display_name(section)));
+            for item in items {
+                display_index += 1;
+                output.push_str(&format!(
+                    "### {}. {} ({} tokens)\n\n",
+                    display_index,
+                    escape_markdown_text(&item.memory_id.to_string()),
+                    item.estimated_tokens
+                ));
+
+                if !item.content.is_empty() {
+                    output.push_str(&markdown_fenced_code_block(&item.content));
+                    output.push('\n');
+                }
+
+                if !item.why.is_empty() {
+                    output.push_str(&format!("**Why:** {}\n\n", escape_markdown_text(&item.why)));
+                }
+
+                output.push_str(&format!(
+                    "**Trust:** `{}` / `{}`\n\n",
+                    item.trust.class.as_str(),
+                    item.trust.posture().as_str()
+                ));
+
+                if !item.provenance.is_empty() {
+                    output.push_str("**Provenance:**\n");
+                    for prov in item.rendered_provenance() {
+                        output.push_str(&format!(
+                            "- {} ({})\n",
+                            markdown_inline_code(&prov.uri),
+                            escape_markdown_text(prov.scheme)
+                        ));
+                    }
+                    output.push('\n');
+                }
+            }
+        }
+    }
+
+    if !pack.omitted.is_empty() {
+        output.push_str("## Omitted\n\n");
+        for omission in &pack.omitted {
+            output.push_str(&format!(
+                "- {} ({} tokens) — {}\n",
+                escape_markdown_text(&omission.memory_id.to_string()),
+                omission.estimated_tokens,
+                escape_markdown_text(omission.reason.as_str())
+            ));
+        }
+        output.push('\n');
+    }
+
+    if !degraded.is_empty() {
+        output.push_str("## Degradations\n\n");
+        for d in degraded {
+            output.push_str(&format!(
+                "- **[{}]** {}\n",
+                d.severity.as_str(),
+                escape_markdown_text(&d.message)
+            ));
+            if let Some(repair) = &d.repair {
+                output.push_str(&format!("  - *Repair:* {}\n", markdown_inline_code(repair)));
+            }
+        }
+        output.push('\n');
+    }
+
+    output.push_str("---\n\n");
+    let escaped_query = escape_markdown_text(&request.query);
+    let command = format!("ee context \"{}\" --format markdown", escaped_query);
+    output.push_str(&format!(
+        "*Generated by {}*\n",
+        markdown_inline_code(&command)
+    ));
+
+    output
+}
+
+fn context_advisory_banner(
+    pack: &PackDraft,
+    degraded: &[ContextResponseDegradation],
+) -> PackAdvisoryBanner {
+    let counts = pack.trust_counts();
+    let mut notes = Vec::new();
+
+    if counts.advisory() > 0 {
+        notes.push(PackAdvisoryNote {
+            code: "advisory_memory",
+            severity: ContextResponseSeverity::Medium,
+            message: format!(
+                "{} packed memor{} from agent assertions or CASS evidence and must be validated against provenance before being treated as policy.",
+                counts.advisory(),
+                plural_suffix(counts.advisory(), "y", "ies")
+            ),
+            memory_ids: memory_ids_for_posture(pack, PackTrustPosture::Advisory),
+            action: "validate_provenance_before_following",
+        });
+    }
+
+    if counts.legacy() > 0 {
+        notes.push(PackAdvisoryNote {
+            code: "legacy_memory",
+            severity: ContextResponseSeverity::High,
+            message: format!(
+                "{} packed legacy memor{} from pre-v1 imports and is evidence only until revalidated.",
+                counts.legacy(),
+                plural_suffix(counts.legacy(), "y", "ies")
+            ),
+            memory_ids: memory_ids_for_posture(pack, PackTrustPosture::LegacyEvidence),
+            action: "revalidate_legacy_memory_before_use",
+        });
+    }
+
+    if !degraded.is_empty() {
+        notes.push(PackAdvisoryNote {
+            code: "degraded_context",
+            severity: highest_degradation_severity(degraded),
+            message: format!(
+                "{} degraded context signal{} present; inspect degraded[] repairs before relying on omitted or fallback sources.",
+                degraded.len(),
+                plural_s(degraded.len())
+            ),
+            memory_ids: Vec::new(),
+            action: "inspect_degraded_repairs",
+        });
+    }
+
+    let status = if !degraded.is_empty() {
+        PackAdvisoryStatus::Degraded
+    } else if counts.advisory() > 0 || counts.legacy() > 0 {
+        PackAdvisoryStatus::Advisory
+    } else {
+        PackAdvisoryStatus::Clear
+    };
+
+    PackAdvisoryBanner {
+        status,
+        summary: advisory_summary(status, &counts, degraded.len()),
+        authoritative_count: counts.authoritative(),
+        advisory_count: counts.advisory(),
+        legacy_count: counts.legacy(),
+        degradation_count: degraded.len(),
+        notes,
+    }
+}
+
+fn context_section_display_name(section: &str) -> &str {
+    match section {
+        "core" => "Core",
+        "supporting" => "Supporting",
+        "procedural" => "Procedural",
+        "background" => "Background",
+        "example" => "Example",
+        other => other,
+    }
+}
+
+fn escape_markdown_text(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let chars: Vec<char> = input.chars().collect();
+    let mut line_start = true;
+    let mut digits_at_line_start: usize = 0;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        let prev_ch = if i > 0 { Some(chars[i - 1]) } else { None };
+        let next_ch = chars.get(i + 1).copied();
+        match ch {
+            '\\' => output.push_str("\\\\"),
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '`' => {
+                output.push('\\');
+                output.push('`');
+            }
+            '\n' => {
+                output.push('\n');
+                line_start = true;
+                digits_at_line_start = 0;
+                i += 1;
+                continue;
+            }
+            '\r' => {
+                i += 1;
+                continue;
+            }
+            '#' if line_start => {
+                output.push('\\');
+                output.push('#');
+            }
+            '+' if line_start && markdown_next_is_space_or_eol(next_ch) => {
+                output.push('\\');
+                output.push('+');
+            }
+            '-' if line_start && markdown_next_is_space_or_eol(next_ch) => {
+                output.push('\\');
+                output.push('-');
+            }
+            '.' if line_start
+                && digits_at_line_start > 0
+                && markdown_next_is_space_or_eol(next_ch) =>
+            {
+                output.push('\\');
+                output.push('.');
+            }
+            ')' if line_start
+                && digits_at_line_start > 0
+                && markdown_next_is_space_or_eol(next_ch) =>
+            {
+                output.push('\\');
+                output.push(')');
+            }
+            '!' if next_ch == Some('[') => {
+                output.push('\\');
+                output.push('!');
+            }
+            '[' | ']' => {
+                output.push('\\');
+                output.push(ch);
+            }
+            '*' | '_' => {
+                if markdown_emphasis_eligible(prev_ch, next_ch) {
+                    output.push('\\');
+                    output.push(ch);
+                } else {
+                    output.push(ch);
+                }
+            }
+            '~' if prev_ch == Some('~') || next_ch == Some('~') => {
+                output.push('\\');
+                output.push('~');
+            }
+            other => output.push(other),
+        }
+        if line_start {
+            if ch.is_ascii_digit() {
+                digits_at_line_start += 1;
+            } else if !ch.is_ascii_whitespace() {
+                line_start = false;
+                digits_at_line_start = 0;
+            }
+        }
+        i += 1;
+    }
+    output
+}
+
+fn escape_markdown_heading(input: &str) -> String {
+    escape_markdown_text(&input.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+fn markdown_inline_code(input: &str) -> String {
+    let normalized = input.replace(['\r', '\n'], " ");
+    let delimiter = "`".repeat(
+        markdown_longest_backtick_run(&normalized)
+            .saturating_add(1)
+            .max(1),
+    );
+    let needs_padding = normalized.starts_with('`')
+        || normalized.ends_with('`')
+        || normalized.starts_with(' ')
+        || normalized.ends_with(' ');
+    let padding = if needs_padding { " " } else { "" };
+    format!("{delimiter}{padding}{normalized}{padding}{delimiter}")
+}
+
+fn markdown_fenced_code_block(content: &str) -> String {
+    let delimiter = "`".repeat(
+        markdown_longest_backtick_run(content)
+            .saturating_add(1)
+            .max(3),
+    );
+    let mut output = String::with_capacity(content.len() + delimiter.len() * 2 + 4);
+    output.push_str(&delimiter);
+    output.push('\n');
+    output.push_str(content);
+    if !content.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(&delimiter);
+    output.push('\n');
+    output
+}
+
+fn markdown_longest_backtick_run(input: &str) -> usize {
+    let mut current = 0;
+    let mut longest = 0;
+    for ch in input.chars() {
+        if ch == '`' {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    longest
+}
+
+fn markdown_emphasis_eligible(prev: Option<char>, next: Option<char>) -> bool {
+    let prev_is_word = prev.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let next_is_word = next.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    !(prev_is_word && next_is_word)
+}
+
+fn markdown_next_is_space_or_eol(next: Option<char>) -> bool {
+    match next {
+        None => true,
+        Some(ch) => ch == ' ' || ch == '\t' || ch == '\n',
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContextResponseDegradation {
     pub code: String,

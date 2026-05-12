@@ -196,6 +196,7 @@ pub(crate) fn inline_code(input: &str) -> String {
 /// Render arbitrary block content inside a Markdown code fence that
 /// cannot be closed by the content's own backticks.
 #[must_use]
+#[cfg(test)]
 pub(crate) fn fenced_code_block(content: &str) -> String {
     let delimiter = "`".repeat(longest_backtick_run(content).saturating_add(1).max(3));
     let mut output = String::with_capacity(content.len() + delimiter.len() * 2 + 4);
