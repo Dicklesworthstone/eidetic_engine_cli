@@ -48,6 +48,7 @@ pub mod audit_actions {
     pub const FEEDBACK_QUARANTINE_RELEASE: &str = "feedback.quarantine.release";
     pub const FEEDBACK_QUARANTINE_REJECT: &str = "feedback.quarantine.reject";
     pub const MEMORY_CREATE: &str = "memory.create";
+    pub const MEMORY_EXPIRE: &str = "memory.expire";
     pub const MEMORY_SCORE_DECAY: &str = "memory.score_decay";
     pub const MEMORY_UPDATE: &str = "memory.update";
     pub const MEMORY_TOMBSTONE: &str = "memory.tombstone";
@@ -7729,6 +7730,16 @@ impl DbConnection {
         if affected > 0 {
             self.garbage_collect_auto_memory_links_for_memory_inner(id)?;
         }
+        Ok(affected > 0)
+    }
+
+    /// Expire a memory by setting its validity end timestamp.
+    pub fn expire_memory_valid_to(&self, id: &str, valid_to: &str) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET valid_to = ?1, updated_at = ?1 WHERE id = ?2 AND tombstoned_at IS NULL AND (valid_to IS NULL OR valid_to > ?1)",
+            &[Value::Text(valid_to.to_string()), Value::Text(id.to_string())],
+        )?;
         Ok(affected > 0)
     }
 
