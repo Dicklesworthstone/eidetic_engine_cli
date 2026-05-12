@@ -1,0 +1,46 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "candidateCount": 1,
+    "command": "curate candidates",
+    "selectedCandidate": {
+      "evidenceTypes": [
+        "agent_inference",
+        "agent_inference",
+        "agent_inference",
+        "agent_inference",
+        "agent_inference",
+        "agent_inference",
+        "agent_inference",
+        "agent_inference",
+        "agent_inference",
+        "agent_inference",
+        "agent_inference"
+      ],
+      "id": "CANDIDATE",
+      "memberMemoryIdCount": 11,
+      "memberMemoryIds": [
+        "MEMORY_01",
+        "MEMORY_02",
+        "MEMORY_03",
+        "MEMORY_04",
+        "MEMORY_05",
+        "MEMORY_06",
+        "MEMORY_07",
+        "MEMORY_08",
+        "MEMORY_09",
+        "MEMORY_10",
+        "MEMORY_11"
+      ],
+      "proposedContentMentionsCargo": true,
+      "reasonMentionsCargo": true,
+      "requiresApply": false,
+      "requiresValidate": true,
+      "reviewState": "new",
+      "sourceType": "agent_inference",
+      "status": "pending",
+      "type": "rule"
+    }
+  }
+}

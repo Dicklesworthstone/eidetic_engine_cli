@@ -115,6 +115,29 @@ fn write_json_artifact(path: &Path, value: &serde_json::Value) -> TestResult {
 }
 
 #[cfg(unix)]
+fn assert_snapshot_file(relative_path: &str, actual: &str) -> TestResult {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative_path);
+    if std::env::var("UPDATE_GOLDEN").is_ok() {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        fs::write(&path, actual).map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let expected = fs::read_to_string(&path)
+        .map_err(|error| format!("missing snapshot {}: {error}", path.display()))?;
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "snapshot mismatch {}\n--- expected\n{expected}\n+++ actual\n{actual}",
+            path.display()
+        ))
+    }
+}
+
+#[cfg(unix)]
 fn perf_artifact_summary_fixture(
     artifact_id: &str,
     profile: &str,
@@ -2373,6 +2396,186 @@ fn curate_candidates_json_lists_empty_pending_queue() -> TestResult {
     ensure(
         run.dossier_dir.join("stdout.schema.json").is_file(),
         "curate candidates dossier should log schema status",
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn curate_candidates_after_seed_matches_snapshot() -> TestResult {
+    let workspace = unique_artifact_dir("curate-candidates-seed")?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let init = run_ee(&["--workspace", workspace_arg.as_str(), "--json", "init"])?;
+    ensure(
+        init.status.success(),
+        format!(
+            "init should succeed before seeding curation candidates; stderr: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ),
+    )?;
+    ensure(init.stderr.is_empty(), "init stderr clean")?;
+
+    let remember_env = [(
+        "EE_REMEMBER_CURATION_SYNC_BUDGET_MS",
+        OsString::from("5000"),
+    )];
+    let mut seeded_memory_ids = Vec::new();
+    for index in 1..=11 {
+        let mut args = vec![
+            "--workspace".to_string(),
+            workspace_arg.clone(),
+            "--json".to_string(),
+            "remember".to_string(),
+            "--level".to_string(),
+            "procedural".to_string(),
+            "--kind".to_string(),
+            "rule".to_string(),
+            "--tags".to_string(),
+            "cargo,release".to_string(),
+            "--confidence".to_string(),
+            "0.8".to_string(),
+            "--source".to_string(),
+            format!("file://AGENTS.md#L{index}-{index}"),
+        ];
+        if index < 11 {
+            args.push("--no-propose-candidates".to_string());
+        }
+        args.push(format!(
+            "Run cargo verification gate {index:02} before release."
+        ));
+
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let remember = run_ee_with_env(&arg_refs, &remember_env)?;
+        let stdout = String::from_utf8_lossy(&remember.stdout);
+        let stderr = String::from_utf8_lossy(&remember.stderr);
+        ensure(
+            remember.status.success(),
+            format!("remember seed {index:02} should succeed; stdout: {stdout}; stderr: {stderr}"),
+        )?;
+        ensure(
+            remember.stderr.is_empty(),
+            format!("remember seed {index:02} stderr clean"),
+        )?;
+        let remember_json: serde_json::Value = serde_json::from_slice(&remember.stdout)
+            .map_err(|error| format!("remember seed {index:02} stdout must be JSON: {error}"))?;
+        let memory_id = remember_json["data"]["memory_id"]
+            .as_str()
+            .ok_or_else(|| format!("remember seed {index:02} missing memory_id"))?
+            .to_string();
+        seeded_memory_ids.push(memory_id);
+
+        if index == 11 {
+            ensure_equal(
+                &remember_json["data"]["curation_candidate_status"],
+                &serde_json::json!("proposed"),
+                "final seed proposes curation candidate",
+            )?;
+            ensure(
+                remember_json["data"]["curation_candidate"]["candidate_id"]
+                    .as_str()
+                    .is_some_and(|candidate_id| candidate_id.starts_with("curate_")),
+                "final seed returns proposed curation candidate id",
+            )?;
+        }
+    }
+
+    let run = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "curate",
+        "candidates",
+    ])?;
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    ensure(
+        run.status.success(),
+        format!("curate candidates after seed should succeed; stderr: {stderr}"),
+    )?;
+    ensure(
+        stderr.is_empty(),
+        "curate candidates after seed stderr clean",
+    )?;
+    ensure_no_ansi(&stdout, "curate candidates after seed stdout")?;
+    let json: serde_json::Value = serde_json::from_slice(&run.stdout)
+        .map_err(|error| format!("curate candidates after seed stdout must be JSON: {error}"))?;
+    let candidates = json["data"]["candidates"]
+        .as_array()
+        .ok_or_else(|| "curate candidates data.candidates must be an array".to_string())?;
+    ensure(
+        !candidates.is_empty(),
+        "seeded cargo rules produce a candidate",
+    )?;
+
+    let selected = candidates
+        .iter()
+        .max_by_key(|candidate| candidate["memberMemoryIds"].as_array().map_or(0, Vec::len))
+        .ok_or_else(|| "expected at least one selected curation candidate".to_string())?;
+    let member_ids = selected["memberMemoryIds"]
+        .as_array()
+        .ok_or_else(|| "selected candidate missing memberMemoryIds".to_string())?;
+    ensure(
+        member_ids.len() >= 3,
+        format!(
+            "selected candidate should include repeated cargo-rule members, got {}",
+            member_ids.len()
+        ),
+    )?;
+
+    let mut normalized_members = member_ids
+        .iter()
+        .map(|member| {
+            let member_id = member
+                .as_str()
+                .ok_or_else(|| "memberMemoryIds entries must be strings".to_string())?;
+            let position = seeded_memory_ids
+                .iter()
+                .position(|seeded_id| seeded_id == member_id)
+                .ok_or_else(|| format!("member {member_id} was not one of the seeded memories"))?;
+            Ok(format!("MEMORY_{:02}", position + 1))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    normalized_members.sort();
+
+    let evidence_types = selected["evidence"]
+        .as_array()
+        .map(|evidence| {
+            evidence
+                .iter()
+                .filter_map(|entry| entry["type"].as_str())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let reason = selected["reason"].as_str().unwrap_or_default();
+    let proposed_content = selected["proposedContent"].as_str().unwrap_or_default();
+    let projection = serde_json::json!({
+        "schema": json["schema"],
+        "success": json["success"],
+        "data": {
+            "command": json["data"]["command"],
+            "candidateCount": candidates.len(),
+            "selectedCandidate": {
+                "id": "CANDIDATE",
+                "type": selected["type"],
+                "status": selected["status"],
+                "reviewState": selected["reviewState"],
+                "memberMemoryIds": normalized_members,
+                "memberMemoryIdCount": member_ids.len(),
+                "sourceType": selected["source"]["sourceType"],
+                "evidenceTypes": evidence_types,
+                "requiresValidate": selected["requiresValidate"],
+                "requiresApply": selected["requiresApply"],
+                "reasonMentionsCargo": reason.contains("cargo"),
+                "proposedContentMentionsCargo": proposed_content.contains("cargo")
+            }
+        }
+    });
+    let mut rendered =
+        serde_json::to_string_pretty(&projection).map_err(|error| error.to_string())?;
+    rendered.push('\n');
+    assert_snapshot_file(
+        "tests/snapshots/curate_candidates_after_seed.snap",
+        &rendered,
     )
 }
 

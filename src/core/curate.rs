@@ -1110,6 +1110,7 @@ pub struct CurateCandidateSummary {
     pub reason: String,
     pub source: CurateCandidateSource,
     pub evidence: Vec<CurateCandidateEvidence>,
+    pub member_memory_ids: Vec<String>,
     pub validation: CurateCandidateValidation,
     pub scope: String,
     pub scope_key: String,
@@ -4784,6 +4785,11 @@ fn candidate_summary_from_stored(
     workspace_path: &Path,
 ) -> CurateCandidateSummary {
     let evidence = candidate_evidence_from_source(&stored.source_type, stored.source_id.as_deref());
+    let member_memory_ids = evidence
+        .iter()
+        .filter(|item| item.id.starts_with("mem_"))
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>();
     let review_state = normalized_review_state(&stored);
     let requires_validate = candidate_requires_validate(&stored.status, &review_state);
     let requires_apply = candidate_requires_apply(&stored.status, &review_state);
@@ -4810,6 +4816,7 @@ fn candidate_summary_from_stored(
             source_id: stored.source_id,
         },
         evidence,
+        member_memory_ids,
         validation: CurateCandidateValidation {
             status: "not_run".to_owned(),
             warnings: Vec::new(),
@@ -5142,6 +5149,48 @@ mod tests {
         );
         assert_eq!(summary.validation.status, "not_run");
         assert_eq!(summary.evidence.len(), 1);
+        assert!(summary.member_memory_ids.is_empty());
+    }
+
+    #[test]
+    fn candidate_summary_splits_cluster_member_memory_ids() {
+        let stored = StoredCurationCandidate {
+            id: "curate_cluster0000000000000000".to_owned(),
+            workspace_id: "wsp_00000000000000000000000000".to_owned(),
+            candidate_type: "rule".to_owned(),
+            target_memory_id: "mem_a".to_owned(),
+            proposed_content: Some("Consolidate repeated cargo rules.".to_owned()),
+            proposed_confidence: Some(0.82),
+            proposed_trust_class: None,
+            source_type: "agent_inference".to_owned(),
+            source_id: Some("mem_alpha, mem_beta,mem_gamma".to_owned()),
+            reason: "Remember-time proposal clustered repeated cargo rules.".to_owned(),
+            confidence: 0.82,
+            status: "pending".to_owned(),
+            created_at: "2026-05-01T00:00:00Z".to_owned(),
+            reviewed_at: None,
+            reviewed_by: None,
+            applied_at: None,
+            ttl_expires_at: None,
+            review_state: "new".to_owned(),
+            snoozed_until: None,
+            merged_into_candidate_id: None,
+            state_entered_at: Some("2026-05-01T00:00:00Z".to_owned()),
+            last_action_at: None,
+            ttl_policy_id: None,
+        };
+
+        let summary = candidate_summary_from_stored(stored, std::path::Path::new("/repo"));
+
+        assert_eq!(
+            summary.member_memory_ids,
+            vec![
+                "mem_alpha".to_owned(),
+                "mem_beta".to_owned(),
+                "mem_gamma".to_owned()
+            ]
+        );
+        assert_eq!(summary.member_memory_ids.len(), summary.evidence.len());
     }
 
     #[test]
@@ -5481,6 +5530,7 @@ mod tests {
         assert_eq!(report.total_count, 1);
         assert_eq!(report.returned_count, 1);
         assert_eq!(report.candidates[0].id, pending_id);
+        assert!(report.candidates[0].member_memory_ids.is_empty());
         assert!(!report.durable_mutation);
         assert_eq!(report.filter.status.as_deref(), Some("pending"));
         Ok(())

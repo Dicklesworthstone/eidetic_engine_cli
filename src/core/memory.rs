@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
@@ -16,10 +16,13 @@ use serde::Serialize;
 use super::index::{
     DEFAULT_INDEX_SUBDIR, IndexProcessingJobReport, process_index_job_for_connection,
 };
+use super::search::{SearchOptions, SearchStatus, run_search};
+use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
-    CreateAuditInput, CreateMemoryInput, CreateMemoryLinkInput, CreateSearchIndexJobInput,
-    CreateWorkspaceInput, DbConnection, MemoryLinkRelation, MemoryLinkSource, SearchIndexJobType,
-    StoredMemory, StoredMemoryLink, audit_actions, generate_audit_id,
+    CreateAuditInput, CreateCurationCandidateInput, CreateMemoryInput, CreateMemoryLinkInput,
+    CreateSearchIndexJobInput, CreateWorkspaceInput, DbConnection, MemoryLinkRelation,
+    MemoryLinkSource, SearchIndexJobType, StoredMemory, StoredMemoryLink, audit_actions,
+    generate_audit_id,
 };
 use crate::models::{
     DomainError, MemoryContent, MemoryId, MemoryKind, MemoryLevel, ProvenanceUri, Tag, TrustClass,
@@ -65,6 +68,8 @@ pub struct RememberMemoryOptions<'a> {
     pub dry_run: bool,
     /// Create bounded workflow-local auto-links after a successful write.
     pub auto_link: bool,
+    /// Propose a curation candidate after persistence when repeated evidence clusters.
+    pub propose_candidates: bool,
 }
 
 /// Result of creating a manual memory.
@@ -132,6 +137,12 @@ pub struct RememberMemoryReport {
     pub auto_link_status: String,
     /// Non-fatal degradations encountered while creating workflow auto-links.
     pub auto_link_degradations: Vec<RememberSuggestedLinkDegradation>,
+    /// Curation candidate proposed from this memory's local evidence cluster.
+    pub curation_candidate: Option<RememberCurationCandidateProposal>,
+    /// Status of remember-time curation proposal.
+    pub curation_candidate_status: String,
+    /// Non-fatal degradations encountered while proposing curation candidates.
+    pub curation_candidate_degradations: Vec<RememberSuggestedLinkDegradation>,
 }
 
 /// Options for closing a workflow lifecycle group.
@@ -300,6 +311,23 @@ pub struct RememberAutoLink {
     pub audit_id: String,
 }
 
+/// A durable remember-time curation candidate created from repeated evidence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RememberCurationCandidateProposal {
+    /// Curation candidate row ID.
+    pub candidate_id: String,
+    /// Memory IDs that define the deterministic evidence cluster.
+    pub member_memory_ids: Vec<String>,
+    /// Memory this candidate targets for review.
+    pub target_memory_id: String,
+    /// Candidate type.
+    pub candidate_type: String,
+    /// Audit entry created for the candidate write.
+    pub audit_id: Option<String>,
+    /// Human-readable proposal reason.
+    pub reason: String,
+}
+
 /// Non-fatal remember suggestion degradation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RememberSuggestedLinkDegradation {
@@ -354,6 +382,9 @@ pub fn remember_memory(
             auto_links: Vec::new(),
             auto_link_status: "dry_run_not_evaluated".to_owned(),
             auto_link_degradations: Vec::new(),
+            curation_candidate: None,
+            curation_candidate_status: "dry_run_not_evaluated".to_owned(),
+            curation_candidate_degradations: Vec::new(),
         });
     }
 
@@ -486,6 +517,35 @@ pub fn remember_memory(
         })?;
     let index_status = remember_index_status(&index_report);
 
+    let (curation_candidate, curation_candidate_status, curation_candidate_degradations) =
+        match propose_curation_candidate_for_remember(
+            &connection,
+            &prepared,
+            &memory_id,
+            &memory_input,
+            options.propose_candidates,
+        ) {
+            Ok(report) => (
+                report.candidate,
+                report.status.to_owned(),
+                report.degradations,
+            ),
+            Err(error) => (
+                None,
+                "degraded".to_owned(),
+                vec![RememberSuggestedLinkDegradation {
+                    code: "auto_propose_failed".to_owned(),
+                    severity: "low".to_owned(),
+                    message: format!(
+                        "Remembered the memory, but curation candidate proposal failed: {}",
+                        error.message()
+                    ),
+                    repair: "Run `ee curate candidates --json` and inspect the review queue."
+                        .to_owned(),
+                }],
+            ),
+        };
+
     Ok(RememberMemoryReport {
         version: env!("CARGO_PKG_VERSION"),
         memory_id: prepared.memory_id,
@@ -518,6 +578,9 @@ pub fn remember_memory(
         auto_links,
         auto_link_status,
         auto_link_degradations,
+        curation_candidate,
+        curation_candidate_status,
+        curation_candidate_degradations,
     })
 }
 
@@ -1502,6 +1565,503 @@ fn auto_link_status(
     } else {
         "linked"
     }
+}
+
+const REMEMBER_CURATION_NEIGHBOR_LIMIT: usize = 10;
+const REMEMBER_CURATION_CLUSTER_THRESHOLD: usize = 3;
+#[cfg(not(test))]
+const REMEMBER_CURATION_SYNC_BUDGET_MS: u128 = 50;
+#[cfg(test)]
+const REMEMBER_CURATION_TEST_SYNC_BUDGET_MS: u128 = 5_000;
+
+struct RememberCurationProposalReport {
+    candidate: Option<RememberCurationCandidateProposal>,
+    status: &'static str,
+    degradations: Vec<RememberSuggestedLinkDegradation>,
+}
+
+fn propose_curation_candidate_for_remember(
+    connection: &DbConnection,
+    prepared: &PreparedRememberMemory,
+    memory_id: &str,
+    memory_input: &CreateMemoryInput,
+    enabled: bool,
+) -> Result<RememberCurationProposalReport, DomainError> {
+    if !enabled {
+        return Ok(RememberCurationProposalReport {
+            candidate: None,
+            status: "disabled",
+            degradations: Vec::new(),
+        });
+    }
+    if memory_input.tags.is_empty() {
+        return Ok(RememberCurationProposalReport {
+            candidate: None,
+            status: "skipped_too_few_neighbors",
+            degradations: vec![RememberSuggestedLinkDegradation {
+                code: "auto_propose_skipped_too_few_neighbors".to_owned(),
+                severity: "info".to_owned(),
+                message:
+                    "No tags were supplied, so remember-time candidate proposal had no cluster key."
+                        .to_owned(),
+                repair: "Use `ee remember --tags <tag>` for memories that should participate in proposal clustering."
+                    .to_owned(),
+            }],
+        });
+    }
+
+    let started = Instant::now();
+    let mut degradations = Vec::new();
+    let mut member_ids = match remember_search_neighbor_ids(prepared, memory_input) {
+        Ok(ids) => ids,
+        Err(error) => {
+            degradations.push(RememberSuggestedLinkDegradation {
+                code: "auto_propose_search_neighbor_lookup_failed".to_owned(),
+                severity: "info".to_owned(),
+                message: format!(
+                    "Frankensearch neighbor lookup was unavailable during remember-time proposal: {error}"
+                ),
+                repair: "Falling back to deterministic tag-overlap clustering.".to_owned(),
+            });
+            Vec::new()
+        }
+    };
+    append_tag_overlap_neighbor_ids(
+        connection,
+        &prepared.workspace_id,
+        &mut member_ids,
+        &memory_input.tags,
+    )?;
+
+    let cluster = remember_candidate_cluster(
+        connection,
+        &prepared.workspace_id,
+        memory_id,
+        memory_input,
+        member_ids,
+    )?;
+    if cluster.len() < REMEMBER_CURATION_CLUSTER_THRESHOLD {
+        return Ok(RememberCurationProposalReport {
+            candidate: None,
+            status: "skipped_too_few_neighbors",
+            degradations,
+        });
+    }
+    if let Some(rule_id) = remember_existing_rule_covering_cluster(
+        connection,
+        &prepared.workspace_id,
+        memory_input,
+        &cluster,
+    )? {
+        degradations.push(RememberSuggestedLinkDegradation {
+            code: "auto_propose_skipped_existing_rule_covers".to_owned(),
+            severity: "info".to_owned(),
+            message: format!(
+                "An existing procedural rule already covers this remember-time evidence cluster: {rule_id}."
+            ),
+            repair: "Review the existing rule with `ee rule show <rule-id> --json` before proposing another candidate."
+                .to_owned(),
+        });
+        return Ok(RememberCurationProposalReport {
+            candidate: None,
+            status: "skipped_existing_rule_covers",
+            degradations,
+        });
+    }
+
+    let mut member_memory_ids = cluster
+        .iter()
+        .map(|memory| memory.id.clone())
+        .collect::<Vec<_>>();
+    member_memory_ids.sort();
+    member_memory_ids.dedup();
+
+    let candidate_id = remember_curation_candidate_id(&prepared.workspace_id, &member_memory_ids);
+    let already_exists = connection
+        .get_curation_candidate(&prepared.workspace_id, &candidate_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to check existing curation candidate: {error}"),
+            repair: Some("ee curate candidates --json".to_owned()),
+        })?
+        .is_some();
+    let reason = remember_curation_candidate_reason(memory_input, &member_memory_ids);
+    let target_memory_id = member_memory_ids
+        .first()
+        .cloned()
+        .unwrap_or_else(|| memory_id.to_owned());
+    if already_exists {
+        return Ok(RememberCurationProposalReport {
+            candidate: Some(RememberCurationCandidateProposal {
+                candidate_id,
+                member_memory_ids,
+                target_memory_id,
+                candidate_type: CandidateType::Rule.as_str().to_owned(),
+                audit_id: None,
+                reason,
+            }),
+            status: "already_exists",
+            degradations,
+        });
+    }
+
+    if started.elapsed().as_millis() > remember_curation_sync_budget_ms() {
+        degradations.push(RememberSuggestedLinkDegradation {
+            code: "auto_propose_deferred_to_maintenance".to_owned(),
+            severity: "info".to_owned(),
+            message: "Remember-time proposal exceeded the synchronous budget before durable write."
+                .to_owned(),
+            repair:
+                "Run `ee review workspace --propose --json` to produce candidates from workspace evidence."
+                    .to_owned(),
+        });
+        return Ok(RememberCurationProposalReport {
+            candidate: None,
+            status: "deferred_to_maintenance",
+            degradations,
+        });
+    }
+
+    let audit_id = generate_audit_id();
+    let proposed_content = remember_curation_candidate_content(memory_input, &cluster);
+    let proposed_confidence = remember_curation_candidate_confidence(&cluster);
+    let source_id = member_memory_ids.join(",");
+    let audit_details = remember_curation_candidate_audit_details(
+        &candidate_id,
+        memory_id,
+        &member_memory_ids,
+        &reason,
+    );
+
+    connection
+        .with_transaction(|| {
+            connection.insert_curation_candidate(
+                &candidate_id,
+                &CreateCurationCandidateInput {
+                    workspace_id: prepared.workspace_id.clone(),
+                    candidate_type: CandidateType::Rule.as_str().to_owned(),
+                    target_memory_id: target_memory_id.clone(),
+                    proposed_content: Some(proposed_content.clone()),
+                    proposed_confidence: Some(proposed_confidence),
+                    proposed_trust_class: None,
+                    source_type: CandidateSource::AgentInference.as_str().to_owned(),
+                    source_id: Some(source_id.clone()),
+                    reason: reason.clone(),
+                    confidence: proposed_confidence,
+                    status: Some(CandidateStatus::Pending.as_str().to_owned()),
+                    created_at: None,
+                    ttl_expires_at: None,
+                },
+            )?;
+            connection.insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(prepared.workspace_id.clone()),
+                    actor: Some("ee remember".to_owned()),
+                    action: audit_actions::CURATION_CANDIDATE_CREATE.to_owned(),
+                    target_type: Some("curation_candidate".to_owned()),
+                    target_id: Some(candidate_id.clone()),
+                    details: Some(audit_details.clone()),
+                },
+            )
+        })
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to insert remember-time curation candidate: {error}"),
+            repair: Some("ee curate candidates --json".to_owned()),
+        })?;
+
+    Ok(RememberCurationProposalReport {
+        candidate: Some(RememberCurationCandidateProposal {
+            candidate_id,
+            member_memory_ids,
+            target_memory_id,
+            candidate_type: CandidateType::Rule.as_str().to_owned(),
+            audit_id: Some(audit_id),
+            reason,
+        }),
+        status: "proposed",
+        degradations,
+    })
+}
+
+fn remember_search_neighbor_ids(
+    prepared: &PreparedRememberMemory,
+    memory_input: &CreateMemoryInput,
+) -> Result<Vec<String>, String> {
+    let report = run_search(&SearchOptions {
+        workspace_path: prepared.workspace_path.clone(),
+        database_path: Some(prepared.database_path.clone()),
+        index_dir: Some(
+            prepared
+                .workspace_path
+                .join(".ee")
+                .join(DEFAULT_INDEX_SUBDIR),
+        ),
+        query: memory_input.content.clone(),
+        limit: u32::try_from(REMEMBER_CURATION_NEIGHBOR_LIMIT + 1).unwrap_or(u32::MAX),
+        speed: crate::search::SpeedMode::Default,
+        explain: false,
+        relevance_floor: Some(0.0),
+    })
+    .map_err(|error| error.to_string())?;
+
+    if matches!(
+        report.status,
+        SearchStatus::IndexError | SearchStatus::IndexNotFound
+    ) {
+        return Err(format!("search status {}", report.status.as_str()));
+    }
+
+    Ok(report
+        .results
+        .into_iter()
+        .map(|hit| hit.doc_id)
+        .take(REMEMBER_CURATION_NEIGHBOR_LIMIT + 1)
+        .collect())
+}
+
+fn append_tag_overlap_neighbor_ids(
+    connection: &DbConnection,
+    workspace_id: &str,
+    member_ids: &mut Vec<String>,
+    tags: &[String],
+) -> Result<(), DomainError> {
+    let mut tag_matches: BTreeMap<String, usize> = BTreeMap::new();
+    for tag in tags {
+        let tagged_ids = connection
+            .list_memories_by_tag(workspace_id, tag)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to query tag-overlap curation neighbors: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+        for memory_id in tagged_ids {
+            *tag_matches.entry(memory_id).or_default() += 1;
+        }
+    }
+    let mut ranked = tag_matches.into_iter().collect::<Vec<_>>();
+    ranked.sort_by(|(left_id, left_count), (right_id, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_id.cmp(right_id))
+    });
+    for (memory_id, _) in ranked {
+        if !member_ids.contains(&memory_id) {
+            member_ids.push(memory_id);
+        }
+    }
+    Ok(())
+}
+
+fn remember_candidate_cluster(
+    connection: &DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+    memory_input: &CreateMemoryInput,
+    member_ids: Vec<String>,
+) -> Result<Vec<StoredMemory>, DomainError> {
+    let required_tags = memory_input.tags.iter().cloned().collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    let mut cluster = Vec::new();
+    for candidate_id in std::iter::once(memory_id.to_owned()).chain(member_ids) {
+        if !seen.insert(candidate_id.clone()) {
+            continue;
+        }
+        let Some(memory) =
+            connection
+                .get_memory(&candidate_id)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to load curation neighbor memory: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                })?
+        else {
+            continue;
+        };
+        if memory.workspace_id != workspace_id
+            || memory.tombstoned_at.is_some()
+            || memory.level != memory_input.level
+            || memory.kind != memory_input.kind
+        {
+            continue;
+        }
+        if memory_input.workflow_id.is_some() && memory.workflow_id != memory_input.workflow_id {
+            continue;
+        }
+        let candidate_tags =
+            connection
+                .get_memory_tags(&memory.id)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to load curation neighbor tags: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                })?;
+        if !required_tags.is_empty()
+            && !candidate_tags
+                .iter()
+                .any(|tag| required_tags.contains(tag.as_str()))
+        {
+            continue;
+        }
+        cluster.push(memory);
+        if cluster.len() > REMEMBER_CURATION_NEIGHBOR_LIMIT {
+            break;
+        }
+    }
+    cluster.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(cluster)
+}
+
+fn remember_existing_rule_covering_cluster(
+    connection: &DbConnection,
+    workspace_id: &str,
+    memory_input: &CreateMemoryInput,
+    cluster: &[StoredMemory],
+) -> Result<Option<String>, DomainError> {
+    let proposal_tags = memory_input.tags.iter().cloned().collect::<BTreeSet<_>>();
+    let cluster_tokens = remember_curation_cluster_tokens(memory_input, cluster);
+    if proposal_tags.is_empty() || cluster_tokens.is_empty() {
+        return Ok(None);
+    }
+
+    let rules = connection
+        .list_procedural_rules(workspace_id, None, None, false)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to inspect existing procedural rules: {error}"),
+            repair: Some("ee rule list --json".to_owned()),
+        })?;
+    for rule in rules {
+        let rule_tags =
+            connection
+                .get_rule_tags(&rule.id)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to inspect procedural rule tags: {error}"),
+                    repair: Some(format!("ee rule show {} --json", rule.id)),
+                })?;
+        if !rule_tags.iter().any(|tag| proposal_tags.contains(tag)) {
+            continue;
+        }
+        let rule_tokens = remember_curation_content_tokens(&rule.content);
+        let overlap = cluster_tokens
+            .intersection(&rule_tokens)
+            .take(REMEMBER_CURATION_COVERING_RULE_MIN_TOKEN_OVERLAP)
+            .count();
+        if overlap >= REMEMBER_CURATION_COVERING_RULE_MIN_TOKEN_OVERLAP {
+            return Ok(Some(rule.id));
+        }
+    }
+
+    Ok(None)
+}
+
+const REMEMBER_CURATION_COVERING_RULE_MIN_TOKEN_OVERLAP: usize = 3;
+
+fn remember_curation_cluster_tokens(
+    memory_input: &CreateMemoryInput,
+    cluster: &[StoredMemory],
+) -> BTreeSet<String> {
+    let mut tokens = remember_curation_content_tokens(&memory_input.content);
+    for memory in cluster {
+        tokens.extend(remember_curation_content_tokens(&memory.content));
+    }
+    tokens
+}
+
+fn remember_curation_content_tokens(content: &str) -> BTreeSet<String> {
+    content
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter_map(|token| {
+            let token = token.trim().to_ascii_lowercase();
+            if token.len() < 3
+                || REMEMBER_CURATION_COVERING_RULE_STOPWORDS.contains(&token.as_str())
+            {
+                None
+            } else {
+                Some(token)
+            }
+        })
+        .collect()
+}
+
+const REMEMBER_CURATION_COVERING_RULE_STOPWORDS: &[&str] = &[
+    "about", "after", "and", "before", "for", "from", "into", "memory", "rule", "that", "the",
+    "this", "with",
+];
+
+fn remember_curation_candidate_id(workspace_id: &str, member_memory_ids: &[String]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(workspace_id.as_bytes());
+    hasher.update(b"\n");
+    for memory_id in member_memory_ids {
+        hasher.update(memory_id.as_bytes());
+        hasher.update(b"\n");
+    }
+    let suffix = hasher.finalize().to_hex().to_string();
+    format!("curate_{}", &suffix[..26])
+}
+
+fn remember_curation_candidate_reason(
+    memory_input: &CreateMemoryInput,
+    member_memory_ids: &[String],
+) -> String {
+    format!(
+        "Remember-time proposal clustered {} {} `{}` memories sharing tag(s): {}.",
+        member_memory_ids.len(),
+        memory_input.level,
+        memory_input.kind,
+        memory_input.tags.join(",")
+    )
+}
+
+fn remember_curation_candidate_content(
+    memory_input: &CreateMemoryInput,
+    cluster: &[StoredMemory],
+) -> String {
+    let exemplar = cluster
+        .iter()
+        .min_by(|left, right| left.id.cmp(&right.id))
+        .map(|memory| memory.content.as_str())
+        .unwrap_or(memory_input.content.as_str());
+    format!(
+        "Consolidate repeated {} `{}` memories tagged [{}]: {}",
+        memory_input.level,
+        memory_input.kind,
+        memory_input.tags.join(","),
+        exemplar
+    )
+}
+
+fn remember_curation_candidate_confidence(cluster: &[StoredMemory]) -> f32 {
+    let sum = cluster.iter().map(|memory| memory.confidence).sum::<f32>();
+    let count = cluster.len().max(1) as f32;
+    (sum / count).clamp(0.05, 0.95)
+}
+
+fn remember_curation_candidate_audit_details(
+    candidate_id: &str,
+    trigger_memory_id: &str,
+    member_memory_ids: &[String],
+    reason: &str,
+) -> String {
+    serde_json::json!({
+        "schema": "ee.audit.remember_curation_candidate_create.v1",
+        "command": "ee remember",
+        "candidateId": candidate_id,
+        "triggerMemoryId": trigger_memory_id,
+        "memberMemoryIds": member_memory_ids,
+        "reason": reason,
+    })
+    .to_string()
+}
+
+#[cfg(not(test))]
+fn remember_curation_sync_budget_ms() -> u128 {
+    std::env::var("EE_REMEMBER_CURATION_SYNC_BUDGET_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u128>().ok())
+        .filter(|budget_ms| *budget_ms > 0)
+        .unwrap_or(REMEMBER_CURATION_SYNC_BUDGET_MS)
+}
+
+#[cfg(test)]
+fn remember_curation_sync_budget_ms() -> u128 {
+    REMEMBER_CURATION_TEST_SYNC_BUDGET_MS
 }
 
 fn suggest_links_for_remember(
@@ -3830,6 +4390,7 @@ mod tests {
             valid_to: None,
             dry_run: false,
             auto_link: true,
+            propose_candidates: true,
         })
         .map_err(|error| error.message())?;
 
@@ -3991,6 +4552,7 @@ mod tests {
             valid_to: None,
             dry_run: false,
             auto_link: true,
+            propose_candidates: true,
         })
         .map_err(|error| error.message())?;
         let source_id = source.memory_id.to_string();
@@ -4190,6 +4752,7 @@ mod tests {
             valid_to: None,
             dry_run: true,
             auto_link: true,
+            propose_candidates: true,
         })
         .map_err(|error| error.message())?;
 
@@ -4277,6 +4840,7 @@ mod tests {
             valid_to: None,
             dry_run: false,
             auto_link: true,
+            propose_candidates: true,
         })
         .map_err(|error| error.message())?;
 
@@ -4408,6 +4972,7 @@ mod tests {
             valid_to: Some("2099-01-01T00:00:00Z"),
             dry_run: false,
             auto_link: true,
+            propose_candidates: true,
         })
         .map_err(|error| error.message())?;
 
@@ -4468,6 +5033,7 @@ mod tests {
             valid_to: None,
             dry_run: true,
             auto_link: true,
+            propose_candidates: true,
         });
         match malformed {
             Err(DomainError::Usage { message, .. }) => {
@@ -4491,6 +5057,7 @@ mod tests {
             valid_to: Some("2020-01-01T00:00:00Z"),
             dry_run: true,
             auto_link: true,
+            propose_candidates: true,
         });
         match reversed {
             Err(DomainError::Usage { message, .. }) => {
@@ -4515,6 +5082,7 @@ mod tests {
             valid_to: Some("2050-01-01T00:00:00Z"),
             dry_run: true,
             auto_link: true,
+            propose_candidates: true,
         })
         .map_err(|error| error.message())?;
         ensure(
@@ -4543,6 +5111,7 @@ mod tests {
             valid_to: None,
             dry_run: false,
             auto_link: true,
+            propose_candidates: true,
         })
         .map_err(|error| error.message())?;
         let second = remember_memory(&RememberMemoryOptions {
@@ -4559,6 +5128,7 @@ mod tests {
             valid_to: None,
             dry_run: false,
             auto_link: true,
+            propose_candidates: true,
         })
         .map_err(|error| error.message())?;
         let third = remember_memory(&RememberMemoryOptions {
@@ -4575,6 +5145,7 @@ mod tests {
             valid_to: None,
             dry_run: false,
             auto_link: true,
+            propose_candidates: true,
         })
         .map_err(|error| error.message())?;
 
@@ -4647,6 +5218,7 @@ mod tests {
             valid_to: None,
             dry_run: false,
             auto_link: true,
+            propose_candidates: true,
         })
         .map_err(|error| error.message())?;
         ensure(
@@ -4669,6 +5241,7 @@ mod tests {
             valid_to: None,
             dry_run: false,
             auto_link: true,
+            propose_candidates: true,
         })
         .map_err(|error| error.message())?;
 
@@ -4770,6 +5343,7 @@ mod tests {
             valid_to: None,
             dry_run: false,
             auto_link: true,
+            propose_candidates: true,
         })
         .map_err(|error| error.message())?;
 
@@ -4787,6 +5361,7 @@ mod tests {
             valid_to: None,
             dry_run: false,
             auto_link: false,
+            propose_candidates: true,
         })
         .map_err(|error| error.message())?;
 
@@ -4806,6 +5381,251 @@ mod tests {
             .list_all_memory_links(None)
             .map_err(|error| error.to_string())?;
         ensure(links.is_empty(), true, "no durable links when disabled")
+    }
+
+    #[test]
+    fn remember_memory_proposes_curation_candidate_after_repeated_tagged_rules() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let mut reports = Vec::new();
+        for index in 0..3 {
+            reports.push(
+                remember_memory(&RememberMemoryOptions {
+                    workspace_path: temp.path(),
+                    database_path: None,
+                    content: &format!(
+                        "Cargo release rule {index}: run cargo fmt --check before release."
+                    ),
+                    workflow_id: None,
+                    level: "procedural",
+                    kind: "rule",
+                    tags: Some("cargo,release"),
+                    confidence: 0.8,
+                    source: None,
+                    valid_from: None,
+                    valid_to: None,
+                    dry_run: false,
+                    auto_link: true,
+                    propose_candidates: true,
+                })
+                .map_err(|error| error.message())?,
+            );
+        }
+
+        let third = reports
+            .last()
+            .ok_or_else(|| "third remember report missing".to_owned())?;
+        ensure(
+            third.curation_candidate_status.clone(),
+            "proposed".to_owned(),
+            "third proposal status",
+        )?;
+        let proposal = third
+            .curation_candidate
+            .as_ref()
+            .ok_or_else(|| "proposal missing".to_owned())?;
+        ensure(proposal.member_memory_ids.len(), 3, "proposal member count")?;
+        for report in &reports {
+            ensure(
+                proposal
+                    .member_memory_ids
+                    .contains(&report.memory_id.to_string()),
+                true,
+                "proposal includes seeded memory",
+            )?;
+        }
+        ensure(
+            proposal.audit_id.is_some(),
+            true,
+            "proposal audit id recorded",
+        )?;
+
+        let connection = crate::db::DbConnection::open_file(&third.database_path)
+            .map_err(|error| error.to_string())?;
+        let candidates = connection
+            .list_curation_candidates(&third.workspace_id, Some("rule"), Some("pending"), None)
+            .map_err(|error| error.to_string())?;
+        ensure(candidates.len(), 1, "stored candidate count")?;
+        let stored = candidates
+            .first()
+            .ok_or_else(|| "stored candidate missing".to_owned())?;
+        ensure(
+            stored.id.clone(),
+            proposal.candidate_id.clone(),
+            "stored candidate id",
+        )?;
+        ensure(
+            stored.source_type.clone(),
+            "agent_inference".to_owned(),
+            "stored candidate source",
+        )?;
+        let source_id = stored
+            .source_id
+            .clone()
+            .ok_or_else(|| "stored source ids missing".to_owned())?;
+        for report in &reports {
+            ensure(
+                source_id.contains(&report.memory_id.to_string()),
+                true,
+                "stored source ids include seeded memory",
+            )?;
+        }
+        let audit_id = proposal
+            .audit_id
+            .as_ref()
+            .ok_or_else(|| "proposal audit missing".to_owned())?;
+        let audit = connection
+            .get_audit(audit_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "candidate audit row missing".to_owned())?;
+        ensure(
+            audit.action,
+            "curation_candidate.create".to_owned(),
+            "candidate audit action",
+        )
+    }
+
+    #[test]
+    fn remember_memory_curation_candidate_proposal_can_be_disabled() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let report = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Remember candidate proposal opt-out.",
+            workflow_id: None,
+            level: "procedural",
+            kind: "rule",
+            tags: Some("cargo,release"),
+            confidence: 0.8,
+            source: None,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: true,
+            propose_candidates: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            report.curation_candidate_status,
+            "disabled".to_owned(),
+            "proposal disabled status",
+        )?;
+        ensure(
+            report.curation_candidate.is_none(),
+            true,
+            "proposal absent when disabled",
+        )
+    }
+
+    #[test]
+    fn remember_memory_skips_curation_candidate_when_existing_rule_covers_cluster() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let mut reports = Vec::new();
+        for index in 0..2 {
+            reports.push(
+                remember_memory(&RememberMemoryOptions {
+                    workspace_path: temp.path(),
+                    database_path: None,
+                    content: &format!(
+                        "Cargo release rule {index}: run cargo fmt --check before release."
+                    ),
+                    workflow_id: None,
+                    level: "procedural",
+                    kind: "rule",
+                    tags: Some("cargo,release"),
+                    confidence: 0.8,
+                    source: None,
+                    valid_from: None,
+                    valid_to: None,
+                    dry_run: false,
+                    auto_link: true,
+                    propose_candidates: true,
+                })
+                .map_err(|error| error.message())?,
+            );
+        }
+
+        let database_path = reports
+            .first()
+            .ok_or_else(|| "seed report missing".to_owned())?
+            .database_path
+            .clone();
+        let workspace_id = reports
+            .first()
+            .ok_or_else(|| "seed report missing".to_owned())?
+            .workspace_id
+            .clone();
+        let connection = crate::db::DbConnection::open_file(&database_path)
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_procedural_rule(
+                "rule_00000000000000000000000000",
+                &crate::db::CreateProceduralRuleInput {
+                    workspace_id: workspace_id.clone(),
+                    content: "Run cargo fmt --check before release work.".to_owned(),
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    trust_class: "human_explicit".to_owned(),
+                    scope: "workspace".to_owned(),
+                    scope_pattern: None,
+                    maturity: "candidate".to_owned(),
+                    protected: false,
+                    source_memory_ids: reports
+                        .iter()
+                        .map(|report| report.memory_id.to_string())
+                        .collect(),
+                    tags: vec!["cargo".to_owned(), "release".to_owned()],
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let third = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Cargo release rule 2: run cargo fmt --check before release.",
+            workflow_id: None,
+            level: "procedural",
+            kind: "rule",
+            tags: Some("cargo,release"),
+            confidence: 0.8,
+            source: None,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: true,
+            propose_candidates: true,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            third.curation_candidate_status,
+            "skipped_existing_rule_covers".to_owned(),
+            "covering rule skip status",
+        )?;
+        ensure(
+            third.curation_candidate.is_none(),
+            true,
+            "no proposal when rule covers cluster",
+        )?;
+        ensure(
+            third
+                .curation_candidate_degradations
+                .iter()
+                .any(|degradation| degradation.code == "auto_propose_skipped_existing_rule_covers"),
+            true,
+            "covering rule degradation emitted",
+        )?;
+        let candidates = connection
+            .list_curation_candidates(&workspace_id, Some("rule"), Some("pending"), None)
+            .map_err(|error| error.to_string())?;
+        ensure(candidates.is_empty(), true, "no stored candidate")
     }
 
     #[test]
@@ -4878,6 +5698,7 @@ mod tests {
             valid_to: None,
             dry_run: false,
             auto_link: true,
+            propose_candidates: true,
         });
 
         match result {
