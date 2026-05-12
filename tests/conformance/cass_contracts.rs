@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use ee::cass::{CassSearchResponse, REQUIRED_API_VERSION, REQUIRED_CONTRACT_VERSION};
+use ee::cass::{CassHealth, CassSearchResponse, REQUIRED_API_VERSION, REQUIRED_CONTRACT_VERSION};
 use ee::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
 use serde_json::Value;
 
@@ -14,9 +14,19 @@ const PINNED_CASS_CRATE_VERSION: &str = "0.4.1";
 const MEMORY_ID: &str = "mem_01234567890123456789012345";
 const GOLDEN_FILES: &[&str] = &[
     "PROVENANCE.md",
+    "api_version.v1.json",
+    "capabilities.v1.json",
+    "health.v1.json",
     "robot_memory_v1.golden",
     "robot_audit_v1.golden",
     "json_contract.golden",
+    "v1/api_version.json",
+    "v1/capabilities.json",
+    "v1/doctor.json",
+    "v1/expand.json",
+    "v1/search_robot.json",
+    "v1/sessions.json",
+    "v1/view.json",
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,6 +92,30 @@ const REQUIREMENTS: &[Requirement] = &[
         description: "UPDATE_GOLDENS=1 provides an explicit regeneration path for reviewed fixture updates",
         tested_by: &["conformance_update_goldens_entrypoint_is_explicit"],
     },
+    Requirement {
+        id: "CASS-CONF-009",
+        level: RequirementLevel::Must,
+        description: "api-version and capabilities fixtures pin required CASS versions and command capabilities",
+        tested_by: &["conformance_api_version_and_capabilities_fixtures_pin_required_surfaces"],
+    },
+    Requirement {
+        id: "CASS-CONF-010",
+        level: RequirementLevel::Must,
+        description: "search --robot fixture pins query, hit, provenance, and robot metadata fields",
+        tested_by: &["conformance_search_robot_fixture_pins_query_hits_and_meta_shape"],
+    },
+    Requirement {
+        id: "CASS-CONF-011",
+        level: RequirementLevel::Must,
+        description: "view and expand JSON fixtures pin line evidence vocabulary consumed by ee",
+        tested_by: &["conformance_view_and_expand_fixtures_pin_line_evidence_shape"],
+    },
+    Requirement {
+        id: "CASS-CONF-012",
+        level: RequirementLevel::Must,
+        description: "doctor/status and health fixtures pin readiness, check, and quarantine evidence fields",
+        tested_by: &["conformance_doctor_and_health_fixtures_pin_readiness_contracts"],
+    },
 ];
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -137,6 +171,40 @@ fn object_field<'a>(
         .get(key)
         .and_then(Value::as_object)
         .ok_or_else(|| format!("`{key}` must be an object"))
+}
+
+fn bool_field(value: &Value, key: &str) -> Result<bool, String> {
+    value
+        .get(key)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| format!("`{key}` must be a bool"))
+}
+
+fn u64_field(value: &Value, key: &str) -> Result<u64, String> {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("`{key}` must be an unsigned integer"))
+}
+
+fn fixture_field_set(name: &str, key: &str) -> Result<BTreeSet<String>, String> {
+    Ok(array_field(&json_fixture(name)?, key)?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect())
+}
+
+fn ensure_contains_all(present: &BTreeSet<String>, required: &[&str], context: &str) -> TestResult {
+    let missing: Vec<&str> = required
+        .iter()
+        .copied()
+        .filter(|field| !present.contains(*field))
+        .collect();
+    ensure(
+        missing.is_empty(),
+        format!("{context} missing required fields: {missing:?}"),
+    )
 }
 
 fn schema_lines(name: &str) -> Result<Vec<Value>, String> {
@@ -289,6 +357,11 @@ fn conformance_cass_fixture_provenance_is_review_gated() -> TestResult {
         PINNED_CASS_CRATE_VERSION,
         "cass api-version --json",
         "cass capabilities --json",
+        "cass search --robot",
+        "cass view --json",
+        "cass expand --json",
+        "cass doctor --json",
+        "cass health --json",
         "robot_memory_v1.golden",
         "robot_audit_v1.golden",
         "json_contract.golden",
@@ -301,6 +374,205 @@ fn conformance_cass_fixture_provenance_is_review_gated() -> TestResult {
         )?;
     }
     Ok(())
+}
+
+#[test]
+fn conformance_api_version_and_capabilities_fixtures_pin_required_surfaces() -> TestResult {
+    let api = json_fixture("v1/api_version.json")?;
+    ensure(
+        api.get("api_version").and_then(Value::as_u64) == Some(u64::from(REQUIRED_API_VERSION)),
+        "api-version fixture must pin ee's required api_version",
+    )?;
+    ensure(
+        string_field(&api, "contract_version")? == REQUIRED_CONTRACT_VERSION,
+        "api-version fixture must pin ee's required contract_version",
+    )?;
+
+    let capabilities = json_fixture("v1/capabilities.json")?;
+    ensure(
+        string_field(&capabilities, "crate_version")? == PINNED_CASS_CRATE_VERSION,
+        "capabilities fixture crate version",
+    )?;
+    ensure(
+        capabilities.get("api_version").and_then(Value::as_u64)
+            == Some(u64::from(REQUIRED_API_VERSION)),
+        "capabilities fixture api_version",
+    )?;
+    ensure(
+        string_field(&capabilities, "contract_version")? == REQUIRED_CONTRACT_VERSION,
+        "capabilities fixture contract_version",
+    )?;
+
+    let features = fixture_field_set("v1/capabilities.json", "features")?;
+    ensure_contains_all(
+        &features,
+        &[
+            "api_version_command",
+            "expand_command",
+            "field_selection",
+            "introspect_command",
+            "json_output",
+            "request_id",
+            "robot_meta",
+            "status_command",
+            "timeout",
+            "view_command",
+        ],
+        "capabilities fixture",
+    )
+}
+
+#[test]
+fn conformance_search_robot_fixture_pins_query_hits_and_meta_shape() -> TestResult {
+    let search = json_fixture("v1/search_robot.json")?;
+    ensure(
+        string_field(&search, "query")? == "format before release",
+        "search query",
+    )?;
+    ensure(u64_field(&search, "limit")? == 2, "search limit")?;
+    ensure(u64_field(&search, "count")? == 1, "search count")?;
+    ensure(
+        string_field(&search, "request_id")? == "ee-gate6-search-001",
+        "search request id",
+    )?;
+
+    let hits = array_field(&search, "hits")?;
+    let hit = hits
+        .first()
+        .ok_or_else(|| "search fixture must include at least one hit".to_string())?;
+    for field in [
+        "source_path",
+        "line_number",
+        "agent",
+        "workspace",
+        "title",
+        "score",
+        "content",
+        "snippet",
+        "created_at",
+        "match_type",
+    ] {
+        ensure(
+            hit.get(field).is_some(),
+            format!("search hit must pin `{field}`"),
+        )?;
+    }
+    ensure(
+        string_field(hit, "source_path")? == "/workspace/session-a.jsonl",
+        "search hit source path",
+    )?;
+    ensure(u64_field(hit, "line_number")? == 42, "search line")?;
+    ensure(
+        string_field(hit, "content")? == "Run cargo fmt --check before release.",
+        "search hit content",
+    )?;
+
+    let meta = object_field(&search, "_meta")?;
+    ensure(meta.contains_key("request_id"), "search meta request id")?;
+    ensure(
+        meta.contains_key("index_freshness"),
+        "search meta index freshness",
+    )?;
+    CassSearchResponse::from_robot_json(fixture_text("v1/search_robot.json")?.as_bytes())
+        .map_err(|error| format!("search fixture must parse through ee parser: {error}"))?;
+    Ok(())
+}
+
+#[test]
+fn conformance_view_and_expand_fixtures_pin_line_evidence_shape() -> TestResult {
+    let view = json_fixture("v1/view.json")?;
+    ensure(
+        string_field(&view, "path")? == "/workspace/session-a.jsonl",
+        "view path",
+    )?;
+    ensure(u64_field(&view, "target_line")? == 2, "view target line")?;
+    ensure(u64_field(&view, "context")? == 1, "view context")?;
+    let view_lines = array_field(&view, "lines")?;
+    ensure(view_lines.len() == 3, "view fixture line count")?;
+    let highlighted = view_lines
+        .iter()
+        .filter(|line| bool_field(line, "highlighted").unwrap_or(false))
+        .count();
+    ensure(highlighted == 1, "view fixture has one highlighted line")?;
+    for line in view_lines {
+        u64_field(line, "line")?;
+        string_field(line, "content")?;
+        bool_field(line, "highlighted")?;
+    }
+
+    let expand = json_fixture("v1/expand.json")?;
+    let expanded_lines = expand
+        .as_array()
+        .ok_or_else(|| "expand fixture must be a JSON array".to_string())?;
+    ensure(expanded_lines.len() == 3, "expand fixture line count")?;
+    let target_count = expanded_lines
+        .iter()
+        .filter(|line| bool_field(line, "is_target").unwrap_or(false))
+        .count();
+    ensure(target_count == 1, "expand fixture has one target line")?;
+    for line in expanded_lines {
+        u64_field(line, "line")?;
+        string_field(line, "role")?;
+        bool_field(line, "is_target")?;
+        string_field(line, "content")?;
+    }
+    Ok(())
+}
+
+#[test]
+fn conformance_doctor_and_health_fixtures_pin_readiness_contracts() -> TestResult {
+    let doctor = json_fixture("v1/doctor.json")?;
+    ensure(
+        string_field(&doctor, "status")? == "healthy",
+        "doctor status",
+    )?;
+    ensure(bool_field(&doctor, "healthy")?, "doctor healthy")?;
+    ensure(bool_field(&doctor, "initialized")?, "doctor initialized")?;
+    ensure(u64_field(&doctor, "issues_found")? == 0, "doctor issues")?;
+    let checks = array_field(&doctor, "checks")?;
+    let check_names: BTreeSet<String> = checks
+        .iter()
+        .filter_map(|check| check.get("name").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    ensure_contains_all(
+        &check_names,
+        &[
+            "data_directory",
+            "database",
+            "fts_table",
+            "index",
+            "sessions",
+        ],
+        "doctor checks",
+    )?;
+    for check in checks {
+        string_field(check, "name")?;
+        string_field(check, "status")?;
+        string_field(check, "message")?;
+        bool_field(check, "fix_available")?;
+        bool_field(check, "fix_applied")?;
+    }
+
+    let quarantine = object_field(&doctor, "quarantine")?;
+    let summary = quarantine
+        .get("summary")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "doctor quarantine summary must be an object".to_string())?;
+    ensure(
+        summary.contains_key("cleanup_apply_allowed"),
+        "doctor quarantine pins cleanup apply gate",
+    )?;
+    ensure(
+        quarantine.contains_key("lexical_cleanup_apply_gate"),
+        "doctor quarantine pins lexical cleanup apply gate",
+    )?;
+
+    let health_text = fixture_text("health.v1.json")?;
+    let health = CassHealth::parse_json(&health_text)
+        .map_err(|error| format!("health fixture must parse through ee parser: {error}"))?;
+    ensure(health.is_ready(), "health fixture ready")?;
+    ensure(!health.is_stale(), "health fixture not stale")
 }
 
 #[test]

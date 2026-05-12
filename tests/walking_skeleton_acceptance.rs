@@ -26,7 +26,7 @@
 //! Criteria 9 and 10 are referenced rather than re-implemented: this
 //! test asserts the surface (DB-backed memory + frankensearch retrieval
 //! + provenance + why + persistence + status capabilities) end-to-end
-//! against the real binary in a real temp workspace.
+//!   against the real binary in a real temp workspace.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

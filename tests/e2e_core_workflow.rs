@@ -5,13 +5,22 @@
 //!
 //! NO MOCKS. Real ee binary, real DB, real search indexes.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::fs;
+use std::path::PathBuf;
 use std::process::{Command, Output};
 
 type TestResult = Result<(), String>;
 
 const EXIT_SUCCESS: i32 = 0;
+
+struct RememberedMemory {
+    level: String,
+    kind: String,
+    content: String,
+    source_uri: String,
+}
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
@@ -48,6 +57,29 @@ fn stdout_json(output: &Output) -> Result<serde_json::Value, String> {
         .map_err(|error| format!("stdout was not JSON: {error}\nstdout: {stdout}"))
 }
 
+fn artifact_dir() -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e_core_workflow_artifacts");
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
+fn persist_artifact(name: &str, output: &Output) {
+    let dir = artifact_dir();
+    let stdout_path = dir.join(format!("{name}.stdout"));
+    let stderr_path = dir.join(format!("{name}.stderr"));
+    let _ = fs::write(&stdout_path, &output.stdout);
+    let _ = fs::write(&stderr_path, &output.stderr);
+}
+
+fn persist_json_artifact(name: &str, value: &serde_json::Value) {
+    let dir = artifact_dir();
+    let path = dir.join(format!("{name}.json"));
+    let _ = fs::write(
+        &path,
+        serde_json::to_string_pretty(value).unwrap_or_default(),
+    );
+}
+
 fn assert_schema(json: &serde_json::Value, expected: &str, context: &str) -> TestResult {
     let schema = json
         .get("schema")
@@ -74,6 +106,29 @@ fn degraded_codes(json: &serde_json::Value) -> Vec<&str> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn json_array<'a>(
+    value: &'a serde_json::Value,
+    pointer: &str,
+    context: &str,
+) -> Result<&'a [serde_json::Value], String> {
+    value
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| format!("{context}: {pointer} must be an array"))
+}
+
+fn json_str<'a>(
+    value: &'a serde_json::Value,
+    pointer: &str,
+    context: &str,
+) -> Result<&'a str, String> {
+    value
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("{context}: {pointer} must be a string"))
 }
 
 #[test]
@@ -334,60 +389,246 @@ fn context_pack_includes_relevant_memories() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let workspace = tempdir.path().to_string_lossy().to_string();
 
-    // Init
-    run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    persist_artifact("pack_context_init", &init);
+    ensure_equal(&init.status.code(), &Some(EXIT_SUCCESS), "init")?;
 
-    // Add specific memories about testing
-    run_ee(&[
-        "--workspace",
-        &workspace,
-        "remember",
-        "Always run unit tests before committing code",
-        "--kind",
-        "rule",
-        "--json",
-    ])?;
-    run_ee(&[
-        "--workspace",
-        &workspace,
-        "remember",
-        "Integration tests should cover happy path and edge cases",
-        "--kind",
-        "rule",
-        "--json",
-    ])?;
-    run_ee(&[
-        "--workspace",
-        &workspace,
-        "remember",
-        "The database schema is defined in migrations/",
-        "--kind",
-        "fact",
-        "--json",
-    ])?;
+    let memories = [
+        (
+            "procedural",
+            "rule",
+            "Always run unit tests before committing code.",
+        ),
+        (
+            "procedural",
+            "rule",
+            "Run integration tests for happy path and edge cases.",
+        ),
+        (
+            "procedural",
+            "command",
+            "Use cargo test --all-targets when validating release readiness.",
+        ),
+        (
+            "semantic",
+            "fact",
+            "The database schema is defined by the ee migration layer.",
+        ),
+        (
+            "semantic",
+            "convention",
+            "Testing output must keep JSON stdout clean and diagnostics on stderr.",
+        ),
+        (
+            "semantic",
+            "decision",
+            "Context packs must include provenance for every selected memory.",
+        ),
+        (
+            "episodic",
+            "failure",
+            "A prior release failed because formatting checks were skipped.",
+        ),
+        (
+            "episodic",
+            "fact",
+            "A search regression once hid relevant testing guidance behind low scores.",
+        ),
+        (
+            "working",
+            "fact",
+            "Current test work is strengthening pack and context evidence checks.",
+        ),
+        (
+            "working",
+            "risk",
+            "Small token budgets may omit lower utility memories but must explain omissions.",
+        ),
+    ];
 
-    // Request context about testing
-    let context = run_ee(&[
-        "--workspace",
-        &workspace,
-        "context",
-        "how to run tests",
-        "--max-tokens",
-        "4000",
-        "--json",
-    ])?;
-    ensure_equal(&context.status.code(), &Some(EXIT_SUCCESS), "context")?;
+    let mut remembered = BTreeMap::new();
+    for (index, (level, kind, content)) in memories.iter().copied().enumerate() {
+        let source_path = tempdir.path().join(format!("memory-source-{index}.md"));
+        fs::write(&source_path, content).map_err(|error| error.to_string())?;
+        let source_uri = format!("file://{}#L1", source_path.display());
 
-    let context_json = stdout_json(&context)?;
+        let remember = run_ee(&[
+            "--workspace",
+            &workspace,
+            "remember",
+            content,
+            "--level",
+            level,
+            "--kind",
+            kind,
+            "--source",
+            &source_uri,
+            "--json",
+        ])?;
+        persist_artifact(&format!("pack_context_remember_{index}"), &remember);
+        ensure_equal(
+            &remember.status.code(),
+            &Some(EXIT_SUCCESS),
+            &format!("remember {index}"),
+        )?;
+        assert_stderr_empty(&remember, &format!("remember {index}"))?;
+        let remember_json = stdout_json(&remember)?;
+        persist_json_artifact(&format!("pack_context_remember_{index}"), &remember_json);
+        let memory_id = json_str(&remember_json, "/data/memory_id", "remember")?.to_owned();
+        remembered.insert(
+            memory_id,
+            RememberedMemory {
+                level: level.to_string(),
+                kind: kind.to_string(),
+                content: content.to_string(),
+                source_uri,
+            },
+        );
+    }
 
-    // Verify pack has content
-    let pack_data = context_json.get("data");
-    ensure(pack_data.is_some(), "context should have data field")?;
+    ensure_equal(&remembered.len(), &10_usize, "remembered memory count")?;
 
-    // Check for pack items or content
-    let has_items = context_json.pointer("/data/pack/items").is_some()
-        || context_json.pointer("/data/items").is_some()
-        || context_json.pointer("/data/pack").is_some();
+    let mut selected_memory_ids = BTreeSet::new();
 
-    ensure(has_items, "context pack should have items or pack data")
+    for max_tokens in ["800", "4000"] {
+        let context = run_ee(&[
+            "--workspace",
+            &workspace,
+            "context",
+            "testing release readiness provenance",
+            "--max-tokens",
+            max_tokens,
+            "--json",
+        ])?;
+        persist_artifact(&format!("pack_context_context_{max_tokens}"), &context);
+        ensure_equal(
+            &context.status.code(),
+            &Some(EXIT_SUCCESS),
+            &format!("context {max_tokens} exit"),
+        )?;
+        assert_stderr_empty(&context, &format!("context {max_tokens}"))?;
+        let context_json = stdout_json(&context)?;
+        persist_json_artifact(&format!("pack_context_context_{max_tokens}"), &context_json);
+        assert_schema(&context_json, "ee.response.v1", "context")?;
+        let requested_tokens = max_tokens
+            .parse::<u64>()
+            .map_err(|error| error.to_string())?;
+        let budget_max_tokens = context_json
+            .pointer("/data/pack/budget/maxTokens")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| format!("context {max_tokens}: maxTokens must be an integer"))?;
+        ensure_equal(
+            &budget_max_tokens,
+            &requested_tokens,
+            &format!("context {max_tokens} budget maxTokens"),
+        )?;
+        let used_tokens = context_json
+            .pointer("/data/pack/budget/usedTokens")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| format!("context {max_tokens}: usedTokens must be an integer"))?;
+        ensure(
+            used_tokens <= requested_tokens,
+            format!("context {max_tokens} usedTokens must not exceed maxTokens"),
+        )?;
+
+        let items = json_array(&context_json, "/data/pack/items", "context")?;
+        ensure(
+            !items.is_empty(),
+            format!("context {max_tokens} should select at least one item"),
+        )?;
+
+        for item in items {
+            let memory_id = json_str(item, "/memoryId", "context item")?;
+            let stored = remembered.get(memory_id).ok_or_else(|| {
+                format!("context selected unknown memory id {memory_id}; item={item:?}")
+            })?;
+            selected_memory_ids.insert(memory_id.to_string());
+
+            ensure(
+                item.get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|packed| packed == stored.content),
+                format!("packed content for {memory_id} must match stored memory"),
+            )?;
+            ensure(
+                item.get("why")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|why| !why.trim().is_empty()),
+                format!("context item {memory_id} must include non-empty why"),
+            )?;
+
+            let provenance = item
+                .get("provenance")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| format!("context item {memory_id} missing provenance[]"))?;
+            ensure(
+                provenance.iter().any(|entry| {
+                    entry
+                        .get("uri")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|uri| uri == stored.source_uri)
+                }),
+                format!(
+                    "context item {memory_id} provenance must include {}",
+                    stored.source_uri
+                ),
+            )?;
+        }
+    }
+
+    ensure(
+        !selected_memory_ids.is_empty(),
+        "context should select at least one remembered memory across budgets",
+    )?;
+
+    for memory_id in selected_memory_ids {
+        let stored = remembered
+            .get(&memory_id)
+            .ok_or_else(|| format!("selected memory {memory_id} was not remembered"))?;
+        let why = run_ee(&["--workspace", &workspace, "why", &memory_id, "--json"])?;
+        persist_artifact(&format!("pack_context_why_{memory_id}"), &why);
+        ensure_equal(
+            &why.status.code(),
+            &Some(EXIT_SUCCESS),
+            &format!("why {memory_id} exit"),
+        )?;
+        assert_stderr_empty(&why, &format!("why {memory_id}"))?;
+        let why_json = stdout_json(&why)?;
+        persist_json_artifact(&format!("pack_context_why_{memory_id}"), &why_json);
+        assert_schema(&why_json, "ee.response.v1", "why")?;
+        ensure_equal(
+            &json_str(&why_json, "/data/memoryId", "why")?,
+            &memory_id.as_str(),
+            &format!("why {memory_id} memoryId"),
+        )?;
+        ensure_equal(
+            &why_json
+                .pointer("/data/found")
+                .and_then(serde_json::Value::as_bool),
+            &Some(true),
+            &format!("why {memory_id} found"),
+        )?;
+        ensure_equal(
+            &json_str(&why_json, "/data/storage/provenanceUri", "why")?,
+            &stored.source_uri.as_str(),
+            &format!("why {memory_id} provenanceUri"),
+        )?;
+        ensure_equal(
+            &json_str(&why_json, "/data/retrieval/level", "why")?,
+            &stored.level.as_str(),
+            &format!("why {memory_id} level"),
+        )?;
+        ensure_equal(
+            &json_str(&why_json, "/data/retrieval/kind", "why")?,
+            &stored.kind.as_str(),
+            &format!("why {memory_id} kind"),
+        )?;
+        ensure(
+            json_str(&why_json, "/data/selection/latestPackSelection/why", "why")
+                .is_ok_and(|why| !why.trim().is_empty()),
+            format!("why {memory_id} should include latest pack selection rationale"),
+        )?;
+    }
+
+    Ok(())
 }

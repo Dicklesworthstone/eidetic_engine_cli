@@ -5,6 +5,7 @@
 //! through `DbConnection` and diffs every content-bearing memory + tag row
 //! between the source workspace and the restored side-path.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -50,6 +51,85 @@ fn ensure_equal<T: std::fmt::Debug + PartialEq>(actual: &T, expected: &T, ctx: &
     } else {
         Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
     }
+}
+
+fn json_str<'a>(value: &'a JsonValue, pointer: &str, context: &str) -> Result<&'a str, String> {
+    value
+        .pointer(pointer)
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| format!("{context}: missing string at {pointer}"))
+}
+
+fn json_u64(value: &JsonValue, pointer: &str, context: &str) -> Result<u64, String> {
+    value
+        .pointer(pointer)
+        .and_then(JsonValue::as_u64)
+        .ok_or_else(|| format!("{context}: missing integer at {pointer}"))
+}
+
+fn artifact_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e_backup_restore_roundtrip_artifacts")
+}
+
+fn persist_json_artifact(name: &str, value: &JsonValue) -> TestResult {
+    let dir = artifact_dir();
+    fs::create_dir_all(&dir).map_err(|error| format!("mkdir artifact dir: {error}"))?;
+    let path = dir.join(format!("{name}.json"));
+    let mut bytes = serde_json::to_vec_pretty(value)
+        .map_err(|error| format!("render artifact {name}: {error}"))?;
+    bytes.push(b'\n');
+    fs::write(&path, bytes).map_err(|error| format!("write artifact {}: {error}", path.display()))
+}
+
+fn read_jsonl_records(path: &Path) -> Result<Vec<JsonValue>, String> {
+    let input = fs::read_to_string(path)
+        .map_err(|error| format!("read JSONL {}: {error}", path.display()))?;
+    input
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(serde_json::from_str::<JsonValue>(trimmed).map_err(|error| {
+                    format!("parse JSONL {} line {}: {error}", path.display(), index + 1)
+                }))
+            }
+        })
+        .collect()
+}
+
+fn records_with_schema(records: &[JsonValue], schema: &str) -> Vec<JsonValue> {
+    records
+        .iter()
+        .filter(|record| record.get("schema").and_then(JsonValue::as_str) == Some(schema))
+        .cloned()
+        .collect()
+}
+
+fn normalized_records_with_schema(
+    records: &[JsonValue],
+    schema: &str,
+    ignored_fields: &[&str],
+) -> Vec<JsonValue> {
+    let mut normalized = records_with_schema(records, schema)
+        .into_iter()
+        .map(|mut record| {
+            if let JsonValue::Object(object) = &mut record {
+                for field in ignored_fields {
+                    object.remove(*field);
+                }
+            }
+            record
+        })
+        .collect::<Vec<_>>();
+    normalized.sort_by_key(JsonValue::to_string);
+    normalized
+}
+
+fn records_path_from_report(report: &JsonValue, context: &str) -> Result<PathBuf, String> {
+    json_str(report, "/data/recordsPath", context).map(PathBuf::from)
 }
 
 fn workspace_id_from_db(conn: &DbConnection, workspace_path: &Path) -> Result<String, String> {
@@ -367,6 +447,314 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         &restored_again.len(),
         &restored_pairs.len(),
         "restored count stable across reopen",
+    )?;
+
+    Ok(())
+}
+
+#[test]
+fn export_import_export_preserves_memory_and_tag_records() -> TestResult {
+    let staging = tempfile::Builder::new()
+        .prefix("ee-0n9b5-jsonl-roundtrip-")
+        .tempdir()
+        .map_err(|error| format!("create temp dir: {error}"))?;
+
+    let source_workspace = staging.path().join("source-ws");
+    let imported_workspace = staging.path().join("imported-ws");
+    let source_export_dir = staging.path().join("source-export");
+    let imported_export_dir = staging.path().join("imported-export");
+    let provenance_dir = staging.path().join("provenance");
+    fs::create_dir_all(&source_workspace).map_err(|error| format!("mkdir source ws: {error}"))?;
+    fs::create_dir_all(&imported_workspace)
+        .map_err(|error| format!("mkdir imported ws: {error}"))?;
+    fs::create_dir_all(&provenance_dir).map_err(|error| format!("mkdir provenance: {error}"))?;
+
+    let source_workspace_arg = source_workspace.to_string_lossy().into_owned();
+    let imported_workspace_arg = imported_workspace.to_string_lossy().into_owned();
+    let source_export_dir_arg = source_export_dir.to_string_lossy().into_owned();
+    let imported_export_dir_arg = imported_export_dir.to_string_lossy().into_owned();
+
+    let init_source = run_ee(&["--workspace", &source_workspace_arg, "--json", "init"])?;
+    persist_json_artifact("0n9b5_01_init_source", &init_source)?;
+
+    let seeds: &[(&str, &str, &str, &str, &str)] = &[
+        (
+            "procedural",
+            "rule",
+            "JSONL roundtrip rule: run cargo fmt --check before release",
+            "roundtrip,rule,release",
+            "0.97",
+        ),
+        (
+            "semantic",
+            "fact",
+            "JSONL roundtrip fact: FrankenSQLite is the source of truth",
+            "roundtrip,fact,storage",
+            "0.91",
+        ),
+        (
+            "episodic",
+            "decision",
+            "JSONL roundtrip decision: compare normalized JSON records",
+            "roundtrip,decision,testing",
+            "0.86",
+        ),
+        (
+            "working",
+            "failure",
+            "JSONL roundtrip failure: stale exports hide missing provenance",
+            "roundtrip,failure,provenance",
+            "0.52",
+        ),
+        (
+            "procedural",
+            "command",
+            "JSONL roundtrip command: ee export --redaction none",
+            "roundtrip,command,cli",
+            "0.88",
+        ),
+        (
+            "semantic",
+            "convention",
+            "JSONL roundtrip convention: stable JSON stays machine-readable",
+            "roundtrip,convention,json",
+            "0.82",
+        ),
+        (
+            "procedural",
+            "anti-pattern",
+            "JSONL roundtrip anti-pattern: do not drop tags during import",
+            "roundtrip,anti-pattern,tags",
+            "0.94",
+        ),
+        (
+            "working",
+            "risk",
+            "JSONL roundtrip risk: regenerated workspace IDs must be normalized",
+            "roundtrip,risk,workspace",
+            "0.64",
+        ),
+        (
+            "episodic",
+            "playbook-step",
+            "JSONL roundtrip playbook step: verify memory IDs survive import",
+            "roundtrip,playbook,ids",
+            "0.79",
+        ),
+    ];
+
+    let mut memory_ids = Vec::with_capacity(seeds.len());
+    for (index, (level, kind, content, tags, confidence)) in seeds.iter().copied().enumerate() {
+        let source_path = provenance_dir.join(format!("source-{index}.md"));
+        fs::write(&source_path, content)
+            .map_err(|error| format!("write provenance source {index}: {error}"))?;
+        let source_uri = format!("file://{}#L1", source_path.display());
+        let remembered = run_ee(&[
+            "--workspace",
+            &source_workspace_arg,
+            "--json",
+            "remember",
+            "--level",
+            level,
+            "--kind",
+            kind,
+            "--tags",
+            tags,
+            "--confidence",
+            confidence,
+            "--source",
+            &source_uri,
+            "--no-propose-candidates",
+            content,
+        ])?;
+        persist_json_artifact(&format!("0n9b5_02_remember_{index}"), &remembered)?;
+        ensure_equal(
+            &remembered.pointer("/success").and_then(JsonValue::as_bool),
+            &Some(true),
+            &format!("remember {index} succeeded"),
+        )?;
+        memory_ids.push(json_str(&remembered, "/data/memory_id", "remember")?.to_owned());
+    }
+
+    ensure_equal(&memory_ids.len(), &seeds.len(), "remembered memory count")?;
+
+    let link = run_ee(&[
+        "--workspace",
+        &source_workspace_arg,
+        "--json",
+        "memory",
+        "link",
+        &memory_ids[0],
+        &memory_ids[1],
+        "--relation",
+        "supports",
+        "--weight",
+        "0.75",
+        "--confidence",
+        "0.90",
+        "--evidence-count",
+        "2",
+        "--metadata",
+        r#"{"reason":"eidetic_engine_cli-0n9b5 source fixture"}"#,
+        "--actor",
+        "jsonl-roundtrip-e2e",
+    ])?;
+    persist_json_artifact("0n9b5_03_link_source_memories", &link)?;
+    ensure_equal(
+        &link.pointer("/data/status").and_then(JsonValue::as_str),
+        &Some("created"),
+        "source memory link created",
+    )?;
+
+    let source_export = run_ee(&[
+        "--workspace",
+        &source_workspace_arg,
+        "--json",
+        "export",
+        "--output-dir",
+        &source_export_dir_arg,
+        "--redaction",
+        "none",
+        "--label",
+        "0n9b5-source",
+    ])?;
+    persist_json_artifact("0n9b5_04_export_source", &source_export)?;
+    ensure_equal(
+        &source_export
+            .pointer("/data/schema")
+            .and_then(JsonValue::as_str),
+        &Some("ee.export.report.v1"),
+        "source export schema",
+    )?;
+    ensure_equal(
+        &json_u64(
+            &source_export,
+            "/data/counts/memoryRecords",
+            "source export",
+        )?,
+        &(seeds.len() as u64),
+        "source export memory count",
+    )?;
+
+    let source_records_path = records_path_from_report(&source_export, "source export")?;
+    let source_records = read_jsonl_records(&source_records_path)?;
+    let source_records_json = JsonValue::Array(source_records.clone());
+    persist_json_artifact("0n9b5_05_source_records", &source_records_json)?;
+
+    let source_link_records = records_with_schema(&source_records, "ee.export.link.v1");
+    ensure(
+        !source_link_records.is_empty(),
+        "source export contains the explicit memory link fixture",
+    )?;
+    ensure(
+        source_link_records.iter().any(|record| {
+            record.get("source_memory_id").and_then(JsonValue::as_str)
+                == Some(memory_ids[0].as_str())
+                && record.get("target_memory_id").and_then(JsonValue::as_str)
+                    == Some(memory_ids[1].as_str())
+                && record.get("link_type").and_then(JsonValue::as_str) == Some("supports")
+        }),
+        "source export includes the expected supports link",
+    )?;
+
+    let init_imported = run_ee(&["--workspace", &imported_workspace_arg, "--json", "init"])?;
+    persist_json_artifact("0n9b5_06_init_imported", &init_imported)?;
+
+    let source_records_path_arg = source_records_path.to_string_lossy().into_owned();
+    let import = run_ee(&[
+        "--workspace",
+        &imported_workspace_arg,
+        "--json",
+        "import",
+        "jsonl",
+        "--source",
+        &source_records_path_arg,
+    ])?;
+    persist_json_artifact("0n9b5_07_import_jsonl", &import)?;
+    ensure_equal(
+        &import.pointer("/data/status").and_then(JsonValue::as_str),
+        &Some("completed"),
+        "import status",
+    )?;
+    ensure_equal(
+        &json_u64(&import, "/data/memoriesImported", "import report")?,
+        &(seeds.len() as u64),
+        "imported memory count",
+    )?;
+    ensure(
+        json_u64(&import, "/data/ignoredRecords", "import report")?
+            >= source_link_records.len() as u64,
+        "import report accounts for link records that are parsed but not replayed",
+    )?;
+
+    let imported_export = run_ee(&[
+        "--workspace",
+        &imported_workspace_arg,
+        "--json",
+        "export",
+        "--output-dir",
+        &imported_export_dir_arg,
+        "--redaction",
+        "none",
+        "--label",
+        "0n9b5-imported",
+    ])?;
+    persist_json_artifact("0n9b5_08_export_imported", &imported_export)?;
+    ensure_equal(
+        &json_u64(
+            &imported_export,
+            "/data/counts/memoryRecords",
+            "imported export",
+        )?,
+        &(seeds.len() as u64),
+        "imported export memory count",
+    )?;
+
+    let imported_records_path = records_path_from_report(&imported_export, "imported export")?;
+    let imported_records = read_jsonl_records(&imported_records_path)?;
+    let imported_records_json = JsonValue::Array(imported_records.clone());
+    persist_json_artifact("0n9b5_09_imported_records", &imported_records_json)?;
+
+    let ignored_memory_fields = ["workspace_id", "created_at", "updated_at"];
+    let source_memories = normalized_records_with_schema(
+        &source_records,
+        "ee.export.memory.v1",
+        &ignored_memory_fields,
+    );
+    let imported_memories = normalized_records_with_schema(
+        &imported_records,
+        "ee.export.memory.v1",
+        &ignored_memory_fields,
+    );
+    persist_json_artifact(
+        "0n9b5_10_normalized_source_memories",
+        &JsonValue::Array(source_memories.clone()),
+    )?;
+    persist_json_artifact(
+        "0n9b5_11_normalized_imported_memories",
+        &JsonValue::Array(imported_memories.clone()),
+    )?;
+    ensure_equal(
+        &imported_memories,
+        &source_memories,
+        "normalized memory records survive export/import/export",
+    )?;
+
+    let ignored_tag_fields = ["created_at"];
+    let source_tags =
+        normalized_records_with_schema(&source_records, "ee.export.tag.v1", &ignored_tag_fields);
+    let imported_tags =
+        normalized_records_with_schema(&imported_records, "ee.export.tag.v1", &ignored_tag_fields);
+    ensure_equal(
+        &imported_tags,
+        &source_tags,
+        "normalized tag records survive export/import/export",
+    )?;
+
+    let imported_link_records = records_with_schema(&imported_records, "ee.export.link.v1");
+    ensure(
+        imported_link_records.is_empty(),
+        "JSONL import currently ignores link records rather than replaying them",
     )?;
 
     Ok(())

@@ -550,6 +550,25 @@ fn degradation_codes(value: &JsonValue) -> Result<Vec<String>, String> {
     degradation_codes_at(value, "/data/degraded", "status degraded")
 }
 
+fn hostile_network_envs(log_dir: &Path) -> Vec<(&'static str, OsString)> {
+    vec![
+        ("HTTP_PROXY", OsString::from("http://127.0.0.1:9")),
+        ("HTTPS_PROXY", OsString::from("http://127.0.0.1:9")),
+        ("ALL_PROXY", OsString::from("socks5://127.0.0.1:9")),
+        ("NO_PROXY", OsString::from("")),
+        (
+            "EE_CASS_BINARY",
+            log_dir.join("missing-cass").into_os_string(),
+        ),
+        (
+            "CASS_DATA_DIR",
+            log_dir.join("missing-cass-data").into_os_string(),
+        ),
+        ("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", OsString::from("1")),
+        ("NO_COLOR", OsString::from("1")),
+    ]
+}
+
 fn degradation_codes_at(
     value: &JsonValue,
     pointer: &str,
@@ -2108,6 +2127,175 @@ fn no_mocks_status_json_conformance_logs_capabilities_and_degradations() -> Test
     }
 
     Ok(())
+}
+
+#[test]
+fn no_mocks_core_memory_loop_succeeds_with_hostile_network_env() -> TestResult {
+    let scenario_id = "local_first_hostile_network";
+    let log_dir = unique_log_dir(scenario_id)?;
+    let artifact_dir = log_dir.join("artifacts");
+    fs::create_dir_all(&artifact_dir)
+        .map_err(|error| format!("failed to create artifact dir: {error}"))?;
+    let events_path = log_dir.join("commands.jsonl");
+    let envs = hostile_network_envs(&log_dir);
+
+    let workspace_temp = tempfile::Builder::new()
+        .prefix("ee-local-first-network-")
+        .tempdir()
+        .map_err(|error| format!("failed to create temp workspace: {error}"))?;
+    let workspace = workspace_temp.path().to_path_buf();
+    let workspace_arg = workspace.display().to_string();
+    let local_first_memory =
+        "Local-first invariant: init remember search context why status must not require network.";
+
+    let run_local_first_step = |name: &'static str, args: Vec<String>| {
+        run_step_with_env(
+            scenario_id,
+            &events_path,
+            &artifact_dir,
+            &workspace,
+            StepSpec {
+                name,
+                args,
+                expected_exit_code: 0,
+                expected_schema: "ee.response.v1",
+                expect_clean_stderr: true,
+            },
+            &envs,
+        )
+    };
+
+    let (_init_event, init_json) = run_local_first_step(
+        "01_init_with_hostile_network_env",
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "init".to_owned(),
+        ],
+    )?;
+    ensure_equal(
+        &init_json.pointer("/data/command"),
+        &Some(&json!("init")),
+        "local-first init command",
+    )?;
+
+    let (_remember_event, remember_json) = run_local_first_step(
+        "02_remember_with_hostile_network_env",
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "remember".to_owned(),
+            "--level".to_owned(),
+            "procedural".to_owned(),
+            "--kind".to_owned(),
+            "rule".to_owned(),
+            "--tags".to_owned(),
+            "local-first,network-isolation".to_owned(),
+            "--source".to_owned(),
+            "file://tests/no_mocks_e2e.rs#L2133".to_owned(),
+            local_first_memory.to_owned(),
+        ],
+    )?;
+    let memory_id = string_at(&remember_json, "/data/memory_id", "local-first remember")?;
+
+    let (_search_event, search_json) = run_local_first_step(
+        "03_search_with_hostile_network_env",
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "search".to_owned(),
+            local_first_memory.to_owned(),
+            "--limit".to_owned(),
+            "5".to_owned(),
+            "--relevance-floor".to_owned(),
+            "0.0".to_owned(),
+        ],
+    )?;
+    let search_ids = json_array(&search_json, "/data/results", "local-first search")?
+        .iter()
+        .filter_map(|result| result.get("docId").and_then(JsonValue::as_str))
+        .collect::<Vec<_>>();
+    ensure(
+        search_ids.iter().any(|doc_id| *doc_id == memory_id),
+        format!("local-first search should return remembered memory, got {search_ids:?}"),
+    )?;
+
+    let (_context_event, context_json) = run_local_first_step(
+        "04_context_with_hostile_network_env",
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "context".to_owned(),
+            local_first_memory.to_owned(),
+            "--max-tokens".to_owned(),
+            "1200".to_owned(),
+        ],
+    )?;
+    let context_ids = memory_ids_from_context(&context_json)?;
+    ensure(
+        context_ids.iter().any(|doc_id| doc_id == &memory_id),
+        format!("local-first context should include remembered memory, got {context_ids:?}"),
+    )?;
+
+    let (_why_event, why_json) = run_local_first_step(
+        "05_why_with_hostile_network_env",
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "why".to_owned(),
+            memory_id.clone(),
+        ],
+    )?;
+    ensure_equal(
+        &why_json.pointer("/data/found"),
+        &Some(&json!(true)),
+        "local-first why found",
+    )?;
+    ensure_equal(
+        &why_json.pointer("/data/memoryId"),
+        &Some(&json!(memory_id.as_str())),
+        "local-first why memory id",
+    )?;
+
+    let (_status_event, status_json) = run_local_first_step(
+        "06_status_with_hostile_network_env",
+        vec![
+            "--workspace".to_owned(),
+            workspace_arg.clone(),
+            "--json".to_owned(),
+            "status".to_owned(),
+        ],
+    )?;
+    ensure_equal(
+        &json_string(
+            &status_json,
+            "/data/capabilities/storage",
+            "local-first status",
+        )?,
+        &"ready",
+        "local-first status storage capability",
+    )?;
+
+    let events_text = fs::read_to_string(&events_path).map_err(|error| {
+        format!(
+            "failed to read local-first JSONL log {}: {error}",
+            events_path.display()
+        )
+    })?;
+    ensure_equal(
+        &events_text.lines().count(),
+        &6_usize,
+        "local-first command event count",
+    )?;
+    ensure(
+        events_text.contains("HTTP_PROXY") && events_text.contains("EE_CASS_BINARY"),
+        "local-first command log must record hostile network/CASS env overrides",
+    )
 }
 
 #[cfg(unix)]

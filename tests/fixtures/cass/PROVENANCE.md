@@ -10,12 +10,20 @@ Commands used to verify the live contract:
 - `cass capabilities --json`
 - `cass introspect --json`
 - `cass status --json`
+- `cass search --robot`
+- `cass view --json`
+- `cass expand --json`
+- `cass doctor --json`
+- `cass health --json`
 
 Fixture files:
 
+- `api_version.v1.json` and `capabilities.v1.json` pin the original CASS version/capability parser fixtures used by unit tests.
+- `health.v1.json` pins the `cass health --json` shape parsed by `ee::cass::CassHealth`.
 - `robot_memory_v1.golden` pins the CASS search robot JSON consumed as memory evidence.
 - `robot_audit_v1.golden` pins a normalized CASS status/audit readiness payload.
 - `json_contract.golden` pins the EE JSONL memory, audit, tag, and workspace records derived from CASS evidence.
+- `v1/api_version.json`, `v1/capabilities.json`, `v1/search_robot.json`, `v1/view.json`, `v1/expand.json`, `v1/sessions.json`, and `v1/doctor.json` pin the dedicated CASS conformance surfaces consumed by `tests/contracts/cass_robot.rs` and `tests/conformance/cass_contracts.rs`.
 
 Regeneration:
 
