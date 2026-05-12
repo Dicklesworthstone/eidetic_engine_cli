@@ -672,7 +672,7 @@ fn target_dir_strategy_for_posture(posture: &str) -> TargetDirStrategy {
         _ => TargetDirStrategy {
             posture: "isolated",
             env_var: "CARGO_TARGET_DIR",
-            recommended_path: "/data/tmp/ee_target_$PANE",
+            recommended_path: "/Volumes/USBNVME16TB/temp_agent_space/cargo-target/$PANE",
             rationale: "Isolated target directory prevents lock contention in swarm/parallel builds.",
         },
     }
