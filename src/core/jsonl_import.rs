@@ -760,13 +760,7 @@ fn prepare_memory(
     trust_subclass: &str,
     parsed: &ParsedJsonlImport,
 ) -> Result<PreparedMemory, JsonlImportIssue> {
-    let _: MemoryId = memory.memory_id.parse().map_err(|error| {
-        JsonlImportIssue::error(
-            None,
-            "invalid_memory_id",
-            format!("memory id `{}` is invalid: {error}", memory.memory_id),
-        )
-    })?;
+    let import_memory_id = import_memory_id(memory, parsed)?;
     let level: MemoryLevel = memory.level.parse().map_err(|error| {
         JsonlImportIssue::error(
             None,
@@ -830,7 +824,7 @@ fn prepare_memory(
     let tag_count = saturating_len(tags.len());
 
     Ok(PreparedMemory {
-        id: memory.memory_id.clone(),
+        id: import_memory_id,
         input: CreateMemoryInput {
             workspace_id: workspace_id.to_owned(),
             level: level.as_str().to_owned(),
@@ -864,6 +858,37 @@ fn prepare_memory(
         .to_string(),
         tag_count,
     })
+}
+
+fn import_memory_id(
+    memory: &ExportMemoryRecord,
+    parsed: &ParsedJsonlImport,
+) -> Result<String, JsonlImportIssue> {
+    match memory.memory_id.parse::<MemoryId>() {
+        Ok(_) => Ok(memory.memory_id.clone()),
+        Err(_) if source_redacts_identifiers(parsed) => {
+            Ok(stable_redacted_memory_id(memory).to_string())
+        }
+        Err(error) => Err(JsonlImportIssue::error(
+            None,
+            "invalid_memory_id",
+            format!("memory id `{}` is invalid: {error}", memory.memory_id),
+        )),
+    }
+}
+
+fn source_redacts_identifiers(parsed: &ParsedJsonlImport) -> bool {
+    parsed
+        .header
+        .as_ref()
+        .is_some_and(|header| header.redaction_level.redacts_identifiers())
+}
+
+fn stable_redacted_memory_id(memory: &ExportMemoryRecord) -> MemoryId {
+    MemoryId::from_uuid(stable_uuid(&format!(
+        "jsonl-redacted-memory:{}:{}:{}:{}",
+        memory.memory_id, memory.level, memory.kind, memory.created_at
+    )))
 }
 
 fn score_or_default(value: Option<f64>, default: f32) -> Result<f32, String> {
