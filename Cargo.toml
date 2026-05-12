@@ -84,6 +84,7 @@ uuid = { version = "1", features = ["v7"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 insta = { version = "1.47.2", features = ["json"] }
 proptest = { version = "1.9.0", default-features = false, features = ["std"] }
+pulldown-cmark = { version = "0.13.3", default-features = false }
 
 [[bench]]
 name = "remember"
