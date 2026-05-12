@@ -262,7 +262,84 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
+/// How the workspace path was discovered (D7).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceSource {
+    /// User passed `--workspace <path>` explicitly.
+    Flag,
+    /// Resolved from `EE_WORKSPACE` environment variable.
+    Env,
+    /// Walk-up from cwd discovered an ancestor containing `.ee/`.
+    WalkUp,
+    /// Fell back to cwd because no other source matched.
+    Cwd,
+}
+
+impl WorkspaceSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Flag => "flag",
+            Self::Env => "env",
+            Self::WalkUp => "walk_up",
+            Self::Cwd => "cwd",
+        }
+    }
+}
+
+/// Walk up from `start` looking for the first ancestor that contains a
+/// `.ee/` directory. Returns the workspace root, NOT the `.ee` dir
+/// itself. Bead bd-17c65.4.8 (D7).
+#[must_use]
+pub fn find_workspace_via_walk_up(start: &Path) -> Option<PathBuf> {
+    let mut current: Option<&Path> = Some(start);
+    while let Some(dir) = current {
+        if dir.join(".ee").is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+/// Resolve the effective workspace path.
+///
+/// Priority order (bead bd-17c65.4.8 / D7):
+///   1. `--workspace <path>` flag
+///   2. `EE_WORKSPACE` environment variable
+///   3. Walk up from cwd looking for a `.ee/` directory
+///   4. Fall back to cwd as a path (legacy compat — most callers
+///      construct `<cwd>/.ee/ee.db` and either find it or not).
+///
+/// Returns `(path, source)` so callers can report how the workspace
+/// was resolved (useful for debugging / agent observability).
+#[must_use]
+pub fn resolve_workspace_for_cli(cli_workspace: Option<&Path>) -> (PathBuf, WorkspaceSource) {
+    if let Some(explicit) = cli_workspace {
+        return (explicit.to_path_buf(), WorkspaceSource::Flag);
+    }
+    if let Ok(env_path) = std::env::var("EE_WORKSPACE") {
+        if !env_path.is_empty() {
+            return (PathBuf::from(env_path), WorkspaceSource::Env);
+        }
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if let Some(walked) = find_workspace_via_walk_up(&cwd) {
+        return (walked, WorkspaceSource::WalkUp);
+    }
+    (cwd, WorkspaceSource::Cwd)
+}
+
 impl Cli {
+    /// Resolve the workspace path with full D7 discovery semantics.
+    ///
+    /// Returns just the path; for callers that need the discovery
+    /// source, use [`resolve_workspace_for_cli`].
+    #[must_use]
+    pub fn resolve_workspace(&self) -> PathBuf {
+        resolve_workspace_for_cli(self.workspace.as_deref()).0
+    }
+
     #[must_use]
     pub const fn wants_json(&self) -> bool {
         self.json || self.robot || self.format.is_machine_readable()
@@ -6356,7 +6433,7 @@ where
         }
         Some(Command::Handoff(ref cmd)) => match cmd {
             HandoffCommand::Preview(args) => {
-                let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+                let workspace_path = cli.resolve_workspace();
                 let profile = match args.profile {
                     HandoffProfile::Compact => CapsuleProfile::Compact,
                     HandoffProfile::Resume => CapsuleProfile::Resume,
@@ -6390,7 +6467,7 @@ where
                 }
             }
             HandoffCommand::Create(args) => {
-                let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+                let workspace_path = cli.resolve_workspace();
                 let profile = match args.profile {
                     HandoffProfile::Compact => CapsuleProfile::Compact,
                     HandoffProfile::Resume => CapsuleProfile::Resume,
@@ -6451,7 +6528,7 @@ where
                 }
             }
             HandoffCommand::Resume(args) => {
-                let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+                let workspace_path = cli.resolve_workspace();
                 let use_latest = args.path == "latest";
                 let options = HandoffResumeOptions {
                     path: if use_latest {
@@ -6508,7 +6585,7 @@ where
             }
         }
         Some(Command::Init(ref args)) => {
-            let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+            let workspace_path = cli.resolve_workspace();
             let options = InitOptions {
                 workspace_path,
                 dry_run: args.dry_run,
@@ -7040,7 +7117,7 @@ where
         }
         Some(Command::Status) => {
             let timing_capture = crate::models::TimingCapture::start();
-            let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+            let workspace_path = cli.resolve_workspace();
             let report = StatusReport::gather_for_workspace(&workspace_path);
             let timing = timing_capture.finish();
             let profile = cli.fields_level().to_field_profile();
@@ -8116,7 +8193,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let result = match command {
         FocusCommand::Show(_) => show_focus(&FocusShowOptions { workspace_path }),
         FocusCommand::Set(args) => set_focus(&FocusSetOptions {
@@ -8242,7 +8319,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let result = match command {
         TaskFrameCommand::Create(args) => {
             parse_task_frame_status(&args.status).and_then(|status| {
@@ -8589,7 +8666,7 @@ fn handle_analyze_drift<W>(cli: &Cli, args: &AnalyzeDriftArgs, stdout: &mut W) -
 where
     W: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = crate::science::DriftAnalysisOptions {
         baseline_snapshot: args.baseline.clone(),
         current_snapshot: args.current.clone(),
@@ -8670,7 +8747,7 @@ fn handle_analyze_clustering<W>(
 where
     W: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = crate::science::ClusteringAnalysisOptions {
         workspace: workspace_path,
         candidate_type: args.candidate_type.clone(),
@@ -8753,7 +8830,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = BackupCreateOptions {
         workspace_path,
         database_path: args.database.clone(),
@@ -8795,7 +8872,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = BackupCreateOptions {
         workspace_path,
         database_path: args.database.clone(),
@@ -8898,7 +8975,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = BackupListOptions {
         workspace_path,
         output_dir: args.output_dir.clone(),
@@ -8950,7 +9027,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let backup_path =
         resolve_backup_path(&workspace_path, &args.backup, args.output_dir.as_deref());
     let options = BackupInspectOptions { backup_path };
@@ -9019,7 +9096,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let backup_path =
         resolve_backup_path(&workspace_path, &args.backup, args.output_dir.as_deref());
     let options = BackupVerifyOptions { backup_path };
@@ -9076,7 +9153,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let backup_path =
         resolve_backup_path(&workspace_path, &args.backup, args.output_dir.as_deref());
     let options = BackupRestoreOptions {
@@ -9247,7 +9324,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     match cmd {
         ModelCommand::Status(args) => {
             let options = crate::core::model::ModelStatusOptions {
@@ -9737,7 +9814,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let since = match args.since.as_deref() {
         Some(value) => match parse_import_since_duration(value, chrono::Utc::now()) {
             Ok(cutoff) => Some(cutoff),
@@ -9818,7 +9895,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = JsonlImportOptions {
         workspace_path,
         database_path: args.database.clone(),
@@ -9968,7 +10045,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = IndexRebuildOptions {
         workspace_path,
         database_path: args.database.clone(),
@@ -10017,7 +10094,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = IndexReembedOptions {
         workspace_path,
         database_path: args.database.clone(),
@@ -10066,7 +10143,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = IndexStatusOptions {
         workspace_path,
         database_path: args.database.clone(),
@@ -10120,7 +10197,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = IndexVacuumOptions {
         workspace_path,
         database_path: args.database.clone(),
@@ -10363,7 +10440,7 @@ where
     E: Write,
 {
     let options = crate::core::learn::LearnAgendaOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        workspace: cli.resolve_workspace(),
         limit: args.limit,
         topic: args.topic.clone(),
         include_resolved: args.include_resolved,
@@ -10413,7 +10490,7 @@ where
     };
 
     let options = crate::core::learn::LearnUncertaintyOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        workspace: cli.resolve_workspace(),
         limit: args.limit,
         min_uncertainty,
         kind: args.kind.clone(),
@@ -10480,7 +10557,7 @@ where
     };
 
     let options = LearnExperimentProposeOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        workspace: cli.resolve_workspace(),
         limit: args.limit,
         topic: args.topic.clone(),
         min_expected_value,
@@ -10532,7 +10609,7 @@ where
     }
 
     let options = LearnExperimentRunOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        workspace: cli.resolve_workspace(),
         experiment_id: args.experiment_id.clone(),
         max_attention_tokens: args.max_attention_tokens,
         max_runtime_seconds: args.max_runtime_seconds,
@@ -10593,7 +10670,7 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let options = LearnObserveOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        workspace: cli.resolve_workspace(),
         database_path: args.database.clone(),
         workspace_id: args.workspace_id.clone(),
         experiment_id: args.experiment_id.clone(),
@@ -10664,7 +10741,7 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let options = LearnCloseOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        workspace: cli.resolve_workspace(),
         database_path: args.database.clone(),
         workspace_id: args.workspace_id.clone(),
         experiment_id: args.experiment_id.clone(),
@@ -10738,7 +10815,7 @@ where
     E: Write,
 {
     let options = crate::core::learn::LearnSummaryOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        workspace: cli.resolve_workspace(),
         period: args.period.clone(),
         since: None,
         detailed: args.detailed,
@@ -10777,7 +10854,7 @@ where
     E: Write,
 {
     let options = AuditTimelineOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        workspace: cli.resolve_workspace(),
         database_path: args.database.clone(),
         since: args.since.clone(),
         surface: args.surface.clone(),
@@ -10802,7 +10879,7 @@ where
     E: Write,
 {
     let options = AuditShowOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        workspace: cli.resolve_workspace(),
         database_path: args.database.clone(),
         audit_id: args.audit_id.clone(),
     };
@@ -10824,7 +10901,7 @@ where
     E: Write,
 {
     let options = AuditDiffOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        workspace: cli.resolve_workspace(),
         database_path: args.database.clone(),
         from: args.from.clone(),
         to: args.to.clone(),
@@ -10847,7 +10924,7 @@ where
     E: Write,
 {
     let options = AuditVerifyOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        workspace: cli.resolve_workspace(),
         database_path: args.database.clone(),
         since: args.since.clone(),
         until: args.until.clone(),
@@ -10873,7 +10950,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace = cli.resolve_workspace();
     let tripwire_sources = if args.check_tripwires {
         let registry = match PreflightGuardRegistry::load(&workspace) {
             Ok(registry) => registry,
@@ -10961,7 +11038,7 @@ where
     E: Write,
 {
     let options = PreflightShowOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        workspace: cli.resolve_workspace(),
         run_id: args.run_id.clone(),
         include_brief: args.include_brief,
         include_tripwires: args.include_tripwires,
@@ -10993,7 +11070,7 @@ where
     };
 
     let options = PreflightCloseOptions {
-        workspace: cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        workspace: cli.resolve_workspace(),
         run_id: args.run_id.clone(),
         cleared: args.cleared,
         reason: args.reason.clone(),
@@ -12898,7 +12975,7 @@ fn open_recorder_database(
     cli: &Cli,
     database: Option<&Path>,
 ) -> Result<crate::db::DbConnection, DomainError> {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let database_path = database
         .map(Path::to_path_buf)
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
@@ -13269,7 +13346,7 @@ where
 {
     use crate::models::{RationaleTrace, RationaleTraceKind};
 
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let database_path = args
         .database
         .clone()
@@ -13423,7 +13500,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let database_path = args
         .database
         .clone()
@@ -13501,7 +13578,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let database_path = args
         .database
         .clone()
@@ -13684,9 +13761,7 @@ where
 }
 
 fn rehearse_workspace(cli: &Cli) -> PathBuf {
-    cli.workspace.clone().unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-    })
+    cli.resolve_workspace()
 }
 
 fn parse_rehearsal_profile(profile: &str) -> Result<RehearsalProfile, DomainError> {
@@ -13761,9 +13836,7 @@ fn handle_diag_integrity<W>(cli: &Cli, args: &DiagIntegrityArgs, stdout: &mut W)
 where
     W: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-    });
+    let workspace_path = cli.resolve_workspace();
     let report = IntegrityDiagnosticsReport::gather(&IntegrityDiagnosticsOptions {
         workspace_path,
         database_path: args.database.clone(),
@@ -13817,9 +13890,7 @@ fn handle_diag_claims<W>(cli: &Cli, args: &DiagClaimsArgs, stdout: &mut W) -> Pr
 where
     W: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-    });
+    let workspace_path = cli.resolve_workspace();
     let report =
         crate::core::claims::DiagClaimsReport::gather(&crate::core::claims::DiagClaimsOptions {
             workspace_path,
@@ -15529,10 +15600,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let workspace = cli.resolve_workspace();
 
     let database_path = args
         .database
@@ -15592,10 +15660,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let workspace = cli.resolve_workspace();
 
     let database_path = args
         .database
@@ -15827,10 +15892,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let workspace = cli.resolve_workspace();
 
     let database_path = args
         .database
@@ -15887,10 +15949,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let workspace = cli.resolve_workspace();
 
     let database_path = args
         .database
@@ -15958,10 +16017,7 @@ where
 {
     use crate::core::memory::{GetMemoryHistoryOptions, get_memory_history};
 
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let workspace = cli.resolve_workspace();
 
     let database_path = args
         .database
@@ -16029,10 +16085,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let workspace = cli.resolve_workspace();
 
     let database_path = args
         .database
@@ -16096,10 +16149,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let workspace = cli.resolve_workspace();
 
     let database_path = args
         .database
@@ -16156,10 +16206,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let workspace = cli.resolve_workspace();
     let database_path = args
         .database
         .clone()
@@ -16458,7 +16505,7 @@ where
         }
     };
 
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = ContextPackOptions {
         workspace_path,
         database_path: args.database.clone(),
@@ -16621,7 +16668,7 @@ fn handle_db_status<W>(cli: &Cli, args: &DbStatusArgs, stdout: &mut W) -> Proces
 where
     W: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let database_path = args
         .database
         .clone()
@@ -16912,7 +16959,7 @@ fn handle_db_check<W>(cli: &Cli, args: &DbCheckArgs, stdout: &mut W) -> ProcessE
 where
     W: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let database_path = args
         .database
         .clone()
@@ -17120,7 +17167,7 @@ fn handle_db_migrations<W>(cli: &Cli, args: &DbMigrationsArgs, stdout: &mut W) -
 where
     W: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let database_path = args
         .database
         .clone()
@@ -19291,7 +19338,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = ReviewSessionOptions {
         workspace_path: workspace_path.as_path(),
         database_path: args.database.as_deref(),
@@ -19384,7 +19431,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = SearchOptions {
         workspace_path,
         database_path: args.database.clone(),
@@ -19452,7 +19499,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let database_path = args
         .database
         .clone()
@@ -19517,7 +19564,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = OutcomeQuarantineListOptions {
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
@@ -19567,7 +19614,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = OutcomeQuarantineReviewOptions {
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
@@ -19623,7 +19670,7 @@ where
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let database_path = args
         .database
         .clone()
@@ -20643,7 +20690,7 @@ impl WorkflowCloseReport {
 }
 
 fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberMemoryReport, DomainError> {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     remember_memory(&RememberMemoryOptions {
         workspace_path: &workspace_path,
         database_path: None,
@@ -20671,7 +20718,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     if args.all && args.status.is_some() {
         return write_domain_error(
             &DomainError::Usage {
@@ -20742,7 +20789,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = CurateValidateOptions {
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
@@ -20793,7 +20840,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = CurateApplyOptions {
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
@@ -20849,7 +20896,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = CurateReviewOptions {
         workspace_path: &workspace_path,
         database_path,
@@ -20901,7 +20948,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = CurateDispositionOptions {
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
@@ -20952,10 +20999,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let workspace = cli.resolve_workspace();
 
     let options = CurateRetireOptions {
         workspace_path: &workspace,
@@ -20991,10 +21035,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let workspace = cli.resolve_workspace();
 
     let options = CurateTombstoneOptions {
         workspace_path: &workspace,
@@ -21030,10 +21071,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let workspace = cli.resolve_workspace();
 
     let options = ReviewWorkspaceOptions {
         workspace_path: &workspace,
@@ -21069,10 +21107,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let workspace = cli.resolve_workspace();
 
     let options = WorkflowCreateOptions {
         workspace_path: &workspace,
@@ -21107,7 +21142,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = PlaybookExtractOptions {
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
@@ -21159,7 +21194,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = PlaybookListOptions {
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
@@ -21213,7 +21248,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = PlaybookExportOptions {
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
@@ -21268,7 +21303,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = PlaybookImportOptions {
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
@@ -21322,7 +21357,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = RuleAddOptions {
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
@@ -21377,7 +21412,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = RuleListOptions {
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
@@ -21425,7 +21460,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = RuleShowOptions {
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
@@ -21469,7 +21504,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = RuleMarkOptions {
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
@@ -21526,7 +21561,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = RuleProtectOptions {
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
@@ -21576,7 +21611,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let protected = match (args.protect, args.unprotect) {
         (true, false) => Some(true),
         (false, true) => Some(false),
@@ -22795,7 +22830,7 @@ fn open_causal_database(cli: &Cli) -> Result<(crate::db::DbConnection, String), 
 }
 
 fn causal_workspace_path(cli: &Cli) -> Result<PathBuf, DomainError> {
-    let raw = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let raw = cli.resolve_workspace();
     let absolute = if raw.is_absolute() {
         raw
     } else {
@@ -23036,7 +23071,7 @@ const DEMO_VERIFY_SIDE_EFFECT: &str =
     "read-only artifact verification; no command execution or artifact write";
 
 fn demo_workspace_path(cli: &Cli) -> PathBuf {
-    cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."))
+    cli.resolve_workspace()
 }
 
 fn demo_manifest_path(cli: &Cli, explicit: Option<&PathBuf>) -> PathBuf {
@@ -24457,7 +24492,7 @@ where
         args.jobs.clone()
     };
 
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let mut runner_options = crate::steward::RunnerOptions::new()
         .with_workspace_path(workspace_path.clone())
         .with_actor("ee-daemon");
@@ -24533,7 +24568,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let job_types = if args.jobs.is_empty() {
         vec![
             JobType::DecaySweep,
@@ -24698,7 +24733,7 @@ fn run_maintenance_job<W>(
 where
     W: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let lock_holder = format!(
         "ee-{}-{}",
         request.command.replace(' ', "_"),
@@ -24849,7 +24884,7 @@ where
             }))
             .collect::<Vec<_>>(),
         "historyPath": maintenance_job_history_path(
-            &cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."))
+            &cli.resolve_workspace()
         ).display().to_string(),
         "next": "ee job run decay_sweep --json"
     });
@@ -24860,7 +24895,7 @@ fn handle_job_list<W>(cli: &Cli, args: &JobListArgs, stdout: &mut W) -> ProcessE
 where
     W: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let since = match parse_job_history_since(args.since.as_deref()) {
         Ok(since) => since,
         Err(message) => {
@@ -24935,7 +24970,7 @@ fn handle_job_show<W>(cli: &Cli, args: &JobShowArgs, stdout: &mut W) -> ProcessE
 where
     W: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let mut rows = match load_maintenance_job_history(&workspace_path) {
         Ok(rows) => rows,
         Err(message) => {
@@ -25170,7 +25205,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = ArtifactRegisterOptions {
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
@@ -25216,7 +25251,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = ArtifactInspectOptions {
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
@@ -25251,7 +25286,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace_path = cli.resolve_workspace();
     let options = ArtifactListOptions {
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
@@ -25308,7 +25343,7 @@ where
     let workspace_path = args
         .workspace
         .clone()
-        .unwrap_or_else(|| cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")));
+        .unwrap_or_else(|| cli.resolve_workspace());
 
     let options = BundleOptions {
         workspace: workspace_path,
@@ -25430,7 +25465,7 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let mut options = SwarmBriefCollectOptions::for_workspace(
-        cli.workspace.clone().unwrap_or_else(|| PathBuf::from(".")),
+        cli.resolve_workspace(),
     );
     options.max_recent_commits = args.max_recent_commits;
     options.include_rch = enabled_sources.contains(&SwarmBriefSourceKind::Rch);
@@ -26857,10 +26892,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let workspace = cli.resolve_workspace();
     let database_path = args
         .database
         .clone()
@@ -26925,10 +26957,7 @@ where
         Ok(payload) => payload,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
-    let workspace = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let workspace = cli.resolve_workspace();
     let database_path = args
         .database
         .clone()
@@ -34579,4 +34608,64 @@ mod tests {
         let error = result.err().ok_or_else(|| "expected error".to_string())?;
         ensure_contains(&error.message, "must be a boolean", "error message")
     }
+
+    // ========================================================================
+    // Bead bd-17c65.4.8 (D7) — Workspace auto-discovery via walk-up
+    // ========================================================================
+
+    #[test]
+    fn workspace_source_as_str_is_stable() {
+        // Wire enum: stable string forms.
+        assert_eq!(super::WorkspaceSource::Flag.as_str(), "flag");
+        assert_eq!(super::WorkspaceSource::Env.as_str(), "env");
+        assert_eq!(super::WorkspaceSource::WalkUp.as_str(), "walk_up");
+        assert_eq!(super::WorkspaceSource::Cwd.as_str(), "cwd");
+    }
+
+    #[test]
+    fn find_workspace_via_walk_up_finds_ancestor_with_ee_dir() -> TestResult {
+        let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
+        // Layout:
+        //   tmp/proj/.ee/
+        //   tmp/proj/src/        <- start search here
+        let proj = tmp.path().join("proj");
+        let ee_dir = proj.join(".ee");
+        let src_dir = proj.join("src");
+        std::fs::create_dir_all(&ee_dir).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&src_dir).map_err(|e| e.to_string())?;
+
+        let found = super::find_workspace_via_walk_up(&src_dir);
+        ensure(
+            found.as_deref() == Some(proj.as_path()),
+            format!("expected proj ancestor, got {found:?}"),
+        )
+    }
+
+    #[test]
+    fn find_workspace_via_walk_up_returns_none_when_no_ee_dir() -> TestResult {
+        let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let found = super::find_workspace_via_walk_up(tmp.path());
+        ensure(
+            found.is_none(),
+            format!("no .ee/ in tree should return None, got {found:?}"),
+        )
+    }
+
+    #[test]
+    fn resolve_workspace_flag_wins_when_provided() -> TestResult {
+        let explicit = std::path::PathBuf::from("/explicit/path");
+        let (path, source) = super::resolve_workspace_for_cli(Some(&explicit));
+        ensure(
+            path == explicit,
+            format!("expected {explicit:?}, got {path:?}"),
+        )?;
+        ensure(
+            source == super::WorkspaceSource::Flag,
+            format!("expected Flag source, got {source:?}"),
+        )
+    }
+
+    // Note: EE_WORKSPACE env-var path is exercised by integration tests
+    // that spawn a subprocess (the lib crate forbids unsafe and thus
+    // cannot mutate env in-process tests).
 }
