@@ -1264,10 +1264,35 @@ fn persist_pack_record(
     draft: &crate::pack::PackDraft,
     degraded: &[ContextResponseDegradation],
 ) -> Result<(), String> {
-    let workspace = connection
-        .get_workspace_by_path(&workspace_path.display().to_string())
+    // Bead bd-17c65.1.9 (A9). Pre-overhaul this surface emitted
+    // `context_pack_persist_failed: workspace not found` on every call
+    // because the lookup used the raw path. `ee init` / `ee remember`
+    // canonicalize before registering, so on macOS `/tmp/...` queries
+    // miss the registered `/private/tmp/...` row. Try the raw form
+    // first (for tests / pre-registered raw paths), then the canonical
+    // (symlink-resolved) form. Matches the pattern in G1's
+    // resolve_workspace_id_with_fallback.
+    let raw = workspace_path.display().to_string();
+    let workspace = match connection
+        .get_workspace_by_path(&raw)
         .map_err(|e| format!("workspace lookup failed: {e}"))?
-        .ok_or_else(|| "workspace not found".to_string())?;
+    {
+        Some(ws) => ws,
+        None => {
+            let canonical = workspace_path.canonicalize().unwrap_or_else(|_| workspace_path.to_path_buf());
+            let canonical_str = canonical.display().to_string();
+            if canonical_str == raw {
+                return Err("workspace not found".to_string());
+            }
+            match connection
+                .get_workspace_by_path(&canonical_str)
+                .map_err(|e| format!("workspace lookup failed: {e}"))?
+            {
+                Some(ws) => ws,
+                None => return Err("workspace not found".to_string()),
+            }
+        }
+    };
 
     let pack_id = PackId::now();
     let pack_hash = draft
