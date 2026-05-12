@@ -41,7 +41,7 @@ EE_BINARY="${EE_BINARY:-$REPO_ROOT/target/release/ee}"
 # Epic registry. Letter → script-basename. Iterate in this order regardless
 # of --only/--skip; that way the summary is deterministic across invocations.
 # ---------------------------------------------------------------------------
-EPIC_LETTERS=(A B C D E F G H)
+EPIC_LETTERS=(A B C D E F G H I)
 declare -A EPIC_SCRIPTS=(
     [A]="pack_format.sh"
     [B]="search_honesty.sh"
@@ -51,6 +51,7 @@ declare -A EPIC_SCRIPTS=(
     [F]="discoverability.sh"
     [G]="learn_curate.sh"
     [H]="output_rendering.sh"
+    [I]="agent_triad.sh"
 )
 declare -A EPIC_NAMES=(
     [A]="pack_format"
@@ -61,6 +62,7 @@ declare -A EPIC_NAMES=(
     [F]="discoverability"
     [G]="learn_curate"
     [H]="output_rendering"
+    [I]="agent_triad"
 )
 
 # ---------------------------------------------------------------------------

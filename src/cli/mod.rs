@@ -145,7 +145,7 @@ use crate::core::rule::{
     extract_playbook_candidates, import_playbook, list_playbook_rules, list_rules, mark_rule,
     protect_rule, show_rule, update_rule,
 };
-use crate::core::search::{SearchOptions, SearchReport, run_search};
+use crate::core::search::{SearchOptions, SearchReport, run_diag_search, run_search};
 use crate::core::status::StatusReport;
 use crate::core::swarm_brief::{
     SwarmBriefCollectOptions, SwarmBriefReport, SwarmBriefSourceKind, SwarmBriefSourceStatus,
@@ -256,6 +256,10 @@ pub struct Cli {
     /// Policy ID to use for decision plane operations.
     #[arg(long, global = true, value_name = "POLICY_ID")]
     pub policy: Option<String>,
+
+    /// Enable the experimental agent triad aliases (`ee pack`, `ee note`, `ee why`).
+    #[arg(long, global = true, hide = true, action = ArgAction::SetTrue)]
+    pub experimental_triad: bool,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -486,6 +490,8 @@ pub enum Command {
     /// Run explicit maintenance jobs without a daemon.
     #[command(subcommand)]
     Maintenance(MaintenanceCommand),
+    /// Experimental shorthand for storing an inferred memory note.
+    Note(NoteArgs),
     /// Run and inspect explicit steward maintenance jobs.
     #[command(subcommand)]
     Job(JobCommand),
@@ -1354,6 +1360,10 @@ pub struct ContextArgs {
     /// Emit a redaction-safe query and pack performance report instead of the context pack.
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain_performance: bool,
+
+    /// Suppress data.pack.text in JSON output for structured-only consumers.
+    #[arg(long = "no-rendered-text", action = ArgAction::SetTrue)]
+    pub no_rendered_text: bool,
 }
 
 /// Arguments for `ee completion`.
@@ -1399,6 +1409,10 @@ pub struct PackArgs {
     /// Optional pack subcommand. Omit it to build from `--query-file`.
     #[command(subcommand)]
     pub command: Option<PackCommand>,
+
+    /// Experimental triad task query. Requires `--experimental-triad` or EE_EXPERIMENTAL_TRIAD.
+    #[arg(value_name = "QUERY")]
+    pub query: Option<String>,
 
     /// Path to an `ee.query.v1` JSON query document.
     #[arg(long, value_name = "PATH")]
@@ -1482,6 +1496,9 @@ pub struct PackBuildArgs {
 
 impl PackArgs {
     fn legacy_build_args(&self) -> Result<PackBuildArgs, DomainError> {
+        if self.query.is_some() {
+            return Err(triad_disabled_error("ee pack \"<task>\""));
+        }
         let Some(query_file) = self.query_file.clone() else {
             return Err(DomainError::Usage {
                 message: "Pack build requires --query-file or a pack subcommand.".to_string(),
@@ -1533,7 +1550,7 @@ pub struct PackDiffArgs {
     pub database: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+#[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum DiagCommand {
     /// Report claim verification posture: unverified, stale, and regressed claims.
     Claims(DiagClaimsArgs),
@@ -1546,6 +1563,8 @@ pub enum DiagCommand {
     /// Report quarantine status for import sources.
     #[command(subcommand)]
     Quarantine(DiagQuarantineCommand),
+    /// Show per-arm search diagnostics before and after fusion.
+    Search(DiagSearchArgs),
     /// Verify stdout/stderr stream separation is correct.
     Streams,
 }
@@ -1607,6 +1626,40 @@ pub struct DiagIntegrityArgs {
     /// Plan the canary write without mutating the database.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+}
+
+/// Arguments for `ee diag search`.
+///
+/// Eq is dropped because `relevance_floor: Option<f32>` cannot satisfy it.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct DiagSearchArgs {
+    /// Query string to diagnose.
+    #[arg(value_name = "QUERY")]
+    pub query: String,
+
+    /// Emit all retrieval arms before fusion.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub all_arms: bool,
+
+    /// Maximum number of final fused results to return.
+    #[arg(long, short = 'n', default_value_t = 10)]
+    pub limit: u32,
+
+    /// Retrieval speed/quality budget: instant, default, or quality.
+    #[arg(long, value_parser = parse_speed_mode_arg, default_value = "default")]
+    pub speed: crate::search::SpeedMode,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Index output directory. Defaults to <workspace>/.ee/index/.
+    #[arg(long, value_name = "PATH")]
+    pub index_dir: Option<PathBuf>,
+
+    /// Minimum score (0.0..=1.0) for a hit to be included in final results.
+    #[arg(long, value_name = "FLOAT")]
+    pub relevance_floor: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
@@ -4119,6 +4172,62 @@ pub struct RememberArgs {
     pub dry_run: bool,
 }
 
+/// Arguments for experimental `ee note`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct NoteArgs {
+    /// Memory content to store.
+    #[arg(value_name = "CONTENT")]
+    pub content: String,
+
+    /// Override inferred memory level.
+    #[arg(long, short = 'l')]
+    pub level: Option<String>,
+
+    /// Override inferred memory kind.
+    #[arg(long, short = 'k')]
+    pub kind: Option<String>,
+
+    /// Tags to apply (comma-separated).
+    #[arg(long, short = 't')]
+    pub tags: Option<String>,
+
+    /// Workflow lifecycle group for working memories.
+    #[arg(long, value_name = "ID")]
+    pub workflow: Option<String>,
+
+    /// Disable bounded workflow-local auto-linking for this memory.
+    #[arg(long = "no-auto-link", action = ArgAction::SetTrue)]
+    pub no_auto_link: bool,
+
+    /// Disable bounded remember-time curation candidate proposal.
+    #[arg(long = "no-propose-candidates", action = ArgAction::SetTrue)]
+    pub no_propose_candidates: bool,
+
+    /// Disable note inference and use remember's default episodic/fact classification.
+    #[arg(long = "no-infer", action = ArgAction::SetTrue)]
+    pub no_infer: bool,
+
+    /// Confidence score (0.0 to 1.0).
+    #[arg(long, default_value = "0.8")]
+    pub confidence: f32,
+
+    /// Source provenance URI (e.g., file://path:line).
+    #[arg(long)]
+    pub source: Option<String>,
+
+    /// RFC3339 timestamp when this memory becomes applicable.
+    #[arg(long, value_name = "RFC3339")]
+    pub valid_from: Option<String>,
+
+    /// RFC3339 timestamp when this memory stops being applicable.
+    #[arg(long, value_name = "RFC3339")]
+    pub valid_to: Option<String>,
+
+    /// Perform a dry run without storing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
 /// Explicit curation review commands.
 #[derive(Clone, Debug, Subcommand, PartialEq)]
 pub enum CurateCommand {
@@ -6346,6 +6455,7 @@ where
                     handle_diag_quarantine_show(&cli, args, stdout, stderr)
                 }
             },
+            DiagCommand::Search(args) => handle_diag_search(&cli, args, stdout, stderr),
             DiagCommand::Streams => {
                 let report = crate::core::streams::StreamsReport::gather(stderr);
                 match cli.renderer() {
@@ -6991,17 +7101,9 @@ where
                 ),
             },
         },
+        Some(Command::Note(ref args)) => handle_note(&cli, args, stdout, stderr),
         Some(Command::Remember(ref args)) => match handle_remember(&cli, args) {
-            Ok(result) => match cli.renderer() {
-                output::Renderer::Human | output::Renderer::Markdown => {
-                    write_stdout(stdout, &result.human_output())
-                }
-                output::Renderer::Toon => write_stdout(stdout, &(result.toon_output() + "\n")),
-                output::Renderer::Json
-                | output::Renderer::Jsonl
-                | output::Renderer::Compact
-                | output::Renderer::Hook => write_stdout(stdout, &(result.json_output() + "\n")),
-            },
+            Ok(result) => write_remember_report(&cli, &result, stdout),
             Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
         },
         Some(Command::Curate(CurateCommand::Candidates(ref args))) => {
@@ -13910,6 +14012,78 @@ where
     }
 }
 
+fn handle_diag_search<W, E>(
+    cli: &Cli,
+    args: &DiagSearchArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !args.all_arms {
+        let error = DomainError::Usage {
+            message: "`ee diag search` requires --all-arms for explicit diagnostic output."
+                .to_string(),
+            repair: Some("Run `ee diag search \"<query>\" --all-arms --json`.".to_string()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    let options = SearchOptions {
+        workspace_path: cli.resolve_workspace(),
+        database_path: args.database.clone(),
+        index_dir: args.index_dir.clone(),
+        query: args.query.clone(),
+        limit: args.limit,
+        speed: args.speed,
+        explain: true,
+        relevance_floor: args.relevance_floor,
+    };
+
+    match run_diag_search(&options) {
+        Ok(report) => {
+            let json = report.data_json().to_string();
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &diag_search_human_summary(&report.data_json()))
+                }
+                output::Renderer::Toon => {
+                    write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+                }
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => write_stdout(stdout, &(json + "\n")),
+            }
+        }
+        Err(error) => {
+            let domain_error = DomainError::SearchIndex {
+                message: error.to_string(),
+                repair: error.repair_hint().map(str::to_string),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn diag_search_human_summary(json: &serde_json::Value) -> String {
+    let query = json["query"].as_str().unwrap_or("");
+    let lexical_count = json["preFusion"]["lexical"]["results"]
+        .as_array()
+        .map_or(0, Vec::len);
+    let semantic_count = json["preFusion"]["semanticFast"]["results"]
+        .as_array()
+        .map_or(0, Vec::len);
+    let final_count = json["final"]["resultCount"].as_u64().unwrap_or(0);
+    let fusion_algorithm = json["fusion"]["algorithm"].as_str().unwrap_or("unknown");
+
+    format!(
+        "Search diagnostics for `{query}`\n\n  lexical hits: {lexical_count}\n  semantic_fast hits: {semantic_count}\n  fusion: {fusion_algorithm}\n  final results: {final_count}\n\nUse --json for per-arm ranks, scores, and fusion contributions.\n"
+    )
+}
+
 fn handle_diag_quarantine_list<W, E>(
     cli: &Cli,
     args: &DiagQuarantineListArgs,
@@ -15727,8 +15901,7 @@ pub(crate) fn ascii_edit_distance(a: &str, b: &str) -> usize {
     for i in 1..=a_bytes.len() {
         curr[0] = i;
         for j in 1..=b_bytes.len() {
-            let cost = if a_bytes[i - 1].to_ascii_lowercase() == b_bytes[j - 1].to_ascii_lowercase()
-            {
+            let cost = if a_bytes[i - 1].eq_ignore_ascii_case(&b_bytes[j - 1]) {
                 0
             } else {
                 1
@@ -16492,6 +16665,7 @@ fn parse_speed_mode_arg(value: &str) -> Result<crate::search::SpeedMode, String>
 fn write_context_response<W>(
     renderer: output::Renderer,
     response: &ContextResponse,
+    include_rendered_text: bool,
     stdout: &mut W,
 ) -> ProcessExitCode
 where
@@ -16510,7 +16684,12 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => write_stdout(
             stdout,
-            &(output::render_context_response_json(response) + "\n"),
+            &(output::render_context_response_json_with_options(
+                response,
+                output::ContextJsonRenderOptions {
+                    include_rendered_text,
+                },
+            ) + "\n"),
         ),
         output::Renderer::Markdown => {
             write_stdout(stdout, &output::render_context_response_markdown(response))
@@ -16586,7 +16765,12 @@ where
     }
 
     match run_context_pack(&options) {
-        Ok(response) => write_context_response(cli.context_renderer(), &response, stdout),
+        Ok(response) => write_context_response(
+            cli.context_renderer(),
+            &response,
+            !args.no_rendered_text,
+            stdout,
+        ),
         Err(error) => {
             let domain_error = context_error_to_domain(&error);
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
@@ -17506,6 +17690,35 @@ where
     W: Write,
     E: Write,
 {
+    if let Some(query) = args.query.as_ref() {
+        if !triad_enabled(cli) {
+            let error = triad_disabled_error("ee pack \"<task>\"");
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+        if args.query_file.is_some() {
+            let error = DomainError::Usage {
+                message: "`ee pack <task>` cannot be combined with --query-file.".to_string(),
+                repair: Some("Use either `ee pack \"prepare release\"` or `ee pack --query-file task.eeq.json`.".to_string()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+        let context_args = ContextArgs {
+            query: query.clone(),
+            max_tokens: args.max_tokens.unwrap_or(4000),
+            candidate_pool: args.candidate_pool.unwrap_or(100),
+            speed: args.speed.unwrap_or(crate::search::SpeedMode::Default),
+            profile: args
+                .profile
+                .clone()
+                .unwrap_or_else(|| "balanced".to_string()),
+            database: args.database.clone(),
+            index_dir: args.index_dir.clone(),
+            explain_performance: args.explain_performance,
+            no_rendered_text: false,
+        };
+        return handle_context(cli, &context_args, stdout, stderr);
+    }
+
     match &args.command {
         Some(PackCommand::Build(build_args)) => handle_pack(cli, build_args, stdout, stderr),
         Some(PackCommand::Replay(replay_args)) => {
@@ -17626,7 +17839,7 @@ where
     match run_context_pack(&options) {
         Ok(mut response) => {
             response.data.degraded.extend(request.degraded);
-            write_context_response(renderer, &response, stdout)
+            write_context_response(renderer, &response, true, stdout)
         }
         Err(error) => {
             let domain_error = context_error_to_domain(&error);
@@ -19287,8 +19500,8 @@ fn output_from_document(
                 ContextResponseDegradation::new(
                     "query_output_explain_already_included",
                     ContextResponseSeverity::Low,
-                    "output.explain was accepted; JSON context packs already include selection certificates and per-item why explanations.",
-                    Some("Inspect data.pack.selectionCertificate and data.pack.items[].why.".to_string()),
+                    "output.explain was accepted; JSON context packs already include algorithm metadata, selection certificates, and per-item why explanations.",
+                    Some("Inspect data.pack.meta.algorithm, data.pack.selectionCertificate, and data.pack.items[].why.".to_string()),
                 )
                 .map_err(|error| {
                     QueryFileError::new(
@@ -19898,6 +20111,32 @@ fn format_why_human(report: &crate::core::why::WhyReport) -> String {
         }
     }
 
+    if let Some(ref history) = report.history {
+        output.push_str("\nHistory:\n");
+        output.push_str(&format!(
+            "  Entries: {} of {}{}\n",
+            history.entries.len(),
+            history.total_count,
+            if history.truncated {
+                " (truncated)"
+            } else {
+                ""
+            }
+        ));
+        for entry in &history.entries {
+            output.push_str(&format!(
+                "  {} {} ({})\n",
+                entry.timestamp, entry.action, entry.audit_id
+            ));
+            if let Some(ref actor) = entry.actor {
+                output.push_str(&format!("    actor: {actor}\n"));
+            }
+            if let Some(ref details) = entry.details {
+                output.push_str(&format!("    details: {details}\n"));
+            }
+        }
+    }
+
     if !report.rationale_traces.is_empty() {
         output.push_str("\nRationale traces:\n");
         for trace in &report.rationale_traces {
@@ -20143,6 +20382,28 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
         })
         .collect();
 
+    let history = report.history.as_ref().map(|history| {
+        let entries: Vec<serde_json::Value> = history
+            .entries
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "auditId": entry.audit_id,
+                    "timestamp": entry.timestamp,
+                    "actor": entry.actor,
+                    "action": entry.action,
+                    "details": entry.details,
+                })
+            })
+            .collect();
+
+        serde_json::json!({
+            "entries": entries,
+            "totalCount": history.total_count,
+            "truncated": history.truncated,
+        })
+    });
+
     let json = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V1,
         "success": true,
@@ -20158,6 +20419,7 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             "selection": selection,
             "contradictions": contradictions,
             "links": links,
+            "history": history,
             "degraded": degraded,
         }
     });
@@ -20806,6 +21068,144 @@ impl WorkflowCloseReport {
             promoted_memory_ids,
             audit_ids
         )
+    }
+}
+
+fn write_remember_report<W>(
+    cli: &Cli,
+    result: &RememberMemoryReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &result.human_output())
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(result.toon_output() + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(result.json_output() + "\n")),
+    }
+}
+
+fn triad_enabled(cli: &Cli) -> bool {
+    cli.experimental_triad
+        || std::env::var("EE_EXPERIMENTAL_TRIAD").is_ok_and(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+}
+
+fn triad_disabled_error(command: &str) -> DomainError {
+    DomainError::Usage {
+        message: format!("{command} is an experimental agent-triad alias."),
+        repair: Some(
+            "Pass --experimental-triad or set EE_EXPERIMENTAL_TRIAD=1 to enable the triad spike."
+                .to_string(),
+        ),
+    }
+}
+
+fn infer_note_level_kind(content: &str) -> (&'static str, &'static str) {
+    let lower = content.to_ascii_lowercase();
+    let words = lower.split_whitespace().collect::<Vec<_>>();
+    let starts_with_rule_verb = words.first().is_some_and(|word| {
+        matches!(
+            word.trim_matches(|ch: char| !ch.is_ascii_alphabetic()),
+            "avoid" | "check" | "ensure" | "prefer" | "remember" | "run" | "use" | "verify"
+        )
+    });
+    let contains_rule_marker = ["must", "always", "never", "should", "required"]
+        .iter()
+        .any(|marker| {
+            words
+                .iter()
+                .any(|word| word.trim_matches(|ch: char| !ch.is_ascii_alphabetic()) == *marker)
+        });
+    if starts_with_rule_verb || contains_rule_marker {
+        return ("procedural", "rule");
+    }
+
+    let contains_failure_marker = [
+        "bug",
+        "error",
+        "failed",
+        "failure",
+        "problem",
+        "regression",
+        "broke",
+        "broken",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    if contains_failure_marker {
+        return ("episodic", "failure");
+    }
+
+    let contains_year = lower
+        .as_bytes()
+        .windows(4)
+        .any(|window| window.iter().all(u8::is_ascii_digit));
+    let contains_past_marker = ["was", "were", "did", "ran", "fixed", "changed"]
+        .iter()
+        .any(|marker| {
+            words
+                .iter()
+                .any(|word| word.trim_matches(|ch: char| !ch.is_ascii_alphabetic()) == *marker)
+        });
+    if contains_year && contains_past_marker {
+        return ("episodic", "event");
+    }
+
+    ("semantic", "fact")
+}
+
+fn note_to_remember_args(args: &NoteArgs) -> RememberArgs {
+    let (inferred_level, inferred_kind) = if args.no_infer {
+        ("episodic", "fact")
+    } else {
+        infer_note_level_kind(&args.content)
+    };
+
+    RememberArgs {
+        content: args.content.clone(),
+        level: args
+            .level
+            .clone()
+            .unwrap_or_else(|| inferred_level.to_string()),
+        kind: args
+            .kind
+            .clone()
+            .unwrap_or_else(|| inferred_kind.to_string()),
+        tags: args.tags.clone(),
+        workflow: args.workflow.clone(),
+        no_auto_link: args.no_auto_link,
+        no_propose_candidates: args.no_propose_candidates,
+        confidence: args.confidence,
+        source: args.source.clone(),
+        valid_from: args.valid_from.clone(),
+        valid_to: args.valid_to.clone(),
+        dry_run: args.dry_run,
+    }
+}
+
+fn handle_note<W, E>(cli: &Cli, args: &NoteArgs, stdout: &mut W, stderr: &mut E) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !triad_enabled(cli) {
+        let error = triad_disabled_error("ee note \"<text>\"");
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    let remember_args = note_to_remember_args(args);
+    match handle_remember(cli, &remember_args) {
+        Ok(result) => write_remember_report(cli, &result, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
 
@@ -26387,6 +26787,7 @@ impl NormalizedInvocation {
                     MaintenanceCommand::Run(_) => "maintenance run".to_string(),
                     MaintenanceCommand::Status(_) => "maintenance status".to_string(),
                 },
+                Command::Note(_) => "note".to_string(),
                 Command::Context(_) => "context".to_string(),
                 Command::Completion(_) => "completion".to_string(),
                 Command::Db(db) => match db {
@@ -26415,6 +26816,7 @@ impl NormalizedInvocation {
                         DiagQuarantineCommand::List(_) => "diag quarantine list".to_string(),
                         DiagQuarantineCommand::Show(_) => "diag quarantine show".to_string(),
                     },
+                    DiagCommand::Search(_) => "diag search".to_string(),
                     DiagCommand::Streams => "diag streams".to_string(),
                 },
                 Command::Doctor(_) => "doctor".to_string(),
@@ -32018,6 +32420,24 @@ mod tests {
     }
 
     #[test]
+    fn context_command_accepts_no_rendered_text() -> TestResult {
+        let parsed =
+            Cli::try_parse_from(["ee", "context", "test", "--no-rendered-text"]).map_err(|e| {
+                format!(
+                    "failed to parse context with no-rendered-text: {:?}",
+                    e.kind()
+                )
+            })?;
+
+        match parsed.command {
+            Some(Command::Context(ref args)) => {
+                ensure_equal(&args.no_rendered_text, &true, "context no_rendered_text")
+            }
+            _ => Err("expected Context command".to_string()),
+        }
+    }
+
+    #[test]
     fn context_renderer_defaults_to_markdown() -> TestResult {
         let cli = Cli::try_parse_from(["ee", "context", "test"])
             .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
@@ -32160,6 +32580,75 @@ mod tests {
                 ensure_equal(&args.profile, &Some("compact".to_string()), "pack profile")
             }
             _ => Err("expected Pack command".to_string()),
+        }
+    }
+
+    #[test]
+    fn experimental_triad_pack_parses_task_query() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "--experimental-triad",
+            "--json",
+            "pack",
+            "prepare release",
+            "--max-tokens",
+            "3000",
+            "--profile",
+            "compact",
+        ])
+        .map_err(|error| format!("failed to parse triad pack: {:?}", error.kind()))?;
+
+        ensure_equal(&parsed.experimental_triad, &true, "experimental triad flag")?;
+        match parsed.command {
+            Some(Command::Pack(ref args)) => {
+                ensure_equal(
+                    &args.query,
+                    &Some("prepare release".to_string()),
+                    "triad pack query",
+                )?;
+                ensure_equal(&args.max_tokens, &Some(3000), "triad max tokens")?;
+                ensure_equal(&args.profile, &Some("compact".to_string()), "triad profile")
+            }
+            _ => Err("expected Pack command".to_string()),
+        }
+    }
+
+    #[test]
+    fn experimental_triad_note_infers_rule_and_allows_overrides() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "--experimental-triad",
+            "note",
+            "Always run cargo fmt before release.",
+            "--kind",
+            "decision",
+            "--tags",
+            "release,format",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse triad note: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Note(ref args)) => {
+                let remember_args = super::note_to_remember_args(args);
+                ensure_equal(
+                    &remember_args.level,
+                    &"procedural".to_string(),
+                    "inferred level",
+                )?;
+                ensure_equal(
+                    &remember_args.kind,
+                    &"decision".to_string(),
+                    "kind override",
+                )?;
+                ensure_equal(
+                    &remember_args.tags,
+                    &Some("release,format".to_string()),
+                    "tags",
+                )?;
+                ensure_equal(&remember_args.dry_run, &true, "dry_run")
+            }
+            _ => Err("expected Note command".to_string()),
         }
     }
 

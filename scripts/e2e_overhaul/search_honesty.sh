@@ -2,10 +2,10 @@
 # J3 — Epic B: search honesty & quality e2e driver.
 #
 # Drives `ee search` and asserts the search response exposes the honesty
-# signals shipped by B1-B5 and records TODOs for B2, B6-B11.
+# signals shipped by B1-B5/B7 and records TODOs for B6, B8, B10, B11.
 #
-# Shipped (real assertions):  B1, B3, B4, B5
-# Not yet shipped (todo):     B2, B6, B7, B8, B10, B11
+# Shipped (real assertions):  B1, B2, B3, B4, B5, B7
+# Not yet shipped (todo):     B6, B8, B10, B11
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -96,23 +96,56 @@ else
 fi
 
 # ------------------------------------------------------------
-# B2 — lexical/BM25 fusion. Today the default features advertise lexical-bm25
-# but `source: lexical` never appears in any result. The fix lives in B2.
+# B2 — lexical/BM25 fusion. Default search must preserve evidence that the
+# lexical arm contributed: at least one result should be lexical or hybrid, and
+# sourceCounts must reflect the same contribution.
 # ------------------------------------------------------------
-LEXICAL_SOURCE_COUNT=$(printf '%s' "$SEARCH_JSON" \
-    | jq '[.data.results[]?.source // empty] | map(select(. == "lexical")) | length' 2>/dev/null \
+LEXICAL_OR_HYBRID_SOURCE_COUNT=$(printf '%s' "$SEARCH_JSON" \
+    | jq '[.data.results[]?.source // empty] | map(select(. == "lexical" or . == "hybrid")) | length' 2>/dev/null \
     || echo 0)
-e2e_log_note "b2_lexical_source_count=$LEXICAL_SOURCE_COUNT (expected >=1 once B2 ships)"
-todo_assert "b2_lexical_fusion_emits_lexical_source" "bd-17c65.2.2" \
-    "Default features claim lexical-bm25 but no result has source=lexical."
+if [ "$LEXICAL_OR_HYBRID_SOURCE_COUNT" -gt 0 ]; then
+    e2e_log_assert_eq "true" "true" "b2_lexical_fusion_emits_lexical_or_hybrid_source"
+else
+    e2e_log_assert_eq "0" ">=1" "b2_lexical_fusion_emits_lexical_or_hybrid_source"
+fi
+
+LEXICAL_OR_HYBRID_METRIC_COUNT=$(printf '%s' "$SEARCH_JSON" \
+    | jq '(.data.metrics.sourceCounts.lexical // 0) + (.data.metrics.sourceCounts.hybrid // 0)' 2>/dev/null \
+    || echo 0)
+if [ "$LEXICAL_OR_HYBRID_METRIC_COUNT" -gt 0 ]; then
+    e2e_log_assert_eq "true" "true" "b2_source_counts_record_lexical_or_hybrid"
+else
+    e2e_log_assert_eq "0" ">=1" "b2_source_counts_record_lexical_or_hybrid"
+fi
+
+# B7 — ee diag search --all-arms.
+DIAG_JSON=$(ee_workspace diag search "forbidden dependencies" --all-arms --json || true)
+if printf '%s' "$DIAG_JSON" | jq . >/dev/null 2>&1; then
+    assert_jq "$DIAG_JSON" '.schema' "ee.diag.search.v1" "b7_diag_search_schema"
+    assert_jq "$DIAG_JSON" '.command' "diag search" "b7_diag_search_command"
+    assert_jq "$DIAG_JSON" '.preFusion.lexical.available' "true" "b7_lexical_arm_available"
+    LEXICAL_PREFUSION_COUNT=$(printf '%s' "$DIAG_JSON" \
+        | jq '.preFusion.lexical.results | length' 2>/dev/null || echo 0)
+    if [ "$LEXICAL_PREFUSION_COUNT" -gt 0 ]; then
+        e2e_log_assert_eq "true" "true" "b7_lexical_prefusion_results_present"
+    else
+        e2e_log_assert_eq "0" ">=1" "b7_lexical_prefusion_results_present"
+    fi
+    FUSION_CONTRIBUTION_COUNT=$(printf '%s' "$DIAG_JSON" \
+        | jq '.fusion.perDocContribution | length' 2>/dev/null || echo 0)
+    if [ "$FUSION_CONTRIBUTION_COUNT" -gt 0 ]; then
+        e2e_log_assert_eq "true" "true" "b7_fusion_contributions_present"
+    else
+        e2e_log_assert_eq "0" ">=1" "b7_fusion_contributions_present"
+    fi
+else
+    e2e_log_note "diag_search_json_unparseable bytes=${#DIAG_JSON}"
+    e2e_log_assert_eq "false" "true" "b7_diag_search_json_parses"
+fi
 
 # B6 — --source-mode flag (lexical_only|semantic_only|hybrid).
 todo_assert "b6_source_mode_flag" "bd-17c65.2.3" \
     "ee search lacks --source-mode for forcing lexical/semantic isolation."
-
-# B7 — ee diag search --all-arms.
-todo_assert "b7_diag_search_all_arms" "bd-17c65.2.4" \
-    "ee diag search --all-arms not yet implemented for cross-retrieval comparison."
 
 # B8 — tombstone visibility semantics in search/pack/graph.
 todo_assert "b8_tombstone_visibility_documented" "bd-17c65.2.8" \
