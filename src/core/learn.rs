@@ -1099,23 +1099,69 @@ fn ensure_learning_workspace(
 
 /// Normalize a workspace path for DB lookup.
 ///
-/// Bead bd-17c65.7.1 (G1) — the pre-overhaul implementation made paths
-/// absolute but did NOT resolve symlinks. On macOS where `/tmp` is a
-/// symlink to `/private/tmp`, `--workspace /tmp/foo` failed to find a
-/// workspace registered as `/private/tmp/foo`. The lookup then fell
-/// back to `stable_workspace_id` which produced a synthetic id, and
-/// every learn-summary query missed the actual memories.
-///
-/// `canonicalize()` resolves symlinks. On failure (e.g. workspace not
-/// on disk yet) we fall back to the original absolute path so a fresh
-/// workspace's lookup still works.
+/// Returns an absolute path WITHOUT canonicalizing symlinks. The
+/// canonicalization step happens at lookup time via
+/// `resolve_workspace_id_with_fallback` so test fixtures that store
+/// workspaces under non-canonical paths (e.g. `/var/folders/...` on
+/// macOS where the canonical form is `/private/var/folders/...`)
+/// still match.
 fn normalize_workspace_path(path: &Path) -> PathBuf {
-    let absolute = if path.is_absolute() {
+    if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir().unwrap_or_default().join(path)
-    };
-    absolute.canonicalize().unwrap_or(absolute)
+    }
+}
+
+/// Resolve a workspace path to its DB row, trying both the path as
+/// given and its canonical (symlink-resolved) form.
+///
+/// Bead bd-17c65.7.1 (G1). The 2026-05-10 walkthrough surfaced the
+/// symlink-mismatch bug: `--workspace /tmp/foo` failed to find a
+/// workspace registered (by `ee remember`) as `/private/tmp/foo`. The
+/// lookup fell back to `stable_workspace_id` and produced a synthetic
+/// id that didn't match any memory rows. Trying both forms picks up
+/// the canonical case while preserving exact-match for the common
+/// case of paths stored without canonicalization.
+fn resolve_workspace_id_with_fallback(
+    connection: &DbConnection,
+    workspace_path: &Path,
+) -> Result<String, DomainError> {
+    // Try the path as given first.
+    let primary = workspace_path.to_string_lossy().into_owned();
+    let primary_lookup = connection.get_workspace_by_path(&primary).map_err(|error| {
+        DomainError::Storage {
+            message: format!("Failed to query workspace: {error}"),
+            repair: Some("ee doctor".to_string()),
+        }
+    })?;
+    if let Some(ws) = primary_lookup {
+        return Ok(ws.id);
+    }
+
+    // Fall back to the canonical (symlink-resolved) form when the raw
+    // path missed. On macOS /tmp → /private/tmp etc.; on Linux
+    // canonicalization is usually a no-op so the second lookup just
+    // verifies the same path.
+    if let Ok(canonical) = workspace_path.canonicalize() {
+        let canonical_str = canonical.to_string_lossy().into_owned();
+        if canonical_str != primary {
+            let canonical_lookup = connection.get_workspace_by_path(&canonical_str).map_err(
+                |error| DomainError::Storage {
+                    message: format!("Failed to query workspace: {error}"),
+                    repair: Some("ee doctor".to_string()),
+                },
+            )?;
+            if let Some(ws) = canonical_lookup {
+                return Ok(ws.id);
+            }
+        }
+    }
+
+    // Final fallback: synthetic stable id derived from the primary
+    // path. Preserves prior behavior for fresh workspaces that have
+    // never been touched by `ee remember`.
+    Ok(stable_workspace_id(&primary))
 }
 
 fn stable_workspace_id(path: &str) -> String {
@@ -2421,17 +2467,9 @@ fn load_learning_snapshot(workspace: &Path) -> Result<LearningSnapshot, DomainEr
             repair: Some("ee doctor".to_string()),
         })?;
     let normalized_workspace = normalize_workspace_path(workspace);
-    let workspace_path_text = normalized_workspace.to_string_lossy().into_owned();
-    let workspace_id = connection
-        .get_workspace_by_path(&workspace_path_text)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query workspace: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?
-        .map_or_else(
-            || stable_workspace_id(&workspace_path_text),
-            |workspace| workspace.id,
-        );
+    // G1: try both raw and canonical forms before falling back to a
+    // synthetic id. See resolve_workspace_id_with_fallback for rationale.
+    let workspace_id = resolve_workspace_id_with_fallback(&connection, &normalized_workspace)?;
     let memory_rows = connection
         .list_memories(&workspace_id, None, false)
         .map_err(|error| DomainError::Storage {
