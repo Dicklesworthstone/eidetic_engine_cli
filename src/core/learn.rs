@@ -1123,12 +1123,54 @@ fn normalize_workspace_path(path: &Path) -> PathBuf {
 /// id that didn't match any memory rows. Trying both forms picks up
 /// the canonical case while preserving exact-match for the common
 /// case of paths stored without canonicalization.
+/// Resolve a workspace path to its DB row, matching `ee remember`'s
+/// canonicalization order so workspace_ids agree across surfaces.
+///
+/// Bead bd-17c65.7.1 (G1). `ee remember`'s `resolve_workspace_path`
+/// canonicalizes the path before computing `stable_workspace_id`. To
+/// produce the SAME workspace_id (and find memories that ee remember
+/// inserted), `ee learn summary` must canonicalize too. Lookup
+/// strategy:
+///
+/// 1. Try the canonical (symlink-resolved) path.
+/// 2. Fall back to the raw path (for fresh workspaces / test fixtures
+///    that store under non-canonical paths).
+/// 3. Final fallback: `stable_workspace_id` from the canonical path —
+///    matches what `ee remember` would have produced for a fresh DB.
 fn resolve_workspace_id_with_fallback(
     connection: &DbConnection,
     workspace_path: &Path,
 ) -> Result<String, DomainError> {
-    // Try the path as given first.
     let primary = workspace_path.to_string_lossy().into_owned();
+    // Compute canonical form once; falls back to absolute if the path
+    // doesn't exist yet (rare — every caller has at least .ee/ee.db).
+    let canonical = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    let canonical_str = canonical.to_string_lossy().into_owned();
+    tracing::debug!(
+        target: "ee::learn",
+        "resolve_workspace_id primary={primary} canonical={canonical_str}"
+    );
+
+    // 1. Try canonical first — matches the path `ee remember` stored
+    // workspaces under.
+    if canonical_str != primary {
+        let canonical_lookup =
+            connection
+                .get_workspace_by_path(&canonical_str)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to query workspace: {error}"),
+                    repair: Some("ee doctor".to_string()),
+                })?;
+        if let Some(ws) = canonical_lookup {
+            tracing::debug!(target: "ee::learn", "resolve_workspace_id matched canonical id={}", ws.id);
+            return Ok(ws.id);
+        }
+    }
+
+    // 2. Fall back to the raw path (test fixtures may register under
+    // non-canonical paths).
     let primary_lookup = connection.get_workspace_by_path(&primary).map_err(|error| {
         DomainError::Storage {
             message: format!("Failed to query workspace: {error}"),
@@ -1136,32 +1178,17 @@ fn resolve_workspace_id_with_fallback(
         }
     })?;
     if let Some(ws) = primary_lookup {
+        tracing::debug!(target: "ee::learn", "resolve_workspace_id matched raw id={}", ws.id);
         return Ok(ws.id);
     }
 
-    // Fall back to the canonical (symlink-resolved) form when the raw
-    // path missed. On macOS /tmp → /private/tmp etc.; on Linux
-    // canonicalization is usually a no-op so the second lookup just
-    // verifies the same path.
-    if let Ok(canonical) = workspace_path.canonicalize() {
-        let canonical_str = canonical.to_string_lossy().into_owned();
-        if canonical_str != primary {
-            let canonical_lookup = connection.get_workspace_by_path(&canonical_str).map_err(
-                |error| DomainError::Storage {
-                    message: format!("Failed to query workspace: {error}"),
-                    repair: Some("ee doctor".to_string()),
-                },
-            )?;
-            if let Some(ws) = canonical_lookup {
-                return Ok(ws.id);
-            }
-        }
-    }
-
-    // Final fallback: synthetic stable id derived from the primary
-    // path. Preserves prior behavior for fresh workspaces that have
-    // never been touched by `ee remember`.
-    Ok(stable_workspace_id(&primary))
+    // 3. Final fallback: synthesize a stable id from the canonical
+    // path. This matches `ee remember`'s `stable_workspace_id(canonical)`
+    // computation, so a fresh workspace's memories (stored under the
+    // canonical id) are findable even when no workspaces row exists.
+    let synthetic = stable_workspace_id(&canonical_str);
+    tracing::debug!(target: "ee::learn", "resolve_workspace_id synthetic id={synthetic}");
+    Ok(synthetic)
 }
 
 fn stable_workspace_id(path: &str) -> String {
