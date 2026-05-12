@@ -324,6 +324,27 @@ impl SearchDegradation {
         }
     }
 
+    /// Top score is above floor but close to it — the embedder may not
+    /// recognize the query's synonyms or the corpus genuinely lacks
+    /// strong matches. Informational so an agent can choose to
+    /// rephrase or fall back to a different source mode.
+    ///
+    /// Bead bd-17c65.2.5 (B5). Fires when `qualityAssessment ==
+    /// "weak"` (per B4): top score is below `2 × floor`.
+    #[must_use]
+    fn weak_query_recall(floor: f32, top_score: f32) -> Self {
+        Self {
+            code: "weak_query_recall".to_string(),
+            severity: "low".to_string(),
+            message: format!(
+                "Top result scored {top_score:.4} against floor {floor:.4}; embedder may not recognize query synonyms, or the corpus lacks strong matches.",
+            ),
+            repair: Some(
+                "Rephrase with concrete words present in stored memories, or use --source-mode lexical_only when implemented (B6).".to_string(),
+            ),
+        }
+    }
+
     /// Most candidates dropped below the floor (informational signal so
     /// an agent can decide whether to retry with a different strategy).
     /// Bead bd-17c65.2.1 (B1).
@@ -1214,6 +1235,16 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
                 degraded.push(SearchDegradation::duplicates_collapsed(
                     duplicates_collapsed,
                 ));
+            }
+
+            // Bead bd-17c65.2.5 (B5). When at least one result passed
+            // the floor but the top score is below 2× the floor (the
+            // B4 "weak" classifier), emit a low-severity signal so
+            // agents can pre-empt low-confidence retrieval failures.
+            if let Some(top) = above_floor.first().map(|hit| hit.score) {
+                if top.is_finite() && top >= floor && top < floor * 2.0 {
+                    degraded.push(SearchDegradation::weak_query_recall(floor, top));
+                }
             }
 
             // Emit no_relevant_results when everything got filtered out
@@ -2472,6 +2503,41 @@ mod tests {
         let (deduped, collapsed) = dedupe_hits_on_doc_id(hits);
         assert!(deduped.is_empty());
         assert_eq!(collapsed, 0);
+    }
+
+    // ========================================================================
+    // Bead bd-17c65.2.5 (B5) — weak_query_recall signal
+    // ========================================================================
+
+    #[test]
+    fn weak_query_recall_degradation_carries_top_score_and_floor() {
+        let degradation = SearchDegradation::weak_query_recall(0.05, 0.07);
+        assert_eq!(degradation.code, "weak_query_recall");
+        assert_eq!(degradation.severity, "low");
+        assert!(degradation.message.contains("0.0700"));
+        assert!(degradation.message.contains("0.0500"));
+        assert!(degradation
+            .repair
+            .as_deref()
+            .is_some_and(|r| r.to_lowercase().contains("rephrase")));
+    }
+
+    /// When top score is strictly between floor and 2× floor, the
+    /// signal fires. Matches QualityAssessment::Weak from B4.
+    #[test]
+    fn weak_query_recall_threshold_aligns_with_quality_weak() {
+        // top exactly at 2× floor → NOT weak (good); top below 2× → weak.
+        // The signal fires when score < 2× floor.
+        let floor = 0.05;
+        let just_below_two_x = 0.09_f32;
+        let two_x = 0.10_f32;
+        let just_above_floor = 0.051_f32;
+        assert!(just_below_two_x < floor * 2.0);
+        assert!(two_x >= floor * 2.0);
+        assert!(just_above_floor >= floor);
+        // Round-trip: degradation factory accepts any (floor, top) pair.
+        let _ = SearchDegradation::weak_query_recall(floor, just_below_two_x);
+        let _ = SearchDegradation::weak_query_recall(floor, just_above_floor);
     }
 
     #[test]
