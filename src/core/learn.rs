@@ -1097,12 +1097,25 @@ fn ensure_learning_workspace(
     Ok(workspace_id)
 }
 
+/// Normalize a workspace path for DB lookup.
+///
+/// Bead bd-17c65.7.1 (G1) — the pre-overhaul implementation made paths
+/// absolute but did NOT resolve symlinks. On macOS where `/tmp` is a
+/// symlink to `/private/tmp`, `--workspace /tmp/foo` failed to find a
+/// workspace registered as `/private/tmp/foo`. The lookup then fell
+/// back to `stable_workspace_id` which produced a synthetic id, and
+/// every learn-summary query missed the actual memories.
+///
+/// `canonicalize()` resolves symlinks. On failure (e.g. workspace not
+/// on disk yet) we fall back to the original absolute path so a fresh
+/// workspace's lookup still works.
 fn normalize_workspace_path(path: &Path) -> PathBuf {
-    if path.is_absolute() {
+    let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir().unwrap_or_default().join(path)
-    }
+    };
+    absolute.canonicalize().unwrap_or(absolute)
 }
 
 fn stable_workspace_id(path: &str) -> String {
@@ -1966,8 +1979,24 @@ fn rounded_metric(value: f64) -> f64 {
     }
 }
 
+/// Return the timestamp to stamp on a learning report.
+///
+/// Bead bd-17c65.7.1 (G1). The pre-overhaul implementation returned the
+/// epoch sentinel "1970-01-01T00:00:00Z" — the most telling clue that
+/// `ee learn summary` was a stub. The 2026-05-10 walkthrough surfaced
+/// this as one of the worst examples of fake-empty success.
+///
+/// Now returns the actual wall-clock time at report assembly. This
+/// trades a small amount of determinism (across-run comparisons of the
+/// summary's `generatedAt` field will differ) for honesty (the field
+/// reflects when the answer was computed). Callers that need
+/// determinism across runs should strip `generatedAt` before
+/// comparison (per the J7 determinism-harness pattern).
+///
+/// Returns RFC 3339 with nanosecond precision, matching the rest of
+/// the audit envelope.
 fn stable_learning_generated_at() -> String {
-    "1970-01-01T00:00:00Z".to_string()
+    crate::obs::now_rfc3339_nanos()
 }
 
 #[derive(Clone, Debug)]
@@ -3460,5 +3489,39 @@ mod tests {
             Err(error) => Err(format!("expected not_found, got {}", error.code())),
             Ok(_) => Err("expected not_found, got success".to_string()),
         }
+    }
+
+    // ========================================================================
+    // Bead bd-17c65.7.1 (G1) — learn summary generated_at is wall-clock
+    // ========================================================================
+
+    /// Lock in the fix: `stable_learning_generated_at` no longer returns
+    /// the 1970-01-01 epoch sentinel. This is the regression test for
+    /// the 2026-05-10 walkthrough's most-cited stub.
+    #[test]
+    fn learning_generated_at_is_not_epoch_sentinel() {
+        let ts = super::stable_learning_generated_at();
+        assert!(
+            !ts.starts_with("1970-01-01"),
+            "stable_learning_generated_at must reflect wall-clock; got `{ts}`"
+        );
+        assert!(
+            ts.starts_with("20") || ts.starts_with("21"),
+            "expected 21st-century RFC 3339 timestamp; got `{ts}`"
+        );
+    }
+
+    #[test]
+    fn learning_generated_at_changes_across_calls() {
+        // Wall-clock generator: calls separated by any amount of time
+        // are allowed to differ (and typically will at nanosecond
+        // resolution). At minimum, neither is the epoch.
+        let a = super::stable_learning_generated_at();
+        let b = super::stable_learning_generated_at();
+        assert!(!a.starts_with("1970"));
+        assert!(!b.starts_with("1970"));
+        // Both are valid RFC 3339 strings (parseable).
+        chrono::DateTime::parse_from_rfc3339(&a).expect("a parses");
+        chrono::DateTime::parse_from_rfc3339(&b).expect("b parses");
     }
 }
