@@ -3667,7 +3667,8 @@ pub fn render_memory_list_json(report: &MemoryListReport) -> String {
             obj.field_str("id", &m.id);
             obj.field_str("level", &m.level);
             obj.field_str("kind", &m.kind);
-            obj.field_str("content_preview", &m.content_preview);
+            obj.field_str("content", &m.content);
+            obj.field_bool("content_truncated", m.content_truncated);
             obj.field_raw("confidence", &format!("{:.4}", m.confidence));
             if let Some(ref uri) = m.provenance_uri {
                 obj.field_str("provenance_uri", uri);
@@ -3707,7 +3708,7 @@ pub fn render_memory_list_human(report: &MemoryListReport) -> String {
 
     for m in &report.memories {
         output.push_str(&format!("  {} [{}] {}\n", m.id, m.level, m.kind));
-        output.push_str(&format!("    {}\n", m.content_preview));
+        output.push_str(&format!("    {}\n", m.content));
         output.push_str(&format!(
             "    confidence={:.2}, created={}, validity={} ({})\n",
             m.confidence, m.created_at, m.validity_status, m.validity_window_kind
@@ -9226,7 +9227,7 @@ pub fn render_learn_uncertainty_human(report: &LearnUncertaintyReport) -> String
             "[{}] {} (uncertainty: {:.2}, confidence: {:.2})\n",
             item.memory_id, item.kind, item.uncertainty, item.confidence
         ));
-        out.push_str(&format!("    {}\n", item.content_preview));
+        out.push_str(&format!("    {}\n", item.content));
         out.push_str(&format!(
             "    Retrieval count: {}\n\n",
             item.retrieval_count
@@ -11444,7 +11445,9 @@ mod tests {
                 relevance: score(0.5)?,
                 utility: score(0.5)?,
                 provenance: vec![pack_provenance("file://x")?],
-                why: format!("matched 'prepare release' via lexical (relevance 0.5{i}, utility 0.5000)"),
+                why: format!(
+                    "matched 'prepare release' via lexical (relevance 0.5{i}, utility 0.5000)"
+                ),
             })
             .map_err(|error| format!("candidate rejected: {error:?}"))?;
             candidates.push(candidate);

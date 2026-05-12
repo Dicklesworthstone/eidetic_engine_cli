@@ -337,6 +337,11 @@ pub struct WhyReport {
     pub memory_id: String,
     /// Whether the memory was found.
     pub found: bool,
+    /// Full memory body text when the memory was found. `None` when the memory
+    /// is not found or an error occurred. The why surface returns the full
+    /// body (no truncation) so an agent does not need to chain a separate
+    /// `ee show` call to read it.
+    pub content: Option<String>,
     /// Storage explanation.
     pub storage: Option<StorageExplanation>,
     /// Retrieval explanation.
@@ -370,6 +375,7 @@ impl WhyReport {
             version: env!("CARGO_PKG_VERSION"),
             memory_id,
             found: true,
+            content: None,
             storage: Some(storage),
             retrieval: Some(retrieval),
             graph_retrieval: None,
@@ -382,6 +388,14 @@ impl WhyReport {
         }
     }
 
+    /// Attach the full memory body to the report. Returns `self` to allow
+    /// builder-style chaining at the construction site.
+    #[must_use]
+    pub fn with_content(mut self, content: String) -> Self {
+        self.content = Some(content);
+        self
+    }
+
     /// Create a report for a not-found memory.
     #[must_use]
     pub fn not_found(memory_id: String) -> Self {
@@ -389,6 +403,7 @@ impl WhyReport {
             version: env!("CARGO_PKG_VERSION"),
             memory_id,
             found: false,
+            content: None,
             storage: None,
             retrieval: None,
             graph_retrieval: None,
@@ -408,6 +423,7 @@ impl WhyReport {
             version: env!("CARGO_PKG_VERSION"),
             memory_id,
             found: false,
+            content: None,
             storage: None,
             retrieval: None,
             graph_retrieval: None,
@@ -648,7 +664,8 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
                     graph_retrieval,
                     degraded: evidence_degradations,
                 },
-            );
+            )
+            .with_content(memory.content.clone());
             return report.with_degradation(WhyDegradation {
                 code: "why_pack_selection_unavailable",
                 severity: "low",
@@ -674,6 +691,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
             degraded: evidence_degradations,
         },
     )
+    .with_content(memory.content.clone())
 }
 
 fn workspace_path_for_memory(conn: &DbConnection, workspace_id: &str) -> Option<PathBuf> {

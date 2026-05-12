@@ -6730,18 +6730,10 @@ where
             handle_memory_tags(&cli, args, stdout, stderr)
         }
         // Bead bd-17c65.6.2 (F2) — top-level aliases route by ID prefix.
-        Some(Command::Show(ref args)) => {
-            handle_show_alias(&cli, args, stdout, stderr)
-        }
-        Some(Command::Link(ref args)) => {
-            handle_link_alias(&cli, args, stdout, stderr)
-        }
-        Some(Command::Tag(ref args)) => {
-            handle_tag_alias(&cli, args, stdout, stderr)
-        }
-        Some(Command::History(ref args)) => {
-            handle_history_alias(&cli, args, stdout, stderr)
-        }
+        Some(Command::Show(ref args)) => handle_show_alias(&cli, args, stdout, stderr),
+        Some(Command::Link(ref args)) => handle_link_alias(&cli, args, stdout, stderr),
+        Some(Command::Tag(ref args)) => handle_tag_alias(&cli, args, stdout, stderr),
+        Some(Command::History(ref args)) => handle_history_alias(&cli, args, stdout, stderr),
         Some(Command::Workflow(WorkflowCommand::Close(ref args))) => {
             handle_workflow_close(&cli, args, stdout, stderr)
         }
@@ -15732,8 +15724,7 @@ pub(crate) fn ascii_edit_distance(a: &str, b: &str) -> usize {
     for i in 1..=a_bytes.len() {
         curr[0] = i;
         for j in 1..=b_bytes.len() {
-            let cost = if a_bytes[i - 1].to_ascii_lowercase()
-                == b_bytes[j - 1].to_ascii_lowercase()
+            let cost = if a_bytes[i - 1].to_ascii_lowercase() == b_bytes[j - 1].to_ascii_lowercase()
             {
                 0
             } else {
@@ -15903,14 +15894,7 @@ where
     E: Write,
 {
     if !matches!(extract_id_prefix(&args.memory_id), Some("mem")) {
-        return alias_id_prefix_error(
-            cli,
-            stdout,
-            stderr,
-            "tag",
-            &args.memory_id,
-            &["mem"],
-        );
+        return alias_id_prefix_error(cli, stdout, stderr, "tag", &args.memory_id, &["mem"]);
     }
     // Convert Option<String> CSV → Vec<String> (matches the existing
     // MemoryTagsArgs `add`/`remove` shape).
@@ -15940,14 +15924,7 @@ where
     E: Write,
 {
     if !matches!(extract_id_prefix(&args.memory_id), Some("mem")) {
-        return alias_id_prefix_error(
-            cli,
-            stdout,
-            stderr,
-            "history",
-            &args.memory_id,
-            &["mem"],
-        );
+        return alias_id_prefix_error(cli, stdout, stderr, "history", &args.memory_id, &["mem"]);
     }
     let memory_args = MemoryHistoryArgs {
         memory_id: args.memory_id.clone(),
@@ -19810,6 +19787,11 @@ where
 fn format_why_human(report: &crate::core::why::WhyReport) -> String {
     let mut output = format!("Memory: {}\n\n", report.memory_id);
 
+    if let Some(ref content) = report.content {
+        output.push_str("Content:\n");
+        output.push_str(&format!("  {content}\n\n"));
+    }
+
     if let Some(ref storage) = report.storage {
         output.push_str("Storage:\n");
         output.push_str(&format!("  Origin: {}\n", storage.origin));
@@ -20166,6 +20148,7 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             "version": report.version,
             "memoryId": report.memory_id,
             "found": report.found,
+            "content": report.content,
             "storage": storage,
             "retrieval": retrieval,
             "graphRetrievalFeatures": graph_retrieval,
@@ -25539,9 +25522,7 @@ where
         Ok(sources) => sources,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
-    let mut options = SwarmBriefCollectOptions::for_workspace(
-        cli.resolve_workspace(),
-    );
+    let mut options = SwarmBriefCollectOptions::for_workspace(cli.resolve_workspace());
     options.max_recent_commits = args.max_recent_commits;
     options.include_rch = enabled_sources.contains(&SwarmBriefSourceKind::Rch);
     options.enabled_sources = enabled_sources;

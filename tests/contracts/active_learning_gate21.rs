@@ -135,8 +135,8 @@ fn uncertainty_fixture() -> LearnUncertaintyReport {
         items: vec![
             UncertaintyItem {
                 memory_id: "mem_gate21_procedure".to_string(),
-                content_preview: "Procedure promotion passed once but lacks replay evidence."
-                    .to_string(),
+                content: "Procedure promotion passed once but lacks replay evidence.".to_string(),
+                content_truncated: false,
                 kind: "procedural".to_string(),
                 uncertainty: 0.82,
                 confidence: 0.42,
@@ -145,8 +145,9 @@ fn uncertainty_fixture() -> LearnUncertaintyReport {
             },
             UncertaintyItem {
                 memory_id: "mem_gate21_budget".to_string(),
-                content_preview: "Budget pruning recommendation has no counterfactual baseline."
+                content: "Budget pruning recommendation has no counterfactual baseline."
                     .to_string(),
+                content_truncated: false,
                 kind: "economic".to_string(),
                 uncertainty: 0.69,
                 confidence: 0.51,

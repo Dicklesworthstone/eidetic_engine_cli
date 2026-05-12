@@ -430,7 +430,7 @@ impl RuleListReport {
                 "  {} [{}] confidence={:.2}\n",
                 rule.id, rule.maturity, rule.confidence
             ));
-            output.push_str(&format!("    {}\n", rule.content_preview));
+            output.push_str(&format!("    {}\n", rule.content));
             output.push_str(&format!(
                 "    scope={}, tags={}, evidence={}\n\n",
                 rule.scope,
@@ -849,7 +849,7 @@ impl PlaybookListReport {
                 rule.maturity,
                 rule.tags.len()
             ));
-            output.push_str(&format!("    {}\n", truncate_rule_content(&rule.content)));
+            output.push_str(&format!("    {}\n", truncate_rule_content(&rule.content).0));
         }
         output
     }
@@ -1027,7 +1027,11 @@ pub struct RuleListFilter {
 #[serde(rename_all = "camelCase")]
 pub struct RuleSummary {
     pub id: String,
-    pub content_preview: String,
+    /// Rule body text. May be truncated for list views — when truncated,
+    /// `content_truncated` is `true` and the value ends with "...".
+    pub content: String,
+    /// True if `content` was truncated for the list view.
+    pub content_truncated: bool,
     pub maturity: String,
     pub lifecycle: RuleLifecycle,
     pub scope: String,
@@ -2655,9 +2659,11 @@ fn load_rule_details(
 }
 
 fn rule_summary_from_details(details: RuleDetails) -> RuleSummary {
+    let (content, content_truncated) = truncate_rule_content(&details.content);
     RuleSummary {
         id: details.id,
-        content_preview: truncate_rule_content(&details.content),
+        content,
+        content_truncated,
         maturity: details.maturity,
         lifecycle: details.lifecycle,
         scope: details.scope,
@@ -2718,13 +2724,13 @@ fn rule_evidence(maturity: &str, source_memory_count: usize) -> RuleEvidence {
     }
 }
 
-fn truncate_rule_content(content: &str) -> String {
+fn truncate_rule_content(content: &str) -> (String, bool) {
     let mut chars = content.chars();
     let preview = chars.by_ref().take(80).collect::<String>();
     if chars.next().is_some() {
-        format!("{preview}...")
+        (format!("{preview}..."), true)
     } else {
-        preview
+        (preview, false)
     }
 }
 

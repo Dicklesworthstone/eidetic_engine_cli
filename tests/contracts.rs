@@ -114,3 +114,6 @@ mod retrieval_field_naming;
 
 #[path = "contracts/no_silent_fallback.rs"]
 mod no_silent_fallback;
+
+#[path = "contracts/canonical_content_field.rs"]
+mod canonical_content_field;

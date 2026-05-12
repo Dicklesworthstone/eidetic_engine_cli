@@ -1792,8 +1792,12 @@ pub struct MemorySummary {
     pub level: String,
     /// Memory kind.
     pub kind: String,
-    /// Content preview (truncated).
-    pub content_preview: String,
+    /// Memory body text. May be truncated for list views — when truncated,
+    /// `content_truncated` is `true` and the value ends with "...".
+    pub content: String,
+    /// True if `content` was truncated for the list view. False when the full
+    /// body is returned (including when the body itself is empty).
+    pub content_truncated: bool,
     /// Confidence score.
     pub confidence: f32,
     /// Provenance URI (EE-072: preserve provenance through JSON output).
@@ -1866,13 +1870,13 @@ fn open_migrated_memory_database(database_path: &Path) -> Result<DbConnection, S
     Ok(conn)
 }
 
-fn truncate_content(content: &str) -> String {
+fn truncate_content(content: &str) -> (String, bool) {
     let char_count = content.chars().count();
     if char_count <= CONTENT_PREVIEW_LEN {
-        content.to_string()
+        (content.to_string(), false)
     } else {
         let truncated: String = content.chars().take(CONTENT_PREVIEW_LEN).collect();
-        format!("{truncated}...")
+        (format!("{truncated}..."), true)
     }
 }
 
@@ -1929,11 +1933,13 @@ pub fn list_memories(options: &ListMemoriesOptions<'_>) -> MemoryListReport {
         .take(options.limit as usize)
         .map(|m| {
             let validity = memory_validity(&m.valid_from, &m.valid_to);
+            let (content, content_truncated) = truncate_content(&m.content);
             MemorySummary {
                 id: m.id,
                 level: m.level,
                 kind: m.kind,
-                content_preview: truncate_content(&m.content),
+                content,
+                content_truncated,
                 confidence: m.confidence,
                 provenance_uri: m.provenance_uri,
                 is_tombstoned: m.tombstoned_at.is_some(),
@@ -3622,7 +3628,7 @@ pub fn check_for_duplicates(options: &DedupeCheckOptions<'_>) -> DedupeCheckRepo
                 existing_memory_id: memory.id.clone(),
                 similarity_score: 1.0,
                 severity: DedupeSeverity::Exact,
-                existing_preview: truncate_content(&memory.content),
+                existing_preview: truncate_content(&memory.content).0,
                 match_type: DedupeMatchType::ExactContent,
                 suggestion: format!(
                     "Exact duplicate exists. Consider using `ee memory show {}` to review.",
@@ -3639,7 +3645,7 @@ pub fn check_for_duplicates(options: &DedupeCheckOptions<'_>) -> DedupeCheckRepo
                 existing_memory_id: memory.id.clone(),
                 similarity_score: 0.99,
                 severity: DedupeSeverity::Exact,
-                existing_preview: truncate_content(&memory.content),
+                existing_preview: truncate_content(&memory.content).0,
                 match_type: DedupeMatchType::NormalizedContent,
                 suggestion: format!(
                     "Near-exact match (whitespace/case differs). Review `ee memory show {}`.",
@@ -3657,7 +3663,7 @@ pub fn check_for_duplicates(options: &DedupeCheckOptions<'_>) -> DedupeCheckRepo
                 existing_memory_id: memory.id.clone(),
                 similarity_score: similarity,
                 severity,
-                existing_preview: truncate_content(&memory.content),
+                existing_preview: truncate_content(&memory.content).0,
                 match_type: DedupeMatchType::Lexical,
                 suggestion: format!(
                     "{:.0}% similar. Consider revising instead: `ee memory revise {}`.",
@@ -4103,7 +4109,40 @@ mod tests {
         let content = "é".repeat(CONTENT_PREVIEW_LEN + 1);
         let expected = format!("{}...", "é".repeat(CONTENT_PREVIEW_LEN));
 
-        ensure(truncate_content(&content), expected, "multibyte preview")
+        ensure(
+            truncate_content(&content),
+            (expected, true),
+            "multibyte preview truncates and reports content_truncated=true",
+        )
+    }
+
+    #[test]
+    fn truncate_content_below_limit_is_untruncated() -> TestResult {
+        let content = "short body";
+        ensure(
+            truncate_content(content),
+            (content.to_string(), false),
+            "below-limit content is not truncated",
+        )
+    }
+
+    #[test]
+    fn truncate_content_at_exact_limit_is_untruncated() -> TestResult {
+        let content = "a".repeat(CONTENT_PREVIEW_LEN);
+        ensure(
+            truncate_content(&content),
+            (content.clone(), false),
+            "at-limit content is not truncated",
+        )
+    }
+
+    #[test]
+    fn truncate_content_empty_is_untruncated() -> TestResult {
+        ensure(
+            truncate_content(""),
+            (String::new(), false),
+            "empty content is not truncated",
+        )
     }
 
     #[test]

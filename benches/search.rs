@@ -247,6 +247,7 @@ fn quick_stats_for_scale(count: usize) -> QuickStats {
         limit: 20,
         speed: SpeedMode::Default,
         explain: false,
+        relevance_floor: None,
     };
 
     for _ in 0..QUICK_WARMUP_ITERS {
@@ -412,6 +413,7 @@ fn run_criterion_mode() {
                 limit: 20,
                 speed: SpeedMode::Default,
                 explain: false,
+                relevance_floor: None,
             };
 
             b.iter(|| {

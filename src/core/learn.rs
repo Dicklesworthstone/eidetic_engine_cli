@@ -162,7 +162,11 @@ pub struct LearnUncertaintyOptions {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UncertaintyItem {
     pub memory_id: String,
-    pub content_preview: String,
+    /// Memory body text. May be truncated for list views — when truncated,
+    /// `content_truncated` is `true` and the value ends with "...".
+    pub content: String,
+    /// True if `content` was truncated for the list view.
+    pub content_truncated: bool,
     pub kind: String,
     pub uncertainty: f64,
     pub confidence: f64,
@@ -1171,12 +1175,12 @@ fn resolve_workspace_id_with_fallback(
 
     // 2. Fall back to the raw path (test fixtures may register under
     // non-canonical paths).
-    let primary_lookup = connection.get_workspace_by_path(&primary).map_err(|error| {
-        DomainError::Storage {
+    let primary_lookup = connection
+        .get_workspace_by_path(&primary)
+        .map_err(|error| DomainError::Storage {
             message: format!("Failed to query workspace: {error}"),
             repair: Some("ee doctor".to_string()),
-        }
-    })?;
+        })?;
     if let Some(ws) = primary_lookup {
         tracing::debug!(target: "ee::learn", "resolve_workspace_id matched raw id={}", ws.id);
         return Ok(ws.id);
@@ -2251,11 +2255,13 @@ impl LearningCluster {
     }
 
     fn uncertainty_item(&self) -> UncertaintyItem {
+        let (content, content_truncated) = self.content_preview_with_flag();
         UncertaintyItem {
             memory_id: self
                 .target_memory_id()
                 .unwrap_or_else(|| self.question_id()),
-            content_preview: self.content_preview(),
+            content,
+            content_truncated,
             kind: self.topic.clone(),
             uncertainty: self.uncertainty(),
             confidence: self.confidence(),
@@ -2416,6 +2422,16 @@ impl LearningCluster {
             .next()
             .cloned()
             .unwrap_or_else(|| format!("Outcome observations for {}.", self.topic))
+    }
+
+    /// Returns the canonical `content` and `content_truncated` flag derived from
+    /// the aggregated sample content for an uncertainty item. The flag is
+    /// `true` only when more than one distinct sample is being elided into a
+    /// single representative preview, signaling to callers that the surface
+    /// does not show the full evidence set.
+    fn content_preview_with_flag(&self) -> (String, bool) {
+        let preview = self.content_preview();
+        (preview, self.content_previews.len() > 1)
     }
 
     fn source(&self) -> String {

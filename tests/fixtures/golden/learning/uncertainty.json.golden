@@ -7,7 +7,8 @@
   "items": [
     {
       "memory_id": "mem_gate21_procedure",
-      "content_preview": "Procedure promotion passed once but lacks replay evidence.",
+      "content": "Procedure promotion passed once but lacks replay evidence.",
+      "content_truncated": false,
       "kind": "procedural",
       "uncertainty": 0.82,
       "confidence": 0.42,
@@ -16,7 +17,8 @@
     },
     {
       "memory_id": "mem_gate21_budget",
-      "content_preview": "Budget pruning recommendation has no counterfactual baseline.",
+      "content": "Budget pruning recommendation has no counterfactual baseline.",
+      "content_truncated": false,
       "kind": "economic",
       "uncertainty": 0.69,
       "confidence": 0.51,
