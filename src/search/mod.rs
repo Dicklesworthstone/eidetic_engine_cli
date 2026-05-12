@@ -13,6 +13,8 @@ pub use frankensearch::{
     Embedder, EmbedderStack, HashEmbedder, IndexBuilder, ScoreSource, ScoredResult, TwoTierConfig,
     TwoTierIndex, TwoTierSearcher,
 };
+#[cfg(feature = "lexical-bm25")]
+pub use frankensearch::{LexicalSearch, TantivyIndex};
 pub use query::{ParsedSearchQuery, SearchQueryClause, parse_search_query};
 pub use scoring::{
     ParseSpeedModeError, RetrievalMaturity, SearchScoreComponents, SearchScoringConfig,

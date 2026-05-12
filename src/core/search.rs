@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -7,11 +7,15 @@ use super::index::{
     IndexHealth, IndexStatusError, IndexStatusOptions, IndexStatusReport, get_index_status,
 };
 use super::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
+#[cfg(feature = "lexical-bm25")]
+use crate::search::TantivyIndex;
 use crate::search::{
     Embedder, HashEmbedder, SpeedMode, TwoTierConfig, TwoTierIndex, TwoTierSearcher,
 };
+use frankensearch::LexicalSearch;
 
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";
+pub const DIAG_SEARCH_SCHEMA_V1: &str = "ee.diag.search.v1";
 pub const PERFORMANCE_EXPLAIN_SCHEMA_V1: &str = "ee.explain.performance.v1";
 const INDEX_STATUS_CACHE_TTL: Duration = Duration::from_secs(1);
 
@@ -107,6 +111,57 @@ pub struct SearchReport {
     /// (B1). Informational; agents can use this to decide whether to
     /// retry with a lower floor or different query.
     pub candidates_below_floor: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct SearchDiagnosticReport {
+    pub query: String,
+    pub requested_limit: u32,
+    pub elapsed_ms: f64,
+    pub pre_fusion: PreFusionDiagnostics,
+    pub fusion: FusionDiagnostics,
+    pub final_report: SearchReport,
+    pub errors: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PreFusionDiagnostics {
+    pub lexical: SearchArmDiagnostics,
+    pub semantic_fast: SearchArmDiagnostics,
+}
+
+#[derive(Clone, Debug)]
+pub struct SearchArmDiagnostics {
+    pub available: bool,
+    pub score_scale: &'static str,
+    pub elapsed_ms: f64,
+    pub results: Vec<SearchArmHit>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SearchArmHit {
+    pub doc_id: String,
+    pub raw_score: f32,
+    pub rank: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct FusionDiagnostics {
+    pub algorithm: &'static str,
+    pub rrf_k: f64,
+    pub per_doc_contribution: Vec<FusionContribution>,
+    pub elapsed_ms: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct FusionContribution {
+    pub doc_id: String,
+    pub lexical_rank: Option<usize>,
+    pub lexical_contribution: Option<f64>,
+    pub semantic_rank: Option<usize>,
+    pub semantic_contribution: Option<f64>,
+    pub fused_score: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -597,7 +652,7 @@ impl SearchReport {
         serde_json::json!({
             "command": "search",
             "status": self.status.as_str(),
-            "query": self.query,
+            "query": &self.query,
             "results": results,
             "resultCount": self.results.len(),
             "elapsedMs": self.elapsed_ms,
@@ -668,6 +723,84 @@ impl SearchReport {
             },
             "fallbacks": self.degraded.iter().map(SearchDegradation::data_json).collect::<Vec<_>>(),
             "redaction": performance_redaction_json(),
+        })
+    }
+}
+
+impl SearchDiagnosticReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": DIAG_SEARCH_SCHEMA_V1,
+            "command": "diag search",
+            "query": &self.query,
+            "requestedLimit": self.requested_limit,
+            "elapsedMs": round_metric_f64(self.elapsed_ms),
+            "preFusion": self.pre_fusion.data_json(),
+            "fusion": self.fusion.data_json(),
+            "final": self.final_report.data_json(),
+            "errors": &self.errors,
+        })
+    }
+}
+
+impl PreFusionDiagnostics {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "lexical": self.lexical.data_json(),
+            "semanticFast": self.semantic_fast.data_json(),
+        })
+    }
+}
+
+impl SearchArmDiagnostics {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "available": self.available,
+            "scoreScale": self.score_scale,
+            "elapsedMs": round_metric_f64(self.elapsed_ms),
+            "resultCount": self.results.len(),
+            "results": self.results.iter().map(SearchArmHit::data_json).collect::<Vec<_>>(),
+            "error": &self.error,
+        })
+    }
+}
+
+impl SearchArmHit {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "docId": &self.doc_id,
+            "rank": self.rank,
+            "rawScore": round_metric_f32(self.raw_score),
+        })
+    }
+}
+
+impl FusionDiagnostics {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "algorithm": self.algorithm,
+            "k": round_metric_f64(self.rrf_k),
+            "elapsedMs": round_metric_f64(self.elapsed_ms),
+            "perDocContribution": self.per_doc_contribution.iter().map(FusionContribution::data_json).collect::<Vec<_>>(),
+        })
+    }
+}
+
+impl FusionContribution {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "docId": &self.doc_id,
+            "lexicalRank": self.lexical_rank,
+            "lexicalContribution": self.lexical_contribution.map(round_metric_f64),
+            "semanticRank": self.semantic_rank,
+            "semanticContribution": self.semantic_contribution.map(round_metric_f64),
+            "fusedScore": round_metric_f64(self.fused_score),
         })
     }
 }
@@ -1306,6 +1439,101 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
     }
 }
 
+pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport, SearchError> {
+    let start = Instant::now();
+    let index_dir = options.resolve_index_dir();
+    let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
+    let (effective_limit, limit_capped) = runtime_profile.cap_search_limit(options.limit);
+
+    if !index_dir.exists() {
+        return Err(SearchError::NoIndex);
+    }
+
+    let mut degraded = search_degradations(options, &index_dir);
+    if limit_capped {
+        degraded.push(SearchDegradation::profile_search_limit_capped(
+            options.limit,
+            effective_limit,
+            runtime_profile.active_profile.as_str(),
+        ));
+    }
+
+    let config = options.two_tier_config_for_limit(effective_limit);
+    let diag_result = diag_search_sync(
+        &index_dir,
+        &options.query,
+        effective_limit as usize,
+        config,
+        options.explain,
+    )
+    .map_err(SearchError::Index)?;
+
+    let (raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(diag_result.final_hits);
+    let floor = options.relevance_floor.unwrap_or(DEFAULT_RELEVANCE_FLOOR);
+    let pre_floor_count = raw_hits.len();
+    let pre_floor_top_score = raw_hits.first().map(|hit| hit.score);
+    let (above_floor, below_floor): (Vec<_>, Vec<_>) = raw_hits
+        .into_iter()
+        .partition(|hit| hit.score.is_finite() && hit.score >= floor);
+    let kept = above_floor.len();
+    let dropped = below_floor.len();
+
+    if duplicates_collapsed > 0 {
+        degraded.push(SearchDegradation::duplicates_collapsed(
+            duplicates_collapsed,
+        ));
+    }
+    if let Some(top) = above_floor.first().map(|hit| hit.score) {
+        if top.is_finite() && top >= floor && top < floor * 2.0 {
+            degraded.push(SearchDegradation::weak_query_recall(floor, top));
+        }
+    }
+    if kept == 0 && pre_floor_count > 0 {
+        degraded.push(SearchDegradation::no_relevant_results(
+            &options.query,
+            floor,
+            pre_floor_count,
+            pre_floor_top_score,
+        ));
+    }
+    if kept > 0 && pre_floor_count >= 3 && (kept * 10) < (pre_floor_count * 3) {
+        degraded.push(SearchDegradation::low_recall_after_floor(
+            floor,
+            kept,
+            pre_floor_count,
+        ));
+    }
+
+    let status = if above_floor.is_empty() {
+        SearchStatus::NoResults
+    } else {
+        SearchStatus::Success
+    };
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let final_report = SearchReport {
+        status,
+        query: options.query.clone(),
+        requested_limit: options.limit,
+        results: above_floor,
+        elapsed_ms: diag_result.final_elapsed_ms,
+        errors: diag_result.errors.clone(),
+        degraded,
+        runtime_profile,
+        relevance_floor_applied: Some(floor),
+        candidates_below_floor: dropped,
+    };
+
+    Ok(SearchDiagnosticReport {
+        query: options.query.clone(),
+        requested_limit: options.limit,
+        elapsed_ms,
+        pre_fusion: diag_result.pre_fusion,
+        fusion: diag_result.fusion,
+        final_report,
+        errors: diag_result.errors,
+    })
+}
+
 fn search_degradations(options: &SearchOptions, index_dir: &Path) -> Vec<SearchDegradation> {
     let Ok(index_status) = cached_index_status_for_search(options, index_dir) else {
         return Vec::new();
@@ -1361,6 +1589,326 @@ fn cached_index_status_for_search(
     Ok(index_status)
 }
 
+struct DiagSearchSyncResult {
+    pre_fusion: PreFusionDiagnostics,
+    fusion: FusionDiagnostics,
+    final_hits: Vec<SearchHit>,
+    final_elapsed_ms: f64,
+    errors: Vec<String>,
+}
+
+#[allow(clippy::too_many_lines)]
+fn diag_search_sync(
+    index_dir: &Path,
+    query: &str,
+    limit: usize,
+    config: TwoTierConfig,
+    explain: bool,
+) -> Result<DiagSearchSyncResult, String> {
+    let index_dir_owned = index_dir.to_path_buf();
+    let query_owned = query.to_string();
+    #[allow(clippy::type_complexity)]
+    let result_holder: Arc<Mutex<Option<Result<DiagSearchSyncResult, String>>>> =
+        Arc::new(Mutex::new(None));
+    let task_result = Arc::clone(&result_holder);
+    let runtime_error_result = Arc::clone(&result_holder);
+
+    let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let runtime_result = crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
+            let index = match TwoTierIndex::open(&index_dir_owned, config.clone()) {
+                Ok(idx) => Arc::new(idx),
+                Err(error) => {
+                    if let Ok(mut guard) = task_result.lock() {
+                        *guard = Some(Err(format!("Failed to open index: {error}")));
+                    }
+                    return;
+                }
+            };
+
+            let candidate_limit = limit
+                .max(1)
+                .saturating_mul(config.candidate_multiplier.max(1));
+            let fast_embedder = Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>;
+            let lexical = match open_lexical_searcher_for_diag(&index_dir_owned) {
+                Ok(lexical) => lexical,
+                Err(error) => {
+                    if let Ok(mut guard) = task_result.lock() {
+                        *guard = Some(Err(error));
+                    }
+                    return;
+                }
+            };
+
+            let lexical_start = Instant::now();
+            let lexical_result = match lexical.as_ref() {
+                Some(lexical) => match lexical.search(&cx, &query_owned, candidate_limit).await {
+                    Ok(results) => SearchArmDiagnostics {
+                        available: true,
+                        score_scale: "bm25_tfidf",
+                        elapsed_ms: lexical_start.elapsed().as_secs_f64() * 1000.0,
+                        results: scored_results_to_arm_hits(&results),
+                        error: None,
+                    },
+                    Err(error) => SearchArmDiagnostics {
+                        available: true,
+                        score_scale: "bm25_tfidf",
+                        elapsed_ms: lexical_start.elapsed().as_secs_f64() * 1000.0,
+                        results: Vec::new(),
+                        error: Some(error.to_string()),
+                    },
+                },
+                None => SearchArmDiagnostics {
+                    available: false,
+                    score_scale: "bm25_tfidf",
+                    elapsed_ms: lexical_start.elapsed().as_secs_f64() * 1000.0,
+                    results: Vec::new(),
+                    error: Some("lexical index not found".to_string()),
+                },
+            };
+
+            let semantic_start = Instant::now();
+            let semantic_result = match fast_embedder.embed(&cx, &query_owned).await {
+                Ok(query_vec) => match index.search_fast(&query_vec, candidate_limit) {
+                    Ok(results) => SearchArmDiagnostics {
+                        available: true,
+                        score_scale: "cosine_similarity",
+                        elapsed_ms: semantic_start.elapsed().as_secs_f64() * 1000.0,
+                        results: vector_hits_to_arm_hits(&results),
+                        error: None,
+                    },
+                    Err(error) => SearchArmDiagnostics {
+                        available: true,
+                        score_scale: "cosine_similarity",
+                        elapsed_ms: semantic_start.elapsed().as_secs_f64() * 1000.0,
+                        results: Vec::new(),
+                        error: Some(error.to_string()),
+                    },
+                },
+                Err(error) => SearchArmDiagnostics {
+                    available: true,
+                    score_scale: "cosine_similarity",
+                    elapsed_ms: semantic_start.elapsed().as_secs_f64() * 1000.0,
+                    results: Vec::new(),
+                    error: Some(error.to_string()),
+                },
+            };
+
+            let fusion_start = Instant::now();
+            let fusion = build_fusion_diagnostics(
+                &lexical_result.results,
+                &semantic_result.results,
+                config.rrf_k,
+                limit,
+            );
+            let fusion = FusionDiagnostics {
+                elapsed_ms: fusion_start.elapsed().as_secs_f64() * 1000.0,
+                ..fusion
+            };
+
+            let final_start = Instant::now();
+            let searcher =
+                TwoTierSearcher::new(Arc::clone(&index), Arc::clone(&fast_embedder), config);
+            let searcher = if let Some(lexical) = lexical {
+                searcher.with_lexical(lexical)
+            } else {
+                searcher
+            };
+            let final_result = searcher.search_collect(&cx, &query_owned, limit).await;
+            let converted = match final_result {
+                Ok((results, _metrics)) => {
+                    let mut hits: Vec<SearchHit> = results
+                        .into_iter()
+                        .map(|result| search_hit_from_scored_result(result, explain))
+                        .collect();
+                    hits.sort_by(search_hit_score_order);
+                    Ok(DiagSearchSyncResult {
+                        pre_fusion: PreFusionDiagnostics {
+                            lexical: lexical_result,
+                            semantic_fast: semantic_result,
+                        },
+                        fusion,
+                        final_hits: hits,
+                        final_elapsed_ms: final_start.elapsed().as_secs_f64() * 1000.0,
+                        errors: Vec::new(),
+                    })
+                }
+                Err(error) => Err(format!("Search failed: {error}")),
+            };
+
+            if let Ok(mut guard) = task_result.lock() {
+                *guard = Some(converted);
+            }
+        });
+
+        if let Err(error) = runtime_result
+            && let Ok(mut guard) = runtime_error_result.lock()
+        {
+            *guard = Some(Err(format!("Runtime failed: {error}")));
+        }
+    }));
+
+    match panic_result {
+        Ok(()) => result_holder
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take())
+            .unwrap_or_else(|| Err("Diagnostic search result not captured".to_string())),
+        Err(_) => Err("Diagnostic search panicked".to_string()),
+    }
+}
+
+#[cfg(feature = "lexical-bm25")]
+fn open_lexical_searcher_for_diag(
+    index_dir: &Path,
+) -> Result<Option<Arc<dyn LexicalSearch>>, String> {
+    open_lexical_searcher(index_dir)
+}
+
+#[cfg(not(feature = "lexical-bm25"))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "signature mirrors the lexical-bm25 implementation"
+)]
+fn open_lexical_searcher_for_diag(
+    _index_dir: &Path,
+) -> Result<Option<Arc<dyn LexicalSearch>>, String> {
+    Ok(None)
+}
+
+fn scored_results_to_arm_hits(results: &[crate::search::ScoredResult]) -> Vec<SearchArmHit> {
+    results
+        .iter()
+        .enumerate()
+        .map(|(index, result)| SearchArmHit {
+            doc_id: result.doc_id.clone(),
+            raw_score: result.score,
+            rank: index + 1,
+        })
+        .collect()
+}
+
+fn vector_hits_to_arm_hits(results: &[frankensearch::core::types::VectorHit]) -> Vec<SearchArmHit> {
+    results
+        .iter()
+        .enumerate()
+        .map(|(index, result)| SearchArmHit {
+            doc_id: result.doc_id.clone(),
+            raw_score: result.score,
+            rank: index + 1,
+        })
+        .collect()
+}
+
+fn build_fusion_diagnostics(
+    lexical: &[SearchArmHit],
+    semantic: &[SearchArmHit],
+    rrf_k: f64,
+    limit: usize,
+) -> FusionDiagnostics {
+    let mut by_doc: BTreeMap<String, FusionContribution> = BTreeMap::new();
+
+    for hit in lexical {
+        let contribution = rank_contribution(rrf_k, hit.rank);
+        by_doc
+            .entry(hit.doc_id.clone())
+            .and_modify(|entry| {
+                entry.lexical_rank = Some(hit.rank);
+                entry.lexical_contribution = Some(contribution);
+                entry.fused_score += contribution;
+            })
+            .or_insert_with(|| FusionContribution {
+                doc_id: hit.doc_id.clone(),
+                lexical_rank: Some(hit.rank),
+                lexical_contribution: Some(contribution),
+                semantic_rank: None,
+                semantic_contribution: None,
+                fused_score: contribution,
+            });
+    }
+
+    for hit in semantic {
+        let contribution = rank_contribution(rrf_k, hit.rank);
+        by_doc
+            .entry(hit.doc_id.clone())
+            .and_modify(|entry| {
+                entry.semantic_rank = Some(hit.rank);
+                entry.semantic_contribution = Some(contribution);
+                entry.fused_score += contribution;
+            })
+            .or_insert_with(|| FusionContribution {
+                doc_id: hit.doc_id.clone(),
+                lexical_rank: None,
+                lexical_contribution: None,
+                semantic_rank: Some(hit.rank),
+                semantic_contribution: Some(contribution),
+                fused_score: contribution,
+            });
+    }
+
+    let mut per_doc_contribution: Vec<_> = by_doc.into_values().collect();
+    per_doc_contribution.sort_by(|left, right| {
+        right
+            .fused_score
+            .total_cmp(&left.fused_score)
+            .then_with(|| {
+                let left_both = left.lexical_rank.is_some() && left.semantic_rank.is_some();
+                let right_both = right.lexical_rank.is_some() && right.semantic_rank.is_some();
+                right_both.cmp(&left_both)
+            })
+            .then_with(|| left.doc_id.cmp(&right.doc_id))
+    });
+    per_doc_contribution.truncate(limit);
+
+    FusionDiagnostics {
+        algorithm: "reciprocal_rank_fusion",
+        rrf_k,
+        per_doc_contribution,
+        elapsed_ms: 0.0,
+    }
+}
+
+fn rank_contribution(rrf_k: f64, one_based_rank: usize) -> f64 {
+    let rank = one_based_rank.saturating_sub(1);
+    let rank_u32 = u32::try_from(rank).unwrap_or(u32::MAX);
+    1.0 / (rrf_k + f64::from(rank_u32) + 1.0)
+}
+
+fn score_source_from_frankensearch(source: crate::search::ScoreSource) -> ScoreSource {
+    match source {
+        crate::search::ScoreSource::Lexical => ScoreSource::Lexical,
+        crate::search::ScoreSource::SemanticFast => ScoreSource::SemanticFast,
+        crate::search::ScoreSource::SemanticQuality => ScoreSource::SemanticQuality,
+        crate::search::ScoreSource::Hybrid => ScoreSource::Hybrid,
+        crate::search::ScoreSource::Reranked => ScoreSource::Reranked,
+    }
+}
+
+fn search_hit_from_scored_result(result: crate::search::ScoredResult, explain: bool) -> SearchHit {
+    let mut hit = SearchHit {
+        doc_id: result.doc_id,
+        score: result.score,
+        source: score_source_from_frankensearch(result.source),
+        fast_score: result.fast_score,
+        quality_score: result.quality_score,
+        lexical_score: result.lexical_score,
+        rerank_score: result.rerank_score,
+        metadata: result.metadata,
+        explanation: None,
+    };
+    if explain {
+        hit.explanation = Some(ScoreExplanation::generate(&hit));
+    }
+    hit
+}
+
+fn search_hit_score_order(left: &SearchHit, right: &SearchHit) -> std::cmp::Ordering {
+    right
+        .score
+        .total_cmp(&left.score)
+        .then_with(|| left.doc_id.cmp(&right.doc_id))
+}
+
 fn search_sync(
     index_dir: &Path,
     query: &str,
@@ -1391,6 +1939,15 @@ fn search_sync(
 
             let fast_embedder = Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>;
             let searcher = TwoTierSearcher::new(index, fast_embedder, config);
+            let searcher = match attach_lexical_searcher(searcher, &index_dir_owned) {
+                Ok(searcher) => searcher,
+                Err(error) => {
+                    if let Ok(mut guard) = task_result.lock() {
+                        *guard = Some(Err(error));
+                    }
+                    return;
+                }
+            };
 
             let search_result = searcher.search_collect(&cx, &query_owned, limit).await;
 
@@ -1398,41 +1955,9 @@ fn search_sync(
                 Ok((results, _metrics)) => {
                     let mut hits: Vec<SearchHit> = results
                         .into_iter()
-                        .map(|r| {
-                            let source = match r.source {
-                                crate::search::ScoreSource::Lexical => ScoreSource::Lexical,
-                                crate::search::ScoreSource::SemanticFast => {
-                                    ScoreSource::SemanticFast
-                                }
-                                crate::search::ScoreSource::SemanticQuality => {
-                                    ScoreSource::SemanticQuality
-                                }
-                                crate::search::ScoreSource::Hybrid => ScoreSource::Hybrid,
-                                crate::search::ScoreSource::Reranked => ScoreSource::Reranked,
-                            };
-                            let mut hit = SearchHit {
-                                doc_id: r.doc_id,
-                                score: r.score,
-                                source,
-                                fast_score: r.fast_score,
-                                quality_score: r.quality_score,
-                                lexical_score: r.lexical_score,
-                                rerank_score: r.rerank_score,
-                                metadata: r.metadata,
-                                explanation: None,
-                            };
-                            if explain {
-                                hit.explanation = Some(ScoreExplanation::generate(&hit));
-                            }
-                            hit
-                        })
+                        .map(|result| search_hit_from_scored_result(result, explain))
                         .collect();
-                    hits.sort_by(|left, right| {
-                        right
-                            .score
-                            .total_cmp(&left.score)
-                            .then_with(|| left.doc_id.cmp(&right.doc_id))
-                    });
+                    hits.sort_by(search_hit_score_order);
                     Ok((hits, Vec::new()))
                 }
                 Err(e) => Err(format!("Search failed: {e}")),
@@ -1460,9 +1985,51 @@ fn search_sync(
     }
 }
 
+#[cfg(feature = "lexical-bm25")]
+fn attach_lexical_searcher(
+    mut searcher: TwoTierSearcher,
+    index_dir: &Path,
+) -> Result<TwoTierSearcher, String> {
+    if let Some(lexical) = open_lexical_searcher(index_dir)? {
+        searcher = searcher.with_lexical(lexical);
+    }
+    Ok(searcher)
+}
+
+#[cfg(not(feature = "lexical-bm25"))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "signature mirrors the lexical-bm25 implementation"
+)]
+fn attach_lexical_searcher(
+    searcher: TwoTierSearcher,
+    _index_dir: &Path,
+) -> Result<TwoTierSearcher, String> {
+    Ok(searcher)
+}
+
+#[cfg(feature = "lexical-bm25")]
+fn open_lexical_searcher(index_dir: &Path) -> Result<Option<Arc<dyn LexicalSearch>>, String> {
+    let lexical_dir = index_dir.join("lexical");
+    if !lexical_dir.exists() {
+        return Ok(None);
+    }
+
+    TantivyIndex::open(&lexical_dir)
+        .map(|lexical| Some(Arc::new(lexical) as Arc<dyn LexicalSearch>))
+        .map_err(|error| {
+            format!(
+                "Failed to open lexical index at {}: {error}",
+                lexical_dir.display()
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "lexical-bm25")]
+    use crate::search::{EmbedderStack, IndexBuilder, IndexableDocument};
 
     type TestResult = Result<(), String>;
 
@@ -1654,6 +2221,198 @@ mod tests {
 
         assert_eq!(cached_degraded.len(), 1);
         assert_eq!(cached_degraded[0].code, "index_missing");
+        Ok(())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn search_sync_attaches_rebuilt_lexical_index_for_literal_queries() -> TestResult {
+        let index_dir = unique_test_dir("lexical-fusion");
+        let build_index_dir = index_dir.clone();
+        let documents = vec![
+            IndexableDocument::new(
+                "mem-forbidden-deps",
+                "Forbidden deps: tokio rusqlite petgraph hyper axum tower reqwest.",
+            ),
+            IndexableDocument::new(
+                "mem-release-format",
+                "Run cargo fmt --check and cargo clippy before release.",
+            ),
+            IndexableDocument::new(
+                "mem-runtime",
+                "Asupersync is the runtime foundation for cancellation budgets.",
+            ),
+        ];
+
+        crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
+            let stack = EmbedderStack::from_parts(
+                Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>,
+                None,
+            );
+            IndexBuilder::new(&build_index_dir)
+                .with_embedder_stack(stack)
+                .add_documents(documents)
+                .build(&cx)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok::<(), String>(())
+        })
+        .map_err(|error| error.to_string())??;
+
+        assert!(open_lexical_searcher(&index_dir)?.is_some());
+
+        let config = TwoTierConfig {
+            explain: true,
+            ..TwoTierConfig::default()
+        };
+        let (hits, errors) = search_sync(&index_dir, "forbidden dependencies", 5, config, true)?;
+
+        assert!(errors.is_empty(), "search returned errors: {errors:?}");
+        let literal_hit = hits
+            .iter()
+            .find(|hit| hit.doc_id == "mem-forbidden-deps")
+            .ok_or_else(|| format!("literal lexical hit missing from results: {hits:?}"))?;
+        assert!(
+            matches!(
+                literal_hit.source,
+                ScoreSource::Lexical | ScoreSource::Hybrid
+            ),
+            "literal hit should carry lexical/hybrid source, got {:?}",
+            literal_hit.source
+        );
+        assert!(
+            literal_hit.lexical_score.is_some_and(|score| score > 0.0),
+            "literal hit should include a positive lexical score: {literal_hit:?}"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn diag_search_report_exposes_prefusion_arms_and_fusion_contributions() -> TestResult {
+        let workspace = unique_test_dir("diag-search-workspace");
+        let index_dir = workspace.join("index");
+        let build_index_dir = index_dir.clone();
+        let documents = vec![
+            IndexableDocument::new(
+                "mem-forbidden-deps",
+                "Forbidden dependencies: tokio rusqlite petgraph hyper axum tower reqwest.",
+            ),
+            IndexableDocument::new(
+                "mem-release-format",
+                "Run cargo fmt --check and cargo clippy before release.",
+            ),
+            IndexableDocument::new(
+                "mem-runtime",
+                "Asupersync is the runtime foundation for cancellation budgets.",
+            ),
+        ];
+
+        crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
+            let stack = EmbedderStack::from_parts(
+                Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>,
+                None,
+            );
+            IndexBuilder::new(&build_index_dir)
+                .with_embedder_stack(stack)
+                .add_documents(documents)
+                .build(&cx)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok::<(), String>(())
+        })
+        .map_err(|error| error.to_string())??;
+
+        let report = run_diag_search(&SearchOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(workspace.join("ee.db")),
+            index_dir: Some(index_dir),
+            query: "forbidden dependencies".to_string(),
+            limit: 5,
+            speed: SpeedMode::Default,
+            explain: true,
+            relevance_floor: Some(0.0),
+        })
+        .map_err(|error| error.to_string())?;
+        let json = report.data_json();
+
+        assert_eq!(json["schema"], DIAG_SEARCH_SCHEMA_V1);
+        assert_eq!(json["command"], "diag search");
+        assert_eq!(json["preFusion"]["lexical"]["available"], true);
+        assert_eq!(json["preFusion"]["lexical"]["scoreScale"], "bm25_tfidf");
+        assert_eq!(
+            json["preFusion"]["semanticFast"]["scoreScale"],
+            "cosine_similarity"
+        );
+        assert!(
+            json["preFusion"]["lexical"]["results"]
+                .as_array()
+                .is_some_and(|results| results
+                    .iter()
+                    .any(|hit| hit["docId"] == "mem-forbidden-deps")),
+            "lexical arm should expose the literal pre-fusion hit: {json}"
+        );
+        assert_eq!(
+            json["fusion"]["algorithm"], "reciprocal_rank_fusion",
+            "fusion algorithm must be explicit"
+        );
+        assert!(
+            json["fusion"]["perDocContribution"]
+                .as_array()
+                .is_some_and(|entries| entries.iter().any(|entry| {
+                    entry["docId"] == "mem-forbidden-deps"
+                        && entry["lexicalContribution"]
+                            .as_f64()
+                            .is_some_and(|score| score > 0.0)
+                })),
+            "fusion contribution should expose lexical rank contribution: {json}"
+        );
+        assert!(
+            json["final"]["metrics"]["sourceCounts"]["lexical"]
+                .as_u64()
+                .unwrap_or(0)
+                + json["final"]["metrics"]["sourceCounts"]["hybrid"]
+                    .as_u64()
+                    .unwrap_or(0)
+                > 0,
+            "final search metrics should retain lexical/hybrid source evidence: {json}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn diag_search_fusion_contribution_uses_rrf_rank_formula() -> TestResult {
+        let lexical = vec![SearchArmHit {
+            doc_id: "mem-a".to_string(),
+            raw_score: 8.0,
+            rank: 1,
+        }];
+        let semantic = vec![
+            SearchArmHit {
+                doc_id: "mem-b".to_string(),
+                raw_score: 0.8,
+                rank: 1,
+            },
+            SearchArmHit {
+                doc_id: "mem-a".to_string(),
+                raw_score: 0.7,
+                rank: 2,
+            },
+        ];
+
+        let fusion = build_fusion_diagnostics(&lexical, &semantic, 60.0, 10);
+        let mem_a = fusion
+            .per_doc_contribution
+            .iter()
+            .find(|entry| entry.doc_id == "mem-a")
+            .ok_or_else(|| "mem-a contribution present".to_string())?;
+
+        assert_eq!(mem_a.lexical_rank, Some(1));
+        assert_eq!(mem_a.semantic_rank, Some(2));
+        let expected = (1.0 / 61.0) + (1.0 / 62.0);
+        assert!((mem_a.fused_score - expected).abs() < 0.000_001);
         Ok(())
     }
 
@@ -2242,7 +3001,9 @@ mod tests {
         let json = metrics.data_json();
         // f32 -> f64 widening introduces sub-epsilon drift (0.0500000007…);
         // compare with tolerance instead of exact equality.
-        let floor = json["relevanceFloor"].as_f64().expect("floor present");
+        let Some(floor) = json["relevanceFloor"].as_f64() else {
+            panic!("floor present: {json}");
+        };
         assert!((floor - 0.05).abs() < 1e-5, "floor mismatch: got {floor}");
         assert_eq!(json["candidatesAboveFloor"], 1);
         assert_eq!(json["candidatesBelowFloor"], 2);
@@ -2371,8 +3132,12 @@ mod tests {
         let weak_hits = vec![synthetic_hit("a", 0.06)];
         let good = RetrievalMetrics::from_hits_with_floor(10, 5.0, &good_hits, 0, Some(0.05), 0);
         let weak = RetrievalMetrics::from_hits_with_floor(10, 5.0, &weak_hits, 0, Some(0.05), 9);
-        let good_score = good.honest_quality_score().expect("good");
-        let weak_score = weak.honest_quality_score().expect("weak");
+        let Some(good_score) = good.honest_quality_score() else {
+            panic!("good score present");
+        };
+        let Some(weak_score) = weak.honest_quality_score() else {
+            panic!("weak score present");
+        };
         assert!(
             good_score > weak_score,
             "expected good {good_score} > weak {weak_score}"
@@ -2388,7 +3153,9 @@ mod tests {
         let metrics = RetrievalMetrics::from_hits_with_floor(10, 5.0, &hits, 0, Some(0.05), 1);
         let json = metrics.data_json();
         assert_eq!(json["qualityAssessment"], "good");
-        let score = json["honestQualityScore"].as_f64().expect("score present");
+        let Some(score) = json["honestQualityScore"].as_f64() else {
+            panic!("score present: {json}");
+        };
         assert!((0.0..=1.0).contains(&score));
     }
 
