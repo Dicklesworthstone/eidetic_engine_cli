@@ -123,3 +123,6 @@ mod context_pack_dual_render;
 
 #[path = "contracts/schema_roundtrip.rs"]
 mod schema_roundtrip;
+
+#[path = "contracts/audit_event_coverage.rs"]
+mod audit_event_coverage;

@@ -799,7 +799,10 @@ fn audit_context_pack_assembly(
     let Ok(conn) = DbConnection::open_file(database_path) else {
         return;
     };
-    let workspace_id = crate::core::curate::stable_workspace_id(workspace_path);
+    let canonical_workspace = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    let workspace_id = crate::core::curate::stable_workspace_id(&canonical_workspace);
     let query_hash = crate::obs::audit_events::query_hash(&response.data.request.query);
     let pack_id_for_audit = response
         .data

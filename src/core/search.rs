@@ -1328,7 +1328,16 @@ fn audit_append_best_effort(
         target_id: target_id.map(str::to_owned),
         details,
     };
-    let _ = conn.insert_audit(&audit_id, &input);
+    if let Err(error) = conn.insert_audit(&audit_id, &input) {
+        // Don't propagate but surface via tracing so issues are visible
+        // when looking at the response logs.
+        tracing::warn!(
+            target: "ee::core::search::audit",
+            action,
+            error = %error,
+            "best-effort audit append failed"
+        );
+    }
 }
 
 pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> {
@@ -1444,7 +1453,14 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
                 .database_path
                 .clone()
                 .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
-            let workspace_id = crate::core::curate::stable_workspace_id(&options.workspace_path);
+            // Match memory_command_workspace_id's canonicalize-then-hash so the
+            // audit row joins to the same workspace the memory was written
+            // under (especially important on macOS where /tmp -> /private/tmp).
+            let canonical_workspace = options
+                .workspace_path
+                .canonicalize()
+                .unwrap_or_else(|_| options.workspace_path.clone());
+            let workspace_id = crate::core::curate::stable_workspace_id(&canonical_workspace);
             let q_hash = audit_query_hash(&options.query);
             let source_arms: Vec<&str> = above_floor
                 .iter()

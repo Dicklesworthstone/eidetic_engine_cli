@@ -2306,6 +2306,21 @@ pub fn get_memory_details(options: &GetMemoryOptions<'_>) -> MemoryShowReport {
         Err(e) => return MemoryShowReport::error(format!("Failed to query tags: {e}")),
     };
 
+    // Bead bd-17c65.7.7 (G8): best-effort audit row so L3 has a
+    // last_accessed signal for `ee memory show` / `ee show <mem_id>`
+    // alias dispatch and G1 can count show-inspection activity. Failure
+    // to append is silently swallowed — never block the read.
+    let details = serde_json::json!({"surface": "memory.show"}).to_string();
+    let audit_input = crate::db::CreateAuditInput {
+        workspace_id: Some(memory.workspace_id.clone()),
+        actor: None,
+        action: crate::db::audit_actions::MEMORY_SHOW.to_owned(),
+        target_type: Some("memory".to_owned()),
+        target_id: Some(options.memory_id.to_owned()),
+        details: Some(details),
+    };
+    let _ = conn.insert_audit(&crate::db::generate_audit_id(), &audit_input);
+
     MemoryShowReport::found(MemoryDetails { memory, tags })
 }
 
