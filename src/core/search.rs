@@ -2009,6 +2009,42 @@ fn search_hit_score_order(left: &SearchHit, right: &SearchHit) -> std::cmp::Orde
         .then_with(|| left.doc_id.cmp(&right.doc_id))
 }
 
+fn option_scores_equivalent(left: Option<f32>, right: Option<f32>) -> bool {
+    const COMPONENT_TIE_EPSILON: f32 = 0.000_001;
+
+    match (left, right) {
+        (Some(left), Some(right)) if left.is_finite() && right.is_finite() => {
+            (left - right).abs() <= COMPONENT_TIE_EPSILON
+        }
+        (Some(left), Some(right)) => left.to_bits() == right.to_bits(),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn search_hit_component_scores_equivalent(left: &SearchHit, right: &SearchHit) -> bool {
+    left.source == right.source
+        && option_scores_equivalent(left.fast_score, right.fast_score)
+        && option_scores_equivalent(left.quality_score, right.quality_score)
+        && option_scores_equivalent(left.lexical_score, right.lexical_score)
+        && option_scores_equivalent(left.rerank_score, right.rerank_score)
+}
+
+fn canonicalize_equivalent_component_scores(hits: &mut [SearchHit]) {
+    for left_index in 0..hits.len() {
+        for right_index in (left_index + 1)..hits.len() {
+            if search_hit_component_scores_equivalent(&hits[left_index], &hits[right_index])
+                && hits[left_index].score.is_finite()
+                && hits[right_index].score.is_finite()
+            {
+                let canonical_score = hits[left_index].score.max(hits[right_index].score);
+                hits[left_index].score = canonical_score;
+                hits[right_index].score = canonical_score;
+            }
+        }
+    }
+}
+
 fn search_sync(
     index_dir: &Path,
     query: &str,
@@ -2057,6 +2093,7 @@ fn search_sync(
                         .into_iter()
                         .map(|result| search_hit_from_scored_result(result, explain))
                         .collect();
+                    canonicalize_equivalent_component_scores(&mut hits);
                     hits.sort_by(search_hit_score_order);
                     Ok((hits, Vec::new()))
                 }
@@ -3069,6 +3106,22 @@ mod tests {
             metadata: None,
             explanation: None,
         }
+    }
+
+    #[test]
+    fn component_score_ties_use_memory_id_order_not_rank_fusion_artifacts() {
+        let mut hits = vec![synthetic_hit("mem_b", 0.10), synthetic_hit("mem_a", 0.20)];
+        for hit in &mut hits {
+            hit.fast_score = Some(0.42);
+        }
+
+        canonicalize_equivalent_component_scores(&mut hits);
+        hits.sort_by(search_hit_score_order);
+
+        assert_eq!(hits[0].doc_id, "mem_a");
+        assert_eq!(hits[1].doc_id, "mem_b");
+        assert!((hits[0].score - 0.20).abs() < 1e-6);
+        assert!((hits[1].score - 0.20).abs() < 1e-6);
     }
 
     #[test]

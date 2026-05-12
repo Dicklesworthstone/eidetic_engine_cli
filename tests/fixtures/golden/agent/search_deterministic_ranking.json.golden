@@ -8,9 +8,9 @@
     "results": [
       {
         "docId": "mem_00000000000000000000010001",
-        "score": 0.5892333984375,
-        "source": "semantic_fast",
-        "why": "Score 0.5892 via fast semantic (0.59)",
+        "score": 0.032786883413791656,
+        "source": "hybrid",
+        "why": "Score 0.0328 via RRF fusion of 2 signals",
         "provenance": [
           {
             "kind": "search_document",
@@ -18,49 +18,40 @@
           }
         ],
         "fastScore": 0.5892333984375,
+        "lexicalScore": 1.7022392749786377,
+        "metadata": {
+          "created_at": "2026-04-30T10:00:00+00:00",
+          "kind": "rule",
+          "level": "procedural",
+          "schema": "ee.search.document.v1",
+          "source": "memory",
+          "workspace": "[WORKSPACE]"
+        },
         "explanation": {
-          "summary": "Score 0.5892 via fast semantic (0.59)",
+          "summary": "Score 0.0328 via RRF fusion of 2 signals",
           "factors": [
             {
               "name": "semantic_fast",
               "value": 0.5892333984375,
               "contribution": "hash-based embedding similarity",
               "sourceField": "fast_score",
-              "formula": "score = fast_score"
-            }
-          ]
-        }
-      },
-      {
-        "docId": "mem_00000000000000000000010003",
-        "score": 0.316162109375,
-        "source": "semantic_fast",
-        "why": "Score 0.3162 via fast semantic (0.32)",
-        "provenance": [
-          {
-            "kind": "search_document",
-            "docId": "mem_00000000000000000000010003"
-          }
-        ],
-        "fastScore": 0.316162109375,
-        "explanation": {
-          "summary": "Score 0.3162 via fast semantic (0.32)",
-          "factors": [
+              "formula": "component = fast_score; final score = score"
+            },
             {
-              "name": "semantic_fast",
-              "value": 0.316162109375,
-              "contribution": "hash-based embedding similarity",
-              "sourceField": "fast_score",
-              "formula": "score = fast_score"
+              "name": "lexical",
+              "value": 1.7022392749786377,
+              "contribution": "BM25 term matching",
+              "sourceField": "lexical_score",
+              "formula": "component = lexical_score; final score = score"
             }
           ]
         }
       },
       {
         "docId": "mem_00000000000000000000010002",
-        "score": 0.28857421875,
-        "source": "semantic_fast",
-        "why": "Score 0.2886 via fast semantic (0.29)",
+        "score": 0.0320020467042923,
+        "source": "hybrid",
+        "why": "Score 0.0320 via RRF fusion of 2 signals",
         "provenance": [
           {
             "kind": "search_document",
@@ -68,15 +59,72 @@
           }
         ],
         "fastScore": 0.28857421875,
+        "lexicalScore": 1.0611357688903809,
+        "metadata": {
+          "created_at": "2026-04-30T10:01:00+00:00",
+          "kind": "rule",
+          "level": "procedural",
+          "schema": "ee.search.document.v1",
+          "source": "memory",
+          "workspace": "[WORKSPACE]"
+        },
         "explanation": {
-          "summary": "Score 0.2886 via fast semantic (0.29)",
+          "summary": "Score 0.0320 via RRF fusion of 2 signals",
           "factors": [
             {
               "name": "semantic_fast",
               "value": 0.28857421875,
               "contribution": "hash-based embedding similarity",
               "sourceField": "fast_score",
-              "formula": "score = fast_score"
+              "formula": "component = fast_score; final score = score"
+            },
+            {
+              "name": "lexical",
+              "value": 1.0611357688903809,
+              "contribution": "BM25 term matching",
+              "sourceField": "lexical_score",
+              "formula": "component = lexical_score; final score = score"
+            }
+          ]
+        }
+      },
+      {
+        "docId": "mem_00000000000000000000010003",
+        "score": 0.0320020467042923,
+        "source": "hybrid",
+        "why": "Score 0.0320 via RRF fusion of 2 signals",
+        "provenance": [
+          {
+            "kind": "search_document",
+            "docId": "mem_00000000000000000000010003"
+          }
+        ],
+        "fastScore": 0.316162109375,
+        "lexicalScore": 0.6179813742637634,
+        "metadata": {
+          "created_at": "2026-04-30T10:02:00+00:00",
+          "kind": "fact",
+          "level": "episodic",
+          "schema": "ee.search.document.v1",
+          "source": "memory",
+          "workspace": "[WORKSPACE]"
+        },
+        "explanation": {
+          "summary": "Score 0.0320 via RRF fusion of 2 signals",
+          "factors": [
+            {
+              "name": "semantic_fast",
+              "value": 0.316162109375,
+              "contribution": "hash-based embedding similarity",
+              "sourceField": "fast_score",
+              "formula": "component = fast_score; final score = score"
+            },
+            {
+              "name": "lexical",
+              "value": 0.6179813742637634,
+              "contribution": "BM25 term matching",
+              "sourceField": "lexical_score",
+              "formula": "component = lexical_score; final score = score"
             }
           ]
         }
@@ -91,24 +139,71 @@
       "elapsedMs": 0.0,
       "sourceCounts": {
         "lexical": 0,
-        "semanticFast": 3,
+        "semanticFast": 0,
         "semanticQuality": 0,
-        "hybrid": 0,
+        "hybrid": 3,
         "reranked": 0
       },
       "scoreDistribution": {
-        "top": 0.5892329812049866,
-        "min": 0.2885740101337433,
-        "max": 0.5892329812049866,
-        "mean": 0.3979899883270264
+        "top": 0.03278699889779091,
+        "min": 0.03200199827551842,
+        "max": 0.03278699889779091,
+        "mean": 0.03226400166749954
       },
       "fieldCoverage": {
         "fastScoreCount": 3,
         "qualityScoreCount": 0,
-        "lexicalScoreCount": 0,
+        "lexicalScoreCount": 3,
         "rerankScoreCount": 0,
-        "metadataCount": 0,
+        "metadataCount": 3,
         "explanationCount": 3
+      },
+      "relevanceFloor": 0.0,
+      "candidatesAboveFloor": 3,
+      "candidatesBelowFloor": 0,
+      "qualityAssessment": "good",
+      "honestQualityScore": 0.995212972164154
+    },
+    "profileRuntime": {
+      "schema": "ee.profile.runtime.v1",
+      "activeProfile": "swarm",
+      "source": "host_probe",
+      "budgets": {
+        "search": {
+          "candidateLimit": 240,
+          "concurrentIndexReaders": 8,
+          "staleIndexTolerance": "repair_hint"
+        },
+        "pack": {
+          "maxTokens": 8000,
+          "maxCandidateMemories": 160,
+          "explanationVerbosity": "full"
+        },
+        "cache": {
+          "memoryCapMb": 2048,
+          "entryCap": 8192,
+          "hotsetPrewarmLimit": 512
+        },
+        "writeSpool": {
+          "queueCap": 8192,
+          "batchCap": 256,
+          "retryBudget": 12
+        },
+        "steward": {
+          "maintenanceWindowMs": 5000,
+          "graphRefreshBudget": 4096,
+          "daemonPrewarm": true
+        },
+        "verification": {
+          "recipe": "full",
+          "targetDirPosture": "isolated",
+          "timeoutClass": "extended",
+          "heavyStrategy": "rch_default"
+        },
+        "diagnostics": {
+          "supportBundleProfile": "full",
+          "redaction": "policy_applied"
+        }
       }
     },
     "errors": [],

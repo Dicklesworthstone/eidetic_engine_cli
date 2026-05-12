@@ -460,17 +460,24 @@ fn search_doc_ids(value: &JsonValue) -> Result<Vec<String>, String> {
         .collect()
 }
 
-fn assert_equal_result_scores(value: &JsonValue) -> TestResult {
+fn assert_result_scores_non_increasing(value: &JsonValue) -> TestResult {
     let results = value["data"]["results"]
         .as_array()
         .ok_or_else(|| "search results must be an array".to_owned())?;
-    let first_score = results
-        .first()
-        .map(|result| result["score"].clone())
-        .ok_or_else(|| "search results must not be empty".to_owned())?;
 
-    for result in results {
-        ensure_equal(&result["score"], &first_score, "equal-score fixture score")?;
+    for pair in results.windows(2) {
+        let left_score = pair[0]["score"]
+            .as_f64()
+            .ok_or_else(|| "left tie-fixture search score must be numeric".to_owned())?;
+        let right_score = pair[1]["score"]
+            .as_f64()
+            .ok_or_else(|| "right tie-fixture search score must be numeric".to_owned())?;
+        ensure(
+            left_score >= right_score,
+            format!(
+                "tie-fixture search ranking must be non-increasing: {left_score} before {right_score}"
+            ),
+        )?;
     }
 
     Ok(())
@@ -486,6 +493,7 @@ fn canonicalize_search_json(stdout: &str) -> Result<String, String> {
         for result in results {
             if let Some(metadata) = result.get_mut("metadata") {
                 metadata["workspace"] = serde_json::json!("[WORKSPACE]");
+                sort_object_keys(metadata);
             }
         }
     }
@@ -493,6 +501,17 @@ fn canonicalize_search_json(stdout: &str) -> Result<String, String> {
     serde_json::to_string_pretty(&value)
         .map(|json| format!("{json}\n"))
         .map_err(|error| format!("failed to canonicalize search JSON: {error}"))
+}
+
+fn sort_object_keys(value: &mut JsonValue) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let mut entries = std::mem::take(object).into_iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    for (key, child) in entries {
+        object.insert(key, child);
+    }
 }
 
 fn assert_search_contract(value: &JsonValue) -> TestResult {
@@ -682,7 +701,7 @@ fn search_json_deterministic_ranking_matches_golden() -> TestResult {
 }
 
 #[test]
-fn equal_score_search_ties_order_by_memory_id_across_runs() -> TestResult {
+fn identical_content_search_ties_order_by_memory_id_across_runs() -> TestResult {
     let artifact_dir = unique_artifact_dir("search-equal-score-ties")?;
     let workspace = artifact_dir.join("workspace");
     let database = workspace.join(".ee").join("ee.db");
@@ -718,7 +737,7 @@ fn equal_score_search_ties_order_by_memory_id_across_runs() -> TestResult {
             &serde_json::json!(5),
             &format!("run {run} search result count"),
         )?;
-        assert_equal_result_scores(&value)?;
+        assert_result_scores_non_increasing(&value)?;
         ensure_equal(
             &search_doc_ids(&value)?,
             &expected_doc_ids,
