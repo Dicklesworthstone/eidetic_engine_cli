@@ -1927,10 +1927,13 @@ mod tests {
             &serde_json::json!("mmr_redundancy"),
             "context selection certificate objective",
         )?;
+        // Bead bd-2pe1z (A1 phase 2): selectionCertificate.steps[] is gone;
+        // the per-item rank trace is now inline on items[]. Read from the
+        // canonical items[] location instead.
         ensure_equal(
-            &value["data"]["pack"]["selectionCertificate"]["steps"][0]["memoryId"],
+            &value["data"]["pack"]["items"][0]["memoryId"],
             &serde_json::json!("mem_00000000000000000000000001"),
-            "context selection certificate memory id",
+            "canonical first-item memory id",
         )?;
 
         let items = value["data"]["pack"]["items"]

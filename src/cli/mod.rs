@@ -4094,6 +4094,10 @@ pub struct RememberArgs {
     #[arg(long = "no-auto-link", action = ArgAction::SetTrue)]
     pub no_auto_link: bool,
 
+    /// Disable bounded remember-time curation candidate proposal.
+    #[arg(long = "no-propose-candidates", action = ArgAction::SetTrue)]
+    pub no_propose_candidates: bool,
+
     /// Confidence score (0.0 to 1.0).
     #[arg(long, default_value = "0.8")]
     pub confidence: f32,
@@ -20501,6 +20505,12 @@ impl RememberMemoryReport {
         if !self.dry_run && !self.auto_links.is_empty() {
             output.push_str(&format!("  Auto links: {}\n", self.auto_links.len()));
         }
+        if let Some(candidate) = &self.curation_candidate {
+            output.push_str(&format!(
+                "  Curation candidate: {}\n",
+                candidate.candidate_id
+            ));
+        }
         if let Some(index_job_id) = &self.index_job_id {
             output.push_str(&format!("  Index job: {index_job_id}\n"));
         }
@@ -20566,9 +20576,11 @@ impl RememberMemoryReport {
         let suggested_link_degradations_json = self.suggested_link_degradations_json();
         let auto_links_json = self.auto_links_json();
         let auto_link_degradations_json = self.auto_link_degradations_json();
+        let curation_candidate_json = self.curation_candidate_json();
+        let curation_candidate_degradations_json = self.curation_candidate_degradations_json();
 
         let mut json = format!(
-            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"auto_links":{},"auto_link_status":"{}","auto_link_degradations":{},"redaction_status":"{}"}}"#,
+            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"auto_links":{},"auto_link_status":"{}","auto_link_degradations":{},"curation_candidate":{},"curation_candidate_status":"{}","curation_candidate_degradations":{},"redaction_status":"{}"}}"#,
             self.version,
             self.memory_id,
             escape_json_string(&self.workspace_id),
@@ -20598,6 +20610,9 @@ impl RememberMemoryReport {
             auto_links_json,
             escape_json_string(&self.auto_link_status),
             auto_link_degradations_json,
+            curation_candidate_json,
+            escape_json_string(&self.curation_candidate_status),
+            curation_candidate_degradations_json,
             escape_json_string(&self.redaction_status)
         );
         json.push('}');
@@ -20697,6 +20712,54 @@ impl RememberMemoryReport {
             .join(",");
         format!("[{items}]")
     }
+
+    fn curation_candidate_json(&self) -> String {
+        use crate::output::escape_json_string;
+
+        self.curation_candidate.as_ref().map_or_else(
+            || "null".to_owned(),
+            |candidate| {
+                let member_ids = candidate
+                    .member_memory_ids
+                    .iter()
+                    .map(|id| format!("\"{}\"", escape_json_string(id)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let audit_id = candidate.audit_id.as_ref().map_or("null".to_owned(), |id| {
+                    format!("\"{}\"", escape_json_string(id))
+                });
+                format!(
+                    r#"{{"candidate_id":"{}","member_memory_ids":[{}],"target_memory_id":"{}","candidate_type":"{}","audit_id":{},"reason":"{}"}}"#,
+                    escape_json_string(&candidate.candidate_id),
+                    member_ids,
+                    escape_json_string(&candidate.target_memory_id),
+                    escape_json_string(&candidate.candidate_type),
+                    audit_id,
+                    escape_json_string(&candidate.reason)
+                )
+            },
+        )
+    }
+
+    fn curation_candidate_degradations_json(&self) -> String {
+        use crate::output::escape_json_string;
+
+        let items = self
+            .curation_candidate_degradations
+            .iter()
+            .map(|degradation| {
+                format!(
+                    r#"{{"code":"{}","severity":"{}","message":"{}","repair":"{}"}}"#,
+                    escape_json_string(&degradation.code),
+                    escape_json_string(&degradation.severity),
+                    escape_json_string(&degradation.message),
+                    escape_json_string(&degradation.repair)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("[{items}]")
+    }
 }
 
 impl WorkflowCloseReport {
@@ -20762,6 +20825,7 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberMemoryRepor
         valid_to: args.valid_to.as_deref(),
         dry_run: args.dry_run,
         auto_link: !args.no_auto_link,
+        propose_candidates: !args.no_propose_candidates,
     })
 }
 
@@ -33050,6 +33114,31 @@ mod tests {
             Some(Command::Remember(ref args)) => {
                 ensure_equal(&args.no_auto_link, &true, "no_auto_link flag")
             }
+            _ => Err("expected Remember command".to_string()),
+        }
+    }
+
+    #[test]
+    fn remember_command_accepts_no_propose_candidates_flag() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "remember",
+            "Capture a memory without curation proposal.",
+            "--no-propose-candidates",
+        ])
+        .map_err(|error| {
+            format!(
+                "failed to parse remember no-propose-candidates: {:?}",
+                error.kind()
+            )
+        })?;
+
+        match parsed.command {
+            Some(Command::Remember(ref args)) => ensure_equal(
+                &args.no_propose_candidates,
+                &true,
+                "no_propose_candidates flag",
+            ),
             _ => Err("expected Remember command".to_string()),
         }
     }

@@ -103,6 +103,7 @@ fn seed_fixture(memory_count: usize) -> Fixture {
             valid_to: None,
             dry_run: false,
             auto_link: true,
+            propose_candidates: false,
         })
         .unwrap_or_else(|error| panic!("failed to seed benchmark memory {index}: {error:?}"));
 

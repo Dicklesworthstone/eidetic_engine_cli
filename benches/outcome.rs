@@ -94,6 +94,7 @@ fn remember_seed_memory(workspace_path: &Path, db_path: &Path, index: usize) {
         valid_to: None,
         dry_run: false,
         auto_link: true,
+        propose_candidates: false,
     };
     remember_memory(&options).expect("seed memory");
 }
@@ -125,6 +126,7 @@ fn seed_fixture(temp_dir: &Path, memory_count: usize) -> OutcomeFixture {
         valid_to: None,
         dry_run: false,
         auto_link: true,
+        propose_candidates: false,
     })
     .expect("create target memory");
 

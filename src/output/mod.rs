@@ -1399,7 +1399,8 @@ pub fn compute_representative_size_diagnostics() -> Vec<(&'static str, OutputSiz
 /// Render a context response as JSON (ee.response.v1 envelope).
 #[must_use]
 pub fn render_context_response_json(response: &ContextResponse) -> String {
-    let mut b = JsonBuilder::with_capacity(2048);
+    let rendered_text = render_context_response_markdown(response);
+    let mut b = JsonBuilder::with_capacity(2048 + rendered_text.len());
     b.field_str("schema", response.schema);
     b.field_bool("success", response.success);
     b.field_object("data", |d| {
@@ -1428,6 +1429,7 @@ pub fn render_context_response_json(response: &ContextResponse) -> String {
                 Some(hash) => pack.field_str("hash", hash),
                 None => pack.field_raw("hash", "null"),
             };
+            pack.field_str("text", &rendered_text);
             pack.field_object("budget", |budget| {
                 budget.field_u32("maxTokens", response.data.pack.budget.max_tokens());
                 budget.field_u32("usedTokens", response.data.pack.used_tokens);
@@ -1548,6 +1550,11 @@ pub fn render_context_response_json(response: &ContextResponse) -> String {
                 obj.field_str("reason", omission.reason.as_str());
             });
             let footer = response.data.pack.provenance_footer();
+            // Bead bd-2pe1z (A1 phase 2): drop provenanceFooter.entries[]. Each
+            // entry's sourceIndex is now emitted inline on the matching
+            // items[] entry (A1 phase 1). The summary fields (memoryCount,
+            // sourceCount, schemes) remain — they are aggregate stats with no
+            // per-item home.
             pack.field_object("provenanceFooter", |obj| {
                 obj.field_raw("memoryCount", &footer.memory_count.to_string());
                 obj.field_raw("sourceCount", &footer.source_count.to_string());
@@ -1555,7 +1562,6 @@ pub fn render_context_response_json(response: &ContextResponse) -> String {
                     "schemes",
                     &string_array_json(footer.schemes.iter().copied()),
                 );
-                obj.field_array_of_objects("entries", &footer.entries, build_item_provenance);
             });
         });
         d.field_array_of_objects("degraded", &response.data.degraded, |obj, degraded| {
@@ -1900,19 +1906,30 @@ fn build_pack_selection_certificate(obj: &mut JsonBuilder, certificate: &PackSel
     );
     obj.field_bool("monotone", certificate.monotone);
     obj.field_bool("submodular", certificate.submodular);
-    obj.field_array_of_objects(
-        "selectedItems",
-        &certificate.selected_items,
-        build_pack_selected_item,
-    );
+    // Bead bd-2pe1z (A1 phase 2): drop selectionCertificate.selectedItems[]
+    // and selectionCertificate.steps[]. Every per-item field they carried
+    // (tokenCost, feasible, marginalGain, objectiveValue, coveredFeatures)
+    // is now emitted inline on each items[] entry by
+    // render_context_response_json (A1 phase 1).
+    //
+    // rejectedFrontier[] stays here: it describes items that were considered
+    // but NOT selected, so they have no items[] entry to attach to. A future
+    // A5 bead consolidates rejectedFrontier[] with pack.omitted[] into a
+    // single pack.skipped[] list.
     obj.field_array_of_objects(
         "rejectedFrontier",
         &certificate.rejected_frontier,
         build_pack_rejected_frontier_item,
     );
-    obj.field_array_of_objects("steps", &certificate.steps, build_pack_selection_step);
 }
 
+// Bead bd-2pe1z (A1 phase 2): build_pack_selected_item and
+// build_pack_selection_step are no longer wired into the certificate JSON
+// because their per-item fields are now emitted inline on each items[]
+// entry. Kept as dead code under #[allow] so the per-item-shape helpers
+// remain available if a future surface needs them (e.g. ee pack replay)
+// without re-deriving the formatting.
+#[allow(dead_code)]
 fn build_pack_selected_item(obj: &mut JsonBuilder, item: &PackSelectedItem) {
     obj.field_u32("rank", item.rank);
     obj.field_str("memoryId", &item.memory_id.to_string());
@@ -1927,6 +1944,7 @@ fn build_pack_rejected_frontier_item(obj: &mut JsonBuilder, item: &PackRejectedF
     obj.field_bool("feasible", item.feasible);
 }
 
+#[allow(dead_code)]
 fn build_pack_selection_step(obj: &mut JsonBuilder, step: &PackSelectionStep) {
     obj.field_u32("rank", step.rank);
     obj.field_str("memoryId", &step.memory_id.to_string());
@@ -1950,6 +1968,7 @@ fn build_rendered_provenance(obj: &mut JsonBuilder, source: &RenderedPackProvena
     obj.field_str("note", &source.note);
 }
 
+#[allow(dead_code)]
 fn build_item_provenance(obj: &mut JsonBuilder, entry: &PackItemProvenance) {
     obj.field_u32("rank", entry.rank);
     obj.field_str("memoryId", &entry.memory_id.to_string());
@@ -11243,10 +11262,13 @@ mod tests {
             "\"provenance\":[{\"uri\":\"file://AGENTS.md#L42\",\"scheme\":\"file\",\"label\":\"AGENTS.md:L42\",\"locator\":\"L42\",\"note\":\"source evidence\"}]",
             "item provenance",
         )?;
+        // Bead bd-2pe1z (A1 phase 2): provenanceFooter no longer emits the
+        // entries[] array — sourceIndex moved inline onto items[]. Footer
+        // keeps the aggregate summary fields only.
         ensure_contains(
             &json,
-            "\"provenanceFooter\":{\"memoryCount\":1,\"sourceCount\":1,\"schemes\":[\"file\"],\"entries\":[",
-            "provenance footer",
+            "\"provenanceFooter\":{\"memoryCount\":1,\"sourceCount\":1,\"schemes\":[\"file\"]}",
+            "provenance footer summary",
         )?;
         ensure_contains(
             &json,

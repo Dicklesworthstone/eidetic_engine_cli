@@ -1629,30 +1629,24 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
             .is_some_and(|algorithm| !algorithm.is_empty()),
         "context pack selection certificate must name the deterministic algorithm",
     )?;
-    let selected_items = context_json["data"]["pack"]["selectionCertificate"]["selectedItems"]
-        .as_array()
-        .ok_or_else(|| "selection certificate selectedItems must be an array".to_string())?;
-    ensure_equal(
-        &selected_items.len(),
-        &pack_items.len(),
-        "selection certificate selected item count",
-    )?;
+    // Bead bd-2pe1z (A1 phase 2): selectionCertificate.selectedItems and
+    // selectionCertificate.steps were collapsed into the canonical items[]
+    // array. Each items[] entry now carries tokenCost, feasible,
+    // scores.marginalGain, scores.objectiveValue, coveredFeatures inline,
+    // so the same checks read from items[] instead of two parallel arrays.
     ensure(
-        selected_items
+        pack_items
             .iter()
             .any(|item| item["memoryId"].as_str() == Some(rule_id)),
-        "selection certificate must include the release rule memory",
+        "canonical items[] must include the release rule memory",
     )?;
-    let selection_steps = context_json["data"]["pack"]["selectionCertificate"]["steps"]
-        .as_array()
-        .ok_or_else(|| "selection certificate steps must be an array".to_string())?;
     ensure(
-        selection_steps.iter().all(|step| {
-            step["marginalGain"].as_f64().is_some()
-                && step["objectiveValue"].as_f64().is_some()
-                && step["tokenCost"].as_u64().is_some()
+        pack_items.iter().all(|item| {
+            item["scores"]["marginalGain"].as_f64().is_some()
+                && item["scores"]["objectiveValue"].as_f64().is_some()
+                && item["tokenCost"].as_u64().is_some()
         }),
-        "selection certificate steps must expose formulaic objective components",
+        "canonical items[] must expose formulaic objective components inline",
     )?;
 
     let why = run_ee(&["--workspace", &workspace, "why", rule_id, "--json"])?;

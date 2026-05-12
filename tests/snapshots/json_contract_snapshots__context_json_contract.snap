@@ -107,30 +107,7 @@ expression: context
         "totalObjectiveValue": 0.306154,
         "monotone": false,
         "submodular": false,
-        "selectedItems": [
-          {
-            "rank": 1,
-            "memoryId": "mem_00000000000000000000000001",
-            "tokenCost": 8,
-            "feasible": true
-          }
-        ],
-        "rejectedFrontier": [],
-        "steps": [
-          {
-            "rank": 1,
-            "memoryId": "mem_00000000000000000000000001",
-            "marginalGain": 0.306154,
-            "objectiveValue": 0.306154,
-            "tokenCost": 8,
-            "feasible": true,
-            "coveredFeatures": [
-              "section:procedural_rules",
-              "diversity:procedural:rule:cargo",
-              "memory:mem_00000000000000000000000001"
-            ]
-          }
-        ]
+        "rejectedFrontier": []
       },
       "items": [
         {
@@ -141,7 +118,9 @@ expression: context
           "estimatedTokens": 8,
           "scores": {
             "relevance": 0.408205,
-            "utility": 0.8
+            "utility": 0.8,
+            "marginalGain": 0.306154,
+            "objectiveValue": 0.306154
           },
           "trust": {
             "class": "human_explicit",
@@ -158,7 +137,15 @@ expression: context
             }
           ],
           "why": "matched 'format before release' via semantic_fast (relevance 0.4082, utility 0.8000)",
-          "diversityKey": "procedural:rule:cargo"
+          "diversityKey": "procedural:rule:cargo",
+          "tokenCost": 8,
+          "feasible": true,
+          "coveredFeatures": [
+            "section:procedural_rules",
+            "diversity:procedural:rule:cargo",
+            "memory:mem_00000000000000000000000001"
+          ],
+          "sourceIndex": 1
         }
       ],
       "omitted": [],
@@ -167,20 +154,6 @@ expression: context
         "sourceCount": 1,
         "schemes": [
           "file"
-        ],
-        "entries": [
-          {
-            "rank": 1,
-            "memoryId": "mem_00000000000000000000000001",
-            "sourceIndex": 1,
-            "source": {
-              "uri": "file://AGENTS.md#L164-173",
-              "scheme": "file",
-              "label": "AGENTS.md:L164-173",
-              "locator": "L164-173",
-              "note": "Memory mem_00000000000000000000000001 selected for context pack; evidenceFreshness=missing_source"
-            }
-          }
         ]
       }
     },
