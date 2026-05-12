@@ -76,6 +76,30 @@ pub mod audit_actions {
     pub const RATIONALE_TRACE_CREATE: &str = "rationale_trace.create";
     pub const TRIPWIRE_CHECK: &str = "tripwire.check";
     pub const TRIPWIRE_CREATE: &str = "tripwire.create";
+
+    // ----------------------------------------------------------------------
+    // Read-surface actions (G8 / bd-17c65.7.7).
+    //
+    // Producers of `last_accessed` signals for L3 decay and access counts
+    // for G1 learn-summary aggregation. Every read surface that returns
+    // memory data writes one of these so the audit log is complete enough
+    // to drive both downstream consumers.
+    //
+    // Privacy: callsites store BLAKE3 query_hash, not raw query text.
+    // ----------------------------------------------------------------------
+
+    /// `ee search` executed against a workspace's index. One row per call.
+    pub const SEARCH_EXECUTED: &str = "search.executed";
+    /// `ee search` returned a specific memory in its result set.
+    pub const SEARCH_RETURNED_MEM: &str = "search.returned_mem";
+    /// `ee context` assembled a pack. One row per call.
+    pub const PACK_ASSEMBLED: &str = "pack.assembled";
+    /// `ee context` selected a specific memory into the pack.
+    pub const PACK_INCLUDED_MEM: &str = "pack.included_mem";
+    /// `ee memory show` / `ee show <mem_id>` fetched a memory's record.
+    pub const MEMORY_SHOW: &str = "memory.show";
+    /// `ee why <id>` returned an explanation for a memory.
+    pub const WHY_INSPECTED: &str = "why.inspected";
 }
 
 const MIGRATION_TABLE_DDL: &str = "CREATE TABLE IF NOT EXISTS ee_schema_migrations (

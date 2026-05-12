@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::db::{CreateAuditInput, DbConnection, audit_actions, generate_audit_id};
+use crate::obs::audit_events::query_hash as audit_query_hash;
+
 use super::index::{
     IndexHealth, IndexStatusError, IndexStatusOptions, IndexStatusReport, get_index_status,
 };
@@ -1297,6 +1300,37 @@ fn dedupe_hits_on_doc_id(hits: Vec<SearchHit>) -> (Vec<SearchHit>, usize) {
     (deduped, collapsed)
 }
 
+/// Best-effort audit append. Bead bd-17c65.7.7 (G8).
+///
+/// Read surfaces (search, context, why, memory show) call this after
+/// completing their primary work to record the access in the audit log
+/// for L3 decay (`last_accessed` signal) and G1 learn summary
+/// aggregation. Failures are silently swallowed — an audit append must
+/// never block or fail the user's primary operation. The audit log is
+/// best-effort enrichment, not part of the read response contract.
+fn audit_append_best_effort(
+    database_path: &Path,
+    workspace_id: Option<&str>,
+    action: &'static str,
+    target_type: Option<&str>,
+    target_id: Option<&str>,
+    details: Option<String>,
+) {
+    let Ok(conn) = DbConnection::open_file(database_path) else {
+        return;
+    };
+    let audit_id = generate_audit_id();
+    let input = CreateAuditInput {
+        workspace_id: workspace_id.map(str::to_owned),
+        actor: None,
+        action: action.to_owned(),
+        target_type: target_type.map(str::to_owned),
+        target_id: target_id.map(str::to_owned),
+        details,
+    };
+    let _ = conn.insert_audit(&audit_id, &input);
+}
+
 pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> {
     let start = Instant::now();
     let index_dir = options.resolve_index_dir();
@@ -1400,6 +1434,56 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
             } else {
                 SearchStatus::Success
             };
+
+            // Bead bd-17c65.7.7 (G8): best-effort audit-log instrumentation.
+            // One `search.executed` row per call + one `search.returned_mem`
+            // row per memory hit so L3 has a `last_accessed` signal and
+            // G1 can count search activity per workspace. Privacy: only
+            // the BLAKE3 prefix of the query reaches the audit log.
+            let database_path = options
+                .database_path
+                .clone()
+                .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
+            let workspace_id = crate::core::curate::stable_workspace_id(&options.workspace_path);
+            let q_hash = audit_query_hash(&options.query);
+            let source_arms: Vec<&str> = above_floor
+                .iter()
+                .map(|hit| hit.source.as_str())
+                .collect::<std::collections::BTreeSet<&str>>()
+                .into_iter()
+                .collect();
+            let executed_details = serde_json::json!({
+                "queryHash": &q_hash,
+                "resultCount": above_floor.len(),
+                "sourceArms": source_arms,
+                "status": status.as_str(),
+            })
+            .to_string();
+            audit_append_best_effort(
+                &database_path,
+                Some(&workspace_id),
+                audit_actions::SEARCH_EXECUTED,
+                Some("workspace"),
+                Some(&workspace_id),
+                Some(executed_details),
+            );
+            for (rank, hit) in above_floor.iter().enumerate() {
+                let returned_details = serde_json::json!({
+                    "queryHash": &q_hash,
+                    "rank": (rank + 1) as u32,
+                    "score": hit.score,
+                    "source": hit.source.as_str(),
+                })
+                .to_string();
+                audit_append_best_effort(
+                    &database_path,
+                    Some(&workspace_id),
+                    audit_actions::SEARCH_RETURNED_MEM,
+                    Some("memory"),
+                    Some(&hit.doc_id),
+                    Some(returned_details),
+                );
+            }
 
             Ok(SearchReport {
                 status,

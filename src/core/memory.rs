@@ -5680,10 +5680,7 @@ mod tests {
     #[test]
     fn remember_memory_rejects_secret_like_content_before_storage() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let secret_like_content = format!(
-            "Rotate {} before release.",
-            ["api", "key", "secret", "123"].join("_")
-        );
+        let secret_like_content = "Rotate API_KEY=sk-FAKEabc123def456ghi789jkl012 before release.";
         let result = remember_memory(&RememberMemoryOptions {
             workspace_path: temp.path(),
             database_path: None,

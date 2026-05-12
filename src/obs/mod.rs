@@ -1,5 +1,6 @@
 pub const SUBSYSTEM: &str = "obs";
 
+pub mod audit_events;
 pub mod log_envelope;
 pub mod test_log;
 
