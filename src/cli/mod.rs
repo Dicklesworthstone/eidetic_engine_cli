@@ -456,6 +456,20 @@ pub enum Command {
     /// Manage stored memories (show, list, history).
     #[command(subcommand)]
     Memory(MemoryCommand),
+    /// Top-level alias that routes by ID prefix.
+    ///
+    /// `mem_<id>` → `ee memory show <id>`
+    /// (future) `wsp_<id>` → `ee workspace show <id>`, etc.
+    ///
+    /// Bead bd-17c65.6.2 (F2). Reduces verbose `ee memory show mem_xxx`
+    /// to `ee show mem_xxx`.
+    Show(ShowAliasArgs),
+    /// Top-level alias for `ee memory link A B --relation X`.
+    Link(LinkAliasArgs),
+    /// Top-level alias for `ee memory tags <id>`.
+    Tag(TagAliasArgs),
+    /// Top-level alias for `ee memory history <id>`.
+    History(HistoryAliasArgs),
     /// Inspect the optional MCP adapter manifest.
     #[command(subcommand)]
     Mcp(McpCommand),
@@ -5402,6 +5416,99 @@ pub struct MemoryExpireArgs {
     pub database: Option<PathBuf>,
 }
 
+// ============================================================================
+// Bead bd-17c65.6.2 (F2) — top-level alias args
+// ============================================================================
+//
+// These structs back the `ee show`, `ee link`, `ee tag`, `ee history`
+// commands. Each forwards to its `ee memory <op>` underlying handler by
+// constructing the full Memory*Args struct. The alias retains a subset
+// of flags that are useful in the shortcut form; agents needing the
+// full flag matrix should use the explicit `ee memory ...` path.
+
+/// Arguments for `ee show <ID>` (F2 top-level alias).
+///
+/// Routes by ID prefix:
+///   `mem_<id>`  →  `ee memory show <id>`
+///   future: `wsp_<id>` → `ee workspace show <id>`, `cand_<id>` → `ee curate show`, etc.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ShowAliasArgs {
+    /// Entity ID. Routing is determined by the prefix segment
+    /// (everything before the first underscore).
+    #[arg(value_name = "ID")]
+    pub id: String,
+    /// Optional database override (forwarded when routing to commands
+    /// that accept it).
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+    /// Include tombstoned memories in the lookup (passed to `memory show`).
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_tombstoned: bool,
+}
+
+/// Arguments for `ee link <A> <B> --relation X` (F2 top-level alias).
+///
+/// Both arguments must be `mem_*` IDs. Errors on any other prefix with
+/// `usage_wrong_id_type_for_op`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct LinkAliasArgs {
+    /// Source memory ID.
+    #[arg(value_name = "FROM_MEMORY_ID")]
+    pub from: String,
+    /// Target memory ID. Omit to list links incident to FROM.
+    #[arg(value_name = "TO_MEMORY_ID")]
+    pub to: Option<String>,
+    /// Link relation (required when creating).
+    #[arg(long, value_name = "RELATION")]
+    pub relation: Option<String>,
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee tag <ID>` (F2 top-level alias).
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TagAliasArgs {
+    /// Memory ID. Routing requires a `mem_*` prefix.
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: String,
+    /// Tags to add (comma-separated, matches `ee memory tags --add`).
+    #[arg(long, value_name = "TAGS")]
+    pub add: Option<String>,
+    /// Tags to remove (comma-separated).
+    #[arg(long, value_name = "TAGS")]
+    pub remove: Option<String>,
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee history <ID>` (F2 top-level alias).
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct HistoryAliasArgs {
+    /// Memory ID. Routing requires a `mem_*` prefix.
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: String,
+    /// Maximum number of history entries to return.
+    #[arg(long, short = 'n', default_value_t = 50)]
+    pub limit: u32,
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Supported entity ID prefixes for F2 alias routing.
+///
+/// Currently only `mem` is wired through; other prefixes return a
+/// structured `usage_ambiguous_id_prefix` error documenting what's
+/// supported so an agent can choose the correct alias / verbose form.
+pub const ALIAS_SUPPORTED_PREFIXES: &[&str] = &["mem"];
+
+/// Extract the prefix from an ID (segment before the first `_`).
+///
+/// Returns `None` when the ID has no underscore.
+#[must_use]
+pub fn extract_id_prefix(id: &str) -> Option<&str> {
+    id.split_once('_').map(|(prefix, _)| prefix)
+}
+
 /// Arguments for `ee memory link`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct MemoryLinkArgs {
@@ -6544,6 +6651,19 @@ where
         }
         Some(Command::Memory(MemoryCommand::Tags(ref args))) => {
             handle_memory_tags(&cli, args, stdout, stderr)
+        }
+        // Bead bd-17c65.6.2 (F2) — top-level aliases route by ID prefix.
+        Some(Command::Show(ref args)) => {
+            handle_show_alias(&cli, args, stdout, stderr)
+        }
+        Some(Command::Link(ref args)) => {
+            handle_link_alias(&cli, args, stdout, stderr)
+        }
+        Some(Command::Tag(ref args)) => {
+            handle_tag_alias(&cli, args, stdout, stderr)
+        }
+        Some(Command::History(ref args)) => {
+            handle_history_alias(&cli, args, stdout, stderr)
         }
         Some(Command::Workflow(WorkflowCommand::Close(ref args))) => {
             handle_workflow_close(&cli, args, stdout, stderr)
@@ -15515,6 +15635,186 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
     }
+}
+
+// ============================================================================
+// Bead bd-17c65.6.2 (F2) — top-level alias handlers
+// ============================================================================
+//
+// Each `handle_*_alias` validates the ID prefix, then constructs the
+// underlying `Memory*Args` and forwards to the existing handler. On
+// prefix mismatch we emit a structured `usage_ambiguous_id_prefix`
+// error that documents the supported prefixes — agents iterate the
+// error details to pick the correct alias / explicit form.
+
+/// Emit the canonical "wrong id prefix" error used by all F2 aliases
+/// when the caller supplies an ID that doesn't route to the current
+/// alias surface.
+fn alias_id_prefix_error<W, E>(
+    cli: &Cli,
+    stdout: &mut W,
+    stderr: &mut E,
+    command: &str,
+    provided_id: &str,
+    expected_prefixes: &[&str],
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let extracted = extract_id_prefix(provided_id);
+    let detail_intro = match extracted {
+        Some(prefix) => format!(
+            "Unknown ID prefix `{prefix}` for `ee {command}`; expected one of: {}.",
+            expected_prefixes.join(", ")
+        ),
+        None => format!(
+            "Argument `{provided_id}` is missing an ID prefix (expected one of: {}).",
+            expected_prefixes.join(", ")
+        ),
+    };
+    let domain_error = DomainError::Usage {
+        message: detail_intro,
+        repair: Some(format!(
+            "Provide an ID with one of the supported prefixes (e.g. `{}_<id>`).",
+            expected_prefixes[0]
+        )),
+    };
+    let wants_json = matches!(cli.renderer(), output::Renderer::Json);
+    write_domain_error(&domain_error, wants_json, stdout, stderr)
+}
+
+fn handle_show_alias<W, E>(
+    cli: &Cli,
+    args: &ShowAliasArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match extract_id_prefix(&args.id) {
+        Some("mem") => {
+            let memory_args = MemoryShowArgs {
+                memory_id: args.id.clone(),
+                database: args.database.clone(),
+                include_tombstoned: args.include_tombstoned,
+            };
+            handle_memory_show(cli, &memory_args, stdout, stderr)
+        }
+        _ => alias_id_prefix_error(
+            cli,
+            stdout,
+            stderr,
+            "show",
+            &args.id,
+            ALIAS_SUPPORTED_PREFIXES,
+        ),
+    }
+}
+
+fn handle_link_alias<W, E>(
+    cli: &Cli,
+    args: &LinkAliasArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    // Both args must be `mem_*` (current scope). When B is omitted,
+    // forward to the list-links shape of `memory link`.
+    if !matches!(extract_id_prefix(&args.from), Some("mem")) {
+        return alias_id_prefix_error(cli, stdout, stderr, "link", &args.from, &["mem"]);
+    }
+    if let Some(ref to) = args.to {
+        if !matches!(extract_id_prefix(to), Some("mem")) {
+            return alias_id_prefix_error(cli, stdout, stderr, "link", to, &["mem"]);
+        }
+    }
+    let memory_args = MemoryLinkArgs {
+        memory_id: args.from.clone(),
+        target_memory_id: args.to.clone(),
+        relation: args.relation.clone(),
+        source: "human".to_string(),
+        weight: "1.0".to_string(),
+        confidence: "1.0".to_string(),
+        undirected: false,
+        evidence_count: 1,
+        metadata: None,
+        actor: None,
+        dry_run: false,
+        include_tombstoned: false,
+        database: args.database.clone(),
+    };
+    handle_memory_link(cli, &memory_args, stdout, stderr)
+}
+
+fn handle_tag_alias<W, E>(
+    cli: &Cli,
+    args: &TagAliasArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !matches!(extract_id_prefix(&args.memory_id), Some("mem")) {
+        return alias_id_prefix_error(
+            cli,
+            stdout,
+            stderr,
+            "tag",
+            &args.memory_id,
+            &["mem"],
+        );
+    }
+    // Convert Option<String> CSV → Vec<String> (matches the existing
+    // MemoryTagsArgs `add`/`remove` shape).
+    let to_vec = |opt: &Option<String>| opt.as_ref().map_or_else(Vec::new, |s| vec![s.clone()]);
+    let memory_args = MemoryTagsArgs {
+        memory_id: args.memory_id.clone(),
+        add: to_vec(&args.add),
+        remove: to_vec(&args.remove),
+        set: None,
+        clear: false,
+        actor: None,
+        dry_run: false,
+        include_tombstoned: false,
+        database: args.database.clone(),
+    };
+    handle_memory_tags(cli, &memory_args, stdout, stderr)
+}
+
+fn handle_history_alias<W, E>(
+    cli: &Cli,
+    args: &HistoryAliasArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !matches!(extract_id_prefix(&args.memory_id), Some("mem")) {
+        return alias_id_prefix_error(
+            cli,
+            stdout,
+            stderr,
+            "history",
+            &args.memory_id,
+            &["mem"],
+        );
+    }
+    let memory_args = MemoryHistoryArgs {
+        memory_id: args.memory_id.clone(),
+        limit: args.limit,
+        database: args.database.clone(),
+    };
+    handle_memory_history(cli, &memory_args, stdout, stderr)
 }
 
 fn handle_memory_link<W, E>(
@@ -26051,6 +26351,11 @@ impl NormalizedInvocation {
                     MemoryCommand::Revise(_) => "memory revise".to_string(),
                     MemoryCommand::Tags(_) => "memory tags".to_string(),
                 },
+                // Bead bd-17c65.6.2 (F2) — top-level aliases.
+                Command::Show(_) => "show".to_string(),
+                Command::Link(_) => "link".to_string(),
+                Command::Tag(_) => "tag".to_string(),
+                Command::History(_) => "history".to_string(),
                 Command::Mcp(mcp) => match mcp {
                     McpCommand::Manifest => "mcp manifest".to_string(),
                 },
