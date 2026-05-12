@@ -483,6 +483,16 @@ pub enum Command {
     /// Inspect database state without mutation.
     #[command(subcommand)]
     Db(DbCommand),
+    /// Apply or inspect workspace schema migrations.
+    ///
+    /// `ee migrate status` reports the current schema version, the latest
+    /// available version, and any pending migrations. `ee migrate run`
+    /// applies any unapplied migrations idempotently. Exit code 8
+    /// (`migration required`) is returned by other commands when the
+    /// workspace database is behind the binary's schema; this command
+    /// is the canonical surface for resolving that.
+    #[command(subcommand)]
+    Migrate(MigrateCommand),
     /// Run the optional maintenance daemon in foreground mode.
     Daemon(DaemonArgs),
     /// Run health checks on workspace and subsystems.
@@ -1106,6 +1116,42 @@ pub enum DbCommand {
     Check(DbCheckArgs),
     /// List pending or applied migrations.
     Migrations(DbMigrationsArgs),
+}
+
+/// Subcommands for `ee migrate`.
+///
+/// Bead bd-17c65.12.1 (L0 phase 1): top-level surface for the existing
+/// `DbConnection::migrate()` + `needs_migration()` framework. `ee migrate
+/// status` reports current vs. latest schema version and whether the
+/// workspace is up to date; `ee migrate run` applies any pending
+/// migrations idempotently. Exit code 8 from other commands is the
+/// signal that this command should be invoked.
+#[derive(Clone, Debug, PartialEq, Subcommand)]
+pub enum MigrateCommand {
+    /// Report current schema version and any pending migrations.
+    Status(MigrateStatusArgs),
+    /// Apply any pending workspace database migrations.
+    Run(MigrateRunArgs),
+}
+
+/// Arguments for `ee migrate status`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct MigrateStatusArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee migrate run`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct MigrateRunArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Report what would be applied without mutating the database.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 }
 
 /// Arguments for `ee db status`.
@@ -6422,6 +6468,10 @@ where
             DbCommand::Status(args) => handle_db_status(&cli, args, stdout),
             DbCommand::Check(args) => handle_db_check(&cli, args, stdout),
             DbCommand::Migrations(args) => handle_db_migrations(&cli, args, stdout),
+        },
+        Some(Command::Migrate(ref migrate_cmd)) => match migrate_cmd {
+            MigrateCommand::Status(args) => handle_migrate_status(&cli, args, stdout, stderr),
+            MigrateCommand::Run(args) => handle_migrate_run(&cli, args, stdout, stderr),
         },
         Some(Command::Diag(ref diag_cmd)) => match diag_cmd {
             DiagCommand::Claims(args) => handle_diag_claims(&cli, args, stdout),
@@ -17519,6 +17569,273 @@ where
     write_db_migrations_output(cli, &report, stdout, true)
 }
 
+// ============================================================================
+// `ee migrate` (top-level surface, bead bd-17c65.12.1 / L0 phase 1)
+//
+// Thin orchestrator over the existing DbConnection migration framework
+// (migrate() / needs_migration() / schema_version()). Each handler emits an
+// ee.response.v1 envelope and uses the standard exit codes:
+//   - Success when up-to-date (status) or applied (run)
+//   - DegradedRequired (8) when status reports pending migrations
+//   - Storage on DB open / mutation errors
+// ============================================================================
+
+fn handle_migrate_status<W, E>(
+    cli: &Cli,
+    args: &MigrateStatusArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found: {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let conn = match crate::db::DbConnection::open_schema_only(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: Some("ee doctor".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let schema_version = conn.schema_version().unwrap_or(None);
+    let needs_migration = conn.needs_migration().unwrap_or(false);
+    let latest_compiled = crate::db::MIGRATIONS.last().map(|m| m.version());
+    let pending_count: usize = crate::db::MIGRATIONS
+        .iter()
+        .filter(|m| !conn.has_migration(m.version()).unwrap_or(true))
+        .count();
+
+    let json = serde_json::json!({
+        "schema": "ee.response.v1",
+        "success": true,
+        "data": {
+            "command": "migrate status",
+            "databasePath": database_path.display().to_string(),
+            "schemaVersion": schema_version,
+            "latestCompiledSchemaVersion": latest_compiled,
+            "needsMigration": needs_migration,
+            "pendingCount": pending_count,
+            "upToDate": !needs_migration,
+        },
+        "degraded": []
+    });
+
+    match cli.renderer() {
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let _ = write_stdout(
+                stdout,
+                &(serde_json::to_string(&json).unwrap_or_default() + "\n"),
+            );
+        }
+        _ => {
+            let mut out = String::new();
+            out.push_str(&format!("Database: {}\n", database_path.display()));
+            if let Some(version) = schema_version {
+                out.push_str(&format!("Schema version: {version}\n"));
+            } else {
+                out.push_str("Schema version: <none recorded>\n");
+            }
+            if let Some(latest) = latest_compiled {
+                out.push_str(&format!("Latest compiled schema version: {latest}\n"));
+            }
+            out.push_str(&format!("Pending migrations: {pending_count}\n"));
+            if needs_migration {
+                out.push_str("\nWorkspace requires migration. Run:\n");
+                out.push_str("  ee migrate run --workspace .\n");
+            } else {
+                out.push_str("\nWorkspace is up to date.\n");
+            }
+            let _ = write_stdout(stdout, &out);
+        }
+    }
+
+    // Exit code 8 (DegradedRequired) when migration is needed so calling
+    // scripts/agents can detect the condition without parsing JSON.
+    if needs_migration {
+        ProcessExitCode::MigrationRequired
+    } else {
+        ProcessExitCode::Success
+    }
+}
+
+fn handle_migrate_run<W, E>(
+    cli: &Cli,
+    args: &MigrateRunArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found: {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: Some("ee doctor".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let pending_summaries: Vec<serde_json::Value> = crate::db::MIGRATIONS
+        .iter()
+        .filter(|m| !conn.has_migration(m.version()).unwrap_or(true))
+        .map(|m| {
+            serde_json::json!({
+                "version": m.version(),
+                "name": m.name(),
+                "checksum": m.checksum(),
+            })
+        })
+        .collect();
+
+    // Dry-run: report what would be applied without mutating.
+    if args.dry_run {
+        let json = serde_json::json!({
+            "schema": "ee.response.v1",
+            "success": true,
+            "data": {
+                "command": "migrate run",
+                "databasePath": database_path.display().to_string(),
+                "dryRun": true,
+                "wouldApply": pending_summaries,
+                "wouldApplyCount": pending_summaries.len(),
+                "schemaVersion": conn.schema_version().unwrap_or(None),
+            },
+            "degraded": []
+        });
+        match cli.renderer() {
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let _ = write_stdout(
+                    stdout,
+                    &(serde_json::to_string(&json).unwrap_or_default() + "\n"),
+                );
+            }
+            _ => {
+                let mut out = String::new();
+                out.push_str(&format!(
+                    "DRY RUN: would apply {} migration(s) to {}\n",
+                    pending_summaries.len(),
+                    database_path.display()
+                ));
+                for m in crate::db::MIGRATIONS
+                    .iter()
+                    .filter(|m| !conn.has_migration(m.version()).unwrap_or(true))
+                {
+                    out.push_str(&format!("  v{} {}\n", m.version(), m.name()));
+                }
+                let _ = write_stdout(stdout, &out);
+            }
+        }
+        return ProcessExitCode::Success;
+    }
+
+    let result = match conn.migrate() {
+        Ok(result) => result,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Migration failed: {error}"),
+                repair: Some("ee doctor".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let post_version = conn.schema_version().unwrap_or(None);
+    let applied: Vec<u32> = result.applied().to_vec();
+    let skipped: Vec<u32> = result.skipped().to_vec();
+    let json = serde_json::json!({
+        "schema": "ee.response.v1",
+        "success": true,
+        "data": {
+            "command": "migrate run",
+            "databasePath": database_path.display().to_string(),
+            "dryRun": false,
+            "applied": applied,
+            "appliedCount": applied.len(),
+            "skipped": skipped,
+            "skippedCount": skipped.len(),
+            "schemaVersion": post_version,
+            "upToDate": true,
+        },
+        "degraded": []
+    });
+    match cli.renderer() {
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let _ = write_stdout(
+                stdout,
+                &(serde_json::to_string(&json).unwrap_or_default() + "\n"),
+            );
+        }
+        _ => {
+            let mut out = String::new();
+            out.push_str(&format!(
+                "Applied {} migration(s) to {}\n",
+                applied.len(),
+                database_path.display()
+            ));
+            for version in &applied {
+                out.push_str(&format!("  v{}\n", version));
+            }
+            if !skipped.is_empty() {
+                out.push_str(&format!(
+                    "Skipped {} already-applied migration(s)\n",
+                    skipped.len()
+                ));
+            }
+            if let Some(v) = post_version {
+                out.push_str(&format!("Workspace is now at schema v{v}.\n"));
+            }
+            let _ = write_stdout(stdout, &out);
+        }
+    }
+
+    ProcessExitCode::Success
+}
+
 fn compiled_pending_summaries() -> Vec<DbPendingMigration> {
     crate::db::MIGRATIONS
         .iter()
@@ -26564,6 +26881,7 @@ const COMMAND_NAMES: &[&str] = &[
     "learn",
     "maintenance",
     "memory",
+    "migrate",
     "mcp",
     "model",
     "outcome",
@@ -26655,6 +26973,7 @@ const LEARN_SUBCOMMANDS: &[&str] = &[
 const LEARN_EXPERIMENT_SUBCOMMANDS: &[&str] = &["propose", "run"];
 const MAINTENANCE_SUBCOMMANDS: &[&str] = &["run", "status"];
 const MEMORY_SUBCOMMANDS: &[&str] = &["expire", "list", "show", "history", "revise", "tags"];
+const MIGRATE_SUBCOMMANDS: &[&str] = &["status", "run"];
 const MCP_SUBCOMMANDS: &[&str] = &["manifest"];
 const MODEL_SUBCOMMANDS: &[&str] = &["status", "list"];
 const OUTCOME_QUARANTINE_SUBCOMMANDS: &[&str] = &["list", "release"];
@@ -26794,6 +27113,10 @@ impl NormalizedInvocation {
                     DbCommand::Status(_) => "db status".to_string(),
                     DbCommand::Check(_) => "db check".to_string(),
                     DbCommand::Migrations(_) => "db migrations".to_string(),
+                },
+                Command::Migrate(migrate) => match migrate {
+                    MigrateCommand::Status(_) => "migrate status".to_string(),
+                    MigrateCommand::Run(_) => "migrate run".to_string(),
                 },
                 Command::Curate(curate) => match curate {
                     CurateCommand::Candidates(_) => "curate candidates".to_string(),
@@ -27157,6 +27480,7 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "learn experiment" => Some(LEARN_EXPERIMENT_SUBCOMMANDS),
         "maintenance" => Some(MAINTENANCE_SUBCOMMANDS),
         "memory" => Some(MEMORY_SUBCOMMANDS),
+        "migrate" => Some(MIGRATE_SUBCOMMANDS),
         "mcp" => Some(MCP_SUBCOMMANDS),
         "model" => Some(MODEL_SUBCOMMANDS),
         "outcome-quarantine" => Some(OUTCOME_QUARANTINE_SUBCOMMANDS),
