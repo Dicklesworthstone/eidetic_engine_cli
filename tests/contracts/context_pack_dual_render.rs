@@ -387,6 +387,71 @@ fn pack_items_carry_merged_certificate_and_step_fields() -> TestResult {
 }
 
 #[test]
+fn markdown_render_appends_pack_metadata_html_comments() -> TestResult {
+    // D3 (bd-17c65.4.3) — the markdown body ends with HTML comments
+    // carrying pack.hash and pack.schema so an agent piping the body
+    // can correlate back to the structured pack record without
+    // re-querying. Comments are invisible to rendered markdown and to
+    // LLMs but trivially greppable.
+    //
+    // `pack.generatedAt` is intentionally omitted: see the matching
+    // comment in render_context_response_markdown for the rationale
+    // (it would break A4 byte-equivalence between standalone markdown
+    // and the JSON `pack.text` field).
+    let response = multi_section_fixture();
+    let markdown = render_context_response_markdown(&response);
+
+    for needle in ["<!-- pack.hash:", "<!-- pack.schema: ee.response.v1 -->"] {
+        if !markdown.contains(needle) {
+            return Err(format!(
+                "rendered markdown is missing `{needle}` trailing comment (D3 contract)"
+            ));
+        }
+    }
+
+    // The comments must appear on consecutive trailing non-empty lines
+    // so a grep-based parser can read them with a fixed prefix regex
+    // without searching the entire body.
+    let trailing: Vec<&str> = markdown
+        .lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(2)
+        .collect();
+    let trailing_joined = trailing.join("\n");
+    for prefix in ["<!-- pack.schema:", "<!-- pack.hash:"] {
+        if !trailing_joined.contains(prefix) {
+            return Err(format!(
+                "trailing 2 non-empty lines must include `{prefix}`; got: {trailing_joined}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn markdown_pack_metadata_does_not_leak_query_in_comments() -> TestResult {
+    // The HTML comments are invisible to rendered markdown but they ARE
+    // present in the byte stream. Privacy-wise that means an accidental
+    // pipe/log of the body would expose them. We assert that the comment
+    // block contains pack.hash, pack.schema, and pack.generatedAt — and
+    // nothing else that could leak the raw query string.
+    let response = multi_section_fixture();
+    let markdown = render_context_response_markdown(&response);
+    let comment_block: String = markdown
+        .lines()
+        .filter(|line| line.starts_with("<!--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if comment_block.contains("prepare release v0.2.0") {
+        return Err(format!(
+            "trailing HTML comments leak the raw query: {comment_block}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn dual_render_with_empty_pack_still_parses_consistently() -> TestResult {
     // Edge case: a request that produces zero items. The markdown render
     // should not panic, and the JSON projection must report an empty items

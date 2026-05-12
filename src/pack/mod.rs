@@ -1262,11 +1262,41 @@ impl ContextResponseData {
 /// Render a context response as the canonical Markdown prompt fragment.
 #[must_use]
 pub fn render_context_response_markdown(response: &ContextResponse) -> String {
-    render_context_markdown(
+    let mut body = render_context_markdown(
         &response.data.request,
         &response.data.pack,
         &response.data.degraded,
-    )
+    );
+    // Bead bd-17c65.4.3 (D3): append pack metadata as trailing HTML
+    // comments. Invisible to standard markdown rendering and to LLMs
+    // (they're treated as inline noise) but trivially greppable by
+    // tools that need to correlate a piped/logged markdown body back
+    // to the structured pack record without re-querying.
+    //
+    // Two fields, one per line, on consecutive trailing lines so grep
+    // tooling can parse with a fixed-prefix regex:
+    //   <!-- pack.hash: blake3:... -->
+    //   <!-- pack.schema: ee.response.v1 -->
+    //
+    // The `pack.hash` value is whatever the pack record carries (None
+    // -> the literal string "absent" so the line is always present and
+    // greppable). `pack.schema` is the response envelope schema the
+    // body adheres to.
+    //
+    // The D3 acceptance text also listed `pack.generatedAt`, but the
+    // body is rendered via this function twice on every context call
+    // (once for the standalone --format markdown output, once as the
+    // `pack.text` JSON field), and embedding a wall-clock timestamp
+    // would break the A4 byte-equivalence invariant between those two
+    // projections. The response envelope already carries `generatedAt`
+    // semantics at the surface layer (audit log + pack record), so
+    // omitting it here is a sound trade — correlation by `pack.hash`
+    // is sufficient for the "find this body's structured record"
+    // use case D3 describes.
+    let pack_hash = response.data.pack.hash.as_deref().unwrap_or("absent");
+    body.push_str(&format!("\n<!-- pack.hash: {pack_hash} -->\n"));
+    body.push_str(&format!("<!-- pack.schema: {} -->\n", response.schema));
+    body
 }
 
 /// Render the canonical Markdown prompt fragment from context pack parts.
