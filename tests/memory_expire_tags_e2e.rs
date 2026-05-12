@@ -164,6 +164,21 @@ fn normalize_memory_response(mut value: JsonValue) -> JsonValue {
             );
         }
         if data
+            .get("previous_valid_to")
+            .is_some_and(JsonValue::is_string)
+        {
+            data.insert(
+                "previous_valid_to".to_owned(),
+                JsonValue::String("<TIMESTAMP>".to_owned()),
+            );
+        }
+        if data.get("valid_to").is_some_and(JsonValue::is_string) {
+            data.insert(
+                "valid_to".to_owned(),
+                JsonValue::String("<TIMESTAMP>".to_owned()),
+            );
+        }
+        if data
             .get("previous_tombstoned_at")
             .is_some_and(JsonValue::is_string)
         {
@@ -365,7 +380,7 @@ fn memory_expire_and_tags_are_audited_idempotent_and_logged() -> TestResult {
     let expire_dry_run_json = parse_stdout_json(&expire_dry_run_output, "expire dry run")?;
     ensure(
         expire_dry_run_json["data"]["status"] == "would_expire",
-        "expire dry-run reports planned tombstone",
+        "expire dry-run reports planned validity end",
     )?;
 
     let mut expire_apply_args = workspace_args(&workspace);

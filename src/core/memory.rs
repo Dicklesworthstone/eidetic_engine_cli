@@ -2578,11 +2578,15 @@ pub struct MemoryExpireReport {
     pub persisted: bool,
     /// Whether the command changed memory state or would change it in dry-run mode.
     pub changed: bool,
+    /// Previous validity end timestamp, if any.
+    pub previous_valid_to: Option<String>,
+    /// Current validity end timestamp after the operation, if known.
+    pub valid_to: Option<String>,
     /// Previous tombstone timestamp, if any.
     pub previous_tombstoned_at: Option<String>,
     /// Current tombstone timestamp after the operation, if known.
     pub tombstoned_at: Option<String>,
-    /// Audit row ID when a tombstone was committed.
+    /// Audit row ID when an expiration was committed.
     pub audit_id: Option<String>,
     /// Search-index job ID queued after a committed change.
     pub index_job_id: Option<String>,
@@ -2813,26 +2817,24 @@ fn expire_audit_details(reason: Option<&str>) -> String {
     serde_json::json!({
         "schema": "ee.audit.memory_expire.v1",
         "reason": reason,
-        "deletion": "none_soft_tombstone_only",
+        "deletion": "none_valid_to_only",
     })
     .to_string()
 }
 
-/// Expire a memory by setting its tombstone timestamp. No files or rows are deleted.
+/// Expire a memory by setting its validity end timestamp. No files or rows are deleted.
 pub fn expire_memory(options: &ExpireMemoryOptions<'_>) -> Result<MemoryExpireReport, DomainError> {
     let conn = open_migrated_memory_database(options.database_path)
         .map_err(memory_command_storage_error)?;
     let workspace_id = memory_command_workspace_id(options.workspace_path);
     let memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
+    let expires_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
     if memory.tombstoned_at.is_some() {
         if !options.include_tombstoned {
             return Err(DomainError::PolicyDenied {
-                message: "Memory is already expired.".to_owned(),
-                repair: Some(
-                    "Use ee memory show --include-tombstoned to inspect the expired memory."
-                        .to_owned(),
-                ),
+                message: "Memory is tombstoned and cannot be expired.".to_owned(),
+                repair: Some("Use ee memory show to inspect the tombstoned memory.".to_owned()),
             });
         }
 
@@ -2845,8 +2847,30 @@ pub fn expire_memory(options: &ExpireMemoryOptions<'_>) -> Result<MemoryExpireRe
             dry_run: options.dry_run,
             persisted: false,
             changed: false,
+            previous_valid_to: memory.valid_to.clone(),
+            valid_to: memory.valid_to,
             previous_tombstoned_at: memory.tombstoned_at.clone(),
             tombstoned_at: memory.tombstoned_at,
+            audit_id: None,
+            index_job_id: None,
+            index_status: "not_scheduled".to_owned(),
+            idempotency: "no_change".to_owned(),
+        });
+    }
+    if memory_validity(&memory.valid_from, &memory.valid_to).status == "expired" {
+        return Ok(MemoryExpireReport {
+            schema: MEMORY_EXPIRE_SCHEMA_V1,
+            version: env!("CARGO_PKG_VERSION"),
+            memory_id: options.memory_id.to_owned(),
+            workspace_id,
+            status: "already_expired".to_owned(),
+            dry_run: options.dry_run,
+            persisted: false,
+            changed: false,
+            previous_valid_to: memory.valid_to.clone(),
+            valid_to: memory.valid_to,
+            previous_tombstoned_at: None,
+            tombstoned_at: None,
             audit_id: None,
             index_job_id: None,
             index_status: "not_scheduled".to_owned(),
@@ -2864,6 +2888,8 @@ pub fn expire_memory(options: &ExpireMemoryOptions<'_>) -> Result<MemoryExpireRe
             dry_run: true,
             persisted: false,
             changed: true,
+            previous_valid_to: memory.valid_to,
+            valid_to: Some(expires_at),
             previous_tombstoned_at: None,
             tombstoned_at: None,
             audit_id: None,
@@ -2886,8 +2912,8 @@ pub fn expire_memory(options: &ExpireMemoryOptions<'_>) -> Result<MemoryExpireRe
     };
 
     conn.with_transaction(|| {
-        let tombstoned = conn.tombstone_memory(options.memory_id)?;
-        if !tombstoned {
+        let expired = conn.expire_memory_valid_to(options.memory_id, &expires_at)?;
+        if !expired {
             return Ok(None);
         }
         conn.insert_audit(
@@ -2895,7 +2921,7 @@ pub fn expire_memory(options: &ExpireMemoryOptions<'_>) -> Result<MemoryExpireRe
             &CreateAuditInput {
                 workspace_id: Some(workspace_id.clone()),
                 actor: actor.map(str::to_owned),
-                action: audit_actions::MEMORY_TOMBSTONE.to_owned(),
+                action: audit_actions::MEMORY_EXPIRE.to_owned(),
                 target_type: Some("memory".to_owned()),
                 target_id: Some(options.memory_id.to_owned()),
                 details: Some(details.clone()),
@@ -2912,20 +2938,24 @@ pub fn expire_memory(options: &ExpireMemoryOptions<'_>) -> Result<MemoryExpireRe
             memory_command_storage_error(format!("Failed to reload expired memory: {error}"))
         })?
         .ok_or_else(|| memory_command_not_found(options.memory_id))?;
+    let refreshed_validity = memory_validity(&refreshed.valid_from, &refreshed.valid_to);
+    let changed = refreshed_validity.status == "expired";
 
     Ok(MemoryExpireReport {
         schema: MEMORY_EXPIRE_SCHEMA_V1,
         version: env!("CARGO_PKG_VERSION"),
         memory_id: options.memory_id.to_owned(),
         workspace_id,
-        status: if refreshed.tombstoned_at.is_some() {
+        status: if changed {
             "expired".to_owned()
         } else {
             "already_expired".to_owned()
         },
         dry_run: false,
-        persisted: refreshed.tombstoned_at.is_some(),
-        changed: refreshed.tombstoned_at.is_some(),
+        persisted: changed,
+        changed,
+        previous_valid_to: memory.valid_to,
+        valid_to: refreshed.valid_to,
         previous_tombstoned_at: None,
         tombstoned_at: refreshed.tombstoned_at,
         audit_id: Some(audit_id),
@@ -4429,6 +4459,12 @@ mod tests {
 
         ensure(report.status, "would_expire".to_owned(), "dry-run status")?;
         ensure(report.persisted, false, "dry-run persisted")?;
+        ensure(
+            report.previous_valid_to.is_none(),
+            true,
+            "dry-run previous valid_to absent",
+        )?;
+        ensure(report.valid_to.is_some(), true, "dry-run valid_to preview")?;
         ensure(report.audit_id.is_none(), true, "dry-run audit absent")?;
 
         let connection = crate::db::DbConnection::open_file(&created.database_path)
@@ -4441,11 +4477,12 @@ mod tests {
             memory.tombstoned_at.is_none(),
             true,
             "memory remains active",
-        )
+        )?;
+        ensure(memory.valid_to.is_none(), true, "memory valid_to unchanged")
     }
 
     #[test]
-    fn expire_memory_persists_tombstone_audit_and_index_job() -> TestResult {
+    fn expire_memory_persists_valid_to_audit_and_index_job() -> TestResult {
         let (temp, created) = remember_revisable_memory("Expire persisted target.")?;
         let report = expire_memory(&ExpireMemoryOptions {
             workspace_path: temp.path(),
@@ -4460,8 +4497,62 @@ mod tests {
 
         ensure(report.status, "expired".to_owned(), "expire status")?;
         ensure(report.persisted, true, "expire persisted")?;
+        ensure(
+            report.previous_valid_to.is_none(),
+            true,
+            "previous valid_to absent",
+        )?;
+        ensure(report.valid_to.is_some(), true, "valid_to is set")?;
+        ensure(
+            report.tombstoned_at.is_none(),
+            true,
+            "expire does not tombstone",
+        )?;
         ensure(report.audit_id.is_some(), true, "audit ID present")?;
         ensure(report.index_job_id.is_some(), true, "index job ID present")?;
+
+        let connection = crate::db::DbConnection::open_file(&created.database_path)
+            .map_err(|error| error.to_string())?;
+        let memory = connection
+            .get_memory(&created.memory_id.to_string())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory missing after expire".to_owned())?;
+        ensure(
+            memory.tombstoned_at.is_none(),
+            true,
+            "memory remains untombstoned",
+        )?;
+        ensure(memory.valid_to.is_some(), true, "memory valid_to persisted")?;
+
+        let audit_id = report
+            .audit_id
+            .as_deref()
+            .ok_or_else(|| "missing audit id".to_owned())?;
+        let audit = connection
+            .get_audit(audit_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing expire audit".to_owned())?;
+        ensure(
+            audit.action,
+            audit_actions::MEMORY_EXPIRE.to_owned(),
+            "expire audit action",
+        )
+    }
+
+    #[test]
+    fn expire_memory_is_idempotent_after_valid_to_expiry() -> TestResult {
+        let (temp, created) = remember_revisable_memory("Expire idempotent target.")?;
+        let report = expire_memory(&ExpireMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: &created.database_path,
+            memory_id: &created.memory_id.to_string(),
+            reason: Some("obsolete"),
+            actor: Some("test"),
+            dry_run: false,
+            include_tombstoned: false,
+        })
+        .map_err(|error| error.message())?;
+        ensure(report.status, "expired".to_owned(), "initial expire status")?;
 
         let already = expire_memory(&ExpireMemoryOptions {
             workspace_path: temp.path(),
@@ -4478,7 +4569,13 @@ mod tests {
             "already_expired".to_owned(),
             "idempotent status",
         )?;
-        ensure(already.persisted, false, "idempotent persisted")
+        ensure(already.persisted, false, "idempotent persisted")?;
+        ensure(
+            already.previous_valid_to,
+            report.valid_to.clone(),
+            "idempotent previous valid_to",
+        )?;
+        ensure(already.valid_to, report.valid_to, "idempotent valid_to")
     }
 
     #[test]

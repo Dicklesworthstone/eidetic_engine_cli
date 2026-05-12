@@ -5654,7 +5654,7 @@ pub struct MemoryExpireArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
 
-    /// Include already-expired memories for idempotency reporting.
+    /// Allow already-tombstoned memories for idempotency reporting.
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_tombstoned: bool,
 
