@@ -3602,7 +3602,13 @@ mod tests {
         assert!(!a.starts_with("1970"));
         assert!(!b.starts_with("1970"));
         // Both are valid RFC 3339 strings (parseable).
-        chrono::DateTime::parse_from_rfc3339(&a).expect("a parses");
-        chrono::DateTime::parse_from_rfc3339(&b).expect("b parses");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&a).is_ok(),
+            "a parses as RFC 3339: {a}"
+        );
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&b).is_ok(),
+            "b parses as RFC 3339: {b}"
+        );
     }
 }

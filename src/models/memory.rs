@@ -645,8 +645,14 @@ mod tests {
         // acute) must produce the same canonical tag bytes.
         let composed = "café"; // U+00E9
         let decomposed = "cafe\u{0301}"; // U+0065 + U+0301
-        let parsed_composed = Tag::parse(composed).expect("composed accepts");
-        let parsed_decomposed = Tag::parse(decomposed).expect("decomposed accepts");
+        let parsed_composed = match Tag::parse(composed) {
+            Ok(tag) => tag,
+            Err(error) => panic!("composed accepts: {error:?}"),
+        };
+        let parsed_decomposed = match Tag::parse(decomposed) {
+            Ok(tag) => tag,
+            Err(error) => panic!("decomposed accepts: {error:?}"),
+        };
         assert_eq!(
             parsed_composed.as_str(),
             parsed_decomposed.as_str(),
@@ -657,9 +663,15 @@ mod tests {
     #[test]
     fn tag_ascii_uppercase_lowercases_unicode_preserves_case() {
         // ASCII letters lowercase; Unicode case-preserving (no locale dep).
-        let ascii = Tag::parse("RELEASE").expect("upper-ASCII accepts");
+        let ascii = match Tag::parse("RELEASE") {
+            Ok(tag) => tag,
+            Err(error) => panic!("upper-ASCII accepts: {error:?}"),
+        };
         assert_eq!(ascii.as_str(), "release");
-        let unicode = Tag::parse("MÉMOIRE").expect("upper-unicode accepts");
+        let unicode = match Tag::parse("MÉMOIRE") {
+            Ok(tag) => tag,
+            Err(error) => panic!("upper-unicode accepts: {error:?}"),
+        };
         // We preserve Unicode case to avoid locale-dependent casing pitfalls.
         // The leading 'M' lowercases (it's ASCII) but 'É' stays uppercase.
         assert!(
