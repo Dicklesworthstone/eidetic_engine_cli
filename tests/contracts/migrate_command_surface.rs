@@ -44,12 +44,7 @@ fn parse_stdout(output: &Output, context: &str) -> Result<Value, String> {
 }
 
 fn init_workspace(workspace: &Path) -> Result<(), String> {
-    let init = run_ee(&[
-        "--workspace",
-        workspace.to_str().unwrap(),
-        "init",
-        "--json",
-    ])?;
+    let init = run_ee(&["--workspace", workspace.to_str().unwrap(), "init", "--json"])?;
     if init.status.code() != Some(0) {
         return Err(format!(
             "init failed: exit {:?}, stderr {}",
@@ -99,7 +94,9 @@ fn migrate_status_on_fresh_workspace_reports_up_to_date() -> TestResult {
         .and_then(Value::as_u64)
         .ok_or_else(|| "missing pendingCount".to_string())?;
     if pending != 0 {
-        return Err(format!("fresh workspace should have 0 pending, got {pending}"));
+        return Err(format!(
+            "fresh workspace should have 0 pending, got {pending}"
+        ));
     }
     Ok(())
 }
@@ -173,10 +170,7 @@ fn migrate_run_is_idempotent_on_up_to_date_workspace() -> TestResult {
         "--json",
     ])?;
     if first.status.code() != Some(0) {
-        return Err(format!(
-            "first migrate run exit {:?}",
-            first.status.code()
-        ));
+        return Err(format!("first migrate run exit {:?}", first.status.code()));
     }
     let first_json = parse_stdout(&first, "first run")?;
     let applied = first_json
