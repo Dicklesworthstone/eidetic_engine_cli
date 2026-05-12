@@ -1,0 +1,1 @@
+Run cargo fmt --check before release.
