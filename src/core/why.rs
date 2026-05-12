@@ -236,6 +236,32 @@ pub struct MemoryLinkSummary {
     pub created_at: String,
 }
 
+/// A single audit timeline entry included in why output.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoryHistorySummaryEntry {
+    /// Audit entry ID.
+    pub audit_id: String,
+    /// Timestamp of the event.
+    pub timestamp: String,
+    /// Actor who performed the action, if known.
+    pub actor: Option<String>,
+    /// Action recorded in the audit log.
+    pub action: String,
+    /// Audit details payload, usually JSON.
+    pub details: Option<String>,
+}
+
+/// Memory history projection bundled into why output.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoryHistorySummary {
+    /// History entries ordered newest first.
+    pub entries: Vec<MemoryHistorySummaryEntry>,
+    /// Total number of audit entries for this memory before truncation.
+    pub total_count: u32,
+    /// Whether entries were truncated by the why history limit.
+    pub truncated: bool,
+}
+
 /// Visible rationale trace evidence linked to a why report.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RationaleTraceSummary {
@@ -354,6 +380,8 @@ pub struct WhyReport {
     pub contradictions: Vec<ContradictionMetadata>,
     /// Memory links: supports, contradicts, derived_from, etc. (EE-LINK-USAGE-001).
     pub links: Vec<MemoryLinkSummary>,
+    /// Audit history timeline for the memory.
+    pub history: Option<MemoryHistorySummary>,
     /// Safe visible rationale traces linked to this memory or latest pack.
     pub rationale_traces: Vec<RationaleTraceSummary>,
     /// Non-fatal degradation notices.
@@ -382,6 +410,7 @@ impl WhyReport {
             selection: Some(selection),
             contradictions: Vec::new(),
             links: Vec::new(),
+            history: None,
             rationale_traces: Vec::new(),
             degraded: Vec::new(),
             error: None,
@@ -410,6 +439,7 @@ impl WhyReport {
             selection: None,
             contradictions: Vec::new(),
             links: Vec::new(),
+            history: None,
             rationale_traces: Vec::new(),
             degraded: Vec::new(),
             error: None,
@@ -430,6 +460,7 @@ impl WhyReport {
             selection: None,
             contradictions: Vec::new(),
             links: Vec::new(),
+            history: None,
             rationale_traces: Vec::new(),
             degraded: Vec::new(),
             error: Some(message),
@@ -497,6 +528,20 @@ impl WhyReport {
     #[must_use]
     pub fn with_links(mut self, links: Vec<MemoryLinkSummary>) -> Self {
         self.links = links;
+        self
+    }
+
+    /// Add memory audit history to the report.
+    #[must_use]
+    pub fn with_history(mut self, history: MemoryHistorySummary) -> Self {
+        self.history = Some(history);
+        self
+    }
+
+    /// Add optional memory audit history to the report.
+    #[must_use]
+    pub fn with_optional_history(mut self, history: Option<MemoryHistorySummary>) -> Self {
+        self.history = history;
         self
     }
 
@@ -589,6 +634,9 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
     // Fetch memory links (EE-LINK-USAGE-001)
     let link_fetch = fetch_links(&conn, memory_id);
 
+    // Fetch memory audit history for the triad `ee why` surface.
+    let history_fetch = fetch_history(&conn, memory_id);
+
     // Fetch rationale traces (EE-RATIONALE-TRACE-001)
     let rationale_trace_fetch = fetch_rationale_traces(&conn, &memory.workspace_id, memory_id);
     let mut evidence_degradations = Vec::new();
@@ -596,6 +644,9 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
         evidence_degradations.push(degradation);
     }
     if let Some(degradation) = link_fetch.degradation {
+        evidence_degradations.push(degradation);
+    }
+    if let Some(degradation) = history_fetch.degradation {
         evidence_degradations.push(degradation);
     }
     if let Some(degradation) = rationale_trace_fetch.degradation {
@@ -608,6 +659,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
     }
     let contradictions = contradiction_fetch.items;
     let links = link_fetch.items;
+    let history = history_fetch.items.into_iter().next();
     let rationale_traces = rationale_trace_fetch.items;
 
     let validity = memory_validity(&memory.valid_from, &memory.valid_to);
@@ -660,6 +712,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
                     latest_pack_selection: None,
                     contradictions,
                     links,
+                    history,
                     rationale_traces,
                     graph_retrieval,
                     degraded: evidence_degradations,
@@ -686,6 +739,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
             latest_pack_selection,
             contradictions,
             links,
+            history,
             rationale_traces,
             graph_retrieval,
             degraded: evidence_degradations,
@@ -911,6 +965,7 @@ struct ReportSelectionInputs {
     latest_pack_selection: Option<PackSelectionExplanation>,
     contradictions: Vec<ContradictionMetadata>,
     links: Vec<MemoryLinkSummary>,
+    history: Option<MemoryHistorySummary>,
     rationale_traces: Vec<RationaleTraceSummary>,
     graph_retrieval: GraphRetrievalExplanation,
     degraded: Vec<WhyDegradation>,
@@ -939,6 +994,7 @@ fn build_report(
     WhyReport::found(memory_id.to_string(), storage, retrieval, selection)
         .with_contradictions(selection_inputs.contradictions)
         .with_links(selection_inputs.links)
+        .with_optional_history(selection_inputs.history)
         .with_graph_retrieval(selection_inputs.graph_retrieval)
         .with_rationale_traces(selection_inputs.rationale_traces)
         .with_degradations(selection_inputs.degraded)
@@ -1367,6 +1423,41 @@ fn fetch_links(conn: &DbConnection, memory_id: &str) -> WhyEvidenceFetch<MemoryL
     )
 }
 
+const WHY_HISTORY_LIMIT: usize = 50;
+
+fn fetch_history(conn: &DbConnection, memory_id: &str) -> WhyEvidenceFetch<MemoryHistorySummary> {
+    let stored_entries = match conn.list_audit_by_target("memory", memory_id, None) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return WhyEvidenceFetch::unavailable(
+                "why_history_unavailable",
+                "memory audit history",
+                error,
+            );
+        }
+    };
+
+    let total_count = stored_entries.len() as u32;
+    let truncated = stored_entries.len() > WHY_HISTORY_LIMIT;
+    let entries = stored_entries
+        .into_iter()
+        .take(WHY_HISTORY_LIMIT)
+        .map(|entry| MemoryHistorySummaryEntry {
+            audit_id: entry.id,
+            timestamp: entry.timestamp,
+            actor: entry.actor,
+            action: entry.action,
+            details: entry.details,
+        })
+        .collect();
+
+    WhyEvidenceFetch::available(vec![MemoryHistorySummary {
+        entries,
+        total_count,
+        truncated,
+    }])
+}
+
 /// Fetch rationale traces linked to a memory (EE-RATIONALE-TRACE-001).
 fn fetch_rationale_traces(
     conn: &DbConnection,
@@ -1547,6 +1638,7 @@ mod tests {
                 latest_pack_selection: Some(selection),
                 contradictions: Vec::new(),
                 links: Vec::new(),
+                history: None,
                 rationale_traces: Vec::new(),
                 graph_retrieval: graph_retrieval_unavailable(
                     "wsp_01234567890123456789012345",

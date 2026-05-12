@@ -349,6 +349,62 @@ fn why_storage_section_is_complete() -> TestResult {
 }
 
 #[test]
+fn why_history_section_includes_audit_timeline() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(&init.status.code(), &Some(0), "init exit")?;
+
+    let remember = run_ee(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "History section test memory.",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--json",
+    ])?;
+    persist_artifact("history_remember", &remember);
+    ensure_equal(&remember.status.code(), &Some(0), "remember exit")?;
+    let remember_json = stdout_json(&remember)?;
+    let memory_id = remember_json["data"]["memory_id"]
+        .as_str()
+        .ok_or_else(|| "memory_id must be a string".to_string())?;
+
+    let why = run_ee(&["--workspace", &workspace, "why", memory_id, "--json"])?;
+    persist_artifact("history_why", &why);
+    ensure_equal(&why.status.code(), &Some(0), "why exit")?;
+
+    let why_json = stdout_json(&why)?;
+    persist_json_artifact("history_why", &why_json);
+    let history = &why_json["data"]["history"];
+    ensure(history.is_object(), "history section must exist")?;
+    ensure(
+        history["totalCount"]
+            .as_u64()
+            .is_some_and(|count| count >= 1),
+        "history.totalCount must include remember audit entry",
+    )?;
+    let entries = history["entries"]
+        .as_array()
+        .ok_or_else(|| "history.entries must be an array".to_string())?;
+    ensure(!entries.is_empty(), "history.entries must not be empty")?;
+    ensure(
+        entries[0]["auditId"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("audit_")),
+        "history entry auditId must have audit_ prefix",
+    )?;
+    ensure(
+        entries[0]["action"].as_str().is_some(),
+        "history entry action must be a string",
+    )
+}
+
+#[test]
 fn why_retrieval_section_exposes_numeric_scores() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
     let workspace = tempdir.path().to_string_lossy().to_string();
