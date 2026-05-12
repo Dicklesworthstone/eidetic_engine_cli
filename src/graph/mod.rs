@@ -1666,21 +1666,14 @@ fn refresh_centrality_from_links(
 
     let mut scores = merge_centrality_scores(&pagerank.scores, &betweenness.scores);
 
-    scores.sort_by(|a, b| {
-        b.pagerank
-            .partial_cmp(&a.pagerank)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    scores.sort_by(|a, b| compare_score_desc_then_memory_id(a, b, |score| score.pagerank));
 
     let mut top_pagerank = scores.clone();
     top_pagerank.truncate(10);
 
     let mut top_betweenness = scores.clone();
-    top_betweenness.sort_by(|a, b| {
-        b.betweenness
-            .partial_cmp(&a.betweenness)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    top_betweenness
+        .sort_by(|a, b| compare_score_desc_then_memory_id(a, b, |score| score.betweenness));
     top_betweenness.truncate(10);
 
     let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
@@ -1699,6 +1692,17 @@ fn refresh_centrality_from_links(
         top_pagerank,
         top_betweenness,
     })
+}
+
+fn compare_score_desc_then_memory_id(
+    left: &MemoryCentralityScore,
+    right: &MemoryCentralityScore,
+    metric: impl Fn(&MemoryCentralityScore) -> f64,
+) -> std::cmp::Ordering {
+    metric(right)
+        .partial_cmp(&metric(left))
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| left.memory_id.cmp(&right.memory_id))
 }
 
 fn merge_centrality_scores(
@@ -3689,6 +3693,14 @@ mod tests {
         (33, 34),
     ];
 
+    fn numbered_memory_id(number: usize) -> String {
+        format!("mem_{number:026}")
+    }
+
+    fn numbered_link_id(number: usize) -> String {
+        format!("link_{number:026}")
+    }
+
     type TestResult<T = ()> = Result<T, String>;
 
     fn graph_result<T>(result: super::GraphResult<T>) -> Result<T, String> {
@@ -5456,6 +5468,122 @@ mod tests {
                 "betweenness should be finite for cyclic graph"
             );
         }
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn refresh_centrality_handles_disconnected_components_deterministically() -> TestResult {
+        let connection = open_projection_db()?;
+        let component_d = numbered_memory_id(201);
+        let component_e = numbered_memory_id(202);
+        insert_memory(&connection, &component_d, "Disconnected source memory")?;
+        insert_memory(&connection, &component_e, "Disconnected target memory")?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000131",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000132",
+            &component_d,
+            &component_e,
+            true,
+            0.9,
+            0.9,
+        )?;
+
+        let first = graph_result(super::refresh_centrality(
+            &connection,
+            &super::CentralityRefreshOptions::default(),
+        ))?;
+        let second = graph_result(super::refresh_centrality(
+            &connection,
+            &super::CentralityRefreshOptions::default(),
+        ))?;
+
+        assert_eq!(first.status, super::CentralityRefreshStatus::Refreshed);
+        assert_eq!(first.node_count, 4);
+        assert_eq!(first.edge_count, 2);
+        assert_eq!(first.scores.len(), 4);
+        assert!(
+            first
+                .scores
+                .iter()
+                .all(|score| score.pagerank.is_finite() && score.betweenness.is_finite())
+        );
+
+        let score_signature = |report: &super::CentralityRefreshReport| {
+            report
+                .scores
+                .iter()
+                .map(|score| {
+                    (
+                        score.memory_id.clone(),
+                        format!("{:.12}", score.pagerank),
+                        format!("{:.12}", score.betweenness),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(score_signature(&first), score_signature(&second));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn refresh_centrality_respects_link_limit_on_large_graph() -> TestResult {
+        let connection = open_projection_db()?;
+        let mut memory_ids = Vec::new();
+        for index in 0..101 {
+            let memory_id = numbered_memory_id(10_000 + index);
+            insert_memory(
+                &connection,
+                &memory_id,
+                &format!("Large graph memory {index}"),
+            )?;
+            memory_ids.push(memory_id);
+        }
+        for index in 0..100 {
+            let link_id = numbered_link_id(10_000 + index);
+            insert_link(
+                &connection,
+                &link_id,
+                &memory_ids[index],
+                &memory_ids[index + 1],
+                true,
+                0.9,
+                0.9,
+            )?;
+        }
+
+        let report = graph_result(super::refresh_centrality(
+            &connection,
+            &super::CentralityRefreshOptions {
+                link_limit: Some(100),
+                ..Default::default()
+            },
+        ))?;
+
+        assert_eq!(report.status, super::CentralityRefreshStatus::Refreshed);
+        assert_eq!(report.node_count, 101);
+        assert_eq!(report.edge_count, 100);
+        assert_eq!(report.scores.len(), 101);
+        assert_eq!(report.top_pagerank.len(), 10);
+        assert_eq!(report.top_betweenness.len(), 10);
+        assert!(
+            report
+                .scores
+                .iter()
+                .all(|score| score.pagerank.is_finite() && score.betweenness.is_finite())
+        );
 
         connection.close().map_err(|error| error.to_string())
     }

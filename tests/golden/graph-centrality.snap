@@ -10,7 +10,10 @@ contracts:
   - same memory links yield stable score ordering with deterministic tie-breaking
   - scores include memoryId, pagerank, and betweenness fields
   - top_pagerank and top_betweenness lists are sorted by respective metric descending
+  - equal centrality scores are tie-broken by memoryId for stable JSON output
   - empty graph returns EmptyGraph status with zero node/edge counts
+  - disconnected components produce finite deterministic scores across repeated refreshes
+  - 100+ node projections respect link_limit while keeping top score lists capped at 10
   - missing database returns clear Storage error with init repair hint
   - JSON stdout is ee.response.v1 envelope with data containing scores
   - human output formats pagerank and betweenness to 4 decimal places
@@ -21,5 +24,7 @@ evidence:
   - MemoryCentralityScore.memory_id
   - MemoryCentralityScore.pagerank
   - MemoryCentralityScore.betweenness
+  - refresh_centrality_handles_disconnected_components_deterministically
+  - refresh_centrality_respects_link_limit_on_large_graph
   - fnx_algorithms::pagerank_directed
   - fnx_algorithms::betweenness_centrality_directed

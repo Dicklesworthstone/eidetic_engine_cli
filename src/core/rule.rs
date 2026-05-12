@@ -1482,29 +1482,31 @@ pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, Domain
 
     let dry_rule = apply_mark_to_detail(
         previous_detail.clone(),
-        &transition,
-        next_confidence,
-        next_utility,
-        next_superseded_by.clone(),
-        positive_feedback_delta,
-        negative_feedback_delta,
-        last_validated_at.clone(),
-        &marked_at,
+        ApplyMarkToDetail {
+            transition: &transition,
+            confidence: next_confidence,
+            utility: next_utility,
+            superseded_by: next_superseded_by.clone(),
+            positive_feedback_delta,
+            negative_feedback_delta,
+            last_validated_at: last_validated_at.clone(),
+            updated_at: &marked_at,
+        },
     );
     if options.dry_run {
-        return Ok(rule_mark_report(
-            &prepared,
-            &rule_id,
-            true,
-            false,
+        return Ok(rule_mark_report(RuleMarkReportInput {
+            prepared: &prepared,
+            rule_id: &rule_id,
+            dry_run: true,
+            persisted: false,
             changed,
-            None,
-            None,
-            &transition,
-            &evidence,
-            previous_detail,
-            dry_rule,
-        ));
+            audit_id: None,
+            index_job_id: None,
+            transition: &transition,
+            evidence: &evidence,
+            previous_rule: previous_detail,
+            rule: dry_rule,
+        }));
     }
 
     let audit_id = generate_audit_id();
@@ -1567,19 +1569,19 @@ pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, Domain
 
     let updated = load_active_rule(&connection, &prepared.workspace_id, &rule_id)?;
     let updated_detail = load_rule_details(&connection, updated)?;
-    Ok(rule_mark_report(
-        &prepared,
-        &rule_id,
-        false,
-        true,
+    Ok(rule_mark_report(RuleMarkReportInput {
+        prepared: &prepared,
+        rule_id: &rule_id,
+        dry_run: false,
+        persisted: true,
         changed,
-        Some(audit_id),
+        audit_id: Some(audit_id),
         index_job_id,
-        &transition,
-        &evidence,
-        previous_detail,
-        updated_detail,
-    ))
+        transition: &transition,
+        evidence: &evidence,
+        previous_rule: previous_detail,
+        rule: updated_detail,
+    }))
 }
 
 /// Update mutable metadata for one procedural rule.
@@ -1598,33 +1600,33 @@ pub fn update_rule(options: &RuleUpdateOptions<'_>) -> Result<RuleUpdateReport, 
     let changed = !prepared_update.changed_fields.is_empty();
 
     if options.dry_run {
-        return Ok(rule_update_report(
-            &prepared,
-            &rule_id,
-            true,
-            false,
+        return Ok(rule_update_report(RuleUpdateReportInput {
+            prepared: &prepared,
+            rule_id: &rule_id,
+            dry_run: true,
+            persisted: false,
             changed,
-            prepared_update.changed_fields,
-            None,
-            None,
-            previous_detail,
-            prepared_update.next_detail,
-        ));
+            changed_fields: prepared_update.changed_fields,
+            audit_id: None,
+            index_job_id: None,
+            previous_rule: previous_detail,
+            rule: prepared_update.next_detail,
+        }));
     }
 
     if !changed {
-        return Ok(rule_update_report(
-            &prepared,
-            &rule_id,
-            false,
-            false,
-            false,
-            Vec::new(),
-            None,
-            None,
-            previous_detail.clone(),
-            previous_detail,
-        ));
+        return Ok(rule_update_report(RuleUpdateReportInput {
+            prepared: &prepared,
+            rule_id: &rule_id,
+            dry_run: false,
+            persisted: false,
+            changed: false,
+            changed_fields: Vec::new(),
+            audit_id: None,
+            index_job_id: None,
+            previous_rule: previous_detail.clone(),
+            rule: previous_detail,
+        }));
     }
 
     let audit_id = generate_audit_id();
@@ -1670,18 +1672,18 @@ pub fn update_rule(options: &RuleUpdateOptions<'_>) -> Result<RuleUpdateReport, 
 
     let updated = load_active_rule(&connection, &prepared.workspace_id, &rule_id)?;
     let updated_detail = load_rule_details(&connection, updated)?;
-    Ok(rule_update_report(
-        &prepared,
-        &rule_id,
-        false,
-        true,
-        true,
-        prepared_update.changed_fields,
-        Some(audit_id),
-        Some(index_job_id),
-        previous_detail,
-        updated_detail,
-    ))
+    Ok(rule_update_report(RuleUpdateReportInput {
+        prepared: &prepared,
+        rule_id: &rule_id,
+        dry_run: false,
+        persisted: true,
+        changed: true,
+        changed_fields: prepared_update.changed_fields,
+        audit_id: Some(audit_id),
+        index_job_id: Some(index_job_id),
+        previous_rule: previous_detail,
+        rule: updated_detail,
+    }))
 }
 
 /// Extract procedural-rule curation candidates from repeated semantic memories.
@@ -2848,33 +2850,34 @@ fn score_changed(previous: f32, next: f32) -> bool {
     (previous - next).abs() > f32::EPSILON
 }
 
-fn apply_mark_to_detail(
-    mut detail: RuleDetails,
-    transition: &RuleLifecycleTransition,
+struct ApplyMarkToDetail<'a> {
+    transition: &'a RuleLifecycleTransition,
     confidence: f32,
     utility: f32,
     superseded_by: Option<String>,
     positive_feedback_delta: u32,
     negative_feedback_delta: u32,
     last_validated_at: Option<String>,
-    updated_at: &str,
-) -> RuleDetails {
-    detail.maturity = transition.next_maturity.as_str().to_owned();
-    detail.confidence = confidence;
-    detail.utility = utility;
+    updated_at: &'a str,
+}
+
+fn apply_mark_to_detail(mut detail: RuleDetails, input: ApplyMarkToDetail<'_>) -> RuleDetails {
+    detail.maturity = input.transition.next_maturity.as_str().to_owned();
+    detail.confidence = input.confidence;
+    detail.utility = input.utility;
     detail.lifecycle = rule_lifecycle(&detail.maturity, detail.source_memory_ids.len());
     detail.evidence = rule_evidence(&detail.maturity, detail.source_memory_ids.len());
     detail.positive_feedback_count = detail
         .positive_feedback_count
-        .saturating_add(positive_feedback_delta);
+        .saturating_add(input.positive_feedback_delta);
     detail.negative_feedback_count = detail
         .negative_feedback_count
-        .saturating_add(negative_feedback_delta);
-    if last_validated_at.is_some() {
-        detail.last_validated_at = last_validated_at;
+        .saturating_add(input.negative_feedback_delta);
+    if input.last_validated_at.is_some() {
+        detail.last_validated_at = input.last_validated_at;
     }
-    detail.superseded_by = superseded_by;
-    detail.updated_at = updated_at.to_owned();
+    detail.superseded_by = input.superseded_by;
+    detail.updated_at = input.updated_at.to_owned();
     detail
 }
 
@@ -2908,29 +2911,35 @@ fn lifecycle_evidence_report(evidence: &RuleLifecycleEvidence) -> RuleMarkEviden
     }
 }
 
-fn rule_mark_report(
-    prepared: &PreparedRuleRead,
-    rule_id: &str,
+struct RuleMarkReportInput<'a> {
+    prepared: &'a PreparedRuleRead,
+    rule_id: &'a str,
     dry_run: bool,
     persisted: bool,
     changed: bool,
     audit_id: Option<String>,
     index_job_id: Option<String>,
-    transition: &RuleLifecycleTransition,
-    evidence: &RuleLifecycleEvidence,
+    transition: &'a RuleLifecycleTransition,
+    evidence: &'a RuleLifecycleEvidence,
     previous_rule: RuleDetails,
     rule: RuleDetails,
-) -> RuleMarkReport {
-    let status = if dry_run {
-        if changed { "would_mark" } else { "unchanged" }
-    } else if changed {
+}
+
+fn rule_mark_report(input: RuleMarkReportInput<'_>) -> RuleMarkReport {
+    let status = if input.dry_run {
+        if input.changed {
+            "would_mark"
+        } else {
+            "unchanged"
+        }
+    } else if input.changed {
         "marked"
     } else {
         "recorded"
     };
-    let index_status = if index_job_id.is_some() {
+    let index_status = if input.index_job_id.is_some() {
         "queued"
-    } else if dry_run {
+    } else if input.dry_run {
         "dry_run_not_queued"
     } else {
         "not_queued_no_indexable_change"
@@ -2940,20 +2949,20 @@ fn rule_mark_report(
         command: "rule mark",
         version: env!("CARGO_PKG_VERSION"),
         status: status.to_owned(),
-        rule_id: rule_id.to_owned(),
-        workspace_id: prepared.workspace_id.clone(),
-        workspace_path: prepared.workspace_path.display().to_string(),
-        database_path: prepared.database_path.display().to_string(),
-        dry_run,
-        persisted,
-        changed,
-        audit_id,
-        index_job_id,
+        rule_id: input.rule_id.to_owned(),
+        workspace_id: input.prepared.workspace_id.clone(),
+        workspace_path: input.prepared.workspace_path.display().to_string(),
+        database_path: input.prepared.database_path.display().to_string(),
+        dry_run: input.dry_run,
+        persisted: input.persisted,
+        changed: input.changed,
+        audit_id: input.audit_id,
+        index_job_id: input.index_job_id,
         index_status: index_status.to_owned(),
-        transition: transition_report(transition),
-        evidence: lifecycle_evidence_report(evidence),
-        previous_rule,
-        rule,
+        transition: transition_report(input.transition),
+        evidence: lifecycle_evidence_report(input.evidence),
+        previous_rule: input.previous_rule,
+        rule: input.rule,
         degraded: Vec::new(),
     }
 }
@@ -3190,9 +3199,9 @@ fn push_changed(changed_fields: &mut Vec<String>, field: &str, changed: bool) {
     }
 }
 
-fn rule_update_report(
-    prepared: &PreparedRuleRead,
-    rule_id: &str,
+struct RuleUpdateReportInput<'a> {
+    prepared: &'a PreparedRuleRead,
+    rule_id: &'a str,
     dry_run: bool,
     persisted: bool,
     changed: bool,
@@ -3201,17 +3210,23 @@ fn rule_update_report(
     index_job_id: Option<String>,
     previous_rule: RuleDetails,
     rule: RuleDetails,
-) -> RuleUpdateReport {
-    let status = if dry_run {
-        if changed { "would_update" } else { "unchanged" }
-    } else if changed {
+}
+
+fn rule_update_report(input: RuleUpdateReportInput<'_>) -> RuleUpdateReport {
+    let status = if input.dry_run {
+        if input.changed {
+            "would_update"
+        } else {
+            "unchanged"
+        }
+    } else if input.changed {
         "updated"
     } else {
         "unchanged"
     };
-    let index_status = if index_job_id.is_some() {
+    let index_status = if input.index_job_id.is_some() {
         "queued"
-    } else if dry_run {
+    } else if input.dry_run {
         "dry_run_not_queued"
     } else {
         "not_queued_no_change"
@@ -3221,19 +3236,19 @@ fn rule_update_report(
         command: "rule update",
         version: env!("CARGO_PKG_VERSION"),
         status: status.to_owned(),
-        rule_id: rule_id.to_owned(),
-        workspace_id: prepared.workspace_id.clone(),
-        workspace_path: prepared.workspace_path.display().to_string(),
-        database_path: prepared.database_path.display().to_string(),
-        dry_run,
-        persisted,
-        changed,
-        changed_fields,
-        audit_id,
-        index_job_id,
+        rule_id: input.rule_id.to_owned(),
+        workspace_id: input.prepared.workspace_id.clone(),
+        workspace_path: input.prepared.workspace_path.display().to_string(),
+        database_path: input.prepared.database_path.display().to_string(),
+        dry_run: input.dry_run,
+        persisted: input.persisted,
+        changed: input.changed,
+        changed_fields: input.changed_fields,
+        audit_id: input.audit_id,
+        index_job_id: input.index_job_id,
         index_status: index_status.to_owned(),
-        previous_rule,
-        rule,
+        previous_rule: input.previous_rule,
+        rule: input.rule,
         degraded: Vec::new(),
     }
 }
