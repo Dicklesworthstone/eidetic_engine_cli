@@ -126,6 +126,79 @@ serve = []
 
 ---
 
+## Local Dev Environment: External Build Drive (Mac)
+
+The Mac dev host (`/Users/jemanuel/projects/eidetic_engine_cli`) redirects
+**all** cargo build output and tmp scratch to an external USB-NVMe drive to
+keep the 460 GB internal SSD from filling up. This is configured globally
+in `~/.zshrc` so it applies to every cargo invocation on this machine, not
+just to this project:
+
+```bash
+# ~/.zshrc — mount-guarded so it degrades to local builds if the drive is
+# unplugged rather than failing every cargo command.
+if [ -d /Volumes/USBNVME16TB ]; then
+  export CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target
+  export TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp
+fi
+```
+
+Why both variables, not just `CARGO_TARGET_DIR`:
+
+- `CARGO_TARGET_DIR` redirects the persisted `target/{debug,release,…}` tree.
+- `TMPDIR` redirects the transient linker / debuginfo / fingerprint scratch
+  cargo writes during a build — easily several GB per session even when the
+  final `target/` is modest. Setting `CARGO_TARGET_DIR` alone leaves that
+  churn on the boot drive and is why the "disk 99% full" cycle kept
+  repeating before May 2026.
+
+Hard rules for agents working on this Mac:
+
+1. **Don't undo the redirect.** If you see `CARGO_TARGET_DIR` set to
+   `/Volumes/USBNVME16TB/...`, leave it. Don't `unset CARGO_TARGET_DIR`
+   "to make builds faster" — the internal SSD has only single-digit GB
+   free and a single full debug build will trip the OOM-for-disk threshold.
+2. **Don't commit the redirect to project config.** No `.cargo/config.toml`
+   in this repo with the external-drive path baked in — the canonical
+   server checkout at `/data/projects/eidetic_engine_cli` doesn't have
+   that drive, and a committed absolute path would break server builds.
+   The redirect lives in `~/.zshrc` (per-machine), not in the repo.
+3. **Reading build artifacts:** `target/` in the repo will be empty or
+   stale; the real artifacts are at
+   `/Volumes/USBNVME16TB/temp_agent_space/cargo-target/{debug,release}/...`.
+   Scripts that hard-code `./target/release/ee` should be updated to use
+   `$(cargo metadata --no-deps --format-version 1 | jq -r .target_directory)/release/ee`
+   or `cargo run --release --` instead of poking at the path directly.
+4. **rch (remote compilation helper)** still works: it builds on remote
+   workers and ships the artifact back; the local `CARGO_TARGET_DIR` only
+   affects where the returned artifact lands.
+5. **If the USB drive is unplugged**, the `if [ -d ... ]` guard falls
+   through and cargo writes to the in-repo `./target/` as usual — slower
+   to fill the disk but builds still work. Re-plug the drive and open a
+   new shell to restore the redirect.
+6. **Disk-pressure cleanup playbook**: when the internal SSD gets tight,
+   the safe-now wins are (in order of size):
+   - `rm -rf "$CARGO_TARGET_DIR/debug/incremental"` — ~7–9 GB, only when
+     no `cargo build`/`cargo test` is running.
+   - `rm -rf "$CARGO_TARGET_DIR/release"` — ~2 GB, only when no release
+     build is running.
+   - `rm -rf fuzz/target` — only when no `cargo fuzz` is running.
+   - `rm -rf ~/.cargo/registry ~/.cargo/advisory-db` — ~300 MB, cargo
+     refetches automatically on next build.
+   Don't touch `target/debug/deps` casually; it forces a full
+   rebuild-from-source of every transitive dependency (10–15 min cost).
+   Never delete `~/.local/share/ee/` (the source-of-truth DB),
+   `~/.local/share/mcp_agent_mail/` (multi-agent coordination), or
+   anything in `~/.agent_settings_backups/` (explicit git-versioned
+   recovery snapshots).
+
+This is a **local dev environment** note, not a project requirement. CI,
+the Linux server checkout, and other contributors are unaffected. The
+note lives in AGENTS.md so any agent working on this Mac understands why
+`target/` looks empty and where the real artifacts are.
+
+---
+
 ## Code Editing Discipline
 
 ### No Script-Based Changes
