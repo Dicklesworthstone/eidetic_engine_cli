@@ -471,7 +471,7 @@ pub fn run_context_pack_with_performance(
     let search_start = Instant::now();
     let mut search_report = match run_search(&SearchOptions {
         workspace_path: options.workspace_path.clone(),
-        database_path: Some(database_path),
+        database_path: Some(database_path.clone()),
         index_dir: options.index_dir.clone(),
         query: request.query.clone(),
         limit: request.candidate_pool,
@@ -778,10 +778,72 @@ pub fn run_context_pack_with_performance(
     let response = ContextResponse::new(request, draft, response_degraded)
         .map_err(|error| ContextPackError::Pack(error.to_string()))?;
 
+    // Bead bd-17c65.7.7 (G8): best-effort audit-log instrumentation for
+    // pack assembly. One `pack.assembled` row per call + one
+    // `pack.included_mem` row per selected item. Privacy: only the
+    // BLAKE3 prefix of the query reaches the audit log. Failures are
+    // swallowed so an audit append never blocks a successful pack.
+    audit_context_pack_assembly(&database_path, &options.workspace_path, &response);
+
     Ok(ContextPackPerformanceRun {
         response,
         performance,
     })
+}
+
+fn audit_context_pack_assembly(
+    database_path: &Path,
+    workspace_path: &Path,
+    response: &ContextResponse,
+) {
+    let Ok(conn) = DbConnection::open_file(database_path) else {
+        return;
+    };
+    let workspace_id = crate::core::curate::stable_workspace_id(workspace_path);
+    let query_hash = crate::obs::audit_events::query_hash(&response.data.request.query);
+    let pack_id_for_audit = response
+        .data
+        .pack
+        .hash
+        .clone()
+        .unwrap_or_else(|| "pack_unhashed".to_owned());
+    let assembled_details = serde_json::json!({
+        "queryHash": &query_hash,
+        "packId": &pack_id_for_audit,
+        "itemCount": response.data.pack.items.len(),
+        "budget": response.data.pack.budget.max_tokens(),
+        "usedTokens": response.data.pack.used_tokens,
+    })
+    .to_string();
+    let assembled_input = crate::db::CreateAuditInput {
+        workspace_id: Some(workspace_id.clone()),
+        actor: None,
+        action: crate::db::audit_actions::PACK_ASSEMBLED.to_owned(),
+        target_type: Some("pack".to_owned()),
+        target_id: Some(pack_id_for_audit.clone()),
+        details: Some(assembled_details),
+    };
+    let _ = conn.insert_audit(&crate::db::generate_audit_id(), &assembled_input);
+
+    for (display_index, item) in response.data.pack.items.iter().enumerate() {
+        let item_details = serde_json::json!({
+            "queryHash": &query_hash,
+            "packId": &pack_id_for_audit,
+            "rank": item.rank,
+            "displayIndex": (display_index + 1) as u32,
+            "section": item.section.as_str(),
+        })
+        .to_string();
+        let item_input = crate::db::CreateAuditInput {
+            workspace_id: Some(workspace_id.clone()),
+            actor: None,
+            action: crate::db::audit_actions::PACK_INCLUDED_MEM.to_owned(),
+            target_type: Some("memory".to_owned()),
+            target_id: Some(item.memory_id.to_string()),
+            details: Some(item_details),
+        };
+        let _ = conn.insert_audit(&crate::db::generate_audit_id(), &item_input);
+    }
 }
 
 fn context_performance_json(
