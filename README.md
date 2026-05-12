@@ -878,6 +878,26 @@ The harness emits `ee.perf.v1` JSON with profile, workload, artifact paths,
 latency fields, resource fields when available, and regression status. Profiles
 can become release-blocking once their fixture variance is low enough for CI.
 
+### Codex RCH Workaround
+
+Some Mac Codex sessions may still find an older `rch` on `PATH` or report the
+Codex hook as not installed. Until that local installation is upgraded, invoke
+the current RCH client by absolute path and fail closed to remote execution:
+
+```bash
+RCH_REQUIRE_REMOTE=1 \
+RCH_VISIBILITY=summary \
+RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects \
+RCH_ALIAS_PROJECT_ROOT=/data/projects \
+/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch exec -- \
+  env CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target \
+  cargo test --lib search_sync_attaches_rebuilt_lexical_index_for_literal_queries -- --nocapture
+```
+
+RCH rewrites the local USB-NVMe `CARGO_TARGET_DIR` to a worker-local target path
+for remote execution, so the external-drive setting is safe for both local
+artifact retrieval and remote Linux workers.
+
 ---
 
 ## Troubleshooting
