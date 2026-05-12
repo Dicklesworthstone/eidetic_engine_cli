@@ -1446,6 +1446,38 @@ pub fn render_context_response_json(response: &ContextResponse) -> String {
                     &response.data.pack.selection_certificate,
                 );
             });
+            // Bead bd-17c65.1.1 (A1 phase 1): consolidate per-item data from the
+            // four parallel pack structures (`items[]`, `selectionCertificate
+            // .selected_items[]`, `selectionCertificate.steps[]`,
+            // `provenanceFooter.entries[]`) onto each `items[]` entry. The
+            // legacy parallel structures still emit for backwards compatibility
+            // with downstream tests and harnesses; removal is tracked in a
+            // follow-up phase. After phase 1, an agent reading `items[i]`
+            // gets the union of fields and no longer has to walk three more
+            // arrays to find tokenCost / feasibility / step trace data.
+            let selected_by_rank: std::collections::BTreeMap<u32, &PackSelectedItem> = response
+                .data
+                .pack
+                .selection_certificate
+                .selected_items
+                .iter()
+                .map(|s| (s.rank, s))
+                .collect();
+            let step_by_rank: std::collections::BTreeMap<u32, &PackSelectionStep> = response
+                .data
+                .pack
+                .selection_certificate
+                .steps
+                .iter()
+                .map(|s| (s.rank, s))
+                .collect();
+            let footer_for_lookup = response.data.pack.provenance_footer();
+            let footer_by_rank: std::collections::BTreeMap<u32, &PackItemProvenance> =
+                footer_for_lookup
+                    .entries
+                    .iter()
+                    .map(|e| (e.rank, e))
+                    .collect();
             pack.field_array_of_objects("items", &response.data.pack.items, |obj, item| {
                 obj.field_u32("rank", item.rank);
                 obj.field_str("memoryId", &item.memory_id.to_string());
@@ -1455,6 +1487,13 @@ pub fn render_context_response_json(response: &ContextResponse) -> String {
                 obj.field_object("scores", |scores| {
                     scores.field_raw("relevance", &score_json(item.relevance.into_inner()));
                     scores.field_raw("utility", &score_json(item.utility.into_inner()));
+                    // A1 phase 1: surface marginalGain / objectiveValue from the
+                    // selection-step trace so agents don't have to cross-reference
+                    // selectionCertificate.steps[] by rank.
+                    if let Some(step) = step_by_rank.get(&item.rank) {
+                        scores.field_raw("marginalGain", &score_json(step.marginal_gain));
+                        scores.field_raw("objectiveValue", &score_json(step.objective_value));
+                    }
                 });
                 obj.field_object("trust", |trust| {
                     trust.field_str("class", item.trust.class.as_str());
@@ -1479,6 +1518,28 @@ pub fn render_context_response_json(response: &ContextResponse) -> String {
                 obj.field_str("why", &item.why);
                 if let Some(diversity_key) = &item.diversity_key {
                     obj.field_str("diversityKey", diversity_key);
+                }
+                // A1 phase 1: surface feasibility + tokenCost from the
+                // certificate's selected_items[] lookup so agents reading
+                // items[] don't have to chase selectionCertificate.selectedItems
+                // for per-item budget feasibility.
+                if let Some(selected) = selected_by_rank.get(&item.rank) {
+                    obj.field_u32("tokenCost", selected.token_cost);
+                    obj.field_bool("feasible", selected.feasible);
+                }
+                // A1 phase 1: surface coveredFeatures from the step trace so
+                // diversity-coverage reasoning is co-located with the rest of
+                // the item's selection rationale.
+                if let Some(step) = step_by_rank.get(&item.rank) {
+                    obj.field_raw(
+                        "coveredFeatures",
+                        &string_array_json(step.covered_features.iter()),
+                    );
+                }
+                // A1 phase 1: surface sourceIndex from provenanceFooter.entries[]
+                // so callers don't have to join the footer array on rank.
+                if let Some(footer_entry) = footer_by_rank.get(&item.rank) {
+                    obj.field_u32("sourceIndex", footer_entry.source_index);
                 }
             });
             pack.field_array_of_objects("omitted", &response.data.pack.omitted, |obj, omission| {

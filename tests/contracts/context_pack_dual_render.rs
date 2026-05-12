@@ -304,6 +304,48 @@ fn dual_render_markdown_item_indices_are_contiguous_1_to_n() -> TestResult {
 }
 
 #[test]
+fn pack_items_carry_merged_certificate_and_step_fields() -> TestResult {
+    // A1 phase 1 (bd-17c65.1.1): items[] now carries per-item data that
+    // previously required walking selectionCertificate.selected_items[],
+    // selectionCertificate.steps[], and provenanceFooter.entries[] in
+    // parallel. This test pins the merge invariant: when a pack has any
+    // items, every item must expose tokenCost, feasible, marginalGain,
+    // objectiveValue, coveredFeatures, and sourceIndex inline.
+    let response = multi_section_fixture();
+    let json_str = render_context_response_json(&response);
+    let json: Value =
+        serde_json::from_str(&json_str).map_err(|error| format!("JSON did not parse: {error}"))?;
+    let items = json
+        .pointer("/data/pack/items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "missing items array".to_string())?;
+    if items.is_empty() {
+        return Err("fixture must have at least one item to exercise A1 merge".to_string());
+    }
+    for (i, item) in items.iter().enumerate() {
+        for field in ["tokenCost", "feasible", "coveredFeatures", "sourceIndex"] {
+            if item.get(field).is_none() {
+                return Err(format!(
+                    "item[{i}] is missing merged field `{field}` (A1 phase 1 contract)"
+                ));
+            }
+        }
+        let scores = item
+            .get("scores")
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("item[{i}].scores is missing"))?;
+        for field in ["marginalGain", "objectiveValue"] {
+            if !scores.contains_key(field) {
+                return Err(format!(
+                    "item[{i}].scores is missing merged field `{field}` (A1 phase 1 contract)"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn dual_render_with_empty_pack_still_parses_consistently() -> TestResult {
     // Edge case: a request that produces zero items. The markdown render
     // should not panic, and the JSON projection must report an empty items
