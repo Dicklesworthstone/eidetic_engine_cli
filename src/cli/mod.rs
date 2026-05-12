@@ -51,13 +51,12 @@ use crate::core::context::{
 };
 use crate::core::curate::{
     CurateApplyOptions, CurateApplyReport, CurateCandidatesOptions, CurateCandidatesReport,
-    CurateDispositionOptions, CurateDispositionReport, CurateRetireOptions, CurateRetireReport,
-    CurateReviewAction, CurateReviewOptions, CurateReviewReport, CurateTombstoneOptions,
-    CurateTombstoneReport, CurateValidateOptions, CurateValidateReport, ReviewSessionOptions,
-    ReviewSessionReport, ReviewWorkspaceOptions, ReviewWorkspaceReport, apply_curation_candidate,
-    list_curation_candidates, review_curation_candidate, review_session_proposals,
-    run_curate_retire, run_curate_tombstone, run_curation_disposition, run_review_workspace,
-    validate_curation_candidate,
+    CurateDispositionOptions, CurateDispositionReport, CurateRetireOptions, CurateReviewAction,
+    CurateReviewOptions, CurateReviewReport, CurateTombstoneOptions, CurateValidateOptions,
+    CurateValidateReport, ReviewSessionOptions, ReviewSessionReport, ReviewWorkspaceOptions,
+    apply_curation_candidate, list_curation_candidates, review_curation_candidate,
+    review_session_proposals, run_curate_retire, run_curate_tombstone, run_curation_disposition,
+    run_review_workspace, validate_curation_candidate,
 };
 use crate::core::doctor::{
     DependencyDiagnosticsReport, DoctorReport, FrankenHealthReport, IntegrityDiagnosticsOptions,
@@ -105,7 +104,7 @@ use crate::core::memory::{
     MemoryLinkOptions, MemoryLinkReport, MemoryReviseReport, MemoryTagsMode, MemoryTagsOptions,
     MemoryTagsReport, RememberMemoryOptions, RememberMemoryReport, ReviseMemoryOptions,
     ReviseReason, WorkflowCloseOptions, WorkflowCloseReport, WorkflowCreateOptions,
-    WorkflowCreateReport, close_workflow, create_workflow, expire_memory, get_memory_details,
+    close_workflow, create_workflow, expire_memory, get_memory_details,
     list_memories, remember_memory, revise_memory, update_memory_link, update_memory_tags,
 };
 use crate::core::outcome::{
@@ -16706,7 +16705,7 @@ type QueryOutputControls = (
     Vec<ContextResponseDegradation>,
 );
 
-fn handle_completion<W>(cli: &Cli, args: &CompletionArgs, stdout: &mut W) -> ProcessExitCode
+fn handle_completion<W>(_cli: &Cli, args: &CompletionArgs, stdout: &mut W) -> ProcessExitCode
 where
     W: Write,
 {
