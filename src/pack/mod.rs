@@ -20,6 +20,7 @@ pub const DEFAULT_MMR_RELEVANCE_WEIGHT: f32 = 0.75;
 pub const FACILITY_LOCATION_RELEVANCE_WEIGHT: f32 = 0.70;
 pub const FACILITY_LOCATION_UTILITY_WEIGHT: f32 = 0.30;
 pub const FACILITY_LOCATION_EPSILON: f32 = 0.000_001;
+pub const MAX_PACK_SKIPPED_ITEMS: usize = 50;
 
 /// Similarity floor applied when two candidates share the same `diversity_key`
 /// during facility-location selection.
@@ -834,7 +835,6 @@ pub struct PackSelectionCertificate {
     pub monotone: bool,
     pub submodular: bool,
     pub selected_items: Vec<PackSelectedItem>,
-    pub rejected_frontier: Vec<PackRejectedFrontierItem>,
     pub steps: Vec<PackSelectionStep>,
 }
 
@@ -898,14 +898,6 @@ pub struct PackSelectedItem {
     pub feasible: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PackRejectedFrontierItem {
-    pub memory_id: MemoryId,
-    pub token_cost: u32,
-    pub reason: PackOmissionReason,
-    pub feasible: bool,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct PackDraft {
     pub query: String,
@@ -950,6 +942,9 @@ impl PackDraft {
                 PackOmissionReason::RedundantCandidate => {
                     redundant_candidates = redundant_candidates.saturating_add(1);
                 }
+                PackOmissionReason::BelowRelevanceFloor
+                | PackOmissionReason::ExcludedByPolicy
+                | PackOmissionReason::ExcludedByFilter => {}
             }
         }
 
@@ -1001,6 +996,19 @@ impl PackDraft {
             schemes: schemes.into_iter().collect(),
             entries,
         }
+    }
+
+    #[must_use]
+    pub fn skipped_total(&self) -> usize {
+        self.omitted.len()
+    }
+
+    #[must_use]
+    pub fn skipped_for_output(&self) -> Vec<&PackOmission> {
+        let mut skipped = self.omitted.iter().collect::<Vec<_>>();
+        skipped.sort_by(|left, right| compare_omissions_for_output(left, right));
+        skipped.truncate(MAX_PACK_SKIPPED_ITEMS);
+        skipped
     }
 
     #[must_use]
@@ -1230,7 +1238,7 @@ impl ContextResponseData {
                 code: "degraded_context",
                 severity: highest_degradation_severity(&self.degraded),
                 message: format!(
-                    "{} degraded context signal{} present; inspect degraded[] repairs before relying on omitted or fallback sources.",
+                    "{} degraded context signal{} present; inspect degraded[] repairs before relying on skipped or fallback sources.",
                     self.degraded.len(),
                     plural_s(self.degraded.len())
                 ),
@@ -1479,7 +1487,7 @@ fn context_advisory_banner(
             code: "degraded_context",
             severity: highest_degradation_severity(degraded),
             message: format!(
-                "{} degraded context signal{} present; inspect degraded[] repairs before relying on omitted or fallback sources.",
+                "{} degraded context signal{} present; inspect degraded[] repairs before relying on skipped or fallback sources.",
                 degraded.len(),
                 plural_s(degraded.len())
             ),
@@ -1859,17 +1867,44 @@ fn redact_pack_item_content(content: String) -> (String, Vec<PackItemRedaction>)
     (report.content, redactions)
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PackOmission {
     pub memory_id: MemoryId,
     pub estimated_tokens: u32,
+    pub relevance: UnitScore,
+    pub utility: UnitScore,
     pub reason: PackOmissionReason,
+    pub rejected_at: PackRejectionStage,
+    pub feasible: bool,
+    pub could_fit_with_budget: Option<u32>,
+}
+
+impl PackOmission {
+    fn from_candidate(
+        candidate: &PackCandidate,
+        reason: PackOmissionReason,
+        could_fit_with_budget: Option<u32>,
+    ) -> Self {
+        Self {
+            memory_id: candidate.memory_id,
+            estimated_tokens: candidate.estimated_tokens,
+            relevance: candidate.relevance,
+            utility: candidate.utility,
+            reason,
+            rejected_at: PackRejectionStage::Selection,
+            feasible: false,
+            could_fit_with_budget,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PackOmissionReason {
     TokenBudgetExceeded,
     RedundantCandidate,
+    BelowRelevanceFloor,
+    ExcludedByPolicy,
+    ExcludedByFilter,
 }
 
 impl PackOmissionReason {
@@ -1878,6 +1913,9 @@ impl PackOmissionReason {
         match self {
             Self::TokenBudgetExceeded => "token_budget_exceeded",
             Self::RedundantCandidate => "redundant_candidate",
+            Self::BelowRelevanceFloor => "below_relevance_floor",
+            Self::ExcludedByPolicy => "excluded_by_policy",
+            Self::ExcludedByFilter => "excluded_by_filter",
         }
     }
 }
@@ -1885,6 +1923,92 @@ impl PackOmissionReason {
 impl fmt::Display for PackOmissionReason {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackRejectionStage {
+    CandidateFilter,
+    Selection,
+}
+
+impl PackRejectionStage {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CandidateFilter => "candidate_filter",
+            Self::Selection => "selection",
+        }
+    }
+}
+
+impl fmt::Display for PackRejectionStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+fn compare_omissions_for_output(left: &PackOmission, right: &PackOmission) -> Ordering {
+    let left_score = left.relevance.into_inner() + left.utility.into_inner();
+    let right_score = right.relevance.into_inner() + right.utility.into_inner();
+    right_score
+        .partial_cmp(&left_score)
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| left.memory_id.cmp(&right.memory_id))
+}
+
+fn minimal_budget_for_candidate(
+    profile: ContextPackProfile,
+    used_tokens: u32,
+    section_used: u32,
+    section: PackSection,
+    candidate_tokens: u32,
+) -> u32 {
+    let required_total_budget = used_tokens.saturating_add(candidate_tokens);
+    let required_section_budget = minimal_budget_for_section(
+        profile,
+        section,
+        section_used.saturating_add(candidate_tokens),
+    );
+    required_total_budget.max(required_section_budget)
+}
+
+fn minimal_budget_for_section(
+    profile: ContextPackProfile,
+    section: PackSection,
+    required_tokens: u32,
+) -> u32 {
+    if required_tokens == 0 {
+        return 0;
+    }
+    let section_mix = ContextProfile::builtin(profile).section_mix;
+    let basis_points = section_mix.weight_bps(context_profile_section(section));
+    if basis_points == 0 {
+        return u32::MAX;
+    }
+
+    let mut low = 0_u32;
+    let mut high = ((u64::from(required_tokens) * 10_000).div_ceil(u64::from(basis_points)))
+        .min(u64::from(u32::MAX)) as u32;
+    while low < high {
+        let mid = low + ((high - low) / 2);
+        let quota = SectionQuotas::for_profile(profile, mid).get(section);
+        if quota.max_tokens >= required_tokens {
+            high = mid;
+        } else {
+            low = mid.saturating_add(1);
+        }
+    }
+    low
+}
+
+const fn context_profile_section(section: PackSection) -> ContextProfileSection {
+    match section {
+        PackSection::ProceduralRules => ContextProfileSection::ProceduralRules,
+        PackSection::Decisions => ContextProfileSection::Decisions,
+        PackSection::Failures => ContextProfileSection::Failures,
+        PackSection::Evidence => ContextProfileSection::Evidence,
+        PackSection::Artifacts => ContextProfileSection::Artifacts,
     }
 }
 
@@ -2094,11 +2218,11 @@ fn assemble_mmr_draft(
         let candidate_index = select_next_candidate_index(&candidates, &selected_signatures);
         let selection = candidates.remove(candidate_index);
         if is_redundant(&selection.signature, &selected_signatures) {
-            omitted.push(PackOmission {
-                memory_id: selection.candidate.memory_id,
-                estimated_tokens: selection.candidate.estimated_tokens,
-                reason: PackOmissionReason::RedundantCandidate,
-            });
+            omitted.push(PackOmission::from_candidate(
+                &selection.candidate,
+                PackOmissionReason::RedundantCandidate,
+                None,
+            ));
             continue;
         }
 
@@ -2139,11 +2263,17 @@ fn assemble_mmr_draft(
                     rank, candidate, redactions,
                 ));
             }
-            _ => omitted.push(PackOmission {
-                memory_id: selection.candidate.memory_id,
-                estimated_tokens: selection.candidate.estimated_tokens,
-                reason: PackOmissionReason::TokenBudgetExceeded,
-            }),
+            _ => omitted.push(PackOmission::from_candidate(
+                &selection.candidate,
+                PackOmissionReason::TokenBudgetExceeded,
+                Some(minimal_budget_for_candidate(
+                    profile,
+                    used_tokens,
+                    section_used,
+                    selection.candidate.section,
+                    selection.candidate.estimated_tokens,
+                )),
+            )),
         }
     }
 
@@ -2167,7 +2297,6 @@ fn assemble_mmr_draft(
             monotone: false,
             submodular: false,
             selected_items: selected_items_from_draft_items(&items),
-            rejected_frontier: rejected_frontier_from_omissions(&omitted),
             steps,
         },
         items,
@@ -2215,12 +2344,17 @@ fn assemble_facility_location_draft(
         ) else {
             omitted.extend(remaining_indices.drain(..).filter_map(|profile_index| {
                 let candidate = candidates.get(profile_index)?.candidate.as_ref()?;
-                PackOmission {
-                    memory_id: candidate.memory_id,
-                    estimated_tokens: candidate.estimated_tokens,
-                    reason: PackOmissionReason::TokenBudgetExceeded,
-                }
-                .into()
+                Some(PackOmission::from_candidate(
+                    candidate,
+                    PackOmissionReason::TokenBudgetExceeded,
+                    Some(minimal_budget_for_candidate(
+                        profile,
+                        used_tokens,
+                        section_usage.tokens_for(candidate.section),
+                        candidate.section,
+                        candidate.estimated_tokens,
+                    )),
+                ))
             }));
             break;
         };
@@ -2228,12 +2362,11 @@ fn assemble_facility_location_draft(
         if marginal_gain <= FACILITY_LOCATION_EPSILON {
             omitted.extend(remaining_indices.drain(..).filter_map(|profile_index| {
                 let candidate = candidates.get(profile_index)?.candidate.as_ref()?;
-                PackOmission {
-                    memory_id: candidate.memory_id,
-                    estimated_tokens: candidate.estimated_tokens,
-                    reason: PackOmissionReason::RedundantCandidate,
-                }
-                .into()
+                Some(PackOmission::from_candidate(
+                    candidate,
+                    PackOmissionReason::RedundantCandidate,
+                    None,
+                ))
             }));
             break;
         }
@@ -2296,7 +2429,6 @@ fn assemble_facility_location_draft(
             monotone: true,
             submodular: true,
             selected_items: selected_items_from_draft_items(&items),
-            rejected_frontier: rejected_frontier_from_omissions(&omitted),
             steps,
         },
         items,
@@ -2313,18 +2445,6 @@ fn selected_items_from_draft_items(items: &[PackDraftItem]) -> Vec<PackSelectedI
             memory_id: item.memory_id,
             token_cost: item.estimated_tokens,
             feasible: true,
-        })
-        .collect()
-}
-
-fn rejected_frontier_from_omissions(omitted: &[PackOmission]) -> Vec<PackRejectedFrontierItem> {
-    omitted
-        .iter()
-        .map(|omission| PackRejectedFrontierItem {
-            memory_id: omission.memory_id,
-            token_cost: omission.estimated_tokens,
-            reason: omission.reason,
-            feasible: false,
         })
         .collect()
 }

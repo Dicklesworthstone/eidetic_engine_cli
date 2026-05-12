@@ -129,3 +129,6 @@ mod audit_event_coverage;
 
 #[path = "contracts/migrate_command_surface.rs"]
 mod migrate_command_surface;
+
+#[path = "contracts/backup_import_roundtrip.rs"]
+mod backup_import_roundtrip;
