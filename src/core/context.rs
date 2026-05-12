@@ -1279,7 +1279,9 @@ fn persist_pack_record(
     {
         Some(ws) => ws,
         None => {
-            let canonical = workspace_path.canonicalize().unwrap_or_else(|_| workspace_path.to_path_buf());
+            let canonical = workspace_path
+                .canonicalize()
+                .unwrap_or_else(|_| workspace_path.to_path_buf());
             let canonical_str = canonical.display().to_string();
             if canonical_str == raw {
                 return Err("workspace not found".to_string());

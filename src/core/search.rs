@@ -349,11 +349,7 @@ impl SearchDegradation {
     /// an agent can decide whether to retry with a different strategy).
     /// Bead bd-17c65.2.1 (B1).
     #[must_use]
-    fn low_recall_after_floor(
-        floor: f32,
-        kept: usize,
-        considered: usize,
-    ) -> Self {
+    fn low_recall_after_floor(floor: f32, kept: usize, considered: usize) -> Self {
         Self {
             code: "low_recall_after_floor".to_string(),
             severity: "low".to_string(),
@@ -863,10 +859,7 @@ impl RetrievalMetrics {
         // Variance signal: how tightly clustered are above-floor
         // scores? Smaller spread → higher confidence. Approximate
         // variance with (max - min) / max, bounded.
-        let variance_proxy = match (
-            self.score_distribution.max,
-            self.score_distribution.min,
-        ) {
+        let variance_proxy = match (self.score_distribution.max, self.score_distribution.min) {
             (Some(max), Some(min)) if max > 0.0 => ((max - min) / max).clamp(0.0, 1.0),
             _ => 0.0,
         };
@@ -1212,9 +1205,7 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
             let (raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(raw_hits);
 
             // Bead bd-17c65.2.1 (B1): apply relevance floor.
-            let floor = options
-                .relevance_floor
-                .unwrap_or(DEFAULT_RELEVANCE_FLOOR);
+            let floor = options.relevance_floor.unwrap_or(DEFAULT_RELEVANCE_FLOOR);
             let pre_floor_count = raw_hits.len();
             let pre_floor_top_score = raw_hits.first().map(|hit| hit.score);
 
@@ -2237,9 +2228,7 @@ mod tests {
             synthetic_hit("b", 0.20),
             synthetic_hit("c", 0.10),
         ];
-        let metrics = RetrievalMetrics::from_hits_with_floor(
-            10, 5.0, &hits, 0, Some(0.05), 4,
-        );
+        let metrics = RetrievalMetrics::from_hits_with_floor(10, 5.0, &hits, 0, Some(0.05), 4);
         assert_eq!(metrics.relevance_floor, Some(0.05));
         assert_eq!(metrics.candidates_above_floor, 3);
         assert_eq!(metrics.candidates_below_floor, 4);
@@ -2249,17 +2238,12 @@ mod tests {
     #[test]
     fn retrieval_metrics_data_json_emits_floor_fields() {
         let hits = vec![synthetic_hit("a", 0.4)];
-        let metrics = RetrievalMetrics::from_hits_with_floor(
-            10, 5.0, &hits, 0, Some(0.05), 2,
-        );
+        let metrics = RetrievalMetrics::from_hits_with_floor(10, 5.0, &hits, 0, Some(0.05), 2);
         let json = metrics.data_json();
         // f32 -> f64 widening introduces sub-epsilon drift (0.0500000007…);
         // compare with tolerance instead of exact equality.
         let floor = json["relevanceFloor"].as_f64().expect("floor present");
-        assert!(
-            (floor - 0.05).abs() < 1e-5,
-            "floor mismatch: got {floor}"
-        );
+        assert!((floor - 0.05).abs() < 1e-5, "floor mismatch: got {floor}");
         assert_eq!(json["candidatesAboveFloor"], 1);
         assert_eq!(json["candidatesBelowFloor"], 2);
     }
@@ -2289,8 +2273,7 @@ mod tests {
 
     #[test]
     fn no_relevant_results_handles_singular_candidate() {
-        let degradation =
-            SearchDegradation::no_relevant_results("q", 0.05, 1, Some(0.01));
+        let degradation = SearchDegradation::no_relevant_results("q", 0.05, 1, Some(0.01));
         // Singular: "1 candidate" not "1 candidates".
         assert!(degradation.message.contains("1 candidate"));
         assert!(!degradation.message.contains("1 candidates"));
@@ -2371,14 +2354,7 @@ mod tests {
 
     #[test]
     fn honest_quality_score_returns_none_when_below_floor() {
-        let metrics = RetrievalMetrics::from_hits_with_floor(
-            10,
-            5.0,
-            &[],
-            0,
-            Some(0.05),
-            5,
-        );
+        let metrics = RetrievalMetrics::from_hits_with_floor(10, 5.0, &[], 0, Some(0.05), 5);
         assert!(metrics.honest_quality_score().is_none());
         assert_eq!(metrics.quality_assessment(), QualityAssessment::Empty);
     }
@@ -2393,12 +2369,8 @@ mod tests {
             synthetic_hit("e", 0.35),
         ];
         let weak_hits = vec![synthetic_hit("a", 0.06)];
-        let good = RetrievalMetrics::from_hits_with_floor(
-            10, 5.0, &good_hits, 0, Some(0.05), 0,
-        );
-        let weak = RetrievalMetrics::from_hits_with_floor(
-            10, 5.0, &weak_hits, 0, Some(0.05), 9,
-        );
+        let good = RetrievalMetrics::from_hits_with_floor(10, 5.0, &good_hits, 0, Some(0.05), 0);
+        let weak = RetrievalMetrics::from_hits_with_floor(10, 5.0, &weak_hits, 0, Some(0.05), 9);
         let good_score = good.honest_quality_score().expect("good");
         let weak_score = weak.honest_quality_score().expect("weak");
         assert!(
@@ -2413,21 +2385,17 @@ mod tests {
     #[test]
     fn retrieval_metrics_data_json_includes_b4_fields() {
         let hits = vec![synthetic_hit("a", 0.40), synthetic_hit("b", 0.20)];
-        let metrics =
-            RetrievalMetrics::from_hits_with_floor(10, 5.0, &hits, 0, Some(0.05), 1);
+        let metrics = RetrievalMetrics::from_hits_with_floor(10, 5.0, &hits, 0, Some(0.05), 1);
         let json = metrics.data_json();
         assert_eq!(json["qualityAssessment"], "good");
-        let score = json["honestQualityScore"]
-            .as_f64()
-            .expect("score present");
+        let score = json["honestQualityScore"].as_f64().expect("score present");
         assert!((0.0..=1.0).contains(&score));
     }
 
     #[test]
     fn retrieval_metrics_quality_assessment_empty_json() {
         // Below-floor input produces empty assessment + null score.
-        let metrics =
-            RetrievalMetrics::from_hits_with_floor(10, 5.0, &[], 0, Some(0.05), 3);
+        let metrics = RetrievalMetrics::from_hits_with_floor(10, 5.0, &[], 0, Some(0.05), 3);
         let json = metrics.data_json();
         assert_eq!(json["qualityAssessment"], "empty");
         assert!(json["honestQualityScore"].is_null());
@@ -2484,10 +2452,7 @@ mod tests {
 
     #[test]
     fn dedupe_nan_score_does_not_replace() {
-        let hits = vec![
-            synthetic_hit("a", 0.4),
-            synthetic_hit("a", f32::NAN),
-        ];
+        let hits = vec![synthetic_hit("a", 0.4), synthetic_hit("a", f32::NAN)];
         let (deduped, collapsed) = dedupe_hits_on_doc_id(hits);
         assert_eq!(deduped.len(), 1);
         assert_eq!(collapsed, 1);
@@ -2516,10 +2481,12 @@ mod tests {
         assert_eq!(degradation.severity, "low");
         assert!(degradation.message.contains("0.0700"));
         assert!(degradation.message.contains("0.0500"));
-        assert!(degradation
-            .repair
-            .as_deref()
-            .is_some_and(|r| r.to_lowercase().contains("rephrase")));
+        assert!(
+            degradation
+                .repair
+                .as_deref()
+                .is_some_and(|r| r.to_lowercase().contains("rephrase"))
+        );
     }
 
     /// When top score is strictly between floor and 2× floor, the
@@ -2543,9 +2510,21 @@ mod tests {
     #[test]
     fn duplicates_collapsed_degradation_uses_correct_grammar() {
         let one = SearchDegradation::duplicates_collapsed(1);
-        assert!(one.message.contains("1 duplicate hit "), "got {}", one.message);
-        assert!(!one.message.contains("hits"), "singular for n=1: {}", one.message);
+        assert!(
+            one.message.contains("1 duplicate hit "),
+            "got {}",
+            one.message
+        );
+        assert!(
+            !one.message.contains("hits"),
+            "singular for n=1: {}",
+            one.message
+        );
         let many = SearchDegradation::duplicates_collapsed(5);
-        assert!(many.message.contains("5 duplicate hits"), "got {}", many.message);
+        assert!(
+            many.message.contains("5 duplicate hits"),
+            "got {}",
+            many.message
+        );
     }
 }

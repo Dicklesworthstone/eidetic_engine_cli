@@ -1138,12 +1138,7 @@ mod tests {
 
     #[test]
     fn recovery_action_env_constructor_populates_only_relevant_fields() {
-        let action = super::RecoveryAction::env(
-            1,
-            "EE_CASS_BINARY",
-            "/abs/path",
-            "Try this first",
-        );
+        let action = super::RecoveryAction::env(1, "EE_CASS_BINARY", "/abs/path", "Try this first");
         assert_eq!(action.priority, 1);
         assert_eq!(action.kind, super::RecoveryKind::Env);
         assert_eq!(action.env_name.as_deref(), Some("EE_CASS_BINARY"));
@@ -1208,10 +1203,11 @@ mod tests {
         };
         let actions = error.recovery_actions();
         assert!(!actions.is_empty());
-        assert!(actions.iter().any(|a| a
-            .command
-            .as_deref()
-            .is_some_and(|cmd| cmd.contains("ee index rebuild"))));
+        assert!(actions.iter().any(|a| {
+            a.command
+                .as_deref()
+                .is_some_and(|cmd| cmd.contains("ee index rebuild"))
+        }));
     }
 
     #[test]
@@ -1223,10 +1219,12 @@ mod tests {
         let actions = error.recovery_actions();
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].kind, super::RecoveryKind::Migration);
-        assert!(actions[0]
-            .command
-            .as_deref()
-            .is_some_and(|cmd| cmd.contains("ee migrate run")));
+        assert!(
+            actions[0]
+                .command
+                .as_deref()
+                .is_some_and(|cmd| cmd.contains("ee migrate run"))
+        );
     }
 
     #[test]
@@ -1242,7 +1240,8 @@ mod tests {
     #[test]
     fn domain_error_recovery_for_policy_secret_recommends_redact() {
         let error = super::DomainError::PolicyDenied {
-            message: "Refusing to persist memory content that contains secrets: openai_sk_prefix.".to_owned(),
+            message: "Refusing to persist memory content that contains secrets: openai_sk_prefix."
+                .to_owned(),
             repair: None,
         };
         let actions = error.recovery_actions();

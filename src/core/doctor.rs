@@ -127,8 +127,7 @@ impl Posture {
             match check.severity {
                 CheckSeverity::Error => return Self::Blocked,
                 CheckSeverity::Warning => {
-                    let is_transient =
-                        transient_predicate.is_some_and(|pred| pred(check));
+                    let is_transient = transient_predicate.is_some_and(|pred| pred(check));
                     if !is_transient {
                         any_warning = true;
                     }
@@ -2561,10 +2560,7 @@ mod tests {
             ),
         ];
         let transient = |c: &CheckResult| c.name == "search_index";
-        assert_eq!(
-            Posture::from_checks(&checks, Some(&transient)),
-            Posture::Ok
-        );
+        assert_eq!(Posture::from_checks(&checks, Some(&transient)), Posture::Ok);
     }
 
     #[test]

@@ -254,32 +254,50 @@ mod tests {
     #[test]
     fn version_string_does_not_escape_dots() {
         // `v0.2.0` mid-text: dots are not list markers.
-        assert_eq!(escape_text("prepare release v0.2.0"), "prepare release v0.2.0");
+        assert_eq!(
+            escape_text("prepare release v0.2.0"),
+            "prepare release v0.2.0"
+        );
     }
 
     #[test]
     fn identifier_with_underscores_passes_through_unescaped() {
         // CommonMark intra-word underscore rule.
-        assert_eq!(escape_text("See mem_01KR9VVVWSE8 for details."), "See mem_01KR9VVVWSE8 for details.");
-        assert_eq!(escape_text("policy.detector.value"), "policy.detector.value");
+        assert_eq!(
+            escape_text("See mem_01KR9VVVWSE8 for details."),
+            "See mem_01KR9VVVWSE8 for details."
+        );
+        assert_eq!(
+            escape_text("policy.detector.value"),
+            "policy.detector.value"
+        );
         assert_eq!(escape_text("under_score_word"), "under_score_word");
     }
 
     #[test]
     fn hash_mid_line_not_escaped() {
         // ATX heading marker only fires at line start.
-        assert_eq!(escape_text("Use #include in C code."), "Use #include in C code.");
+        assert_eq!(
+            escape_text("Use #include in C code."),
+            "Use #include in C code."
+        );
     }
 
     #[test]
     fn hash_at_line_start_is_escaped() {
         // Real heading-like prefix must be neutralized.
-        assert_eq!(escape_text("## Inline heading attempt"), "\\## Inline heading attempt");
+        assert_eq!(
+            escape_text("## Inline heading attempt"),
+            "\\## Inline heading attempt"
+        );
     }
 
     #[test]
     fn dot_after_digit_mid_line_not_escaped() {
-        assert_eq!(escape_text("Items 1. apple 2. banana"), "Items 1. apple 2. banana");
+        assert_eq!(
+            escape_text("Items 1. apple 2. banana"),
+            "Items 1. apple 2. banana"
+        );
     }
 
     #[test]

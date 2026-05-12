@@ -185,7 +185,7 @@ fn doctor_fixture() -> DoctorReport {
     DoctorReport {
         version: env!("CARGO_PKG_VERSION"),
         overall_healthy: false,
-            posture: Posture::DegradedRecoverable,
+        posture: Posture::DegradedRecoverable,
         checks: vec![
             CheckResult {
                 name: "database",
