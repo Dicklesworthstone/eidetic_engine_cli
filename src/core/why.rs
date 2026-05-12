@@ -728,7 +728,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
         }
     };
 
-    build_report(
+    let report = build_report(
         memory_id,
         storage,
         retrieval,
@@ -745,7 +745,23 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
             degraded: evidence_degradations,
         },
     )
-    .with_content(memory.content.clone())
+    .with_content(memory.content.clone());
+
+    // Bead bd-17c65.7.7 (G8): best-effort audit row so L3 has a
+    // last_accessed signal for `ee why` reads, and G1 can count
+    // why-inspection activity per workspace.
+    let details = serde_json::json!({"surface": "why"}).to_string();
+    let audit_input = crate::db::CreateAuditInput {
+        workspace_id: Some(memory.workspace_id.clone()),
+        actor: None,
+        action: crate::db::audit_actions::WHY_INSPECTED.to_owned(),
+        target_type: Some("memory".to_owned()),
+        target_id: Some(memory_id.to_owned()),
+        details: Some(details),
+    };
+    let _ = conn.insert_audit(&crate::db::generate_audit_id(), &audit_input);
+
+    report
 }
 
 fn workspace_path_for_memory(conn: &DbConnection, workspace_id: &str) -> Option<PathBuf> {
