@@ -864,7 +864,7 @@ Benchmark profiles are explicit so agents and CI can pick the right cost tier:
 
 ```bash
 # Small no-mock smoke run, suitable for agent closeout through rch
-rch exec -- env TMPDIR=/data/tmp CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ee_bench ./scripts/bench.sh --profile ci-smoke --json
+rch exec -- env TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target ./scripts/bench.sh --profile ci-smoke --json
 
 # Broader nightly profile over all benchmark groups
 ./scripts/bench.sh --profile nightly

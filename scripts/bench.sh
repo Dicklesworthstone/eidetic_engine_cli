@@ -14,7 +14,7 @@ set -eu
 #
 # Environment:
 #   CARGO_TARGET_DIR       Build directory. For RCH use:
-#                          CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ee_bench
+#                          CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target
 #   EE_BENCH_ARTIFACT_DIR  Directory for JSON artifacts.
 #   EE_BENCH_OUTPUT        Output path for JSON artifact.
 
@@ -56,10 +56,23 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+DEFAULT_AGENT_BUILD_ROOT="/Volumes/USBNVME16TB/temp_agent_space"
 BUDGETS_FILE="$PROJECT_ROOT/benches/budgets.toml"
 BASELINE_FILE="$PROJECT_ROOT/benches/baselines/v0.1.json"
 WORKLOAD_FILE="$PROJECT_ROOT/tests/fixtures/swarm_scale/workloads.json"
-TARGET_ROOT="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_ee_bench}"
+if [ -d "$DEFAULT_AGENT_BUILD_ROOT" ]; then
+    mkdir -p "$DEFAULT_AGENT_BUILD_ROOT/cargo-target" "$DEFAULT_AGENT_BUILD_ROOT/tmp" 2>/dev/null || true
+    if [ -z "${TMPDIR:-}" ]; then
+        export TMPDIR="$DEFAULT_AGENT_BUILD_ROOT/tmp"
+    fi
+fi
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+    TARGET_ROOT="$CARGO_TARGET_DIR"
+elif [ -d "$DEFAULT_AGENT_BUILD_ROOT" ]; then
+    TARGET_ROOT="$DEFAULT_AGENT_BUILD_ROOT/cargo-target"
+else
+    TARGET_ROOT="${TMPDIR:-/tmp}/rch_target_ee_bench"
+fi
 CRITERION_DIR="$TARGET_ROOT/criterion"
 ARTIFACT_DIR="${EE_BENCH_ARTIFACT_DIR:-$TARGET_ROOT/ee-bench}"
 OUTPUT_FILE="${EE_BENCH_OUTPUT:-$ARTIFACT_DIR/ee-perf.v1.json}"

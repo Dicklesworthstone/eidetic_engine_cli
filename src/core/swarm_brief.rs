@@ -1976,8 +1976,8 @@ fn resource_pressure_recommendations(report: &SwarmBriefReport) -> Vec<SwarmBrie
         reason_codes: reason_codes.into_iter().collect(),
         evidence: evidence.into_iter().collect(),
         suggested_commands: vec![
-            "RCH_VISIBILITY=summary RCH_QUEUE_WHEN_BUSY=1 rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_eidetic_engine_cli\" cargo check --all-targets".to_string(),
-            "RCH_VISIBILITY=summary RCH_QUEUE_WHEN_BUSY=1 rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_eidetic_engine_cli\" cargo clippy --all-targets -- -D warnings".to_string(),
+            "RCH_VISIBILITY=summary RCH_QUEUE_WHEN_BUSY=1 rch exec -- env CARGO_TARGET_DIR=\"${CARGO_TARGET_DIR:-/Volumes/USBNVME16TB/temp_agent_space/cargo-target}\" cargo check --all-targets".to_string(),
+            "RCH_VISIBILITY=summary RCH_QUEUE_WHEN_BUSY=1 rch exec -- env CARGO_TARGET_DIR=\"${CARGO_TARGET_DIR:-/Volumes/USBNVME16TB/temp_agent_space/cargo-target}\" cargo clippy --all-targets -- -D warnings".to_string(),
         ],
         must_not_do: vec![
             "Do not run local cargo verification when resource pressure is medium or high."

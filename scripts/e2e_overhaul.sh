@@ -35,7 +35,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 EPIC_DIR="$SCRIPT_DIR/e2e_overhaul"
 
-EE_BINARY="${EE_BINARY:-$REPO_ROOT/target/release/ee}"
+DEFAULT_AGENT_BUILD_ROOT="/Volumes/USBNVME16TB/temp_agent_space"
+
+if [ -d "${DEFAULT_AGENT_BUILD_ROOT}" ]; then
+    mkdir -p "${DEFAULT_AGENT_BUILD_ROOT}/cargo-target" "${DEFAULT_AGENT_BUILD_ROOT}/tmp" 2>/dev/null || true
+    if [ -z "${CARGO_TARGET_DIR:-}" ]; then
+        export CARGO_TARGET_DIR="${DEFAULT_AGENT_BUILD_ROOT}/cargo-target"
+    fi
+    if [ -z "${TMPDIR:-}" ]; then
+        export TMPDIR="${DEFAULT_AGENT_BUILD_ROOT}/tmp"
+    fi
+fi
+
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+    EE_BINARY="${EE_BINARY:-${CARGO_TARGET_DIR%/}/release/ee}"
+else
+    EE_BINARY="${EE_BINARY:-$REPO_ROOT/target/release/ee}"
+fi
 
 # ---------------------------------------------------------------------------
 # Epic registry. Letter → script-basename. Iterate in this order regardless

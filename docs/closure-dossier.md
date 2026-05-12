@@ -362,7 +362,7 @@ artifact_paths = ["target/ee-e2e/walking_skeleton/<run-id>/"]
 
 [[verification_commands]]
 kind = "build"
-command = "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_pane$(tmux display -p \"#P\") cargo check --all-targets"
+command = "rch exec -- env CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target/pane$(tmux display -p \"#P\") cargo check --all-targets"
 status = "passed"
 ```
 

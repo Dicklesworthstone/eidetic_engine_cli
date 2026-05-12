@@ -177,10 +177,10 @@ when both the CPU and memory thresholds for that tier are met.
 Use RCH and an isolated target directory in this repository:
 
 ```bash
-TMPDIR=/data/tmp CARGO_TARGET_DIR=/data/tmp/ee-profile-target rch exec -- cargo test --test property_profile_probe
-TMPDIR=/data/tmp CARGO_TARGET_DIR=/data/tmp/ee-profile-target rch exec -- cargo test --test e2e_profile_workflow
-TMPDIR=/data/tmp CARGO_TARGET_DIR=/data/tmp/ee-profile-target rch exec -- cargo test --test perf_budget_conformance
-TMPDIR=/data/tmp CARGO_TARGET_DIR=/data/tmp/ee-profile-target rch exec -- cargo test --test json_contract_snapshots profile_config
+TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target/profile rch exec -- cargo test --test property_profile_probe
+TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target/profile rch exec -- cargo test --test e2e_profile_workflow
+TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target/profile rch exec -- cargo test --test perf_budget_conformance
+TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target/profile rch exec -- cargo test --test json_contract_snapshots profile_config
 ```
 
 ## SHOULD Gaps

@@ -1240,8 +1240,8 @@
             "rch:rch queue depth: 9"
           ],
           "suggestedCommands": [
-            "RCH_VISIBILITY=summary RCH_QUEUE_WHEN_BUSY=1 rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_eidetic_engine_cli\" cargo check --all-targets",
-            "RCH_VISIBILITY=summary RCH_QUEUE_WHEN_BUSY=1 rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_eidetic_engine_cli\" cargo clippy --all-targets -- -D warnings"
+            "RCH_VISIBILITY=summary RCH_QUEUE_WHEN_BUSY=1 rch exec -- env CARGO_TARGET_DIR=\"${CARGO_TARGET_DIR:-/Volumes/USBNVME16TB/temp_agent_space/cargo-target}\" cargo check --all-targets",
+            "RCH_VISIBILITY=summary RCH_QUEUE_WHEN_BUSY=1 rch exec -- env CARGO_TARGET_DIR=\"${CARGO_TARGET_DIR:-/Volumes/USBNVME16TB/temp_agent_space/cargo-target}\" cargo clippy --all-targets -- -D warnings"
           ],
           "mustNotDo": [
             "Do not run local cargo verification when resource pressure is medium or high.",

@@ -2,6 +2,10 @@
 /target*
 **/*.rs.bk
 
+# Machine-local Cargo target override. This repo's local checkout points Cargo
+# at external scratch storage so build artifacts do not fill the system disk.
+.cargo/config.toml
+
 # The project has a real Rust module at src/core. Some developer machines have
 # broad global ignores for "core", so keep this module visible to Git.
 !src/core/
