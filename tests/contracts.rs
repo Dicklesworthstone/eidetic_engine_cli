@@ -120,3 +120,6 @@ mod canonical_content_field;
 
 #[path = "contracts/context_pack_dual_render.rs"]
 mod context_pack_dual_render;
+
+#[path = "contracts/schema_roundtrip.rs"]
+mod schema_roundtrip;
