@@ -411,6 +411,8 @@ fn run_search_json_for_query(
         .arg(index_dir)
         .arg("--limit")
         .arg(limit.to_string())
+        .arg("--relevance-floor")
+        .arg("0.0")
         .arg("--explain")
         .output()
         .map_err(|error| format!("failed to run ee search --json: {error}"))?;
@@ -550,8 +552,8 @@ fn assert_search_contract(value: &JsonValue) -> TestResult {
         &doc_ids,
         &vec![
             "mem_00000000000000000000010001",
-            "mem_00000000000000000000010003",
             "mem_00000000000000000000010002",
+            "mem_00000000000000000000010003",
         ],
         "deterministic search ranking",
     )?;
@@ -594,6 +596,7 @@ fn assert_search_contract(value: &JsonValue) -> TestResult {
 
     let source_counts = &value["data"]["metrics"]["sourceCounts"];
     let mut observed_semantic_fast = 0;
+    let mut observed_lexical_or_hybrid = 0;
     for result in results {
         let source = result["source"]
             .as_str()
@@ -601,15 +604,32 @@ fn assert_search_contract(value: &JsonValue) -> TestResult {
         if source == "semantic_fast" {
             observed_semantic_fast += 1;
         }
+        if matches!(source, "lexical" | "hybrid") {
+            observed_lexical_or_hybrid += 1;
+        }
         ensure(
             source_counts.get(source_count_key(source)).is_some(),
             format!("sourceCounts must include camelCase key for {source}"),
         )?;
     }
+    ensure(
+        observed_lexical_or_hybrid > 0,
+        "deterministic search golden must include lexical or hybrid evidence",
+    )?;
     ensure_equal(
         &source_counts["semanticFast"],
         &serde_json::json!(observed_semantic_fast),
         "semantic fast source count",
+    )?;
+    let lexical_count = source_counts["lexical"]
+        .as_u64()
+        .ok_or_else(|| "lexical source count must be numeric".to_owned())?;
+    let hybrid_count = source_counts["hybrid"]
+        .as_u64()
+        .ok_or_else(|| "hybrid source count must be numeric".to_owned())?;
+    ensure(
+        lexical_count + hybrid_count > 0,
+        "search metrics must count lexical or hybrid evidence",
     )?;
     ensure_json_number_close(
         &value["data"]["metrics"]["scoreDistribution"]["top"],
