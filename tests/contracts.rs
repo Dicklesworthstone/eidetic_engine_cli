@@ -117,3 +117,6 @@ mod no_silent_fallback;
 
 #[path = "contracts/canonical_content_field.rs"]
 mod canonical_content_field;
+
+#[path = "contracts/context_pack_dual_render.rs"]
+mod context_pack_dual_render;
