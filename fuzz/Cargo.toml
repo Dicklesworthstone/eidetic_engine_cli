@@ -75,7 +75,15 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "provenance_uri"
+path = "fuzz_targets/provenance_uri.rs"
+test = false
+doc = false
+bench = false
+
 [patch.crates-io]
+asupersync = { path = "/data/projects/asupersync" }
 fsqlite = { path = "/data/projects/frankensqlite/crates/fsqlite" }
 fsqlite-core = { path = "/data/projects/frankensqlite/crates/fsqlite-core" }
 fsqlite-error = { path = "/data/projects/frankensqlite/crates/fsqlite-error" }
