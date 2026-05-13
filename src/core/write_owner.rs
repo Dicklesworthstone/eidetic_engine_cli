@@ -80,6 +80,9 @@ pub const WRITE_OWNER_BUSY_CODE: &str = "write_owner_busy";
 /// Error code for write spool backpressure.
 pub const WRITE_SPOOL_BACKPRESSURE_CODE: &str = "write_spool_backpressure";
 
+/// User-facing alias for queue-depth write spool backpressure (L1).
+pub const WRITE_QUEUE_FULL_CODE: &str = "write_queue_full";
+
 /// A request to perform a write operation.
 #[derive(Debug)]
 pub struct WriteRequest {

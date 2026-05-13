@@ -1,0 +1,35 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "output_redaction_disabled",
+  "introduced_by": {
+    "bead": "bd-17c65.2.9",
+    "epic_letter": "B"
+  },
+  "surfaces": [
+    "search",
+    "context"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Workspace policy disables output-time redaction, so search and context responses return raw memory content and emit an explicit warning signal.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "mkdir -p .ee",
+      "printf '[policy.output_redaction]\\nenabled = false\\n' > .ee/config.toml",
+      "ee remember 'Rotate api_key=sk_fake_output_redaction_fixture before release.' --workspace . --level procedural --kind rule --allow-secret-mention --json",
+      "ee index rebuild --workspace . --json"
+    ],
+    "invocation": "ee search 'rotate api key' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "output_redaction_disabled",
+    "severity": "info",
+    "message_contains": [
+      "Output-time redaction is disabled",
+      "secret-like values"
+    ],
+    "repair_contains": "policy.output_redaction.enabled",
+    "repair_string": "Set policy.output_redaction.enabled = true in .ee/config.toml."
+  }
+}

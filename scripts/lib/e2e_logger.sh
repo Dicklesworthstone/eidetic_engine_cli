@@ -51,13 +51,41 @@ _e2e_hash_file() {
 
 _e2e_hash_string() {
     local str="$1"
-    local tmp
-    tmp=$(mktemp)
-    printf '%s' "$str" > "$tmp"
-    _e2e_hash_file "$tmp"
-    if [ "${EE_E2E_KEEP_ARTIFACTS:-${EE_E2E_KEEP_WORKSPACE:-0}}" != "1" ]; then
-        rm -f "$tmp"
+    if command -v b3sum >/dev/null 2>&1; then
+        printf 'blake3:%s' "$(printf '%s' "$str" | b3sum | awk '{print $1}')"
+    elif python3 -c "import blake3" >/dev/null 2>&1; then
+        printf '%s' "$str" | python3 -c "import sys,blake3; print('blake3:'+blake3.blake3(sys.stdin.buffer.read()).hexdigest())"
+    else
+        printf 'sha256:%s' "$(printf '%s' "$str" | shasum -a 256 | awk '{print $1}')"
     fi
+}
+
+_e2e_source_hash() {
+    local root="${REPO_ROOT:-$(pwd)}"
+    local payload=""
+    local rel
+    for rel in Cargo.lock Cargo.toml rust-toolchain.toml; do
+        if [ -f "$root/$rel" ]; then
+            payload="${payload}${rel}=$(_e2e_hash_file "$root/$rel")"$'\n'
+        fi
+    done
+    if [ -z "$payload" ]; then
+        printf 'unavailable'
+    else
+        _e2e_hash_string "$payload"
+    fi
+}
+
+_e2e_tmp_root() {
+    printf '%s\n' "${EE_E2E_ARTIFACT_TMPDIR:-${EE_E2E_TMPDIR:-${TMPDIR:-/tmp}}}"
+}
+
+_e2e_mktemp_file() {
+    local label="${1:-artifact}"
+    local root
+    root="$(_e2e_tmp_root)"
+    mkdir -p "$root"
+    mktemp "${root%/}/ee-e2e-${label}.XXXXXX"
 }
 
 # Emit a single JSON-line event. Uses python3 for JSON encoding so embedded
@@ -69,7 +97,7 @@ _e2e_emit_event() {
     local kind="$1"
     case "$EE_TEST_LOG_LEVEL" in
         quiet)
-            case "$kind" in command_end|assert_fail|golden_compare) :;; *) return 0;; esac ;;
+            case "$kind" in command_end|assert_fail|golden_compare|artifact_manifest) :;; *) return 0;; esac ;;
         normal)
             case "$kind" in timer_lap) return 0;; esac ;;
     esac
@@ -140,6 +168,59 @@ e2e_log_note() {
     _e2e_emit_event "note" "message" "${1:-}"
 }
 
+# Emit a deterministic manifest for the artifact exercised by a verification
+# command. Raw output stays out of the log; paths and hashes are enough for
+# closeout tooling to locate retained evidence and detect binary confusion.
+# Usage: e2e_log_artifact_manifest <phase> <binary_path> [argv...]
+e2e_log_artifact_manifest() {
+    local phase="${1:-manual}"
+    local binary_path="${2:-${EE_BINARY:-}}"
+    shift 2 || true
+
+    local args_str=""
+    local arg
+    for arg in "$@"; do
+        if [ -z "$args_str" ]; then args_str="$arg"; else args_str="$args_str"$'\x01'"$arg"; fi
+    done
+
+    local binary_hash="unavailable"
+    local binary_hash_status="missing"
+    if [ -n "$binary_path" ] && [ -f "$binary_path" ]; then
+        binary_hash="$(_e2e_hash_file "$binary_path")"
+        binary_hash_status="available"
+    elif [ -n "$binary_path" ]; then
+        binary_hash_status="not_file"
+    fi
+
+    local command_hash source_hash manifest_hash execution_substrate host_name
+    command_hash="$(_e2e_hash_string "$binary_path"$'\n'"$args_str")"
+    source_hash="$(_e2e_source_hash)"
+    execution_substrate="${EE_TEST_EXECUTION_SUBSTRATE:-local}"
+    if [ -n "${RCH_WORKER_ID:-}${RCH_WORKER_HOST:-}" ]; then
+        execution_substrate="rch"
+    fi
+    host_name="$(hostname 2>/dev/null || printf 'unknown')"
+    manifest_hash="$(_e2e_hash_string "$phase"$'\n'"$binary_path"$'\n'"$binary_hash"$'\n'"$command_hash"$'\n'"${CARGO_TARGET_DIR:-}"$'\n'"${EE_E2E_FIXTURE_FILTER:-${EE_TEST_FILTER:-}}"$'\n'"${EPIC_RETENTION_MANIFEST:-${EE_E2E_RETENTION_MANIFEST:-}}")"
+
+    _e2e_emit_event "artifact_manifest" \
+        "manifest_schema" "ee.test_artifact_manifest.v1" \
+        "phase" "$phase" \
+        "binary_path" "$binary_path" \
+        "binary_hash" "$binary_hash" \
+        "binary_hash_status" "$binary_hash_status" \
+        "source_hash" "$source_hash" \
+        "command_hash" "$command_hash" \
+        "command_arg_count" "$#" \
+        "execution_substrate" "$execution_substrate" \
+        "local_host" "$host_name" \
+        "worker_host" "${RCH_WORKER_HOST:-${RCH_WORKER_ID:-}}" \
+        "target_directory" "${CARGO_TARGET_DIR:-}" \
+        "fixture_filter" "${EE_E2E_FIXTURE_FILTER:-${EE_TEST_FILTER:-}}" \
+        "log_path" "${EE_TEST_LOG_PATH:-}" \
+        "retention_manifest_path" "${EPIC_RETENTION_MANIFEST:-${EE_E2E_RETENTION_MANIFEST:-}}" \
+        "artifact_manifest_hash" "$manifest_hash"
+}
+
 # Wrap a command: capture stdout/stderr/exit, emit start+end events, AND
 # write stdout to a temp file so callers can use it after.
 # Usage:  e2e_log_command "$EE" remember "hello" ...
@@ -153,13 +234,16 @@ e2e_log_command() {
     done
     _e2e_emit_event "command_start" "command" "$label" "args" "$args_str"
     local out_file err_file
-    out_file=$(mktemp)
-    err_file=$(mktemp)
-    local started=$(python3 -c "import time; print(time.monotonic_ns())")
+    out_file=$(_e2e_mktemp_file stdout)
+    err_file=$(_e2e_mktemp_file stderr)
+    local started
+    started=$(python3 -c "import time; print(time.monotonic_ns())")
     "$@" >"$out_file" 2>"$err_file"
     local rc=$?
-    local ended=$(python3 -c "import time; print(time.monotonic_ns())")
-    local elapsed_ms=$(python3 -c "print(($ended - $started) / 1_000_000.0)")
+    local ended
+    ended=$(python3 -c "import time; print(time.monotonic_ns())")
+    local elapsed_ms
+    elapsed_ms=$(python3 -c "print(($ended - $started) / 1_000_000.0)")
     local stdout_hash stderr_excerpt
     stdout_hash=$(_e2e_hash_file "$out_file")
     stderr_excerpt=$(head -c "$EE_TEST_LOG_STDERR_CAP" "$err_file")
@@ -170,6 +254,7 @@ e2e_log_command() {
         "stderr_excerpt" "$stderr_excerpt" \
         "exit_code" "$rc" \
         "elapsed_ms" "$elapsed_ms"
+    e2e_log_artifact_manifest "command_end" "$label" "$@"
     cat "$out_file"
     if [ "${EE_E2E_KEEP_ARTIFACTS:-${EE_E2E_KEEP_WORKSPACE:-0}}" = "1" ]; then
         e2e_log_note "e2e_log_command_keep_artifacts stdout=$out_file stderr=$err_file"
@@ -202,7 +287,17 @@ e2e_log_assert_num() {
     local op="${2:?op required}"
     local want="${3:?want required}"
     local label="${4:?label required}"
-    if [ "$got" "$op" "$want" ] 2>/dev/null; then
+    local matched="false"
+    case "$op" in
+        -le) [ "$got" -le "$want" ] 2>/dev/null && matched="true" ;;
+        -lt) [ "$got" -lt "$want" ] 2>/dev/null && matched="true" ;;
+        -ge) [ "$got" -ge "$want" ] 2>/dev/null && matched="true" ;;
+        -gt) [ "$got" -gt "$want" ] 2>/dev/null && matched="true" ;;
+        -eq) [ "$got" -eq "$want" ] 2>/dev/null && matched="true" ;;
+        -ne) [ "$got" -ne "$want" ] 2>/dev/null && matched="true" ;;
+        *) matched="false" ;;
+    esac
+    if [ "$matched" = "true" ]; then
         EE_TEST_LOG_ASSERTS_PASS=$((EE_TEST_LOG_ASSERTS_PASS + 1))
         _e2e_emit_event "assert_ok" "label" "$label"
     else

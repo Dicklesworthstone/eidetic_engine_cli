@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "write_queue_full",
+  "introduced_by": {
+    "bead": "bd-17c65.12.2",
+    "epic_letter": "L"
+  },
+  "surfaces": [
+    "write spool"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "The workspace write spool is at its configured pending-write capacity, so new writes should retry with backoff or increase the writeSpool queue cap.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee diag write-spool --max-pending 1 --enqueue 2 --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "write_queue_full",
+    "severity": "low",
+    "message_contains": [
+      "write queue",
+      "retry"
+    ],
+    "repair_contains": "exponential backoff"
+  }
+}
