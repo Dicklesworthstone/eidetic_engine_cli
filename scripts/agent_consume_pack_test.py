@@ -2,8 +2,8 @@
 """Self-test for `agent_consume_pack.py` (bd-17c65.10.8 / J8).
 
 Exercises the `consume()` function against representative ee response
-shapes — both the post-A4 `pack.text` happy path and the items[]
-fallback — plus error envelopes. Pure Python 3.8+ stdlib (unittest);
+shapes - both the post-A4 `pack.text` happy path and the items[]
+fallback - plus error envelopes. Pure Python 3.8+ stdlib (unittest);
 zero third-party deps so it runs on any CI worker without pip install.
 
 Run:
@@ -44,7 +44,7 @@ class ConsumeHappyPath(unittest.TestCase):
         self.assertEqual(out, "# Context Pack\n\nverbatim markdown body\n")
 
     def test_empty_pack_text_falls_back_to_items_render(self) -> None:
-        # An empty string is falsy → consume() must drop through to the
+        # An empty string is falsy, so consume() must drop through to the
         # items[] renderer so an agent never sees a zero-byte fragment.
         resp = {
             "schema": "ee.response.v1",
@@ -98,7 +98,7 @@ class ConsumeItemsFallback(unittest.TestCase):
 
     def test_items_render_handles_missing_fields_gracefully(self) -> None:
         # A degenerate pack with only the bare minimum still renders
-        # without raising — the script must never throw on a schema
+        # without raising; the script must never throw on a schema
         # that ships fewer fields than the consumer expects.
         resp = {"success": True, "data": {"pack": {"items": [{"content": "x"}]}}}
         out = consume(resp)
@@ -148,7 +148,7 @@ class ConsumeErrorEnvelope(unittest.TestCase):
         }
         out = consume(resp)
         # The HTML-comment framing means a downstream Markdown renderer
-        # silently swallows it — an agent that ignores comments still
+        # silently swallows it; an agent that ignores comments still
         # sees zero noise, but an agent that inspects the raw fragment
         # can scrape the error code from it.
         self.assertIn("<!-- ee error:", out)
@@ -158,7 +158,7 @@ class ConsumeErrorEnvelope(unittest.TestCase):
 
     def test_error_envelope_with_missing_error_object_uses_unknown(self) -> None:
         # An old/broken response that lacks the `error` field entirely
-        # must not crash — the renderer falls back to the literal
+        # must not crash; the renderer falls back to the literal
         # "unknown" code so the agent can still distinguish error from
         # success.
         resp = {"success": False}
@@ -168,7 +168,7 @@ class ConsumeErrorEnvelope(unittest.TestCase):
 
     def test_missing_success_field_treated_as_error(self) -> None:
         # An old/broken response that lacks the `success` field must not
-        # silently render an empty pack — it must produce the error
+        # silently render an empty pack; it must produce the error
         # comment so the agent loop notices.
         resp = {"data": {"pack": {"text": "should not appear"}}}
         out = consume(resp)
@@ -182,7 +182,7 @@ class ConsumePromptFragmentDiscipline(unittest.TestCase):
     def test_output_is_pure_markdown_no_tool_call_wrapping(self) -> None:
         # The whole point of J8: an agent prepends this verbatim to its
         # LLM prompt. No JSON envelopes, no XML tag wrappers, no "tool
-        # result" framing — pure Markdown only.
+        # result" framing; pure Markdown only.
         resp = {"success": True, "data": {"pack": {"text": "# Pack\n\nbody\n"}}}
         out = consume(resp)
         self.assertFalse(out.startswith("{"))
