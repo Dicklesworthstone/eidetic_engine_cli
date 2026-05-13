@@ -535,6 +535,15 @@ pub enum Command {
     Claim(ClaimCommand),
     /// Assemble a task-specific context pack from relevant memories.
     Context(ContextArgs),
+    /// Retrieve a previously persisted context pack by ID.
+    ///
+    /// Persisted packs are immutable artifacts created during a prior
+    /// `ee context` invocation. `ee context-show <pack_id>` looks up
+    /// the pack record from the workspace database and renders it in
+    /// the same canonical shape as a fresh `ee context` response.
+    /// Bead bd-17c65.1.10 (A11).
+    #[command(name = "context-show")]
+    ContextShow(ContextShowArgs),
     /// Generate shell completion scripts for ee.
     Completion(CompletionArgs),
     /// Review curation proposals without silently mutating memory.
@@ -1442,6 +1451,18 @@ fn parse_steward_job_type(raw: &str) -> Result<JobType, String> {
                 .join(", ")
         )
     })
+}
+
+/// Arguments for `ee context-show <pack_id>`. Bead bd-17c65.1.10 (A11).
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct ContextShowArgs {
+    /// Pack ID to retrieve (e.g. `pack_01ABCDEFGHJKMNPQRSTVWXYZ01`).
+    #[arg(value_name = "PACK_ID")]
+    pub pack_id: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee context`.
@@ -6078,7 +6099,7 @@ pub struct HistoryAliasArgs {
 /// Currently only `mem` is wired through; other prefixes return a
 /// structured `usage_ambiguous_id_prefix` error documenting what's
 /// supported so an agent can choose the correct alias / verbose form.
-pub const ALIAS_SUPPORTED_PREFIXES: &[&str] = &["mem"];
+pub const ALIAS_SUPPORTED_PREFIXES: &[&str] = &["mem", "pack"];
 
 /// Extract the prefix from an ID (segment before the first `_`).
 ///
@@ -6818,6 +6839,7 @@ where
             MaintenanceCommand::Status(args) => handle_maintenance_status(&cli, args, stdout),
         },
         Some(Command::Context(ref args)) => handle_context(&cli, args, stdout, stderr),
+        Some(Command::ContextShow(ref args)) => handle_context_show(&cli, args, stdout, stderr),
         Some(Command::Completion(ref args)) => handle_completion(&cli, args, stdout),
         Some(Command::Db(ref db_cmd)) => match db_cmd {
             DbCommand::Status(args) => handle_db_status(&cli, args, stdout),
@@ -16693,6 +16715,14 @@ where
             };
             handle_memory_show(cli, &memory_args, stdout, stderr)
         }
+        // Bead bd-17c65.1.10 (A11): route pack_* IDs to context-show.
+        Some("pack") => {
+            let pack_args = ContextShowArgs {
+                pack_id: args.id.clone(),
+                database: args.database.clone(),
+            };
+            handle_context_show(cli, &pack_args, stdout, stderr)
+        }
         _ => alias_id_prefix_error(
             cli,
             stdout,
@@ -17464,6 +17494,168 @@ fn context_error_to_domain(error: &ContextPackError) -> DomainError {
             repair: Some("Use redaction.policy=respect or remove redaction bypass.".to_string()),
         },
     }
+}
+
+/// Handle `ee context-show <pack_id>` — retrieve a previously persisted
+/// pack by ID and render it. Bead bd-17c65.1.10 (A11).
+///
+/// Loads the StoredPackRecord + StoredPackItems from the workspace
+/// database and renders a compact ee.response.v1 envelope mirroring
+/// the canonical pack shape. Persisted packs are immutable artifacts,
+/// so the response surface is read-only — no re-computation of
+/// scores, no re-walk of memory state. The pack hash returned by the
+/// original `ee context` invocation is preserved verbatim so callers
+/// can correlate this view back to the audit log.
+fn handle_context_show<W, E>(
+    cli: &Cli,
+    args: &ContextShowArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found: {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let conn = match crate::db::DbConnection::open_schema_only(&database_path) {
+        Ok(c) => c,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: Some("ee doctor".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let record = match conn.get_pack_record(&args.pack_id) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            let domain_error = DomainError::NotFound {
+                resource: "pack".to_owned(),
+                id: args.pack_id.clone(),
+                repair: Some("ee context <query>  # create a fresh pack".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to query pack: {error}"),
+                repair: Some("ee doctor".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let items = match conn.get_pack_items(&args.pack_id) {
+        Ok(items) => items,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to query pack items: {error}"),
+                repair: Some("ee doctor".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    // Build response. The shape mirrors ee context but uses the
+    // persisted record's fields. Pack item provenance is stored as a
+    // raw JSON blob in the DB — pass it through verbatim.
+    let items_json: Vec<serde_json::Value> = items
+        .into_iter()
+        .map(|item| {
+            let provenance: serde_json::Value =
+                serde_json::from_str(&item.provenance_json).unwrap_or(serde_json::Value::Null);
+            serde_json::json!({
+                "rank": item.rank,
+                "memoryId": item.memory_id,
+                "section": item.section,
+                "estimatedTokens": item.estimated_tokens,
+                "scores": {
+                    "relevance": item.relevance,
+                    "utility": item.utility,
+                },
+                "why": item.why,
+                "diversityKey": item.diversity_key,
+                "provenance": provenance,
+                "trust": {
+                    "class": item.trust_class,
+                    "subclass": item.trust_subclass,
+                },
+            })
+        })
+        .collect();
+
+    let degraded: serde_json::Value = record
+        .degraded_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_else(|| serde_json::json!([]));
+
+    let envelope = serde_json::json!({
+        "schema": "ee.response.v1",
+        "success": true,
+        "data": {
+            "command": "context show",
+            "pack": {
+                "id": record.id,
+                "workspaceId": record.workspace_id,
+                "query": record.query,
+                "profile": record.profile,
+                "maxTokens": record.max_tokens,
+                "usedTokens": record.used_tokens,
+                "itemCount": record.item_count,
+                "omittedCount": record.omitted_count,
+                "hash": record.pack_hash,
+                "ledgerHash": record.ledger_hash,
+                "createdAt": record.created_at,
+                "createdBy": record.created_by,
+                "items": items_json,
+                "degraded": degraded,
+            },
+        },
+    });
+
+    match cli.renderer() {
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let _ = write_stdout(
+                stdout,
+                &(serde_json::to_string(&envelope).unwrap_or_default() + "\n"),
+            );
+        }
+        _ => {
+            let mut out = String::new();
+            out.push_str(&format!(
+                "Pack: {}\n  Query: {}\n  Profile: {}\n  Tokens: {}/{}\n  Items: {}\n  Created: {}\n  Hash: {}\n",
+                record.id,
+                record.query,
+                record.profile,
+                record.used_tokens,
+                record.max_tokens,
+                record.item_count,
+                record.created_at,
+                record.pack_hash,
+            ));
+            let _ = write_stdout(stdout, &out);
+        }
+    }
+    ProcessExitCode::Success
 }
 
 fn handle_context<W, E>(
@@ -28182,6 +28374,7 @@ impl NormalizedInvocation {
                 },
                 Command::Note(_) => "note".to_string(),
                 Command::Context(_) => "context".to_string(),
+                Command::ContextShow(_) => "context-show".to_string(),
                 Command::Completion(_) => "completion".to_string(),
                 Command::Db(db) => match db {
                     DbCommand::Status(_) => "db status".to_string(),

@@ -148,5 +148,11 @@ mod workspace_fingerprint_reconciliation;
 #[path = "contracts/handoff_capsule_roundtrip_determinism.rs"]
 mod handoff_capsule_roundtrip_determinism;
 
+#[path = "contracts/context_show_persisted_pack.rs"]
+mod context_show_persisted_pack;
+
 #[path = "contracts/failure_mode_fixtures.rs"]
 mod failure_mode_fixtures;
+
+#[path = "contracts/failure_mode_repair_string.rs"]
+mod failure_mode_repair_string;
