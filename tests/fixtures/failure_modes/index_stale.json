@@ -1,0 +1,24 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "index_stale",
+  "introduced_by": { "bead": "bd-17c65.2.1", "epic_letter": "B" },
+  "surfaces": ["search", "context"],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "Memory database advanced beyond the search index generation. Reads can still return data but may miss recently-added memories until the index is rebuilt.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# (synthetic: mutate ee.db without invoking the index writer, e.g. via the test harness's direct DB layer)"
+    ],
+    "invocation": "ee search 'any query' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "index_stale",
+    "severity": "high",
+    "message_contains": [
+      "Search index is stale"
+    ],
+    "repair_contains": "ee index rebuild"
+  }
+}

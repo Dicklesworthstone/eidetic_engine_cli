@@ -1,0 +1,25 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "index_missing",
+  "introduced_by": { "bead": "bd-17c65.2.1", "epic_letter": "B" },
+  "surfaces": ["search", "context"],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Search index metadata or files are missing. Results unavailable until the index is rebuilt.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# delete .ee/indexes/ to simulate a missing index"
+    ],
+    "invocation": "ee search 'any query' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "index_missing",
+    "severity": "medium",
+    "message_contains": [
+      "Search index",
+      "missing"
+    ],
+    "repair_contains": "ee index rebuild"
+  }
+}

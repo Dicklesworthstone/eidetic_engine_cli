@@ -71,13 +71,49 @@ pub struct SearchOptions {
     pub relevance_floor: Option<f32>,
 }
 
-/// Default relevance floor (bead bd-17c65.2.1 / B1).
+/// Default relevance floor for 0..=1-normalized score sources (bead
+/// bd-17c65.2.1 / B1).
 ///
 /// Calibrated against the 2026-05-10 corpus where junk semantic_fast hits
-/// scored `< 0.03` and meaningful hits scored `0.10..=0.50`. Configurable
-/// per-call via `--relevance-floor` and per-workspace via
-/// `search.relevance_floor` config.
+/// scored `< 0.03` and meaningful hits scored `0.10..=0.50`. Applies to
+/// `Lexical` (normalized BM25), `SemanticFast`, `SemanticQuality`, and
+/// `Reranked` (cross-encoder) score sources. Configurable per-call via
+/// `--relevance-floor` and per-workspace via `search.relevance_floor`
+/// config.
 pub const DEFAULT_RELEVANCE_FLOOR: f32 = 0.05;
+
+/// Default relevance floor for `Hybrid` (RRF-fused) score-source (bead
+/// bd-n22a4, B2-followup).
+///
+/// RRF scores have magnitude `arms_contributing / (k + 1)` which tops out
+/// around `0.033` for k=60 and two arms — applying the cosine-domain
+/// [`DEFAULT_RELEVANCE_FLOOR`] of 0.05 to those scores would filter every
+/// reasonable hybrid result and surface only `no_relevant_results`
+/// degraded entries to the agent. This floor preserves the noise-vs-
+/// signal cut for RRF-magnitude scores (top hit at 1/61 ≈ 0.0164 still
+/// passes; rank ~190 single-arm RRF gets filtered).
+pub const DEFAULT_RELEVANCE_FLOOR_HYBRID: f32 = 0.005;
+
+/// Per-source default relevance floor.
+///
+/// Returns [`DEFAULT_RELEVANCE_FLOOR_HYBRID`] for `Hybrid` (RRF-fused)
+/// hits and [`DEFAULT_RELEVANCE_FLOOR`] for every source whose scores
+/// are already 0..=1 normalized. Used when the caller passes no explicit
+/// `relevance_floor` override — the explicit override still applies
+/// uniformly to every hit regardless of source so existing test fixtures
+/// and `--relevance-floor 0.0` keep working unchanged.
+///
+/// Bead bd-n22a4 (B2-followup).
+#[must_use]
+pub const fn default_floor_for_source(source: ScoreSource) -> f32 {
+    match source {
+        ScoreSource::Hybrid => DEFAULT_RELEVANCE_FLOOR_HYBRID,
+        ScoreSource::Lexical
+        | ScoreSource::SemanticFast
+        | ScoreSource::SemanticQuality
+        | ScoreSource::Reranked => DEFAULT_RELEVANCE_FLOOR,
+    }
+}
 
 impl SearchOptions {
     fn resolve_index_dir(&self) -> PathBuf {
@@ -1453,19 +1489,44 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
             let (raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(raw_hits);
 
             // Bead bd-17c65.2.1 (B1): apply relevance floor.
-            let floor = options.relevance_floor.unwrap_or(DEFAULT_RELEVANCE_FLOOR);
+            // Bead bd-n22a4 (B2-followup): when the caller does not pass an
+            // explicit override the floor is per-hit-source — RRF-fused
+            // hybrid hits get `DEFAULT_RELEVANCE_FLOOR_HYBRID` (≈0.005)
+            // while 0..=1-normalized sources keep `DEFAULT_RELEVANCE_FLOOR`
+            // (0.05). An explicit override still applies uniformly so
+            // `--relevance-floor 0.0` and existing golden fixtures with a
+            // pinned floor keep behaving exactly as before.
+            let user_floor_override = options.relevance_floor;
             let pre_floor_count = raw_hits.len();
             let pre_floor_top_score = raw_hits.first().map(|hit| hit.score);
+            let pre_floor_top_source = raw_hits.first().map(|hit| hit.source);
 
             // Partition into above-floor (kept) and below-floor (dropped).
             // Floor of 0.0 is "disabled" — keep everything. NaN scores are
-            // always dropped because NaN >= floor is false.
-            let (above_floor, below_floor): (Vec<_>, Vec<_>) = raw_hits
-                .into_iter()
-                .partition(|hit| hit.score.is_finite() && hit.score >= floor);
+            // always dropped because NaN >= per_hit_floor is false.
+            let (above_floor, below_floor): (Vec<_>, Vec<_>) =
+                raw_hits.into_iter().partition(|hit| {
+                    let per_hit_floor =
+                        user_floor_override.unwrap_or_else(|| default_floor_for_source(hit.source));
+                    hit.score.is_finite() && hit.score >= per_hit_floor
+                });
             let dropped = below_floor.len();
             let above_floor = apply_tombstone_visibility(options, above_floor, &mut degraded);
             let kept = above_floor.len();
+
+            // Representative floor for degradation reporting + metrics:
+            // pick the floor that applies to the top remaining hit, or to
+            // the top pre-filter hit when the result set is empty. Falls
+            // back to `DEFAULT_RELEVANCE_FLOOR` when there were no hits at
+            // all (NoResults). The user override always wins if set.
+            let representative_floor = user_floor_override.unwrap_or_else(|| {
+                above_floor
+                    .first()
+                    .map(|hit| hit.source)
+                    .or(pre_floor_top_source)
+                    .map_or(DEFAULT_RELEVANCE_FLOOR, default_floor_for_source)
+            });
+            let floor = representative_floor;
 
             // Surface dedupe count as a low-severity info signal when
             // it fired; agents reading the metrics can correlate with
@@ -1642,14 +1703,29 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
     .map_err(SearchError::Index)?;
 
     let (raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(diag_result.final_hits);
-    let floor = options.relevance_floor.unwrap_or(DEFAULT_RELEVANCE_FLOOR);
+    // Bead bd-n22a4 (B2-followup): mirror `run_search`'s per-source
+    // adaptive floor so `ee diag search` reports the same floor
+    // semantics that the live search path applies — without this the
+    // diag arm would silently disagree with `ee search` on which hits
+    // pass the default floor.
+    let user_floor_override = options.relevance_floor;
     let pre_floor_count = raw_hits.len();
     let pre_floor_top_score = raw_hits.first().map(|hit| hit.score);
-    let (above_floor, below_floor): (Vec<_>, Vec<_>) = raw_hits
-        .into_iter()
-        .partition(|hit| hit.score.is_finite() && hit.score >= floor);
+    let pre_floor_top_source = raw_hits.first().map(|hit| hit.source);
+    let (above_floor, below_floor): (Vec<_>, Vec<_>) = raw_hits.into_iter().partition(|hit| {
+        let per_hit_floor =
+            user_floor_override.unwrap_or_else(|| default_floor_for_source(hit.source));
+        hit.score.is_finite() && hit.score >= per_hit_floor
+    });
     let kept = above_floor.len();
     let dropped = below_floor.len();
+    let floor = user_floor_override.unwrap_or_else(|| {
+        above_floor
+            .first()
+            .map(|hit| hit.source)
+            .or(pre_floor_top_source)
+            .map_or(DEFAULT_RELEVANCE_FLOOR, default_floor_for_source)
+    });
 
     if duplicates_collapsed > 0 {
         degraded.push(SearchDegradation::duplicates_collapsed(
@@ -2250,6 +2326,23 @@ fn apply_tombstone_visibility(
             }
         }
     }
+
+    let total_before = visible_hits
+        .len()
+        .saturating_add(filtered)
+        .saturating_add(expired_filtered);
+    tracing::info!(
+        target: "ee.search",
+        event = "tombstone_filter",
+        surface = "search",
+        total_before,
+        tombstoned_count = filtered.saturating_add(included),
+        included = options.include_tombstoned,
+        tombstoned_included_count = included,
+        tombstoned_filtered_count = filtered,
+        expired_filtered_count = expired_filtered,
+        "tombstone_filter"
+    );
 
     if filtered > 0 {
         degraded.push(SearchDegradation::tombstoned_filtered(filtered));
@@ -3398,6 +3491,153 @@ mod tests {
         // Changing this default is a contract change — agents downstream
         // rely on the value.
         assert!((DEFAULT_RELEVANCE_FLOOR - 0.05).abs() < f32::EPSILON);
+    }
+
+    // ========================================================================
+    // bd-n22a4 (B2-followup): per-source default floor coverage. RRF-fused
+    // hybrid hits get the hybrid floor (≈0.005) while 0..=1-normalized
+    // sources keep the semantic-domain floor (0.05).
+    // ========================================================================
+
+    #[test]
+    fn default_floor_hybrid_is_one_in_two_hundred() {
+        // 0.005 covers RRF magnitudes down to 1-arm rank ~190 (1/(60+1) at
+        // rank N is ≈ 0.0164 at rank 1, ≈ 0.005 at rank 190). Changing
+        // this value is a contract change — `ee search` users see
+        // dramatically different recall on hybrid queries.
+        assert!((DEFAULT_RELEVANCE_FLOOR_HYBRID - 0.005).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn default_floor_for_hybrid_returns_hybrid_constant() {
+        assert!(
+            (default_floor_for_source(ScoreSource::Hybrid) - DEFAULT_RELEVANCE_FLOOR_HYBRID).abs()
+                < f32::EPSILON
+        );
+    }
+
+    #[test]
+    fn default_floor_for_normalized_sources_returns_standard_floor() {
+        // Every source whose scores live in the 0..=1 cosine/BM25 domain
+        // keeps the standard floor — only the RRF-magnitude `Hybrid`
+        // source gets the lower one.
+        for source in [
+            ScoreSource::Lexical,
+            ScoreSource::SemanticFast,
+            ScoreSource::SemanticQuality,
+            ScoreSource::Reranked,
+        ] {
+            assert!(
+                (default_floor_for_source(source) - DEFAULT_RELEVANCE_FLOOR).abs() < f32::EPSILON,
+                "{:?} should use DEFAULT_RELEVANCE_FLOOR",
+                source,
+            );
+        }
+    }
+
+    #[test]
+    fn hybrid_floor_admits_typical_rrf_scores_that_semantic_floor_would_reject() {
+        // The exact bug bd-n22a4 was filed for: a hybrid hit with score
+        // ≈0.0328 (the 2-arm-rank-1 RRF top) gets filtered out by the
+        // semantic-domain floor of 0.05, leaving every default-floor
+        // hybrid search empty. The hybrid floor of 0.005 admits it.
+        let rrf_top_two_arm: f32 = 2.0 / 61.0; // ≈ 0.03278
+        assert!(rrf_top_two_arm >= DEFAULT_RELEVANCE_FLOOR_HYBRID);
+        assert!(rrf_top_two_arm < DEFAULT_RELEVANCE_FLOOR);
+        // Single-arm RRF rank-1: 1/61 ≈ 0.0164 — still well above the
+        // hybrid floor, still below the semantic floor.
+        let rrf_rank_one_one_arm: f32 = 1.0 / 61.0;
+        assert!(rrf_rank_one_one_arm >= DEFAULT_RELEVANCE_FLOOR_HYBRID);
+        assert!(rrf_rank_one_one_arm < DEFAULT_RELEVANCE_FLOOR);
+    }
+
+    #[test]
+    fn hybrid_floor_still_rejects_genuinely_weak_rrf_scores() {
+        // The floor must still be a noise/signal cut, not "accept
+        // everything". Scores at single-arm rank ~250 (1/(60+250) ≈
+        // 0.0032) sit below the hybrid floor and get filtered.
+        let rrf_deep_rank: f32 = 1.0 / 310.0; // ≈ 0.00323
+        assert!(rrf_deep_rank < DEFAULT_RELEVANCE_FLOOR_HYBRID);
+    }
+
+    /// Helper: synthesize a hybrid `SearchHit` for adaptive-floor tests.
+    fn synthetic_hybrid_hit(doc_id: &str, score: f32) -> SearchHit {
+        let mut hit = synthetic_hit(doc_id, score);
+        hit.source = ScoreSource::Hybrid;
+        hit
+    }
+
+    #[test]
+    fn adaptive_partition_keeps_typical_hybrid_hit_with_no_override() {
+        // Reproduces the bd-n22a4 acceptance path: a hybrid hit at the
+        // typical 2-arm RRF top of ≈0.0328 must survive the default
+        // floor when no explicit override is set, so `ee search` on a
+        // one-memory workspace returns the matching memory instead of a
+        // `no_relevant_results` degraded entry.
+        let hits = vec![synthetic_hybrid_hit("mem_canonical", 2.0 / 61.0)];
+        let user_floor_override: Option<f32> = None;
+        let kept: Vec<_> = hits
+            .into_iter()
+            .filter(|hit| {
+                let per_hit_floor =
+                    user_floor_override.unwrap_or_else(|| default_floor_for_source(hit.source));
+                hit.score.is_finite() && hit.score >= per_hit_floor
+            })
+            .collect();
+        assert_eq!(
+            kept.len(),
+            1,
+            "hybrid hit at ≈0.0328 must pass default floor"
+        );
+        assert_eq!(kept[0].doc_id, "mem_canonical");
+    }
+
+    #[test]
+    fn adaptive_partition_still_filters_weak_semantic_hit_with_no_override() {
+        // Mirror assertion: a SemanticFast hit at 0.02 (cosine-domain
+        // noise) still gets filtered out under the standard 0.05 floor.
+        // The adaptive policy must not weaken the semantic-only path.
+        let hits = vec![synthetic_hit("mem_semantic_noise", 0.02)];
+        let user_floor_override: Option<f32> = None;
+        let kept: Vec<_> = hits
+            .into_iter()
+            .filter(|hit| {
+                let per_hit_floor =
+                    user_floor_override.unwrap_or_else(|| default_floor_for_source(hit.source));
+                hit.score.is_finite() && hit.score >= per_hit_floor
+            })
+            .collect();
+        assert!(
+            kept.is_empty(),
+            "weak semantic hit at 0.02 must still be filtered by 0.05 floor"
+        );
+    }
+
+    #[test]
+    fn explicit_override_applies_uniformly_across_all_sources() {
+        // Backstop: when the caller passes `--relevance-floor 0.10` it
+        // must apply uniformly. This guarantees existing fixtures and
+        // `--relevance-floor 0.0` (disabled) keep their exact prior
+        // semantics — the adaptive policy ONLY kicks in when no
+        // explicit override is set.
+        let hits = vec![
+            synthetic_hybrid_hit("mem_hybrid_strong", 0.20),
+            synthetic_hybrid_hit("mem_hybrid_weak", 0.02),
+            synthetic_hit("mem_semantic_strong", 0.20),
+            synthetic_hit("mem_semantic_weak", 0.02),
+        ];
+        let user_floor_override: Option<f32> = Some(0.10);
+        let kept: Vec<_> = hits
+            .into_iter()
+            .filter(|hit| {
+                let per_hit_floor =
+                    user_floor_override.unwrap_or_else(|| default_floor_for_source(hit.source));
+                hit.score.is_finite() && hit.score >= per_hit_floor
+            })
+            .collect();
+        assert_eq!(kept.len(), 2, "0.10 override should keep both strong hits");
+        assert!(kept.iter().any(|h| h.doc_id == "mem_hybrid_strong"));
+        assert!(kept.iter().any(|h| h.doc_id == "mem_semantic_strong"));
     }
 
     #[test]

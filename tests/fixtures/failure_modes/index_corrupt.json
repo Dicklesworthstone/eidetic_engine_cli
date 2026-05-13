@@ -1,0 +1,24 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "index_corrupt",
+  "introduced_by": { "bead": "bd-17c65.2.1", "epic_letter": "B" },
+  "surfaces": ["search", "context"],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "Search index manifest is unreadable or fails internal validation. Index must be rebuilt from the durable DB source of truth.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# corrupt .ee/indexes/combined/manifest.json"
+    ],
+    "invocation": "ee search 'any query' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "index_corrupt",
+    "severity": "high",
+    "message_contains": [
+      "index"
+    ],
+    "repair_contains": "ee index rebuild"
+  }
+}

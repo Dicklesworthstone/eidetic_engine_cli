@@ -1,0 +1,26 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "context_evidence_freshness_changed_source",
+  "introduced_by": { "bead": "bd-17c65.1.2", "epic_letter": "A" },
+  "surfaces": ["context", "pack replay"],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "ee context (or ee pack replay) detected that an evidence source referenced by the persisted pack ledger has changed contents since the pack was built. The pack is still rendered honestly, but the agent should treat its evidence as potentially stale.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Original convention.' --workspace . --level semantic --kind fact",
+      "ee context 'project conventions' --workspace . --json",
+      "# mutate the referenced memory's content (e.g. via memory edit / curate replace)"
+    ],
+    "invocation": "ee pack replay <pack-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "context_evidence_freshness_changed_source",
+    "severity": "info",
+    "message_contains": [
+      "evidence",
+      "changed"
+    ]
+  }
+}

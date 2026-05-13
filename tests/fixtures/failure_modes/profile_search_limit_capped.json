@@ -1,0 +1,25 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "profile_search_limit_capped",
+  "introduced_by": { "bead": "bd-17c65.2.4", "epic_letter": "B" },
+  "surfaces": ["search", "diag search"],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Active runtime profile (laptop / swarm / batch / ci-smoke / hpc) imposes a candidateLimit budget. When the caller requests more, the searcher caps the effective limit and emits this signal so the agent knows the answer is bounded.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Project memory.' --workspace . --level procedural --kind rule"
+    ],
+    "invocation": "ee search 'project' --workspace . --limit 10000 --json"
+  },
+  "expected_emission": {
+    "code": "profile_search_limit_capped",
+    "severity": "info",
+    "message_contains": [
+      "limit",
+      "capped"
+    ],
+    "repair_contains": "profile"
+  }
+}

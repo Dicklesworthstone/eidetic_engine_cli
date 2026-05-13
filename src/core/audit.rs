@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
 use crate::db::{DbConnection, StoredAuditEntry, compute_audit_row_hash};
-use crate::models::DomainError;
+use crate::models::{DomainError, ProducerMetadata};
 
 /// Schema for audit timeline response.
 pub const AUDIT_TIMELINE_SCHEMA_V1: &str = "ee.audit.timeline.v1";
@@ -77,6 +77,7 @@ pub struct AuditTimelineEntry {
     pub workspace_id: Option<String>,
     pub target_type: Option<String>,
     pub target_id: Option<String>,
+    pub producer: ProducerMetadata,
     pub details: Option<JsonValue>,
 }
 
@@ -562,6 +563,8 @@ fn storage_error(context: &str, error: crate::db::DbError) -> DomainError {
 
 impl From<StoredAuditEntry> for AuditTimelineEntry {
     fn from(entry: StoredAuditEntry) -> Self {
+        let producer =
+            ProducerMetadata::audit_actor(entry.actor.as_deref(), Some(&entry.timestamp));
         Self {
             id: entry.id,
             timestamp: entry.timestamp,
@@ -575,6 +578,7 @@ impl From<StoredAuditEntry> for AuditTimelineEntry {
             workspace_id: entry.workspace_id,
             target_type: entry.target_type,
             target_id: entry.target_id,
+            producer,
             details: entry
                 .details
                 .as_deref()

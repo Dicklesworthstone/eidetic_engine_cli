@@ -1,0 +1,24 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "expired_filtered",
+  "introduced_by": { "bead": "bd-17c65.2.8", "epic_letter": "B" },
+  "surfaces": ["search"],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "ee memory expire sets valid_to in the past; subsequent search excludes time-expired memories from the result set. This informational signal records how many were filtered so the agent can correlate result counts with corpus size.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Working note that expires today.' --workspace . --level working --kind fact",
+      "ee memory expire <memory_id>"
+    ],
+    "invocation": "ee search 'working note' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "expired_filtered",
+    "severity": "info",
+    "message_contains": [
+      "expired"
+    ]
+  }
+}

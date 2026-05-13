@@ -1,0 +1,25 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "duplicates_collapsed",
+  "introduced_by": { "bead": "bd-17c65.2.3", "epic_letter": "B" },
+  "surfaces": ["search"],
+  "severity": "low",
+  "repair_present": false,
+  "trigger": {
+    "description": "Hybrid fusion (and reranker, when active) can produce multiple hits with the same docId. Dedup keeps the highest-scoring and emits this informational signal so callers can correlate raw vs returned counts.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Use cargo fmt before release.' --workspace . --level procedural --kind rule"
+    ],
+    "invocation": "ee search 'cargo fmt' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "duplicates_collapsed",
+    "severity": "low",
+    "message_contains": [
+      "Collapsed",
+      "duplicate hit",
+      "highest-scoring occurrence"
+    ]
+  }
+}

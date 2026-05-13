@@ -1,0 +1,24 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "weak_query_recall",
+  "introduced_by": { "bead": "bd-17c65.2.5", "epic_letter": "B" },
+  "surfaces": ["search"],
+  "severity": "low",
+  "repair_present": false,
+  "trigger": {
+    "description": "Top result passes the relevance floor but its score is below 2x the floor (B4 'weak' classifier). Embedder may not recognize query synonyms or corpus genuinely lacks strong matches.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Database connection pooling guide' --workspace . --level semantic --kind fact"
+    ],
+    "invocation": "ee search 'connection' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "weak_query_recall",
+    "severity": "low",
+    "message_contains": [
+      "top score",
+      "below"
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "no_relevant_results",
+  "introduced_by": { "bead": "bd-17c65.2.1", "epic_letter": "B" },
+  "surfaces": ["search"],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee search runs against a workspace whose candidates all score below the relevance floor; no honest results to return.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Run cargo fmt before release.' --workspace . --level procedural --kind rule"
+    ],
+    "invocation": "ee search 'completely unrelated query' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "no_relevant_results",
+    "severity": "medium",
+    "message_contains": [
+      "No memories scored above relevance floor",
+      "considered"
+    ],
+    "repair_contains": "lower --relevance-floor"
+  }
+}
