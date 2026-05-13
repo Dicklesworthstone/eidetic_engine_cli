@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.doctor.v1.json",
+  "title": "ee.doctor.v1",
+  "description": "ee doctor response envelope.",
+  "type": "object",
+  "required": ["schema", "success", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v1"},
+    "success": {"type": "boolean"},
+    "fields": {"type": "string"},
+    "data": {
+      "type": "object",
+      "required": ["command", "version", "posture", "healthy", "checks"],
+      "additionalProperties": false,
+      "properties": {
+        "command": {"type": "string", "const": "doctor"},
+        "version": {"type": "string"},
+        "posture": {"type": "string"},
+        "healthy": {"type": "boolean"},
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "severity", "message"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {"type": "string"},
+              "severity": {"type": "string", "enum": ["ok", "warning", "error"]},
+              "message": {"type": "string"}
+            }
+          }
+        }
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["command", "version", "posture", "healthy"],
+    "summary": ["command", "version", "posture", "healthy"],
+    "standard": ["command", "version", "posture", "healthy", "checks"],
+    "full": ["*"]
+  }
+}

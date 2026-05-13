@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.error.v2.json",
+  "title": "ee.error.v2",
+  "description": "Canonical machine-readable error envelope emitted on JSON stdout for failed ee commands.",
+  "type": "object",
+  "required": ["schema", "error"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.error.v2"
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "message", "severity", "details"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "message": {"type": "string"},
+        "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+        "repair": {"type": "string"},
+        "details": {
+          "type": "object",
+          "properties": {
+            "recovery": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/recoveryAction"}
+            },
+            "attemptedPaths": {
+              "type": "array",
+              "items": {"type": "string"}
+            }
+          },
+          "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+        },
+        "nonRecoverable": {"type": "boolean"}
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["code", "severity"],
+    "summary": ["code", "message", "severity", "repair"],
+    "standard": ["code", "message", "severity", "repair", "details", "nonRecoverable"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "recoveryAction": {
+      "type": "object",
+      "required": ["priority", "kind", "rationale"],
+      "additionalProperties": false,
+      "properties": {
+        "priority": {"type": "integer", "minimum": 0, "maximum": 255},
+        "kind": {
+          "type": "string",
+          "enum": [
+            "env",
+            "config",
+            "flag",
+            "install",
+            "rebuild",
+            "permission",
+            "migration",
+            "broaden",
+            "narrow",
+            "seed",
+            "none"
+          ]
+        },
+        "rationale": {"type": "string"},
+        "envName": {"type": "string"},
+        "valueHint": {"type": "string"},
+        "configPath": {"type": "string"},
+        "configKey": {"type": "string"},
+        "flagName": {"type": "string"},
+        "command": {"type": "string"},
+        "resultsIn": {"type": "string"},
+        "example": {"type": "string"}
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.export.v1.json",
+  "title": "ee.export.v1",
+  "description": "ee export response envelope for JSONL backup/export reports.",
+  "type": "object",
+  "required": ["schema", "success", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v1"},
+    "success": {"type": "boolean"},
+    "fields": {"type": "string"},
+    "data": {
+      "type": "object",
+      "required": [
+        "schema",
+        "command",
+        "version",
+        "status",
+        "dryRun",
+        "workspacePath",
+        "workspaceId",
+        "databasePath",
+        "outputPath",
+        "manifestPath",
+        "recordsPath",
+        "counts",
+        "provenance",
+        "verificationStatus",
+        "artifacts",
+        "degraded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.export.report.v1"},
+        "command": {"type": "string", "const": "export"},
+        "version": {"type": "string"},
+        "status": {"type": "string"},
+        "dryRun": {"type": "boolean"},
+        "workspacePath": {"type": "string"},
+        "workspaceId": {"type": "string"},
+        "databasePath": {"type": "string"},
+        "outputPath": {"type": "string"},
+        "manifestPath": {"type": "string"},
+        "recordsPath": {"type": "string"},
+        "manifestHash": {"type": ["string", "null"]},
+        "recordsHash": {"type": ["string", "null"]},
+        "redactionLevel": {"type": "string"},
+        "exportScope": {"type": "string"},
+        "counts": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "provenance": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "verificationStatus": {"type": "string"},
+        "artifacts": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}}
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["command", "version", "status", "manifestPath"],
+    "summary": ["command", "version", "status", "counts", "verificationStatus", "degraded"],
+    "standard": ["schema", "command", "version", "status", "dryRun", "workspacePath", "workspaceId", "databasePath", "outputPath", "manifestPath", "recordsPath", "manifestHash", "recordsHash", "redactionLevel", "exportScope", "counts", "provenance", "verificationStatus", "artifacts", "degraded"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

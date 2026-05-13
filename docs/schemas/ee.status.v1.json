@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.status.v1.json",
+  "title": "ee.status.v1",
+  "description": "ee status response envelope.",
+  "type": "object",
+  "required": ["schema", "success", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v1"},
+    "success": {"type": "boolean"},
+    "fields": {"type": "string"},
+    "data": {
+      "type": "object",
+      "required": [
+        "command",
+        "version",
+        "workspace",
+        "capabilities",
+        "runtime",
+        "memoryHealth",
+        "curationHealth",
+        "feedbackHealth",
+        "derivedAssets",
+        "agentInventory",
+        "degraded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "command": {"type": "string", "const": "status"},
+        "version": {"type": "string"},
+        "workspace": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "capabilities": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "runtime": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "memoryHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "curationHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "feedbackHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "derivedAssets": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "agentInventory": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}}
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["command", "version", "workspace"],
+    "summary": ["command", "version", "workspace", "capabilities"],
+    "standard": ["command", "version", "workspace", "capabilities", "runtime", "memoryHealth", "curationHealth", "feedbackHealth", "derivedAssets", "agentInventory", "degraded"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.search.v1.json",
+  "title": "ee.search.v1",
+  "description": "ee search JSON response envelope and command payload.",
+  "type": "object",
+  "required": ["schema", "success", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v1"},
+    "success": {"type": "boolean"},
+    "fields": {"type": "string"},
+    "data": {
+      "type": "object",
+      "required": [
+        "command",
+        "query",
+        "status",
+        "resultCount",
+        "results",
+        "degraded",
+        "errors",
+        "metrics",
+        "elapsedMs"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "command": {"type": "string", "const": "search"},
+        "query": {"type": "string"},
+        "status": {"type": "string"},
+        "resultCount": {"type": "integer"},
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["docId", "score", "source", "why", "provenance"],
+            "additionalProperties": false,
+            "properties": {
+              "docId": {"type": "string"},
+              "score": {"type": "number"},
+              "source": {"type": "string", "enum": ["lexical", "semantic_fast", "semantic_quality", "hybrid", "lexical_only", "semantic_only"]},
+              "why": {"type": "string"},
+              "fastScore": {"type": ["number", "null"]},
+              "lexicalScore": {"type": ["number", "null"]},
+              "metadata": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+              "provenance": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+              "explanation": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+            }
+          }
+        },
+        "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "errors": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "metrics": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "elapsedMs": {"type": "number"},
+        "profileRuntime": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["docId", "score", "source"],
+    "summary": ["query", "status", "resultCount", "docId", "score", "source"],
+    "standard": ["query", "status", "resultCount", "results", "docId", "score", "source", "why", "provenance", "degraded", "errors", "metrics", "elapsedMs"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.capabilities.v1.json",
+  "title": "ee.capabilities.v1",
+  "description": "ee capabilities response envelope.",
+  "type": "object",
+  "required": ["schema", "success", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v1"},
+    "success": {"type": "boolean"},
+    "fields": {"type": "string"},
+    "data": {
+      "type": "object",
+      "required": ["command", "version", "subsystems", "features", "unimplemented", "commands", "output", "summary"],
+      "additionalProperties": false,
+      "properties": {
+        "command": {"type": "string", "const": "capabilities"},
+        "version": {"type": "string"},
+        "subsystems": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "features": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "unimplemented": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "commands": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "binaries": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "envOverrides": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "output": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "summary": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["command", "version"],
+    "summary": ["command", "version", "summary"],
+    "standard": ["command", "version", "subsystems", "features", "unimplemented", "commands", "binaries", "envOverrides", "output", "summary"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

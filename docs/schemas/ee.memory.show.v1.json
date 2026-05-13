@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.memory.show.v1.json",
+  "title": "ee.memory.show.v1",
+  "description": "ee memory show response envelope.",
+  "type": "object",
+  "required": ["schema", "success", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v1"},
+    "success": {"type": "boolean"},
+    "fields": {"type": "string"},
+    "data": {
+      "type": "object",
+      "required": ["command", "version", "found", "is_tombstoned"],
+      "additionalProperties": false,
+      "properties": {
+        "command": {"type": "string", "const": "memory show"},
+        "version": {"type": "string"},
+        "found": {"type": "boolean"},
+        "is_tombstoned": {"type": "boolean"},
+        "memory": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "error": {"type": "string"}
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["command", "version", "found", "is_tombstoned"],
+    "summary": ["command", "version", "found", "is_tombstoned", "id", "level", "kind"],
+    "standard": ["command", "version", "found", "is_tombstoned", "memory", "error"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

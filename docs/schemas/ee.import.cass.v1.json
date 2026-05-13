@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.import.cass.v1.json",
+  "title": "ee.import.cass.v1",
+  "description": "ee import cass response envelope.",
+  "type": "object",
+  "required": ["schema", "success", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v1"},
+    "success": {"type": "boolean"},
+    "fields": {"type": "string"},
+    "data": {
+      "type": "object",
+      "required": [
+        "schema",
+        "command",
+        "workspacePath",
+        "databasePath",
+        "sourceId",
+        "ledgerId",
+        "dryRun",
+        "since",
+        "sessionsDiscovered",
+        "sessionsImported",
+        "sessionsSkipped",
+        "spansImported",
+        "indexJobsQueued",
+        "indexRequiredAction",
+        "status",
+        "sessions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.import.cass.v1"},
+        "command": {"type": "string", "const": "import cass"},
+        "workspacePath": {"type": "string"},
+        "databasePath": {"type": ["string", "null"]},
+        "sourceId": {"type": "string"},
+        "ledgerId": {"type": ["string", "null"]},
+        "dryRun": {"type": "boolean"},
+        "since": {"type": ["string", "null"]},
+        "sessionsDiscovered": {"type": "integer"},
+        "sessionsImported": {"type": "integer"},
+        "sessionsSkipped": {"type": "integer"},
+        "spansImported": {"type": "integer"},
+        "indexJobsQueued": {"type": "integer"},
+        "indexRequiredAction": {"type": ["string", "null"]},
+        "status": {"type": "string"},
+        "sessions": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}}
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["schema", "command", "status"],
+    "summary": ["schema", "command", "status", "sessionsDiscovered", "sessionsImported", "sessionsSkipped", "spansImported"],
+    "standard": ["schema", "command", "workspacePath", "databasePath", "sourceId", "ledgerId", "dryRun", "since", "sessionsDiscovered", "sessionsImported", "sessionsSkipped", "spansImported", "indexJobsQueued", "indexRequiredAction", "status", "sessions"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

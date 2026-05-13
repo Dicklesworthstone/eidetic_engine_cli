@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.error.v2.json",
+  "title": "deprecated error schema placeholder",
+  "description": "Legacy-named file retained only until explicit deletion is approved. The canonical error envelope is ee.error.v2.",
+  "type": "object",
+  "required": ["schema", "error"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.error.v2"
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "message", "severity", "details"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "message": {"type": "string"},
+        "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+        "repair": {"type": "string"},
+        "details": {"type": "object", "additionalProperties": true},
+        "nonRecoverable": {"type": "boolean"}
+      }
+    }
+  }
+}

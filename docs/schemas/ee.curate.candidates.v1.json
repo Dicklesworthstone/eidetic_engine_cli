@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.curate.candidates.v1.json",
+  "title": "ee.curate.candidates.v1",
+  "description": "ee curate candidates response envelope.",
+  "type": "object",
+  "required": ["schema", "success", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v1"},
+    "success": {"type": "boolean"},
+    "fields": {"type": "string"},
+    "data": {
+      "type": "object",
+      "required": [
+        "schema",
+        "command",
+        "version",
+        "workspaceId",
+        "workspacePath",
+        "databasePath",
+        "totalCount",
+        "returnedCount",
+        "limit",
+        "offset",
+        "truncated",
+        "durableMutation",
+        "filter",
+        "candidates",
+        "degraded",
+        "nextAction"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.curate.candidates.v1"},
+        "command": {"type": "string", "const": "curate candidates"},
+        "version": {"type": "string"},
+        "workspaceId": {"type": "string"},
+        "workspacePath": {"type": "string"},
+        "databasePath": {"type": "string"},
+        "totalCount": {"type": "integer"},
+        "returnedCount": {"type": "integer"},
+        "limit": {"type": "integer"},
+        "offset": {"type": "integer"},
+        "truncated": {"type": "boolean"},
+        "durableMutation": {"type": "boolean"},
+        "filter": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "candidates": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "nextAction": {"type": "string"}
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["command", "version", "returnedCount", "candidateId"],
+    "summary": ["command", "version", "totalCount", "returnedCount", "limit", "offset", "truncated", "nextAction"],
+    "standard": ["command", "version", "totalCount", "returnedCount", "limit", "offset", "truncated", "durableMutation", "filter", "candidates", "degraded", "nextAction"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

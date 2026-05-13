@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.graph.export.v1.json",
+  "title": "ee.graph.export.v1",
+  "description": "ee graph export response envelope.",
+  "type": "object",
+  "required": ["schema", "success", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v1"},
+    "success": {"type": "boolean"},
+    "fields": {"type": "string"},
+    "data": {
+      "type": "object",
+      "required": [
+        "command",
+        "version",
+        "status",
+        "format",
+        "workspaceId",
+        "graphType",
+        "snapshot",
+        "graph",
+        "artifact",
+        "degraded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "command": {"type": "string", "const": "graph export"},
+        "version": {"type": "string"},
+        "status": {"type": "string"},
+        "format": {"type": "string", "enum": ["mermaid"]},
+        "workspaceId": {"type": "string"},
+        "graphType": {"type": "string"},
+        "snapshot": {"type": ["object", "null"], "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "graph": {
+          "type": "object",
+          "required": ["nodeCount", "edgeCount"],
+          "additionalProperties": false,
+          "properties": {
+            "nodeCount": {"type": "integer"},
+            "edgeCount": {"type": "integer"}
+          }
+        },
+        "artifact": {
+          "type": "object",
+          "required": ["mediaType", "content"],
+          "additionalProperties": false,
+          "properties": {
+            "mediaType": {"type": "string"},
+            "content": {"type": "string"}
+          }
+        },
+        "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}}
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["command", "version", "status"],
+    "summary": ["command", "version", "status", "format", "nodeCount", "edgeCount", "degraded"],
+    "standard": ["command", "version", "status", "format", "workspaceId", "graphType", "snapshot", "graph", "nodeCount", "edgeCount", "artifact", "degraded"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

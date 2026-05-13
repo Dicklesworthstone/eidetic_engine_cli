@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.memory.list.v1.json",
+  "title": "ee.memory.list.v1",
+  "description": "ee memory list response envelope.",
+  "type": "object",
+  "required": ["schema", "success", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v1"},
+    "success": {"type": "boolean"},
+    "fields": {"type": "string"},
+    "data": {
+      "type": "object",
+      "required": ["command", "version", "total_count", "truncated", "filter", "memories"],
+      "additionalProperties": false,
+      "properties": {
+        "command": {"type": "string", "const": "memory list"},
+        "version": {"type": "string"},
+        "total_count": {"type": "integer"},
+        "truncated": {"type": "boolean"},
+        "filter": {
+          "type": "object",
+          "required": ["include_tombstoned"],
+          "additionalProperties": false,
+          "properties": {
+            "level": {"type": "string"},
+            "tag": {"type": "string"},
+            "include_tombstoned": {"type": "boolean"}
+          }
+        },
+        "memories": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "level",
+              "kind",
+              "content",
+              "content_truncated",
+              "confidence",
+              "is_tombstoned",
+              "validity_status",
+              "validity_window_kind",
+              "created_at"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string"},
+              "level": {"type": "string"},
+              "kind": {"type": "string"},
+              "content": {"type": "string"},
+              "content_truncated": {"type": "boolean"},
+              "confidence": {"type": "number"},
+              "provenance_uri": {"type": "string"},
+              "is_tombstoned": {"type": "boolean"},
+              "valid_from": {"type": ["string", "null"]},
+              "valid_to": {"type": ["string", "null"]},
+              "validity_status": {"type": "string"},
+              "validity_window_kind": {"type": "string"},
+              "created_at": {"type": "string"}
+            }
+          }
+        },
+        "error": {"type": "string"}
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["command", "version", "id", "level", "kind"],
+    "summary": ["command", "version", "total_count", "truncated", "id", "level", "kind", "content"],
+    "standard": ["command", "version", "memories", "total_count", "truncated", "filter", "error"],
+    "full": ["*"]
+  }
+}
