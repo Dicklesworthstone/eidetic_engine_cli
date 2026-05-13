@@ -13,8 +13,8 @@
   "trigger": {
     "description": "A decay sweep job cannot resolve a database path from the workspace or explicit options.",
     "setup_commands": [
-      "mkdir empty-workspace",
-      "cd empty-workspace"
+      "mkdir empty-workspace-outside-any-initialized-workspace",
+      "cd empty-workspace-outside-any-initialized-workspace"
     ],
     "invocation": "ee job run decay_sweep --json"
   },

@@ -1740,7 +1740,7 @@ run_fixture_scenario() {
             ;;
         decay_sweep_database_unresolved)
             local unresolved_job_workspace
-            unresolved_job_workspace="$EPIC_WORKSPACE/j6-decay-database-unresolved"
+            unresolved_job_workspace="${EPIC_WORKSPACE}.j6-decay-database-unresolved"
             mkdir -p "$unresolved_job_workspace"
             SCENARIO_OUTPUT=$(
                 cd "$unresolved_job_workspace" &&
