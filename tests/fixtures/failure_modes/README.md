@@ -43,12 +43,12 @@ in the same commit, keeping the catalog complete by construction.
 | `runtime_unavailable` | status, doctor | high | bd-17c65.10.6 (J6) |
 | `storage_unavailable` | doctor, dependency contract | high | bd-17c65.10.6 (J6) |
 | `search_unavailable` | doctor, dependency contract | medium | bd-17c65.10.6 (J6) |
-| `graph_unavailable` | doctor, diag graph | medium | bd-17c65.10.6 (J6) |
+| `graph_unavailable` | diag dependencies, dependency contract | medium | bd-17c65.10.6 (J6) |
 | `cass_unavailable` | doctor, import cass | medium | bd-17c65.10.6 (J6) |
 | `toon_unavailable` | status, doctor | medium | bd-17c65.10.6 (J6) |
-| `diagram_backend_unavailable` | doctor, dependency contract | medium | bd-17c65.10.6 (J6) |
+| `diagram_backend_unavailable` | diag dependencies, dependency contract | medium | bd-17c65.10.6 (J6) |
 | `agent_detection_unavailable` | agent sources, doctor | medium | bd-17c65.10.6 (J6) |
-| `mcp_unavailable` | doctor, dependency contract | medium | bd-17c65.10.6 (J6) |
+| `mcp_unavailable` | diag dependencies, dependency contract | medium | bd-17c65.10.6 (J6) |
 | `storage_not_inspected` | status | low | bd-17c65.10.6 (J6) |
 | `storage_not_initialized` | status | medium | bd-17c65.10.6 (J6) |
 | `storage_degraded` | status, health | medium | bd-17c65.10.6 (J6) |
