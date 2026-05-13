@@ -1,0 +1,7 @@
+{
+  "name": "fenced_code_embedded_fence",
+  "renderer": "fenced_code_block",
+  "input": "before\n```\n# injected\n```\nafter",
+  "expected": "````\nbefore\n```\n# injected\n```\nafter\n````\n",
+  "rationale": "Fenced code blocks use a delimiter longer than any embedded fence."
+}

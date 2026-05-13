@@ -1,0 +1,7 @@
+{
+  "name": "backslash_text",
+  "renderer": "text",
+  "input": "C:\\Windows\\System32",
+  "expected": "C:\\\\Windows\\\\System32",
+  "rationale": "Backslash is the Markdown escape character and must be escaped in body text."
+}

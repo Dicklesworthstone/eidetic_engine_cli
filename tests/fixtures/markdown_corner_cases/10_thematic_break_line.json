@@ -1,0 +1,7 @@
+{
+  "name": "thematic_break_line",
+  "renderer": "text",
+  "input": "Before\n---\nAfter",
+  "expected": "Before\n\\---\nAfter",
+  "rationale": "A hyphen-only line can become a thematic break or setext underline."
+}

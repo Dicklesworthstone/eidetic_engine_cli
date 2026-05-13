@@ -1,0 +1,7 @@
+{
+  "name": "table_pipe_body_text",
+  "renderer": "text",
+  "input": "Table cell a|b stays body text",
+  "expected": "Table cell a|b stays body text",
+  "rationale": "Pipes are not escaped by body-text rendering; table renderers handle table cells separately."
+}

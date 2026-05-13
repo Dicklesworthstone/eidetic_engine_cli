@@ -1,0 +1,7 @@
+{
+  "name": "link_syntax_neutralized",
+  "renderer": "text",
+  "input": "See [docs](https://example.com/path(test)).",
+  "expected": "See \\[docs\\](https://example.com/path(test)).",
+  "rationale": "Square brackets are escaped so arbitrary text cannot create a Markdown link."
+}

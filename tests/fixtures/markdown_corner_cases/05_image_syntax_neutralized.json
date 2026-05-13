@@ -1,0 +1,7 @@
+{
+  "name": "image_syntax_neutralized",
+  "renderer": "text",
+  "input": "![alt](javascript:alert(1))",
+  "expected": "\\!\\[alt\\](javascript:alert(1))",
+  "rationale": "The image opener is escaped so arbitrary text cannot create a Markdown image."
+}

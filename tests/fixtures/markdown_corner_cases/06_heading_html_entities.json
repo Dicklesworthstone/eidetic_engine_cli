@@ -1,0 +1,7 @@
+{
+  "name": "heading_html_entities",
+  "renderer": "heading",
+  "input": "Title with &amp; <tag>",
+  "expected": "Title with &amp;amp; &lt;tag&gt;",
+  "rationale": "Heading text is still arbitrary text, so HTML-sensitive characters are escaped."
+}

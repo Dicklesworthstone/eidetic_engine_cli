@@ -1,0 +1,7 @@
+{
+  "name": "blockquote_markers_neutralized",
+  "renderer": "text",
+  "input": "> quote\n>> nested",
+  "expected": "&gt; quote\n&gt;&gt; nested",
+  "rationale": "Greater-than signs are escaped as HTML entities so arbitrary text cannot create blockquotes."
+}

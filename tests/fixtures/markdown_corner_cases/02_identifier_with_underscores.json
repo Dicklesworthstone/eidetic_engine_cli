@@ -1,0 +1,7 @@
+{
+  "name": "identifier_with_underscores",
+  "renderer": "text",
+  "input": "See mem_01KR9V_ABCDEF for details.",
+  "expected": "See mem_01KR9V_ABCDEF for details.",
+  "rationale": "CommonMark does not treat intra-word underscores as emphasis."
+}

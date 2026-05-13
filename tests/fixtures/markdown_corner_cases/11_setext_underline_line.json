@@ -1,0 +1,7 @@
+{
+  "name": "setext_underline_line",
+  "renderer": "text",
+  "input": "Title\n===\nBody",
+  "expected": "Title\n\\===\nBody",
+  "rationale": "An equals-only line can turn the previous paragraph into a setext heading."
+}

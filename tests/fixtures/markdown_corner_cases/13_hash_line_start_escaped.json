@@ -1,0 +1,7 @@
+{
+  "name": "hash_line_start_escaped",
+  "renderer": "text",
+  "input": "# Heading attempt",
+  "expected": "\\# Heading attempt",
+  "rationale": "A hash mark at line start can create an ATX heading."
+}

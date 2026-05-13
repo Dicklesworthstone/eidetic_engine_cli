@@ -1,0 +1,7 @@
+{
+  "name": "ordered_list_marker_line_start",
+  "renderer": "text",
+  "input": "1. first\n2) second",
+  "expected": "1\\. first\n2\\) second",
+  "rationale": "Ordered-list markers at line start are escaped."
+}

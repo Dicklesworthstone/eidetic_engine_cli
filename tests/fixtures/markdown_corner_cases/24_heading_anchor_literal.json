@@ -1,0 +1,7 @@
+{
+  "name": "heading_anchor_literal",
+  "renderer": "text",
+  "input": "Use {#anchor-id} literally",
+  "expected": "Use {#anchor-id} literally",
+  "rationale": "Brace syntax is not CommonMark core syntax and is left literal."
+}

@@ -1,0 +1,7 @@
+{
+  "name": "numeric_list_marker_midline",
+  "renderer": "text",
+  "input": "Items 1. apple 2. banana",
+  "expected": "Items 1. apple 2. banana",
+  "rationale": "Numeric dot markers only start ordered lists at line start."
+}

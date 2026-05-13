@@ -1,0 +1,7 @@
+{
+  "name": "inline_code_backslash_literal",
+  "renderer": "inline_code",
+  "input": "C:\\Windows\\System32",
+  "expected": "`C:\\Windows\\System32`",
+  "rationale": "Backslash inside an inline code span is literal."
+}

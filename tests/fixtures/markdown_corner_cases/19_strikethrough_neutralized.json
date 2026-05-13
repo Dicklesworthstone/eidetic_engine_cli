@@ -1,0 +1,7 @@
+{
+  "name": "strikethrough_neutralized",
+  "renderer": "text",
+  "input": "keep ~~do not strike~~ visible",
+  "expected": "keep \\~\\~do not strike\\~\\~ visible",
+  "rationale": "Tilde pairs are escaped so arbitrary text cannot create strikethrough."
+}

@@ -1,0 +1,7 @@
+{
+  "name": "url_with_parentheses",
+  "renderer": "text",
+  "input": "See https://example.com/path(test) for details.",
+  "expected": "See https://example.com/path(test) for details.",
+  "rationale": "Parentheses in plain URL text do not need escaping outside link syntax."
+}

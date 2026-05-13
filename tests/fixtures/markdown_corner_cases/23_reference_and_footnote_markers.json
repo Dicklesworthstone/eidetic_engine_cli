@@ -1,0 +1,7 @@
+{
+  "name": "reference_and_footnote_markers",
+  "renderer": "text",
+  "input": "See [label] and [^1]",
+  "expected": "See \\[label\\] and \\[^1\\]",
+  "rationale": "Reference-link and footnote-like brackets are escaped defensively."
+}

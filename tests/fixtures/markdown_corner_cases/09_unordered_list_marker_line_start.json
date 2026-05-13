@@ -1,0 +1,7 @@
+{
+  "name": "unordered_list_marker_line_start",
+  "renderer": "text",
+  "input": "- bullet\n+ plus",
+  "expected": "\\- bullet\n\\+ plus",
+  "rationale": "Unordered-list markers at line start are escaped."
+}

@@ -1,0 +1,7 @@
+{
+  "name": "hash_midline_literal",
+  "renderer": "text",
+  "input": "Use #include in C code.",
+  "expected": "Use #include in C code.",
+  "rationale": "A hash mark is not a heading marker when it appears mid-line."
+}

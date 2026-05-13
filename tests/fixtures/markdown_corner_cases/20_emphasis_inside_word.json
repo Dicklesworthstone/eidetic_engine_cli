@@ -1,0 +1,7 @@
+{
+  "name": "emphasis_inside_word",
+  "renderer": "text",
+  "input": "a*b*c and intra_word_under_score",
+  "expected": "a*b*c and intra_word_under_score",
+  "rationale": "Intra-word emphasis markers are left alone for readability."
+}

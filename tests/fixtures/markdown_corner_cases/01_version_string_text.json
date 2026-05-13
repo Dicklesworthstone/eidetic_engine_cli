@@ -1,0 +1,7 @@
+{
+  "name": "version_string_text",
+  "renderer": "text",
+  "input": "prepare release v0.2.0",
+  "expected": "prepare release v0.2.0",
+  "rationale": "Dots in a version string are not ordered-list markers in body text."
+}

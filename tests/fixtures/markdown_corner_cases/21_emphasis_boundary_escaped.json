@@ -1,0 +1,7 @@
+{
+  "name": "emphasis_boundary_escaped",
+  "renderer": "text",
+  "input": "this *is* bold and _is_ italic",
+  "expected": "this \\*is\\* bold and \\_is\\_ italic",
+  "rationale": "Emphasis markers at word boundaries are escaped."
+}

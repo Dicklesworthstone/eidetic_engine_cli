@@ -1,0 +1,7 @@
+{
+  "name": "inline_code_backtick_run",
+  "renderer": "inline_code",
+  "input": "run `cmd` then ```stop```",
+  "expected": "```` run `cmd` then ```stop``` ````",
+  "rationale": "Inline code uses a delimiter longer than any embedded backtick run."
+}
