@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "swarm_scale_budget_exceeded",
+  "introduced_by": {
+    "bead": "bd-1zb7k.8",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "bench",
+    "e2e"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A swarm-scale measurement exceeds the budget in tests/swarm_scale_budgets.toml after applying the configured tolerance.",
+    "setup_commands": [
+      "EE_SWARM_SCALE_FORCE_FAILURE=budget_exceeded scripts/e2e_overhaul/swarm_scale.sh"
+    ],
+    "invocation": "EE_SWARM_SCALE_FORCE_FAILURE=budget_exceeded scripts/e2e_overhaul/swarm_scale.sh"
+  },
+  "expected_emission": {
+    "code": "swarm_scale_budget_exceeded",
+    "severity": "warning",
+    "message_contains": [
+      "swarm-scale",
+      "budget"
+    ],
+    "repair_contains": "tests/swarm_scale_budgets.toml"
+  }
+}

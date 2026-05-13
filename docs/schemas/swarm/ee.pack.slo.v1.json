@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.pack.slo.v1.json",
+  "title": "ee.pack.slo.v1",
+  "description": "Context pack assembly SLO result, including selected resource profile, budgets, actuals, and degradations.",
+  "type": "object",
+  "required": ["schema", "profile", "budgetClass", "actuals", "status", "degradations"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.pack.slo.v1"},
+    "profile": {"type": "string", "enum": ["lean", "standard", "swarm_heavy"]},
+    "budgetClass": {"$ref": "ee.resource.profile.v1.json#/properties/budgetClass"},
+    "actuals": {
+      "type": "object",
+      "required": ["candidateCount", "scannedCount", "indexGeneration", "graphGeneration", "graphEdgesTraversed", "elapsedMs", "memoryBytesPeak"],
+      "additionalProperties": false,
+      "properties": {
+        "candidateCount": {"type": "integer", "minimum": 0},
+        "scannedCount": {"type": "integer", "minimum": 0},
+        "indexGeneration": {"type": ["integer", "null"], "minimum": 0},
+        "graphGeneration": {"type": ["integer", "null"], "minimum": 0},
+        "graphEdgesTraversed": {"type": "integer", "minimum": 0},
+        "elapsedMs": {"type": "integer", "minimum": 0},
+        "memoryBytesPeak": {"type": "integer", "minimum": 0}
+      }
+    },
+    "status": {"type": "string", "enum": ["within_budget", "warning", "failure"]},
+    "degradations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "severity", "message", "repair"],
+        "additionalProperties": false,
+        "properties": {
+          "code": {"type": "string", "enum": ["pack_assembly_slow", "pack_assembly_budget_exceeded", "pack_concurrent_limit_reached"]},
+          "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+          "message": {"type": "string"},
+          "repair": {"type": ["string", "null"]}
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.pack.slo.v1",
+      "profile": "standard",
+      "budgetClass": {
+        "candidatesScannedMax": 240,
+        "graphTraversalMaxEdges": 8192,
+        "elapsedMsTarget": 200,
+        "elapsedMsWarning": 500,
+        "elapsedMsFailure": 2000,
+        "concurrentPackMax": 4
+      },
+      "actuals": {
+        "candidateCount": 12,
+        "scannedCount": 12,
+        "indexGeneration": null,
+        "graphGeneration": null,
+        "graphEdgesTraversed": 0,
+        "elapsedMs": 18,
+        "memoryBytesPeak": 65536
+      },
+      "status": "within_budget",
+      "degradations": []
+    }
+  ],
+  "x-ee-status": {
+    "shipped": true,
+    "tracking_bead": "bd-1zb7k.5",
+    "available_in_build": true,
+    "feature_flag": null,
+    "expected_version": "0.3.0"
+  },
+  "x-ee-doc": "docs/swarm/pack_slo.md"
+}

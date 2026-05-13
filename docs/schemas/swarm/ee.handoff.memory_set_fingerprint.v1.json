@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.handoff.memory_set_fingerprint.v1.json",
+  "title": "ee.handoff.memory_set_fingerprint.v1",
+  "description": "Planned handoff fingerprint for the exact memory set used to build a capsule or resume context.",
+  "type": "object",
+  "required": ["schema", "workspaceFingerprint", "memorySetHash", "memoryIds", "packHash", "createdAt"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.handoff.memory_set_fingerprint.v1"},
+    "workspaceFingerprint": {"type": "string"},
+    "memorySetHash": {"type": "string"},
+    "memoryIds": {"type": "array", "items": {"type": "string"}},
+    "packHash": {"type": ["string", "null"]},
+    "createdAt": {"type": "string", "format": "date-time"}
+  },
+  "examples": [
+    {
+      "schema": "ee.handoff.memory_set_fingerprint.v1",
+      "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3",
+      "memorySetHash": "blake3:d0118a636a9a5a1e2ad36738eb3432bd18b5dbb4b31e4a264c2b710913f0439e",
+      "memoryIds": ["mem_00000000000000000000010001", "mem_00000000000000000000010002"],
+      "packHash": "pack_00000000000000000000010001",
+      "createdAt": "2026-05-13T14:00:00Z"
+    }
+  ],
+  "x-ee-status": {
+    "shipped": false,
+    "tracking_bead": "bd-17c65.13.5",
+    "available_in_build": false,
+    "feature_flag": null,
+    "expected_version": "0.3.0"
+  },
+  "x-ee-doc": "docs/swarm/handoff_memory_set_fingerprint.md"
+}

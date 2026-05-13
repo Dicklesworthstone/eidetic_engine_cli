@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "conflict_direct",
+  "introduced_by": {
+    "bead": "bd-1zb7k.9",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "context"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A context pack selects memories with directly contradictory claims on the same subject.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Always use HTTPS for callbacks.' --workspace . --level procedural --kind rule --tag transport-https --json",
+      "ee remember 'Never use HTTPS for callbacks.' --workspace . --level procedural --kind rule --tag transport-https --json",
+      "ee index rebuild --workspace . --json"
+    ],
+    "invocation": "ee context 'HTTPS callbacks' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "conflict_direct",
+    "severity": "medium",
+    "message_contains": [
+      "directly conflicting claims"
+    ],
+    "repair_contains": "Review the conflicting memory IDs",
+    "repair_string": "Review the conflicting memory IDs before acting on either claim."
+  }
+}

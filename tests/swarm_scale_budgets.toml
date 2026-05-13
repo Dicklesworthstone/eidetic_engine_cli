@@ -1,0 +1,175 @@
+[meta]
+schema = "ee.swarm_scale.budgets.v1"
+bead = "bd-1zb7k.8"
+source_manifest = "tests/fixtures/swarm_scale/corpus_manifest.json"
+volatile_registry = "docs/volatile_field_registry.md"
+runs_per_operation = 3
+normal_ci_scale = "1k"
+explicit_benchmark_env = "EE_SWARM_BENCH"
+event_schema = "ee.perf.v1"
+event_kind = "swarm_scale_measurement"
+
+[scales."1k"]
+fixture_scale = "smoke_1k"
+memory_count = 1000
+agent_count = 64
+normal_verification = true
+explicit_benchmark = false
+
+[scales."10k"]
+fixture_scale = "mid_10k"
+memory_count = 10000
+agent_count = 64
+normal_verification = false
+explicit_benchmark = true
+
+[scales."100k"]
+fixture_scale = "large_100k"
+memory_count = 100000
+agent_count = 256
+normal_verification = false
+explicit_benchmark = true
+
+[operations.ee_init]
+dominant_stage = "storage"
+determinism_required = true
+
+[operations.ee_init.budgets."1k"]
+budget_ms = 500
+tolerance_pct = 30
+
+[operations.ee_init.budgets."10k"]
+budget_ms = 1000
+tolerance_pct = 30
+
+[operations.ee_init.budgets."100k"]
+budget_ms = 3000
+tolerance_pct = 30
+
+[operations.ee_remember]
+dominant_stage = "storage"
+determinism_required = true
+
+[operations.ee_remember.budgets."1k"]
+budget_ms = 20
+tolerance_pct = 50
+
+[operations.ee_remember.budgets."10k"]
+budget_ms = 30
+tolerance_pct = 50
+
+[operations.ee_remember.budgets."100k"]
+budget_ms = 50
+tolerance_pct = 50
+
+[operations.ee_search]
+dominant_stage = "search"
+determinism_required = true
+
+[operations.ee_search.budgets."1k"]
+budget_ms = 150
+tolerance_pct = 40
+
+[operations.ee_search.budgets."10k"]
+budget_ms = 300
+tolerance_pct = 40
+
+[operations.ee_search.budgets."100k"]
+budget_ms = 800
+tolerance_pct = 40
+
+[operations.ee_context]
+dominant_stage = "token_packing"
+determinism_required = true
+
+[operations.ee_context.budgets."1k"]
+budget_ms = 250
+tolerance_pct = 40
+
+[operations.ee_context.budgets."10k"]
+budget_ms = 500
+tolerance_pct = 40
+
+[operations.ee_context.budgets."100k"]
+budget_ms = 1500
+tolerance_pct = 40
+
+[operations.ee_index_rebuild]
+dominant_stage = "search_index"
+determinism_required = true
+
+[operations.ee_index_rebuild.budgets."1k"]
+budget_ms = 5000
+tolerance_pct = 20
+
+[operations.ee_index_rebuild.budgets."10k"]
+budget_ms = 30000
+tolerance_pct = 20
+
+[operations.ee_index_rebuild.budgets."100k"]
+budget_ms = 300000
+tolerance_pct = 20
+
+[operations.ee_why]
+dominant_stage = "rendering"
+determinism_required = true
+
+[operations.ee_why.budgets."1k"]
+budget_ms = 30
+tolerance_pct = 50
+
+[operations.ee_why.budgets."10k"]
+budget_ms = 50
+tolerance_pct = 50
+
+[operations.ee_why.budgets."100k"]
+budget_ms = 100
+tolerance_pct = 50
+
+[operations.ee_export]
+dominant_stage = "storage"
+determinism_required = true
+
+[operations.ee_export.budgets."1k"]
+budget_ms = 5000
+tolerance_pct = 25
+
+[operations.ee_export.budgets."10k"]
+budget_ms = 30000
+tolerance_pct = 25
+
+[operations.ee_export.budgets."100k"]
+budget_ms = 300000
+tolerance_pct = 25
+
+[operations.ee_handoff_create]
+dominant_stage = "rendering"
+determinism_required = true
+
+[operations.ee_handoff_create.budgets."1k"]
+budget_ms = 200
+tolerance_pct = 30
+
+[operations.ee_handoff_create.budgets."10k"]
+budget_ms = 500
+tolerance_pct = 30
+
+[operations.ee_handoff_create.budgets."100k"]
+budget_ms = 2000
+tolerance_pct = 30
+
+[operations.ee_graph_centrality_refresh]
+dominant_stage = "graph"
+determinism_required = true
+
+[operations.ee_graph_centrality_refresh.budgets."1k"]
+budget_ms = 3000
+tolerance_pct = 30
+
+[operations.ee_graph_centrality_refresh.budgets."10k"]
+budget_ms = 30000
+tolerance_pct = 30
+
+[operations.ee_graph_centrality_refresh.budgets."100k"]
+budget_ms = 600000
+tolerance_pct = 30

@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "swarm_scale_nondeterminism",
+  "introduced_by": {
+    "bead": "bd-1zb7k.8",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "bench",
+    "e2e"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "Three repeated swarm-scale measurements produce different output hashes after volatile-field normalization.",
+    "setup_commands": [
+      "EE_SWARM_SCALE_FORCE_FAILURE=nondeterminism scripts/e2e_overhaul/swarm_scale.sh"
+    ],
+    "invocation": "EE_SWARM_SCALE_FORCE_FAILURE=nondeterminism scripts/e2e_overhaul/swarm_scale.sh"
+  },
+  "expected_emission": {
+    "code": "swarm_scale_nondeterminism",
+    "severity": "high",
+    "message_contains": [
+      "swarm-scale",
+      "nondeterminism"
+    ],
+    "repair_contains": "docs/volatile_field_registry.md"
+  }
+}

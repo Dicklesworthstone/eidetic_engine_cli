@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.swarm.recommendation.v1.json",
+  "title": "ee.swarm.recommendation.v1",
+  "description": "Agent-facing recommendation emitted by the read-only swarm brief surface.",
+  "type": "object",
+  "required": ["id", "kind", "confidence", "severity", "reasonCodes", "evidence", "suggestedCommands", "mustNotDo"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {"type": "string"},
+    "kind": {"type": "string"},
+    "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+    "severity": {"type": "string", "enum": ["info", "low", "medium", "high", "urgent"]},
+    "reasonCodes": {"type": "array", "items": {"type": "string"}},
+    "evidence": {"type": "array", "items": {"type": "string"}},
+    "suggestedCommands": {"type": "array", "items": {"type": "string"}},
+    "mustNotDo": {"type": "array", "items": {"type": "string"}}
+  },
+  "examples": [
+    {
+      "id": "swarm_brief_agent_mail_unavailable",
+      "kind": "coordination_source_degraded",
+      "confidence": "high",
+      "severity": "medium",
+      "reasonCodes": ["agent_mail_unavailable"],
+      "evidence": ["source:agent_mail status:unavailable"],
+      "suggestedCommands": ["scripts/swarm_coordination_health.sh"],
+      "mustNotDo": ["Do not block implementation waiting for live Agent Mail."]
+    }
+  ],
+  "x-ee-status": {
+    "shipped": true,
+    "tracking_bead": "bd-2nkbn",
+    "available_in_build": true,
+    "feature_flag": null,
+    "expected_version": "0.3.0"
+  },
+  "x-ee-doc": "docs/swarm/swarm_recommendation.md"
+}

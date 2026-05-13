@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.swarm_fixture_corpus.v1.json",
+  "title": "ee.swarm_fixture_corpus.v1",
+  "description": "Manifest for deterministic swarm-scale fixture corpora used by load, ranking, and pack-shape tests.",
+  "type": "object",
+  "required": ["schema", "corpusId", "seedFamily", "workspaceFingerprint", "profiles", "fixtures"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.swarm_fixture_corpus.v1"},
+    "corpusId": {"type": "string"},
+    "seedFamily": {"type": "string"},
+    "workspaceFingerprint": {"type": "string"},
+    "profiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "memoryCount", "agentCount", "expectedDbRows", "expectedGraphNodes", "expectedGraphEdges"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string"},
+          "memoryCount": {"type": "integer", "minimum": 0},
+          "agentCount": {"type": "integer", "minimum": 0},
+          "expectedDbRows": {"type": "integer", "minimum": 0},
+          "expectedGraphNodes": {"type": "integer", "minimum": 0},
+          "expectedGraphEdges": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "fixtures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "kind", "contentHash"],
+        "additionalProperties": false,
+        "properties": {
+          "path": {"type": "string"},
+          "kind": {"type": "string"},
+          "contentHash": {"type": "string"}
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.swarm_fixture_corpus.v1",
+      "corpusId": "swarm-fixture-small-001",
+      "seedFamily": "seed.swarm_scale.v1",
+      "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3",
+      "profiles": [
+        {"name": "small", "memoryCount": 128, "agentCount": 4, "expectedDbRows": 128, "expectedGraphNodes": 128, "expectedGraphEdges": 96}
+      ],
+      "fixtures": [
+        {"path": "tests/fixtures/swarm/small.jsonl", "kind": "jsonl", "contentHash": "blake3:fixture"}
+      ]
+    }
+  ],
+  "x-ee-status": {
+    "shipped": false,
+    "tracking_bead": "bd-1zb7k.6",
+    "available_in_build": false,
+    "feature_flag": null,
+    "expected_version": "0.3.0"
+  },
+  "x-ee-doc": "docs/swarm/swarm_fixture_corpus.md"
+}

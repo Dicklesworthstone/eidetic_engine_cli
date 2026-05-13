@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.coordination_snapshot.v1.json",
+  "title": "ee.coordination_snapshot.v1",
+  "description": "Read-only coordination snapshot embedded in context packs from caller-provided Beads and Agent Mail source data.",
+  "type": "object",
+  "required": ["schema", "capturedAt", "scope", "freshness", "summary", "sources"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.coordination_snapshot.v1"},
+    "capturedAt": {"type": ["string", "null"], "format": "date-time"},
+    "scope": {"type": "string"},
+    "freshness": {
+      "type": "object",
+      "required": ["status", "staleAfterMs"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"type": "string", "enum": ["fresh", "stale", "degraded", "conflict"]},
+        "staleAfterMs": {"type": "integer", "minimum": 1}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["sourceCount", "entryCount", "staleSourceCount", "degradedSourceCount", "unavailableSourceCount", "activeConflictCount", "activeReservationCount", "inProgressBeadCount"],
+      "additionalProperties": false,
+      "properties": {
+        "sourceCount": {"type": "integer", "minimum": 0},
+        "entryCount": {"type": "integer", "minimum": 0},
+        "staleSourceCount": {"type": "integer", "minimum": 0},
+        "degradedSourceCount": {"type": "integer", "minimum": 0},
+        "unavailableSourceCount": {"type": "integer", "minimum": 0},
+        "activeConflictCount": {"type": "integer", "minimum": 0},
+        "activeReservationCount": {"type": "integer", "minimum": 0},
+        "inProgressBeadCount": {"type": "integer", "minimum": 0}
+      }
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "sourceId", "status", "freshnessMs", "lastSyncedAt", "stale", "entryCount", "entries", "degraded"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {"type": "string"},
+          "sourceId": {"type": "string"},
+          "status": {"type": "string"},
+          "freshnessMs": {"type": ["integer", "null"], "minimum": 0},
+          "lastSyncedAt": {"type": ["string", "null"], "format": "date-time"},
+          "stale": {"type": "boolean"},
+          "entryCount": {"type": "integer", "minimum": 0},
+          "entries": {"type": "array", "items": {"$ref": "#/$defs/entry"}},
+          "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "required": ["kind", "id", "summary", "severity", "conflict", "provenance"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"type": "string"},
+        "id": {"type": "string"},
+        "status": {"type": "string"},
+        "summary": {"type": "string"},
+        "severity": {"type": "string", "enum": ["info", "low", "medium", "high", "urgent"]},
+        "conflict": {"type": "boolean"},
+        "provenance": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+        "message": {"type": "string"},
+        "repair": {"type": "string"}
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.coordination_snapshot.v1",
+      "capturedAt": "2026-05-13T14:00:00Z",
+      "scope": "workspace",
+      "freshness": {"status": "fresh", "staleAfterMs": 86400000},
+      "summary": {"sourceCount": 1, "entryCount": 1, "staleSourceCount": 0, "degradedSourceCount": 0, "unavailableSourceCount": 0, "activeConflictCount": 0, "activeReservationCount": 0, "inProgressBeadCount": 1},
+      "sources": [
+        {
+          "kind": "beads",
+          "sourceId": "local",
+          "status": "fresh",
+          "freshnessMs": 0,
+          "lastSyncedAt": "2026-05-13T14:00:00Z",
+          "stale": false,
+          "entryCount": 1,
+          "entries": [{"kind": "bead", "id": "bd-1zb7k.7", "status": "in_progress", "summary": "S6 schema lifecycle work", "severity": "info", "conflict": false, "provenance": ["br://bd-1zb7k.7"]}],
+          "degraded": []
+        }
+      ]
+    }
+  ],
+  "x-ee-status": {
+    "shipped": true,
+    "tracking_bead": "bd-1zb7k.4",
+    "available_in_build": true,
+    "feature_flag": null,
+    "expected_version": "0.3.0"
+  },
+  "x-ee-doc": "docs/swarm/coordination_snapshot.md"
+}

@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.consensus.v1.json",
+  "title": "ee.consensus.v1",
+  "description": "Consensus record for multiple packed memories that agree on the same subject.",
+  "type": "object",
+  "required": ["schema", "subjectFingerprint", "subjectSummary", "agreementScore", "memberMemoryIds", "memberProducers", "semanticSimilarityMin", "firstRecordedAt", "lastReinforcedAt"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.consensus.v1"},
+    "subjectFingerprint": {"type": "string"},
+    "subjectSummary": {"type": "string"},
+    "agreementScore": {"type": "number", "minimum": 0, "maximum": 1},
+    "memberMemoryIds": {"type": "array", "minItems": 2, "items": {"type": "string"}},
+    "memberProducers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["agentName", "trustClass"],
+        "additionalProperties": false,
+        "properties": {
+          "agentName": {"type": ["string", "null"]},
+          "trustClass": {"type": "string", "enum": ["human_explicit", "agent_validated", "agent_assertion", "cass_evidence", "legacy_import"]}
+        }
+      }
+    },
+    "semanticSimilarityMin": {"type": "number", "minimum": 0, "maximum": 1},
+    "firstRecordedAt": {"type": ["string", "null"], "format": "date-time"},
+    "lastReinforcedAt": {"type": ["string", "null"], "format": "date-time"}
+  },
+  "examples": [
+    {
+      "schema": "ee.consensus.v1",
+      "subjectFingerprint": "blake3:2a6f1d4a8f38557c6a5a98b8433ef53f65dcf0b3e6dc986aba2ddf9153181b8a",
+      "subjectSummary": "Run cargo fmt --check before release",
+      "agreementScore": 0.92,
+      "memberMemoryIds": ["mem_00000000000000000000010001", "mem_00000000000000000000010002"],
+      "memberProducers": [
+        {"agentName": "BlueLake", "trustClass": "agent_validated"},
+        {"agentName": null, "trustClass": "human_explicit"}
+      ],
+      "semanticSimilarityMin": 0.92,
+      "firstRecordedAt": "2026-05-13T00:00:00Z",
+      "lastReinforcedAt": "2026-05-13T01:00:00Z"
+    }
+  ],
+  "x-ee-status": {
+    "shipped": true,
+    "tracking_bead": "bd-1zb7k.9",
+    "available_in_build": true,
+    "feature_flag": null,
+    "expected_version": "0.3.0"
+  },
+  "x-ee-doc": "docs/swarm/consensus.md"
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.resource.profile.v1.json",
+  "title": "ee.resource.profile.v1",
+  "description": "Resource profile and budget class used by context pack assembly.",
+  "type": "object",
+  "required": ["schema", "profile", "budgetClass"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.resource.profile.v1"},
+    "profile": {"type": "string", "enum": ["lean", "standard", "swarm_heavy"]},
+    "budgetClass": {
+      "type": "object",
+      "required": ["candidatesScannedMax", "graphTraversalMaxEdges", "elapsedMsTarget", "elapsedMsWarning", "elapsedMsFailure", "concurrentPackMax"],
+      "additionalProperties": false,
+      "properties": {
+        "candidatesScannedMax": {"type": "integer", "minimum": 1},
+        "graphTraversalMaxEdges": {"type": "integer", "minimum": 0},
+        "elapsedMsTarget": {"type": "integer", "minimum": 1},
+        "elapsedMsWarning": {"type": "integer", "minimum": 1},
+        "elapsedMsFailure": {"type": "integer", "minimum": 1},
+        "concurrentPackMax": {"type": "integer", "minimum": 1}
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.resource.profile.v1",
+      "profile": "swarm_heavy",
+      "budgetClass": {
+        "candidatesScannedMax": 1600,
+        "graphTraversalMaxEdges": 65536,
+        "elapsedMsTarget": 1000,
+        "elapsedMsWarning": 2000,
+        "elapsedMsFailure": 10000,
+        "concurrentPackMax": 16
+      }
+    }
+  ],
+  "x-ee-status": {
+    "shipped": true,
+    "tracking_bead": "bd-1zb7k.5",
+    "available_in_build": true,
+    "feature_flag": null,
+    "expected_version": "0.3.0"
+  },
+  "x-ee-doc": "docs/swarm/resource_profile.md"
+}

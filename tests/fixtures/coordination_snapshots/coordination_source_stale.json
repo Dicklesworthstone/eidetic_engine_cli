@@ -1,0 +1,21 @@
+{
+  "schema": "ee.coordination_snapshot.v1",
+  "captured_at": "2026-05-13T10:00:00Z",
+  "scope": "workspace",
+  "sources": [
+    {
+      "kind": "beads_ready",
+      "source_id": "br ready --json",
+      "last_synced_at": "2026-05-12T00:00:00Z",
+      "freshness_ms": 90000000,
+      "entries": [
+        {
+          "kind": "bead",
+          "id": "bd-stale",
+          "status": "in_progress",
+          "summary": "Stale in-progress coordination fixture"
+        }
+      ]
+    }
+  ]
+}

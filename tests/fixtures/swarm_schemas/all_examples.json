@@ -1,0 +1,121 @@
+{
+  "schema": "ee.swarm_schema_examples.v1",
+  "examples": {
+    "ee.producer.metadata.v1": {
+      "schema": "ee.producer.metadata.v1",
+      "sourceSystem": "verification",
+      "identity": {"status": "known", "agentName": "BlueLake", "harness": "codex-cli", "model": "gpt-5"},
+      "run": {"runId": "run-20260513-001", "sessionId": "session-001", "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"},
+      "observedAt": "2026-05-13T14:00:00Z"
+    },
+    "ee.trust_lane.v1": {
+      "scopeApplied": "swarm",
+      "strictScope": false,
+      "currentAgent": null,
+      "teamSize": 0,
+      "candidatesTotal": 12,
+      "candidatesInScope": 12,
+      "candidatesExcludedByScope": 0,
+      "strictViolations": 0,
+      "excludedMemoryIds": []
+    },
+    "ee.verification.evidence.v1": {
+      "schema": "ee.verification.evidence.v1",
+      "verificationId": "ver_pass_00000000000000000001",
+      "beadId": "bd-example",
+      "gateName": "cargo fmt",
+      "command": "cargo fmt --check",
+      "commandHash": "blake3:5d305320b75f9525e1086fe2944d7b2f20d2d1e962ed1912f23ebbfd23446b9f",
+      "status": "passed",
+      "exitCode": 0,
+      "startedAt": "2026-05-13T00:00:00Z",
+      "finishedAt": "2026-05-13T00:00:01Z",
+      "durationMs": 1000,
+      "environment": {"workspaceFingerprint": "repo:25e38e130474e7f0292de2a3", "cwd": "/repo", "toolchain": "rustc 1.96.0-nightly"},
+      "offload": {"requiredRemote": false, "remoteRequiredEnv": null, "offloadTool": null, "worker": null, "fallbackDetected": false, "fallbackReason": null},
+      "outputSummary": {"stdoutTail": null, "stderrTail": null, "redacted": false},
+      "artifacts": [],
+      "producer": {"schema": "ee.producer.metadata.v1", "sourceSystem": "verification", "identity": {"status": "unknown", "agentName": null, "harness": null, "model": null}, "run": {"runId": "verify-run-20260513", "sessionId": null, "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"}, "observedAt": "2026-05-13T00:00:00Z"}
+    },
+    "ee.coordination_snapshot.v1": {
+      "schema": "ee.coordination_snapshot.v1",
+      "capturedAt": "2026-05-13T14:00:00Z",
+      "scope": "workspace",
+      "freshness": {"status": "fresh", "staleAfterMs": 86400000},
+      "summary": {"sourceCount": 1, "entryCount": 1, "staleSourceCount": 0, "degradedSourceCount": 0, "unavailableSourceCount": 0, "activeConflictCount": 0, "activeReservationCount": 0, "inProgressBeadCount": 1},
+      "sources": [
+        {
+          "kind": "beads",
+          "sourceId": "local",
+          "status": "fresh",
+          "freshnessMs": 0,
+          "lastSyncedAt": "2026-05-13T14:00:00Z",
+          "stale": false,
+          "entryCount": 1,
+          "entries": [{"kind": "bead", "id": "bd-1zb7k.7", "status": "in_progress", "summary": "S6 schema lifecycle work", "severity": "info", "conflict": false, "provenance": ["br://bd-1zb7k.7"]}],
+          "degraded": []
+        }
+      ]
+    },
+    "ee.resource.profile.v1": {
+      "schema": "ee.resource.profile.v1",
+      "profile": "swarm_heavy",
+      "budgetClass": {"candidatesScannedMax": 1600, "graphTraversalMaxEdges": 65536, "elapsedMsTarget": 1000, "elapsedMsWarning": 2000, "elapsedMsFailure": 10000, "concurrentPackMax": 16}
+    },
+    "ee.pack.slo.v1": {
+      "schema": "ee.pack.slo.v1",
+      "profile": "standard",
+      "budgetClass": {"candidatesScannedMax": 240, "graphTraversalMaxEdges": 8192, "elapsedMsTarget": 200, "elapsedMsWarning": 500, "elapsedMsFailure": 2000, "concurrentPackMax": 4},
+      "actuals": {"candidateCount": 12, "scannedCount": 12, "indexGeneration": null, "graphGeneration": null, "graphEdgesTraversed": 0, "elapsedMs": 18, "memoryBytesPeak": 65536},
+      "status": "within_budget",
+      "degradations": []
+    },
+    "ee.consensus.v1": {
+      "schema": "ee.consensus.v1",
+      "subjectFingerprint": "blake3:2a6f1d4a8f38557c6a5a98b8433ef53f65dcf0b3e6dc986aba2ddf9153181b8a",
+      "subjectSummary": "Run cargo fmt --check before release",
+      "agreementScore": 0.92,
+      "memberMemoryIds": ["mem_00000000000000000000010001", "mem_00000000000000000000010002"],
+      "memberProducers": [{"agentName": "BlueLake", "trustClass": "agent_validated"}, {"agentName": null, "trustClass": "human_explicit"}],
+      "semanticSimilarityMin": 0.92,
+      "firstRecordedAt": "2026-05-13T00:00:00Z",
+      "lastReinforcedAt": "2026-05-13T01:00:00Z"
+    },
+    "ee.conflict.v1": {
+      "schema": "ee.conflict.v1",
+      "subjectFingerprint": "blake3:7fd01e847fe35e5a5d1a752a67d90adf75a752f8a1a4f6c30dca186660afc532",
+      "kind": "direct",
+      "conflictingMemoryIds": ["mem_00000000000000000000010001", "mem_00000000000000000000010003"],
+      "evidencePointers": ["ee://memory/mem_00000000000000000000010001", "ee://memory/mem_00000000000000000000010003"],
+      "earliestAt": "2026-05-13T00:00:00Z",
+      "latestAt": "2026-05-13T02:00:00Z",
+      "recommendedAction": "review"
+    },
+    "ee.swarm_fixture_corpus.v1": {
+      "schema": "ee.swarm_fixture_corpus.v1",
+      "corpusId": "swarm-fixture-small-001",
+      "seedFamily": "seed.swarm_scale.v1",
+      "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3",
+      "profiles": [{"name": "small", "memoryCount": 128, "agentCount": 4, "expectedDbRows": 128, "expectedGraphNodes": 128, "expectedGraphEdges": 96}],
+      "fixtures": [{"path": "tests/fixtures/swarm/small.jsonl", "kind": "jsonl", "contentHash": "blake3:fixture"}]
+    },
+    "ee.handoff.memory_set_fingerprint.v1": {
+      "schema": "ee.handoff.memory_set_fingerprint.v1",
+      "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3",
+      "memorySetHash": "blake3:d0118a636a9a5a1e2ad36738eb3432bd18b5dbb4b31e4a264c2b710913f0439e",
+      "memoryIds": ["mem_00000000000000000000010001", "mem_00000000000000000000010002"],
+      "packHash": "pack_00000000000000000000010001",
+      "createdAt": "2026-05-13T14:00:00Z"
+    },
+    "ee.swarm.recommendation.v1": {
+      "id": "swarm_brief_agent_mail_unavailable",
+      "kind": "coordination_source_degraded",
+      "confidence": "high",
+      "severity": "medium",
+      "reasonCodes": ["agent_mail_unavailable"],
+      "evidence": ["source:agent_mail status:unavailable"],
+      "suggestedCommands": ["scripts/swarm_coordination_health.sh"],
+      "mustNotDo": ["Do not block implementation waiting for live Agent Mail."]
+    }
+  }
+}

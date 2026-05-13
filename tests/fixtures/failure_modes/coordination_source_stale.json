@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "coordination_source_stale",
+  "introduced_by": {
+    "bead": "bd-1zb7k.4",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "context",
+    "pack"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "A redacted coordination snapshot has a source older than the configured staleness threshold.",
+    "setup_commands": [
+      "ee init --workspace <workspace> --json",
+      "ee remember --workspace <workspace> --level procedural --kind rule 'Coordinate before editing reserved files.' --json",
+      "ee index rebuild --workspace <workspace> --json"
+    ],
+    "invocation": "ee context 'coordination snapshot fixture' --workspace <workspace> --coordination-snapshot tests/fixtures/coordination_snapshots/coordination_source_stale.json --json"
+  },
+  "expected_emission": {
+    "code": "coordination_source_stale",
+    "severity": "low",
+    "message_contains": [
+      "Coordination snapshot contains stale sources"
+    ],
+    "repair_contains": "Regenerate the redacted coordination snapshot"
+  }
+}

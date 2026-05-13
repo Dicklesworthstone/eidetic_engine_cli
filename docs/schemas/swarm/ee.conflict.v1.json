@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.conflict.v1.json",
+  "title": "ee.conflict.v1",
+  "description": "Conflict record for packed memories that disagree, overlap unsafely, or appear stale.",
+  "type": "object",
+  "required": ["schema", "subjectFingerprint", "kind", "conflictingMemoryIds", "evidencePointers", "earliestAt", "latestAt", "recommendedAction"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.conflict.v1"},
+    "subjectFingerprint": {"type": "string"},
+    "kind": {"type": "string", "enum": ["direct", "stale_replacement", "partial_overlap"]},
+    "conflictingMemoryIds": {"type": "array", "minItems": 2, "items": {"type": "string"}},
+    "evidencePointers": {"type": "array", "items": {"type": "string"}},
+    "earliestAt": {"type": ["string", "null"], "format": "date-time"},
+    "latestAt": {"type": ["string", "null"], "format": "date-time"},
+    "recommendedAction": {"type": "string", "enum": ["review", "promote_one", "tombstone_older", "request_clarification"]}
+  },
+  "examples": [
+    {
+      "schema": "ee.conflict.v1",
+      "subjectFingerprint": "blake3:7fd01e847fe35e5a5d1a752a67d90adf75a752f8a1a4f6c30dca186660afc532",
+      "kind": "direct",
+      "conflictingMemoryIds": ["mem_00000000000000000000010001", "mem_00000000000000000000010003"],
+      "evidencePointers": ["ee://memory/mem_00000000000000000000010001", "ee://memory/mem_00000000000000000000010003"],
+      "earliestAt": "2026-05-13T00:00:00Z",
+      "latestAt": "2026-05-13T02:00:00Z",
+      "recommendedAction": "review"
+    }
+  ],
+  "x-ee-status": {
+    "shipped": true,
+    "tracking_bead": "bd-1zb7k.9",
+    "available_in_build": true,
+    "feature_flag": null,
+    "expected_version": "0.3.0"
+  },
+  "x-ee-doc": "docs/swarm/conflict.md"
+}

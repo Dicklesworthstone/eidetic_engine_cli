@@ -1,0 +1,95 @@
+{
+  "schema": "ee.swarm_fixture_corpus.v1",
+  "corpusId": "swarm-fixture-corpus-v1",
+  "seedFamily": "seed.swarm_scale.v1",
+  "fixedClock": "2026-05-13T00:00:00Z",
+  "hashEmbedder": {
+    "algorithm": "blake3-xof-unit-vector",
+    "dimensions": 384
+  },
+  "scales": [
+    {
+      "name": "smoke_1k",
+      "agentCount": 64,
+      "memoryCount": 1000,
+      "materializedInCi": true,
+      "memoryIdPrefix": "mem_swarm_smoke_",
+      "expectedFirstMemoryId": "mem_swarm_smoke_000001",
+      "expectedLastMemoryId": "mem_swarm_smoke_001000"
+    },
+    {
+      "name": "mid_10k",
+      "agentCount": 64,
+      "memoryCount": 10000,
+      "materializedInCi": false,
+      "memoryIdPrefix": "mem_swarm_mid_",
+      "expectedFirstMemoryId": "mem_swarm_mid_000001",
+      "expectedLastMemoryId": "mem_swarm_mid_010000"
+    },
+    {
+      "name": "large_100k",
+      "agentCount": 256,
+      "memoryCount": 100000,
+      "materializedInCi": false,
+      "memoryIdPrefix": "mem_swarm_large_",
+      "expectedFirstMemoryId": "mem_swarm_large_000001",
+      "expectedLastMemoryId": "mem_swarm_large_100000"
+    }
+  ],
+  "agentTemplate": {
+    "namePrefix": "SwarmAgent",
+    "programCycle": ["codex-cli", "claude-code", "gemini-cli", "ntm-worker"],
+    "modelCycle": ["gpt-5", "claude-opus-4.1", "gemini-2.5-pro", "gpt-5-codex"],
+    "trustClassCycle": ["human_explicit", "agent_validated", "agent_assertion", "cass_evidence"]
+  },
+  "topics": ["release", "database", "coordination", "verification", "refactor", "policy"],
+  "conflicts": [
+    {
+      "kind": "direct",
+      "memoryIds": ["mem_swarm_smoke_000007", "mem_swarm_smoke_000008"],
+      "reason": "One memory says release tags require local-only checks; the other requires remote verification evidence."
+    },
+    {
+      "kind": "stale_replacement",
+      "memoryIds": ["mem_swarm_smoke_000013", "mem_swarm_smoke_000014"],
+      "reason": "The older handoff path was replaced by the coordination snapshot path."
+    },
+    {
+      "kind": "partial_overlap",
+      "memoryIds": ["mem_swarm_smoke_000019", "mem_swarm_smoke_000020"],
+      "reason": "Both memories mention Beads coordination but disagree on whether Agent Mail is required."
+    }
+  ],
+  "coordinationSnapshots": [
+    {
+      "schema": "ee.coordination_snapshot.v1",
+      "scope": "workspace",
+      "sources": ["beads", "agent_mail"],
+      "expectedActiveReservationCount": 3,
+      "expectedInProgressBeadCount": 2
+    }
+  ],
+  "verificationEvidence": [
+    {
+      "schema": "ee.verification.evidence.v1",
+      "verificationId": "ver_swarm_smoke_000001",
+      "status": "passed",
+      "beadId": "bd-1zb7k.6",
+      "command": "cargo test --test swarm_fixture_corpus_unit -- --nocapture"
+    }
+  ],
+  "expectedPacks": [
+    {
+      "scale": "smoke_1k",
+      "query": "release verification coordination",
+      "expectedTop3Ids": ["mem_swarm_smoke_000001", "mem_swarm_smoke_000007", "mem_swarm_smoke_000014"],
+      "expectedMaxTokens": 1200,
+      "markdownGolden": "tests/fixtures/golden/swarm_fixture/smoke_release_pack.md.golden"
+    }
+  ],
+  "artifacts": [
+    {"path": "tests/fixtures/swarm_scale/corpus_manifest.json", "kind": "manifest"},
+    {"path": "tests/fixtures/golden/swarm_fixture/smoke_release_pack.md.golden", "kind": "markdown_golden"},
+    {"path": "scripts/e2e_overhaul/swarm_fixture.sh", "kind": "e2e_script"}
+  ]
+}

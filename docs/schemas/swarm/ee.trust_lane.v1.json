@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.trust_lane.v1.json",
+  "title": "ee.trust_lane.v1",
+  "description": "Scoped retrieval trust-lane statistics emitted by context and search surfaces.",
+  "type": "object",
+  "required": [
+    "scopeApplied",
+    "strictScope",
+    "currentAgent",
+    "teamSize",
+    "candidatesTotal",
+    "candidatesInScope",
+    "candidatesExcludedByScope",
+    "strictViolations",
+    "excludedMemoryIds"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "scopeApplied": {"type": "string", "enum": ["self", "team", "workspace", "verified", "swarm"]},
+    "strictScope": {"type": "boolean"},
+    "currentAgent": {"type": ["string", "null"]},
+    "teamSize": {"type": "integer", "minimum": 0},
+    "candidatesTotal": {"type": "integer", "minimum": 0},
+    "candidatesInScope": {"type": "integer", "minimum": 0},
+    "candidatesExcludedByScope": {"type": "integer", "minimum": 0},
+    "strictViolations": {"type": "integer", "minimum": 0},
+    "excludedMemoryIds": {"type": "array", "items": {"type": "string"}}
+  },
+  "examples": [
+    {
+      "scopeApplied": "swarm",
+      "strictScope": false,
+      "currentAgent": null,
+      "teamSize": 0,
+      "candidatesTotal": 12,
+      "candidatesInScope": 12,
+      "candidatesExcludedByScope": 0,
+      "strictViolations": 0,
+      "excludedMemoryIds": []
+    },
+    {
+      "scopeApplied": "self",
+      "strictScope": true,
+      "currentAgent": "BlueLake",
+      "teamSize": 1,
+      "candidatesTotal": 8,
+      "candidatesInScope": 3,
+      "candidatesExcludedByScope": 5,
+      "strictViolations": 5,
+      "excludedMemoryIds": ["mem_00000000000000000000010001"]
+    }
+  ],
+  "x-ee-status": {
+    "shipped": true,
+    "tracking_bead": "bd-1zb7k.2",
+    "available_in_build": true,
+    "feature_flag": null,
+    "expected_version": "0.3.0"
+  },
+  "x-ee-doc": "docs/swarm/trust_lane.md"
+}

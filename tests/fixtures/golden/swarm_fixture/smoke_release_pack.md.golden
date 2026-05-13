@@ -1,0 +1,9 @@
+# Swarm Fixture Pack
+
+Query: release verification coordination
+Scale: smoke_1k
+Manifest: swarm-fixture-corpus-v1
+
+1. mem_swarm_smoke_000001 - release memory from SwarmAgent00 using codex-cli. Verification status: passed.
+2. mem_swarm_smoke_000007 - release memory from SwarmAgent06 using gemini-cli. Verification status: conflict_expected.
+3. mem_swarm_smoke_000014 - database memory from SwarmAgent13 using claude-code. Verification status: stale_replacement_expected.

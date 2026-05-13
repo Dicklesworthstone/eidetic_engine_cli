@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "coordination_source_unavailable",
+  "introduced_by": {
+    "bead": "bd-1zb7k.4",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "context",
+    "pack"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A redacted coordination snapshot records a required coordination source as unavailable.",
+    "setup_commands": [
+      "ee init --workspace <workspace> --json",
+      "ee remember --workspace <workspace> --level procedural --kind rule 'Coordinate before editing reserved files.' --json",
+      "ee index rebuild --workspace <workspace> --json"
+    ],
+    "invocation": "ee context 'coordination snapshot fixture' --workspace <workspace> --coordination-snapshot tests/fixtures/coordination_snapshots/coordination_source_unavailable.json --json"
+  },
+  "expected_emission": {
+    "code": "coordination_source_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "Coordination snapshot contains unavailable sources"
+    ],
+    "repair_contains": "Provide fresh redacted coordination sources",
+    "repair_string": "Provide fresh redacted coordination sources or rerun ee swarm brief."
+  }
+}

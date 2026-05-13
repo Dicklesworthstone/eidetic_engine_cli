@@ -1,0 +1,109 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/test-fixtures/swarm_scale/corpus_manifest.schema.json",
+  "title": "ee.swarm_fixture_corpus.v1 test manifest",
+  "type": "object",
+  "required": [
+    "schema",
+    "corpusId",
+    "seedFamily",
+    "fixedClock",
+    "hashEmbedder",
+    "scales",
+    "agentTemplate",
+    "topics",
+    "conflicts",
+    "coordinationSnapshots",
+    "verificationEvidence",
+    "expectedPacks",
+    "artifacts"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.swarm_fixture_corpus.v1"},
+    "corpusId": {"type": "string"},
+    "seedFamily": {"type": "string", "const": "seed.swarm_scale.v1"},
+    "fixedClock": {"type": "string"},
+    "hashEmbedder": {
+      "type": "object",
+      "required": ["algorithm", "dimensions"],
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {"type": "string"},
+        "dimensions": {"type": "integer", "minimum": 1}
+      }
+    },
+    "scales": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["name", "agentCount", "memoryCount", "materializedInCi", "memoryIdPrefix", "expectedFirstMemoryId", "expectedLastMemoryId"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string"},
+          "agentCount": {"type": "integer", "minimum": 1},
+          "memoryCount": {"type": "integer", "minimum": 1},
+          "materializedInCi": {"type": "boolean"},
+          "memoryIdPrefix": {"type": "string"},
+          "expectedFirstMemoryId": {"type": "string"},
+          "expectedLastMemoryId": {"type": "string"}
+        }
+      }
+    },
+    "agentTemplate": {
+      "type": "object",
+      "required": ["namePrefix", "programCycle", "modelCycle", "trustClassCycle"],
+      "additionalProperties": false,
+      "properties": {
+        "namePrefix": {"type": "string"},
+        "programCycle": {"type": "array", "items": {"type": "string"}},
+        "modelCycle": {"type": "array", "items": {"type": "string"}},
+        "trustClassCycle": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "topics": {"type": "array", "items": {"type": "string"}},
+    "conflicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "memoryIds", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {"type": "string", "enum": ["direct", "stale_replacement", "partial_overlap"]},
+          "memoryIds": {"type": "array", "minItems": 2, "items": {"type": "string"}},
+          "reason": {"type": "string"}
+        }
+      }
+    },
+    "coordinationSnapshots": {"type": "array", "items": {"type": "object"}},
+    "verificationEvidence": {"type": "array", "items": {"type": "object"}},
+    "expectedPacks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["scale", "query", "expectedTop3Ids", "expectedMaxTokens", "markdownGolden"],
+        "additionalProperties": false,
+        "properties": {
+          "scale": {"type": "string"},
+          "query": {"type": "string"},
+          "expectedTop3Ids": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "string"}},
+          "expectedMaxTokens": {"type": "integer", "minimum": 1},
+          "markdownGolden": {"type": "string"}
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "kind"],
+        "additionalProperties": false,
+        "properties": {
+          "path": {"type": "string"},
+          "kind": {"type": "string"}
+        }
+      }
+    }
+  }
+}

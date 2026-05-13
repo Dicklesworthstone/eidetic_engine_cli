@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "conflict_trust_mismatch",
+  "introduced_by": {
+    "bead": "bd-1zb7k.9",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "context"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A context pack selects a conflict where one side has a higher trust class than the other.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee import jsonl --workspace . --source conflict-trust-mismatch.jsonl --json",
+      "ee index rebuild --workspace . --json"
+    ],
+    "invocation": "ee context 'trusted callback transport' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "conflict_trust_mismatch",
+    "severity": "high",
+    "message_contains": [
+      "trust mismatch conflict",
+      "higher-trust memory"
+    ],
+    "repair_contains": "reviewing its provenance"
+  }
+}

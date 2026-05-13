@@ -1,0 +1,59 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.producer.metadata.v1.json",
+  "title": "ee.producer.metadata.v1",
+  "description": "Producer identity metadata attached to memory-like evidence records, context packs, and verification records.",
+  "type": "object",
+  "required": ["schema", "sourceSystem", "identity", "run", "observedAt"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.producer.metadata.v1"},
+    "sourceSystem": {"type": "string", "enum": ["cli", "cass", "audit", "agent_mail", "recorder", "curation", "verification", "unknown"]},
+    "identity": {
+      "type": "object",
+      "required": ["status", "agentName", "harness", "model"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"type": "string", "enum": ["known", "unknown", "unobserved"]},
+        "agentName": {"type": ["string", "null"]},
+        "harness": {"type": ["string", "null"]},
+        "model": {"type": ["string", "null"]}
+      }
+    },
+    "run": {
+      "type": "object",
+      "required": ["runId", "sessionId", "workspaceFingerprint"],
+      "additionalProperties": false,
+      "properties": {
+        "runId": {"type": ["string", "null"]},
+        "sessionId": {"type": ["string", "null"]},
+        "workspaceFingerprint": {"type": ["string", "null"]}
+      }
+    },
+    "observedAt": {"type": ["string", "null"], "format": "date-time"}
+  },
+  "examples": [
+    {
+      "schema": "ee.producer.metadata.v1",
+      "sourceSystem": "verification",
+      "identity": {"status": "known", "agentName": "BlueLake", "harness": "codex-cli", "model": "gpt-5"},
+      "run": {"runId": "run-20260513-001", "sessionId": "session-001", "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"},
+      "observedAt": "2026-05-13T14:00:00Z"
+    },
+    {
+      "schema": "ee.producer.metadata.v1",
+      "sourceSystem": "cli",
+      "identity": {"status": "unobserved", "agentName": null, "harness": null, "model": null},
+      "run": {"runId": null, "sessionId": null, "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"},
+      "observedAt": null
+    }
+  ],
+  "x-ee-status": {
+    "shipped": true,
+    "tracking_bead": "bd-1zb7k.1",
+    "available_in_build": true,
+    "feature_flag": null,
+    "expected_version": "0.3.0"
+  },
+  "x-ee-doc": "docs/swarm/producer_metadata.md"
+}

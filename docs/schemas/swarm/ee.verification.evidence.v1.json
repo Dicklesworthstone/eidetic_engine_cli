@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.verification.evidence.v1.json",
+  "title": "ee.verification.evidence.v1",
+  "description": "Verification evidence ledger record for build, test, lint, and closure gates.",
+  "type": "object",
+  "required": [
+    "schema",
+    "verificationId",
+    "beadId",
+    "gateName",
+    "command",
+    "commandHash",
+    "status",
+    "exitCode",
+    "startedAt",
+    "finishedAt",
+    "durationMs",
+    "environment",
+    "offload",
+    "outputSummary",
+    "artifacts",
+    "producer"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.verification.evidence.v1"},
+    "verificationId": {"type": "string"},
+    "beadId": {"type": ["string", "null"]},
+    "gateName": {"type": "string"},
+    "command": {"type": "string"},
+    "commandHash": {"type": "string"},
+    "status": {"type": "string", "enum": ["passed", "failed", "blocked", "interrupted", "fallback_detected", "unknown"]},
+    "exitCode": {"type": ["integer", "null"]},
+    "startedAt": {"type": ["string", "null"], "format": "date-time"},
+    "finishedAt": {"type": ["string", "null"], "format": "date-time"},
+    "durationMs": {"type": ["integer", "null"], "minimum": 0},
+    "environment": {
+      "type": "object",
+      "required": ["workspaceFingerprint", "cwd", "toolchain"],
+      "additionalProperties": false,
+      "properties": {
+        "workspaceFingerprint": {"type": ["string", "null"]},
+        "cwd": {"type": ["string", "null"]},
+        "toolchain": {"type": ["string", "null"]}
+      }
+    },
+    "offload": {
+      "type": "object",
+      "required": ["requiredRemote", "remoteRequiredEnv", "offloadTool", "worker", "fallbackDetected", "fallbackReason"],
+      "additionalProperties": false,
+      "properties": {
+        "requiredRemote": {"type": "boolean"},
+        "remoteRequiredEnv": {"type": ["string", "null"]},
+        "offloadTool": {"type": ["string", "null"]},
+        "worker": {"type": ["string", "null"]},
+        "fallbackDetected": {"type": "boolean"},
+        "fallbackReason": {"type": ["string", "null"]}
+      }
+    },
+    "outputSummary": {
+      "type": "object",
+      "required": ["stdoutTail", "stderrTail", "redacted"],
+      "additionalProperties": false,
+      "properties": {
+        "stdoutTail": {"type": ["string", "null"]},
+        "stderrTail": {"type": ["string", "null"]},
+        "redacted": {"type": "boolean"}
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "kind", "contentHash"],
+        "additionalProperties": false,
+        "properties": {
+          "path": {"type": "string"},
+          "kind": {"type": "string"},
+          "contentHash": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "producer": {"$ref": "ee.producer.metadata.v1.json"}
+  },
+  "examples": [
+    {
+      "schema": "ee.verification.evidence.v1",
+      "verificationId": "ver_pass_00000000000000000001",
+      "beadId": "bd-example",
+      "gateName": "cargo fmt",
+      "command": "cargo fmt --check",
+      "commandHash": "blake3:5d305320b75f9525e1086fe2944d7b2f20d2d1e962ed1912f23ebbfd23446b9f",
+      "status": "passed",
+      "exitCode": 0,
+      "startedAt": "2026-05-13T00:00:00Z",
+      "finishedAt": "2026-05-13T00:00:01Z",
+      "durationMs": 1000,
+      "environment": {"workspaceFingerprint": "repo:25e38e130474e7f0292de2a3", "cwd": "/repo", "toolchain": "rustc 1.96.0-nightly"},
+      "offload": {"requiredRemote": false, "remoteRequiredEnv": null, "offloadTool": null, "worker": null, "fallbackDetected": false, "fallbackReason": null},
+      "outputSummary": {"stdoutTail": null, "stderrTail": null, "redacted": false},
+      "artifacts": [],
+      "producer": {"schema": "ee.producer.metadata.v1", "sourceSystem": "verification", "identity": {"status": "unknown", "agentName": null, "harness": null, "model": null}, "run": {"runId": "verify-run-20260513", "sessionId": null, "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"}, "observedAt": "2026-05-13T00:00:00Z"}
+    }
+  ],
+  "x-ee-status": {
+    "shipped": true,
+    "tracking_bead": "bd-1zb7k.3",
+    "available_in_build": true,
+    "feature_flag": null,
+    "expected_version": "0.3.0"
+  },
+  "x-ee-doc": "docs/swarm/verification_evidence.md"
+}

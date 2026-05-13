@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "consensus_no_clusters",
+  "introduced_by": {
+    "bead": "bd-1zb7k.9",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "context"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "A context pack has no selected memories, so no consensus neighborhood can be formed.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee context 'sparse consensus subject' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "consensus_no_clusters",
+    "severity": "low",
+    "message_contains": [
+      "did not contain enough query-relevant neighboring memories",
+      "consensus clusters"
+    ],
+    "repair_contains": "increase --candidate-pool"
+  }
+}

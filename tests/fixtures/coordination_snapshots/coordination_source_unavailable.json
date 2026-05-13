@@ -1,0 +1,21 @@
+{
+  "schema": "ee.coordination_snapshot.v1",
+  "captured_at": "2026-05-13T10:00:00Z",
+  "scope": "workspace",
+  "sources": [
+    {
+      "kind": "agent_mail_thread",
+      "source_id": "agent-mail snapshot",
+      "status": "unavailable",
+      "entries": [],
+      "degraded": [
+        {
+          "code": "agent_mail_unavailable",
+          "severity": "warning",
+          "message": "Agent Mail snapshot was unavailable.",
+          "repair": "Provide a redacted Agent Mail snapshot file."
+        }
+      ]
+    }
+  ]
+}
