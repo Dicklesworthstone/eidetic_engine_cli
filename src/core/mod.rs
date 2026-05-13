@@ -8,6 +8,7 @@ use crate::models::{
 pub mod agent_detect;
 pub mod agent_docs;
 pub mod artifact;
+pub mod artifact_relocation;
 pub mod audit;
 pub mod backup;
 pub mod bayes;
@@ -21,6 +22,7 @@ pub mod context;
 pub mod curate;
 pub mod degraded_honesty;
 pub mod determinism;
+pub mod disk_pressure;
 pub mod doctor;
 pub mod economy;
 pub mod effect;
@@ -205,9 +207,17 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
         SupportedSchema::new("runtime_profile", profile::RUNTIME_PROFILE_SCHEMA_V1),
         SupportedSchema::new("update_plan", UPDATE_PLAN_SCHEMA_V1),
         SupportedSchema::new("artifact_summary", ARTIFACT_SUMMARY_SCHEMA_V1),
+        SupportedSchema::new(
+            "artifact_relocation",
+            artifact_relocation::ARTIFACT_RELOCATION_SCHEMA_V1,
+        ),
         SupportedSchema::new("compare_result", perf_forensics::COMPARE_RESULT_SCHEMA_V1),
         SupportedSchema::new("budget_check", perf_forensics::BUDGET_CHECK_SCHEMA_V1),
         SupportedSchema::new("swarm_brief", swarm_brief::SWARM_BRIEF_SCHEMA_V1),
+        SupportedSchema::new(
+            "disk_pressure_diagnostics",
+            disk_pressure::DISK_PRESSURE_DIAGNOSTICS_SCHEMA_V1,
+        ),
         SupportedSchema::new(
             "pack_quality_report",
             crate::eval::PACK_QUALITY_REPORT_SCHEMA_V1,
