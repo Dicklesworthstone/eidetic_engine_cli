@@ -48,7 +48,7 @@ use crate::models::{
 use crate::pack::{
     ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
     ContextResponseDegradation, ContextResponseSeverity, PackCandidate, PackCandidateInput,
-    PackProvenance, PackSection, PackTrustSignal, TokenBudget,
+    PackItemLifecycle, PackProvenance, PackSection, PackTrustSignal, TokenBudget,
     assemble_draft_with_profile_and_options, estimate_tokens_default, pack_item_provenance_json,
 };
 
@@ -285,6 +285,10 @@ pub struct ContextPackOptions {
     pub candidate_pool: Option<u32>,
     pub max_results: Option<u32>,
     pub include_tombstoned: bool,
+    pub as_of: Option<DateTime<Utc>>,
+    pub include_expired: bool,
+    pub include_future: bool,
+    pub include_stale: bool,
     pub pagination: Option<ContextPagination>,
     pub output_options: ContextPackOutputOptions,
 }
@@ -316,6 +320,15 @@ pub struct ContextPackOutputOptions {
     pub include_skipped: bool,
     pub include_meta: bool,
     pub include_verbose_meta: bool,
+    /// Bead bd-17c65.5.2 (E2): when `false` (the default), per-response
+    /// `degraded[]` filters out signals whose [`crate::pack::DegradedCategory`]
+    /// classifies them as build-time feature gaps or workspace-state
+    /// conditions that did not affect this particular response. When
+    /// `true` (via `--include-non-affecting-degradations`), every
+    /// signal surfaces — the pre-E2 verbose behavior. Defaults differ
+    /// per profile only in the Verbose profile (true), to match the
+    /// existing "verbose surfaces everything" convention.
+    pub include_non_affecting_degradations: bool,
 }
 
 impl Default for ContextPackOutputOptions {
@@ -335,6 +348,7 @@ impl ContextPackOutputOptions {
                 include_skipped: false,
                 include_meta: true,
                 include_verbose_meta: false,
+                include_non_affecting_degradations: false,
             },
             ContextPackOutputProfile::Standard => Self {
                 profile,
@@ -343,6 +357,7 @@ impl ContextPackOutputOptions {
                 include_skipped: true,
                 include_meta: true,
                 include_verbose_meta: false,
+                include_non_affecting_degradations: false,
             },
             ContextPackOutputProfile::Verbose => Self {
                 profile,
@@ -351,6 +366,7 @@ impl ContextPackOutputOptions {
                 include_skipped: true,
                 include_meta: true,
                 include_verbose_meta: true,
+                include_non_affecting_degradations: true,
             },
         }
     }
@@ -370,6 +386,9 @@ impl ContextPackOutputOptions {
                 .map_or(self.include_skipped, |value| !value),
             include_meta: overrides.no_meta.map_or(self.include_meta, |value| !value),
             include_verbose_meta: self.include_verbose_meta,
+            include_non_affecting_degradations: overrides
+                .include_non_affecting_degradations
+                .unwrap_or(self.include_non_affecting_degradations),
         }
     }
 }
@@ -380,6 +399,10 @@ pub struct ContextPackOutputOptionOverrides {
     pub no_rendered_text: Option<bool>,
     pub no_skipped: Option<bool>,
     pub no_meta: Option<bool>,
+    /// Bead bd-17c65.5.2 (E2): when `Some(true)`, surface every
+    /// degraded signal regardless of category (the
+    /// `--include-non-affecting-degradations` CLI flag).
+    pub include_non_affecting_degradations: Option<bool>,
 }
 
 /// Pagination state for context pack execution.
@@ -527,7 +550,12 @@ pub fn run_context_pack_with_performance(
     }
     trace.record_elapsed("requestValidate", request_start);
 
-    if options.filters.redaction.requests_bypass() {
+    let mut effective_filters = options.filters.clone();
+    if effective_filters.temporal.as_of.is_none() {
+        effective_filters.temporal.as_of = options.as_of;
+    }
+
+    if effective_filters.redaction.requests_bypass() {
         return Err(ContextPackError::PolicyDenied(
             "Redaction bypass requires elevated permission. The 'bypass' policy is not yet \
              supported; use 'respect' (default) to apply redaction filtering."
@@ -575,7 +603,11 @@ pub fn run_context_pack_with_performance(
         limit: request.candidate_pool,
         speed: options.speed,
         explain: false,
+        as_of: context_validity_reference_time(options, &effective_filters),
         include_tombstoned: options.include_tombstoned,
+        include_expired: context_include_expired(options, &effective_filters),
+        include_future: context_include_future(options, &effective_filters),
+        include_stale: context_include_stale(options, &effective_filters),
         // Context packing owns relevance and budget filtering after retrieval.
         // Keep the candidate pool broad so an exact single-memory match is not
         // dropped by the interactive search command's presentation floor.
@@ -605,6 +637,10 @@ pub fn run_context_pack_with_performance(
             &request.query,
             request.candidate_pool,
             options.include_tombstoned,
+            context_validity_reference_time(options, &effective_filters),
+            context_include_expired(options, &effective_filters),
+            context_include_future(options, &effective_filters),
+            context_include_stale(options, &effective_filters),
             &mut degraded,
         );
         let fallback_count = fallback_hits.len();
@@ -628,12 +664,12 @@ pub fn run_context_pack_with_performance(
 
     // Apply metadata query filters to search results. Tag filters are applied
     // after memory tags have been batch-loaded during candidate resolution.
-    if !options.filters.filters.is_empty() {
+    if !effective_filters.filters.is_empty() {
         let pre_filter_count = search_report.results.len();
         trace.filter_input_count = pre_filter_count;
         search_report
             .results
-            .retain(|hit| options.filters.matches(hit.metadata.as_ref()));
+            .retain(|hit| effective_filters.matches(hit.metadata.as_ref()));
         let filtered_count = pre_filter_count - search_report.results.len();
         trace.filtered_count = filtered_count;
         if filtered_count > 0 {
@@ -665,7 +701,7 @@ pub fn run_context_pack_with_performance(
         &connection,
         &options.workspace_path,
         &search_report,
-        &options.filters,
+        &effective_filters,
         options.include_tombstoned,
         &mut degraded,
     );
@@ -734,7 +770,7 @@ pub fn run_context_pack_with_performance(
     let graph_metrics = apply_graph_hints(
         &connection,
         &options.workspace_path,
-        &options.filters,
+        &effective_filters,
         options.include_tombstoned,
         &mut candidates,
         &mut degraded,
@@ -776,7 +812,7 @@ pub fn run_context_pack_with_performance(
         candidate_filter_input_count.saturating_add(trace.focus_candidate_count);
     let redaction_filtered_candidates = filter_candidates_by_redaction_allow_categories(
         &mut candidates,
-        &options.filters.redaction,
+        &effective_filters.redaction,
     );
     if redaction_filtered_candidates > 0 {
         candidate_metrics.redaction_filtered_candidates = candidate_metrics
@@ -1014,7 +1050,11 @@ fn context_performance_json(
                 "effectiveCandidatePool": search_report.requested_limit,
                 "maxTokens": draft.budget.max_tokens(),
                 "profile": request.profile.as_str(),
-                "filtersApplied": !options.filters.is_empty(),
+                "filtersApplied": !options.filters.is_empty()
+                    || options.as_of.is_some()
+                    || options.include_expired
+                    || options.include_future
+                    || options.include_stale,
             },
             "profileRuntime": search_report.runtime_profile.data_json(),
             "dbReads": context_db_reads_json(trace),
@@ -1216,15 +1256,28 @@ fn lexical_memory_fallback_hits(
     query: &str,
     limit: u32,
     include_tombstoned: bool,
+    as_of: Option<DateTime<Utc>>,
+    include_expired: bool,
+    include_future: bool,
+    include_stale: bool,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Vec<SearchHit> {
     let query_terms = lexical_terms(query);
     if query_terms.is_empty() {
         return Vec::new();
     }
+    let reference_time = as_of.unwrap_or_else(Utc::now);
 
-    let memories =
-        fallback_memories_for_workspace(connection, workspace_path, include_tombstoned, degraded);
+    let memories = fallback_memories_for_workspace(
+        connection,
+        workspace_path,
+        include_tombstoned,
+        as_of,
+        include_expired,
+        include_future,
+        include_stale,
+        degraded,
+    );
     let mut scored: Vec<(StoredMemory, f32)> = memories
         .into_values()
         .filter_map(|memory| {
@@ -1249,7 +1302,7 @@ fn lexical_memory_fallback_hits(
             quality_score: None,
             lexical_score: Some(score),
             rerank_score: None,
-            metadata: Some(memory_fallback_metadata(&memory)),
+            metadata: Some(memory_fallback_metadata(&memory, reference_time)),
             explanation: None,
         })
         .collect()
@@ -1259,13 +1312,44 @@ fn fallback_memories_for_workspace(
     connection: &DbConnection,
     workspace_path: &Path,
     include_tombstoned: bool,
+    as_of: Option<DateTime<Utc>>,
+    include_expired: bool,
+    include_future: bool,
+    include_stale: bool,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> BTreeMap<String, StoredMemory> {
     let mut memories = BTreeMap::new();
+    let reference_time = as_of.unwrap_or_else(Utc::now);
+    let mut expired_filtered = 0usize;
+    let mut future_filtered = 0usize;
+    let mut malformed_filtered = 0usize;
+    let mut total_seen = 0usize;
     for workspace_id in context_workspace_ids(connection, workspace_path, degraded) {
         match connection.list_memories(&workspace_id, None, include_tombstoned) {
             Ok(rows) => {
                 for memory in rows {
+                    total_seen = total_seen.saturating_add(1);
+                    match fallback_memory_validity_visibility(
+                        &memory,
+                        reference_time,
+                        include_expired,
+                        include_future,
+                        include_stale,
+                    ) {
+                        FallbackMemoryVisibility::Visible => {}
+                        FallbackMemoryVisibility::Expired => {
+                            expired_filtered = expired_filtered.saturating_add(1);
+                            continue;
+                        }
+                        FallbackMemoryVisibility::Future => {
+                            future_filtered = future_filtered.saturating_add(1);
+                            continue;
+                        }
+                        FallbackMemoryVisibility::Malformed => {
+                            malformed_filtered = malformed_filtered.saturating_add(1);
+                            continue;
+                        }
+                    }
                     memories.insert(memory.id.clone(), memory);
                 }
             }
@@ -1278,7 +1362,127 @@ fn fallback_memories_for_workspace(
             ),
         }
     }
+    let total_filtered = expired_filtered
+        .saturating_add(future_filtered)
+        .saturating_add(malformed_filtered);
+    if total_filtered > 0 && total_filtered.saturating_mul(2) >= total_seen {
+        push_degradation(
+            degraded,
+            "validity_filtered_significant_recall_drop",
+            ContextResponseSeverity::Low,
+            format!(
+                "Validity window filtering removed {total_filtered} fallback candidate{}; {} candidate{} remain.",
+                if total_filtered == 1 { "" } else { "s" },
+                memories.len(),
+                if memories.len() == 1 { "" } else { "s" },
+            ),
+            Some("Consider --as-of, --include-expired, --include-future, or --include-stale when historic or inactive memories are expected.".to_owned()),
+        );
+    }
     memories
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FallbackMemoryVisibility {
+    Visible,
+    Expired,
+    Future,
+    Malformed,
+}
+
+fn fallback_memory_validity_visibility(
+    memory: &StoredMemory,
+    reference_time: DateTime<Utc>,
+    include_expired: bool,
+    include_future: bool,
+    _include_stale: bool,
+) -> FallbackMemoryVisibility {
+    if let Some(valid_from) = memory.valid_from.as_deref() {
+        let Some(valid_from) = parse_stored_memory_timestamp(valid_from) else {
+            return FallbackMemoryVisibility::Malformed;
+        };
+        if valid_from > reference_time && !include_future {
+            return FallbackMemoryVisibility::Future;
+        }
+    }
+
+    if let Some(valid_to) = memory.valid_to.as_deref() {
+        let Some(valid_to) = parse_stored_memory_timestamp(valid_to) else {
+            return FallbackMemoryVisibility::Malformed;
+        };
+        if valid_to < reference_time && !include_expired {
+            return FallbackMemoryVisibility::Expired;
+        }
+    }
+
+    FallbackMemoryVisibility::Visible
+}
+
+fn context_validity_reference_time(
+    options: &ContextPackOptions,
+    filters: &crate::models::QueryFilters,
+) -> Option<DateTime<Utc>> {
+    options
+        .as_of
+        .or_else(|| {
+            filters
+                .temporal
+                .validity
+                .as_ref()
+                .and_then(|v| v.reference_time)
+        })
+        .or(filters.temporal.as_of)
+}
+
+fn context_include_expired(
+    options: &ContextPackOptions,
+    filters: &crate::models::QueryFilters,
+) -> bool {
+    options.include_expired
+        || matches!(
+            filters
+                .temporal
+                .validity
+                .as_ref()
+                .map(|validity| validity.posture),
+            Some(
+                crate::models::QueryTemporalValidityPosture::Relaxed
+                    | crate::models::QueryTemporalValidityPosture::Ignore
+            )
+        )
+}
+
+fn context_include_future(
+    options: &ContextPackOptions,
+    filters: &crate::models::QueryFilters,
+) -> bool {
+    options.include_future
+        || matches!(
+            filters
+                .temporal
+                .validity
+                .as_ref()
+                .map(|validity| validity.posture),
+            Some(
+                crate::models::QueryTemporalValidityPosture::Relaxed
+                    | crate::models::QueryTemporalValidityPosture::Ignore
+            )
+        )
+}
+
+fn context_include_stale(
+    options: &ContextPackOptions,
+    filters: &crate::models::QueryFilters,
+) -> bool {
+    options.include_stale
+        || matches!(
+            filters
+                .temporal
+                .validity
+                .as_ref()
+                .map(|validity| validity.posture),
+            Some(crate::models::QueryTemporalValidityPosture::Ignore)
+        )
 }
 
 fn context_workspace_ids(
@@ -1354,7 +1558,10 @@ fn lexical_memory_score(memory: &StoredMemory, query_terms: &BTreeSet<String>) -
     Some(matched as f32 / query_terms.len() as f32)
 }
 
-fn memory_fallback_metadata(memory: &StoredMemory) -> serde_json::Value {
+fn memory_fallback_metadata(
+    memory: &StoredMemory,
+    reference_time: DateTime<Utc>,
+) -> serde_json::Value {
     serde_json::json!({
         "source": "memory",
         "memoryId": &memory.id,
@@ -1367,6 +1574,10 @@ fn memory_fallback_metadata(memory: &StoredMemory) -> serde_json::Value {
         "provenanceUri": &memory.provenance_uri,
         "createdAt": &memory.created_at,
         "updatedAt": &memory.updated_at,
+        "valid_from": &memory.valid_from,
+        "valid_to": &memory.valid_to,
+        "validity_status": validity_status_for_memory(memory, reference_time),
+        "validity_window_kind": validity_window_kind(memory.valid_from.as_deref(), memory.valid_to.as_deref()),
     })
 }
 
@@ -1700,6 +1911,22 @@ fn compute_pack_hash_components(
                 hasher.update(tombstoned_at.as_bytes());
             }
         }
+        if let Some(lifecycle) = &item.lifecycle {
+            for hasher in [&mut draft_hasher, &mut composite_hasher] {
+                hasher.update(lifecycle.validity_status.as_bytes());
+                hasher.update(lifecycle.validity_window_kind.as_bytes());
+            }
+            if let Some(valid_from) = &lifecycle.valid_from {
+                for hasher in [&mut draft_hasher, &mut composite_hasher] {
+                    hasher.update(valid_from.as_bytes());
+                }
+            }
+            if let Some(valid_to) = &lifecycle.valid_to {
+                for hasher in [&mut draft_hasher, &mut composite_hasher] {
+                    hasher.update(valid_to.as_bytes());
+                }
+            }
+        }
         for redaction in &item.redactions {
             for hasher in [&mut draft_hasher, &mut composite_hasher] {
                 hasher.update(redaction.reason.as_bytes());
@@ -1910,6 +2137,12 @@ fn candidates_from_search_with_metrics(
                     tags_map: &tags_map,
                     workspace_path,
                     query: &search_report.query,
+                    validity_reference_time: filters
+                        .temporal
+                        .validity
+                        .as_ref()
+                        .and_then(|validity| validity.reference_time)
+                        .or(filters.temporal.as_of),
                     include_tombstoned,
                 };
                 match candidate_from_hit_preloaded(preloaded, hit, memory_id, artifact_id, degraded)
@@ -2425,7 +2658,8 @@ fn graph_memory_matches_filters(
     filters: &crate::models::QueryFilters,
 ) -> bool {
     if !filters.filters.is_empty() {
-        let metadata = memory_fallback_metadata(memory);
+        let reference_time = filters.temporal.as_of.unwrap_or_else(Utc::now);
+        let metadata = memory_fallback_metadata(memory, reference_time);
         if !filters.matches(Some(&metadata)) {
             return false;
         }
@@ -2534,7 +2768,8 @@ fn graph_candidate_from_memory(
     .ok()?;
     let candidate = candidate
         .with_diversity_key(diversity_key_for_memory(memory, tags))
-        .with_trust_signal(trust_signal_for_memory(memory, memory_id, degraded));
+        .with_trust_signal(trust_signal_for_memory(memory, memory_id, degraded))
+        .with_lifecycle(pack_lifecycle_for_memory(memory, None));
     let candidate = match memory.tombstoned_at.as_ref() {
         Some(tombstoned_at) => candidate.with_tombstoned_at(tombstoned_at.clone()),
         None => candidate,
@@ -2650,6 +2885,63 @@ fn parse_stored_memory_timestamp(raw: &str) -> Option<DateTime<Utc>> {
         .ok()
 }
 
+fn pack_lifecycle_for_memory(
+    memory: &StoredMemory,
+    reference_time: Option<DateTime<Utc>>,
+) -> PackItemLifecycle {
+    let reference_time = reference_time.unwrap_or_else(Utc::now);
+    PackItemLifecycle {
+        validity_status: validity_status_for_memory(memory, reference_time).to_owned(),
+        validity_window_kind: validity_window_kind(
+            memory.valid_from.as_deref(),
+            memory.valid_to.as_deref(),
+        )
+        .to_owned(),
+        valid_from: memory.valid_from.clone(),
+        valid_to: memory.valid_to.clone(),
+    }
+}
+
+fn validity_status_for_memory(
+    memory: &StoredMemory,
+    reference_time: DateTime<Utc>,
+) -> &'static str {
+    let valid_from = match memory.valid_from.as_deref() {
+        Some(raw) => match parse_stored_memory_timestamp(raw) {
+            Some(timestamp) => Some(timestamp),
+            None => return "malformed",
+        },
+        None => None,
+    };
+    let valid_to = match memory.valid_to.as_deref() {
+        Some(raw) => match parse_stored_memory_timestamp(raw) {
+            Some(timestamp) => Some(timestamp),
+            None => return "malformed",
+        },
+        None => None,
+    };
+
+    if valid_from.is_none() && valid_to.is_none() {
+        "unknown"
+    } else if valid_from.is_some_and(|timestamp| timestamp > reference_time) {
+        "future"
+    } else if valid_to.is_some_and(|timestamp| timestamp < reference_time) {
+        "expired"
+    } else {
+        "current"
+    }
+}
+
+fn validity_window_kind(valid_from: Option<&str>, valid_to: Option<&str>) -> &'static str {
+    match (valid_from, valid_to) {
+        (None, None) => "unbounded",
+        (Some(from), Some(to)) if from == to => "instant",
+        (Some(_), Some(_)) => "bounded",
+        (Some(_), None) => "starts_at",
+        (None, Some(_)) => "ends_at",
+    }
+}
+
 fn load_candidate_batch_maps(
     connection: &DbConnection,
     memory_ids: &[&str],
@@ -2698,6 +2990,7 @@ struct PreloadedCandidateSource<'a> {
     tags_map: &'a BTreeMap<String, Vec<String>>,
     workspace_path: &'a Path,
     query: &'a str,
+    validity_reference_time: Option<DateTime<Utc>>,
     include_tombstoned: bool,
 }
 
@@ -2748,7 +3041,11 @@ fn candidate_from_hit_preloaded(
 
     let candidate = candidate
         .with_diversity_key(diversity_key_for_memory(memory, &tags))
-        .with_trust_signal(trust_signal_for_memory(memory, memory_id, degraded));
+        .with_trust_signal(trust_signal_for_memory(memory, memory_id, degraded))
+        .with_lifecycle(pack_lifecycle_for_memory(
+            memory,
+            source.validity_reference_time,
+        ));
     let candidate = match memory.tombstoned_at.as_ref() {
         Some(tombstoned_at) => candidate.with_tombstoned_at(tombstoned_at.clone()),
         None => candidate,
@@ -2882,7 +3179,8 @@ fn focus_candidate_from_item(
 
     let candidate = candidate
         .with_diversity_key(diversity_key_for_memory(&memory, &tags))
-        .with_trust_signal(trust_signal_for_memory(&memory, item.memory_id, degraded));
+        .with_trust_signal(trust_signal_for_memory(&memory, item.memory_id, degraded))
+        .with_lifecycle(pack_lifecycle_for_memory(&memory, None));
     let candidate = match memory.tombstoned_at.as_ref() {
         Some(tombstoned_at) => candidate.with_tombstoned_at(tombstoned_at.clone()),
         None => candidate,
@@ -3748,6 +4046,10 @@ mod tests {
             candidate_pool: Some(2),
             max_results: None,
             include_tombstoned: false,
+            as_of: None,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
             pagination: None,
             output_options: Default::default(),
         };
@@ -3858,6 +4160,10 @@ mod tests {
             candidate_pool: Some(10),
             max_results: None,
             include_tombstoned: false,
+            as_of: None,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
             pagination: None,
             output_options: Default::default(),
         })
@@ -3950,6 +4256,10 @@ mod tests {
             candidate_pool: Some(10),
             max_results: None,
             include_tombstoned: false,
+            as_of: None,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
             pagination: None,
             output_options: Default::default(),
         };
@@ -3991,6 +4301,118 @@ mod tests {
         assert_eq!(
             json["data"]["pack"]["items"][0]["lifecycle"]["tombstonedAt"],
             tombstoned_at
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn context_pack_validity_window_honors_as_of_and_include_future() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let db_path = ee_dir.join("ee.db");
+        let empty_index_dir = tempdir.path().join("empty-index");
+        std::fs::create_dir_all(&empty_index_dir).map_err(|error| error.to_string())?;
+
+        let connection = DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = super::stable_context_workspace_id(&workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("workspace".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(44)).to_string();
+        connection
+            .insert_memory(
+                &memory_id,
+                &CreateMemoryInput {
+                    workspace_id,
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Future rollout rule requires release freeze signoff.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.95,
+                    utility: 0.80,
+                    importance: 0.70,
+                    provenance_uri: None,
+                    trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                    trust_subclass: Some("test".to_owned()),
+                    tags: vec!["release".to_owned()],
+                    valid_from: Some("2099-06-01T00:00:00Z".to_owned()),
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        let base_options = super::ContextPackOptions {
+            workspace_path: workspace,
+            database_path: Some(db_path),
+            index_dir: Some(empty_index_dir),
+            query: "future rollout freeze signoff".to_owned(),
+            speed: crate::search::SpeedMode::Default,
+            filters: crate::models::QueryFilters::default(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(400),
+            candidate_pool: Some(10),
+            max_results: None,
+            include_tombstoned: false,
+            as_of: Some(query_time("2099-05-13T00:00:00Z")),
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            pagination: None,
+            output_options: Default::default(),
+        };
+
+        let default_response = super::run_context_pack(&base_options)
+            .map_err(|error| format!("default validity context pack failed: {error:?}"))?;
+        assert!(
+            default_response.data.pack.items.is_empty(),
+            "context should exclude not-yet-valid memory before valid_from"
+        );
+
+        let mut include_options = base_options.clone();
+        include_options.include_future = true;
+        let include_response = super::run_context_pack(&include_options)
+            .map_err(|error| format!("include future context pack failed: {error:?}"))?;
+        let included_item = include_response
+            .data
+            .pack
+            .items
+            .iter()
+            .find(|item| item.memory_id.to_string() == memory_id)
+            .ok_or_else(|| "include_future should keep not-yet-valid memory".to_owned())?;
+        assert_eq!(
+            included_item
+                .lifecycle
+                .as_ref()
+                .map(|lifecycle| lifecycle.validity_status.as_str()),
+            Some("future")
+        );
+
+        let mut replay_options = base_options;
+        replay_options.as_of = Some(query_time("2099-06-15T00:00:00Z"));
+        let replay_response = super::run_context_pack(&replay_options)
+            .map_err(|error| format!("as-of replay context pack failed: {error:?}"))?;
+        assert!(
+            replay_response
+                .data
+                .pack
+                .items
+                .iter()
+                .any(|item| item.memory_id.to_string() == memory_id),
+            "as_of after valid_from should include the memory"
         );
         Ok(())
     }
@@ -4397,6 +4819,7 @@ mod tests {
             trust: PackTrustSignal::new(TrustClass::AgentAssertion, None),
             redactions: Vec::new(),
             tombstoned_at: None,
+            lifecycle: None,
             selected_in: PackSelectionPhase::StrictMmr,
         };
 

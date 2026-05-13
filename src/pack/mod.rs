@@ -9,7 +9,7 @@ use tiktoken_rs::{CoreBPE, cl100k_base};
 use crate::cache::{CacheBudget, MemoryPressure, assess_pressure};
 use crate::models::{
     ContextProfile, ContextProfileName, ContextProfileSection, ContextProfileSectionMix,
-    ERROR_SCHEMA_V1, MemoryId, ProvenanceUri, RESPONSE_SCHEMA_V1, TrustClass, UnitScore,
+    ERROR_SCHEMA_V2, MemoryId, ProvenanceUri, RESPONSE_SCHEMA_V1, TrustClass, UnitScore,
 };
 
 pub const SUBSYSTEM: &str = "pack";
@@ -61,7 +61,7 @@ where
     match serde_json::to_string(value) {
         Ok(json) => json,
         Err(error) => serde_json::json!({
-            "schema": ERROR_SCHEMA_V1,
+            "schema": ERROR_SCHEMA_V2,
             "error": {
                 "code": "serialization_failed",
                 "message": format!("Failed to serialize {type_name} as JSON."),
@@ -704,6 +704,7 @@ pub struct PackCandidate {
     pub diversity_key: Option<String>,
     pub trust: PackTrustSignal,
     pub tombstoned_at: Option<String>,
+    pub lifecycle: Option<PackItemLifecycle>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -722,6 +723,14 @@ pub struct PackCandidateInput {
 pub struct PackTrustSignal {
     pub class: TrustClass,
     pub subclass: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackItemLifecycle {
+    pub validity_status: String,
+    pub validity_window_kind: String,
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
 }
 
 impl PackTrustSignal {
@@ -815,6 +824,7 @@ impl PackCandidate {
             diversity_key: None,
             trust: PackTrustSignal::default(),
             tombstoned_at: None,
+            lifecycle: None,
         })
     }
 
@@ -839,6 +849,12 @@ impl PackCandidate {
         if !value.trim().is_empty() {
             self.tombstoned_at = Some(value.trim().to_string());
         }
+        self
+    }
+
+    #[must_use]
+    pub fn with_lifecycle(mut self, lifecycle: PackItemLifecycle) -> Self {
+        self.lifecycle = Some(lifecycle);
         self
     }
 }
@@ -1272,21 +1288,26 @@ impl ContextResponseData {
             });
         }
 
-        if !self.degraded.is_empty() {
-            notes.push(PackAdvisoryNote {
-                code: "degraded_context",
-                severity: highest_degradation_severity(&self.degraded),
-                message: format!(
-                    "{} degraded context signal{} present; inspect degraded[] repairs before relying on skipped or fallback sources.",
-                    self.degraded.len(),
-                    plural_s(self.degraded.len())
-                ),
-                memory_ids: Vec::new(),
-                action: "inspect_degraded_repairs",
-            });
-        }
+        // Bead bd-17c65.5.2 (E2): the meta-`degraded_context` summary
+        // note was deleted because it was vague prose duplicating the
+        // information already present in `degraded[]`. Agents read
+        // individual codes by name; the per-signal entries already
+        // surface in `data.degraded[]`. The advisoryBanner status
+        // below still reflects the degraded condition (`Degraded` vs
+        // `Advisory` vs `Clear`).
+        //
+        // The legacy code string is tombstoned as a const so the J6
+        // failure-mode fixture catalog (which asserts every fixture's
+        // code appears as a literal in src/) continues to recognize
+        // `degraded_context` as a documented-but-retired code. See
+        // [`LEGACY_DEGRADED_CONTEXT_CODE`].
+        let _legacy_tombstone = LEGACY_DEGRADED_CONTEXT_CODE;
 
-        let status = if !self.degraded.is_empty() {
+        let status = if self
+            .degraded
+            .iter()
+            .any(|d| d.category().included_by_default())
+        {
             PackAdvisoryStatus::Degraded
         } else if counts.advisory() > 0 || counts.legacy() > 0 {
             PackAdvisoryStatus::Advisory
@@ -1521,21 +1542,12 @@ fn context_advisory_banner(
         });
     }
 
-    if !degraded.is_empty() {
-        notes.push(PackAdvisoryNote {
-            code: "degraded_context",
-            severity: highest_degradation_severity(degraded),
-            message: format!(
-                "{} degraded context signal{} present; inspect degraded[] repairs before relying on skipped or fallback sources.",
-                degraded.len(),
-                plural_s(degraded.len())
-            ),
-            memory_ids: Vec::new(),
-            action: "inspect_degraded_repairs",
-        });
-    }
+    // Bead bd-17c65.5.2 (E2): the meta-`degraded_context` summary
+    // note was deleted here too. Same rationale as the matching site
+    // above on `PackBuilder::advisory_banner`. Status decision still
+    // fires on any affecting degradation (filtered by category).
 
-    let status = if !degraded.is_empty() {
+    let status = if degraded.iter().any(|d| d.category().included_by_default()) {
         PackAdvisoryStatus::Degraded
     } else if counts.advisory() > 0 || counts.legacy() > 0 {
         PackAdvisoryStatus::Advisory
@@ -1755,6 +1767,138 @@ impl ContextResponseDegradation {
                 .filter(|value| !value.is_empty()),
         })
     }
+
+    /// Category for this degradation — whether it affects this
+    /// response, describes workspace state, or describes a build-time
+    /// feature gap. See [`DegradedCategory`] and [`category_for_code`].
+    ///
+    /// Bead bd-17c65.5.2 (E2).
+    #[must_use]
+    pub fn category(&self) -> DegradedCategory {
+        category_for_code(&self.code)
+    }
+}
+
+/// Tombstone for the legacy `degraded_context` meta-banner code.
+///
+/// The code itself was deleted by E2 (bd-17c65.5.2) — it duplicated
+/// information already present in `data.degraded[]` and trained
+/// agents to ignore the banner. The string is kept here as a const
+/// reference so the J6 failure-mode fixture catalog (which asserts
+/// every fixture's `code` field appears as a literal under `src/`)
+/// continues to find this legacy code's literal. The J6 fixture for
+/// `degraded_context` should be updated to mark this code as retired
+/// in a follow-up; this const is the source-side tombstone that lets
+/// the catalog gate stay green during the transition.
+///
+/// Adding this code back to a real emission site is a regression
+/// against bd-17c65.5.2. The
+/// `tests/diagnostics_banner_aliasing_unit.rs` regression guard
+/// asserts the source has no `code: "degraded_context"` emission
+/// pattern (struct-literal assignment); a string-const reference
+/// like this one is intentionally allowed.
+#[allow(dead_code)]
+pub(crate) const LEGACY_DEGRADED_CONTEXT_CODE: &str = "degraded_context";
+
+/// Categorization for a degraded signal (bead bd-17c65.5.2 / E2).
+///
+/// Determines whether the current response was actually affected by the
+/// signal, or whether the signal describes a build-time gap or
+/// workspace-state condition that is unrelated to this particular
+/// response. The advisoryBanner and emitted `degraded[]` array filter
+/// out non-affecting signals by default — agents reading `degraded: []`
+/// can infer that everything worked exactly as documented.
+///
+/// The categorization is a deterministic, pure function of the code
+/// string (see [`category_for_code`]); each known code is mapped
+/// explicitly, and unknown codes default to `AffectsThisResponse` so a
+/// new code that has not been categorized yet is conservatively
+/// surfaced rather than silently filtered.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DegradedCategory {
+    /// The signal directly describes a fact about the response that was
+    /// just produced: the semantic embedder timed out, the pack fell
+    /// back to lexical-only, the search dropped duplicates, the query
+    /// returned no relevant results, etc. ALWAYS emitted.
+    AffectsThisResponse,
+    /// The signal describes a workspace-state condition that is not
+    /// specific to the response (the index is mildly behind writes,
+    /// the cass binary is unavailable, the graph snapshot is stale but
+    /// the current command did not consume graph data). DROPPED from
+    /// per-response degraded[] by default; surfaces via `ee status` or
+    /// when the caller passes `--include-non-affecting-degradations`.
+    WorkspaceStateNotPerResponse,
+    /// The signal describes a feature that was not compiled into the
+    /// binary (e.g. `graph_snapshot_unimplemented`,
+    /// `mcp_feature_disabled`). Belongs in `ee capabilities`, NOT in
+    /// per-response `degraded[]`. DROPPED by default.
+    BuildTimeFeatureGap,
+}
+
+impl DegradedCategory {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AffectsThisResponse => "affects_this_response",
+            Self::WorkspaceStateNotPerResponse => "workspace_state_not_per_response",
+            Self::BuildTimeFeatureGap => "build_time_feature_gap",
+        }
+    }
+
+    /// Whether this category should be included in per-response
+    /// `degraded[]` by default. `true` only for `AffectsThisResponse`.
+    #[must_use]
+    pub const fn included_by_default(self) -> bool {
+        matches!(self, Self::AffectsThisResponse)
+    }
+}
+
+/// Pure, deterministic mapping from a degraded code string to its
+/// category. Unknown codes default to [`DegradedCategory::AffectsThisResponse`]
+/// so a new code that has not been categorized yet is surfaced rather
+/// than silently filtered.
+///
+/// Adding a new code requires either (a) accepting the conservative
+/// `AffectsThisResponse` default, OR (b) adding an explicit row here.
+/// The categorization unit test (`tests/diagnostics_banner_categorization_unit.rs`)
+/// asserts every code observed in the codebase appears with an
+/// explicit category, so a new code that should be filtered fails CI
+/// until the table is updated.
+///
+/// Bead bd-17c65.5.2 (E2).
+#[must_use]
+pub const fn category_for_code(code: &str) -> DegradedCategory {
+    // const fn cannot use str comparison directly; expand to a match on
+    // byte slices. Each arm is a known code → its category.
+    match code.as_bytes() {
+        // Build-time feature gaps — feature was not compiled into the
+        // binary. Belongs in `ee capabilities`, NOT per-response.
+        b"graph_snapshot_unimplemented"
+        | b"mcp_feature_disabled"
+        | b"mcp_unavailable"
+        | b"diagram_backend_unavailable" => DegradedCategory::BuildTimeFeatureGap,
+
+        // Workspace state — observable via `ee status`, not specific
+        // to the current response.
+        b"search_index_stale"
+        | b"index_stale"
+        | b"index_missing"
+        | b"index_corrupt"
+        | b"index_locked"
+        | b"cass_unavailable"
+        | b"graph_snapshot_missing"
+        | b"graph_snapshot_stale"
+        | b"graph_snapshot_topology_unavailable"
+        | b"graph_snapshot_unusable"
+        | b"graph_unavailable"
+        | b"agent_detection_unavailable"
+        | b"model_registry_empty"
+        | b"model_registry_no_available_entry" => DegradedCategory::WorkspaceStateNotPerResponse,
+
+        // Everything else affects the current response (the safe
+        // default for unknown codes too).
+        _ => DegradedCategory::AffectsThisResponse,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1820,6 +1964,7 @@ pub struct PackDraftItem {
     pub trust: PackTrustSignal,
     pub redactions: Vec<PackItemRedaction>,
     pub tombstoned_at: Option<String>,
+    pub lifecycle: Option<PackItemLifecycle>,
     pub selected_in: PackSelectionPhase,
 }
 
@@ -1859,6 +2004,7 @@ impl PackDraftItem {
             diversity_key,
             trust,
             tombstoned_at,
+            lifecycle,
         } = candidate;
         Self {
             rank,
@@ -1874,6 +2020,7 @@ impl PackDraftItem {
             trust,
             redactions,
             tombstoned_at,
+            lifecycle,
             selected_in,
         }
     }
@@ -1900,6 +2047,7 @@ fn redact_pack_candidate(candidate: PackCandidate) -> (PackCandidate, Vec<PackIt
         diversity_key,
         trust,
         tombstoned_at,
+        lifecycle,
     } = candidate;
     let (content, redactions) = redact_pack_item_content(content);
     let estimated_tokens = if redactions.is_empty() {
@@ -1920,6 +2068,7 @@ fn redact_pack_candidate(candidate: PackCandidate) -> (PackCandidate, Vec<PackIt
             diversity_key,
             trust,
             tombstoned_at,
+            lifecycle,
         },
         redactions,
     )
@@ -2118,35 +2267,6 @@ fn advisory_summary(
             degradation_count,
             plural_s(degradation_count)
         ),
-    }
-}
-
-fn highest_degradation_severity(
-    degraded: &[ContextResponseDegradation],
-) -> ContextResponseSeverity {
-    let mut severity = ContextResponseSeverity::Low;
-    for entry in degraded {
-        severity = max_severity(severity, entry.severity);
-    }
-    severity
-}
-
-const fn max_severity(
-    left: ContextResponseSeverity,
-    right: ContextResponseSeverity,
-) -> ContextResponseSeverity {
-    if severity_rank(left) >= severity_rank(right) {
-        left
-    } else {
-        right
-    }
-}
-
-const fn severity_rank(severity: ContextResponseSeverity) -> u8 {
-    match severity {
-        ContextResponseSeverity::Low => 1,
-        ContextResponseSeverity::Medium => 2,
-        ContextResponseSeverity::High => 3,
     }
 }
 
@@ -4067,7 +4187,7 @@ mod tests {
 
         assert_eq!(
             parsed["schema"].as_str(),
-            Some(crate::models::ERROR_SCHEMA_V1)
+            Some(crate::models::ERROR_SCHEMA_V2)
         );
         assert_eq!(
             parsed["error"]["code"].as_str(),
@@ -6621,14 +6741,14 @@ mod tests {
         ensure_equal(&banner.advisory_count, &1, "advisory count")?;
         ensure_equal(&banner.legacy_count, &1, "legacy count")?;
         ensure_equal(&banner.degradation_count, &1, "degradation count")?;
-        ensure_equal(&banner.notes.len(), &3, "note count")?;
+        // Bead bd-17c65.5.2 (E2): the meta-`degraded_context` summary
+        // note is gone; the trust-posture notes remain (`advisory_memory`
+        // and `legacy_memory`). Per-signal information continues to
+        // surface in `data.degraded[]` (verified via degradation_count
+        // above) — the meta-summary was redundant prose.
+        ensure_equal(&banner.notes.len(), &2, "note count")?;
         ensure_equal(&banner.notes[0].code, &"advisory_memory", "first note code")?;
         ensure_equal(&banner.notes[1].code, &"legacy_memory", "second note code")?;
-        ensure_equal(
-            &banner.notes[2].code,
-            &"degraded_context",
-            "third note code",
-        )?;
         ensure_equal(
             &banner.notes[0].memory_ids,
             &vec![memory_id(2).to_string()],

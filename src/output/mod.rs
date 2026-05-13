@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::fmt::Write as _;
 use std::io::IsTerminal;
@@ -37,8 +38,8 @@ use crate::core::{VERSION_PROVENANCE_SCHEMA_V1, VersionReport};
 use crate::eval::{EvaluationReport, EvaluationStatus, FixtureListEntry, ScenarioValidationResult};
 use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
 use crate::models::{
-    DomainError, ERROR_SCHEMA_V1, InstallCheckReport, InstallPlanReport, ProducerMetadata,
-    RESPONSE_SCHEMA_V0, RESPONSE_SCHEMA_V1,
+    DomainError, ERROR_SCHEMA_V2, InstallCheckReport, InstallPlanReport, ProducerMetadata,
+    RESPONSE_SCHEMA_V0, RESPONSE_SCHEMA_V1, RecoveryAction, RecoveryKind,
 };
 use crate::pack::{
     ContextResponse, PackAdvisoryBanner, PackAdvisoryNote, PackItemProvenance, PackOmission,
@@ -138,6 +139,128 @@ impl FieldProfile {
         matches!(self, Self::Full)
     }
 }
+
+/// Parsed selector for the global `--fields` flag.
+///
+/// A selector may be a preset (`minimal`, `summary`, `standard`, `full`), an
+/// explicit field list (`docId,score,source`), or a preset plus additions
+/// (`minimal,why`). Field names are canonical response keys and are applied to
+/// the `data` payload only; envelope fields always remain present.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FieldSelector {
+    raw: String,
+    preset: Option<FieldProfile>,
+    explicit_fields: Vec<String>,
+    conflicting_presets: Vec<String>,
+}
+
+impl FieldSelector {
+    #[must_use]
+    pub fn parse(raw: &str) -> Self {
+        let mut preset = None;
+        let mut explicit_fields = Vec::new();
+        let mut conflicting_presets = Vec::new();
+
+        for token in raw
+            .split(',')
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+        {
+            if let Some(value) = token.strip_prefix("preset=") {
+                if let Some(profile) = parse_field_profile(value) {
+                    if preset.replace(profile).is_some() {
+                        conflicting_presets.push(token.to_string());
+                    }
+                } else {
+                    explicit_fields.push(token.to_string());
+                }
+            } else if let Some(profile) = parse_field_profile(token) {
+                if preset.is_none() {
+                    preset = Some(profile);
+                } else {
+                    conflicting_presets.push(token.to_string());
+                }
+            } else {
+                explicit_fields.push(token.to_string());
+            }
+        }
+
+        Self {
+            raw: raw.trim().to_string(),
+            preset,
+            explicit_fields,
+            conflicting_presets,
+        }
+    }
+
+    #[must_use]
+    pub fn standard() -> Self {
+        Self {
+            raw: "standard".to_string(),
+            preset: Some(FieldProfile::Standard),
+            explicit_fields: Vec::new(),
+            conflicting_presets: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn raw(&self) -> &str {
+        &self.raw
+    }
+
+    #[must_use]
+    pub const fn preset(&self) -> FieldProfile {
+        match self.preset {
+            Some(profile) => profile,
+            None => FieldProfile::Standard,
+        }
+    }
+
+    #[must_use]
+    pub fn render_profile(&self) -> FieldProfile {
+        if self.needs_full_render() {
+            FieldProfile::Full
+        } else {
+            self.preset()
+        }
+    }
+
+    #[must_use]
+    pub fn needs_full_render(&self) -> bool {
+        !self.explicit_fields.is_empty() || self.preset.is_none()
+    }
+
+    #[must_use]
+    pub fn has_conflicting_presets(&self) -> bool {
+        !self.conflicting_presets.is_empty()
+    }
+}
+
+impl Default for FieldSelector {
+    fn default() -> Self {
+        Self::standard()
+    }
+}
+
+impl std::str::FromStr for FieldSelector {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Ok(Self::parse(raw))
+    }
+}
+
+fn parse_field_profile(raw: &str) -> Option<FieldProfile> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "minimal" => Some(FieldProfile::Minimal),
+        "summary" => Some(FieldProfile::Summary),
+        "standard" => Some(FieldProfile::Standard),
+        "full" | "*" => Some(FieldProfile::Full),
+        _ => None,
+    }
+}
+
+const FIELD_PRESETS_AVAILABLE: &[&str] = &["minimal", "summary", "standard", "full"];
 
 /// Cards output profile (EE-341).
 ///
@@ -1211,6 +1334,484 @@ fn render_response_json_v0(json: &str) -> String {
     b.finish()
 }
 
+/// Apply a parsed `--fields` selector to a JSON response envelope.
+pub fn apply_field_selector_to_json(
+    json: &str,
+    selector: &FieldSelector,
+) -> Result<String, DomainError> {
+    if selector.has_conflicting_presets() {
+        return Err(conflicting_presets_error(selector));
+    }
+
+    let mut value = match serde_json::from_str::<serde_json::Value>(json) {
+        Ok(value) => value,
+        Err(_) => return Ok(json.to_owned()),
+    };
+    let Some(object) = value.as_object_mut() else {
+        return Ok(json.to_owned());
+    };
+    if object.get("schema").and_then(serde_json::Value::as_str) != Some(RESPONSE_SCHEMA_V1) {
+        return Ok(json.to_owned());
+    }
+    let Some(data) = object
+        .get_mut("data")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Ok(json.to_owned());
+    };
+
+    let command = data
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let requested_fields = requested_fields_for_selector(command, selector);
+    if requested_fields.is_empty() {
+        return Ok(json.to_owned());
+    }
+
+    let accepted_fields = collect_field_names(&serde_json::Value::Object(data.clone()));
+    if !requested_fields.iter().any(|field| field == "*") {
+        if let Some(rejected) = requested_fields
+            .iter()
+            .find(|field| !accepted_fields.contains(field.as_str()))
+        {
+            return Err(unknown_field_error(rejected, &accepted_fields));
+        }
+    }
+
+    let selected = requested_fields
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let filtered = filter_selected_data(data, &selected);
+    *data = filtered;
+    object.insert(
+        "fields".to_string(),
+        serde_json::Value::String(selector.raw().to_string()),
+    );
+    serde_json::to_string(&value).map_err(|error| DomainError::Usage {
+        message: format!("Failed to render selected fields: {error}."),
+        repair: Some("Use --fields full and report the serialization failure.".to_string()),
+    })
+}
+
+fn filter_selected_data(
+    data: &serde_json::Map<String, serde_json::Value>,
+    selected: &BTreeSet<&str>,
+) -> serde_json::Map<String, serde_json::Value> {
+    if selected.contains("*") {
+        return data.clone();
+    }
+
+    let root_selected = data
+        .keys()
+        .filter(|key| selected.contains(key.as_str()))
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let child_selected = selected
+        .iter()
+        .copied()
+        .filter(|field| !root_selected.contains(field))
+        .collect::<BTreeSet<_>>();
+
+    let mut filtered = serde_json::Map::new();
+    for (key, child) in data {
+        if selected.contains(key.as_str()) {
+            let child = if child_selected.is_empty() {
+                child.clone()
+            } else {
+                filter_selected_fields(child, &child_selected).unwrap_or_else(|| child.clone())
+            };
+            filtered.insert(key.clone(), child);
+        } else if !child_selected.is_empty()
+            && let Some(filtered_child) = filter_selected_fields(child, &child_selected)
+        {
+            filtered.insert(key.clone(), filtered_child);
+        }
+    }
+    filtered
+}
+
+fn requested_fields_for_selector(command: &str, selector: &FieldSelector) -> Vec<String> {
+    let mut fields = Vec::new();
+    if let Some(preset) = selector.preset {
+        fields.extend(
+            preset_fields_for_command(command, preset)
+                .iter()
+                .map(|field| (*field).to_string()),
+        );
+    }
+    for field in &selector.explicit_fields {
+        if !fields.iter().any(|existing| existing == field) {
+            fields.push(field.clone());
+        }
+    }
+    fields
+}
+
+/// Return the canonical field names for a command/preset pair.
+#[must_use]
+pub fn field_preset_names_for_command(
+    command: &str,
+    preset: FieldProfile,
+) -> &'static [&'static str] {
+    preset_fields_for_command(command, preset)
+}
+
+fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&'static str] {
+    match command {
+        "search" => match preset {
+            FieldProfile::Minimal => &["docId", "score", "source"],
+            FieldProfile::Summary => {
+                &["query", "status", "resultCount", "docId", "score", "source"]
+            }
+            FieldProfile::Standard => &[
+                "query",
+                "status",
+                "resultCount",
+                "results",
+                "docId",
+                "score",
+                "source",
+                "why",
+                "provenance",
+                "degraded",
+                "errors",
+                "metrics",
+                "elapsedMs",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "context" => match preset {
+            FieldProfile::Minimal => &["command", "query", "hash"],
+            FieldProfile::Summary => &[
+                "command", "request", "pack", "budget", "quality", "degraded",
+            ],
+            FieldProfile::Standard => &["command", "request", "pack", "items", "degraded"],
+            FieldProfile::Full => &["*"],
+        },
+        "status" => match preset {
+            FieldProfile::Minimal => &["command", "version", "workspace"],
+            FieldProfile::Summary => &["command", "version", "workspace", "capabilities"],
+            FieldProfile::Standard => &[
+                "command",
+                "version",
+                "workspace",
+                "capabilities",
+                "runtime",
+                "memoryHealth",
+                "curationHealth",
+                "feedbackHealth",
+                "derivedAssets",
+                "agentInventory",
+                "degraded",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "memory show" => match preset {
+            FieldProfile::Minimal => &["command", "version", "found", "is_tombstoned"],
+            FieldProfile::Summary => &[
+                "command",
+                "version",
+                "found",
+                "is_tombstoned",
+                "id",
+                "level",
+                "kind",
+            ],
+            FieldProfile::Standard => &[
+                "command",
+                "version",
+                "found",
+                "is_tombstoned",
+                "memory",
+                "error",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "memory list" => match preset {
+            FieldProfile::Minimal => &["command", "version", "id", "level", "kind"],
+            FieldProfile::Summary => &[
+                "command",
+                "version",
+                "total_count",
+                "truncated",
+                "id",
+                "level",
+                "kind",
+                "content",
+            ],
+            FieldProfile::Standard => &[
+                "command",
+                "version",
+                "memories",
+                "total_count",
+                "truncated",
+                "filter",
+                "error",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "capabilities" => match preset {
+            FieldProfile::Minimal => &["command", "version"],
+            FieldProfile::Summary => &["command", "version", "summary"],
+            FieldProfile::Standard => &[
+                "command",
+                "version",
+                "subsystems",
+                "features",
+                "commands",
+                "binaries",
+                "envOverrides",
+                "output",
+                "summary",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "doctor" => match preset {
+            FieldProfile::Minimal | FieldProfile::Summary => {
+                &["command", "version", "posture", "healthy"]
+            }
+            FieldProfile::Standard => &["command", "version", "posture", "healthy", "checks"],
+            FieldProfile::Full => &["*"],
+        },
+        "health" | "check" => match preset {
+            FieldProfile::Minimal => &["command", "version", "verdict"],
+            FieldProfile::Summary => &["command", "version", "verdict", "summary", "subsystems"],
+            FieldProfile::Standard | FieldProfile::Full => &["*"],
+        },
+        "import cass" => match preset {
+            FieldProfile::Minimal => &["schema", "command", "status"],
+            FieldProfile::Summary => &[
+                "schema",
+                "command",
+                "status",
+                "sessionsDiscovered",
+                "sessionsImported",
+                "sessionsSkipped",
+                "spansImported",
+            ],
+            FieldProfile::Standard => &[
+                "schema",
+                "command",
+                "workspacePath",
+                "databasePath",
+                "sourceId",
+                "ledgerId",
+                "dryRun",
+                "since",
+                "sessionsDiscovered",
+                "sessionsImported",
+                "sessionsSkipped",
+                "spansImported",
+                "indexJobsQueued",
+                "indexRequiredAction",
+                "status",
+                "sessions",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "export" => match preset {
+            FieldProfile::Minimal => &["command", "version", "status", "manifestPath"],
+            FieldProfile::Summary => &[
+                "command",
+                "version",
+                "status",
+                "counts",
+                "verificationStatus",
+                "degraded",
+            ],
+            FieldProfile::Standard => &[
+                "schema",
+                "command",
+                "version",
+                "status",
+                "dryRun",
+                "workspacePath",
+                "workspaceId",
+                "databasePath",
+                "outputPath",
+                "manifestPath",
+                "recordsPath",
+                "manifestHash",
+                "recordsHash",
+                "redactionLevel",
+                "exportScope",
+                "counts",
+                "provenance",
+                "verificationStatus",
+                "artifacts",
+                "degraded",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "curate candidates" => match preset {
+            FieldProfile::Minimal => &["command", "version", "returnedCount", "candidateId"],
+            FieldProfile::Summary => &[
+                "command",
+                "version",
+                "totalCount",
+                "returnedCount",
+                "limit",
+                "offset",
+                "truncated",
+                "nextAction",
+            ],
+            FieldProfile::Standard => &[
+                "command",
+                "version",
+                "totalCount",
+                "returnedCount",
+                "limit",
+                "offset",
+                "truncated",
+                "durableMutation",
+                "filter",
+                "candidates",
+                "degraded",
+                "nextAction",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "graph export" => match preset {
+            FieldProfile::Minimal => &["command", "version", "status"],
+            FieldProfile::Summary => &[
+                "command",
+                "version",
+                "status",
+                "format",
+                "nodeCount",
+                "edgeCount",
+                "degraded",
+            ],
+            FieldProfile::Standard => &[
+                "command",
+                "version",
+                "status",
+                "format",
+                "workspaceId",
+                "graphType",
+                "snapshot",
+                "graph",
+                "nodeCount",
+                "edgeCount",
+                "artifact",
+                "degraded",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        _ => match preset {
+            FieldProfile::Minimal => &["command", "version", "status", "id", "schema"],
+            FieldProfile::Summary => {
+                &["command", "version", "status", "summary", "count", "schema"]
+            }
+            FieldProfile::Standard | FieldProfile::Full => &["*"],
+        },
+    }
+}
+
+fn collect_field_names(value: &serde_json::Value) -> BTreeSet<String> {
+    let mut fields = BTreeSet::new();
+    collect_field_names_inner(value, &mut fields);
+    fields
+}
+
+fn collect_field_names_inner(value: &serde_json::Value, fields: &mut BTreeSet<String>) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                fields.insert(key.clone());
+                collect_field_names_inner(child, fields);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_field_names_inner(item, fields);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn filter_selected_fields(
+    value: &serde_json::Value,
+    selected: &BTreeSet<&str>,
+) -> Option<serde_json::Value> {
+    if selected.contains("*") {
+        return Some(value.clone());
+    }
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut filtered = serde_json::Map::new();
+            for (key, child) in object {
+                if selected.contains(key.as_str()) {
+                    filtered.insert(key.clone(), child.clone());
+                } else if let Some(filtered_child) = filter_selected_fields(child, selected) {
+                    filtered.insert(key.clone(), filtered_child);
+                }
+            }
+            (!filtered.is_empty()).then_some(serde_json::Value::Object(filtered))
+        }
+        serde_json::Value::Array(items) => {
+            let filtered = items
+                .iter()
+                .map(|item| {
+                    filter_selected_fields(item, selected).unwrap_or(serde_json::Value::Null)
+                })
+                .collect::<Vec<_>>();
+            (!filtered.is_empty()).then_some(serde_json::Value::Array(filtered))
+        }
+        _ => None,
+    }
+}
+
+fn unknown_field_error(rejected: &str, accepted_fields: &BTreeSet<String>) -> DomainError {
+    let accepted = accepted_fields.iter().cloned().collect::<Vec<_>>();
+    let details = serde_json::json!({
+        "failureModeCode": "usage_unknown_field",
+        "rejectedField": rejected,
+        "acceptedFields": accepted,
+        "presetsAvailable": FIELD_PRESETS_AVAILABLE,
+        "recovery": [{
+            "priority": 1,
+            "kind": "command",
+            "command": "ee schema list --json",
+            "reason": "Inspect canonical response schemas and accepted field names."
+        }]
+    });
+    DomainError::UsageCodeWithDetails {
+        code: "usage_unknown_field",
+        message: format!("Unknown field `{rejected}` in --fields flag."),
+        repair: Some("Run `ee schema list --json` and choose a canonical field name.".to_string()),
+        details_json: details.to_string(),
+    }
+}
+
+fn conflicting_presets_error(selector: &FieldSelector) -> DomainError {
+    let details = serde_json::json!({
+        "failureModeCode": "usage_conflicting_presets",
+        "selector": selector.raw(),
+        "conflictingPresets": &selector.conflicting_presets,
+        "presetsAvailable": FIELD_PRESETS_AVAILABLE,
+        "recovery": [{
+            "priority": 1,
+            "kind": "flag",
+            "flag": "--fields",
+            "valueHint": "preset=<one-preset>,fieldA,fieldB or fieldA,fieldB",
+            "reason": "Use one preset plus optional explicit field additions, or omit presets for an explicit field list."
+        }]
+    });
+    DomainError::UsageCodeWithDetails {
+        code: "usage_conflicting_presets",
+        message: "Conflicting --fields presets were provided.".to_string(),
+        repair: Some(
+            "Use one preset, for example `--fields preset=standard,why`, or use an explicit field list."
+                .to_string(),
+        ),
+        details_json: details.to_string(),
+    }
+}
+
 pub struct ResponseEnvelope {
     builder: JsonBuilder,
 }
@@ -1404,6 +2005,14 @@ pub struct ContextJsonRenderOptions {
     pub include_skipped: bool,
     pub include_meta: bool,
     pub include_verbose_meta: bool,
+    /// Bead bd-17c65.5.2 (E2): when `false` (the default), per-response
+    /// `degraded[]` filters out signals whose [`crate::pack::DegradedCategory`]
+    /// indicates they do not affect this response (build-time feature
+    /// gaps, workspace-state conditions). When `true` (`--include-non-affecting-degradations`
+    /// flag), every signal surfaces regardless of category — the
+    /// pre-E2 verbose behavior, useful for diagnostic mode and the
+    /// loud-baseline golden snapshot.
+    pub include_non_affecting_degradations: bool,
 }
 
 impl Default for ContextJsonRenderOptions {
@@ -1413,6 +2022,7 @@ impl Default for ContextJsonRenderOptions {
             include_skipped: true,
             include_meta: true,
             include_verbose_meta: false,
+            include_non_affecting_degradations: false,
         }
     }
 }
@@ -1424,6 +2034,7 @@ impl From<ContextPackOutputOptions> for ContextJsonRenderOptions {
             include_skipped: options.include_skipped,
             include_meta: options.include_meta,
             include_verbose_meta: options.include_verbose_meta,
+            include_non_affecting_degradations: options.include_non_affecting_degradations,
         }
     }
 }
@@ -1600,10 +2211,38 @@ pub fn render_context_response_json_with_options(
                 }
                 obj.field_str("why", &item.why);
                 obj.field_str("selectedIn", item.selected_in.as_str());
-                if let Some(tombstoned_at) = &item.tombstoned_at {
+                if item.lifecycle.is_some() || item.tombstoned_at.is_some() {
                     obj.field_object("lifecycle", |lifecycle| {
-                        lifecycle.field_str("status", "tombstoned");
-                        lifecycle.field_str("tombstonedAt", tombstoned_at);
+                        match (&item.tombstoned_at, &item.lifecycle) {
+                            (Some(_), _) => lifecycle.field_str("status", "tombstoned"),
+                            (None, Some(item_lifecycle)) => {
+                                lifecycle.field_str("status", &item_lifecycle.validity_status)
+                            }
+                            (None, None) => lifecycle.field_str("status", "unknown"),
+                        };
+                        if let Some(item_lifecycle) = &item.lifecycle {
+                            lifecycle.field_str(
+                                "validity_status",
+                                &item_lifecycle.validity_status,
+                            );
+                            lifecycle.field_str(
+                                "validity_window_kind",
+                                &item_lifecycle.validity_window_kind,
+                            );
+                            field_optional_str(
+                                lifecycle,
+                                "valid_from",
+                                item_lifecycle.valid_from.as_deref(),
+                            );
+                            field_optional_str(
+                                lifecycle,
+                                "valid_to",
+                                item_lifecycle.valid_to.as_deref(),
+                            );
+                        }
+                        if let Some(tombstoned_at) = &item.tombstoned_at {
+                            lifecycle.field_str("tombstonedAt", tombstoned_at);
+                        }
                     });
                 }
                 if let Some(diversity_key) = &item.diversity_key {
@@ -1657,7 +2296,22 @@ pub fn render_context_response_json_with_options(
                 );
             });
         });
-        d.field_array_of_objects("degraded", &response.data.degraded, |obj, degraded| {
+        // Bead bd-17c65.5.2 (E2): filter the per-response degraded[]
+        // array by category. The DegradedCategory::AffectsThisResponse
+        // signals always emit; build-time feature gaps and
+        // workspace-state conditions are filtered out unless the
+        // caller passes --include-non-affecting-degradations
+        // (options.include_non_affecting_degradations).
+        let filtered_degraded: Vec<&crate::pack::ContextResponseDegradation> = response
+            .data
+            .degraded
+            .iter()
+            .filter(|d| {
+                options.include_non_affecting_degradations
+                    || d.category().included_by_default()
+            })
+            .collect();
+        d.field_array_of_objects("degraded", &filtered_degraded, |obj, degraded| {
             obj.field_str("code", &degraded.code);
             obj.field_str("severity", degraded.severity.as_str());
             obj.field_str("message", &degraded.message);
@@ -1812,7 +2466,20 @@ pub fn render_context_response_hook(response: &ContextResponse) -> String {
         obj.field_str("content", &item.content);
         obj.field_u32("tokens", item.estimated_tokens);
     });
-    b.field_array_of_objects("degraded", &response.data.degraded, |obj, degraded| {
+    // Bead bd-17c65.5.2 (E2): the hook surface mirrors the JSON
+    // contract — non-affecting signals are filtered out by default
+    // so a downstream hook consumer (claude-code PreToolUse, etc.)
+    // sees only signals the current response was actually affected
+    // by. Hook callers that need the verbose surface should pipe the
+    // raw `ee context --json --include-non-affecting-degradations`
+    // instead of the hook envelope.
+    let filtered_hook_degraded: Vec<&crate::pack::ContextResponseDegradation> = response
+        .data
+        .degraded
+        .iter()
+        .filter(|d| d.category().included_by_default())
+        .collect();
+    b.field_array_of_objects("degraded", &filtered_hook_degraded, |obj, degraded| {
         obj.field_str("code", &degraded.code);
         obj.field_str("severity", degraded.severity.as_str());
         obj.field_str("message", &degraded.message);
@@ -4418,7 +5085,7 @@ where
 
 fn serialization_failure_error_json(report_name: &str, error: &serde_json::Error) -> String {
     let mut envelope = JsonBuilder::with_capacity(384);
-    envelope.field_str("schema", ERROR_SCHEMA_V1);
+    envelope.field_str("schema", ERROR_SCHEMA_V2);
     envelope.field_object("error", |obj| {
         obj.field_str("code", "serialization_failed");
         obj.field_str(
@@ -4978,11 +5645,88 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: response_schema_definition,
         },
         SchemaEntry {
-            id: "ee.error.v1",
-            version: "1",
-            description: "Error response envelope with code, message, and repair",
+            id: ERROR_SCHEMA_V2,
+            version: "2",
+            description: "Error response envelope with structured recovery details",
             category: "envelope",
             definition: error_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.pack.v2",
+            version: "2",
+            description: "Context pack response envelope and canonical pack payload",
+            category: "context",
+            definition: pack_response_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.search.v1",
+            version: "1",
+            description: "Search response envelope and result payload",
+            category: "search",
+            definition: search_response_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.memory.show.v1",
+            version: "1",
+            description: "Memory detail response envelope",
+            category: "memory",
+            definition: memory_show_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.memory.list.v1",
+            version: "1",
+            description: "Paged memory list response envelope",
+            category: "memory",
+            definition: memory_list_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.status.v1",
+            version: "1",
+            description: "Status response envelope and health posture payload",
+            category: "ops",
+            definition: status_response_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.doctor.v1",
+            version: "1",
+            description: "Doctor diagnostics response envelope",
+            category: "ops",
+            definition: doctor_response_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.capabilities.v1",
+            version: "1",
+            description: "Capabilities response envelope and machine-readable feature catalog",
+            category: "ops",
+            definition: capabilities_response_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::models::IMPORT_CASS_SCHEMA_V1,
+            version: "1",
+            description: "CASS import response envelope",
+            category: "import",
+            definition: import_cass_response_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.export.v1",
+            version: "1",
+            description: "Export response envelope for JSONL backup/export reports",
+            category: "backup",
+            definition: export_response_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::core::curate::CURATE_CANDIDATES_SCHEMA_V1,
+            version: "1",
+            description: "Curation candidate list response envelope",
+            category: "curate",
+            definition: curate_candidates_response_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::graph::GRAPH_EXPORT_SCHEMA_V1,
+            version: "1",
+            description: "Graph export response envelope",
+            category: "graph",
+            definition: graph_export_response_schema_definition,
         },
         SchemaEntry {
             id: MCP_MANIFEST_SCHEMA_V1,
@@ -5175,7 +5919,7 @@ fn render_single_schema_export(schema_id: &str) -> String {
     }
 
     let mut b = JsonBuilder::with_capacity(256);
-    b.field_str("schema", ERROR_SCHEMA_V1);
+    b.field_str("schema", ERROR_SCHEMA_V2);
     b.field_object("error", |e| {
         e.field_str("code", "schema_not_found");
         e.field_str("message", &format!("Schema '{}' not found", schema_id));
@@ -5212,11 +5956,55 @@ fn schema_definition_array_json() -> String {
 }
 
 fn response_schema_definition() -> String {
-    r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"ee.response.v1","type":"object","required":["schema","success","data"],"properties":{"schema":{"const":"ee.response.v1"},"success":{"type":"boolean"},"data":{"type":"object"},"degraded":{"type":"array","items":{"type":"object","required":["code","severity","message","repair"],"properties":{"code":{"type":"string"},"severity":{"type":"string","enum":["low","medium","high"]},"message":{"type":"string"},"repair":{"type":"string"}}}}}}"#.to_string()
+    include_str!("../../docs/schemas/ee.response.v1.json").to_string()
 }
 
 fn error_schema_definition() -> String {
-    r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"ee.error.v1","type":"object","required":["schema","error"],"properties":{"schema":{"const":"ee.error.v1"},"error":{"type":"object","required":["code","message","severity","details"],"properties":{"code":{"type":"string"},"message":{"type":"string"},"severity":{"type":"string","enum":["low","medium","high"]},"repair":{"type":"string"},"details":{"type":"object"}}}}}"#.to_string()
+    include_str!("../../docs/schemas/ee.error.v2.json").to_string()
+}
+
+fn pack_response_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.pack.v2.json").to_string()
+}
+
+fn search_response_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.search.v1.json").to_string()
+}
+
+fn memory_show_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.memory.show.v1.json").to_string()
+}
+
+fn memory_list_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.memory.list.v1.json").to_string()
+}
+
+fn status_response_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.status.v1.json").to_string()
+}
+
+fn doctor_response_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.doctor.v1.json").to_string()
+}
+
+fn capabilities_response_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.capabilities.v1.json").to_string()
+}
+
+fn import_cass_response_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.import.cass.v1.json").to_string()
+}
+
+fn export_response_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.export.v1.json").to_string()
+}
+
+fn curate_candidates_response_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.curate.candidates.v1.json").to_string()
+}
+
+fn graph_export_response_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.graph.export.v1.json").to_string()
 }
 
 fn mcp_manifest_schema_definition() -> String {
@@ -5713,7 +6501,7 @@ fn render_mcp_tool_manifest_entry(obj: &mut JsonBuilder, cmd: &CommandEntry) {
     obj.field_bool("available", cmd.available);
     obj.field_str("source", "public_command_manifest");
     obj.field_str("responseEnvelope", RESPONSE_SCHEMA_V1);
-    obj.field_str("errorEnvelope", ERROR_SCHEMA_V1);
+    obj.field_str("errorEnvelope", ERROR_SCHEMA_V2);
     obj.field_array_of_objects("subcommands", cmd.subcommands, |sub, sc| {
         sub.field_str("name", sc.name);
         sub.field_str("description", sc.description);
@@ -5797,7 +6585,7 @@ pub fn render_toon_from_json(json: &str) -> String {
     toon::json_to_toon(json).unwrap_or_else(|error| {
         let message = escape_toon_quoted_string(&format!("TOON encoding failed: {error}"));
         format!(
-            "schema: {ERROR_SCHEMA_V1}\nerror:\n  code: toon_encoding_failed\n  message: \"{message}\"\n  severity: medium\n  details:\n"
+            "schema: {ERROR_SCHEMA_V2}\nerror:\n  code: toon_encoding_failed\n  message: \"{message}\"\n  severity: medium\n  details:\n"
         )
     })
 }
@@ -5838,7 +6626,7 @@ pub fn help_text() -> &'static str {
 pub fn schema_json() -> String {
     format!(
         "{{\"schema\":\"{}\",\"success\":true,\"data\":{{\"command\":\"schema\",\"schemas\":{{\"response\":\"{}\",\"error\":\"{}\"}}}}}}",
-        RESPONSE_SCHEMA_V1, RESPONSE_SCHEMA_V1, ERROR_SCHEMA_V1
+        RESPONSE_SCHEMA_V1, RESPONSE_SCHEMA_V1, ERROR_SCHEMA_V2
     )
 }
 
@@ -6899,8 +7687,19 @@ pub fn render_agent_docs_toon(report: &AgentDocsReport) -> String {
 #[must_use]
 pub fn error_response_json(error: &DomainError) -> String {
     let message = error.message();
+    let recovery_actions = error.recovery_actions();
+    let non_recoverable = error_non_recoverable(&recovery_actions);
+    tracing::warn!(
+        target: "ee::output::error",
+        schema = ERROR_SCHEMA_V2,
+        code = error.code(),
+        severity = domain_error_severity(error),
+        has_recovery = !recovery_actions.is_empty(),
+        has_nonrecoverable = non_recoverable,
+        "emitting error envelope"
+    );
     let mut envelope = JsonBuilder::new();
-    envelope.field_str("schema", ERROR_SCHEMA_V1);
+    envelope.field_str("schema", ERROR_SCHEMA_V2);
     envelope.field_object("error", |obj| {
         obj.field_str("code", error.code());
         obj.field_str("message", &message);
@@ -6909,8 +7708,11 @@ pub fn error_response_json(error: &DomainError) -> String {
             obj.field_str("repair", repair);
         }
         obj.field_object("details", |details| {
-            domain_error_details(details, error);
+            domain_error_details(details, error, &recovery_actions);
         });
+        if non_recoverable {
+            obj.field_bool("nonRecoverable", true);
+        }
     });
     envelope.finish()
 }
@@ -6924,6 +7726,7 @@ fn domain_error_severity(error: &DomainError) -> &'static str {
     match error {
         DomainError::Usage { .. }
         | DomainError::UsageWithDetails { .. }
+        | DomainError::UsageCodeWithDetails { .. }
         | DomainError::NotFound { .. } => "low",
         DomainError::Storage { .. } | DomainError::MigrationDrift { .. } => "high",
         DomainError::Configuration { .. }
@@ -6937,9 +7740,14 @@ fn domain_error_severity(error: &DomainError) -> &'static str {
     }
 }
 
-fn domain_error_details(details: &mut JsonBuilder, error: &DomainError) {
+fn domain_error_details(
+    details: &mut JsonBuilder,
+    error: &DomainError,
+    recovery_actions: &[RecoveryAction],
+) {
     match error {
         DomainError::UsageWithDetails { details_json, .. }
+        | DomainError::UsageCodeWithDetails { details_json, .. }
         | DomainError::PolicyDeniedWithDetails { details_json, .. } => {
             append_domain_error_details(details, details_json);
         }
@@ -6949,12 +7757,23 @@ fn domain_error_details(details: &mut JsonBuilder, error: &DomainError) {
         details.field_str("resource", resource);
         details.field_str("id", id);
     }
-    // Bead bd-17c65.6.1 (F1): structured recovery actions. Empty vector
-    // collapses to an absent `recovery` field so unmapped errors stay
-    // shape-compatible with the v1 schema.
-    let recoveries = error.recovery_actions();
-    if !recoveries.is_empty() {
-        details.field_array_of_objects("recovery", &recoveries, |obj, action| {
+    if matches!(error, DomainError::Import { .. })
+        && error
+            .message()
+            .to_lowercase()
+            .contains("cass binary not found")
+    {
+        details.field_array_of_strs(
+            "attemptedPaths",
+            &[
+                "/usr/local/bin/cass",
+                "/usr/bin/cass",
+                "/opt/homebrew/bin/cass",
+            ],
+        );
+    }
+    if !recovery_actions.is_empty() {
+        details.field_array_of_objects("recovery", recovery_actions, |obj, action| {
             obj.field_u32("priority", u32::from(action.priority));
             obj.field_str("kind", action.kind.as_str());
             obj.field_str("rationale", &action.rationale);
@@ -6984,6 +7803,12 @@ fn domain_error_details(details: &mut JsonBuilder, error: &DomainError) {
             }
         });
     }
+}
+
+fn error_non_recoverable(recovery_actions: &[RecoveryAction]) -> bool {
+    recovery_actions
+        .iter()
+        .any(|action| matches!(action.kind, RecoveryKind::None))
 }
 
 fn append_domain_error_details(details: &mut JsonBuilder, details_json: &str) {
@@ -10385,7 +11210,7 @@ mod tests {
     };
     use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
     use crate::models::{
-        DomainError, ERROR_SCHEMA_V1, MemoryId, ProvenanceUri, RESPONSE_SCHEMA_V1, TrustClass,
+        DomainError, ERROR_SCHEMA_V2, MemoryId, ProvenanceUri, RESPONSE_SCHEMA_V1, TrustClass,
         UnitScore,
     };
     use crate::pack::{
@@ -10414,7 +11239,7 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&json).map_err(|error| error.to_string())?;
 
-        assert_eq!(parsed["schema"].as_str(), Some(ERROR_SCHEMA_V1));
+        assert_eq!(parsed["schema"].as_str(), Some(ERROR_SCHEMA_V2));
         assert_eq!(
             parsed["error"]["code"].as_str(),
             Some("serialization_failed")
@@ -10436,7 +11261,7 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&json).map_err(|error| error.to_string())?;
 
-        assert_eq!(parsed["schema"].as_str(), Some(ERROR_SCHEMA_V1));
+        assert_eq!(parsed["schema"].as_str(), Some(ERROR_SCHEMA_V2));
         assert_eq!(
             parsed["error"]["code"].as_str(),
             Some("serialization_failed")
@@ -10684,7 +11509,7 @@ mod tests {
             ],
             schemas: vec![
                 SupportedSchema::new("response", RESPONSE_SCHEMA_V1),
-                SupportedSchema::new("error", ERROR_SCHEMA_V1),
+                SupportedSchema::new("error", ERROR_SCHEMA_V2),
                 SupportedSchema::new("version_provenance", VERSION_PROVENANCE_SCHEMA_V1),
             ],
             degradations,
@@ -10868,7 +11693,7 @@ mod tests {
             repair: Some("ee --help".to_string()),
         };
         let json = error_response_json(&error);
-        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "error schema")?;
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v2\"", "error schema")?;
         ensure_contains(&json, "\"code\":\"usage\"", "error code")?;
         ensure_contains(
             &json,
@@ -10886,7 +11711,7 @@ mod tests {
             repair: None,
         };
         let json = error_response_json(&error);
-        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "error schema")?;
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v2\"", "error schema")?;
         ensure_contains(&json, "\"code\":\"storage\"", "error code")?;
         ensure_contains(&json, "\"severity\":\"high\"", "error severity")?;
         ensure_contains(&json, "\"details\":{}", "empty details object")?;
@@ -11784,9 +12609,9 @@ mod tests {
     // ========================================================================
     // Error JSON Schema Tests (EE-015)
     //
-    // These tests verify the ee.error.v1 JSON schema contract for all
+    // These tests verify the ee.error.v2 JSON schema contract for all
     // DomainError variants. Each error type must produce valid JSON with:
-    // - schema: "ee.error.v1"
+    // - schema: "ee.error.v2"
     // - error.code: stable string matching the error variant
     // - error.message: human-readable description
     // - error.severity: stable low/medium/high classification
@@ -11801,7 +12626,7 @@ mod tests {
             repair: Some("ee --help".to_string()),
         };
         let json = error_response_json(&error);
-        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v2\"", "schema")?;
         ensure_contains(&json, "\"code\":\"usage\"", "code")?;
         ensure_contains(&json, "\"message\":\"Unknown command 'xyz'.\"", "message")?;
         ensure_contains(&json, "\"severity\":\"low\"", "severity")?;
@@ -11816,7 +12641,7 @@ mod tests {
             repair: Some("ee doctor --fix-plan --json".to_string()),
         };
         let json = error_response_json(&error);
-        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v2\"", "schema")?;
         ensure_contains(&json, "\"code\":\"configuration\"", "code")?;
         ensure_contains(
             &json,
@@ -11839,7 +12664,7 @@ mod tests {
             repair: Some("ee doctor --fix-plan --json".to_string()),
         };
         let json = error_response_json(&error);
-        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v2\"", "schema")?;
         ensure_contains(&json, "\"code\":\"storage\"", "code")?;
         ensure_contains(&json, "\"message\":\"Database file corrupted.\"", "message")?;
         ensure_contains(&json, "\"severity\":\"high\"", "severity")?;
@@ -11858,7 +12683,7 @@ mod tests {
             repair: Some("ee index rebuild".to_string()),
         };
         let json = error_response_json(&error);
-        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v2\"", "schema")?;
         ensure_contains(&json, "\"code\":\"search_index\"", "code")?;
         ensure_contains(&json, "generation 9", "message contains details")?;
         ensure_contains(&json, "\"severity\":\"medium\"", "severity")?;
@@ -11879,7 +12704,7 @@ mod tests {
             repair: Some("ee import cass --dry-run".to_string()),
         };
         let json = error_response_json(&error);
-        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v2\"", "schema")?;
         ensure_contains(&json, "\"code\":\"import\"", "code")?;
         ensure_contains(
             &json,
@@ -11898,7 +12723,7 @@ mod tests {
             repair: Some("ee index reembed --dry-run".to_string()),
         };
         let json = error_response_json(&error);
-        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v2\"", "schema")?;
         ensure_contains(&json, "\"code\":\"unsatisfied_degraded_mode\"", "code")?;
         ensure_contains(&json, "--require-semantic", "message contains flag")?;
         ensure_contains(&json, "\"severity\":\"medium\"", "severity")?;
@@ -11913,7 +12738,7 @@ mod tests {
             repair: Some("ee doctor --fix-plan --json".to_string()),
         };
         let json = error_response_json(&error);
-        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v2\"", "schema")?;
         ensure_contains(&json, "\"code\":\"policy_denied\"", "code")?;
         ensure_contains(
             &json,
@@ -11962,7 +12787,7 @@ mod tests {
             repair: Some("ee init --workspace .".to_string()),
         };
         let json = error_response_json(&error);
-        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v2\"", "schema")?;
         ensure_contains(&json, "\"code\":\"migration_required\"", "code")?;
         ensure_contains(&json, "version 3", "message contains version")?;
         ensure_contains(&json, "\"severity\":\"medium\"", "severity")?;
@@ -12057,7 +12882,7 @@ mod tests {
             errors.iter().zip(codes.iter()).zip(severities.iter())
         {
             let json = error_response_json(error);
-            ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", expected_code)?;
+            ensure_starts_with(&json, "{\"schema\":\"ee.error.v2\"", expected_code)?;
             ensure_contains(
                 &json,
                 &format!("\"code\":\"{expected_code}\""),
@@ -12274,7 +13099,7 @@ mod tests {
     #[test]
     fn invalid_json_to_toon_returns_stable_error() -> TestResult {
         let toon = super::render_toon_from_json("{not valid json");
-        ensure_contains(&toon, "schema: ee.error.v1", "error schema")?;
+        ensure_contains(&toon, "schema: ee.error.v2", "error schema")?;
         ensure_contains(&toon, "code: toon_encoding_failed", "error code")?;
         ensure_contains(&toon, "severity: medium", "error severity")?;
         ensure_contains(&toon, "details:", "error details")
@@ -12283,7 +13108,7 @@ mod tests {
     #[test]
     fn unknown_schema_export_error_has_required_fields() -> TestResult {
         let json = render_schema_export_json(Some("ee.missing.v1"));
-        ensure_starts_with(&json, "{\"schema\":\"ee.error.v1\"", "schema")?;
+        ensure_starts_with(&json, "{\"schema\":\"ee.error.v2\"", "schema")?;
         ensure_contains(&json, "\"code\":\"schema_not_found\"", "code")?;
         ensure_contains(&json, "\"severity\":\"low\"", "severity")?;
         ensure_contains(&json, "\"details\":{", "details")?;
@@ -12292,11 +13117,21 @@ mod tests {
 
     #[test]
     fn public_schema_registry_exports_every_listed_schema_once() -> TestResult {
-        fn exported_schema_id(schema: &serde_json::Value) -> Option<&str> {
-            schema
-                .get("$id")
-                .or_else(|| schema.get("schema"))
-                .and_then(serde_json::Value::as_str)
+        fn exported_schema_id(schema: &serde_json::Value) -> Option<String> {
+            if let Some(title) = schema.get("title").and_then(serde_json::Value::as_str) {
+                return Some(title.to_string());
+            }
+            if let Some(schema_id) = schema.get("schema").and_then(serde_json::Value::as_str) {
+                return Some(schema_id.to_string());
+            }
+            let uri = schema.get("$id").and_then(serde_json::Value::as_str)?;
+            let file_name = uri.rsplit('/').next().unwrap_or(uri);
+            Some(
+                file_name
+                    .strip_suffix(".json")
+                    .unwrap_or(file_name)
+                    .to_string(),
+            )
         }
 
         let list_json = super::render_schema_list_json();
@@ -12338,7 +13173,7 @@ mod tests {
             )?;
             ensure_equal(
                 &exported_schema_id(&exported),
-                &Some(schema_id.as_str()),
+                &Some(schema_id.clone()),
                 "single schema export id",
             )?;
         }
@@ -12352,7 +13187,6 @@ mod tests {
             .iter()
             .map(|schema| {
                 exported_schema_id(schema)
-                    .map(str::to_owned)
                     .ok_or_else(|| "bulk schema export entry missing $id/schema".to_owned())
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -12525,7 +13359,7 @@ mod tests {
         for (i, fixture) in fixtures.iter().enumerate() {
             let value: serde_json::Value = serde_json::from_str(fixture)
                 .map_err(|e| format!("error fixture {} is not valid JSON: {e}", i))?;
-            if value.get("schema") != Some(&serde_json::Value::String("ee.error.v1".to_string())) {
+            if value.get("schema") != Some(&serde_json::Value::String("ee.error.v2".to_string())) {
                 return Err(format!("error fixture {} missing schema", i));
             }
         }

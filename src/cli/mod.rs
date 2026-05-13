@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -206,10 +206,11 @@ use crate::steward::{
 const HELP_PRELUDE: &str = concat!(
     "Most-used commands (start here):\n",
     "  init          Initialize an ee workspace\n",
-    "  remember      Capture a durable memory\n",
-    "  search        Find relevant memories\n",
-    "  context       Assemble a task-specific context pack\n",
+    "  note          Capture a memory with agent-friendly level/kind inference\n",
+    "  pack          Assemble a task-specific context pack\n",
     "  why           Explain why a memory was stored or selected\n",
+    "  search        Fine-grained memory retrieval\n",
+    "  remember      Explicit memory capture without inference\n",
     "\n",
     "Quick categories (the full alphabetical list is below):\n",
     "\n",
@@ -263,9 +264,17 @@ pub struct Cli {
     #[arg(skip)]
     format_explicit: bool,
 
-    /// Control the verbosity level of output fields.
-    #[arg(long, global = true, value_enum, default_value_t = FieldsLevel::Standard)]
-    pub fields: FieldsLevel,
+    /// Control output fields by preset or comma-separated canonical names.
+    #[arg(
+        long,
+        global = true,
+        value_name = "PRESET|FIELD_LIST",
+        default_value = "standard"
+    )]
+    pub fields: output::FieldSelector,
+
+    #[arg(skip)]
+    fields_explicit: bool,
 
     /// Control cards output verbosity (none/summary/math/full).
     #[arg(long, global = true, value_enum, default_value_t = CardsLevel::Math)]
@@ -303,7 +312,7 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "POLICY_ID")]
     pub policy: Option<String>,
 
-    /// Enable the experimental agent triad aliases (`ee pack`, `ee note`, `ee why`).
+    /// Compatibility no-op retained from the agent triad spike.
     #[arg(long, global = true, hide = true, action = ArgAction::SetTrue)]
     pub experimental_triad: bool,
 
@@ -433,8 +442,16 @@ impl Cli {
     }
 
     #[must_use]
-    pub const fn fields_level(&self) -> FieldsLevel {
-        self.fields
+    pub fn fields_level(&self) -> FieldsLevel {
+        if self.fields.needs_full_render() {
+            return FieldsLevel::Full;
+        }
+        FieldsLevel::from_field_profile(self.fields.preset())
+    }
+
+    #[must_use]
+    pub fn field_selector(&self) -> &output::FieldSelector {
+        &self.fields
     }
 
     #[must_use]
@@ -478,6 +495,8 @@ impl Cli {
 thread_local! {
     static ACTIVE_RESPONSE_SCHEMA_VERSION: Cell<output::ResponseSchemaVersion> =
         const { Cell::new(output::ResponseSchemaVersion::V1) };
+    static ACTIVE_FIELD_SELECTOR: RefCell<Option<output::FieldSelector>> =
+        const { RefCell::new(None) };
 }
 
 const EXPORT_REPORT_SCHEMA_V1: &str = "ee.export.report.v1";
@@ -547,7 +566,7 @@ pub enum Command {
     /// Run explicit maintenance jobs without a daemon.
     #[command(subcommand)]
     Maintenance(MaintenanceCommand),
-    /// Experimental shorthand for storing an inferred memory note.
+    /// Agent-friendly shorthand for storing an inferred memory note.
     Note(NoteArgs),
     /// Run and inspect explicit steward maintenance jobs.
     #[command(subcommand)]
@@ -1480,9 +1499,36 @@ pub struct ContextArgs {
     #[arg(long = "no-meta", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
     pub no_meta: Option<bool>,
 
+    /// Bead bd-17c65.5.2 (E2): include ALL degraded signals in
+    /// `data.degraded[]`, even those whose category indicates they
+    /// did not affect the current response. By default the array
+    /// only carries signals that affected this response — build-time
+    /// feature gaps and workspace-state conditions are filtered out
+    /// (an agent seeing `degraded: []` can infer everything worked).
+    /// Use this flag for diagnostic walkthroughs that need every
+    /// signal regardless of category.
+    #[arg(long = "include-non-affecting-degradations", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
+    pub include_non_affecting_degradations: Option<bool>,
+
     /// Include tombstoned memories in context results with lifecycle metadata.
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_tombstoned: bool,
+
+    /// Evaluate validity windows and temporal replay as of this RFC3339 timestamp.
+    #[arg(long, value_name = "RFC3339", value_parser = parse_rfc3339_arg)]
+    pub as_of: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// Include memories whose valid_to is before the validity reference time.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_expired: bool,
+
+    /// Include memories whose valid_from is after the validity reference time.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_future: bool,
+
+    /// Include memories marked with stale validity status when present in index metadata.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_stale: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -1548,7 +1594,7 @@ pub struct PackArgs {
     #[command(subcommand)]
     pub command: Option<PackCommand>,
 
-    /// Experimental triad task query. Requires `--experimental-triad` or EE_EXPERIMENTAL_TRIAD.
+    /// Agent-facing task query. Equivalent to `ee context "<task>"` with smart defaults.
     #[arg(value_name = "QUERY")]
     pub query: Option<String>,
 
@@ -1592,6 +1638,13 @@ pub struct PackArgs {
     #[arg(long = "no-meta", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
     pub no_meta: Option<bool>,
 
+    /// Bead bd-17c65.5.2 (E2): include all degraded signals in
+    /// `data.degraded[]` regardless of category (build-time gaps,
+    /// workspace-state, affects-this-response). Default is filtered
+    /// (only affects-this-response).
+    #[arg(long = "include-non-affecting-degradations", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
+    pub include_non_affecting_degradations: Option<bool>,
+
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
@@ -1603,6 +1656,22 @@ pub struct PackArgs {
     /// Emit a redaction-safe query and pack performance report instead of the context pack.
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain_performance: bool,
+
+    /// Evaluate validity windows and temporal replay as of this RFC3339 timestamp.
+    #[arg(long, value_name = "RFC3339", value_parser = parse_rfc3339_arg)]
+    pub as_of: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// Include memories whose valid_to is before the validity reference time.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_expired: bool,
+
+    /// Include memories whose valid_from is after the validity reference time.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_future: bool,
+
+    /// Include memories marked with stale validity status when present in index metadata.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_stale: bool,
 }
 
 /// Pack subcommands: build, replay, diff.
@@ -1659,6 +1728,13 @@ pub struct PackBuildArgs {
     #[arg(long = "no-meta", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
     pub no_meta: Option<bool>,
 
+    /// Bead bd-17c65.5.2 (E2): include all degraded signals in
+    /// `data.degraded[]` regardless of category (build-time gaps,
+    /// workspace-state, affects-this-response). Default is filtered
+    /// (only affects-this-response).
+    #[arg(long = "include-non-affecting-degradations", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
+    pub include_non_affecting_degradations: Option<bool>,
+
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
@@ -1670,18 +1746,31 @@ pub struct PackBuildArgs {
     /// Emit a redaction-safe query and pack performance report instead of the context pack.
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain_performance: bool,
+
+    /// Evaluate validity windows and temporal replay as of this RFC3339 timestamp.
+    #[arg(long, value_name = "RFC3339", value_parser = parse_rfc3339_arg)]
+    pub as_of: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// Include memories whose valid_to is before the validity reference time.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_expired: bool,
+
+    /// Include memories whose valid_from is after the validity reference time.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_future: bool,
+
+    /// Include memories marked with stale validity status when present in index metadata.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_stale: bool,
 }
 
 impl PackArgs {
     fn legacy_build_args(&self) -> Result<PackBuildArgs, DomainError> {
-        if self.query.is_some() {
-            return Err(triad_disabled_error("ee pack \"<task>\""));
-        }
         let Some(query_file) = self.query_file.clone() else {
             return Err(DomainError::Usage {
                 message: "Pack build requires --query-file or a pack subcommand.".to_string(),
                 repair: Some(
-                    "Use `ee pack --query-file task.eeq.json` or `ee pack replay <pack-id>`."
+                    "Use `ee pack \"prepare release\"`, `ee pack --query-file task.eeq.json`, or `ee pack replay <pack-id>`."
                         .to_string(),
                 ),
             });
@@ -1698,9 +1787,14 @@ impl PackArgs {
             no_rendered_text: self.no_rendered_text,
             no_skipped: self.no_skipped,
             no_meta: self.no_meta,
+            include_non_affecting_degradations: self.include_non_affecting_degradations,
             database: self.database.clone(),
             index_dir: self.index_dir.clone(),
             explain_performance: self.explain_performance,
+            as_of: self.as_of,
+            include_expired: self.include_expired,
+            include_future: self.include_future,
+            include_stale: self.include_stale,
         })
     }
 }
@@ -4251,6 +4345,22 @@ pub struct SearchArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_tombstoned: bool,
 
+    /// Evaluate validity windows at this RFC3339 timestamp.
+    #[arg(long, value_name = "RFC3339", value_parser = parse_rfc3339_arg)]
+    pub as_of: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// Include memories whose valid_to is before the validity reference time.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_expired: bool,
+
+    /// Include memories whose valid_from is after the validity reference time.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_future: bool,
+
+    /// Include memories marked with stale validity status when present in index metadata.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_stale: bool,
+
     /// Emit a redaction-safe query performance report instead of search hits.
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain_performance: bool,
@@ -6467,6 +6577,16 @@ impl FieldsLevel {
             Self::Full => output::FieldProfile::Full,
         }
     }
+
+    #[must_use]
+    pub const fn from_field_profile(profile: output::FieldProfile) -> Self {
+        match profile {
+            output::FieldProfile::Minimal => Self::Minimal,
+            output::FieldProfile::Summary => Self::Summary,
+            output::FieldProfile::Standard => Self::Standard,
+            output::FieldProfile::Full => Self::Full,
+        }
+    }
 }
 
 /// Cards output verbosity level (EE-341).
@@ -6538,9 +6658,13 @@ where
         Err(error) => return write_parse_error(error, &args, stdout, stderr),
     };
     cli.format_explicit = args_contain_format_flag(&args);
+    cli.fields_explicit = args_contain_fields_flag(&args);
     resolve_workspace_alias_global(&mut cli);
     ACTIVE_RESPONSE_SCHEMA_VERSION.with(|version| {
         version.set(cli.response_schema_version());
+    });
+    ACTIVE_FIELD_SELECTOR.with(|selector| {
+        *selector.borrow_mut() = cli.fields_explicit.then(|| cli.field_selector().clone());
     });
 
     if cli.schema {
@@ -7390,7 +7514,7 @@ where
         },
         Some(Command::Note(ref args)) => handle_note(&cli, args, stdout, stderr),
         Some(Command::Remember(ref args)) => match handle_remember(&cli, args) {
-            Ok(result) => write_remember_report(&cli, &result, stdout),
+            Ok(result) => write_remember_report(&cli, &result, stdout, true),
             Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
         },
         Some(Command::Curate(CurateCommand::Candidates(ref args))) => {
@@ -7595,6 +7719,21 @@ fn args_contain_format_flag(args: &[OsString]) -> bool {
             continue;
         };
         if arg == "--format" || arg.starts_with("--format=") {
+            return true;
+        }
+    }
+    false
+}
+
+fn args_contain_fields_flag(args: &[OsString]) -> bool {
+    for arg in args.iter().skip(1) {
+        if arg == OsStr::new("--") {
+            return false;
+        }
+        let Some(arg) = arg.to_str() else {
+            continue;
+        };
+        if arg == "--fields" || arg.starts_with("--fields=") {
             return true;
         }
     }
@@ -8202,7 +8341,11 @@ fn pack_quality_actuals_for_cases(
             limit,
             speed,
             explain: false,
+            as_of: None,
             include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
             relevance_floor: None,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
@@ -8491,7 +8634,11 @@ fn run_eval_retrieval_queries(
             limit,
             speed: SpeedMode::Default,
             explain: false,
+            as_of: None,
             include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
             relevance_floor: None,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
@@ -10028,34 +10175,142 @@ where
     .to_string()
 }
 
-fn active_response_schema_stdout(text: &str) -> Cow<'_, str> {
-    ACTIVE_RESPONSE_SCHEMA_VERSION.with(|version| response_schema_stdout(text, version.get()))
+fn active_response_schema_stdout(text: &str) -> Result<Cow<'_, str>, DomainError> {
+    let selector = ACTIVE_FIELD_SELECTOR.with(|selector| selector.borrow().clone());
+    let schema_version = ACTIVE_RESPONSE_SCHEMA_VERSION.with(Cell::get);
+    if selector.is_none() && matches!(schema_version, output::ResponseSchemaVersion::V1) {
+        return Ok(Cow::Borrowed(text));
+    }
+    response_schema_stdout(text, schema_version, selector.as_ref()).map(Cow::Owned)
 }
 
 fn response_schema_stdout(
     text: &str,
     schema_version: output::ResponseSchemaVersion,
-) -> Cow<'_, str> {
-    if matches!(schema_version, output::ResponseSchemaVersion::V1) {
-        return Cow::Borrowed(text);
-    }
-
+    selector: Option<&output::FieldSelector>,
+) -> Result<String, DomainError> {
     let (body, has_newline) = match text.strip_suffix('\n') {
         Some(body) => (body, true),
         None => (text, false),
     };
-    let mut converted = output::render_response_json_for_schema_version(body, schema_version);
+    let selected = if let Some(selector) = selector {
+        let started = Instant::now();
+        match output::apply_field_selector_to_json(body, selector) {
+            Ok(selected) => {
+                log_field_selector_event(
+                    selector,
+                    body,
+                    &selected,
+                    started.elapsed().as_micros(),
+                    0,
+                );
+                selected
+            }
+            Err(error) => {
+                log_field_selector_event(selector, body, body, started.elapsed().as_micros(), 1);
+                return Err(error);
+            }
+        }
+    } else {
+        body.to_owned()
+    };
+    let mut converted = output::render_response_json_for_schema_version(&selected, schema_version);
     if has_newline {
         converted.push('\n');
     }
-    Cow::Owned(converted)
+    Ok(converted)
+}
+
+fn log_field_selector_event(
+    selector: &output::FieldSelector,
+    original_json: &str,
+    selected_json: &str,
+    elapsed_us: u128,
+    rejected_field_count: usize,
+) {
+    let event = crate::obs::TestEvent::new(
+        crate::obs::test_id_or("field_selector"),
+        crate::obs::EventKind::FieldSelector,
+    )
+    .with_field("surface", response_command_surface(original_json))
+    .with_field("preset", selector.preset().as_str())
+    .with_field(
+        "explicit_fields_count",
+        output_field_selector_explicit_count(selector.raw()),
+    )
+    .with_field(
+        "fields_in_response",
+        u64::try_from(response_data_field_count(selected_json)).unwrap_or(u64::MAX),
+    )
+    .with_field(
+        "rejected_field_count",
+        u64::try_from(rejected_field_count).unwrap_or(u64::MAX),
+    )
+    .with_field("elapsed_us", u64::try_from(elapsed_us).unwrap_or(u64::MAX));
+    crate::obs::log_event(event);
+}
+
+fn response_command_surface(json: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/data/command")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn output_field_selector_explicit_count(raw: &str) -> u64 {
+    let count = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|token| {
+            !token.is_empty()
+                && !token.eq_ignore_ascii_case("minimal")
+                && !token.eq_ignore_ascii_case("summary")
+                && !token.eq_ignore_ascii_case("standard")
+                && !token.eq_ignore_ascii_case("full")
+                && *token != "*"
+                && !token.starts_with("preset=")
+        })
+        .count();
+    u64::try_from(count).unwrap_or(u64::MAX)
+}
+
+fn response_data_field_count(json: &str) -> usize {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return 0;
+    };
+    value
+        .get("data")
+        .map(count_json_object_fields)
+        .unwrap_or_default()
+}
+
+fn count_json_object_fields(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Object(object) => {
+            object.len() + object.values().map(count_json_object_fields).sum::<usize>()
+        }
+        serde_json::Value::Array(items) => items.iter().map(count_json_object_fields).sum(),
+        _ => 0,
+    }
 }
 
 fn write_stdout<W>(stdout: &mut W, text: &str) -> ProcessExitCode
 where
     W: Write,
 {
-    let output = active_response_schema_stdout(text);
+    let output = match active_response_schema_stdout(text) {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = stdout.write_all(output::error_response_json(&error).as_bytes());
+            let _ = stdout.write_all(b"\n");
+            return error.exit_code();
+        }
+    };
     match stdout.write_all(output.as_bytes()) {
         Ok(()) => ProcessExitCode::Success,
         Err(_) => ProcessExitCode::Usage,
@@ -10431,7 +10686,7 @@ where
 {
     if wants_json && let IndexRebuildError::LockContention(contention) = error {
         let json = serde_json::json!({
-            "schema": crate::models::ERROR_SCHEMA_V1,
+            "schema": crate::models::ERROR_SCHEMA_V2,
             "error": {
                 "code": INDEX_PUBLISH_LOCK_CONTENTION_CODE,
                 "message": error.to_string(),
@@ -13123,8 +13378,7 @@ where
 {
     if wants_json {
         let json = serde_json::json!({
-            "schema": crate::models::ERROR_SCHEMA_V1,
-            "success": false,
+            "schema": crate::models::ERROR_SCHEMA_V2,
             "error": {
                 "code": code,
                 "message": message,
@@ -13153,8 +13407,7 @@ where
 {
     if wants_json {
         let json = serde_json::json!({
-            "schema": crate::models::ERROR_SCHEMA_V1,
-            "success": false,
+            "schema": crate::models::ERROR_SCHEMA_V2,
             "error": error.data_json(),
         });
         let _ = stdout.write_all((json.to_string() + "\n").as_bytes());
@@ -13683,8 +13936,7 @@ where
 {
     if wants_json {
         let json = serde_json::json!({
-            "schema": crate::models::ERROR_SCHEMA_V1,
-            "success": false,
+            "schema": crate::models::ERROR_SCHEMA_V2,
             "error": error.data_json(),
         });
         let _ = stdout.write_all((json.to_string() + "\n").as_bytes());
@@ -14413,7 +14665,11 @@ where
         limit: args.limit,
         speed: args.speed,
         explain: true,
+        as_of: None,
         include_tombstoned: false,
+        include_expired: false,
+        include_future: false,
+        include_stale: false,
         relevance_floor: args.relevance_floor,
         source_mode: SearchSourceMode::Hybrid,
         strict_source_mode: false,
@@ -17083,6 +17339,7 @@ fn resolve_context_output_options(
     no_rendered_text: Option<bool>,
     no_skipped: Option<bool>,
     no_meta: Option<bool>,
+    include_non_affecting_degradations: Option<bool>,
 ) -> ContextPackOutputOptions {
     ContextPackOutputOptions::for_profile(pack_profile.to_core()).with_overrides(
         ContextPackOutputOptionOverrides {
@@ -17090,6 +17347,7 @@ fn resolve_context_output_options(
             no_rendered_text,
             no_skipped,
             no_meta,
+            include_non_affecting_degradations,
         },
     )
 }
@@ -17115,6 +17373,12 @@ fn parse_search_source_mode_arg(value: &str) -> Result<SearchSourceMode, String>
             "Invalid source mode '{value}'. Expected lexical_only, semantic_only, or hybrid."
         )),
     }
+}
+
+fn parse_rfc3339_arg(value: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
+        .map_err(|error| format!("Expected RFC3339 timestamp, got {value:?}: {error}"))
 }
 
 fn write_context_response<W>(
@@ -17212,6 +17476,20 @@ where
     W: Write,
     E: Write,
 {
+    handle_context_with_alias_notice(cli, args, stdout, stderr, true)
+}
+
+fn handle_context_with_alias_notice<W, E>(
+    cli: &Cli,
+    args: &ContextArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+    include_deprecated_alias: bool,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
     let profile = match parse_context_profile(&args.profile) {
         Ok(profile) => profile,
         Err(message) => {
@@ -17230,7 +17508,10 @@ where
         args.no_rendered_text,
         args.no_skipped,
         args.no_meta,
+        args.include_non_affecting_degradations,
     );
+    let mut filters = crate::models::QueryFilters::default();
+    filters.temporal.as_of = args.as_of;
     let options = ContextPackOptions {
         workspace_path,
         database_path: args.database.clone(),
@@ -17242,8 +17523,12 @@ where
         candidate_pool: Some(args.candidate_pool),
         max_results: None,
         include_tombstoned: args.include_tombstoned,
+        as_of: args.as_of,
+        include_expired: args.include_expired,
+        include_future: args.include_future,
+        include_stale: args.include_stale,
         pagination: None,
-        filters: crate::models::QueryFilters::default(),
+        filters,
         output_options,
     };
 
@@ -17258,17 +17543,43 @@ where
     }
 
     match run_context_pack(&options) {
-        Ok(response) => write_context_response(
-            cli.context_renderer(),
-            cli.format,
-            &response,
-            output::ContextJsonRenderOptions::from(output_options),
-            stdout,
-        ),
+        Ok(mut response) => {
+            if include_deprecated_alias {
+                response
+                    .data
+                    .degraded
+                    .push(deprecated_context_alias_degradation());
+            }
+            write_context_response(
+                cli.context_renderer(),
+                cli.format,
+                &response,
+                output::ContextJsonRenderOptions::from(output_options),
+                stdout,
+            )
+        }
         Err(error) => {
             let domain_error = context_error_to_domain(&error);
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
         }
+    }
+}
+
+fn deprecated_context_alias_degradation() -> ContextResponseDegradation {
+    match ContextResponseDegradation::new(
+        "deprecated_alias",
+        ContextResponseSeverity::Low,
+        "`ee context` is a compatibility alias for the promoted triad command.",
+        Some("Use `ee pack \"<task>\"`.".to_string()),
+    ) {
+        Ok(entry) => entry,
+        Err(_) => ContextResponseDegradation {
+            code: "deprecated_alias".to_string(),
+            severity: ContextResponseSeverity::Low,
+            message: "`ee context` is a compatibility alias for the promoted triad command."
+                .to_string(),
+            repair: Some("Use `ee pack \"<task>\"`.".to_string()),
+        },
     }
 }
 
@@ -18452,10 +18763,6 @@ where
     E: Write,
 {
     if let Some(query) = args.query.as_ref() {
-        if !triad_enabled(cli) {
-            let error = triad_disabled_error("ee pack \"<task>\"");
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-        }
         if args.query_file.is_some() {
             let error = DomainError::Usage {
                 message: "`ee pack <task>` cannot be combined with --query-file.".to_string(),
@@ -18480,9 +18787,14 @@ where
             no_rendered_text: args.no_rendered_text,
             no_skipped: args.no_skipped,
             no_meta: args.no_meta,
+            include_non_affecting_degradations: args.include_non_affecting_degradations,
             include_tombstoned: false,
+            as_of: args.as_of,
+            include_expired: args.include_expired,
+            include_future: args.include_future,
+            include_stale: args.include_stale,
         };
-        return handle_context(cli, &context_args, stdout, stderr);
+        return handle_context_with_alias_notice(cli, &context_args, stdout, stderr, false);
     }
 
     match &args.command {
@@ -18539,6 +18851,7 @@ where
         args.no_rendered_text,
         args.no_skipped,
         args.no_meta,
+        args.include_non_affecting_degradations,
     );
 
     let pagination = if request.pagination.is_empty() {
@@ -18584,18 +18897,27 @@ where
         })
     };
 
+    let mut filters = request.filters;
+    if filters.temporal.as_of.is_none() {
+        filters.temporal.as_of = args.as_of;
+    }
+
     let options = ContextPackOptions {
         workspace_path,
         database_path: args.database.clone(),
         index_dir: args.index_dir.clone(),
         query: request.query,
         speed: args.speed.unwrap_or(request.speed),
-        filters: request.filters,
+        filters,
         profile,
         max_tokens: args.max_tokens.or(request.max_tokens),
         candidate_pool: args.candidate_pool.or(request.candidate_pool),
         max_results: request.max_results,
         include_tombstoned: false,
+        as_of: args.as_of,
+        include_expired: args.include_expired,
+        include_future: args.include_future,
+        include_stale: args.include_stale,
         pagination,
         output_options,
     };
@@ -20364,7 +20686,7 @@ where
             }
         }
         let json = serde_json::json!({
-            "schema": crate::models::ERROR_SCHEMA_V1,
+            "schema": crate::models::ERROR_SCHEMA_V2,
             "error": error_json,
         });
         let _ = stdout.write_all((json.to_string() + "\n").as_bytes());
@@ -20489,7 +20811,11 @@ where
         limit: args.limit,
         speed: args.speed,
         explain: args.explain,
+        as_of: args.as_of,
         include_tombstoned: args.include_tombstoned,
+        include_expired: args.include_expired,
+        include_future: args.include_future,
+        include_stale: args.include_stale,
         relevance_floor: args.relevance_floor,
         source_mode: args.source_mode,
         strict_source_mode: args.strict_source_mode,
@@ -22127,6 +22453,7 @@ fn write_remember_report<W>(
     cli: &Cli,
     result: &RememberMemoryReport,
     stdout: &mut W,
+    include_deprecated_alias: bool,
 ) -> ProcessExitCode
 where
     W: Write,
@@ -22139,29 +22466,40 @@ where
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(stdout, &(result.json_output() + "\n")),
+        | output::Renderer::Hook => {
+            let json = if include_deprecated_alias {
+                remember_json_with_deprecated_alias(result.json_output())
+            } else {
+                result.json_output()
+            };
+            write_stdout(stdout, &(json + "\n"))
+        }
     }
 }
 
-fn triad_enabled(cli: &Cli) -> bool {
-    cli.experimental_triad
-        || read(EnvVar::ExperimentalTriad).is_some_and(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-        })
+fn remember_json_with_deprecated_alias(json: String) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&json) else {
+        return json;
+    };
+    let Some(degraded) = value
+        .get_mut("data")
+        .and_then(|data| data.get_mut("degraded"))
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return json;
+    };
+    degraded.push(serde_json::json!({
+        "code": "deprecated_alias",
+        "severity": "low",
+        "message": "`ee remember` is a compatibility alias for the promoted triad command.",
+        "repair": "Use `ee note \"<text>\"` when inference is acceptable; keep `ee remember` for explicit level/kind capture."
+    }));
+    value.to_string()
 }
 
-fn triad_disabled_error(command: &str) -> DomainError {
-    DomainError::Usage {
-        message: format!("{command} is an experimental agent-triad alias."),
-        repair: Some(
-            "Pass --experimental-triad or set EE_EXPERIMENTAL_TRIAD=1 to enable the triad spike."
-                .to_string(),
-        ),
-    }
-}
-
-fn infer_note_level_kind(content: &str) -> (&'static str, &'static str) {
+/// Rule-based level/kind inference used by the `ee note` wrapper.
+#[must_use]
+pub fn infer_note_level_kind(content: &str) -> (&'static str, &'static str) {
     let lower = content.to_ascii_lowercase();
     let words = lower.split_whitespace().collect::<Vec<_>>();
     let starts_with_rule_verb = words.first().is_some_and(|word| {
@@ -22250,14 +22588,9 @@ where
     W: Write,
     E: Write,
 {
-    if !triad_enabled(cli) {
-        let error = triad_disabled_error("ee note \"<text>\"");
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-    }
-
     let remember_args = note_to_remember_args(args);
     match handle_remember(cli, &remember_args) {
-        Ok(result) => write_remember_report(cli, &result, stdout),
+        Ok(result) => write_remember_report(cli, &result, stdout, false),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
@@ -29258,7 +29591,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!(crate::models::ERROR_SCHEMA_V1),
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
             "required-source error schema",
         )?;
         ensure_equal(
@@ -30801,7 +31134,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.error.v1"),
+            &serde_json::json!("ee.error.v2"),
             "error schema",
         )?;
         ensure_equal(
@@ -31249,7 +31582,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.error.v1"),
+            &serde_json::json!("ee.error.v2"),
             "error schema",
         )?;
         ensure_equal(
@@ -31680,7 +32013,7 @@ mod tests {
             .map_err(|error| format!("require-sources stdout must parse as JSON: {error}"))?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.error.v1"),
+            &serde_json::json!("ee.error.v2"),
             "require-sources error schema",
         )?;
         ensure_equal(
@@ -31721,12 +32054,12 @@ mod tests {
             .map_err(|error| format!("learn experiment propose stdout must be JSON: {error}"))?;
         ensure_equal(
             &json["schema"],
-            &serde_json::json!("ee.error.v1"),
+            &serde_json::json!("ee.error.v2"),
             "error schema",
         )?;
         ensure(
             json.get("success").is_none(),
-            "ee.error.v1 must not include response success flag",
+            "ee.error.v2 must not include response success flag",
         )?;
         ensure(
             json["error"]["code"].as_str().is_some(),
@@ -31778,7 +32111,7 @@ mod tests {
             .map_err(|error| format!("learn experiment run stdout must be JSON: {error}"))?;
         ensure_equal(
             &json["schema"],
-            &serde_json::json!("ee.error.v1"),
+            &serde_json::json!("ee.error.v2"),
             "error schema",
         )?;
         ensure_equal(
@@ -31813,7 +32146,7 @@ mod tests {
             .map_err(|error| format!("learn experiment run error stdout must be JSON: {error}"))?;
         ensure_equal(
             &json["schema"],
-            &serde_json::json!("ee.error.v1"),
+            &serde_json::json!("ee.error.v2"),
             "error schema",
         )?;
         ensure_equal(
@@ -31885,6 +32218,24 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Success, "help exit")?;
         ensure_contains(&stdout, "Usage:", "help usage line")?;
         ensure_contains(&stdout, "status", "help status subcommand")?;
+        ensure_contains(&stdout, "  note ", "help promotes note")?;
+        ensure_contains(&stdout, "  pack ", "help promotes pack")?;
+        ensure_contains(&stdout, "  why ", "help promotes why")?;
+        let note_pos = stdout
+            .find("  note ")
+            .ok_or_else(|| "help note position missing".to_string())?;
+        let pack_pos = stdout
+            .find("  pack ")
+            .ok_or_else(|| "help pack position missing".to_string())?;
+        let why_pos = stdout
+            .find("  why ")
+            .ok_or_else(|| "help why position missing".to_string())?;
+        let search_pos = stdout
+            .find("  search ")
+            .ok_or_else(|| "help search position missing".to_string())?;
+        ensure(note_pos < search_pos, "help lists note before search")?;
+        ensure(pack_pos < search_pos, "help lists pack before search")?;
+        ensure(why_pos < search_pos, "help lists why before search")?;
         ensure(stderr.is_empty(), "help stderr must be empty")
     }
 
@@ -31928,7 +32279,7 @@ mod tests {
     fn unknown_command_with_json_flag_writes_json_error_to_stdout() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "--json", "unknown"]);
         ensure_equal(&exit, &ProcessExitCode::Usage, "json unknown exit")?;
-        ensure_starts_with(&stdout, "{\"schema\":\"ee.error.v1\"", "json error schema")?;
+        ensure_starts_with(&stdout, "{\"schema\":\"ee.error.v2\"", "json error schema")?;
         ensure_contains(&stdout, "\"code\":\"usage\"", "json error code")?;
         ensure(stderr.is_empty(), "json error stderr must be empty")
     }
@@ -31937,7 +32288,7 @@ mod tests {
     fn unknown_command_with_robot_flag_writes_json_error_to_stdout() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "--robot", "unknown"]);
         ensure_equal(&exit, &ProcessExitCode::Usage, "robot unknown exit")?;
-        ensure_starts_with(&stdout, "{\"schema\":\"ee.error.v1\"", "robot error schema")?;
+        ensure_starts_with(&stdout, "{\"schema\":\"ee.error.v2\"", "robot error schema")?;
         ensure_contains(&stdout, "\"code\":\"usage\"", "robot error code")?;
         ensure(stderr.is_empty(), "robot error stderr must be empty")
     }
@@ -31948,7 +32299,7 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Usage, "format json unknown exit")?;
         ensure_starts_with(
             &stdout,
-            "{\"schema\":\"ee.error.v1\"",
+            "{\"schema\":\"ee.error.v2\"",
             "format json error schema",
         )?;
         ensure_contains(&stdout, "\"code\":\"usage\"", "format json error code")?;
@@ -31959,7 +32310,7 @@ mod tests {
     fn unknown_argument_after_global_flag_reports_actual_argument() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "--json", "status", "--definitely-bad"]);
         ensure_equal(&exit, &ProcessExitCode::Usage, "unknown argument exit")?;
-        ensure_contains(&stdout, "ee.error.v1", "error schema")?;
+        ensure_contains(&stdout, "ee.error.v2", "error schema")?;
         ensure_contains(
             &stdout,
             "--definitely-bad",
@@ -32024,7 +32375,7 @@ mod tests {
     #[test]
     fn parser_accepts_fields_flag() -> TestResult {
         let parsed = Cli::try_parse_from(["ee", "--fields", "minimal", "status"])
-            .map(|cli| cli.fields)
+            .map(|cli| cli.fields_level())
             .map_err(|error| format!("failed to parse fields flag: {:?}", error.kind()))?;
         ensure_equal(&parsed, &FieldsLevel::Minimal, "fields minimal")
     }
@@ -32038,11 +32389,25 @@ mod tests {
             ("full", FieldsLevel::Full),
         ] {
             let parsed = Cli::try_parse_from(["ee", "--fields", arg, "status"])
-                .map(|cli| cli.fields)
+                .map(|cli| cli.fields_level())
                 .map_err(|error| format!("failed to parse --fields {arg}: {:?}", error.kind()))?;
             ensure_equal(&parsed, &expected, &format!("fields {arg}"))?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn parser_accepts_explicit_field_list() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "--fields", "command,version", "status"])
+            .map(|cli| cli.fields_level())
+            .map_err(|error| {
+                format!("failed to parse explicit --fields list: {:?}", error.kind())
+            })?;
+        ensure_equal(
+            &parsed,
+            &FieldsLevel::Full,
+            "explicit fields render from full",
+        )
     }
 
     #[test]
@@ -32173,6 +32538,86 @@ mod tests {
         )
     }
 
+    #[test]
+    fn fields_explicit_list_filters_data_payload() -> TestResult {
+        let (exit, stdout, stderr) =
+            invoke(&["ee", "--fields", "command,version", "--json", "status"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "explicit fields exit")?;
+        ensure(stderr.is_empty(), "stderr empty")?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("explicit fields JSON parses: {error}"))?;
+        let data = value
+            .get("data")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| "explicit fields response has data object".to_string())?;
+        let keys = data.keys().cloned().collect::<Vec<_>>();
+        ensure_equal(
+            &keys,
+            &vec!["command".to_string(), "version".to_string()],
+            "explicit data keys",
+        )?;
+        ensure_equal(
+            &value.get("fields").and_then(serde_json::Value::as_str),
+            &Some("command,version"),
+            "fields indicator",
+        )
+    }
+
+    #[test]
+    fn fields_unknown_name_returns_structured_error() -> TestResult {
+        let (exit, stdout, stderr) =
+            invoke(&["ee", "--fields", "missingField", "--json", "status"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "unknown field exit")?;
+        ensure(stderr.is_empty(), "stderr empty")?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("unknown field error JSON parses: {error}"))?;
+        ensure_equal(
+            &value
+                .pointer("/error/code")
+                .and_then(serde_json::Value::as_str),
+            &Some("usage_unknown_field"),
+            "usage code",
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/error/details/rejectedField")
+                .and_then(serde_json::Value::as_str),
+            &Some("missingField"),
+            "rejected field",
+        )?;
+        ensure(
+            value
+                .pointer("/error/details/acceptedFields")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|fields| !fields.is_empty()),
+            "accepted fields present",
+        )
+    }
+
+    #[test]
+    fn fields_conflicting_presets_return_structured_error() -> TestResult {
+        let (exit, stdout, stderr) =
+            invoke(&["ee", "--fields", "minimal,summary", "--json", "status"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "conflicting presets exit")?;
+        ensure(stderr.is_empty(), "stderr empty")?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("conflicting presets JSON parses: {error}"))?;
+        ensure_equal(
+            &value
+                .pointer("/error/code")
+                .and_then(serde_json::Value::as_str),
+            &Some("usage_conflicting_presets"),
+            "usage code",
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/error/details/conflictingPresets/0")
+                .and_then(serde_json::Value::as_str),
+            &Some("summary"),
+            "conflicting preset detail",
+        )
+    }
+
     // ========================================================================
     // Stream Isolation Tests (EE-019)
     //
@@ -32222,7 +32667,7 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Usage, "json error exit")?;
         ensure_starts_with(
             &stdout,
-            "{\"schema\":\"ee.error.v1\"",
+            "{\"schema\":\"ee.error.v2\"",
             "json error envelope",
         )?;
         let json: serde_json::Value =
@@ -32248,7 +32693,7 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Usage, "robot error exit")?;
         ensure_starts_with(
             &stdout,
-            "{\"schema\":\"ee.error.v1\"",
+            "{\"schema\":\"ee.error.v2\"",
             "robot error envelope",
         )?;
         ensure(stderr.is_empty(), "robot error stderr must be empty")
@@ -32260,7 +32705,7 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Usage, "format json error exit")?;
         ensure_starts_with(
             &stdout,
-            "{\"schema\":\"ee.error.v1\"",
+            "{\"schema\":\"ee.error.v2\"",
             "format json error env",
         )?;
         ensure(stderr.is_empty(), "format json error stderr must be empty")
@@ -32290,7 +32735,7 @@ mod tests {
         //
         // stdout receives:
         // - JSON responses (ee.response.v1 envelope) in machine mode
-        // - JSON errors (ee.error.v1 envelope) when --json/--robot/--format=json is set
+        // - JSON errors (ee.error.v2 envelope) when --json/--robot/--format=json is set
         // - Human-readable output (help, status, version) in human mode
         //
         // stderr receives:
@@ -33345,7 +33790,7 @@ mod tests {
         ]);
 
         ensure_equal(&exit, &ProcessExitCode::Import, "legacy dry-run exit")?;
-        ensure_starts_with(&stdout, "{\"schema\":\"ee.error.v1\"", "error schema")?;
+        ensure_starts_with(&stdout, "{\"schema\":\"ee.error.v2\"", "error schema")?;
         ensure_contains(&stdout, "\"code\":\"import\"", "import error code")?;
         ensure_contains(&stdout, "--dry-run", "dry-run repair hint")?;
         ensure(stderr.is_empty(), "legacy dry-run stderr empty")
@@ -33839,7 +34284,64 @@ mod tests {
     }
 
     #[test]
-    fn experimental_triad_pack_parses_task_query() -> TestResult {
+    fn triad_pack_parses_task_query_without_compat_flag() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "--json",
+            "pack",
+            "prepare release",
+            "--max-tokens",
+            "3000",
+            "--profile",
+            "compact",
+        ])
+        .map_err(|error| format!("failed to parse triad pack: {:?}", error.kind()))?;
+
+        ensure_equal(&parsed.experimental_triad, &false, "compat flag default")?;
+        match parsed.command {
+            Some(Command::Pack(ref args)) => {
+                ensure_equal(
+                    &args.query,
+                    &Some("prepare release".to_string()),
+                    "triad pack query",
+                )?;
+                ensure_equal(&args.max_tokens, &Some(3000), "triad max tokens")?;
+                ensure_equal(&args.profile, &Some("compact".to_string()), "triad profile")
+            }
+            _ => Err("expected Pack command".to_string()),
+        }
+    }
+
+    #[test]
+    fn triad_pack_parses_validity_window_flags() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "pack",
+            "prepare release",
+            "--as-of",
+            "2026-05-13T00:00:00Z",
+            "--include-expired",
+            "--include-future",
+            "--include-stale",
+        ])
+        .map_err(|error| format!("failed to parse triad pack validity: {:?}", error.kind()))?;
+
+        let expected_as_of = chrono::DateTime::parse_from_rfc3339("2026-05-13T00:00:00Z")
+            .expect("test timestamp")
+            .with_timezone(&chrono::Utc);
+        match parsed.command {
+            Some(Command::Pack(ref args)) => {
+                ensure_equal(&args.as_of, &Some(expected_as_of), "pack as_of")?;
+                ensure_equal(&args.include_expired, &true, "pack include expired")?;
+                ensure_equal(&args.include_future, &true, "pack include future")?;
+                ensure_equal(&args.include_stale, &true, "pack include stale")
+            }
+            _ => Err("expected Pack command".to_string()),
+        }
+    }
+
+    #[test]
+    fn experimental_triad_flag_is_noop_compatibility_flag() -> TestResult {
         let parsed = Cli::try_parse_from([
             "ee",
             "--experimental-triad",
@@ -33865,6 +34367,39 @@ mod tests {
                 ensure_equal(&args.profile, &Some("compact".to_string()), "triad profile")
             }
             _ => Err("expected Pack command".to_string()),
+        }
+    }
+
+    #[test]
+    fn triad_note_infers_rule_without_compat_flag() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "note",
+            "Always run cargo fmt before release.",
+            "--tags",
+            "release,format",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse triad note: {:?}", error.kind()))?;
+
+        ensure_equal(&parsed.experimental_triad, &false, "compat flag default")?;
+        match parsed.command {
+            Some(Command::Note(ref args)) => {
+                let remember_args = super::note_to_remember_args(args);
+                ensure_equal(
+                    &remember_args.level,
+                    &"procedural".to_string(),
+                    "inferred level",
+                )?;
+                ensure_equal(&remember_args.kind, &"rule".to_string(), "inferred kind")?;
+                ensure_equal(
+                    &remember_args.tags,
+                    &Some("release,format".to_string()),
+                    "tags",
+                )?;
+                ensure_equal(&remember_args.dry_run, &true, "dry_run")
+            }
+            _ => Err("expected Note command".to_string()),
         }
     }
 
@@ -33905,6 +34440,42 @@ mod tests {
             }
             _ => Err("expected Note command".to_string()),
         }
+    }
+
+    #[test]
+    fn remember_json_with_deprecated_alias_appends_degradation() -> TestResult {
+        let enriched = super::remember_json_with_deprecated_alias(
+            r#"{"schema":"ee.response.v1","success":true,"data":{"degraded":[]}}"#.to_string(),
+        );
+        let value: serde_json::Value = serde_json::from_str(&enriched)
+            .map_err(|error| format!("remember alias json parses: {error}"))?;
+
+        let code = value
+            .pointer("/data/degraded/0/code")
+            .and_then(serde_json::Value::as_str);
+        let severity = value
+            .pointer("/data/degraded/0/severity")
+            .and_then(serde_json::Value::as_str);
+        let repair = value
+            .pointer("/data/degraded/0/repair")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        ensure_equal(&code, &Some("deprecated_alias"), "remember alias code")?;
+        ensure_equal(&severity, &Some("low"), "remember alias severity")?;
+        ensure_contains(repair, "ee note", "remember alias repair")
+    }
+
+    #[test]
+    fn context_deprecated_alias_points_to_pack() -> TestResult {
+        let entry = super::deprecated_context_alias_degradation();
+        ensure_equal(
+            &entry.code.as_str(),
+            &"deprecated_alias",
+            "context alias code",
+        )?;
+        ensure_contains(&entry.message, "ee context", "context alias message")?;
+        let repair = entry.repair.as_deref().unwrap_or_default();
+        ensure_contains(repair, "ee pack", "context alias repair")
     }
 
     #[test]
@@ -34227,7 +34798,7 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Usage, "pack missing file exit")?;
         ensure_starts_with(
             &stdout,
-            "{\"schema\":\"ee.error.v1\"",
+            "{\"schema\":\"ee.error.v2\"",
             "pack missing file error schema",
         )?;
         ensure_contains(
@@ -34265,7 +34836,7 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Storage, "context json exit")?;
         ensure_starts_with(
             &stdout,
-            "{\"schema\":\"ee.error.v1\"",
+            "{\"schema\":\"ee.error.v2\"",
             "context json schema",
         )?;
         ensure_contains(&stdout, "\"code\":\"storage\"", "context storage code")?;
@@ -34289,7 +34860,7 @@ mod tests {
         )?;
         ensure_starts_with(
             &stdout,
-            "{\"schema\":\"ee.error.v1\"",
+            "{\"schema\":\"ee.error.v2\"",
             "context invalid profile schema",
         )?;
         ensure_contains(&stdout, "\"code\":\"usage\"", "context usage code")?;
@@ -34412,6 +34983,34 @@ mod tests {
     }
 
     #[test]
+    fn search_command_accepts_validity_window_flags() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "search",
+            "test",
+            "--as-of",
+            "2026-05-13T00:00:00Z",
+            "--include-expired",
+            "--include-future",
+            "--include-stale",
+        ])
+        .map_err(|e| format!("failed to parse search validity flags: {:?}", e.kind()))?;
+
+        let expected_as_of = chrono::DateTime::parse_from_rfc3339("2026-05-13T00:00:00Z")
+            .expect("test timestamp")
+            .with_timezone(&chrono::Utc);
+        match parsed.command {
+            Some(Command::Search(ref args)) => {
+                ensure_equal(&args.as_of, &Some(expected_as_of), "search as_of")?;
+                ensure_equal(&args.include_expired, &true, "search include expired")?;
+                ensure_equal(&args.include_future, &true, "search include future")?;
+                ensure_equal(&args.include_stale, &true, "search include stale")
+            }
+            _ => Err("expected Search command".to_string()),
+        }
+    }
+
+    #[test]
     fn context_command_accepts_include_tombstoned() -> TestResult {
         let parsed = Cli::try_parse_from(["ee", "context", "test", "--include-tombstoned"])
             .map_err(|e| format!("failed to parse context with tombstones: {:?}", e.kind()))?;
@@ -34419,6 +35018,34 @@ mod tests {
         match parsed.command {
             Some(Command::Context(ref args)) => {
                 ensure_equal(&args.include_tombstoned, &true, "include tombstoned")
+            }
+            _ => Err("expected Context command".to_string()),
+        }
+    }
+
+    #[test]
+    fn context_command_accepts_validity_window_flags() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "context",
+            "test",
+            "--as-of",
+            "2026-05-13T00:00:00Z",
+            "--include-expired",
+            "--include-future",
+            "--include-stale",
+        ])
+        .map_err(|e| format!("failed to parse context validity flags: {:?}", e.kind()))?;
+
+        let expected_as_of = chrono::DateTime::parse_from_rfc3339("2026-05-13T00:00:00Z")
+            .expect("test timestamp")
+            .with_timezone(&chrono::Utc);
+        match parsed.command {
+            Some(Command::Context(ref args)) => {
+                ensure_equal(&args.as_of, &Some(expected_as_of), "context as_of")?;
+                ensure_equal(&args.include_expired, &true, "context include expired")?;
+                ensure_equal(&args.include_future, &true, "context include future")?;
+                ensure_equal(&args.include_stale, &true, "context include stale")
             }
             _ => Err("expected Context command".to_string()),
         }
@@ -34503,7 +35130,7 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::SearchIndex, "contention exit")?;
         ensure_contains(
             &stdout,
-            "\"schema\":\"ee.error.v1\"",
+            "\"schema\":\"ee.error.v2\"",
             "contention error schema",
         )?;
         ensure_contains(
@@ -34539,7 +35166,7 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::SearchIndex, "search error exit")?;
         ensure_starts_with(
             &stdout,
-            "{\"schema\":\"ee.error.v1\"",
+            "{\"schema\":\"ee.error.v2\"",
             "search error schema",
         )?;
         ensure_contains(&stdout, "\"code\":\"search_index\"", "search error code")?;
@@ -34836,7 +35463,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.error.v1"),
+            &serde_json::json!("ee.error.v2"),
             "error schema",
         )?;
         ensure_equal(
@@ -35964,7 +36591,7 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Usage, "invalid topic exit")?;
         ensure_starts_with(
             &stdout,
-            "{\"schema\":\"ee.error.v1\"",
+            "{\"schema\":\"ee.error.v2\"",
             "invalid topic error schema",
         )?;
         ensure_contains(&stdout, "Unknown topic", "invalid topic message")?;
@@ -36254,7 +36881,7 @@ mod tests {
     fn unknown_command_json_includes_did_you_mean() -> TestResult {
         let (exit, stdout, _stderr) = invoke(&["ee", "statis", "--json"]);
         ensure_equal(&exit, &ProcessExitCode::Usage, "unknown command exit")?;
-        ensure_contains(&stdout, "ee.error.v1", "error schema")?;
+        ensure_contains(&stdout, "ee.error.v2", "error schema")?;
         ensure_contains(&stdout, "did you mean", "did_you_mean hint in message")
     }
 
@@ -36262,7 +36889,7 @@ mod tests {
     fn unknown_expanded_nested_subcommand_json_includes_did_you_mean() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "backup", "restor", "--json"]);
         ensure_equal(&exit, &ProcessExitCode::Usage, "backup typo exit")?;
-        ensure_contains(&stdout, "ee.error.v1", "error schema")?;
+        ensure_contains(&stdout, "ee.error.v2", "error schema")?;
         ensure_contains(&stdout, "did you mean `restore`", "backup restore hint")?;
         ensure(stderr.is_empty(), "json error stderr must be empty")
     }
@@ -36271,7 +36898,7 @@ mod tests {
     fn unknown_second_level_subcommand_json_includes_did_you_mean() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "learn", "experiment", "rn", "--json"]);
         ensure_equal(&exit, &ProcessExitCode::Usage, "learn experiment typo exit")?;
-        ensure_contains(&stdout, "ee.error.v1", "error schema")?;
+        ensure_contains(&stdout, "ee.error.v2", "error schema")?;
         ensure_contains(&stdout, "did you mean `run`", "learn experiment run hint")?;
         ensure(stderr.is_empty(), "json error stderr must be empty")
     }
