@@ -144,26 +144,14 @@ fn two_creates_same_workspace_have_different_legacy_content_hashes() -> TestResu
 }
 
 #[test]
-#[ignore = "Documents real finding: the v1 capsule body uses templated section content (objective/next_actions/decisions placeholders) and does not actually reflect the underlying memory set. Adding a new memory leaves the canonical hash unchanged. Tracked as follow-up bead bd-m3-capsule-state-reflection; un-ignore when the capsule body learns to reflect the memory state and the canonical hash becomes a real state fingerprint."]
 fn canonical_hash_changes_when_workspace_state_changes() -> TestResult {
-    // FINDING (2026-05-13, M3 contract development):
-    //
-    // M3's contract is "same workspace state → same canonical hash". The
-    // converse — "different workspace state → different canonical hash" —
-    // would make canonical_content_hash a true workspace-state
-    // fingerprint, useful for cache validation and round-trip
-    // verification across export/import cycles.
-    //
-    // Today the v1 capsule body doesn't enumerate the memory set; it
-    // synthesizes Resume-profile sections (workspace identity,
-    // objective placeholder, next-actions placeholder, decisions
-    // placeholder, swarm brief if any) that don't change as new
-    // memories land. Adding a memory therefore leaves the canonical
-    // hash unchanged.
-    //
-    // The fix is in the capsule producer (include a deterministic
-    // workspace_state_hash or memory-set summary in the capsule body),
-    // not in the M3 hashing logic — left as a follow-up bead.
+    // bd-1xkxi (M3 follow-up): the capsule body now embeds a
+    // deterministic workspace_state_hash computed from the memory set
+    // (BLAKE3 over the sorted level/kind/content/tags projection).
+    // Adding a memory perturbs that hash, which in turn perturbs the
+    // canonical_content_hash. The capsule's canonical hash is now a
+    // true workspace-state fingerprint, useful for cache validation
+    // and round-trip verification across export/import cycles.
     let (_dir, workspace) = build_workspace_with_seeds()?;
     let before = create_capsule(&workspace, "before")?;
 

@@ -1527,11 +1527,22 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
     // SoftSamePath / SoftSameRepo / Hard) against its bound workspace.
     let workspace_identity = compute_workspace_identity_for_capsule(&options.workspace);
 
+    // Bead bd-1xkxi (M3 follow-up): embed a deterministic
+    // workspace_state_hash so the canonical_content_hash actually
+    // reflects the underlying memory set. Without this, adding a new
+    // memory wouldn't change the capsule hash because the v1 capsule
+    // body uses templated section placeholders. The hash is computed
+    // from the DB file at <workspace>/.ee/ee.db when present;
+    // otherwise None (preview-on-empty-workspace path).
+    let db_path = options.workspace.join(".ee").join("ee.db");
+    let workspace_state_hash = compute_workspace_state_hash(&db_path);
+
     let capsule_content = serde_json::json!({
         "schema": HANDOFF_CAPSULE_SCHEMA_V1,
         "capsule_id": capsule_id,
         "workspace": options.workspace,
         "workspace_identity": workspace_identity,
+        "workspace_state_hash": workspace_state_hash,
         "profile": options.profile.as_str(),
         "sections": sections,
         "active_focus": active_focus,
@@ -1965,6 +1976,43 @@ pub fn compute_workspace_identity_for_capsule(workspace: &Path) -> WorkspaceIden
         scope_kind: scope.kind.as_str().to_owned(),
         repository_fingerprint: scope.repository_fingerprint.clone(),
     }
+}
+
+/// Compute a deterministic workspace_state_hash over the memory set in
+/// `database_path` (bead bd-1xkxi, M3 follow-up). Hash is BLAKE3 over
+/// the sorted canonical projection of every non-tombstoned memory in
+/// every workspace — `level;kind;content;sorted_tags` per row. Same
+/// projection scheme L2 uses for backup round-trip determinism, so a
+/// capsule embedding this hash and an L2 backup of the same workspace
+/// will land on the same fingerprint.
+///
+/// Returns `None` when the DB can't be opened (e.g. the workspace
+/// hasn't been initialized yet) — capsule producers fall back to
+/// embedding only the identity fingerprint in that case.
+#[must_use]
+pub fn compute_workspace_state_hash(database_path: &Path) -> Option<String> {
+    let conn = crate::db::DbConnection::open_file(database_path).ok()?;
+    let workspaces = conn.list_workspaces().ok()?;
+    let mut projections: Vec<String> = Vec::new();
+    for workspace in &workspaces {
+        let memories = conn.list_memories(&workspace.id, None, false).ok()?;
+        for memory in memories {
+            let tags = conn.get_memory_tags(&memory.id).unwrap_or_default();
+            let mut tags_sorted: Vec<String> = tags;
+            tags_sorted.sort();
+            projections.push(format!(
+                "level={};kind={};content={};tags={}",
+                memory.level,
+                memory.kind,
+                memory.content,
+                tags_sorted.join(",")
+            ));
+        }
+    }
+    projections.sort();
+    let joined = projections.join("\n");
+    let digest = blake3::hash(joined.as_bytes()).to_hex();
+    Some(format!("blake3:{}", &digest.as_str()[..16]))
 }
 
 /// Resolve a [`WorkspaceIdentity`] for a path that the resume-side
