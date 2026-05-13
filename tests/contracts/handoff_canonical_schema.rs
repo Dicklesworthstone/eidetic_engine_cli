@@ -95,6 +95,8 @@ fn produce_capsule(workspace: &std::path::Path) -> Result<Value, String> {
         since: None,
         dry_run: false,
         task_frame_id: None,
+        bind_to_machine: false,
+        machine_salt_path: None,
     })
     .map_err(|error| format!("create_handoff: {error:?}"))?;
 

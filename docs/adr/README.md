@@ -34,6 +34,7 @@ including rejected alternatives and verification hooks.
 - [ADR 0026: Pack Quality Sentinel](0026-pack-quality-sentinel.md)
 - [ADR 0027: Read-Only Swarm Coordination Brief](0027-read-only-swarm-coordination-brief.md)
 - [ADR 0028: Counterfactual Lab And Immutable Revisions](0028-counterfactual-lab-and-immutable-revisions.md)
+- [ADR 0029: Handoff Capsule HMAC Keying](0029-handoff-capsule-hmac.md)
 - [ADR 0030: Typed Determinism Capability Token](0030-typed-determinism-capability-token.md)
 - [ADR 0031: Submodular Pack Assembly — Audit, Don't Certify](0031-submodular-pack-or-rename.md)
 - [ADR 0032: Bayesian (alpha, beta) Posteriors on Memories](0032-bayesian-memory-posteriors.md)

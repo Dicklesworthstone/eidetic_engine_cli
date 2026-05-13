@@ -95,6 +95,8 @@ fn build_capsule() -> Result<CapsuleFixture, String> {
         since: None,
         dry_run: false,
         task_frame_id: None,
+        bind_to_machine: false,
+        machine_salt_path: None,
     })
     .map_err(|error| format!("create_handoff: {error:?}"))?;
 
@@ -120,6 +122,8 @@ fn run_resume(
         bound_workspace_identity: None,
         include_prompt_fragment,
         require_fresh: false,
+        insecure_skip_hmac: false,
+        machine_salt_path: None,
     })
     .map_err(|error| format!("resume_handoff: {error:?}"))
 }

@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "handoff_hmac_missing",
+  "introduced_by": {
+    "bead": "bd-17c65.13.6",
+    "epic_letter": "M"
+  },
+  "surfaces": [
+    "handoff resume"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A legacy or manually edited handoff capsule has no top-level integrity block, so resume fails closed unless the caller explicitly opts into the insecure audited bypass.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee handoff create --workspace . --out capsule.json --json",
+      "python3 - <<'PY'\nimport json\np='capsule.json'\nd=json.load(open(p))\nd.pop('integrity', None)\nopen(p,'w').write(json.dumps(d, indent=2))\nPY"
+    ],
+    "invocation": "ee handoff resume capsule.json --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "handoff_hmac_missing",
+    "severity": "high",
+    "message_contains": [
+      "unsigned",
+      "cannot be trusted"
+    ],
+    "repair_contains": "--insecure-skip-hmac",
+    "repair_string": "Recreate the capsule with this ee version, or pass --insecure-skip-hmac for audited emergency recovery."
+  }
+}

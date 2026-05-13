@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "handoff_hmac_skipped",
+  "introduced_by": {
+    "bead": "bd-17c65.13.6",
+    "epic_letter": "M"
+  },
+  "surfaces": [
+    "handoff resume"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "The caller passes --insecure-skip-hmac, so resume loads an unsigned or tampered capsule but marks the response as high-severity degraded and records an audit row when the workspace DB is available.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee handoff create --workspace . --out capsule.json --json",
+      "python3 - <<'PY'\nimport json\np='capsule.json'\nd=json.load(open(p))\nd['sections'][0]['content']='tampered content'\nopen(p,'w').write(json.dumps(d, indent=2))\nPY"
+    ],
+    "invocation": "ee handoff resume capsule.json --workspace . --insecure-skip-hmac --json"
+  },
+  "expected_emission": {
+    "code": "handoff_hmac_skipped",
+    "severity": "high",
+    "message_contains": [
+      "explicitly skipped",
+      "may be tampered"
+    ],
+    "repair_contains": "Recreate the capsule",
+    "repair_string": "Recreate the capsule without --insecure-skip-hmac before trusting it."
+  }
+}

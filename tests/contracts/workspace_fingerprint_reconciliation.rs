@@ -214,6 +214,8 @@ fn build_capsule_with_identity() -> Result<(TempDir, PathBuf, PathBuf), String> 
         since: None,
         dry_run: false,
         task_frame_id: None,
+        bind_to_machine: false,
+        machine_salt_path: None,
     })
     .map_err(|error| format!("create_handoff: {error:?}"))?;
 
@@ -266,6 +268,8 @@ fn resume_populates_workspace_match_when_structured_identity_is_bound() -> TestR
         bound_workspace_identity: Some(bound_same),
         include_prompt_fragment: false,
         require_fresh: false,
+        insecure_skip_hmac: false,
+        machine_salt_path: None,
     })
     .map_err(|error| format!("resume_handoff(exact): {error:?}"))?;
     if !matches!(report_same.workspace_match, Some(WorkspaceMatch::Exact)) {
@@ -297,6 +301,8 @@ fn resume_populates_workspace_match_when_structured_identity_is_bound() -> TestR
         bound_workspace_identity: Some(bound_other),
         include_prompt_fragment: true,
         require_fresh: false,
+        insecure_skip_hmac: false,
+        machine_salt_path: None,
     })
     .map_err(|error| format!("resume_handoff(hard): {error:?}"))?;
     if !matches!(report_hard.workspace_match, Some(WorkspaceMatch::Hard)) {

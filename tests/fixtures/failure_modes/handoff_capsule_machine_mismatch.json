@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "handoff_capsule_machine_mismatch",
+  "introduced_by": {
+    "bead": "bd-17c65.13.6",
+    "epic_letter": "M"
+  },
+  "surfaces": [
+    "handoff resume"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A machine-bound handoff capsule is resumed from a workspace or machine that cannot derive the original HMAC key context.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee handoff create --workspace . --out capsule.json --bind-to-machine --json"
+    ],
+    "invocation": "ee handoff resume capsule.json --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "handoff_capsule_machine_mismatch",
+    "severity": "high",
+    "message_contains": [
+      "key context",
+      "workspace or machine"
+    ],
+    "repair_contains": "Resume on the original workspace/machine",
+    "repair_string": "Resume on the original workspace/machine, or recreate the capsule here."
+  }
+}

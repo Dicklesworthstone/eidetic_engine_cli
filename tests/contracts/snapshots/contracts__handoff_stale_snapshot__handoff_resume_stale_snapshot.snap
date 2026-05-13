@@ -1,0 +1,19 @@
+---
+source: tests/contracts/handoff_stale_snapshot.rs
+expression: normalized
+---
+{
+  "computed_at": "TIMESTAMP",
+  "captured_state_hash": "HASH_CAPTURED",
+  "current_state_hash": "HASH_CURRENT",
+  "drift_detected": true,
+  "memories_added_since": 1,
+  "memories_expired_since": 0,
+  "memories_revised_since": 0,
+  "content_drift_score": 0.5,
+  "repair_hints": [
+    "Add new evidence: ee context --extend-capsule <capsule>",
+    "Refresh: ee handoff create --refresh <capsule>",
+    "Significant drift; consider rebuilding: ee handoff create --workspace ."
+  ]
+}

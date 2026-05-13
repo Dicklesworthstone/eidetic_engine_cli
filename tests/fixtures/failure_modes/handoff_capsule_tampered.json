@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "handoff_capsule_tampered",
+  "introduced_by": {
+    "bead": "bd-17c65.13.6",
+    "epic_letter": "M"
+  },
+  "surfaces": [
+    "handoff resume"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A handoff capsule's signed JSON body is edited after creation, causing the body hash or HMAC verification to fail before resume exposes prompt content.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee handoff create --workspace . --out capsule.json --json",
+      "python3 - <<'PY'\nimport json\np='capsule.json'\nd=json.load(open(p))\nd['sections'][0]['content']='tampered content'\nopen(p,'w').write(json.dumps(d, indent=2))\nPY"
+    ],
+    "invocation": "ee handoff resume capsule.json --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "handoff_capsule_tampered",
+    "severity": "high",
+    "message_contains": [
+      "Handoff capsule",
+      "verification failed"
+    ],
+    "repair_contains": "Discard the capsule",
+    "repair_string": "Discard the capsule and recreate it from the source workspace."
+  }
+}

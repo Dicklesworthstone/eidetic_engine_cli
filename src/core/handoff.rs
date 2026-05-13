@@ -11,10 +11,18 @@
 //! - **inspect**: Validate an existing capsule
 //! - **resume**: Render next-agent payload from a capsule
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use chrono::{DateTime, Utc};
+use ring::hmac;
+use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::core::focus::{focus_state_hash, read_active_focus_state};
 use crate::core::swarm_brief::{
@@ -24,6 +32,7 @@ use crate::core::swarm_brief::{
 use crate::core::task_frame::{
     NON_EXECUTING_CONTRACT, TaskFrameRecord, TaskFrameShowOptions, show_task_frame,
 };
+use crate::db::{CreateAuditInput, DbConnection, audit_actions, generate_audit_id};
 use crate::models::DomainError;
 
 /// Schema for handoff capsule format.
@@ -40,6 +49,31 @@ pub const HANDOFF_INSPECT_SCHEMA_V1: &str = "ee.handoff.inspect.v1";
 
 /// Schema for handoff resume report.
 pub const HANDOFF_RESUME_SCHEMA_V1: &str = "ee.handoff.resume.v1";
+
+/// Degraded code fired when a handoff capsule's captured memory set is stale.
+pub const HANDOFF_SNAPSHOT_STALE_CODE: &str = "handoff_snapshot_stale";
+
+/// Error code emitted when a capsule has no integrity block.
+pub const HANDOFF_HMAC_MISSING_CODE: &str = "handoff_hmac_missing";
+
+/// Error code emitted when signed capsule data does not verify.
+pub const HANDOFF_CAPSULE_TAMPERED_CODE: &str = "handoff_capsule_tampered";
+
+/// Error code emitted when a machine-bound capsule cannot verify here.
+pub const HANDOFF_CAPSULE_MACHINE_MISMATCH_CODE: &str = "handoff_capsule_machine_mismatch";
+
+/// Degraded code emitted when a caller explicitly bypasses HMAC checks.
+pub const HANDOFF_HMAC_SKIPPED_CODE: &str = "handoff_hmac_skipped";
+
+/// Error code emitted when strict mode cannot find the machine-local salt.
+pub const STRICT_MODE_NO_SALT_FILE_CODE: &str = "strict_mode_no_salt_file";
+
+const HANDOFF_INTEGRITY_SCHEMA_V1: &str = "ee.handoff.integrity.v1";
+const HANDOFF_HMAC_ALGORITHM: &str = "hmac-sha256";
+const HANDOFF_HMAC_KEY_MODE_WORKSPACE_SECRET: &str = "workspace_secret";
+const HANDOFF_HMAC_KEY_MODE_MACHINE_BOUND: &str = "workspace_secret_machine_bound";
+const HANDOFF_WORKSPACE_SECRET_FILE: &str = "handoff_hmac_key";
+const HANDOFF_MACHINE_SALT_FILE: &str = "handoff_machine_salt";
 
 /// ID prefix for handoff capsules.
 pub const HANDOFF_CAPSULE_ID_PREFIX: &str = "hcap_";
@@ -320,7 +354,11 @@ pub struct DegradationInfo {
     pub code: String,
     /// Human-readable message.
     pub message: String,
+    /// Degraded severity, when the surface classifies one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
     /// Suggested next action.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub next_action: Option<String>,
 }
 
@@ -330,8 +368,15 @@ impl DegradationInfo {
         Self {
             code: code.into(),
             message: message.into(),
+            severity: None,
             next_action: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_severity(mut self, severity: impl Into<String>) -> Self {
+        self.severity = Some(severity.into());
+        self
     }
 
     #[must_use]
@@ -461,6 +506,11 @@ pub struct CreateOptions {
     pub dry_run: bool,
     /// Optional task-frame scope to include.
     pub task_frame_id: Option<String>,
+    /// Bind the capsule HMAC to this machine's local salt.
+    pub bind_to_machine: bool,
+    /// Test/embedding override for the machine salt path. CLI callers
+    /// leave this unset and use the platform default.
+    pub machine_salt_path: Option<PathBuf>,
 }
 
 impl Default for CreateOptions {
@@ -472,6 +522,8 @@ impl Default for CreateOptions {
             since: None,
             dry_run: false,
             task_frame_id: None,
+            bind_to_machine: false,
+            machine_salt_path: None,
         }
     }
 }
@@ -688,6 +740,13 @@ pub struct ResumeOptions {
     /// `degraded[]` entry but the resume still completes.
     /// Bead bd-17c65.13.5 (M4).
     pub require_fresh: bool,
+    /// Explicitly bypass HMAC verification for emergency recovery.
+    /// Resume still emits `handoff_hmac_skipped` and records a
+    /// best-effort audit row.
+    pub insecure_skip_hmac: bool,
+    /// Test/embedding override for the machine salt path. CLI callers
+    /// leave this unset and use the platform default.
+    pub machine_salt_path: Option<PathBuf>,
 }
 
 impl Default for ResumeOptions {
@@ -702,6 +761,8 @@ impl Default for ResumeOptions {
             bound_workspace_identity: None,
             include_prompt_fragment: true,
             require_fresh: false,
+            insecure_skip_hmac: false,
+            machine_salt_path: None,
         }
     }
 }
@@ -899,15 +960,18 @@ pub struct ResumeReport {
 /// capture against the workspace state at resume time
 /// (M4 / bd-17c65.13.5).
 ///
-/// Phase-1 ships hash-based drift detection: any change to the
-/// non-tombstoned memory set's content/level/kind/tags projection
-/// flips `drift_detected` to `true`. The per-signal counts
-/// (`memories_added_since` et al.) report `None` ("unknown") in
-/// phase 1 because they require the capsule to embed the memory ID
-/// set at capture time. That richer capture is tracked as a
-/// follow-up bead.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// Capsules created by M4 embed a compact memory snapshot containing
+/// IDs, timestamps, validity windows, and content projection hashes.
+/// Resume compares that captured snapshot with the current workspace
+/// DB so agents can distinguish added, expired, revised, and
+/// set-level drift. Legacy capsules without the snapshot still get
+/// hash-only drift detection, with per-signal fields left as `None`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct StaleSnapshot {
+    /// Wall-clock time the resume side computed this comparison. This
+    /// is intentionally volatile and should be stripped by deterministic
+    /// comparisons before hashing machine output.
+    pub computed_at: String,
     /// Workspace state hash captured when the capsule was created.
     /// 16-char hex BLAKE3 prefix. `None` only for legacy capsules
     /// captured before M3.
@@ -923,18 +987,94 @@ pub struct StaleSnapshot {
     /// inspect the degraded array directly.
     pub drift_detected: bool,
     /// Count of new memories created in the workspace after the
-    /// capsule's capture timestamp. `None` in phase 1 because the
-    /// capsule does not embed the captured memory ID set; emitting
-    /// `Some(0)` would be a lie when in fact we cannot tell.
+    /// capsule's capture timestamp. `None` for legacy capsules or
+    /// unreadable workspaces where the signal cannot be measured.
     pub memories_added_since: Option<u64>,
     /// Count of capsule-included memories whose `valid_to` has
-    /// elapsed since capture. `None` in phase 1 for the same reason.
+    /// elapsed since capture. `None` for legacy capsules or unreadable
+    /// workspaces where the signal cannot be measured.
     pub memories_expired_since: Option<u64>,
-    /// Count of capsule-included memories whose content hash has
-    /// changed since capture. `None` until N15.1 (immutable
-    /// revisions) lands; the underlying content_hash mutation
-    /// pathway is not yet observable.
+    /// Count of capsule-included memories whose level/kind/content/tag
+    /// projection changed since capture. This remains distinct from
+    /// `memories_expired_since`; validity-window changes are measured
+    /// separately.
     pub memories_revised_since: Option<u64>,
+    /// Jaccard drift between the memory ID set captured in the
+    /// capsule and the active memory ID set at resume time. `0.0`
+    /// means the active set is unchanged; `1.0` means no active IDs
+    /// overlap. `None` for legacy capsules that did not embed the
+    /// memory snapshot.
+    pub content_drift_score: Option<f64>,
+    /// Concrete repair hints tied to the drift signals. Empty when no
+    /// drift was detected.
+    pub repair_hints: Vec<String>,
+}
+
+/// Configurable thresholds deciding when measured stale-snapshot drift
+/// should emit a degraded condition. The drift metrics themselves are
+/// always reported; these thresholds only gate `degradations[]`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HandoffStaleThresholds {
+    pub memories_added: u64,
+    pub any_expired_in_pack: bool,
+    pub content_drift_score: f64,
+    pub memories_revised: u64,
+}
+
+impl Default for HandoffStaleThresholds {
+    fn default() -> Self {
+        Self {
+            memories_added: 20,
+            any_expired_in_pack: true,
+            content_drift_score: 0.15,
+            memories_revised: 0,
+        }
+    }
+}
+
+impl HandoffStaleThresholds {
+    #[must_use]
+    pub fn from_config(config: &crate::config::HandoffStaleThresholdConfig) -> Self {
+        let defaults = Self::default();
+        Self {
+            memories_added: config.memories_added.unwrap_or(defaults.memories_added),
+            any_expired_in_pack: config
+                .any_expired_in_pack
+                .unwrap_or(defaults.any_expired_in_pack),
+            content_drift_score: config
+                .content_drift_score
+                .unwrap_or(defaults.content_drift_score),
+            memories_revised: config.memories_revised.unwrap_or(defaults.memories_revised),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct CapsuleMemorySnapshot {
+    captured_at: String,
+    memory_count: u64,
+    level_counts: BTreeMap<String, u64>,
+    content_hash_tree_root: String,
+    valid_window: CapsuleMemoryValidWindow,
+    memories: Vec<CapsuleMemorySnapshotItem>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct CapsuleMemoryValidWindow {
+    min_valid_from: Option<String>,
+    max_valid_to: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct CapsuleMemorySnapshotItem {
+    workspace_id: String,
+    id: String,
+    level: String,
+    created_at: String,
+    updated_at: String,
+    content_hash: String,
+    valid_from: Option<String>,
+    valid_to: Option<String>,
 }
 
 /// A memory selected for the resume payload.
@@ -1021,6 +1161,7 @@ fn compute_content_hash(content: &str) -> String {
 /// change on every create regardless of workspace state:
 ///   - `capsule_id` — freshly generated ULID per call
 ///   - `created_at` — wall-clock timestamp
+///   - `captured_at` — memory snapshot capture timestamp
 ///     and recursively scrubs the volatile per-section fields:
 ///   - `audit_id` (assigned at write time)
 ///   - `last_accessed_at` (changes on every memory touch)
@@ -1039,6 +1180,8 @@ fn strip_volatile_capsule_fields(value: &mut serde_json::Value) {
     if let Some(object) = value.as_object_mut() {
         object.remove("capsule_id");
         object.remove("created_at");
+        object.remove("captured_at");
+        object.remove("integrity");
         object.remove("audit_id");
         object.remove("last_accessed_at");
         for (_, child) in object.iter_mut() {
@@ -1085,6 +1228,436 @@ fn canonicalize_json_value(value: &serde_json::Value) -> serde_json::Value {
         }
         other => other.clone(),
     }
+}
+
+fn signed_capsule_body(capsule: &serde_json::Value) -> serde_json::Value {
+    let mut body = capsule.clone();
+    if let Some(object) = body.as_object_mut() {
+        object.remove("integrity");
+    }
+    body
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    bytes_to_lower_hex(digest.as_slice())
+}
+
+fn bytes_to_lower_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+fn hmac_workspace_secret_path(workspace: &Path) -> PathBuf {
+    workspace
+        .join(".ee")
+        .join("keys")
+        .join(HANDOFF_WORKSPACE_SECRET_FILE)
+}
+
+fn default_machine_salt_path() -> PathBuf {
+    std::env::var_os("HOME").map_or_else(
+        || {
+            PathBuf::from(".ee")
+                .join("keys")
+                .join(HANDOFF_MACHINE_SALT_FILE)
+        },
+        |home| {
+            PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("ee")
+                .join("keys")
+                .join(HANDOFF_MACHINE_SALT_FILE)
+        },
+    )
+}
+
+fn machine_salt_path(override_path: Option<&Path>) -> PathBuf {
+    override_path.map_or_else(default_machine_salt_path, Path::to_path_buf)
+}
+
+fn read_or_create_secret(path: &Path) -> Result<[u8; 32], DomainError> {
+    match fs::read(path) {
+        Ok(bytes) => bytes_to_32_byte_secret(&bytes, path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let secret = random_secret()?;
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
+                    message: format!("Failed to create handoff key directory: {error}"),
+                    repair: Some(format!("Check permissions for {}", parent.display())),
+                })?;
+            }
+            write_private_secret(path, &secret)?;
+            Ok(secret)
+        }
+        Err(error) => Err(DomainError::Storage {
+            message: format!("Failed to read handoff HMAC key: {error}"),
+            repair: Some(format!("Check permissions for {}", path.display())),
+        }),
+    }
+}
+
+fn read_existing_secret(path: &Path, missing_code: &'static str) -> Result<[u8; 32], DomainError> {
+    let bytes = fs::read(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            handoff_hmac_error(
+                missing_code,
+                "Required handoff HMAC key material is missing.",
+                "Resume on the machine/workspace that created the capsule, or recreate the capsule.",
+            )
+        } else {
+            DomainError::Storage {
+                message: format!("Failed to read handoff HMAC key: {error}"),
+                repair: Some(format!("Check permissions for {}", path.display())),
+            }
+        }
+    })?;
+    bytes_to_32_byte_secret(&bytes, path)
+}
+
+fn bytes_to_32_byte_secret(bytes: &[u8], path: &Path) -> Result<[u8; 32], DomainError> {
+    let array: [u8; 32] = bytes.try_into().map_err(|_| DomainError::Storage {
+        message: format!(
+            "Invalid handoff key length at {}; expected 32 bytes.",
+            path.display()
+        ),
+        repair: Some("Regenerate handoff keys after backing up existing key files.".to_owned()),
+    })?;
+    Ok(array)
+}
+
+fn random_secret() -> Result<[u8; 32], DomainError> {
+    let rng = SystemRandom::new();
+    let mut secret = [0_u8; 32];
+    rng.fill(&mut secret).map_err(|_| DomainError::Storage {
+        message: "Failed to generate handoff HMAC key material.".to_owned(),
+        repair: Some("Verify the operating system random source is available.".to_owned()),
+    })?;
+    Ok(secret)
+}
+
+fn write_private_secret(path: &Path, secret: &[u8; 32]) -> Result<(), DomainError> {
+    fs::write(path, secret).map_err(|error| DomainError::Storage {
+        message: format!("Failed to write handoff HMAC key: {error}"),
+        repair: Some(format!("Check permissions for {}", path.display())),
+    })?;
+    set_private_file_mode(path)
+}
+
+#[cfg(unix)]
+fn set_private_file_mode(path: &Path) -> Result<(), DomainError> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+        DomainError::Storage {
+            message: format!("Failed to set handoff key permissions: {error}"),
+            repair: Some(format!("Set mode 0600 on {}", path.display())),
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn set_private_file_mode(_path: &Path) -> Result<(), DomainError> {
+    Ok(())
+}
+
+fn append_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) {
+    let len = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(bytes);
+}
+
+fn key_input(
+    workspace_identity: &WorkspaceIdentity,
+    capsule_schema_version: &str,
+    workspace_secret: &[u8; 32],
+) -> Vec<u8> {
+    let mut input = Vec::new();
+    append_len_prefixed(&mut input, capsule_schema_version.as_bytes());
+    append_len_prefixed(
+        &mut input,
+        workspace_identity.fingerprint.to_lowercase().as_bytes(),
+    );
+    append_len_prefixed(&mut input, workspace_identity.canonical_root.as_bytes());
+    append_len_prefixed(&mut input, workspace_identity.scope_kind.as_bytes());
+    match &workspace_identity.repository_fingerprint {
+        Some(repo) => {
+            input.push(1);
+            append_len_prefixed(&mut input, repo.to_lowercase().as_bytes());
+        }
+        None => input.push(0),
+    }
+    append_len_prefixed(&mut input, workspace_secret);
+    input
+}
+
+fn derive_handoff_hmac_key(
+    workspace_identity: &WorkspaceIdentity,
+    capsule_schema_version: &str,
+    workspace_secret: &[u8; 32],
+    machine_salt: Option<&[u8; 32]>,
+) -> ([u8; 32], String) {
+    let mut input = key_input(workspace_identity, capsule_schema_version, workspace_secret);
+    let context = if let Some(salt) = machine_salt {
+        append_len_prefixed(&mut input, salt);
+        "ee.handoff.capsule.hmac.strict.v1"
+    } else {
+        "ee.handoff.capsule.hmac.workspace.v1"
+    };
+    let key = blake3::derive_key(context, &input);
+    let input_hash = blake3::hash(&input).to_hex()[..16].to_owned();
+    (key, format!("blake3:{input_hash}"))
+}
+
+fn sign_capsule_content(
+    mut capsule: serde_json::Value,
+    workspace: &Path,
+    bind_to_machine: bool,
+    machine_salt_path_override: Option<&Path>,
+) -> Result<serde_json::Value, DomainError> {
+    let workspace_identity = capsule
+        .get("workspace_identity")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<WorkspaceIdentity>(value).ok())
+        .ok_or_else(|| DomainError::Storage {
+            message: "Cannot sign handoff capsule without workspace_identity.".to_owned(),
+            repair: Some("Regenerate the capsule with a workspace-aware ee version.".to_owned()),
+        })?;
+    let capsule_schema = capsule
+        .get("schema")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(HANDOFF_CAPSULE_SCHEMA_V1);
+    let workspace_secret = read_or_create_secret(&hmac_workspace_secret_path(workspace))?;
+    let machine_salt = if bind_to_machine {
+        let path = machine_salt_path(machine_salt_path_override);
+        Some(read_or_create_secret(&path)?)
+    } else {
+        None
+    };
+    let (key_bytes, key_derivation_input_hash) = derive_handoff_hmac_key(
+        &workspace_identity,
+        capsule_schema,
+        &workspace_secret,
+        machine_salt.as_ref(),
+    );
+    let signed_body = signed_capsule_body(&capsule);
+    let signed_body_bytes = canonical_json_string(&signed_body);
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &key_bytes);
+    let tag = hmac::sign(&key, signed_body_bytes.as_bytes());
+    let encoded_hmac = URL_SAFE_NO_PAD.encode(tag.as_ref());
+    let hmac_prefix = encoded_hmac.chars().take(8).collect::<String>();
+    let key_mode = if bind_to_machine {
+        HANDOFF_HMAC_KEY_MODE_MACHINE_BOUND
+    } else {
+        HANDOFF_HMAC_KEY_MODE_WORKSPACE_SECRET
+    };
+    let integrity = serde_json::json!({
+        "schema": HANDOFF_INTEGRITY_SCHEMA_V1,
+        "algorithm": HANDOFF_HMAC_ALGORITHM,
+        "keyMode": key_mode,
+        "bodySha256": format!("sha256:{}", sha256_hex(signed_body_bytes.as_bytes())),
+        "keyDerivationInputHash": key_derivation_input_hash,
+        "hmac": format!("base64url:{encoded_hmac}"),
+        "hmacPrefix": hmac_prefix,
+    });
+    if let Some(object) = capsule.as_object_mut() {
+        object.insert("integrity".to_owned(), integrity);
+    }
+    tracing::info!(
+        event = "handoff_hmac_computed",
+        capsule_id = capsule
+            .get("capsule_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown"),
+        hmac_prefix = %hmac_prefix,
+        key_mode = key_mode,
+        "handoff capsule HMAC computed"
+    );
+    Ok(capsule)
+}
+
+fn verify_capsule_integrity(
+    capsule: &serde_json::Value,
+    workspace: &Path,
+    machine_salt_path_override: Option<&Path>,
+) -> Result<(), DomainError> {
+    let integrity = capsule
+        .get("integrity")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            handoff_hmac_error(
+                HANDOFF_HMAC_MISSING_CODE,
+                "Handoff capsule is unsigned and cannot be trusted.",
+                "Recreate the capsule with this ee version, or pass --insecure-skip-hmac for audited emergency recovery.",
+            )
+        })?;
+    let algorithm = integrity
+        .get("algorithm")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let key_mode = integrity
+        .get("keyMode")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if algorithm != HANDOFF_HMAC_ALGORITHM {
+        return Err(handoff_hmac_error(
+            HANDOFF_CAPSULE_TAMPERED_CODE,
+            "Handoff capsule uses an unsupported integrity algorithm.",
+            "Recreate the capsule with this ee version.",
+        ));
+    }
+
+    let signed_body = signed_capsule_body(capsule);
+    let signed_body_bytes = canonical_json_string(&signed_body);
+    let expected_body_sha = integrity
+        .get("bodySha256")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let actual_body_sha = format!("sha256:{}", sha256_hex(signed_body_bytes.as_bytes()));
+    if expected_body_sha != actual_body_sha {
+        return Err(handoff_hmac_error(
+            HANDOFF_CAPSULE_TAMPERED_CODE,
+            "Handoff capsule body hash does not match its integrity record.",
+            "Discard the capsule and recreate it from the source workspace.",
+        ));
+    }
+
+    let workspace_identity = capsule
+        .get("workspace_identity")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<WorkspaceIdentity>(value).ok())
+        .ok_or_else(|| {
+            handoff_hmac_error(
+                HANDOFF_CAPSULE_TAMPERED_CODE,
+                "Handoff capsule is missing signed workspace identity.",
+                "Discard the capsule and recreate it from the source workspace.",
+            )
+        })?;
+    let capsule_schema = capsule
+        .get("schema")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(HANDOFF_CAPSULE_SCHEMA_V1);
+    let workspace_secret = read_existing_secret(
+        &hmac_workspace_secret_path(workspace),
+        HANDOFF_CAPSULE_MACHINE_MISMATCH_CODE,
+    )?;
+    let machine_salt = match key_mode {
+        HANDOFF_HMAC_KEY_MODE_WORKSPACE_SECRET => None,
+        HANDOFF_HMAC_KEY_MODE_MACHINE_BOUND => {
+            let path = machine_salt_path(machine_salt_path_override);
+            Some(read_existing_secret(&path, STRICT_MODE_NO_SALT_FILE_CODE)?)
+        }
+        _ => {
+            return Err(handoff_hmac_error(
+                HANDOFF_CAPSULE_TAMPERED_CODE,
+                "Handoff capsule declares an unknown HMAC key mode.",
+                "Recreate the capsule with this ee version.",
+            ));
+        }
+    };
+    let (key_bytes, key_derivation_input_hash) = derive_handoff_hmac_key(
+        &workspace_identity,
+        capsule_schema,
+        &workspace_secret,
+        machine_salt.as_ref(),
+    );
+    if integrity
+        .get("keyDerivationInputHash")
+        .and_then(serde_json::Value::as_str)
+        != Some(key_derivation_input_hash.as_str())
+    {
+        return Err(handoff_hmac_error(
+            HANDOFF_CAPSULE_MACHINE_MISMATCH_CODE,
+            "Handoff capsule key context does not match this workspace or machine.",
+            "Resume on the original workspace/machine, or recreate the capsule here.",
+        ));
+    }
+    let encoded_hmac = integrity
+        .get("hmac")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| value.strip_prefix("base64url:"))
+        .ok_or_else(|| {
+            handoff_hmac_error(
+                HANDOFF_CAPSULE_TAMPERED_CODE,
+                "Handoff capsule integrity record is malformed.",
+                "Discard the capsule and recreate it from the source workspace.",
+            )
+        })?;
+    let expected_tag = URL_SAFE_NO_PAD.decode(encoded_hmac).map_err(|_| {
+        handoff_hmac_error(
+            HANDOFF_CAPSULE_TAMPERED_CODE,
+            "Handoff capsule HMAC is not valid base64url.",
+            "Discard the capsule and recreate it from the source workspace.",
+        )
+    })?;
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &key_bytes);
+    hmac::verify(&key, signed_body_bytes.as_bytes(), &expected_tag).map_err(|_| {
+        let code = if key_mode == HANDOFF_HMAC_KEY_MODE_MACHINE_BOUND {
+            HANDOFF_CAPSULE_MACHINE_MISMATCH_CODE
+        } else {
+            HANDOFF_CAPSULE_TAMPERED_CODE
+        };
+        handoff_hmac_error(
+            code,
+            "Handoff capsule HMAC verification failed.",
+            "Discard the capsule and recreate it from the source workspace.",
+        )
+    })?;
+    tracing::info!(
+        event = "handoff_hmac_verify_result",
+        capsule_id = capsule
+            .get("capsule_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown"),
+        status = "ok",
+        key_mode = key_mode,
+        "handoff capsule HMAC verified"
+    );
+    Ok(())
+}
+
+fn handoff_hmac_error(
+    code: &'static str,
+    message: impl Into<String>,
+    repair: impl Into<String>,
+) -> DomainError {
+    DomainError::UnsatisfiedDegradedModeCode {
+        code,
+        message: message.into(),
+        repair: Some(repair.into()),
+    }
+}
+
+fn record_handoff_insecure_load_audit(
+    workspace: &Path,
+    capsule_path: &Path,
+    capsule_bytes: &str,
+    capsule_id: &str,
+) {
+    let database_path = workspace.join(".ee").join("ee.db");
+    let Ok(conn) = DbConnection::open_file(&database_path) else {
+        return;
+    };
+    let details = serde_json::json!({
+        "schema": "ee.audit.handoff_insecure_load.v1",
+        "capsulePath": capsule_path.display().to_string(),
+        "capsuleSha256": format!("sha256:{}", sha256_hex(capsule_bytes.as_bytes())),
+        "capsuleId": capsule_id,
+        "reason": "caller passed --insecure-skip-hmac",
+    });
+    let input = CreateAuditInput {
+        workspace_id: None,
+        actor: Some("ee handoff resume".to_owned()),
+        action: audit_actions::HANDOFF_INSECURE_LOAD.to_owned(),
+        target_type: Some("handoff_capsule".to_owned()),
+        target_id: Some(capsule_id.to_owned()),
+        details: Some(details.to_string()),
+    };
+    let _ = conn.insert_audit(&generate_audit_id(), &input);
 }
 
 fn focus_memory_ids(focus_state: &crate::models::FocusState) -> Vec<String> {
@@ -1585,6 +2158,8 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
     // SoftSamePath / SoftSameRepo / Hard) against its bound workspace.
     let workspace_identity = compute_workspace_identity_for_capsule(&options.workspace);
 
+    let created_at = Utc::now().to_rfc3339();
+
     // Bead bd-1xkxi (M3 follow-up): embed a deterministic
     // workspace_state_hash so the canonical_content_hash actually
     // reflects the underlying memory set. Without this, adding a new
@@ -1594,6 +2169,17 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
     // otherwise None (preview-on-empty-workspace path).
     let db_path = options.workspace.join(".ee").join("ee.db");
     let workspace_state_hash = compute_workspace_state_hash(&db_path);
+    let memory_snapshot = compute_capsule_memory_snapshot(&db_path, &created_at);
+    if let Some(snapshot) = &memory_snapshot {
+        tracing::info!(
+            event = "handoff_capsule_fingerprint_computed",
+            capsule_id = %capsule_id,
+            level_counts = ?snapshot.level_counts,
+            content_hash_tree_root = %snapshot.content_hash_tree_root,
+            valid_window = ?snapshot.valid_window,
+            "handoff capsule memory fingerprint computed"
+        );
+    }
 
     let capsule_content = serde_json::json!({
         "schema": HANDOFF_CAPSULE_SCHEMA_V1,
@@ -1601,13 +2187,20 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         "workspace": options.workspace,
         "workspace_identity": workspace_identity,
         "workspace_state_hash": workspace_state_hash,
+        "memory_snapshot": memory_snapshot,
         "profile": options.profile.as_str(),
         "sections": sections,
         "active_focus": active_focus,
         "task_frame": task_frame_json,
         "swarm_brief_summary": swarm_brief_summary,
-        "created_at": Utc::now().to_rfc3339(),
+        "created_at": created_at,
     });
+    let capsule_content = sign_capsule_content(
+        capsule_content,
+        &options.workspace,
+        options.bind_to_machine,
+        options.machine_salt_path.as_deref(),
+    )?;
 
     let content_str = crate::core::serialize_pretty_or_error(&capsule_content);
     report.content_hash = compute_content_hash(&content_str);
@@ -1737,6 +2330,34 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
         .to_owned();
 
     let mut report = ResumeReport::new(capsule_id, path);
+    if options.insecure_skip_hmac {
+        record_handoff_insecure_load_audit(
+            &options.workspace,
+            &report.capsule_path,
+            &content,
+            &report.capsule_id,
+        );
+        report.degradations.push(
+            DegradationInfo::new(
+                HANDOFF_HMAC_SKIPPED_CODE,
+                "Handoff capsule HMAC verification was explicitly skipped; resumed content may be tampered.",
+            )
+            .with_severity("high")
+            .with_next_action("Recreate the capsule without --insecure-skip-hmac before trusting it."),
+        );
+        tracing::warn!(
+            event = "handoff_hmac_insecure_load",
+            capsule_id = %report.capsule_id,
+            capsule_sha256 = %format!("sha256:{}", sha256_hex(content.as_bytes())),
+            "handoff capsule loaded with HMAC verification disabled"
+        );
+    } else {
+        verify_capsule_integrity(
+            &capsule,
+            &options.workspace,
+            options.machine_salt_path.as_deref(),
+        )?;
+    }
 
     report.workspace = capsule
         .get("workspace")
@@ -1918,14 +2539,35 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
     // may have drifted from current ground truth. When
     // `require_fresh` is set, drift converts to a hard error.
     let stale = compute_stale_snapshot_state(&capsule, &options.workspace);
+    let stale_thresholds = handoff_stale_thresholds_for_workspace(&options.workspace);
     if let Some(s) = &stale {
-        if s.drift_detected {
+        tracing::info!(
+            event = "handoff_resume_drift_computed",
+            capsule_id = %report.capsule_id,
+            memories_added = ?s.memories_added_since,
+            memories_expired = ?s.memories_expired_since,
+            memories_revised = ?s.memories_revised_since,
+            content_drift_score = ?s.content_drift_score,
+            drift_detected = s.drift_detected,
+            "handoff resume memory drift computed"
+        );
+        if let Some(breach) = stale_threshold_breach(s, &stale_thresholds) {
+            tracing::info!(
+                event = "handoff_stale_threshold_breached",
+                code = HANDOFF_SNAPSHOT_STALE_CODE,
+                severity = breach.severity,
+                threshold_field = breach.threshold_field,
+                threshold_value = %breach.threshold_value,
+                observed_value = %breach.observed_value,
+                "handoff stale snapshot threshold breached"
+            );
             report.degradations.push(
                 DegradationInfo::new(
-                    "handoff_snapshot_stale",
+                    HANDOFF_SNAPSHOT_STALE_CODE,
                     "Workspace memory set has drifted since this capsule was captured; the resumed pack may not reflect current ground truth.".to_owned(),
                 )
-                .with_next_action("ee handoff create --workspace . --refresh"),
+                .with_severity(breach.severity)
+                .with_next_action(breach.repair_hint),
             );
         }
     }
@@ -1966,26 +2608,420 @@ fn compute_stale_snapshot_state(
         .and_then(|v| v.as_str())
         .map(str::to_owned);
 
+    let captured_at = capsule
+        .get("memory_snapshot")
+        .and_then(|v| v.get("captured_at"))
+        .and_then(|v| v.as_str())
+        .or_else(|| capsule.get("created_at").and_then(|v| v.as_str()))
+        .map(str::to_owned);
+
+    let captured_snapshot = capsule
+        .get("memory_snapshot")
+        .and_then(|v| serde_json::from_value::<CapsuleMemorySnapshot>(v.clone()).ok());
+
     let db_path = workspace_path.join(".ee").join("ee.db");
     let current = compute_workspace_state_hash(&db_path);
+    let computed_at = Utc::now().to_rfc3339();
+    let current_snapshot = compute_capsule_memory_snapshot(&db_path, &computed_at);
 
-    if captured.is_none() && current.is_none() {
+    if captured.is_none()
+        && current.is_none()
+        && captured_snapshot.is_none()
+        && current_snapshot.is_none()
+    {
         return None;
     }
 
-    let drift_detected = match (captured.as_deref(), current.as_deref()) {
+    let hash_drift_detected = match (captured.as_deref(), current.as_deref()) {
         (Some(a), Some(b)) => a != b,
         _ => false,
     };
+    let captured_at_time = captured_at.as_deref().and_then(parse_rfc3339_timestamp);
+    let computed_at_time = parse_rfc3339_timestamp(&computed_at);
+
+    let memories_added_since = match (
+        captured_snapshot.as_ref(),
+        current_snapshot.as_ref(),
+        captured_at_time.as_ref(),
+    ) {
+        (Some(_), Some(snapshot), Some(captured_at)) => Some(
+            snapshot
+                .memories
+                .iter()
+                .filter(|memory| {
+                    parse_rfc3339_timestamp(&memory.created_at)
+                        .is_some_and(|created_at| &created_at > captured_at)
+                })
+                .count()
+                .try_into()
+                .unwrap_or(u64::MAX),
+        ),
+        _ => None,
+    };
+
+    let memories_expired_since = match (
+        captured_snapshot.as_ref(),
+        current_snapshot.as_ref(),
+        captured_at_time.as_ref(),
+        computed_at_time.as_ref(),
+    ) {
+        (Some(captured_snapshot), Some(current_snapshot), Some(captured_at), Some(computed_at)) => {
+            let captured_by_key = snapshot_by_key(captured_snapshot);
+            Some(
+                current_snapshot
+                    .memories
+                    .iter()
+                    .filter(|memory| captured_by_key.contains_key(&snapshot_key(memory)))
+                    .filter(|memory| {
+                        memory.valid_to.as_deref().is_some_and(|valid_to| {
+                            parse_rfc3339_timestamp(valid_to).is_some_and(|valid_to| {
+                                &valid_to > captured_at && &valid_to <= computed_at
+                            })
+                        })
+                    })
+                    .count()
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+            )
+        }
+        _ => None,
+    };
+
+    let memories_revised_since = match (captured_snapshot.as_ref(), current_snapshot.as_ref()) {
+        (Some(captured_snapshot), Some(current_snapshot)) => {
+            let current_by_key = snapshot_by_key(current_snapshot);
+            Some(
+                captured_snapshot
+                    .memories
+                    .iter()
+                    .filter(|captured_memory| {
+                        current_by_key
+                            .get(&snapshot_key(captured_memory))
+                            .is_some_and(|current_memory| {
+                                current_memory.content_hash != captured_memory.content_hash
+                            })
+                    })
+                    .count()
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+            )
+        }
+        _ => None,
+    };
+
+    let content_drift_score = match (
+        captured_snapshot.as_ref(),
+        current_snapshot.as_ref(),
+        captured_at_time.as_ref(),
+        computed_at_time.as_ref(),
+    ) {
+        (Some(captured_snapshot), Some(current_snapshot), Some(captured_at), Some(computed_at)) => {
+            Some(snapshot_content_drift_score(
+                captured_snapshot,
+                captured_at,
+                current_snapshot,
+                computed_at,
+            ))
+        }
+        _ => None,
+    };
+
+    let measured_drift_detected = memories_added_since.is_some_and(|count| count > 0)
+        || memories_expired_since.is_some_and(|count| count > 0)
+        || memories_revised_since.is_some_and(|count| count > 0)
+        || content_drift_score.is_some_and(|score| score > 0.0);
+    let drift_detected = hash_drift_detected || measured_drift_detected;
+    let mut repair_hints = Vec::new();
+    if memories_added_since.is_some_and(|count| count > 0) {
+        repair_hints.push("Refresh: ee handoff create --refresh <capsule>".to_owned());
+        repair_hints.push("Add new evidence: ee context --extend-capsule <capsule>".to_owned());
+    }
+    if memories_expired_since.is_some_and(|count| count > 0) {
+        repair_hints.push(
+            "Expired memories likely misleading; rebuild: ee handoff create --workspace . --refresh-evidence"
+                .to_owned(),
+        );
+    }
+    if content_drift_score.is_some_and(|score| score > 0.0) {
+        repair_hints.push(
+            "Significant drift; consider rebuilding: ee handoff create --workspace .".to_owned(),
+        );
+    }
+    if memories_revised_since.is_some_and(|count| count > 0) {
+        repair_hints.push("Refresh: ee handoff create --refresh <capsule>".to_owned());
+    }
+    repair_hints.sort();
+    repair_hints.dedup();
 
     Some(StaleSnapshot {
+        computed_at,
         captured_state_hash: captured,
         current_state_hash: current,
         drift_detected,
-        memories_added_since: None,
-        memories_expired_since: None,
-        memories_revised_since: None,
+        memories_added_since,
+        memories_expired_since,
+        memories_revised_since,
+        content_drift_score,
+        repair_hints,
     })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StaleThresholdBreach {
+    severity: &'static str,
+    threshold_field: &'static str,
+    threshold_value: String,
+    observed_value: String,
+    repair_hint: &'static str,
+}
+
+fn handoff_stale_thresholds_for_workspace(workspace_path: &Path) -> HandoffStaleThresholds {
+    let config_path = workspace_path.join(".ee").join("config.toml");
+    let Ok(contents) = std::fs::read_to_string(config_path) else {
+        return HandoffStaleThresholds::default();
+    };
+    let Ok(config) = crate::config::ConfigFile::parse(&contents) else {
+        return HandoffStaleThresholds::default();
+    };
+    HandoffStaleThresholds::from_config(&config.handoff.stale_threshold)
+}
+
+fn stale_threshold_breach(
+    snapshot: &StaleSnapshot,
+    thresholds: &HandoffStaleThresholds,
+) -> Option<StaleThresholdBreach> {
+    let mut breaches = Vec::new();
+    if snapshot
+        .memories_added_since
+        .is_some_and(|observed| observed > thresholds.memories_added)
+    {
+        breaches.push(StaleThresholdBreach {
+            severity: "medium",
+            threshold_field: "memories_added",
+            threshold_value: thresholds.memories_added.to_string(),
+            observed_value: snapshot
+                .memories_added_since
+                .unwrap_or_default()
+                .to_string(),
+            repair_hint: "Refresh: ee handoff create --refresh <capsule>",
+        });
+    }
+    if thresholds.any_expired_in_pack
+        && snapshot
+            .memories_expired_since
+            .is_some_and(|observed| observed > 0)
+    {
+        breaches.push(StaleThresholdBreach {
+            severity: "high",
+            threshold_field: "any_expired_in_pack",
+            threshold_value: thresholds.any_expired_in_pack.to_string(),
+            observed_value: snapshot
+                .memories_expired_since
+                .unwrap_or_default()
+                .to_string(),
+            repair_hint: "Expired memories likely misleading; rebuild: ee handoff create --workspace . --refresh-evidence",
+        });
+    }
+    if snapshot
+        .content_drift_score
+        .is_some_and(|observed| observed > thresholds.content_drift_score)
+    {
+        breaches.push(StaleThresholdBreach {
+            severity: "medium",
+            threshold_field: "content_drift_score",
+            threshold_value: thresholds.content_drift_score.to_string(),
+            observed_value: format!("{:.6}", snapshot.content_drift_score.unwrap_or_default()),
+            repair_hint: "Significant drift; consider rebuilding: ee handoff create --workspace .",
+        });
+    }
+    if snapshot
+        .memories_revised_since
+        .is_some_and(|observed| observed > thresholds.memories_revised)
+    {
+        breaches.push(StaleThresholdBreach {
+            severity: "low",
+            threshold_field: "memories_revised",
+            threshold_value: thresholds.memories_revised.to_string(),
+            observed_value: snapshot
+                .memories_revised_since
+                .unwrap_or_default()
+                .to_string(),
+            repair_hint: "Refresh: ee handoff create --refresh <capsule>",
+        });
+    }
+    breaches.into_iter().fold(None, |best, breach| match best {
+        Some(current) if severity_rank(current.severity) >= severity_rank(breach.severity) => {
+            Some(current)
+        }
+        _ => Some(breach),
+    })
+}
+
+fn severity_rank(severity: &str) -> u8 {
+    match severity {
+        "high" => 3,
+        "medium" => 2,
+        "low" => 1,
+        _ => 0,
+    }
+}
+
+fn parse_rfc3339_timestamp(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+}
+
+fn compute_capsule_memory_snapshot(
+    database_path: &Path,
+    captured_at: &str,
+) -> Option<CapsuleMemorySnapshot> {
+    let conn = crate::db::DbConnection::open_file(database_path).ok()?;
+    let workspaces = conn.list_workspaces().ok()?;
+    let mut memories = Vec::new();
+    for workspace in &workspaces {
+        let stored_memories = conn.list_memories(&workspace.id, None, false).ok()?;
+        for memory in stored_memories {
+            let tags = conn.get_memory_tags(&memory.id).unwrap_or_default();
+            memories.push(snapshot_item_from_memory(&memory, &tags));
+        }
+    }
+    let mut level_counts = BTreeMap::new();
+    for memory in &memories {
+        *level_counts.entry(memory.level.clone()).or_insert(0) += 1;
+    }
+    let valid_window = memory_snapshot_valid_window(&memories);
+    memories.sort_by(|left, right| {
+        snapshot_key(left)
+            .cmp(&snapshot_key(right))
+            .then_with(|| left.content_hash.cmp(&right.content_hash))
+    });
+    let content_hash_tree_root = memory_snapshot_tree_root(&memories);
+    let memory_count = u64::try_from(memories.len()).unwrap_or(u64::MAX);
+    Some(CapsuleMemorySnapshot {
+        captured_at: captured_at.to_owned(),
+        memory_count,
+        level_counts,
+        content_hash_tree_root,
+        valid_window,
+        memories,
+    })
+}
+
+fn snapshot_item_from_memory(
+    memory: &crate::db::StoredMemory,
+    tags: &[String],
+) -> CapsuleMemorySnapshotItem {
+    let mut tags_sorted = tags.to_vec();
+    tags_sorted.sort();
+    CapsuleMemorySnapshotItem {
+        workspace_id: memory.workspace_id.clone(),
+        id: memory.id.clone(),
+        level: memory.level.clone(),
+        created_at: memory.created_at.clone(),
+        updated_at: memory.updated_at.clone(),
+        content_hash: snapshot_memory_content_hash(memory, &tags_sorted),
+        valid_from: memory.valid_from.clone(),
+        valid_to: memory.valid_to.clone(),
+    }
+}
+
+fn memory_snapshot_valid_window(
+    memories: &[CapsuleMemorySnapshotItem],
+) -> CapsuleMemoryValidWindow {
+    let min_valid_from = memories
+        .iter()
+        .filter_map(|memory| memory.valid_from.clone())
+        .min();
+    let max_valid_to = memories
+        .iter()
+        .filter_map(|memory| memory.valid_to.clone())
+        .max();
+    CapsuleMemoryValidWindow {
+        min_valid_from,
+        max_valid_to,
+    }
+}
+
+fn memory_snapshot_tree_root(memories: &[CapsuleMemorySnapshotItem]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for memory in memories {
+        hash_snapshot_field(&mut hasher, "workspace_id", &memory.workspace_id);
+        hash_snapshot_field(&mut hasher, "id", &memory.id);
+        hash_snapshot_field(&mut hasher, "content_hash", &memory.content_hash);
+    }
+    let digest = hasher.finalize().to_hex();
+    format!("blake3:{}", &digest.as_str()[..16])
+}
+
+fn snapshot_memory_content_hash(memory: &crate::db::StoredMemory, tags: &[String]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hash_snapshot_field(&mut hasher, "workspace_id", &memory.workspace_id);
+    hash_snapshot_field(&mut hasher, "id", &memory.id);
+    hash_snapshot_field(&mut hasher, "level", &memory.level);
+    hash_snapshot_field(&mut hasher, "kind", &memory.kind);
+    hash_snapshot_field(&mut hasher, "content", &memory.content);
+    hash_snapshot_field(&mut hasher, "tags", &tags.join(","));
+    let digest = hasher.finalize().to_hex();
+    format!("blake3:{}", &digest.as_str()[..16])
+}
+
+fn hash_snapshot_field(hasher: &mut blake3::Hasher, field: &str, value: &str) {
+    hasher.update(field.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(value.len().to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(value.as_bytes());
+    hasher.update(b"\n");
+}
+
+fn snapshot_key(memory: &CapsuleMemorySnapshotItem) -> (String, String) {
+    (memory.workspace_id.clone(), memory.id.clone())
+}
+
+fn snapshot_by_key(
+    snapshot: &CapsuleMemorySnapshot,
+) -> BTreeMap<(String, String), &CapsuleMemorySnapshotItem> {
+    snapshot
+        .memories
+        .iter()
+        .map(|memory| (snapshot_key(memory), memory))
+        .collect()
+}
+
+fn active_snapshot_keys(
+    snapshot: &CapsuleMemorySnapshot,
+    as_of: &DateTime<Utc>,
+) -> BTreeSet<(String, String)> {
+    snapshot
+        .memories
+        .iter()
+        .filter(|memory| {
+            memory
+                .valid_to
+                .as_deref()
+                .and_then(parse_rfc3339_timestamp)
+                .is_none_or(|valid_to| &valid_to > as_of)
+        })
+        .map(snapshot_key)
+        .collect()
+}
+
+fn snapshot_content_drift_score(
+    captured_snapshot: &CapsuleMemorySnapshot,
+    captured_at: &DateTime<Utc>,
+    current_snapshot: &CapsuleMemorySnapshot,
+    computed_at: &DateTime<Utc>,
+) -> f64 {
+    let captured_keys = active_snapshot_keys(captured_snapshot, captured_at);
+    let current_keys = active_snapshot_keys(current_snapshot, computed_at);
+    let union_count = captured_keys.union(&current_keys).count();
+    if union_count == 0 {
+        return 0.0;
+    }
+    let intersection_count = captured_keys.intersection(&current_keys).count();
+    let score = 1.0 - (intersection_count as f64 / union_count as f64);
+    (score * 1_000_000.0).round() / 1_000_000.0
 }
 
 /// Render the ready-to-prepend markdown body for `ee handoff resume`.
@@ -2224,6 +3260,13 @@ mod tests {
         }
     }
 
+    fn repo_tempdir() -> Result<tempfile::TempDir, String> {
+        tempfile::Builder::new()
+            .prefix("ee-handoff-test-")
+            .tempdir_in(std::env::current_dir().map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())
+    }
+
     #[test]
     fn capsule_profile_has_stable_string_representation() -> TestResult {
         ensure_equal(&CapsuleProfile::Compact.as_str(), &"compact", "compact")?;
@@ -2420,6 +3463,8 @@ mod tests {
             since: None,
             dry_run: false,
             task_frame_id: None,
+            bind_to_machine: false,
+            machine_salt_path: None,
         })
         .map_err(|error| error.message())?;
         ensure(create.active_focus.is_some(), "create includes focus")?;
@@ -2434,6 +3479,8 @@ mod tests {
             bound_workspace_identity: None,
             include_prompt_fragment: true,
             require_fresh: false,
+            insecure_skip_hmac: false,
+            machine_salt_path: None,
         })
         .map_err(|error| error.message())?;
         ensure(resume.active_focus.is_some(), "resume includes focus")?;
@@ -2499,6 +3546,8 @@ mod tests {
             since: None,
             dry_run: false,
             task_frame_id: Some(frame_id.clone()),
+            bind_to_machine: false,
+            machine_salt_path: None,
         })
         .map_err(|error| error.message())?;
         ensure(create.task_frame.is_some(), "create includes task frame")?;
@@ -2519,6 +3568,8 @@ mod tests {
             bound_workspace_identity: None,
             include_prompt_fragment: true,
             require_fresh: false,
+            insecure_skip_hmac: false,
+            machine_salt_path: None,
         })
         .map_err(|error| error.message())?;
         ensure(resume.task_frame.is_some(), "resume includes task frame")?;
@@ -2566,6 +3617,197 @@ mod tests {
         let estimate = estimate_tokens(text);
         ensure(estimate >= 4, "at least one token per word")?;
         ensure(estimate <= 8, "not more than double word count")
+    }
+
+    fn create_test_capsule(
+        workspace: &Path,
+        bind_to_machine: bool,
+        machine_salt_path: Option<PathBuf>,
+    ) -> Result<PathBuf, String> {
+        let output = workspace.join("handoff.json");
+        create_handoff(&CreateOptions {
+            workspace: workspace.to_path_buf(),
+            output: output.clone(),
+            profile: CapsuleProfile::Resume,
+            since: None,
+            dry_run: false,
+            task_frame_id: None,
+            bind_to_machine,
+            machine_salt_path,
+        })
+        .map_err(|error| error.message())?;
+        Ok(output)
+    }
+
+    #[test]
+    fn handoff_hmac_default_mode_round_trips_same_workspace() -> TestResult {
+        let dir = repo_tempdir()?;
+        let output = create_test_capsule(dir.path(), false, None)?;
+        let capsule_text = fs::read_to_string(&output).map_err(|error| error.to_string())?;
+        ensure(
+            capsule_text.contains("\"integrity\""),
+            "capsule carries integrity block",
+        )?;
+
+        let resume = resume_handoff(&ResumeOptions {
+            path: output,
+            use_latest: false,
+            workspace: dir.path().to_path_buf(),
+            max_sections: None,
+            task_frame_id: None,
+            bound_workspace_id: None,
+            bound_workspace_identity: None,
+            include_prompt_fragment: false,
+            require_fresh: false,
+            insecure_skip_hmac: false,
+            machine_salt_path: None,
+        })
+        .map_err(|error| error.message())?;
+        ensure(
+            !resume
+                .degradations
+                .iter()
+                .any(|degradation| degradation.code == HANDOFF_HMAC_SKIPPED_CODE),
+            "verified resume must not emit hmac skipped degradation",
+        )
+    }
+
+    #[test]
+    fn handoff_hmac_missing_fails_closed() -> TestResult {
+        let dir = repo_tempdir()?;
+        let output = create_test_capsule(dir.path(), false, None)?;
+        let mut capsule: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&output).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        let Some(capsule_object) = capsule.as_object_mut() else {
+            return Err("capsule object".to_owned());
+        };
+        capsule_object.remove("integrity");
+        fs::write(
+            &output,
+            serde_json::to_string_pretty(&capsule).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let error = match resume_handoff(&ResumeOptions {
+            path: output,
+            use_latest: false,
+            workspace: dir.path().to_path_buf(),
+            max_sections: None,
+            task_frame_id: None,
+            bound_workspace_id: None,
+            bound_workspace_identity: None,
+            include_prompt_fragment: false,
+            require_fresh: false,
+            insecure_skip_hmac: false,
+            machine_salt_path: None,
+        }) {
+            Ok(_) => panic!("unsigned capsule should fail closed"),
+            Err(error) => error,
+        };
+        ensure_equal(&error.code(), &HANDOFF_HMAC_MISSING_CODE, "error code")
+    }
+
+    #[test]
+    fn handoff_hmac_tampered_body_fails_closed() -> TestResult {
+        let dir = repo_tempdir()?;
+        let output = create_test_capsule(dir.path(), false, None)?;
+        let mut capsule: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&output).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        capsule["sections"][0]["content"] =
+            serde_json::Value::String("tampered workspace section".to_owned());
+        fs::write(
+            &output,
+            serde_json::to_string_pretty(&capsule).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let error = match resume_handoff(&ResumeOptions {
+            path: output,
+            use_latest: false,
+            workspace: dir.path().to_path_buf(),
+            max_sections: None,
+            task_frame_id: None,
+            bound_workspace_id: None,
+            bound_workspace_identity: None,
+            include_prompt_fragment: false,
+            require_fresh: false,
+            insecure_skip_hmac: false,
+            machine_salt_path: None,
+        }) {
+            Ok(_) => panic!("tampered capsule should fail closed"),
+            Err(error) => error,
+        };
+        ensure_equal(&error.code(), &HANDOFF_CAPSULE_TAMPERED_CODE, "error code")
+    }
+
+    #[test]
+    fn handoff_hmac_insecure_skip_loads_with_high_degradation() -> TestResult {
+        let dir = repo_tempdir()?;
+        let output = create_test_capsule(dir.path(), false, None)?;
+        let mut capsule: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&output).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        capsule["sections"][0]["content"] =
+            serde_json::Value::String("tampered but explicitly bypassed".to_owned());
+        fs::write(
+            &output,
+            serde_json::to_string_pretty(&capsule).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let report = resume_handoff(&ResumeOptions {
+            path: output,
+            use_latest: false,
+            workspace: dir.path().to_path_buf(),
+            max_sections: None,
+            task_frame_id: None,
+            bound_workspace_id: None,
+            bound_workspace_identity: None,
+            include_prompt_fragment: false,
+            require_fresh: false,
+            insecure_skip_hmac: true,
+            machine_salt_path: None,
+        })
+        .map_err(|error| error.message())?;
+        let degradation = report
+            .degradations
+            .iter()
+            .find(|degradation| degradation.code == HANDOFF_HMAC_SKIPPED_CODE)
+            .ok_or_else(|| "missing handoff_hmac_skipped degradation".to_owned())?;
+        ensure_equal(
+            &degradation.severity.as_deref(),
+            &Some("high"),
+            "degradation severity",
+        )
+    }
+
+    #[test]
+    fn handoff_hmac_strict_missing_salt_fails_closed() -> TestResult {
+        let dir = repo_tempdir()?;
+        let salt_dir = repo_tempdir()?;
+        let create_salt = salt_dir.path().join("machine-a-salt");
+        let resume_salt = salt_dir.path().join("missing-machine-b-salt");
+        let output = create_test_capsule(dir.path(), true, Some(create_salt))?;
+
+        let error = match resume_handoff(&ResumeOptions {
+            path: output,
+            use_latest: false,
+            workspace: dir.path().to_path_buf(),
+            max_sections: None,
+            task_frame_id: None,
+            bound_workspace_id: None,
+            bound_workspace_identity: None,
+            include_prompt_fragment: false,
+            require_fresh: false,
+            insecure_skip_hmac: false,
+            machine_salt_path: Some(resume_salt),
+        }) {
+            Ok(_) => panic!("strict capsule should fail when machine salt is missing"),
+            Err(error) => error,
+        };
+        ensure_equal(&error.code(), &STRICT_MODE_NO_SALT_FILE_CODE, "error code")
     }
 
     #[test]

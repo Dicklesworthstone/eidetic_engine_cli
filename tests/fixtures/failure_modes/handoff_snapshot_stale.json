@@ -1,0 +1,34 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "handoff_snapshot_stale",
+  "introduced_by": {
+    "bead": "bd-17c65.13.5",
+    "epic_letter": "M"
+  },
+  "surfaces": [
+    "handoff resume"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A handoff capsule is resumed after the workspace memory set has changed since capsule capture.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Seed handoff memory.' --workspace . --level semantic --kind fact --json",
+      "ee handoff create --workspace . --out capsule.json --json",
+      "ee remember 'New memory after handoff capture.' --workspace . --level semantic --kind fact --json"
+    ],
+    "invocation": "ee handoff resume capsule.json --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "handoff_snapshot_stale",
+    "severity": "medium",
+    "message_contains": [
+      "Workspace memory set has drifted",
+      "current ground truth"
+    ],
+    "repair_contains": "ee handoff create --refresh <capsule>",
+    "repair_string": "Refresh: ee handoff create --refresh <capsule>",
+    "repair_command_regex": "(?<cmd>ee handoff create --refresh <capsule>)"
+  }
+}
