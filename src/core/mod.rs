@@ -10,6 +10,7 @@ pub mod agent_docs;
 pub mod artifact;
 pub mod audit;
 pub mod backup;
+pub mod bayes;
 pub mod budget;
 pub mod capabilities;
 pub mod causal;
