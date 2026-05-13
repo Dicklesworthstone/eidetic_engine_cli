@@ -93,6 +93,7 @@ fn seed_database(workspace_path: &Path, link_count: usize) -> (PathBuf, String, 
             dry_run: false,
             auto_link: true,
             propose_candidates: false,
+            allow_secret_mention: false,
         };
 
         let report = match remember_memory(&options) {

@@ -95,6 +95,7 @@ fn seed_fixture(workspace_path: &Path, candidate_count: usize) -> CurateFixture 
         dry_run: false,
         auto_link: true,
         propose_candidates: false,
+        allow_secret_mention: false,
     })
     .unwrap_or_else(|error| panic!("failed creating curate benchmark target memory: {error:?}"));
 

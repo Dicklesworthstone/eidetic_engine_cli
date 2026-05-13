@@ -251,6 +251,7 @@ impl PackSizeFixture {
                 dry_run: false,
                 auto_link: true,
                 propose_candidates: false,
+                allow_secret_mention: false,
             };
 
             match remember_memory(&options) {
@@ -305,6 +306,7 @@ impl PackSizeFixture {
             max_results: None,
             include_tombstoned: false,
             pagination: None,
+            output_options: Default::default(),
         };
         let response =
             run_context_pack(&options).map_err(|error| format!("run context pack: {error}"))?;

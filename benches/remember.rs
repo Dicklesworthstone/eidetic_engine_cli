@@ -60,6 +60,7 @@ fn seed_database(temp_dir: &Path, n: usize) -> std::path::PathBuf {
             dry_run: false,
             auto_link: true,
             propose_candidates: false,
+            allow_secret_mention: false,
         };
         remember_memory(&options).expect("seed memory");
     }
@@ -105,6 +106,7 @@ fn bench_remember(c: &mut Criterion) {
                     dry_run: false,
                     auto_link: true,
                     propose_candidates: false,
+                    allow_secret_mention: false,
                 };
                 remember_memory(&options).expect("remember");
             });
@@ -141,6 +143,7 @@ fn bench_remember_dry_run(c: &mut Criterion) {
                 dry_run: true,
                 auto_link: true,
                 propose_candidates: false,
+                allow_secret_mention: false,
             };
             remember_memory(&options).expect("dry_run remember");
         });

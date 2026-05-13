@@ -77,6 +77,7 @@ fn seed_database(temp_dir: &Path, memory_count: usize) -> std::path::PathBuf {
             dry_run: false,
             auto_link: true,
             propose_candidates: false,
+            allow_secret_mention: false,
         };
         remember_memory(&options).expect("seed memory");
     }
@@ -118,6 +119,7 @@ fn bench_context(c: &mut Criterion) {
                         max_results: None,
                         include_tombstoned: false,
                         pagination: None,
+                        output_options: Default::default(),
                     };
                     run_context_pack(&options).expect("context pack");
                 });
@@ -159,6 +161,7 @@ fn bench_context_memory_scales(c: &mut Criterion) {
                     max_results: None,
                     include_tombstoned: false,
                     pagination: None,
+                    output_options: Default::default(),
                 };
                 run_context_pack(&options).expect("context pack");
             });
