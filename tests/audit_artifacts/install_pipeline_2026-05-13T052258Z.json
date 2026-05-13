@@ -1,0 +1,42 @@
+{
+  "schema": "ee.audit.install_pipeline.v1",
+  "generated_at": "2026-05-13T05:22:58Z",
+  "src_commit": "1d8b255221a41bbbc7da9c53fb95e292ccffab04",
+  "decided_path": "path_b_pre_release",
+  "decision_inputs": {
+    "gh_releases": false,
+    "crates_name_claimed": true,
+    "tap_formula_present": false
+  },
+  "github_releases": {
+    "probe_status": "no_releases",
+    "releases": []
+  },
+  "crates_io": {
+    "probe_status": "ok",
+    "name_claimed": true,
+    "latest_version": "0.0.0"
+  },
+  "homebrew_tap": {
+    "probe_status": "unreachable",
+    "formula_present": null
+  },
+  "release_workflow": {
+    "path": ".github/workflows/release.yml",
+    "targets_csv": "x86_64-unknown-linux-gnu,x86_64-unknown-linux-musl",
+    "asset_categories": [
+      "tar.xz",
+      "tar.xz.sha256",
+      "sigstore",
+      "install.sh",
+      "install.ps1"
+    ],
+    "cosign_installer_present": true
+  },
+  "next_actions": [
+    "File bd-2gill.A: Claim ee crate name on crates.io and publish initial release",
+    "File bd-2gill.B: Publish Dicklesworthstone/homebrew-tap with Formula/ee.rb pinned to v0.1.0",
+    "File bd-2gill.C: Ship v0.1.0 GitHub release with full asset set (ee-{target}.tar.xz + .sha256 + sigstore.json + install.sh + install.ps1)",
+    "Wire each followup as parent-child child of bd-2gill, label install-pipeline-followup"
+  ]
+}

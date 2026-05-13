@@ -1,0 +1,2558 @@
+{
+  "schema": "ee.audit.randomness_inventory.v1",
+  "generated_at": "2026-05-13T05:11:59Z",
+  "src_commit": "4612ec001675db95be52f8973a94f9dcbae1d93b",
+  "count_total": 316,
+  "rows": [
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 44,
+      "call_excerpt": "use ring::rand::SystemRandom;",
+      "randomness_kind": "rng",
+      "severity": "deterministic_today",
+      "proposed_remediation": "capability_token"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 2527,
+      "call_excerpt": "let rng = ring::rand::SystemRandom::new();",
+      "randomness_kind": "rng",
+      "severity": "deterministic_today",
+      "proposed_remediation": "capability_token"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 2558,
+      "call_excerpt": "let rng = ring::rand::SystemRandom::new();",
+      "randomness_kind": "rng",
+      "severity": "deterministic_today",
+      "proposed_remediation": "capability_token"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 2588,
+      "call_excerpt": "let rng = ring::rand::SystemRandom::new();",
+      "randomness_kind": "rng",
+      "severity": "deterministic_today",
+      "proposed_remediation": "capability_token"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 2620,
+      "call_excerpt": "let rng = ring::rand::SystemRandom::new();",
+      "randomness_kind": "rng",
+      "severity": "deterministic_today",
+      "proposed_remediation": "capability_token"
+    },
+    {
+      "fn_path": "src/cass/process.rs",
+      "line": 733,
+      "call_excerpt": "let now = SystemTime::now()",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cass/import.rs",
+      "line": 1520,
+      "call_excerpt": "let now = SystemTime::now()",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cass/client.rs",
+      "line": 714,
+      "call_excerpt": "let now = SystemTime::now()",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cass/client.rs",
+      "line": 1052,
+      "call_excerpt": "SystemTime::now()",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cass/client.rs",
+      "line": 1109,
+      "call_excerpt": "SystemTime::now()",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/search.rs",
+      "line": 2955,
+      "call_excerpt": "let nanos = std::time::SystemTime::now()",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cli/mod.rs",
+      "line": 29399,
+      "call_excerpt": "std::time::SystemTime::now()",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cli/mod.rs",
+      "line": 33263,
+      "call_excerpt": "std::time::SystemTime::now()",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/index.rs",
+      "line": 38,
+      "call_excerpt": "let ts = SystemTime::now()",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/index.rs",
+      "line": 1449,
+      "call_excerpt": "SystemTime::now()",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/workspace.rs",
+      "line": 768,
+      "call_excerpt": "let nanos = SystemTime::now()",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/lab.rs",
+      "line": 1282,
+      "call_excerpt": "let timestamp = SystemTime::now()",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/audit.rs",
+      "line": 607,
+      "call_excerpt": "let nanos = SystemTime::now()",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/feedback.rs",
+      "line": 624,
+      "call_excerpt": "let timestamp = SystemTime::now()",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/rehearse.rs",
+      "line": 1351,
+      "call_excerpt": "let timestamp = SystemTime::now()",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/plan.rs",
+      "line": 1176,
+      "call_excerpt": "SystemTime::now()",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/procedure.rs",
+      "line": 3196,
+      "call_excerpt": "let timestamp = SystemTime::now()",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cass/process.rs",
+      "line": 220,
+      "call_excerpt": "let started = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cass/process.rs",
+      "line": 481,
+      "call_excerpt": "let deadline = Instant::now() + TIMEOUT_PIPE_DRAIN_GRACE;",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cass/process.rs",
+      "line": 488,
+      "call_excerpt": "let now = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cass/process.rs",
+      "line": 881,
+      "call_excerpt": "let started = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/pack/mod.rs",
+      "line": 6391,
+      "call_excerpt": "let legacy_start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/pack/mod.rs",
+      "line": 6397,
+      "call_excerpt": "let lazy_start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/pack/mod.rs",
+      "line": 6445,
+      "call_excerpt": "let legacy_start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/pack/mod.rs",
+      "line": 6457,
+      "call_excerpt": "let cached_start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/graph/mod.rs",
+      "line": 927,
+      "call_excerpt": "let start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/graph/mod.rs",
+      "line": 1620,
+      "call_excerpt": "let total_start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/graph/mod.rs",
+      "line": 1659,
+      "call_excerpt": "let pagerank_start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/graph/mod.rs",
+      "line": 1663,
+      "call_excerpt": "let betweenness_start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/models/timing.rs",
+      "line": 95,
+      "call_excerpt": "start: Instant::now(),",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/models/timing.rs",
+      "line": 106,
+      "call_excerpt": "self.phases.push((Instant::now(), phase_name));",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/models/timing.rs",
+      "line": 117,
+      "call_excerpt": "let end = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/obs/test_log.rs",
+      "line": 344,
+      "call_excerpt": "let started = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/context.rs",
+      "line": 522,
+      "call_excerpt": "let total_start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/context.rs",
+      "line": 526,
+      "call_excerpt": "let request_start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/context.rs",
+      "line": 577,
+      "call_excerpt": "let db_open_start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/context.rs",
+      "line": 597,
+      "call_excerpt": "let search_start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/context.rs",
+      "line": 698,
+      "call_excerpt": "let candidate_start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/context.rs",
+      "line": 785,
+      "call_excerpt": "let focus_start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/context.rs",
+      "line": 875,
+      "call_excerpt": "let pack_start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/context.rs",
+      "line": 928,
+      "call_excerpt": "let persist_start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/budget.rs",
+      "line": 54,
+      "call_excerpt": "Self::unbounded_at(Instant::now())",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/budget.rs",
+      "line": 114,
+      "call_excerpt": "self.elapsed_at(Instant::now())",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/budget.rs",
+      "line": 132,
+      "call_excerpt": "self.remaining_wall_clock_at(Instant::now())",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/budget.rs",
+      "line": 213,
+      "call_excerpt": "self.check_at(Instant::now())",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/budget.rs",
+      "line": 357,
+      "call_excerpt": "Instant::now()",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/swarm_brief.rs",
+      "line": 598,
+      "call_excerpt": "let started_at = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/write_owner.rs",
+      "line": 216,
+      "call_excerpt": "arrived_at: std::time::Instant::now(),",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/write_owner.rs",
+      "line": 253,
+      "call_excerpt": "arrived_at: std::time::Instant::now(),",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/memory.rs",
+      "line": 2167,
+      "call_excerpt": "let started = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/status.rs",
+      "line": 1870,
+      "call_excerpt": "let started_at = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/rehearse.rs",
+      "line": 373,
+      "call_excerpt": "let started = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/rehearse.rs",
+      "line": 1256,
+      "call_excerpt": "let started = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/steward/mod.rs",
+      "line": 2211,
+      "call_excerpt": "let started = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/steward/mod.rs",
+      "line": 2357,
+      "call_excerpt": "let started = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/steward/mod.rs",
+      "line": 2496,
+      "call_excerpt": "let started = std::time::Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/steward/mod.rs",
+      "line": 2706,
+      "call_excerpt": "let started = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/steward/mod.rs",
+      "line": 3112,
+      "call_excerpt": "let started = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/search.rs",
+      "line": 1633,
+      "call_excerpt": "let start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/search.rs",
+      "line": 1887,
+      "call_excerpt": "let start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/search.rs",
+      "line": 2093,
+      "call_excerpt": "let now = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/search.rs",
+      "line": 2176,
+      "call_excerpt": "let lexical_start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/search.rs",
+      "line": 2203,
+      "call_excerpt": "let semantic_start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/search.rs",
+      "line": 2230,
+      "call_excerpt": "let fusion_start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/search.rs",
+      "line": 2242,
+      "call_excerpt": "let final_start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/index.rs",
+      "line": 695,
+      "call_excerpt": "let start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/index.rs",
+      "line": 818,
+      "call_excerpt": "let start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/index.rs",
+      "line": 996,
+      "call_excerpt": "let start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/index.rs",
+      "line": 2110,
+      "call_excerpt": "let start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/index.rs",
+      "line": 2207,
+      "call_excerpt": "let start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/verify.rs",
+      "line": 992,
+      "call_excerpt": "let start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/verify.rs",
+      "line": 1033,
+      "call_excerpt": "let start = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cli/mod.rs",
+      "line": 7820,
+      "call_excerpt": "let start = std::time::Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cli/mod.rs",
+      "line": 10219,
+      "call_excerpt": "let started = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cli/mod.rs",
+      "line": 13784,
+      "call_excerpt": "let mut idle_started = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cli/mod.rs",
+      "line": 13790,
+      "call_excerpt": "idle_started = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cli/mod.rs",
+      "line": 25664,
+      "call_excerpt": "let started = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cli/mod.rs",
+      "line": 26005,
+      "call_excerpt": "let run_started = Instant::now();",
+      "randomness_kind": "systemtime",
+      "severity": "latent_risk",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/steward/mod.rs",
+      "line": 1518,
+      "call_excerpt": ".unwrap_or_else(|| Utc::now().to_rfc3339());",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/steward/mod.rs",
+      "line": 2092,
+      "call_excerpt": "let timestamp = chrono::Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/steward/mod.rs",
+      "line": 2127,
+      "call_excerpt": "let completion_time = chrono::Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/steward/mod.rs",
+      "line": 3539,
+      "call_excerpt": "let started_at = chrono::Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/steward/mod.rs",
+      "line": 3554,
+      "call_excerpt": "let now = chrono::Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/steward/mod.rs",
+      "line": 3577,
+      "call_excerpt": "let completed_at = chrono::Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/steward/mod.rs",
+      "line": 3594,
+      "call_excerpt": "let timestamp = chrono::Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/steward/mod.rs",
+      "line": 4117,
+      "call_excerpt": "let started_at = chrono::Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/steward/mod.rs",
+      "line": 4124,
+      "call_excerpt": "let tick_started_at = chrono::Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/steward/mod.rs",
+      "line": 4167,
+      "call_excerpt": "completed_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 3818,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 3952,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 3993,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 4058,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 4158,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 4259,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 4274,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 4445,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 4566,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 4703,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 4792,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 5022,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 5293,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 5441,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 5611,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 5663,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 5781,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 5824,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 6106,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 6148,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 6209,
+      "call_excerpt": ".unwrap_or_else(|| Utc::now().to_rfc3339());",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 6246,
+      "call_excerpt": ".unwrap_or_else(|| Utc::now().to_rfc3339());",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 6367,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 6418,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 6468,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 6610,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 6819,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 7285,
+      "call_excerpt": "let updated_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 7610,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 7727,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 7981,
+      "call_excerpt": "let verified_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 8442,
+      "call_excerpt": ".unwrap_or_else(|| Utc::now().to_rfc3339());",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 8591,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 8819,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 8906,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 9186,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 9745,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 9826,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 9874,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 9891,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 9908,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 10097,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 10512,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 11747,
+      "call_excerpt": "let now_instant = Utc::now();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 11892,
+      "call_excerpt": "let now = advisory_lock_timestamp(Utc::now());",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 11957,
+      "call_excerpt": "let now = advisory_lock_timestamp(Utc::now());",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 11990,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 12339,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 12563,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/db/mod.rs",
+      "line": 12593,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/hooks/installer.rs",
+      "line": 567,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/hooks/installer.rs",
+      "line": 704,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/obs/log_envelope.rs",
+      "line": 179,
+      "call_excerpt": "Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true)",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/obs/test_log.rs",
+      "line": 181,
+      "call_excerpt": "ts: Utc::now(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/science/mod.rs",
+      "line": 450,
+      "call_excerpt": "generated_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/science/mod.rs",
+      "line": 604,
+      "call_excerpt": "generated_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/science/mod.rs",
+      "line": 640,
+      "call_excerpt": "generated_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/science/mod.rs",
+      "line": 1017,
+      "call_excerpt": "generated_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/science/mod.rs",
+      "line": 1038,
+      "call_excerpt": "generated_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/science/mod.rs",
+      "line": 1059,
+      "call_excerpt": "generated_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/science/mod.rs",
+      "line": 1083,
+      "call_excerpt": "generated_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cli/mod.rs",
+      "line": 10519,
+      "call_excerpt": "Some(value) => match parse_import_since_duration(value, chrono::Utc::now()) {",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cli/mod.rs",
+      "line": 13172,
+      "call_excerpt": ".unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cli/mod.rs",
+      "line": 14137,
+      "call_excerpt": "let now = chrono::Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cli/mod.rs",
+      "line": 26004,
+      "call_excerpt": "let started_at = chrono::Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cli/mod.rs",
+      "line": 26087,
+      "call_excerpt": "let completed_at = chrono::Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cli/mod.rs",
+      "line": 27121,
+      "call_excerpt": "let now = chrono::Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cass/import.rs",
+      "line": 1047,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cass/import.rs",
+      "line": 1083,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/backup.rs",
+      "line": 533,
+      "call_excerpt": "let created_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 352,
+      "call_excerpt": "checked_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 372,
+      "call_excerpt": "checked_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 392,
+      "call_excerpt": "checked_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 412,
+      "call_excerpt": "checked_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 432,
+      "call_excerpt": "checked_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 452,
+      "call_excerpt": "checked_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 472,
+      "call_excerpt": "checked_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 492,
+      "call_excerpt": "checked_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 512,
+      "call_excerpt": "checked_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 536,
+      "call_excerpt": "checked_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 556,
+      "call_excerpt": "checked_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 1404,
+      "call_excerpt": ".map(|expires_at| expires_at > chrono::Utc::now())",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 1659,
+      "call_excerpt": "signed_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 1839,
+      "call_excerpt": "signed_at: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/tripwire.rs",
+      "line": 111,
+      "call_excerpt": "listed_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/tripwire.rs",
+      "line": 324,
+      "call_excerpt": "checked_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/tripwire.rs",
+      "line": 496,
+      "call_excerpt": "let checked_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/support_bundle.rs",
+      "line": 362,
+      "call_excerpt": "created_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/support_bundle.rs",
+      "line": 1859,
+      "call_excerpt": "let now = Utc::now();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/preflight_guard.rs",
+      "line": 633,
+      "call_excerpt": "let checked_at = chrono::Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/procedure.rs",
+      "line": 99,
+      "call_excerpt": "let created_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/procedure.rs",
+      "line": 505,
+      "call_excerpt": "let exported_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/procedure.rs",
+      "line": 1007,
+      "call_excerpt": "let generated_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/procedure.rs",
+      "line": 1237,
+      "call_excerpt": "let generated_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/procedure.rs",
+      "line": 2446,
+      "call_excerpt": "let verified_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/procedure.rs",
+      "line": 2632,
+      "call_excerpt": ".unwrap_or_else(|| Utc::now().to_rfc3339());",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/recorder.rs",
+      "line": 127,
+      "call_excerpt": "let timestamp = chrono::Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/recorder.rs",
+      "line": 302,
+      "call_excerpt": "let timestamp = chrono::Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/recorder.rs",
+      "line": 1015,
+      "call_excerpt": "let timestamp = chrono::Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/recorder.rs",
+      "line": 1816,
+      "call_excerpt": "let timestamp = chrono::Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/recorder.rs",
+      "line": 2001,
+      "call_excerpt": "let started_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/recorder.rs",
+      "line": 2059,
+      "call_excerpt": "let ended_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/memory.rs",
+      "line": 689,
+      "call_excerpt": "let closed_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/memory.rs",
+      "line": 751,
+      "call_excerpt": "let created_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/memory.rs",
+      "line": 1205,
+      "call_excerpt": "let now = Utc::now();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/memory.rs",
+      "line": 2032,
+      "call_excerpt": "let reinforced_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/memory.rs",
+      "line": 3392,
+      "call_excerpt": "let expires_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/economy.rs",
+      "line": 337,
+      "call_excerpt": "generated_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/economy.rs",
+      "line": 474,
+      "call_excerpt": "generated_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/economy.rs",
+      "line": 568,
+      "call_excerpt": "generated_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/economy.rs",
+      "line": 938,
+      "call_excerpt": "let now = Utc::now();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/outcome.rs",
+      "line": 795,
+      "call_excerpt": "recorded_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/outcome.rs",
+      "line": 1409,
+      "call_excerpt": "let since = Utc::now()",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/index.rs",
+      "line": 1455,
+      "call_excerpt": "chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/index.rs",
+      "line": 2473,
+      "call_excerpt": ".map(|expires_at| expires_at <= chrono::Utc::now())",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/handoff.rs",
+      "line": 430,
+      "call_excerpt": "generated_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/handoff.rs",
+      "line": 526,
+      "call_excerpt": "created_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/handoff.rs",
+      "line": 634,
+      "call_excerpt": "inspected_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/handoff.rs",
+      "line": 923,
+      "call_excerpt": "resumed_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/handoff.rs",
+      "line": 1551,
+      "call_excerpt": "\"created_at\": Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/curate.rs",
+      "line": 1225,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/curate.rs",
+      "line": 1915,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/curate.rs",
+      "line": 2024,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/curate.rs",
+      "line": 2132,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/curate.rs",
+      "line": 2312,
+      "call_excerpt": "let retired_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/curate.rs",
+      "line": 2431,
+      "call_excerpt": "let tombstoned_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/rehearse.rs",
+      "line": 211,
+      "call_excerpt": "let created_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/rehearse.rs",
+      "line": 372,
+      "call_excerpt": "let created_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/rehearse.rs",
+      "line": 639,
+      "call_excerpt": "let inspected_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/rehearse.rs",
+      "line": 800,
+      "call_excerpt": "let created_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/artifact.rs",
+      "line": 1020,
+      "call_excerpt": "Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/repro.rs",
+      "line": 351,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/lab.rs",
+      "line": 113,
+      "call_excerpt": "captured_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/lab.rs",
+      "line": 192,
+      "call_excerpt": "replayed_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/lab.rs",
+      "line": 404,
+      "call_excerpt": "analyzed_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/lab.rs",
+      "line": 1187,
+      "call_excerpt": "reconstructed_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/lab.rs",
+      "line": 1229,
+      "call_excerpt": "let base_time = Utc::now();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/feedback.rs",
+      "line": 298,
+      "call_excerpt": "created_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/feedback.rs",
+      "line": 440,
+      "call_excerpt": "recorded_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/feedback.rs",
+      "line": 473,
+      "call_excerpt": "summarized_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/status.rs",
+      "line": 1323,
+      "call_excerpt": "(memory_health_from_rows(&memories, Utc::now()), Vec::new())",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/status.rs",
+      "line": 1482,
+      "call_excerpt": "let health = curation_health_from_rows(&candidates, &policies, Utc::now());",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/status.rs",
+      "line": 1524,
+      "call_excerpt": "let since = Utc::now()",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/status.rs",
+      "line": 2032,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/status.rs",
+      "line": 2680,
+      "call_excerpt": "let now = chrono::Utc::now();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/status.rs",
+      "line": 2908,
+      "call_excerpt": "let now = chrono::Utc::now();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/status.rs",
+      "line": 2927,
+      "call_excerpt": "let now = chrono::Utc::now();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/preflight.rs",
+      "line": 423,
+      "call_excerpt": "started_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/preflight.rs",
+      "line": 618,
+      "call_excerpt": "closed_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/preflight.rs",
+      "line": 1046,
+      "call_excerpt": "report.completed_at = Some(Utc::now().to_rfc3339());",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/rule.rs",
+      "line": 1464,
+      "call_excerpt": "let marked_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/rule.rs",
+      "line": 1930,
+      "call_excerpt": "let exported_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/rule.rs",
+      "line": 3146,
+      "call_excerpt": "Utc::now().to_rfc3339()",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/focus.rs",
+      "line": 387,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/focus.rs",
+      "line": 434,
+      "call_excerpt": "let now = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/focus.rs",
+      "line": 555,
+      "call_excerpt": "state.updated_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/focus.rs",
+      "line": 587,
+      "call_excerpt": "Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/claims.rs",
+      "line": 1002,
+      "call_excerpt": "Ok(Utc::now() > expires_at)",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/serve.rs",
+      "line": 192,
+      "call_excerpt": "let recorded_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/serve.rs",
+      "line": 267,
+      "call_excerpt": "let recovered_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/serve.rs",
+      "line": 425,
+      "call_excerpt": "recorded_at: Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/serve.rs",
+      "line": 458,
+      "call_excerpt": "Utc::now().to_rfc3339()",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/causal.rs",
+      "line": 2837,
+      "call_excerpt": "let created_at = chrono::Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/models/decision.rs",
+      "line": 368,
+      "call_excerpt": "Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true)",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/learn.rs",
+      "line": 869,
+      "call_excerpt": "let generated_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/learn.rs",
+      "line": 1019,
+      "call_excerpt": "let generated_at = Utc::now().to_rfc3339();",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/task_frame.rs",
+      "line": 657,
+      "call_excerpt": "Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/core/task_frame.rs",
+      "line": 830,
+      "call_excerpt": "Utc::now().timestamp_nanos_opt().unwrap_or_default()",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/models/certificate.rs",
+      "line": 925,
+      "call_excerpt": "timestamp: chrono::Utc::now().to_rfc3339(),",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/models/progress.rs",
+      "line": 242,
+      "call_excerpt": ".timestamp(chrono::Utc::now().to_rfc3339())",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/models/progress.rs",
+      "line": 254,
+      "call_excerpt": ".timestamp(chrono::Utc::now().to_rfc3339())",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/models/progress.rs",
+      "line": 266,
+      "call_excerpt": ".timestamp(chrono::Utc::now().to_rfc3339())",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/models/progress.rs",
+      "line": 291,
+      "call_excerpt": ".timestamp(chrono::Utc::now().to_rfc3339())",
+      "randomness_kind": "systemtime",
+      "severity": "confirmed_drift",
+      "proposed_remediation": "inject_clock"
+    },
+    {
+      "fn_path": "src/cache/mod.rs",
+      "line": 107,
+      "call_excerpt": "entries: HashMap<K, V>,",
+      "randomness_kind": "hashmap_iter",
+      "severity": "latent_risk",
+      "proposed_remediation": "sort_iter"
+    },
+    {
+      "fn_path": "src/cache/mod.rs",
+      "line": 201,
+      "call_excerpt": "entries: HashMap<K, S3Entry<V>>,",
+      "randomness_kind": "hashmap_iter",
+      "severity": "latent_risk",
+      "proposed_remediation": "sort_iter"
+    },
+    {
+      "fn_path": "src/search/mod.rs",
+      "line": 68,
+      "call_excerpt": "metadata: HashMap<String, String>,",
+      "randomness_kind": "hashmap_iter",
+      "severity": "latent_risk",
+      "proposed_remediation": "sort_iter"
+    },
+    {
+      "fn_path": "src/pack/mod.rs",
+      "line": 1349,
+      "call_excerpt": "let mut by_section: std::collections::HashMap<&str, Vec<&PackDraftItem>> =",
+      "randomness_kind": "hashmap_iter",
+      "severity": "latent_risk",
+      "proposed_remediation": "sort_iter"
+    },
+    {
+      "fn_path": "src/core/search.rs",
+      "line": 27,
+      "call_excerpt": "static SEARCH_INDEX_STATUS_CACHE: OnceLock<Mutex<HashMap<IndexStatusCacheKey, CachedIndexStatus>>> =",
+      "randomness_kind": "hashmap_iter",
+      "severity": "latent_risk",
+      "proposed_remediation": "sort_iter"
+    },
+    {
+      "fn_path": "src/core/search.rs",
+      "line": 1568,
+      "call_excerpt": "let mut seen: std::collections::HashMap<String, usize> =",
+      "randomness_kind": "hashmap_iter",
+      "severity": "latent_risk",
+      "proposed_remediation": "sort_iter"
+    },
+    {
+      "fn_path": "src/models/demo.rs",
+      "line": 237,
+      "call_excerpt": "env_overrides: HashMap<String, String>,",
+      "randomness_kind": "hashmap_iter",
+      "severity": "latent_risk",
+      "proposed_remediation": "sort_iter"
+    },
+    {
+      "fn_path": "src/models/demo.rs",
+      "line": 674,
+      "call_excerpt": "pub env_overrides: HashMap<String, String>,",
+      "randomness_kind": "hashmap_iter",
+      "severity": "latent_risk",
+      "proposed_remediation": "sort_iter"
+    },
+    {
+      "fn_path": "src/core/mod.rs",
+      "line": 620,
+      "call_excerpt": "let mut map: HashMap<Vec<u8>, String> = HashMap::new();",
+      "randomness_kind": "hashmap_iter",
+      "severity": "latent_risk",
+      "proposed_remediation": "sort_iter"
+    },
+    {
+      "fn_path": "src/core/write_owner.rs",
+      "line": 852,
+      "call_excerpt": "idempotency: HashMap<String, u64>,",
+      "randomness_kind": "hashmap_iter",
+      "severity": "latent_risk",
+      "proposed_remediation": "sort_iter"
+    },
+    {
+      "fn_path": "src/core/effect.rs",
+      "line": 905,
+      "call_excerpt": "entries: HashMap<&'static str, CommandEffect>,",
+      "randomness_kind": "hashmap_iter",
+      "severity": "latent_risk",
+      "proposed_remediation": "sort_iter"
+    },
+    {
+      "fn_path": "src/main.rs",
+      "line": 108,
+      "call_excerpt": "let filter = tracing_env_filter_from_env(std::env::var(\"RUST_LOG\").ok());",
+      "randomness_kind": "env",
+      "severity": "latent_risk",
+      "proposed_remediation": "env_var"
+    },
+    {
+      "fn_path": "src/config/path.rs",
+      "line": 484,
+      "call_excerpt": "let raw = std::env::var(\"CARGO_PKG_NAME\").unwrap_or_else(|_| String::new());",
+      "randomness_kind": "env",
+      "severity": "latent_risk",
+      "proposed_remediation": "env_var"
+    },
+    {
+      "fn_path": "src/core/repro.rs",
+      "line": 784,
+      "call_excerpt": "if let Ok(rust_version) = std::env::var(\"RUSTC_VERSION\") {",
+      "randomness_kind": "env",
+      "severity": "latent_risk",
+      "proposed_remediation": "env_var"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 1674,
+      "call_excerpt": "std::env::var(\"HOME\")",
+      "randomness_kind": "env",
+      "severity": "latent_risk",
+      "proposed_remediation": "env_var"
+    },
+    {
+      "fn_path": "src/config/env_registry.rs",
+      "line": 233,
+      "call_excerpt": "let value = std::env::var_os(var.name());",
+      "randomness_kind": "env",
+      "severity": "latent_risk",
+      "proposed_remediation": "env_var"
+    },
+    {
+      "fn_path": "src/cass/process.rs",
+      "line": 737,
+      "call_excerpt": "let target_dir = std::env::var_os(\"CARGO_TARGET_DIR\")",
+      "randomness_kind": "env",
+      "severity": "latent_risk",
+      "proposed_remediation": "env_var"
+    },
+    {
+      "fn_path": "src/cass/import.rs",
+      "line": 1524,
+      "call_excerpt": "let target_dir = std::env::var_os(\"CARGO_TARGET_DIR\")",
+      "randomness_kind": "env",
+      "severity": "latent_risk",
+      "proposed_remediation": "env_var"
+    },
+    {
+      "fn_path": "src/cass/import.rs",
+      "line": 2182,
+      "call_excerpt": "if let Some(existing_path) = std::env::var_os(\"PATH\") {",
+      "randomness_kind": "env",
+      "severity": "latent_risk",
+      "proposed_remediation": "env_var"
+    },
+    {
+      "fn_path": "src/config/path.rs",
+      "line": 112,
+      "call_excerpt": "let home = std::env::var_os(home_var).map(PathBuf::from);",
+      "randomness_kind": "env",
+      "severity": "latent_risk",
+      "proposed_remediation": "env_var"
+    },
+    {
+      "fn_path": "src/cass/client.rs",
+      "line": 199,
+      "call_excerpt": "trusted_cass_locations_for_home(std::env::var_os(\"HOME\").as_deref())",
+      "randomness_kind": "env",
+      "severity": "latent_risk",
+      "proposed_remediation": "env_var"
+    },
+    {
+      "fn_path": "src/cass/client.rs",
+      "line": 359,
+      "call_excerpt": "let path_var = std::env::var_os(\"PATH\")?;",
+      "randomness_kind": "env",
+      "severity": "latent_risk",
+      "proposed_remediation": "env_var"
+    },
+    {
+      "fn_path": "src/cass/client.rs",
+      "line": 677,
+      "call_excerpt": "let Some(data_dir) = std::env::var_os(\"CASS_DATA_DIR\") else {",
+      "randomness_kind": "env",
+      "severity": "latent_risk",
+      "proposed_remediation": "env_var"
+    },
+    {
+      "fn_path": "src/cass/client.rs",
+      "line": 718,
+      "call_excerpt": "let target_dir = std::env::var_os(\"CARGO_TARGET_DIR\")",
+      "randomness_kind": "env",
+      "severity": "latent_risk",
+      "proposed_remediation": "env_var"
+    },
+    {
+      "fn_path": "src/core/swarm_brief.rs",
+      "line": 2714,
+      "call_excerpt": "let home = std::env::var_os(\"HOME\").map(PathBuf::from);",
+      "randomness_kind": "env",
+      "severity": "latent_risk",
+      "proposed_remediation": "env_var"
+    },
+    {
+      "fn_path": "src/cli/mod.rs",
+      "line": 23986,
+      "call_excerpt": "let home: Option<PathBuf> = std::env::var_os(home_var).map(PathBuf::from);",
+      "randomness_kind": "env",
+      "severity": "latent_risk",
+      "proposed_remediation": "env_var"
+    },
+    {
+      "fn_path": "src/cli/mod.rs",
+      "line": 25436,
+      "call_excerpt": "if let Some(root) = std::env::var_os(\"XDG_DATA_HOME\") {",
+      "randomness_kind": "env",
+      "severity": "latent_risk",
+      "proposed_remediation": "env_var"
+    },
+    {
+      "fn_path": "src/cli/mod.rs",
+      "line": 25440,
+      "call_excerpt": "std::env::var_os(home_var)",
+      "randomness_kind": "env",
+      "severity": "latent_risk",
+      "proposed_remediation": "env_var"
+    },
+    {
+      "fn_path": "src/cli/mod.rs",
+      "line": 25506,
+      "call_excerpt": "if let Some(existing) = std::env::var_os(\"PATH\") {",
+      "randomness_kind": "env",
+      "severity": "latent_risk",
+      "proposed_remediation": "env_var"
+    },
+    {
+      "fn_path": "src/core/audit.rs",
+      "line": 604,
+      "call_excerpt": "let root = std::env::var_os(\"CARGO_TARGET_DIR\")",
+      "randomness_kind": "env",
+      "severity": "latent_risk",
+      "proposed_remediation": "env_var"
+    },
+    {
+      "fn_path": "src/eval/runner.rs",
+      "line": 375,
+      "call_excerpt": "let entries = std::fs::read_dir(fixture_dir).map_err(|e| DomainError::Storage {",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    },
+    {
+      "fn_path": "src/output/markdown.rs",
+      "line": 462,
+      "call_excerpt": "let mut entries = std::fs::read_dir(&root)",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    },
+    {
+      "fn_path": "src/science/mod.rs",
+      "line": 702,
+      "call_excerpt": "let Ok(entries) = std::fs::read_dir(dir) else {",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    },
+    {
+      "fn_path": "src/core/index.rs",
+      "line": 1373,
+      "call_excerpt": "for entry in std::fs::read_dir(parent).map_err(|e| {",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    },
+    {
+      "fn_path": "src/core/index.rs",
+      "line": 2308,
+      "call_excerpt": "for entry in std::fs::read_dir(path)? {",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    },
+    {
+      "fn_path": "src/core/index.rs",
+      "line": 2331,
+      "call_excerpt": "for entry in std::fs::read_dir(parent)? {",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    },
+    {
+      "fn_path": "src/core/index.rs",
+      "line": 2485,
+      "call_excerpt": "for entry in std::fs::read_dir(index_dir)? {",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    },
+    {
+      "fn_path": "src/core/handoff.rs",
+      "line": 2046,
+      "call_excerpt": "if let Ok(entries) = std::fs::read_dir(&handoffs_dir) {",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    },
+    {
+      "fn_path": "src/core/certificate.rs",
+      "line": 1939,
+      "call_excerpt": "for entry in fs::read_dir(key_dir)? {",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    },
+    {
+      "fn_path": "src/core/procedure.rs",
+      "line": 2368,
+      "call_excerpt": "let entries = fs::read_dir(fixture_root).ok()?;",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    },
+    {
+      "fn_path": "src/core/rehearse.rs",
+      "line": 1051,
+      "call_excerpt": "let mut entries = fs::read_dir(path)",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    },
+    {
+      "fn_path": "src/core/rehearse.rs",
+      "line": 1110,
+      "call_excerpt": "let mut entries = fs::read_dir(source)",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    },
+    {
+      "fn_path": "src/core/support_bundle.rs",
+      "line": 451,
+      "call_excerpt": "if let Ok(entries) = fs::read_dir(bundle_dir) {",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    },
+    {
+      "fn_path": "src/core/support_bundle.rs",
+      "line": 1004,
+      "call_excerpt": "let Ok(entries) = fs::read_dir(directory) else {",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    },
+    {
+      "fn_path": "src/core/support_bundle.rs",
+      "line": 1581,
+      "call_excerpt": "let Ok(entries) = fs::read_dir(report_dir) else {",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    },
+    {
+      "fn_path": "src/core/support_bundle.rs",
+      "line": 1727,
+      "call_excerpt": "let Ok(entries) = fs::read_dir(report_dir) else {",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    },
+    {
+      "fn_path": "src/core/backup.rs",
+      "line": 662,
+      "call_excerpt": "let mut backup_paths = fs::read_dir(&backup_root)",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    },
+    {
+      "fn_path": "src/core/backup.rs",
+      "line": 1695,
+      "call_excerpt": "let mut entries = fs::read_dir(side_path).map_err(|error| DomainError::Storage {",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    },
+    {
+      "fn_path": "src/core/install.rs",
+      "line": 1258,
+      "call_excerpt": "let Ok(entries) = fs::read_dir(dir) else {",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    },
+    {
+      "fn_path": "src/core/legacy_import.rs",
+      "line": 496,
+      "call_excerpt": "let entries = fs::read_dir(&directory).map_err(|error| io_error(&directory, error))?;",
+      "randomness_kind": "filesystem_order",
+      "severity": "latent_risk",
+      "proposed_remediation": "manual_sort"
+    }
+  ],
+  "summary": {
+    "by_kind": {
+      "env": 19,
+      "filesystem_order": 20,
+      "hashmap_iter": 11,
+      "rng": 5,
+      "systemtime": 261
+    },
+    "by_severity": {
+      "confirmed_drift": 183,
+      "deterministic_today": 5,
+      "latent_risk": 128
+    },
+    "by_remediation": {
+      "capability_token": 5,
+      "env_var": 19,
+      "inject_clock": 261,
+      "manual_sort": 20,
+      "sort_iter": 11
+    }
+  },
+  "rows_content_hash": "blake3-ish:51a8854727a5768008ba8269596e8666cc9ffdd88e8ac3f13101ad36434a3bfc"
+}
