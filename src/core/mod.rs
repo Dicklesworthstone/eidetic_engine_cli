@@ -219,6 +219,10 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
             disk_pressure::DISK_PRESSURE_DIAGNOSTICS_SCHEMA_V1,
         ),
         SupportedSchema::new(
+            "artifact_retention_diagnostics",
+            disk_pressure::ARTIFACT_RETENTION_DIAGNOSTICS_SCHEMA_V1,
+        ),
+        SupportedSchema::new(
             "pack_quality_report",
             crate::eval::PACK_QUALITY_REPORT_SCHEMA_V1,
         ),

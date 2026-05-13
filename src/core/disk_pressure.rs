@@ -8,19 +8,23 @@ use std::cmp::Reverse;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+pub const ARTIFACT_RETENTION_DIAGNOSTICS_SCHEMA_V1: &str = "ee.artifact_retention.diagnostics.v1";
 pub const DISK_PRESSURE_DIAGNOSTICS_SCHEMA_V1: &str = "ee.disk_pressure.diagnostics.v1";
 pub const EXTERNAL_BUILD_ROOT: &str = "/Volumes/USBNVME16TB/temp_agent_space";
 
 const GIB: u64 = 1024 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
 const WARNING_AVAILABLE_BYTES: u64 = 20 * GIB;
 const DEGRADED_AVAILABLE_BYTES: u64 = 5 * GIB;
 const BLOCKED_AVAILABLE_BYTES: u64 = GIB;
 const WARNING_PERCENT_USED: f64 = 85.0;
 const DEGRADED_PERCENT_USED: f64 = 95.0;
 const BLOCKED_PERCENT_USED: f64 = 99.0;
+const SECONDS_PER_DAY: u64 = 86_400;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiskPressureOptions {
@@ -29,6 +33,16 @@ pub struct DiskPressureOptions {
     pub top_limit: usize,
     pub consumer_depth: usize,
     pub consumer_entry_limit: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactRetentionOptions {
+    pub workspace: PathBuf,
+    pub workspace_source: &'static str,
+    pub top_limit: usize,
+    pub consumer_depth: usize,
+    pub consumer_entry_limit: usize,
+    pub now_unix_seconds: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -140,6 +154,97 @@ pub struct DiskPressureGuidance {
     pub repair: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactRetentionActionKind {
+    Keep,
+    MovePreserve,
+    CompressPreserve,
+    EligibleForHumanCleanup,
+}
+
+impl ArtifactRetentionActionKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Keep => "keep",
+            Self::MovePreserve => "move_preserve",
+            Self::CompressPreserve => "compress_preserve",
+            Self::EligibleForHumanCleanup => "eligible_for_human_cleanup",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactRetentionReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub side_effect_free: bool,
+    pub mutation_policy: &'static str,
+    pub workspace: DiskPressureWorkspace,
+    pub summary: ArtifactRetentionSummary,
+    pub roots: Vec<ArtifactRetentionRoot>,
+    pub actions: Vec<ArtifactRetentionAction>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactRetentionSummary {
+    pub root_count: usize,
+    pub existing_roots: usize,
+    pub total_bytes: u64,
+    pub over_budget_roots: usize,
+    pub expired_roots: usize,
+    pub retained_for_closeout_roots: usize,
+    pub j1_log_configured: bool,
+    pub retention_manifest_configured: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactRetentionRoot {
+    pub label: &'static str,
+    pub category: &'static str,
+    pub path: String,
+    pub path_source: &'static str,
+    pub exists: bool,
+    pub kind: &'static str,
+    pub bytes: u64,
+    pub artifact_count: u64,
+    pub measurement: &'static str,
+    pub truncated: bool,
+    pub retention_reason: &'static str,
+    pub default_ttl_days: Option<u64>,
+    pub bead_closeout_required: bool,
+    pub budget: ArtifactRetentionBudget,
+    pub latest_modified_unix_seconds: Option<u64>,
+    pub age_days: Option<u64>,
+    pub contains_retention_manifest: bool,
+    pub posture: &'static str,
+    pub recommended_action: ArtifactRetentionActionKind,
+    pub top_consumers: Vec<DiskPressureTopConsumer>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactRetentionBudget {
+    pub warning_bytes: u64,
+    pub degraded_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactRetentionAction {
+    pub priority: u8,
+    pub kind: ArtifactRetentionActionKind,
+    pub target: &'static str,
+    pub path: String,
+    pub reason: String,
+    pub suggestion: String,
+    pub destructive: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RootSpec {
     label: &'static str,
@@ -153,9 +258,40 @@ struct FsCapacity {
     available_bytes: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ArtifactRetentionRootSpec {
+    label: &'static str,
+    category: &'static str,
+    path: PathBuf,
+    path_source: &'static str,
+    retention_reason: &'static str,
+    default_ttl_days: Option<u64>,
+    bead_closeout_required: bool,
+    warning_bytes: u64,
+    degraded_bytes: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ArtifactRetentionScan {
+    bytes: u64,
+    artifact_count: u64,
+    latest_modified_unix_seconds: Option<u64>,
+    contains_retention_manifest: bool,
+    truncated: bool,
+}
+
 #[must_use]
 pub fn gather_disk_pressure_report(options: &DiskPressureOptions) -> DiskPressureReport {
     let workspace = normalize_path(&options.workspace);
+    tracing::info!(
+        event = "disk_pressure_scan_started",
+        workspace = %path_to_string(&workspace),
+        workspace_source = options.workspace_source,
+        top_limit = options.top_limit,
+        consumer_depth = options.consumer_depth,
+        consumer_entry_limit = options.consumer_entry_limit,
+        "disk pressure diagnostic scan started"
+    );
     let specs = root_specs(&workspace);
     let external_root = Path::new(EXTERNAL_BUILD_ROOT);
 
@@ -176,6 +312,18 @@ pub fn gather_disk_pressure_report(options: &DiskPressureOptions) -> DiskPressur
 
     global_consumers.sort_by_key(|consumer| Reverse(consumer.bytes));
     global_consumers.truncate(options.top_limit.max(1));
+    for consumer in &global_consumers {
+        tracing::info!(
+            event = "disk_pressure_top_consumer",
+            root_label = consumer.root_label,
+            path = %consumer.path,
+            kind = consumer.kind,
+            bytes = consumer.bytes,
+            measurement = consumer.measurement,
+            truncated = consumer.truncated,
+            "disk pressure top consumer measured"
+        );
+    }
 
     let posture = roots
         .iter()
@@ -184,6 +332,14 @@ pub fn gather_disk_pressure_report(options: &DiskPressureOptions) -> DiskPressur
         .unwrap_or(DiskPressurePosture::Ok);
     let guidance = build_guidance(&roots, external_root);
     let recovery_actions = build_recovery_actions(posture, &guidance);
+    tracing::info!(
+        event = "disk_pressure_repair_plan_emitted",
+        posture = posture.as_str(),
+        guidance_count = guidance.len(),
+        recovery_action_count = recovery_actions.len(),
+        side_effect_free = true,
+        "disk pressure repair plan emitted"
+    );
 
     DiskPressureReport {
         schema: DISK_PRESSURE_DIAGNOSTICS_SCHEMA_V1,
@@ -208,6 +364,81 @@ pub fn gather_disk_pressure_report(options: &DiskPressureOptions) -> DiskPressur
         recovery_actions,
         guidance,
     }
+}
+
+#[must_use]
+pub fn gather_artifact_retention_report(
+    options: &ArtifactRetentionOptions,
+) -> ArtifactRetentionReport {
+    let workspace = normalize_path(&options.workspace);
+    let specs = artifact_retention_specs(&workspace);
+    let j1_log_configured = env::var_os("EE_TEST_LOG_PATH").is_some();
+    let retention_manifest_configured = env::var_os("EPIC_RETENTION_MANIFEST").is_some()
+        || env::var_os("EE_E2E_RETENTION_MANIFEST").is_some();
+
+    let mut roots = Vec::with_capacity(specs.len());
+    let mut actions = Vec::with_capacity(specs.len());
+
+    for spec in specs {
+        let root = inspect_artifact_retention_root(
+            &spec,
+            options.top_limit.max(1),
+            options.consumer_depth,
+            options.consumer_entry_limit.max(1),
+            options.now_unix_seconds,
+        );
+        actions.push(artifact_retention_action(actions.len(), &root));
+        roots.push(root);
+    }
+
+    let summary = ArtifactRetentionSummary {
+        root_count: roots.len(),
+        existing_roots: roots.iter().filter(|root| root.exists).count(),
+        total_bytes: roots.iter().map(|root| root.bytes).sum(),
+        over_budget_roots: roots
+            .iter()
+            .filter(|root| {
+                matches!(
+                    root.recommended_action,
+                    ArtifactRetentionActionKind::MovePreserve
+                        | ArtifactRetentionActionKind::CompressPreserve
+                )
+            })
+            .count(),
+        expired_roots: roots
+            .iter()
+            .filter(|root| {
+                root.recommended_action == ArtifactRetentionActionKind::EligibleForHumanCleanup
+            })
+            .count(),
+        retained_for_closeout_roots: roots
+            .iter()
+            .filter(|root| root.bead_closeout_required && root.exists)
+            .count(),
+        j1_log_configured,
+        retention_manifest_configured,
+    };
+
+    ArtifactRetentionReport {
+        schema: ARTIFACT_RETENTION_DIAGNOSTICS_SCHEMA_V1,
+        command: "diag artifacts",
+        side_effect_free: true,
+        mutation_policy: "read_only_report_no_files_modified_no_cleanup",
+        workspace: DiskPressureWorkspace {
+            path: path_to_string(&workspace),
+            source: options.workspace_source,
+        },
+        summary,
+        roots,
+        actions,
+    }
+}
+
+#[must_use]
+pub fn current_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 fn root_specs(workspace: &Path) -> Vec<(RootSpec, PathBuf)> {
@@ -324,6 +555,290 @@ fn root_specs(workspace: &Path) -> Vec<(RootSpec, PathBuf)> {
     }
 
     specs
+}
+
+fn artifact_retention_specs(workspace: &Path) -> Vec<ArtifactRetentionRootSpec> {
+    let tmpdir = env::var_os("TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir);
+    let cargo_target = env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace.join("target"));
+
+    let mut specs = vec![
+        ArtifactRetentionRootSpec {
+            label: "tests_audit_artifacts",
+            category: "verification_audit_artifacts",
+            path: workspace.join("tests/audit_artifacts"),
+            path_source: "workspace/tests/audit_artifacts",
+            retention_reason: "install, release, and verification audit JSON evidence",
+            default_ttl_days: None,
+            bead_closeout_required: true,
+            warning_bytes: 256 * MIB,
+            degraded_bytes: GIB,
+        },
+        ArtifactRetentionRootSpec {
+            label: "cargo_target_e2e",
+            category: "e2e_retained_workspaces",
+            path: cargo_target.join("ee-e2e"),
+            path_source: "CARGO_TARGET_DIR/ee-e2e",
+            retention_reason: "E2E command dossiers and retained workspaces",
+            default_ttl_days: Some(14),
+            bead_closeout_required: false,
+            warning_bytes: 2 * GIB,
+            degraded_bytes: 10 * GIB,
+        },
+        ArtifactRetentionRootSpec {
+            label: "workspace_target_e2e",
+            category: "e2e_retained_workspaces",
+            path: workspace.join("target/ee-e2e"),
+            path_source: "workspace/target/ee-e2e",
+            retention_reason: "legacy or fallback E2E artifact root",
+            default_ttl_days: Some(14),
+            bead_closeout_required: false,
+            warning_bytes: 2 * GIB,
+            degraded_bytes: 10 * GIB,
+        },
+        ArtifactRetentionRootSpec {
+            label: "golden_artifacts",
+            category: "golden_artifacts",
+            path: cargo_target.join("ee-golden-artifacts"),
+            path_source: "CARGO_TARGET_DIR/ee-golden-artifacts",
+            retention_reason: "generated golden comparison artifacts",
+            default_ttl_days: Some(30),
+            bead_closeout_required: true,
+            warning_bytes: GIB,
+            degraded_bytes: 5 * GIB,
+        },
+        ArtifactRetentionRootSpec {
+            label: "bench_artifacts",
+            category: "benchmark_artifacts",
+            path: cargo_target.join("ee-bench"),
+            path_source: "CARGO_TARGET_DIR/ee-bench",
+            retention_reason: "benchmark and performance regression JSON artifacts",
+            default_ttl_days: Some(30),
+            bead_closeout_required: true,
+            warning_bytes: GIB,
+            degraded_bytes: 5 * GIB,
+        },
+        ArtifactRetentionRootSpec {
+            label: "tmp_e2e_workspaces",
+            category: "e2e_retained_workspaces",
+            path: tmpdir.clone(),
+            path_source: "TMPDIR",
+            retention_reason: "temporary E2E workspaces and J1 stdout/stderr side artifacts",
+            default_ttl_days: Some(7),
+            bead_closeout_required: false,
+            warning_bytes: 5 * GIB,
+            degraded_bytes: 20 * GIB,
+        },
+        ArtifactRetentionRootSpec {
+            label: "support_bundles",
+            category: "support_bundles",
+            path: workspace.join(".ee/support-bundles"),
+            path_source: "workspace/.ee/support-bundles",
+            retention_reason: "redacted diagnostic support bundles",
+            default_ttl_days: Some(30),
+            bead_closeout_required: true,
+            warning_bytes: GIB,
+            degraded_bytes: 5 * GIB,
+        },
+    ];
+
+    if let Some(path) = env::var_os("EE_TEST_LOG_PATH").map(PathBuf::from) {
+        specs.push(ArtifactRetentionRootSpec {
+            label: "j1_current_log",
+            category: "j1_jsonl_log",
+            path,
+            path_source: "EE_TEST_LOG_PATH",
+            retention_reason: "current structured J1 JSONL event log",
+            default_ttl_days: Some(30),
+            bead_closeout_required: true,
+            warning_bytes: 128 * MIB,
+            degraded_bytes: 512 * MIB,
+        });
+    }
+
+    if let Some(path) = env::var_os("EPIC_RETENTION_MANIFEST")
+        .or_else(|| env::var_os("EE_E2E_RETENTION_MANIFEST"))
+        .map(PathBuf::from)
+    {
+        specs.push(ArtifactRetentionRootSpec {
+            label: "current_retention_manifest",
+            category: "retention_manifest",
+            path,
+            path_source: "EPIC_RETENTION_MANIFEST|EE_E2E_RETENTION_MANIFEST",
+            retention_reason: "current per-run retained-artifact manifest",
+            default_ttl_days: Some(30),
+            bead_closeout_required: true,
+            warning_bytes: 16 * MIB,
+            degraded_bytes: 128 * MIB,
+        });
+    }
+
+    specs
+}
+
+fn inspect_artifact_retention_root(
+    spec: &ArtifactRetentionRootSpec,
+    top_limit: usize,
+    consumer_depth: usize,
+    consumer_entry_limit: usize,
+    now_unix_seconds: u64,
+) -> ArtifactRetentionRoot {
+    let exists = spec.path.exists();
+    let kind = file_kind(&spec.path);
+    let scan = if exists {
+        scan_artifact_retention_path(&spec.path, consumer_depth, consumer_entry_limit)
+    } else {
+        ArtifactRetentionScan::default()
+    };
+    let age_days = scan
+        .latest_modified_unix_seconds
+        .map(|modified| now_unix_seconds.saturating_sub(modified) / SECONDS_PER_DAY);
+    let recommended_action = classify_artifact_retention_action(exists, &scan, spec, age_days);
+    let posture = artifact_retention_posture(
+        exists,
+        scan.bytes,
+        spec.warning_bytes,
+        spec.degraded_bytes,
+        spec.default_ttl_days,
+        age_days,
+        spec.bead_closeout_required,
+    );
+
+    ArtifactRetentionRoot {
+        label: spec.label,
+        category: spec.category,
+        path: path_to_string(&spec.path),
+        path_source: spec.path_source,
+        exists,
+        kind,
+        bytes: scan.bytes,
+        artifact_count: scan.artifact_count,
+        measurement: "bounded_recursive_metadata",
+        truncated: scan.truncated,
+        retention_reason: spec.retention_reason,
+        default_ttl_days: spec.default_ttl_days,
+        bead_closeout_required: spec.bead_closeout_required,
+        budget: ArtifactRetentionBudget {
+            warning_bytes: spec.warning_bytes,
+            degraded_bytes: spec.degraded_bytes,
+        },
+        latest_modified_unix_seconds: scan.latest_modified_unix_seconds,
+        age_days,
+        contains_retention_manifest: scan.contains_retention_manifest,
+        posture,
+        recommended_action,
+        top_consumers: top_consumers(
+            spec.label,
+            &spec.path,
+            top_limit,
+            consumer_depth,
+            consumer_entry_limit,
+        ),
+    }
+}
+
+fn classify_artifact_retention_action(
+    exists: bool,
+    scan: &ArtifactRetentionScan,
+    spec: &ArtifactRetentionRootSpec,
+    age_days: Option<u64>,
+) -> ArtifactRetentionActionKind {
+    if !exists || scan.bytes == 0 || scan.artifact_count == 0 || spec.bead_closeout_required {
+        return ArtifactRetentionActionKind::Keep;
+    }
+    if spec
+        .default_ttl_days
+        .zip(age_days)
+        .is_some_and(|(ttl, age)| age >= ttl)
+    {
+        return ArtifactRetentionActionKind::EligibleForHumanCleanup;
+    }
+    if scan.bytes >= spec.degraded_bytes {
+        ArtifactRetentionActionKind::MovePreserve
+    } else if scan.bytes >= spec.warning_bytes {
+        ArtifactRetentionActionKind::CompressPreserve
+    } else {
+        ArtifactRetentionActionKind::Keep
+    }
+}
+
+fn artifact_retention_posture(
+    exists: bool,
+    bytes: u64,
+    warning_bytes: u64,
+    degraded_bytes: u64,
+    ttl_days: Option<u64>,
+    age_days: Option<u64>,
+    bead_closeout_required: bool,
+) -> &'static str {
+    if !exists {
+        "missing"
+    } else if bead_closeout_required {
+        "retained_for_closeout"
+    } else if ttl_days.zip(age_days).is_some_and(|(ttl, age)| age >= ttl) {
+        "expired"
+    } else if bytes >= degraded_bytes {
+        "over_budget"
+    } else if bytes >= warning_bytes {
+        "watch"
+    } else {
+        "ok"
+    }
+}
+
+fn artifact_retention_action(
+    index: usize,
+    root: &ArtifactRetentionRoot,
+) -> ArtifactRetentionAction {
+    let reason = match root.recommended_action {
+        ArtifactRetentionActionKind::Keep if root.bead_closeout_required => {
+            "Artifact root is retained as closeout evidence.".to_owned()
+        }
+        ArtifactRetentionActionKind::Keep if !root.exists => {
+            "Artifact root is not present.".to_owned()
+        }
+        ArtifactRetentionActionKind::Keep => "Artifact root is within retention budget.".to_owned(),
+        ArtifactRetentionActionKind::CompressPreserve => {
+            "Artifact root is above the warning budget.".to_owned()
+        }
+        ArtifactRetentionActionKind::MovePreserve => {
+            "Artifact root is above the degraded budget.".to_owned()
+        }
+        ArtifactRetentionActionKind::EligibleForHumanCleanup => {
+            "Artifact root is past its retention TTL and is not required for bead closeout."
+                .to_owned()
+        }
+    };
+    let suggestion = match root.recommended_action {
+        ArtifactRetentionActionKind::Keep => {
+            "Keep artifacts in place; no cleanup action is recommended.".to_owned()
+        }
+        ArtifactRetentionActionKind::CompressPreserve => {
+            "Compress this root into a manifest-tracked archive before considering cleanup."
+                .to_owned()
+        }
+        ArtifactRetentionActionKind::MovePreserve => format!(
+            "Use `ee artifact relocate --from {} --to {}/artifact-retention --manifest <path> --apply --json` to preserve-copy before any cleanup review.",
+            root.path, EXTERNAL_BUILD_ROOT
+        ),
+        ArtifactRetentionActionKind::EligibleForHumanCleanup => {
+            "Ask the human to approve any exact cleanup command; this diagnostic never deletes."
+                .to_owned()
+        }
+    };
+
+    ArtifactRetentionAction {
+        priority: u8::try_from(index.saturating_add(1)).unwrap_or(u8::MAX),
+        kind: root.recommended_action,
+        target: root.label,
+        path: root.path.clone(),
+        reason,
+        suggestion,
+        destructive: false,
+    }
 }
 
 fn inspect_root(
@@ -577,6 +1092,64 @@ fn top_consumers(
     entries
 }
 
+fn scan_artifact_retention_path(
+    path: &Path,
+    max_depth: usize,
+    entry_limit: usize,
+) -> ArtifactRetentionScan {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return ArtifactRetentionScan::default();
+    };
+
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs());
+    let mut scan = ArtifactRetentionScan {
+        bytes: metadata.len(),
+        artifact_count: 1,
+        latest_modified_unix_seconds: modified,
+        contains_retention_manifest: path
+            .file_name()
+            .is_some_and(|name| name == "e2e_retention_manifest.json"),
+        truncated: false,
+    };
+
+    if !metadata.is_dir() || max_depth == 0 {
+        return scan;
+    }
+
+    let Ok(children) = fs::read_dir(path) else {
+        return scan;
+    };
+    for (index, child) in children.flatten().enumerate() {
+        if index >= entry_limit {
+            scan.truncated = true;
+            break;
+        }
+        let child_scan =
+            scan_artifact_retention_path(&child.path(), max_depth.saturating_sub(1), entry_limit);
+        scan.bytes = scan.bytes.saturating_add(child_scan.bytes);
+        scan.artifact_count = scan
+            .artifact_count
+            .saturating_add(child_scan.artifact_count);
+        scan.latest_modified_unix_seconds = match (
+            scan.latest_modified_unix_seconds,
+            child_scan.latest_modified_unix_seconds,
+        ) {
+            (Some(left), Some(right)) => Some(left.max(right)),
+            (None, Some(right)) => Some(right),
+            (Some(left), None) => Some(left),
+            (None, None) => None,
+        };
+        scan.contains_retention_manifest |= child_scan.contains_retention_manifest;
+        scan.truncated |= child_scan.truncated;
+    }
+
+    scan
+}
+
 fn bounded_size(path: &Path, max_depth: usize, entry_limit: usize) -> (u64, bool) {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return (0, false);
@@ -751,6 +1324,56 @@ mod tests {
         let actions = build_recovery_actions(DiskPressurePosture::Ok, &[]);
         ensure(actions.len(), 1usize, "action count")?;
         ensure(actions[0].kind, "noop", "noop kind")
+    }
+
+    #[test]
+    fn artifact_retention_actions_are_preservation_only() -> TestResult {
+        let actions = [
+            classify_artifact_retention_action(false, 0, 0, 10, 20, None, None, false),
+            classify_artifact_retention_action(true, 8, 1, 10, 20, None, None, false),
+            classify_artifact_retention_action(true, 12, 1, 10, 20, None, None, false),
+            classify_artifact_retention_action(true, 24, 1, 10, 20, None, None, false),
+            classify_artifact_retention_action(true, 8, 1, 10, 20, Some(7), Some(8), false),
+            classify_artifact_retention_action(true, 24, 1, 10, 20, Some(7), Some(8), true),
+        ];
+        let expected = [
+            ArtifactRetentionActionKind::Keep,
+            ArtifactRetentionActionKind::Keep,
+            ArtifactRetentionActionKind::CompressPreserve,
+            ArtifactRetentionActionKind::MovePreserve,
+            ArtifactRetentionActionKind::EligibleForHumanCleanup,
+            ArtifactRetentionActionKind::Keep,
+        ];
+        ensure(actions, expected, "artifact retention actions")
+    }
+
+    #[test]
+    fn artifact_retention_postures_explain_budget_and_ttl() -> TestResult {
+        ensure(
+            artifact_retention_posture(false, 0, 10, 20, None, None, false),
+            "missing",
+            "missing",
+        )?;
+        ensure(
+            artifact_retention_posture(true, 1, 10, 20, None, None, true),
+            "retained_for_closeout",
+            "closeout",
+        )?;
+        ensure(
+            artifact_retention_posture(true, 1, 10, 20, Some(7), Some(8), false),
+            "expired",
+            "expired",
+        )?;
+        ensure(
+            artifact_retention_posture(true, 24, 10, 20, None, None, false),
+            "over_budget",
+            "over budget",
+        )?;
+        ensure(
+            artifact_retention_posture(true, 12, 10, 20, None, None, false),
+            "watch",
+            "watch",
+        )
     }
 
     #[test]

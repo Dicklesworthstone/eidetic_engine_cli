@@ -550,17 +550,32 @@ mod tests {
     type TestResult = Result<(), String>;
 
     fn temp_path(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "ee-artifact-relocation-{label}-{}",
-            std::process::id()
-        ))
+        let root = std::env::var_os("CARGO_TARGET_TMPDIR")
+            .or_else(|| std::env::var_os("CARGO_TARGET_DIR"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join("target")
+            });
+        let unique = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        root.join("ee-artifact-relocation-tests")
+            .join(format!("{label}-{}-{unique}", std::process::id()))
+    }
+
+    fn parent_dir(path: &Path) -> TestResult<&Path> {
+        path.parent()
+            .ok_or_else(|| format!("path has no parent: {}", path.display()))
     }
 
     #[test]
     fn relocation_plan_refuses_non_artifact_source_without_force() -> TestResult {
         let workspace = temp_path("refuse-workspace");
         let source = workspace.join("src/main.rs");
-        fs::create_dir_all(source.parent().unwrap()).map_err(|error| error.to_string())?;
+        fs::create_dir_all(parent_dir(&source)?).map_err(|error| error.to_string())?;
         fs::write(&source, "fn main() {}\n").map_err(|error| error.to_string())?;
         let manifest = workspace.join("manifest.json");
         let destination = temp_path("refuse-destination");
@@ -584,7 +599,7 @@ mod tests {
     fn relocation_apply_copies_and_writes_manifest_without_removing_original() -> TestResult {
         let workspace = temp_path("apply-workspace");
         let source = workspace.join("target/debug/sample.o");
-        fs::create_dir_all(source.parent().unwrap()).map_err(|error| error.to_string())?;
+        fs::create_dir_all(parent_dir(&source)?).map_err(|error| error.to_string())?;
         fs::write(&source, "artifact bytes\n").map_err(|error| error.to_string())?;
         let destination = temp_path("apply-destination");
         let manifest = temp_path("apply-manifest").join("relocation.json");
@@ -611,6 +626,68 @@ mod tests {
         }
         if report.manifest.entries[0].blake3.is_none() {
             return Err("manifest entry missing blake3".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn relocation_restore_copies_missing_original_from_manifest() -> TestResult {
+        let workspace = temp_path("restore-workspace");
+        let original = workspace.join("target/debug/restored.o");
+        let destination = temp_path("restore-destination")
+            .join(RELOCATION_DIR)
+            .join("target/debug/restored.o");
+        fs::create_dir_all(parent_dir(&destination)?).map_err(|error| error.to_string())?;
+        fs::write(&destination, "restore bytes\n").map_err(|error| error.to_string())?;
+        let manifest_path = temp_path("restore-manifest").join("relocation.json");
+        fs::create_dir_all(parent_dir(&manifest_path)?).map_err(|error| error.to_string())?;
+        let manifest = ArtifactRelocationManifest {
+            schema: ARTIFACT_RELOCATION_SCHEMA_V1.to_owned(),
+            command_version: env!("CARGO_PKG_VERSION").to_owned(),
+            actor: "test".to_owned(),
+            created_at: "2026-05-13T00:00:00Z".to_owned(),
+            workspace_path: path_to_string(&workspace),
+            source_path: path_to_string(&original),
+            destination_root: path_to_string(parent_dir(&destination)?),
+            restoration_command: format!(
+                "ee artifact relocate --restore --manifest {} --json",
+                manifest_path.display()
+            ),
+            force_with_explicit_path: false,
+            entries: vec![ArtifactRelocationEntry {
+                original_path: path_to_string(&original),
+                destination_path: path_to_string(&destination),
+                kind: "file".to_owned(),
+                size_bytes: 14,
+                mtime_unix_seconds: None,
+                blake3: Some(hash_file(&destination).map_err(|error| error.to_string())?),
+                status: "copied".to_owned(),
+            }],
+        };
+        let json = serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?;
+        fs::write(&manifest_path, json).map_err(|error| error.to_string())?;
+
+        let report = relocate_artifacts(&ArtifactRelocationOptions {
+            workspace_path: &workspace,
+            source_path: None,
+            destination_root: None,
+            manifest_path: &manifest_path,
+            actor: Some("test"),
+            mode: ArtifactRelocationMode::Restore,
+            force_with_explicit_path: false,
+        })
+        .map_err(|error| error.to_string())?;
+
+        if !original.exists() {
+            return Err("restore did not recreate missing original".to_owned());
+        }
+        let original_hash = hash_file(&original).map_err(|error| error.to_string())?;
+        let destination_hash = hash_file(&destination).map_err(|error| error.to_string())?;
+        if original_hash != destination_hash {
+            return Err("restored file hash mismatch".to_owned());
+        }
+        if !report.restored {
+            return Err("restore report did not mark restored=true".to_owned());
         }
         Ok(())
     }

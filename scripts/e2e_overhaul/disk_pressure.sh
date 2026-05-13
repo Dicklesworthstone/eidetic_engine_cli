@@ -8,6 +8,15 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/e2e_overhaul/lib/shared.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/shared.sh"
+require_jq
+
+e2e_log_start "disk_pressure"
+trap e2e_log_end EXIT
+
 SCRATCH_ROOT="${TMPDIR:-/tmp}/ee-disk-pressure-e2e"
 RUN_ID="run-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 WORKSPACE="$SCRATCH_ROOT/$RUN_ID/workspace"
@@ -27,8 +36,9 @@ snapshot() {
 
 before_snapshot="$(snapshot)"
 
-if [ -n "${EE_BIN:-}" ]; then
-    report="$("$EE_BIN" --workspace "$WORKSPACE" diag disk-pressure --json \
+EE_UNDER_TEST="${EE_BIN:-${EE_BINARY:-}}"
+if [ -n "$EE_UNDER_TEST" ]; then
+    report="$("$EE_UNDER_TEST" --workspace "$WORKSPACE" diag disk-pressure --json \
         --top-limit 3 --consumer-depth 1 --consumer-entry-limit 100)"
 else
     report="$(cd "$REPO_ROOT" && cargo run --quiet -- --workspace "$WORKSPACE" \
@@ -38,24 +48,23 @@ fi
 
 after_snapshot="$(snapshot)"
 
-if [ "$before_snapshot" != "$after_snapshot" ]; then
-    echo "disk-pressure diagnostic mutated the synthetic workspace" >&2
-    exit 1
-fi
+e2e_log_assert_eq "$after_snapshot" "$before_snapshot" "disk_pressure_no_mutation"
 
-printf '%s\n' "$report" |
-    jq -e '
-      .schema == "ee.response.v1"
-      and .success == true
-      and .data.schema == "ee.disk_pressure.diagnostics.v1"
-      and .data.sideEffectFree == true
-      and .data.mutationPolicy == "read_only_report_no_files_modified"
-      and (.data.roots | map(.label) | index("workspace") != null)
-      and (.data.roots | map(.label) | index("cargo_target") != null)
-      and (.data.recoveryActions | all(.kind as $kind |
-        ["move_preserve", "compress_preserve", "rotate_with_manifest", "ask_human", "noop"]
-        | index($kind) != null))
-    ' >/dev/null
+assert_jq "$report" '.schema' "ee.response.v1" "disk_pressure_response_schema"
+assert_jq "$report" '.success' "true" "disk_pressure_response_success"
+assert_jq "$report" '.data.schema' "ee.disk_pressure.diagnostics.v1" \
+    "disk_pressure_data_schema"
+assert_jq "$report" '.data.sideEffectFree' "true" "disk_pressure_side_effect_free"
+assert_jq "$report" '.data.mutationPolicy' "read_only_report_no_files_modified" \
+    "disk_pressure_mutation_policy"
+assert_jq "$report" '(.data.roots | map(.label) | index("workspace") != null)' \
+    "true" "disk_pressure_workspace_root"
+assert_jq "$report" '(.data.roots | map(.label) | index("cargo_target") != null)' \
+    "true" "disk_pressure_cargo_target_root"
+# shellcheck disable=SC2016
+assert_jq "$report" '(.data.recoveryActions | all(.kind as $kind |
+    ["move_preserve", "compress_preserve", "rotate_with_manifest", "ask_human", "noop"]
+    | index($kind) != null))' "true" "disk_pressure_recovery_actions_preserve_only"
 
 jq -n \
     --arg schema "ee.disk_pressure.e2e.v1" \
