@@ -71,6 +71,7 @@ if [ -z "${EE_BINARY:-}" ]; then
     fi
 fi
 
+# shellcheck disable=SC2329
 beads_lock_wait_seconds() {
     case "$BEADS_LOCK_WAIT_SECONDS" in
         ''|*[!0-9]*)
@@ -83,6 +84,7 @@ beads_lock_wait_seconds() {
     esac
 }
 
+# shellcheck disable=SC2329
 with_beads_read_locks() {
     local beads_dir="${REPO_ROOT}/.beads"
     [ -d "$beads_dir" ] || {
@@ -137,6 +139,7 @@ with_beads_read_locks() {
     return "$status"
 }
 
+# shellcheck disable=SC2329
 snapshot_proposal_guard() {
     if ! git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         echo "ok: not in a git worktree; snapshot proposal guard skipped"
@@ -184,17 +187,21 @@ run_stage() {
     echo "[*] Running: $name"
     echo "    $cmd"
 
-    local start_time=$(date +%s)
-    local output_file=$(mktemp)
+    local start_time
+    start_time=$(date +%s)
+    local output_file
+    output_file=$(mktemp)
 
     if eval "$cmd" 2>&1 | tee "$output_file"; then
-        local end_time=$(date +%s)
+        local end_time
+        end_time=$(date +%s)
         local duration=$((end_time - start_time))
         echo "[+] PASS: $name (${duration}s)"
         STAGE_RESULTS="${STAGE_RESULTS}PASS ${name} (${duration}s)\n"
 
         # Capture artifact paths from E2E output
-        local artifacts=$(grep -o 'Artifacts:[[:space:]]*[^ ]*' "$output_file" | head -1 | sed 's/Artifacts:[[:space:]]*//' || true)
+        local artifacts
+        artifacts=$(grep -o 'Artifacts:[[:space:]]*[^ ]*' "$output_file" | head -1 | sed 's/Artifacts:[[:space:]]*//' || true)
         if [ -n "$artifacts" ] && [ -d "$artifacts" ]; then
             ARTIFACT_DIRS="${ARTIFACT_DIRS}  ${name}: ${artifacts}\n"
         fi
@@ -202,7 +209,8 @@ run_stage() {
         echo ""
     else
         local exit_code=$?
-        local end_time=$(date +%s)
+        local end_time
+        end_time=$(date +%s)
         local duration=$((end_time - start_time))
         if [ "$exit_code" -eq "$BEADS_LOCK_SKIP_CODE" ]; then
             echo "[!] SKIP: $name (${duration}s)"
@@ -214,6 +222,31 @@ run_stage() {
         echo "[-] FAIL: $name (Exit code: $exit_code, ${duration}s)"
         rm -f "$output_file"
         exit $exit_code
+    fi
+}
+
+artifact_retention_summary() {
+    echo ""
+    echo "Artifact retention:"
+
+    if [ ! -x "${EE_BINARY:-}" ]; then
+        echo "  skipped: ee binary not found at ${EE_BINARY:-<unset>}"
+        return 0
+    fi
+
+    local summary_json
+    if ! summary_json=$("$EE_BINARY" --workspace "$REPO_ROOT" diag artifacts --json 2>/dev/null); then
+        echo "  skipped: ee diag artifacts failed"
+        return 0
+    fi
+
+    if command -v jq >/dev/null 2>&1; then
+        printf "%s\n" "$summary_json" | jq -r '
+            .data.summary
+            | "  roots=\(.rootCount) existing=\(.existingRoots) bytes=\(.totalBytes) over_budget=\(.overBudgetRoots) expired=\(.expiredRoots)"
+        ' || true
+    else
+        echo "  report available via: $EE_BINARY --workspace $REPO_ROOT diag artifacts --json"
     fi
 }
 
@@ -271,5 +304,7 @@ if [ -n "$ARTIFACT_DIRS" ]; then
     echo "Artifact directories:"
     printf "%b" "$ARTIFACT_DIRS"
 fi
+
+artifact_retention_summary
 
 exit 0

@@ -66,7 +66,10 @@ use crate::core::curate::{
     run_curate_untombstone, run_curation_disposition, run_review_workspace,
     validate_curation_candidate,
 };
-use crate::core::disk_pressure::{DiskPressureOptions, gather_disk_pressure_report};
+use crate::core::disk_pressure::{
+    ArtifactRetentionOptions, DiskPressureOptions, current_unix_seconds,
+    gather_artifact_retention_report, gather_disk_pressure_report,
+};
 use crate::core::doctor::{
     DependencyDiagnosticsReport, DoctorReport, FrankenHealthReport, IntegrityDiagnosticsOptions,
     IntegrityDiagnosticsReport,
@@ -83,8 +86,9 @@ use crate::core::focus::{
 };
 use crate::core::handoff::{
     CapsuleProfile, CreateOptions as HandoffCreateOptions, InspectOptions as HandoffInspectOptions,
-    PreviewOptions as HandoffPreviewOptions, ResumeOptions as HandoffResumeOptions, create_handoff,
-    inspect_handoff, preview_handoff, resume_handoff,
+    PreviewOptions as HandoffPreviewOptions, ResumeOptions as HandoffResumeOptions,
+    RotateKeyOptions as HandoffRotateKeyOptions, create_handoff, inspect_handoff, preview_handoff,
+    resume_handoff, rotate_handoff_key,
 };
 use crate::core::health::HealthReport;
 use crate::core::index::{
@@ -1960,6 +1964,8 @@ pub struct PackDiffArgs {
 pub enum DiagCommand {
     /// Acquire a deterministic advisory lock for diagnostic fixture replay.
     AdvisoryLock(DiagAdvisoryLockArgs),
+    /// Report verification artifact retention budgets and preserve-only actions.
+    Artifacts(DiagArtifactsArgs),
     /// Report claim verification posture: unverified, stale, and regressed claims.
     Claims(DiagClaimsArgs),
     /// Seed deterministic causal evidence for diagnostic fixture replay.
@@ -2120,6 +2126,22 @@ pub struct DiagDiskPressureArgs {
     pub top_limit: usize,
 
     /// Recursive depth for bounded top-consumer measurement.
+    #[arg(long, default_value_t = 2, value_name = "N")]
+    pub consumer_depth: usize,
+
+    /// Maximum entries to inspect per directory during bounded measurement.
+    #[arg(long, default_value_t = 4000, value_name = "N")]
+    pub consumer_entry_limit: usize,
+}
+
+/// Arguments for `ee diag artifacts`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagArtifactsArgs {
+    /// Maximum top consumers to report per artifact root.
+    #[arg(long, default_value_t = 5, value_name = "N")]
+    pub top_limit: usize,
+
+    /// Recursive depth for bounded artifact measurement.
     #[arg(long, default_value_t = 2, value_name = "N")]
     pub consumer_depth: usize,
 
@@ -3061,6 +3083,8 @@ pub enum HandoffCommand {
     Inspect(HandoffInspectArgs),
     /// Render next-agent payload from a capsule.
     Resume(HandoffResumeArgs),
+    /// Rotate a capsule HMAC under fresh workspace key material.
+    RotateKey(HandoffRotateKeyArgs),
 }
 
 /// Arguments for `ee handoff preview`.
@@ -3139,6 +3163,14 @@ pub struct HandoffResumeArgs {
     /// high-severity degraded entry.
     #[arg(long = "insecure-skip-hmac", action = ArgAction::SetTrue)]
     pub insecure_skip_hmac: bool,
+}
+
+/// Arguments for `ee handoff rotate-key`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct HandoffRotateKeyArgs {
+    /// Path to the capsule file to rotate in place.
+    #[arg(long = "capsule", value_name = "PATH")]
+    pub capsule: PathBuf,
 }
 
 /// Handoff capsule profile.
@@ -7576,6 +7608,7 @@ where
             DiagCommand::AdvisoryLock(args) => {
                 handle_diag_advisory_lock(&cli, args, stdout, stderr)
             }
+            DiagCommand::Artifacts(args) => handle_diag_artifacts(&cli, args, stdout),
             DiagCommand::Claims(args) => handle_diag_claims(&cli, args, stdout),
             DiagCommand::CausalEdge(args) => handle_diag_causal_edge(&cli, args, stdout, stderr),
             DiagCommand::CurationCandidate(args) => {
@@ -7851,6 +7884,33 @@ where
                         | output::Renderer::Hook => write_stdout(
                             stdout,
                             &(output::render_handoff_resume_json(&report) + "\n"),
+                        ),
+                    },
+                    Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
+                }
+            }
+            HandoffCommand::RotateKey(args) => {
+                let workspace_path = cli.resolve_workspace();
+                let options = HandoffRotateKeyOptions {
+                    workspace: workspace_path,
+                    capsule: args.capsule.clone(),
+                    machine_salt_path: None,
+                };
+                match rotate_handoff_key(&options) {
+                    Ok(report) => match cli.renderer() {
+                        output::Renderer::Human | output::Renderer::Markdown => {
+                            write_stdout(stdout, &output::render_handoff_rotate_key_human(&report))
+                        }
+                        output::Renderer::Toon => write_stdout(
+                            stdout,
+                            &(output::render_handoff_rotate_key_toon(&report) + "\n"),
+                        ),
+                        output::Renderer::Json
+                        | output::Renderer::Jsonl
+                        | output::Renderer::Compact
+                        | output::Renderer::Hook => write_stdout(
+                            stdout,
+                            &(output::render_handoff_rotate_key_json(&report) + "\n"),
                         ),
                     },
                     Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
@@ -15456,6 +15516,54 @@ where
                     "\n{}: {}\nNext: {}\n",
                     guidance.severity, guidance.message, guidance.repair
                 ));
+            }
+            write_stdout(stdout, &out)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&workspace_response_json(&report)) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(workspace_response_json(&report) + "\n"))
+        }
+    }
+}
+
+fn handle_diag_artifacts<W>(cli: &Cli, args: &DiagArtifactsArgs, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    let (workspace_path, workspace_source) = resolve_workspace_for_cli(cli.workspace.as_deref());
+    let report = gather_artifact_retention_report(&ArtifactRetentionOptions {
+        workspace: workspace_path,
+        workspace_source: workspace_source.as_str(),
+        top_limit: args.top_limit,
+        consumer_depth: args.consumer_depth,
+        consumer_entry_limit: args.consumer_entry_limit,
+        now_unix_seconds: current_unix_seconds(),
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let mut out = format!(
+                "artifact retention diagnostics\n\nroots: {}\nbytes: {}\nover budget: {}\nexpired: {}\n",
+                report.summary.root_count,
+                report.summary.total_bytes,
+                report.summary.over_budget_roots,
+                report.summary.expired_roots
+            );
+            for action in &report.actions {
+                if action.kind.as_str() != "keep" {
+                    out.push_str(&format!(
+                        "\n{}: {}\nNext: {}\n",
+                        action.kind.as_str(),
+                        action.reason,
+                        action.suggestion
+                    ));
+                }
             }
             write_stdout(stdout, &out)
         }
@@ -31990,6 +32098,7 @@ impl NormalizedInvocation {
                 },
                 Command::Diag(diag) => match diag {
                     DiagCommand::AdvisoryLock(_) => "diag advisory-lock".to_string(),
+                    DiagCommand::Artifacts(_) => "diag artifacts".to_string(),
                     DiagCommand::CausalEdge(_) => "diag causal-edge".to_string(),
                     DiagCommand::Claims(_) => "diag claims".to_string(),
                     DiagCommand::CurationCandidate(_) => "diag curation-candidate".to_string(),
@@ -32039,6 +32148,7 @@ impl NormalizedInvocation {
                     HandoffCommand::Create(_) => "handoff create".to_string(),
                     HandoffCommand::Inspect(_) => "handoff inspect".to_string(),
                     HandoffCommand::Resume(_) => "handoff resume".to_string(),
+                    HandoffCommand::RotateKey(_) => "handoff rotate-key".to_string(),
                 },
                 Command::Health => "health".to_string(),
                 Command::Help => "help".to_string(),
@@ -32849,11 +32959,12 @@ mod tests {
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction, Cli,
         Command, CurateCommand, DaemonCommand, DiagCommand, DiagQuarantineCommand, EconomyCommand,
-        FieldsLevel, FocusCommand, GraphCommand, ImportCommand, JobCommand, LearnCommand,
-        LearnExperimentCommand, MaintenanceCommand, MemoryCommand, OutcomeQuarantineCommand,
-        OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand, RuleCommand, ShadowMode,
-        SituationCommand, SwarmBriefArgs, SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand,
-        VerifyCommand, WorkflowCommand, decay_settings_from_config, run, write_index_rebuild_error,
+        FieldsLevel, FocusCommand, GraphCommand, HandoffCommand, ImportCommand, JobCommand,
+        LearnCommand, LearnExperimentCommand, MaintenanceCommand, MemoryCommand,
+        OutcomeQuarantineCommand, OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand,
+        RuleCommand, ShadowMode, SituationCommand, SwarmBriefArgs, SwarmCommand, TaskFrameCommand,
+        TaskFrameSubgoalCommand, VerifyCommand, WorkflowCommand, decay_settings_from_config, run,
+        write_index_rebuild_error,
     };
     use crate::core::index::IndexRebuildError;
     use crate::core::search::{
@@ -34410,6 +34521,49 @@ mod tests {
                 )
             }
             other => Err(format!("expected artifact register command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_artifact_relocate_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "artifact",
+            "relocate",
+            "--from",
+            "target/debug",
+            "--to",
+            "/Volumes/USBNVME16TB/artifacts",
+            "--manifest",
+            "relocation.json",
+            "--apply",
+            "--actor",
+            "test-agent",
+        ])
+        .map_err(|error| format!("failed to parse artifact relocate: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Artifact(ArtifactCommand::Relocate(args))) => {
+                ensure_equal(
+                    &args.from,
+                    &Some(std::path::PathBuf::from("target/debug")),
+                    "from",
+                )?;
+                ensure_equal(
+                    &args.to,
+                    &Some(std::path::PathBuf::from("/Volumes/USBNVME16TB/artifacts")),
+                    "to",
+                )?;
+                ensure_equal(
+                    &args.manifest,
+                    &std::path::PathBuf::from("relocation.json"),
+                    "manifest",
+                )?;
+                ensure_equal(&args.apply, &true, "apply")?;
+                ensure_equal(&args.restore, &false, "restore")?;
+                ensure_equal(&args.actor, &Some("test-agent".to_owned()), "actor")
+            }
+            other => Err(format!("expected artifact relocate command, got {other:?}")),
         }
     }
 
@@ -36866,6 +37020,66 @@ mod tests {
                 ensure_equal(&args.consumer_entry_limit, &20, "consumer entry limit")
             }
             _ => Err("expected diag disk-pressure command".to_string()),
+        }
+    }
+
+    #[test]
+    fn diag_artifacts_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "diag",
+            "artifacts",
+            "--top-limit",
+            "4",
+            "--consumer-depth",
+            "1",
+            "--consumer-entry-limit",
+            "25",
+        ])
+        .map_err(|e| format!("failed to parse diag artifacts: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::Artifacts(args))) => {
+                ensure_equal(&args.top_limit, &4, "top limit")?;
+                ensure_equal(&args.consumer_depth, &1, "consumer depth")?;
+                ensure_equal(&args.consumer_entry_limit, &25, "consumer entry limit")
+            }
+            _ => Err("expected diag artifacts command".to_string()),
+        }
+    }
+
+    #[test]
+    fn diag_artifacts_json_contract() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "diag", "artifacts", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "diag artifacts exit")?;
+        ensure(stderr.is_empty(), "diag artifacts stderr must be empty")?;
+        ensure_contains(&stdout, "\"schema\":\"ee.response.v1\"", "response schema")?;
+        ensure_contains(
+            &stdout,
+            "\"schema\":\"ee.artifact_retention.diagnostics.v1\"",
+            "data schema",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"mutationPolicy\":\"read_only_report_no_files_modified_no_cleanup\"",
+            "mutation policy",
+        )?;
+        ensure_contains(&stdout, "\"actions\":", "actions present")
+    }
+
+    #[test]
+    fn handoff_rotate_key_command_parses() -> TestResult {
+        let parsed =
+            Cli::try_parse_from(["ee", "handoff", "rotate-key", "--capsule", "handoff.json"])
+                .map_err(|e| format!("failed to parse handoff rotate-key: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Handoff(HandoffCommand::RotateKey(args))) => ensure_equal(
+                &args.capsule,
+                &PathBuf::from("handoff.json"),
+                "capsule path",
+            ),
+            _ => Err("expected handoff rotate-key command".to_string()),
         }
     }
 

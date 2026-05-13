@@ -45,6 +45,7 @@ pub mod audit_actions {
     pub const CERTIFICATE_UPSERT: &str = "certificate.upsert";
     pub const FEEDBACK_RECORD: &str = "feedback.record";
     pub const HANDOFF_INSECURE_LOAD: &str = "handoff.insecure_load";
+    pub const HANDOFF_HMAC_ROTATE: &str = "handoff.hmac_rotate";
     pub const FEEDBACK_QUARANTINE: &str = "feedback.quarantine";
     pub const FEEDBACK_QUARANTINE_RELEASE: &str = "feedback.quarantine.release";
     pub const FEEDBACK_QUARANTINE_REJECT: &str = "feedback.quarantine.reject";
@@ -3653,6 +3654,38 @@ ALTER TABLE memories ADD COLUMN bayes_beta REAL NOT NULL DEFAULT 0.5
     "blake3:v041_bayes_posterior_2026_05_13",
 );
 
+/// V043: Add `logical_id` to memories — the revision-chain identifier for
+/// N15.1 (bd-17c65.14.15.2).
+///
+/// Every memory belongs to a *revision chain*: a sequence of rows that
+/// share a `logical_id` but have distinct `id` values, one per
+/// historical revision. The current live row has `valid_to IS NULL`;
+/// prior revisions carry the timestamp when they were superseded.
+///
+/// This migration ships the foundational column only:
+///   - Adds `logical_id TEXT` (nullable in SQL because SQLite cannot add a
+///     NOT NULL column without a default; the app code enforces non-null
+///     on insert via the canonical INSERT path).
+///   - Backfills `logical_id = id` for every existing row. After the
+///     backfill every row's chain is a singleton; revising a memory will
+///     extend the chain by appending a sibling row.
+///   - Adds an index on `logical_id` so chain lookups don't scan.
+///
+/// The actual `ee memory revise` write path that turns
+/// `MemoryReviseReport::write_unavailable` into a real revision is
+/// tracked as a follow-up bead. Until that lands, `logical_id` equals
+/// `id` for every memory and the column is informational.
+pub const V043_LOGICAL_ID: Migration = Migration::new(
+    43,
+    "memory_logical_id",
+    r#"
+ALTER TABLE memories ADD COLUMN logical_id TEXT;
+UPDATE memories SET logical_id = id WHERE logical_id IS NULL;
+CREATE INDEX idx_memories_logical_id ON memories(logical_id);
+"#,
+    "blake3:v043_memory_logical_id_2026_05_13",
+);
+
 /// V042: Allow every pack omission reason emitted by the packer.
 pub const V042_PACK_OMISSION_REASONS: Migration = Migration::new(
     42,
@@ -3811,6 +3844,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V040_PACK_SELECTION_LEDGERS,
     V041_BAYES_POSTERIOR,
     V042_PACK_OMISSION_REASONS,
+    V043_LOGICAL_ID,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -7708,9 +7742,15 @@ impl DbConnection {
                 created_at: &now,
             });
 
+        // N15.1 (bd-17c65.14.15.2): new memories belong to a singleton
+        // revision chain whose `logical_id` equals the row's `id`. When
+        // the revise write path lands, it will INSERT a new row with the
+        // SAME logical_id but a fresh id, and UPDATE the prior row's
+        // `valid_to`. Until then, every memory's chain is a singleton —
+        // logical_id is equal to id and the field is informational.
         self.execute_for(
             DbOperation::Execute,
-            "INSERT INTO memories (id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, created_at, updated_at, valid_from, valid_to) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            "INSERT INTO memories (id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, created_at, updated_at, valid_from, valid_to, logical_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             &[
                 Value::Text(id.to_string()),
                 Value::Text(input.workspace_id.clone()),
@@ -7731,6 +7771,7 @@ impl DbConnection {
                 Value::Text(now),
                 input.valid_from.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
                 input.valid_to.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                Value::Text(id.to_string()),
             ],
         )?;
 
@@ -7756,6 +7797,29 @@ impl DbConnection {
         )?;
 
         rows.first().map(stored_memory_from_row).transpose()
+    }
+
+    /// Look up the revision-chain identifier for a memory.
+    ///
+    /// Every memory belongs to a revision chain whose members share a
+    /// `logical_id`. Newly inserted memories have `logical_id == id`
+    /// (singleton chain). The future `ee memory revise` write path
+    /// will extend the chain by inserting a new row with the same
+    /// `logical_id` and a fresh `id`, and updating the prior row's
+    /// `valid_to`. Bead bd-17c65.14.15.2 (N15.1).
+    ///
+    /// Returns `None` when no memory matches `id`; returns the
+    /// row's `logical_id` value otherwise.
+    pub fn get_memory_logical_id(&self, id: &str) -> Result<Option<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT logical_id FROM memories WHERE id = ?1 ORDER BY id ASC LIMIT 1",
+            &[Value::Text(id.to_string())],
+        )?;
+        match rows.first() {
+            None => Ok(None),
+            Some(row) => Ok(optional_text(row, 0)?.map(str::to_string)),
+        }
     }
 
     /// List memories in a workspace, optionally filtering by level and/or tombstone status.

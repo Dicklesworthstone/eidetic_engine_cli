@@ -2993,6 +2993,7 @@ fn render_status_posture_json(
 ) {
     parent.field_object("posture", |p| {
         p.field_str("overall", posture.overall.as_str());
+        render_status_workspace_posture_json(p, posture);
         p.field_object("thisOperation", |operation| {
             operation.field_str("status", posture.this_operation.status.as_str());
             operation.field_raw(
@@ -3019,6 +3020,38 @@ fn render_status_posture_json(
                 obj.field_str("fallback", fallback);
             }
         });
+    });
+}
+
+fn render_status_workspace_posture_json(
+    parent: &mut JsonBuilder,
+    posture: &crate::models::posture::WorkspacePostureReport,
+) {
+    parent.field_object("workspace", |workspace| {
+        if let Some(storage) = posture
+            .subsystems
+            .iter()
+            .find(|subsystem| subsystem.id == "storage")
+        {
+            render_posture_subsystem_object(workspace, "storage", storage);
+        }
+    });
+}
+
+fn render_posture_subsystem_object(
+    parent: &mut JsonBuilder,
+    field_name: &str,
+    subsystem: &crate::models::posture::SubsystemPostureReport,
+) {
+    parent.field_object(field_name, |obj| {
+        obj.field_str("status", subsystem.status.as_str());
+        obj.field_u32("checksPassed", subsystem.checks_passed);
+        if let Some(reason) = subsystem.reason {
+            obj.field_str("reason", reason);
+        }
+        if let Some(fallback) = subsystem.fallback {
+            obj.field_str("fallback", fallback);
+        }
     });
 }
 
@@ -11141,6 +11174,7 @@ use crate::core::audit::{
 use crate::core::handoff::{
     CreateReport as HandoffCreateReport, InspectReport as HandoffInspectReport,
     PreviewReport as HandoffPreviewReport, ResumeReport as HandoffResumeReport,
+    RotateKeyReport as HandoffRotateKeyReport,
 };
 
 /// Render an audit timeline report as JSON.
@@ -11475,6 +11509,49 @@ pub fn render_handoff_create_human(report: &HandoffCreateReport) -> String {
 #[must_use]
 pub fn render_handoff_create_toon(report: &HandoffCreateReport) -> String {
     render_toon_from_json(&render_handoff_create_json(report))
+}
+
+/// Render a handoff rotate-key report as JSON.
+#[must_use]
+pub fn render_handoff_rotate_key_json(report: &HandoffRotateKeyReport) -> String {
+    serde_json::json!({
+        "schema": report.schema,
+        "capsule_id": report.capsule_id,
+        "capsule_path": report.capsule_path,
+        "key_mode": report.key_mode,
+        "body_sha256": report.body_sha256,
+        "old_hmac_prefix": report.old_hmac_prefix,
+        "new_hmac_prefix": report.new_hmac_prefix,
+        "canonical_content_hash_before": report.canonical_content_hash_before,
+        "canonical_content_hash_after": report.canonical_content_hash_after,
+        "body_preserved": report.body_preserved,
+        "audit_id": report.audit_id,
+        "rotated_at": report.rotated_at
+    })
+    .to_string()
+}
+
+/// Render a handoff rotate-key report as human-readable text.
+#[must_use]
+pub fn render_handoff_rotate_key_human(report: &HandoffRotateKeyReport) -> String {
+    let mut lines = Vec::new();
+    lines.push("Handoff Capsule HMAC Rotated".to_owned());
+    lines.push(format!("ID: {}", report.capsule_id));
+    lines.push(format!("Capsule: {}", report.capsule_path.display()));
+    lines.push(format!("Key mode: {}", report.key_mode));
+    lines.push(format!(
+        "HMAC prefix: {} -> {}",
+        report.old_hmac_prefix.as_deref().unwrap_or(""),
+        report.new_hmac_prefix
+    ));
+    lines.push(format!("Body preserved: {}", report.body_preserved));
+    lines.join("\n") + "\n"
+}
+
+/// Render a handoff rotate-key report as TOON.
+#[must_use]
+pub fn render_handoff_rotate_key_toon(report: &HandoffRotateKeyReport) -> String {
+    render_toon_from_json(&render_handoff_rotate_key_json(report))
 }
 
 /// Render a handoff inspect report as JSON.
@@ -12284,6 +12361,27 @@ mod tests {
         ensure_contains(&json, "\"degraded\":[", "status degraded array")?;
         ensure_contains(&json, "\"derivedAssets\":[", "derived assets")?;
         ensure_contains(&json, "\"name\":\"search_index\"", "search index asset")
+    }
+
+    #[test]
+    fn status_json_embeds_workspace_storage_posture_object() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        crate::core::write_owner::mark_write_replay_required(temp.path())
+            .map_err(|error| error.to_string())?;
+        let report = StatusReport::gather_for_workspace(temp.path());
+        let json = render_status_json(&report);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+
+        ensure(
+            parsed["data"]["posture"]["workspace"]["storage"]["status"] == "degraded_recoverable",
+            "storage posture status is nested under posture.workspace.storage",
+        )?;
+        ensure(
+            parsed["data"]["posture"]["workspace"]["storage"]["reason"]
+                == "uncommitted_write_replay_required",
+            "storage posture reason is nested under posture.workspace.storage",
+        )
     }
 
     #[test]

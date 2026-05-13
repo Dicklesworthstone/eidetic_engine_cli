@@ -39,6 +39,14 @@ The manifest is intentionally declarative. Each tier records:
 
 The test `tests/swarm_scale_workloads.rs` validates the manifest rather than materializing 100,000 memories during normal test runs. Later beads can use this manifest to drive concrete generators and RCH-backed benchmark harnesses without changing the workload vocabulary.
 
+## Disk Relief Without Deletion
+
+Swarm runs can fill local disks with build outputs, retained e2e workspaces, logs, and audit artifacts. `ee diag disk-pressure --json` is the read-only posture surface: it reports capacity, top consumers, and preservation-only recovery suggestions.
+
+When artifacts need to move, use `ee artifact relocate --from <path> --to <external-root> --manifest <manifest> --json` to preview a manifest, then add `--apply` only after reviewing the plan. Apply mode copies artifacts to the destination and writes a manifest with original paths, destination paths, sizes, mtimes, BLAKE3 hashes, actor, command version, and a restore command. It does not delete originals and refuses non-artifact source roots unless `--force-with-explicit-path` is supplied.
+
+Restoration is also manifest-driven: `ee artifact relocate --restore --manifest <manifest> --json` copies missing originals back from the preserved destination. This is disk relief, not cleanup. Removing files still requires a separate, explicit human-approved command outside this workflow.
+
 ## Follow-On Beads
 
 - `eidetic_engine_cli-fcq1.2` should consume this manifest for RCH-friendly benchmark budgets.
