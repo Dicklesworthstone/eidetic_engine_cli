@@ -51,11 +51,62 @@ HAS_HEALTHY=$(printf '%s' "$DOCTOR_JSON" \
 e2e_log_note "e1_doctor_has_healthy_or_report=$HAS_HEALTHY"
 
 # ------------------------------------------------------------
-# E2 (not shipped) — degraded[] should only appear when the *current* response
-# was actually affected. Today the banner is almost always non-empty.
+# E2 (SHIPPED 2026-05-13 CopperHarbor) — bead bd-17c65.5.2:
+# Conditional banner emission. `data.degraded[]` filters out
+# build-time feature gaps and workspace-state signals unless the
+# caller passes `--include-non-affecting-degradations`.
+#
+# Three assertions:
+#   - quiet baseline: a fresh-workspace `ee context` query produces
+#     `data.degraded[] | length == 0` after the filter (the only
+#     signals fired are build-time / workspace-state).
+#   - verbose: the same query with --include-non-affecting-degradations
+#     surfaces the full set (>= the quiet count).
+#   - the deleted meta-`degraded_context` code never appears in any
+#     emitted code, in either mode.
 # ------------------------------------------------------------
-todo_assert "e2_conditional_banner_emission" "bd-17c65.5.2" \
-    "degraded[] currently emits banner content even when the current response isn't impacted."
+WS_E2=$(mktemp -d /tmp/ee-e2e-banner.XXXXXX)
+trap 'rm -rf "$WS_E2"' EXIT
+e2e_log_note "e2_workspace=$WS_E2"
+
+run_capture "$EE_BINARY" init --workspace "$WS_E2" --json
+run_capture "$EE_BINARY" remember "Run cargo fmt --check before release." \
+    --workspace "$WS_E2" --level procedural --kind rule --tags release --json
+
+# Quiet baseline — default filter, expect zero degraded entries.
+QUIET_JSON=$(run_capture "$EE_BINARY" context "prepare release" \
+    --workspace "$WS_E2" --max-tokens 1000 --json)
+QUIET_LEN=$(printf '%s' "$QUIET_JSON" | jq -r '.data.degraded | length' 2>/dev/null || echo "?")
+e2e_log_assert_eq "$QUIET_LEN" "0" \
+    "e2_quiet_baseline_degraded_array_empty"
+
+# Verbose mode — every signal surfaces.
+VERBOSE_JSON=$(run_capture "$EE_BINARY" context "prepare release" \
+    --workspace "$WS_E2" --max-tokens 1000 \
+    --include-non-affecting-degradations=true --json)
+VERBOSE_LEN=$(printf '%s' "$VERBOSE_JSON" | jq -r '.data.degraded | length' 2>/dev/null || echo "?")
+# Verbose must be >= quiet — we expand the set, never shrink it.
+if [ "$VERBOSE_LEN" = "?" ] || [ "$QUIET_LEN" = "?" ]; then
+    e2e_log_assert_eq "parse_failed" "ok" "e2_verbose_count_parsed"
+elif [ "$VERBOSE_LEN" -ge "$QUIET_LEN" ]; then
+    e2e_log_assert_eq "true" "true" "e2_verbose_count_ge_quiet"
+else
+    e2e_log_assert_eq "$VERBOSE_LEN" ">=$QUIET_LEN" "e2_verbose_count_ge_quiet"
+fi
+
+# Deleted meta-code regression guard — `degraded_context` must NEVER
+# appear in either emission mode.
+for MODE in "quiet" "verbose"; do
+    if [ "$MODE" = "quiet" ]; then
+        MODE_JSON="$QUIET_JSON"
+    else
+        MODE_JSON="$VERBOSE_JSON"
+    fi
+    HAS_LEGACY=$(printf '%s' "$MODE_JSON" \
+        | jq -r '[.data.degraded[]? | select(.code == "degraded_context")] | length' \
+        2>/dev/null || echo "?")
+    e2e_log_assert_eq "$HAS_LEGACY" "0" "e2_legacy_meta_code_absent_in_${MODE}"
+done
 
 # E3 — graph_snapshot rename + status normalization.
 todo_assert "e3_graph_snapshot_rename" "bd-17c65.5.3" \
