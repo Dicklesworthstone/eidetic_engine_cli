@@ -1,0 +1,8 @@
+schema: ee.determinism_token.snapshot.v1
+seed: 1876542735482029013
+source: child
+scope: root::pack#0
+seed_hash_prefix: 1aa5d9985feb
+first_uuid_v7: d1acf23f-03d5-7000-8000-000000000000
+first_rng_u64: 16896947212026232489
+inventory_hash: blake3-ish:51a8854727a5768008ba8269596e8666cc9ffdd88e8ac3f13101ad36434a3bfc
