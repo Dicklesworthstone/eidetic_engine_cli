@@ -42,6 +42,6 @@ class Ee < Formula
     assert_match "ee #{version}", shell_output("#{bin}/ee --version")
 
     # Quick health check
-    system "#{bin}/ee", "health"
+    system "#{bin}/ee", "doctor", "--json"
   end
 end

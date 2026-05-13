@@ -23,6 +23,7 @@ if [ $# -lt 1 ]; then
 fi
 
 VERSION="$1"
+VERSION="${VERSION#v}"
 OUTPUT_FILE="${2:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -37,6 +38,17 @@ fi
 
 echo "Fetching SHA256 hashes for v$VERSION..." >&2
 
+fetch_sha256() {
+    url="$1"
+    sha="$(curl -fsSL "$url" | awk '{print $1}')"
+    if printf '%s\n' "$sha" | grep -Eq '^[[:xdigit:]]{64}$'; then
+        printf '%s\n' "$sha"
+    else
+        echo "Error: Invalid SHA256 digest from $url: ${sha:-empty}" >&2
+        exit 1
+    fi
+}
+
 # Fetch SHA256 files from release
 DARWIN_ARM64_SHA=""
 DARWIN_X86_64_SHA=""
@@ -45,7 +57,7 @@ LINUX_X86_64_SHA=""
 for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu; do
     SHA_URL="$RELEASE_URL/ee-$target.tar.xz.sha256"
     echo "  Fetching $SHA_URL" >&2
-    SHA=$(curl -sL "$SHA_URL" 2>/dev/null | awk '{print $1}' || echo "")
+    SHA="$(fetch_sha256 "$SHA_URL")"
 
     case "$target" in
         aarch64-apple-darwin) DARWIN_ARM64_SHA="$SHA" ;;

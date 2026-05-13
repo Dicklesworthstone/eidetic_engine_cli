@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
+    # GitHub does not evaluate path filters for tag pushes, so v* tags
+    # still trigger releases even though branch pushes are Cargo.toml-scoped.
     paths:
       - 'Cargo.toml'
 
@@ -11,12 +15,17 @@ permissions:
   contents: write
   id-token: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   check-version:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
       changed: ${{ steps.version.outputs.changed }}
@@ -29,16 +38,28 @@ jobs:
       - name: Check version change
         id: version
         run: |
+          set -euo pipefail
           # Extract current version from Cargo.toml
           CURRENT=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "Current version: $CURRENT"
+
+          echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+            if [ "$CURRENT" != "$TAG_VERSION" ]; then
+              echo "::error title=Version mismatch::Tag $GITHUB_REF_NAME does not match Cargo.toml version $CURRENT"
+              exit 1
+            fi
+            echo "Running release from existing tag $GITHUB_REF_NAME"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           # Extract previous version
           git show HEAD^:Cargo.toml > /tmp/prev_cargo.toml 2>/dev/null || echo 'version = "0.0.0"' > /tmp/prev_cargo.toml
           PREVIOUS=$(grep '^version = ' /tmp/prev_cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "Previous version: $PREVIOUS"
-
-          echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
 
           if [ "$CURRENT" != "$PREVIOUS" ]; then
             echo "Version changed from $PREVIOUS to $CURRENT"
@@ -52,6 +73,7 @@ jobs:
     needs: check-version
     if: needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -70,6 +92,7 @@ jobs:
 
       - name: Vision coverage gate
         run: |
+          set -euo pipefail
           VISION_COVERAGE_RELEASE_TAG=true sh ./scripts/vision-coverage.sh --json
           GAP=$(jq -r '.gap_percentage' .vision-coverage-report.json)
           if [ "$GAP" != "0" ]; then
@@ -79,6 +102,7 @@ jobs:
 
       - name: Performance benchmarks
         run: |
+          set -euo pipefail
           ./scripts/bench.sh --check-regression --json > ee-perf.v1.json
           echo "::notice title=Performance results::Benchmark artifact generated"
 
@@ -92,6 +116,7 @@ jobs:
     needs: [check-version, gates]
     if: needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
@@ -103,7 +128,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           VERSION="${{ needs.check-version.outputs.version }}"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="$GITHUB_REF_NAME"
+            echo "Using existing tag: $TAG"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           TAG="v${VERSION}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
@@ -142,6 +175,7 @@ jobs:
             os: windows-latest
             cross: false
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -166,6 +200,7 @@ jobs:
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
+          set -euo pipefail
           mkdir -p dist
           cp target/${{ matrix.target }}/release/ee dist/
           cd dist
@@ -188,13 +223,13 @@ jobs:
         uses: sigstore/cosign-installer@v3
 
       - name: Sign with Sigstore
+        shell: bash
         run: |
+          set -euo pipefail
           cd dist
-          cosign sign-blob --yes --output-signature ee-${{ matrix.target }}.tar.xz.sig --output-certificate ee-${{ matrix.target }}.tar.xz.pem ee-${{ matrix.target }}.tar.xz
-          # Create sigstore bundle JSON
-          echo '{}' | jq --arg sig "$(cat ee-${{ matrix.target }}.tar.xz.sig | base64 -w0 2>/dev/null || base64)" \
-                        --arg cert "$(cat ee-${{ matrix.target }}.tar.xz.pem | base64 -w0 2>/dev/null || base64)" \
-                        '{signature: $sig, certificate: $cert}' > ee-${{ matrix.target }}.tar.xz.sigstore.json
+          cosign sign-blob --yes \
+            --bundle ee-${{ matrix.target }}.tar.xz.sigstore.json \
+            ee-${{ matrix.target }}.tar.xz
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -210,9 +245,12 @@ jobs:
     needs: [check-version, tag, build]
     if: needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -223,8 +261,14 @@ jobs:
 
       - name: Prepare release assets
         run: |
+          set -euo pipefail
           mkdir -p release
-          mv artifacts/* release/ 2>/dev/null || true
+          artifact_count="$(find artifacts -maxdepth 1 -type f | wc -l | tr -d '[:space:]')"
+          if [ "$artifact_count" -eq 0 ]; then
+            echo "::error title=Missing release artifacts::No build artifacts were downloaded for release publication."
+            exit 1
+          fi
+          find artifacts -maxdepth 1 -type f -exec mv {} release/ \;
 
           # Copy install scripts
           cp install.sh release/
@@ -233,8 +277,10 @@ jobs:
       - name: Generate release notes
         id: notes
         run: |
+          set -euo pipefail
           VERSION="${{ needs.check-version.outputs.version }}"
           TAG="${{ needs.tag.outputs.tag }}"
+          NOTES=""
 
           # Try to extract from CHANGELOG.md
           if [ -f CHANGELOG.md ]; then
@@ -246,72 +292,110 @@ jobs:
           if [ -z "$NOTES" ]; then
             PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
             if [ -n "$PREV_TAG" ]; then
-              NOTES=$(git log --pretty=format:"- %s" "${PREV_TAG}..HEAD" | head -50)
+              NOTES=$(git log -50 --pretty=format:"- %s" "${PREV_TAG}..HEAD")
             else
-              NOTES=$(git log --pretty=format:"- %s" -20)
+              NOTES=$(git log -20 --pretty=format:"- %s")
             fi
           fi
 
-          # Write to file for multiline output
-          cat > release_notes.md << 'NOTES_EOF'
-          ## Installation
-
-          ### Unix (Linux/macOS)
-          ```bash
-          curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh | bash
-          ```
-
-          ### Windows (PowerShell)
-          ```powershell
-          iwr -useb https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.ps1 | iex
-          ```
-
-          ## Verification
-
-          All release artifacts are signed with Sigstore. Verify with:
-          ```bash
-          cosign verify-blob --certificate ee-<target>.tar.xz.pem --signature ee-<target>.tar.xz.sig ee-<target>.tar.xz
-          ```
-
-          ## Changes
-
-          NOTES_EOF
+          # Write release notes without an expanding heredoc; markdown
+          # backtick fences would otherwise be parsed as command substitution.
+          {
+            printf '%s\n\n' '## Installation'
+            printf '%s\n' '### Unix (Linux/macOS)'
+            printf '%s\n' '```bash'
+            printf 'curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/%s/install.sh \\\n' "$TAG"
+            printf '  | EE_VERSION="%s" sh\n' "$TAG"
+            printf '%s\n\n' '```'
+            printf '%s\n' '### Windows (PowerShell)'
+            printf '%s\n' '```powershell'
+            printf '& ([scriptblock]::Create((iwr -useb https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/%s/install.ps1).Content)) -Version "%s"\n' "$TAG" "$VERSION"
+            printf '%s\n\n' '```'
+            printf '%s\n\n' '## Verification'
+            printf '%s\n' 'All release artifacts are signed with Sigstore. Verify with:'
+            printf '%s\n' '```bash'
+            printf '%s\n' 'cosign verify-blob --bundle ee-<target>.tar.xz.sigstore.json ee-<target>.tar.xz'
+            printf '%s\n\n' '```'
+            printf '%s\n\n' '## Changes'
+          } > release_notes.md
           echo "$NOTES" >> release_notes.md
 
       - name: Create GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           TAG="${{ needs.tag.outputs.tag }}"
-          gh release create "$TAG" \
-            --title "ee $TAG" \
-            --notes-file release_notes.md \
-            release/*
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" \
+              --title "ee $TAG" \
+              --notes-file release_notes.md
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" \
+              --title "ee $TAG" \
+              --notes-file release_notes.md \
+              release/*
+          fi
 
   smoke-test:
-    needs: [tag, release]
+    needs: [check-version, tag, release]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu-24.04
+            image: ubuntu:24.04
+          - name: debian-bookworm-slim
+            image: debian:bookworm-slim
     container:
-      image: ubuntu:22.04
+      image: ${{ matrix.image }}
     steps:
       - name: Install dependencies
         run: |
+          set -euo pipefail
           apt-get update
           apt-get install -y curl ca-certificates xz-utils
 
       - name: Download and install ee
         run: |
-          curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh | bash
+          set -euo pipefail
+          curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/${{ needs.tag.outputs.tag }}/install.sh \
+            | EE_VERSION="${{ needs.tag.outputs.tag }}" bash
 
       - name: Verify installation
         run: |
+          set -euo pipefail
           export PATH="$HOME/.local/bin:$PATH"
-          ee --version
+          ee --version | grep -F "${{ needs.check-version.outputs.version }}"
           ee --help
+          ee doctor --json
+
+  smoke-test-macos:
+    needs: [check-version, tag, release]
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - name: Download and install ee
+        run: |
+          set -euo pipefail
+          curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/${{ needs.tag.outputs.tag }}/install.sh \
+            | EE_VERSION="${{ needs.tag.outputs.tag }}" EE_INSTALL_DIR="$RUNNER_TEMP/ee-bin" bash
+
+      - name: Verify installation
+        run: |
+          set -euo pipefail
+          export PATH="$RUNNER_TEMP/ee-bin:$PATH"
+          ee --version | grep -F "${{ needs.check-version.outputs.version }}"
+          ee --help
+          ee doctor --json
 
   update-homebrew:
-    needs: [check-version, tag, release]
+    needs: [check-version, tag, release, smoke-test, smoke-test-macos]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -321,6 +405,7 @@ jobs:
 
       - name: Generate Homebrew formula
         run: |
+          set -euo pipefail
           VERSION="${{ needs.check-version.outputs.version }}"
           ./scripts/homebrew/update-formula.sh "$VERSION" > ee.rb
           cat ee.rb
@@ -329,7 +414,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
+          set -euo pipefail
           VERSION="${{ needs.check-version.outputs.version }}"
+          if [ -z "${GITHUB_TOKEN:-}" ]; then
+            echo "::warning title=Homebrew tap token missing::Skipping Homebrew tap PR because HOMEBREW_TAP_TOKEN is not configured."
+            exit 0
+          fi
 
           # Clone the tap repo
           git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/Dicklesworthstone/homebrew-tap.git" tap
@@ -345,14 +435,26 @@ jobs:
 
           # Create branch and PR
           BRANCH="update-ee-v${VERSION}"
-          git checkout -b "$BRANCH"
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            git fetch origin "$BRANCH"
+            git checkout -B "$BRANCH" FETCH_HEAD
+          else
+            git checkout -b "$BRANCH"
+          fi
           git add Formula/ee.rb
+          if git diff --cached --quiet; then
+            echo "::notice title=Homebrew formula unchanged::Formula/ee.rb already matches v${VERSION}; skipping tap PR."
+            exit 0
+          fi
           git commit -m "Update ee to v${VERSION}"
           git push origin "$BRANCH"
 
-          # Create PR (will fail gracefully if HOMEBREW_TAP_TOKEN not set)
-          gh pr create \
-            --title "Update ee to v${VERSION}" \
-            --body "Automated update from ee release workflow." \
-            --head "$BRANCH" \
-            --base main || echo "PR creation skipped (token may not be configured)"
+          if gh pr list --head "$BRANCH" --base main --state open --json number --jq 'length' | grep -qx '0'; then
+            gh pr create \
+              --title "Update ee to v${VERSION}" \
+              --body "Automated update from ee release workflow." \
+              --head "$BRANCH" \
+              --base main
+          else
+            echo "::notice title=Homebrew PR already open::A PR already exists for $BRANCH."
+          fi

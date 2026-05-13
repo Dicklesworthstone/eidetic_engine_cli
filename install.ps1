@@ -14,7 +14,7 @@
     Installation directory. Defaults to $env:LOCALAPPDATA\ee\bin.
 
 .EXAMPLE
-    iwr -useb https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.ps1 | iex
+    & ([scriptblock]::Create((iwr -useb https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.1.0/install.ps1).Content)) -Version "0.1.0"
 
 .EXAMPLE
     .\install.ps1 -Version 0.1.0
@@ -57,8 +57,8 @@ function Get-Architecture {
     $arch = [System.Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITECTURE")
     switch ($arch) {
         "AMD64" { return "x86_64" }
-        "x86"   { return "i686" }
-        "ARM64" { return "aarch64" }
+        "x86"   { Write-Error-Exit "Unsupported architecture: 32-bit Windows is not in the release asset matrix." }
+        "ARM64" { Write-Error-Exit "Unsupported architecture: Windows ARM64 is not in the release asset matrix." }
         default { Write-Error-Exit "Unsupported architecture: $arch" }
     }
 }
@@ -84,7 +84,12 @@ function Get-ReleaseAssetUrl {
         [string]$Version,
         [string]$AssetName
     )
-    $tag = "v$Version"
+    if ($Version.StartsWith("v")) {
+        $tag = $Version
+    }
+    else {
+        $tag = "v$Version"
+    }
     return "https://github.com/$RepoOwner/$RepoName/releases/download/$tag/$AssetName"
 }
 
@@ -135,11 +140,11 @@ function Verify-Sigstore {
             Write-Host "  Sigstore signature verified." -ForegroundColor Green
         }
         else {
-            Write-Host "  Warning: Sigstore verification failed: $result" -ForegroundColor Yellow
+            Write-Error-Exit "Sigstore verification failed: $result"
         }
     }
     catch {
-        Write-Host "  Warning: Sigstore verification error: $_" -ForegroundColor Yellow
+        Write-Error-Exit "Sigstore verification error: $_"
     }
 }
 
@@ -274,13 +279,13 @@ function Main {
         Download-File (Get-ReleaseAssetUrl $Version $tarballName) $tarballPath
         Download-File (Get-ReleaseAssetUrl $Version $sha256Name) $sha256Path
 
-        try {
+        $cosign = Get-Command cosign -ErrorAction SilentlyContinue
+        if ($cosign) {
             Download-File (Get-ReleaseAssetUrl $Version $sigstoreName) $sigstorePath
             $hasSigstore = $true
-        }
-        catch {
+        } else {
             $hasSigstore = $false
-            Write-Host "  Note: Sigstore bundle not available for this release." -ForegroundColor Yellow
+            Write-Host "  Note: cosign not found, skipping Sigstore verification." -ForegroundColor Yellow
         }
 
         $expectedHash = (Get-Content $sha256Path -Raw).Trim().Split()[0]

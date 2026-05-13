@@ -1,6 +1,6 @@
 #!/bin/sh
 # ee (Eidetic Engine CLI) installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh | bash
+# Usage: curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.1.0/install.sh | EE_VERSION=v0.1.0 sh
 #
 # Environment variables:
 #   EE_VERSION    - specific version to install (default: latest)
@@ -119,8 +119,7 @@ verify_sha256() {
     elif command -v shasum >/dev/null 2>&1; then
         ACTUAL=$(shasum -a 256 "$FILE" | cut -d' ' -f1)
     else
-        warn "No SHA256 tool found. Skipping verification."
-        return 0
+        error "No SHA256 tool found. Install sha256sum or shasum, or set EE_SKIP_VERIFY=1 to bypass verification."
     fi
 
     if [ "$ACTUAL" != "$EXPECTED" ]; then
@@ -144,7 +143,7 @@ verify_sigstore() {
     if cosign verify-blob --bundle "$BUNDLE" "$ARTIFACT" >/dev/null 2>&1; then
         info "Sigstore signature verified."
     else
-        warn "Sigstore verification failed. Proceeding anyway."
+        error "Sigstore verification failed."
     fi
 }
 
@@ -160,6 +159,10 @@ main() {
     if [ -z "${VERSION}" ]; then
         VERSION=$(get_latest_version)
     fi
+    case "${VERSION}" in
+        v*) ;;
+        *) VERSION="v${VERSION}" ;;
+    esac
     info "Installing version: ${VERSION}"
 
     # Determine install directory
@@ -188,9 +191,14 @@ main() {
             error "Failed to download checksum"
         verify_sha256 "${TMPDIR}/${TARBALL}" "${EXPECTED_SHA}"
 
-        # Try Sigstore verification
-        if http_download "${SIGSTORE_URL}" "${TMPDIR}/sigstore.json" 2>/dev/null; then
+        # Sigstore verification is required when cosign is installed.
+        if command -v cosign >/dev/null 2>&1; then
+            http_download "${SIGSTORE_URL}" "${TMPDIR}/sigstore.json" || \
+                error "Failed to download Sigstore bundle"
             verify_sigstore "${TMPDIR}/sigstore.json" "${TMPDIR}/${TARBALL}"
+        else
+            warn "cosign not found. Skipping Sigstore verification."
+            warn "Install cosign for cryptographic signature verification."
         fi
     else
         warn "Skipping verification (EE_SKIP_VERIFY=1)"

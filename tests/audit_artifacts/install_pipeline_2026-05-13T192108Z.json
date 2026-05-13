@@ -1,0 +1,143 @@
+{
+  "schema": "ee.audit.install_pipeline.v1",
+  "generated_at": "2026-05-13T19:21:08Z",
+  "src_commit": "c7c9baba2f3c5fabaaebe206bcbdecb5da610fc8",
+  "decided_path": "path_b_pre_release",
+  "decision_inputs": {
+    "release_tag": "",
+    "release_version": "",
+    "gh_releases": false,
+    "latest_release_published": false,
+    "release_assets_complete": false,
+    "crates_name_claimed": true,
+    "crates_points_at_project": false,
+    "crates_version_matches_release": false,
+    "tap_formula_present": false,
+    "tap_version_matches_release": false
+  },
+  "github_releases": {
+    "probe_status": "no_releases",
+    "releases": []
+  },
+  "github_release_assets": {
+    "probe_status": "no_release",
+    "tag": "",
+    "expected_assets": [],
+    "asset_names": [],
+    "missing_assets": [],
+    "asset_matrix_complete": false
+  },
+  "crates_io": {
+    "probe_status": "ok",
+    "name_claimed": true,
+    "latest_version": "0.0.0",
+    "repository": "https://github.com/ewpratten/ee",
+    "homepage": "https://github.com/ewpratten/ee",
+    "documentation": "https://docs.rs/ee",
+    "created_at": "2024-01-26T23:57:24.001024Z",
+    "updated_at": "2024-01-26T23:57:24.001024Z",
+    "owners": [
+      {
+        "id": 111857,
+        "login": "ewpratten",
+        "name": "Evan Pratten"
+      }
+    ]
+  },
+  "homebrew_tap": {
+    "probe_status": "unreachable",
+    "formula_present": null
+  },
+  "release_workflow": {
+    "path": ".github/workflows/release.yml",
+    "targets_csv": "aarch64-apple-darwin,aarch64-unknown-linux-gnu,x86_64-apple-darwin,x86_64-pc-windows-msvc,x86_64-unknown-linux-gnu,x86_64-unknown-linux-musl",
+    "asset_categories": [
+      "tar.xz",
+      "tar.xz.sha256",
+      "sigstore",
+      "install.sh",
+      "install.ps1"
+    ],
+    "cosign_installer_present": true,
+    "tag_trigger_present": true,
+    "cosign_bundle_present": true,
+    "smoke_containers": [
+      "debian:bookworm-slim",
+      "ubuntu:24.04"
+    ],
+    "macos_smoke_present": true,
+    "smoke_uses_release_tag": true,
+    "smoke_uses_release_installer_asset": true,
+    "release_notes_use_release_assets": true,
+    "release_notes_pin_installer_version": true,
+    "release_notes_no_expanding_heredoc": true,
+    "release_notes_git_log_pipe_safe": true,
+    "release_notes_checkout_full_history": true,
+    "smoke_runs_doctor": true,
+    "release_publish_idempotent": true,
+    "homebrew_after_smoke": true,
+    "homebrew_missing_token_skip_present": true,
+    "homebrew_pr_idempotent": true,
+    "release_concurrency_present": true,
+    "job_timeouts_present": true,
+    "critical_bash_steps_strict": true,
+    "release_requires_downloaded_artifacts": true,
+    "smoke_version_assertions_present": true,
+    "smoke_version_context_available": true
+  },
+  "readme_installation": {
+    "probe_status": "ok",
+    "installation_status_section": true,
+    "release_installer_marked_planned": true,
+    "homebrew_marked_planned": true,
+    "cargo_marked_planned": true,
+    "source_build_marked_available": true,
+    "release_installer_uses_release_assets": true,
+    "release_installer_pins_version": true,
+    "planned_markers_present": true
+  },
+  "installer_assets": {
+    "probe_status": "ok",
+    "installer_examples_use_release_assets": true,
+    "unix_installer_supports_musl_asset": true,
+    "unix_installer_normalizes_version_tag": true,
+    "unix_installer_fails_on_bad_sigstore": true,
+    "unix_installer_requires_sigstore_bundle_with_cosign": true,
+    "unix_installer_requires_sha256_tool": true,
+    "windows_installer_supports_x64_asset": true,
+    "windows_installer_rejects_unbuilt_i686": true,
+    "windows_installer_rejects_unbuilt_arm64": true,
+    "windows_installer_normalizes_version_tag": true,
+    "windows_installer_fails_on_bad_sigstore": true,
+    "windows_installer_requires_sigstore_bundle_with_cosign": true,
+    "homebrew_formula_tests_doctor_json": true,
+    "homebrew_formula_fetches_sha_strictly": true,
+    "homebrew_formula_normalizes_version_tag": true,
+    "installer_targets_match_release_matrix": true
+  },
+  "ci_workflow": {
+    "probe_status": "ok",
+    "schedule_present": true,
+    "workflow_dispatch_present": true,
+    "verify_not_scheduled": true,
+    "install_pipeline_smoke_present": true,
+    "linux_runner_present": true,
+    "macos_runner_present": true,
+    "path_a_gate_present": true,
+    "linux_docker_smoke_present": true,
+    "pre_release_skip_present": true,
+    "audit_artifact_upload_present": true,
+    "smoke_uses_latest_release_tag": true,
+    "smoke_uses_release_installer_asset": true,
+    "homebrew_smoke_present": true,
+    "cargo_smoke_present": true,
+    "smoke_version_assertions_present": true,
+    "weekly_smoke_ready": true
+  },
+  "next_actions": [
+    "File bd-2gill.A: Claim ee crate name on crates.io and publish initial release",
+    "File bd-2gill.B: Publish Dicklesworthstone/homebrew-tap with Formula/ee.rb pinned to v0.1.0",
+    "File bd-2gill.C: Ship v0.1.0 GitHub release with full asset set (ee-{target}.tar.xz + .sha256 + sigstore.json + install.sh + install.ps1)",
+    "Wire each followup as parent-child child of bd-2gill, label install-pipeline-followup"
+  ]
+}

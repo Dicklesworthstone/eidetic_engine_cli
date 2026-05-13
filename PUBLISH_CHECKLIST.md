@@ -18,7 +18,16 @@ Before publishing, ensure:
    - [ ] `franken-agent-detection` published to crates.io (or feature-gated)
    - [ ] `toon` (`tru`) published to crates.io
 
-3. **Metadata complete**
+3. **Crate name ownership resolved**
+   - [ ] `cargo owner --list ee` works with a logged-in crates.io token
+   - [ ] `ee` is owned by the project account, or a replacement crate name is chosen
+   - [ ] `scripts/audit_install_pipeline.sh` reports `crates_io.repository` as `https://github.com/Dicklesworthstone/eidetic_engine_cli`
+
+   As of the 2026-05-13 audit, crates.io has `ee` at `0.0.0` owned by `ewpratten`
+   and pointing at `https://github.com/ewpratten/ee`; the project cannot publish
+   `ee` until ownership is transferred or the crate name changes.
+
+4. **Metadata complete**
    - [x] `description` set
    - [x] `license` set (MIT)
    - [x] `repository` set

@@ -5,13 +5,15 @@
 **Durable, local-first, explainable memory for coding agents.**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Dicklesworthstone/eidetic_engine_cli/ci.yml?branch=main&label=CI)](https://github.com/Dicklesworthstone/eidetic_engine_cli/actions)
-[![crates.io](https://img.shields.io/crates/v/ee.svg)](https://crates.io/crates/ee)
+[![crates.io planned](https://img.shields.io/badge/crates.io-planned-lightgrey.svg)](#installation-status)
 [![License: MIT+Rider](https://img.shields.io/badge/License-MIT%2BOpenAI%2FAnthropic%20Rider-yellow.svg)](./LICENSE)
 [![Rust 2024](https://img.shields.io/badge/rust-2024-orange.svg)](rust-toolchain.toml)
 [![No Tokio](https://img.shields.io/badge/runtime-Asupersync-blueviolet.svg)](#hard-requirements)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh | bash
+git clone https://github.com/Dicklesworthstone/eidetic_engine_cli
+cd eidetic_engine_cli
+cargo build --release
 ```
 
 </div>
@@ -230,27 +232,53 @@ Hard constraints. CI fails if any of them break.
 
 ## Installation
 
-### Quick install (recommended)
+### Installation status
+
+`ee` is still pre-release. The GitHub release, Homebrew tap, and crates.io
+install paths below are planned surfaces, not live distribution channels yet.
+The current audit (`scripts/audit_install_pipeline.sh`) reports:
+
+| Path | Status | Tracking |
+|---|---|---|
+| GitHub release installer | planned; no release assets published yet | `bd-2gill.3` |
+| Homebrew tap | planned; tap formula not published yet | `bd-2gill.2` |
+| crates.io | planned; `ee` currently points to another owner/repository | `bd-2gill.1` |
+| Source build | available now | this README |
+
+### Release installer (planned)
+
+Planned after the first signed GitHub release ships; see `bd-2gill.3`.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh | bash
+curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.1.0/install.sh \
+  | EE_VERSION=v0.1.0 sh
 ```
 
-Verifies the binary against the published Sigstore bundle, drops it in `~/.local/bin/ee`, and runs `ee doctor` to confirm.
+This will verify the binary against the published Sigstore bundle, drop it in
+`~/.local/bin/ee`, and run `ee doctor` to confirm.
 
 PowerShell (Windows):
 
+Planned after the first signed GitHub release ships; see `bd-2gill.3`.
+
 ```powershell
-iwr -useb https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.ps1 | iex
+& ([scriptblock]::Create((iwr -useb https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.1.0/install.ps1).Content)) -Version "0.1.0"
 ```
 
 ### Homebrew (macOS / Linux)
+
+Planned after `Dicklesworthstone/homebrew-tap` publishes `Formula/ee.rb`; see
+`bd-2gill.2`.
 
 ```bash
 brew install Dicklesworthstone/tap/ee
 ```
 
 ### Cargo
+
+Planned after crate ownership is resolved. As of the 2026-05-13 audit,
+`crates.io/crates/ee` points at `https://github.com/ewpratten/ee`, not this
+project; see `bd-2gill.1`.
 
 ```bash
 cargo install ee
@@ -818,8 +846,8 @@ Codex shells out, so the same calls work. The output of `ee context "<task>" --j
 Optional MCP adapter (feature-gated, off by default):
 
 ```bash
-cargo install ee --features mcp
-ee mcp manifest --json
+cargo build --release --features mcp
+./target/release/ee mcp manifest --json
 ```
 
 The manifest mirrors the CLI contracts for tools such as `ee_context`, `ee_search`, `ee_remember`, `ee_outcome`, `ee_curate_candidates`, and `ee_memory_show`. Schemas match CLI JSON exactly; the CLI is the compatibility contract.

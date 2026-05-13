@@ -7,10 +7,22 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
+  schedule:
+    - cron: '17 9 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   verify:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,3 +57,108 @@ jobs:
 
       - name: MCP parity tests
         run: cargo test --workspace --features mcp --test mcp_parity
+
+  install-pipeline-smoke:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: install-pipeline-smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y jq ca-certificates curl xz-utils
+
+      - name: Install jq
+        if: runner.os == 'macOS'
+        run: brew install jq
+
+      - name: Audit install pipeline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/audit_install_pipeline.sh
+
+      - name: Read audit decision
+        id: audit
+        shell: bash
+        run: |
+          DECIDED_PATH="$(jq -r '.decided_path' tests/audit_artifacts/latest_install_pipeline.json)"
+          LATEST_TAG="$(jq -r '.github_releases.releases[0].tagName // ""' tests/audit_artifacts/latest_install_pipeline.json)"
+          echo "decided_path=$DECIDED_PATH" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+          echo "Install pipeline path: $DECIDED_PATH"
+          echo "Latest release tag: ${LATEST_TAG:-none}"
+
+      - name: Upload install audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-pipeline-audit-${{ runner.os }}
+          path: tests/audit_artifacts/install_pipeline_*.json
+
+      - name: Skip live smoke until first release
+        if: steps.audit.outputs.decided_path != 'path_a_post_release'
+        run: |
+          echo "::notice title=Install pipeline pre-release::Skipping live installer smoke until GitHub release, Homebrew tap, and crates.io ownership are ready."
+
+      - name: Linux installer smoke
+        if: steps.audit.outputs.decided_path == 'path_a_post_release' && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for image in ubuntu:24.04 debian:bookworm-slim; do
+            docker run --rm -e EE_RELEASE_TAG="${{ steps.audit.outputs.latest_tag }}" "$image" sh -eu -c '
+              apt-get update
+              apt-get install -y curl ca-certificates xz-utils
+              curl -fsSL "https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/${EE_RELEASE_TAG}/install.sh" \
+                | EE_VERSION="${EE_RELEASE_TAG}" sh
+              export PATH="$HOME/.local/bin:$PATH"
+              EE_EXPECTED_VERSION="${EE_RELEASE_TAG#v}"
+              ee --version | grep -F "$EE_EXPECTED_VERSION"
+              ee doctor --json
+            '
+          done
+
+      - name: macOS installer smoke
+        if: steps.audit.outputs.decided_path == 'path_a_post_release' && runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/${{ steps.audit.outputs.latest_tag }}/install.sh \
+            | EE_VERSION="${{ steps.audit.outputs.latest_tag }}" EE_INSTALL_DIR="$RUNNER_TEMP/ee-bin" sh
+          export PATH="$RUNNER_TEMP/ee-bin:$PATH"
+          EE_EXPECTED_VERSION="${{ steps.audit.outputs.latest_tag }}"
+          EE_EXPECTED_VERSION="${EE_EXPECTED_VERSION#v}"
+          ee --version | grep -F "$EE_EXPECTED_VERSION"
+          ee doctor --json
+
+      - name: Homebrew installer smoke
+        if: steps.audit.outputs.decided_path == 'path_a_post_release' && runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install Dicklesworthstone/tap/ee
+          EE_EXPECTED_VERSION="${{ steps.audit.outputs.latest_tag }}"
+          EE_EXPECTED_VERSION="${EE_EXPECTED_VERSION#v}"
+          ee --version | grep -F "$EE_EXPECTED_VERSION"
+          ee doctor --json
+
+      - name: Cargo installer smoke
+        if: steps.audit.outputs.decided_path == 'path_a_post_release'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CARGO_HOME="$RUNNER_TEMP/clean-cargo-home"
+          export PATH="$CARGO_HOME/bin:$PATH"
+          cargo install ee
+          EE_EXPECTED_VERSION="${{ steps.audit.outputs.latest_tag }}"
+          EE_EXPECTED_VERSION="${EE_EXPECTED_VERSION#v}"
+          ee --version | grep -F "$EE_EXPECTED_VERSION"
+          ee doctor --json

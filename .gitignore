@@ -127,3 +127,11 @@ tests/logs/
 /find_async_sleep.sh
 /fix_unwrap_err.sh
 /patch.py
+
+# scripts/audit_install_pipeline.sh writes a timestamped JSON snapshot per
+# run into tests/audit_artifacts/. The "latest_install_pipeline.json" symlink
+# and an occasional `git add -f`'d baseline are the authoritative artifacts;
+# every other timestamped run is scratch and should not pile up in git.
+tests/audit_artifacts/install_pipeline_*.json
+!tests/audit_artifacts/install_pipeline_2026-05-13T052258Z.json
+!tests/audit_artifacts/install_pipeline_2026-05-13T192108Z.json
