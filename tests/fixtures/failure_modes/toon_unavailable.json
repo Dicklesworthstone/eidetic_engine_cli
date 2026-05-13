@@ -13,11 +13,11 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "The TOON renderer capability probe fails; JSON remains the canonical output surface.",
+    "description": "The TOON renderer capability is explicitly disabled; JSON remains the canonical output surface.",
     "setup_commands": [
-      "ee status --workspace . --json"
+      "export EE_DISABLE_TOON=1"
     ],
-    "invocation": "ee status --workspace . --json"
+    "invocation": "EE_DISABLE_TOON=1 ee status --workspace . --json"
   },
   "expected_emission": {
     "code": "toon_unavailable",
@@ -26,6 +26,7 @@
       "TOON",
       "unavailable"
     ],
-    "repair_contains": "json"
+    "repair_contains": "json",
+    "repair_string": "Unset `EE_DISABLE_TOON` or use `--format json`."
   }
 }

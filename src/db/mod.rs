@@ -52,7 +52,11 @@ pub mod audit_actions {
     pub const MEMORY_EXPIRE: &str = "memory.expire";
     pub const MEMORY_SCORE_DECAY: &str = "memory.score_decay";
     pub const MEMORY_UPDATE: &str = "memory.update";
+    pub const MEMORY_LEVEL_TRANSITION: &str = "memory.level_transition";
     pub const MEMORY_TOMBSTONE: &str = "memory.tombstone";
+    pub const MEMORY_UNTOMBSTONE: &str = "memory.untombstone";
+    pub const MEMORY_DECAY_DEMOTE: &str = "memory.decay_demote";
+    pub const MEMORY_DECAY_TOMBSTONE: &str = "memory.decay_tombstone";
     pub const MEMORY_TAG_ADD: &str = "memory.tag.add";
     pub const MEMORY_TAG_REMOVE: &str = "memory.tag.remove";
     pub const MEMORY_TAG_SET: &str = "memory.tag.set";
@@ -80,6 +84,7 @@ pub mod audit_actions {
     pub const TRIPWIRE_CREATE: &str = "tripwire.create";
     pub const VERIFICATION_INGEST: &str = "verification.ingest";
     pub const VERIFICATION_RECORD: &str = VERIFICATION_INGEST;
+    pub const MIGRATION_INDEX_REBUILD: &str = "migration.index_rebuild";
 
     // ----------------------------------------------------------------------
     // Read-surface actions (G8 / bd-17c65.7.7).
@@ -7736,6 +7741,25 @@ impl DbConnection {
         Ok(affected > 0)
     }
 
+    /// Restore a tombstoned memory row without recreating or deleting data.
+    pub fn untombstone_memory(
+        &self,
+        id: &str,
+        workspace_id: &str,
+        restored_at: &str,
+    ) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET tombstoned_at = NULL, updated_at = ?1 WHERE id = ?2 AND workspace_id = ?3 AND tombstoned_at IS NOT NULL",
+            &[
+                Value::Text(restored_at.to_owned()),
+                Value::Text(id.to_owned()),
+                Value::Text(workspace_id.to_owned()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
     /// Restore an imported tombstone timestamp without synthesizing a fresh one.
     pub fn restore_imported_memory_tombstone(&self, id: &str, tombstoned_at: &str) -> Result<bool> {
         let affected = self.execute_for(
@@ -7759,6 +7783,42 @@ impl DbConnection {
             "UPDATE memories SET valid_to = ?1, updated_at = ?1 WHERE id = ?2 AND tombstoned_at IS NULL AND (valid_to IS NULL OR valid_to > ?1)",
             &[Value::Text(valid_to.to_string()), Value::Text(id.to_string())],
         )?;
+        Ok(affected > 0)
+    }
+
+    /// Set temporal validity fields for deterministic diagnostic fixture replay.
+    pub fn set_memory_validity_for_diagnostic(
+        &self,
+        id: &str,
+        valid_from: Option<&str>,
+        valid_to: Option<&str>,
+        clear_valid_from: bool,
+        clear_valid_to: bool,
+    ) -> Result<bool> {
+        let mut assignments = Vec::new();
+        let mut params = Vec::new();
+
+        if clear_valid_from || valid_from.is_some() {
+            params.push(valid_from.map_or(Value::Null, |value| Value::Text(value.to_string())));
+            assignments.push(format!("valid_from = ?{}", params.len()));
+        }
+        if clear_valid_to || valid_to.is_some() {
+            params.push(valid_to.map_or(Value::Null, |value| Value::Text(value.to_string())));
+            assignments.push(format!("valid_to = ?{}", params.len()));
+        }
+        if assignments.is_empty() {
+            return Ok(false);
+        }
+
+        params.push(Value::Text(Utc::now().to_rfc3339()));
+        assignments.push(format!("updated_at = ?{}", params.len()));
+        params.push(Value::Text(id.to_string()));
+        let sql = format!(
+            "UPDATE memories SET {} WHERE id = ?{} AND tombstoned_at IS NULL",
+            assignments.join(", "),
+            params.len()
+        );
+        let affected = self.execute_for(DbOperation::Execute, &sql, &params)?;
         Ok(affected > 0)
     }
 
@@ -8402,6 +8462,83 @@ pub struct ApplyMemoryScoreUpdateInput {
     pub feedback_event_ids: Vec<String>,
 }
 
+/// Lifecycle demotion values after applying deterministic memory decay.
+#[derive(Debug, Clone)]
+pub struct ApplyMemoryDecayDemotionInput {
+    pub workspace_id: String,
+    pub level: String,
+    pub importance: f32,
+    pub updated_at: String,
+    pub actor: Option<String>,
+    pub details: String,
+}
+
+/// Stored-memory level transition values for non-decay lifecycle changes.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ApplyMemoryLevelTransitionInput {
+    pub workspace_id: String,
+    pub expected_level: Option<String>,
+    pub level: String,
+    pub updated_at: String,
+    pub actor: Option<String>,
+    pub reason: String,
+    pub automatic: bool,
+    pub event: String,
+    pub evidence_refs: Vec<String>,
+    pub source_action: Option<String>,
+}
+
+/// Input for creating a causal evidence ledger row.
+#[derive(Debug, Clone)]
+pub struct CreateCausalEvidenceInput {
+    pub workspace_id: String,
+    pub failure_id: String,
+    pub candidate_cause_id: String,
+    pub contribution_score: f64,
+    pub evidence_uris: Vec<String>,
+    pub computed_at: Option<String>,
+    pub method: String,
+}
+
+/// Canonical details schema for `memory.level_transition` audit rows.
+pub const MEMORY_LEVEL_TRANSITION_AUDIT_SCHEMA_V1: &str = "ee.audit.memory_level_transition.v1";
+
+/// Audit payload for one canonical memory lifecycle transition.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MemoryLevelTransitionAuditInput {
+    pub workspace_id: String,
+    pub actor: Option<String>,
+    pub memory_id: String,
+    pub previous_level: String,
+    pub new_level: String,
+    pub reason: String,
+    pub automatic: bool,
+    pub event: String,
+    pub evidence_refs: Vec<String>,
+    pub source_action: Option<String>,
+}
+
+fn memory_level_transition_audit_details(input: &MemoryLevelTransitionAuditInput) -> String {
+    let payload = serde_json::json!({
+        "schema": MEMORY_LEVEL_TRANSITION_AUDIT_SCHEMA_V1,
+        "memoryId": input.memory_id.as_str(),
+        "previousLevel": input.previous_level.as_str(),
+        "newLevel": input.new_level.as_str(),
+        "reason": input.reason.as_str(),
+        "automatic": input.automatic,
+        "event": input.event.as_str(),
+        "evidenceRefs": &input.evidence_refs,
+        "sourceAction": input.source_action.as_deref(),
+    });
+    let details_hash = format!(
+        "blake3:{}",
+        blake3::hash(payload.to_string().as_bytes()).to_hex()
+    );
+    let mut payload_with_hash = payload;
+    payload_with_hash["detailsHash"] = serde_json::json!(details_hash);
+    payload_with_hash.to_string()
+}
+
 /// Audit details for one working memory promoted by workflow closure.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct WorkflowMemoryPromotion {
@@ -8646,6 +8783,132 @@ impl DbConnection {
         Ok(affected > 0)
     }
 
+    /// Record the canonical memory-level lifecycle audit row for a transition.
+    pub fn insert_memory_level_transition_audit(
+        &self,
+        input: &MemoryLevelTransitionAuditInput,
+    ) -> Result<String> {
+        let audit_id = generate_audit_id();
+        self.insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(input.workspace_id.clone()),
+                actor: input.actor.clone(),
+                action: audit_actions::MEMORY_LEVEL_TRANSITION.to_string(),
+                target_type: Some("memory".to_string()),
+                target_id: Some(input.memory_id.clone()),
+                details: Some(memory_level_transition_audit_details(input)),
+            },
+        )?;
+        Ok(audit_id)
+    }
+
+    /// Insert or replace one causal evidence ledger row.
+    pub fn insert_causal_evidence(
+        &self,
+        id: &str,
+        input: &CreateCausalEvidenceInput,
+    ) -> Result<()> {
+        let computed_at = input
+            .computed_at
+            .clone()
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        let evidence_uris_json = json_string_vec(&input.evidence_uris, "causal evidence URIs")?;
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT OR REPLACE INTO causal_evidence (id, workspace_id, failure_id, candidate_cause_id, contribution_score, evidence_uris_json, computed_at, method) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.failure_id.clone()),
+                Value::Text(input.candidate_cause_id.clone()),
+                Value::Float(input.contribution_score as f32),
+                Value::Text(evidence_uris_json),
+                Value::Text(computed_at),
+                Value::Text(input.method.clone()),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Apply a memory level transition and record the canonical audit row.
+    pub fn apply_memory_level_transition_audited(
+        &self,
+        memory_id: &str,
+        input: &ApplyMemoryLevelTransitionInput,
+    ) -> Result<Option<String>> {
+        self.with_transaction(|| self.apply_memory_level_transition_inner(memory_id, input))
+    }
+
+    /// Apply a memory level transition inside an already-open transaction.
+    pub fn apply_memory_level_transition_in_current_transaction(
+        &self,
+        memory_id: &str,
+        input: &ApplyMemoryLevelTransitionInput,
+    ) -> Result<Option<String>> {
+        self.apply_memory_level_transition_inner(memory_id, input)
+    }
+
+    fn apply_memory_level_transition_inner(
+        &self,
+        memory_id: &str,
+        input: &ApplyMemoryLevelTransitionInput,
+    ) -> Result<Option<String>> {
+        let Some(existing) = self.get_memory(memory_id)? else {
+            return Ok(None);
+        };
+        if !text_matches(&existing.workspace_id, &input.workspace_id)
+            || existing.tombstoned_at.is_some()
+        {
+            return Ok(None);
+        }
+        let expected_level = input.expected_level.as_deref().unwrap_or(&existing.level);
+        if !text_matches(&existing.level, expected_level) {
+            return Ok(None);
+        }
+        if text_matches(&existing.level, &input.level) {
+            return Ok(None);
+        }
+
+        let mut updated = existing.clone();
+        updated.level = input.level.clone();
+        let provenance_chain_hash = compute_memory_provenance_chain_hash(&updated);
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET level = ?1, updated_at = ?2, provenance_chain_hash = ?3, provenance_chain_hash_version = ?4, provenance_verification_status = ?5, provenance_verified_at = NULL, provenance_verification_note = NULL WHERE id = ?6 AND workspace_id = ?7 AND tombstoned_at IS NULL AND level = ?8",
+            &[
+                Value::Text(input.level.clone()),
+                Value::Text(input.updated_at.clone()),
+                Value::Text(provenance_chain_hash),
+                Value::Text(PROVENANCE_CHAIN_HASH_VERSION.to_string()),
+                Value::Text(PROVENANCE_STATUS_UNVERIFIED.to_string()),
+                Value::Text(memory_id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(expected_level.to_owned()),
+            ],
+        )?;
+        if affected == 0 {
+            return Ok(None);
+        }
+
+        let audit_id =
+            self.insert_memory_level_transition_audit(&MemoryLevelTransitionAuditInput {
+                workspace_id: input.workspace_id.clone(),
+                actor: input.actor.clone(),
+                memory_id: memory_id.to_string(),
+                previous_level: existing.level,
+                new_level: input.level.clone(),
+                reason: input.reason.clone(),
+                automatic: input.automatic,
+                event: input.event.clone(),
+                evidence_refs: input.evidence_refs.clone(),
+                source_action: input.source_action.clone(),
+            })?;
+        Ok(Some(audit_id))
+    }
+
     /// Apply a maintenance score update to a memory and record an audit entry.
     pub fn apply_memory_score_update_audited(
         &self,
@@ -8717,6 +8980,139 @@ impl DbConnection {
         Ok(Some(audit_id))
     }
 
+    /// Apply a deterministic memory-decay demotion and record an audit entry.
+    pub fn apply_memory_decay_demotion_audited(
+        &self,
+        memory_id: &str,
+        input: &ApplyMemoryDecayDemotionInput,
+    ) -> Result<Option<String>> {
+        self.with_transaction(|| self.apply_memory_decay_demotion_audited_inner(memory_id, input))
+    }
+
+    fn apply_memory_decay_demotion_audited_inner(
+        &self,
+        memory_id: &str,
+        input: &ApplyMemoryDecayDemotionInput,
+    ) -> Result<Option<String>> {
+        let Some(existing) = self.get_memory(memory_id)? else {
+            return Ok(None);
+        };
+        if !text_matches(&existing.workspace_id, &input.workspace_id)
+            || existing.tombstoned_at.is_some()
+        {
+            return Ok(None);
+        }
+        if text_matches(&existing.level, &input.level)
+            && (existing.importance - input.importance).abs() <= 0.000_001
+        {
+            return Ok(None);
+        }
+
+        let mut updated = existing.clone();
+        updated.level = input.level.clone();
+        updated.importance = input.importance;
+        let provenance_chain_hash = compute_memory_provenance_chain_hash(&updated);
+
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET level = ?1, importance = ?2, updated_at = ?3, provenance_chain_hash = ?4, provenance_chain_hash_version = ?5, provenance_verification_status = ?6, provenance_verified_at = NULL, provenance_verification_note = NULL WHERE id = ?7 AND workspace_id = ?8 AND tombstoned_at IS NULL",
+            &[
+                Value::Text(input.level.clone()),
+                Value::Float(input.importance),
+                Value::Text(input.updated_at.clone()),
+                Value::Text(provenance_chain_hash),
+                Value::Text(PROVENANCE_CHAIN_HASH_VERSION.to_string()),
+                Value::Text(PROVENANCE_STATUS_UNVERIFIED.to_string()),
+                Value::Text(memory_id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+            ],
+        )?;
+        if affected == 0 {
+            return Ok(None);
+        }
+
+        let audit_id = generate_audit_id();
+        self.insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(input.workspace_id.clone()),
+                actor: input.actor.clone(),
+                action: audit_actions::MEMORY_DECAY_DEMOTE.to_string(),
+                target_type: Some("memory".to_string()),
+                target_id: Some(memory_id.to_string()),
+                details: Some(input.details.clone()),
+            },
+        )?;
+
+        let _ = self.insert_memory_level_transition_audit(&MemoryLevelTransitionAuditInput {
+            workspace_id: input.workspace_id.clone(),
+            actor: input.actor.clone(),
+            memory_id: memory_id.to_string(),
+            previous_level: existing.level,
+            new_level: input.level.clone(),
+            reason: "harmful_feedback_decay".to_string(),
+            automatic: true,
+            event: "feedback.harmful_decay".to_string(),
+            evidence_refs: vec!["decay_evaluation".to_string()],
+            source_action: Some(audit_actions::MEMORY_DECAY_DEMOTE.to_string()),
+        })?;
+
+        Ok(Some(audit_id))
+    }
+
+    /// Tombstone a memory through deterministic decay and record a decay-specific audit row.
+    pub fn tombstone_memory_decay_audited(
+        &self,
+        memory_id: &str,
+        workspace_id: &str,
+        actor: Option<&str>,
+        details: &str,
+    ) -> Result<Option<String>> {
+        self.with_transaction(|| {
+            let Some(existing) = self.get_memory(memory_id)? else {
+                return Ok(None);
+            };
+            if !text_matches(&existing.workspace_id, workspace_id)
+                || existing.tombstoned_at.is_some()
+            {
+                return Ok(None);
+            }
+            let tombstoned = self.tombstone_memory(memory_id)?;
+            if !tombstoned {
+                return Ok(None);
+            }
+
+            let audit_id = generate_audit_id();
+            self.insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(workspace_id.to_string()),
+                    actor: actor.map(str::to_string),
+                    action: audit_actions::MEMORY_DECAY_TOMBSTONE.to_string(),
+                    target_type: Some("memory".to_string()),
+                    target_id: Some(memory_id.to_string()),
+                    details: Some(details.to_string()),
+                },
+            )?;
+
+            let _ =
+                self.insert_memory_level_transition_audit(&MemoryLevelTransitionAuditInput {
+                    workspace_id: workspace_id.to_string(),
+                    actor: actor.map(str::to_string),
+                    memory_id: memory_id.to_string(),
+                    previous_level: existing.level,
+                    new_level: "tombstoned".to_string(),
+                    reason: "auto_forgetting".to_string(),
+                    automatic: true,
+                    event: "decay.l3".to_string(),
+                    evidence_refs: vec!["decay_evaluation".to_string()],
+                    source_action: Some(audit_actions::MEMORY_DECAY_TOMBSTONE.to_string()),
+                })?;
+
+            Ok(Some(audit_id))
+        })
+    }
+
     /// Promote eligible working memories for a workflow and record per-memory audit entries.
     pub fn promote_workflow_working_memories_audited(
         &self,
@@ -8778,29 +9174,19 @@ impl DbConnection {
             }
             self.garbage_collect_auto_memory_links_for_memory_inner(&memory.id)?;
 
-            let audit_id = generate_audit_id();
-            self.insert_audit(
-                &audit_id,
-                &CreateAuditInput {
-                    workspace_id: Some(workspace_id.to_string()),
+            let audit_id =
+                self.insert_memory_level_transition_audit(&MemoryLevelTransitionAuditInput {
+                    workspace_id: workspace_id.to_string(),
                     actor: Some(actor.to_string()),
-                    action: audit_actions::MEMORY_UPDATE.to_string(),
-                    target_type: Some("memory".to_string()),
-                    target_id: Some(memory.id.clone()),
-                    details: Some(
-                        serde_json::json!({
-                            "schema": "ee.audit.workflow_close_memory_promotion.v1",
-                            "command": "ee workflow close",
-                            "workflowId": workflow_id,
-                            "previousLevel": "working",
-                            "newLevel": "episodic",
-                            "closedAt": closed_at,
-                            "criteria": ["importance >= 0.5"],
-                        })
-                        .to_string(),
-                    ),
-                },
-            )?;
+                    memory_id: memory.id.clone(),
+                    previous_level: "working".to_string(),
+                    new_level: "episodic".to_string(),
+                    reason: "workflow_close".to_string(),
+                    automatic: true,
+                    event: "workflow.completed".to_string(),
+                    evidence_refs: vec![workflow_id.to_string(), closed_at.to_string()],
+                    source_action: Some("ee workflow close".to_string()),
+                })?;
             promotions.push(WorkflowMemoryPromotion {
                 memory_id: memory.id,
                 audit_id,
@@ -9525,6 +9911,12 @@ impl DbConnection {
         actor: Option<&str>,
         reason: Option<&str>,
     ) -> Result<Option<String>> {
+        let Some(existing) = self.get_memory(memory_id)? else {
+            return Ok(None);
+        };
+        if !text_matches(&existing.workspace_id, workspace_id) || existing.tombstoned_at.is_some() {
+            return Ok(None);
+        }
         let tombstoned = self.tombstone_memory(memory_id)?;
         if !tombstoned {
             return Ok(None);
@@ -9545,7 +9937,55 @@ impl DbConnection {
             },
         )?;
 
+        let evidence_refs = reason
+            .map(|value| vec![value.to_string()])
+            .unwrap_or_else(|| vec!["manual_tombstone".to_string()]);
+        let _ = self.insert_memory_level_transition_audit(&MemoryLevelTransitionAuditInput {
+            workspace_id: workspace_id.to_string(),
+            actor: actor.map(str::to_string),
+            memory_id: memory_id.to_string(),
+            previous_level: existing.level,
+            new_level: "tombstoned".to_string(),
+            reason: "manual_tombstone".to_string(),
+            automatic: false,
+            event: "manual.tombstone".to_string(),
+            evidence_refs,
+            source_action: Some(audit_actions::MEMORY_TOMBSTONE.to_string()),
+        })?;
+
         Ok(Some(audit_id))
+    }
+
+    /// Restore a tombstoned memory with an audit log entry.
+    pub fn untombstone_memory_audited(
+        &self,
+        memory_id: &str,
+        workspace_id: &str,
+        actor: Option<&str>,
+        restored_at: &str,
+        details: &str,
+    ) -> Result<Option<String>> {
+        self.with_transaction(|| {
+            let restored = self.untombstone_memory(memory_id, workspace_id, restored_at)?;
+            if !restored {
+                return Ok(None);
+            }
+
+            let audit_id = generate_audit_id();
+            self.insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(workspace_id.to_string()),
+                    actor: actor.map(str::to_string),
+                    action: audit_actions::MEMORY_UNTOMBSTONE.to_string(),
+                    target_type: Some("memory".to_string()),
+                    target_id: Some(memory_id.to_string()),
+                    details: Some(details.to_string()),
+                },
+            )?;
+
+            Ok(Some(audit_id))
+        })
     }
 
     /// Add tags to a memory with an audit log entry (EE-070).
@@ -10616,6 +11056,24 @@ impl DbConnection {
             DbOperation::Query,
             "SELECT id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, ledger_json, ledger_hash, created_at, created_by FROM pack_records WHERE id = ?1",
             &[Value::Text(id.to_string())],
+        )?;
+
+        rows.first().map(stored_pack_record_from_row).transpose()
+    }
+
+    /// Get the newest pack record for a workspace/query pair.
+    pub fn get_latest_pack_record_for_query(
+        &self,
+        workspace_id: &str,
+        query: &str,
+    ) -> Result<Option<StoredPackRecord>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, ledger_json, ledger_hash, created_at, created_by FROM pack_records WHERE workspace_id = ?1 AND query = ?2 ORDER BY created_at DESC, id DESC LIMIT 1",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(query.to_string()),
+            ],
         )?;
 
         rows.first().map(stored_pack_record_from_row).transpose()
@@ -17149,6 +17607,73 @@ mod tests {
                 .details
                 .as_ref()
                 .is_some_and(|d| d.contains("outdated")),
+            "audit details contain reason",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn untombstone_memory_audited_restores_row_and_creates_audit_entry() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let memory_input = super::CreateMemoryInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            level: "episodic".to_string(),
+            kind: "observation".to_string(),
+            content: "Temporary observation should be reversible.".to_string(),
+            workflow_id: None,
+            confidence: 0.95,
+            utility: 0.6,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: "cass_evidence".to_string(),
+            trust_subclass: None,
+            tags: vec![],
+            valid_from: None,
+            valid_to: None,
+        };
+        connection.insert_memory("mem_untombstone000000000000001", &memory_input)?;
+        ensure(
+            connection.tombstone_memory("mem_untombstone000000000000001")?,
+            "memory should tombstone before restore",
+        )?;
+
+        let audit_id = connection.untombstone_memory_audited(
+            "mem_untombstone000000000000001",
+            "wsp_01234567890123456789012345",
+            Some("agent:cleanup"),
+            "2026-05-13T00:00:00Z",
+            r#"{"reason":"restore after review"}"#,
+        )?;
+        ensure(audit_id.is_some(), "audit ID returned for untombstone")?;
+        let audit_id = audit_id.ok_or_else(|| TestFailure::new("no audit ID"))?;
+
+        let memory = connection.get_memory("mem_untombstone000000000000001")?;
+        let memory = memory.ok_or_else(|| TestFailure::new("memory not found"))?;
+        ensure(memory.tombstoned_at.is_none(), "memory is restored")?;
+        ensure_equal(
+            &memory.updated_at.as_str(),
+            &"2026-05-13T00:00:00Z",
+            "restored updated_at",
+        )?;
+
+        let audit = connection
+            .get_audit(&audit_id)?
+            .ok_or_else(|| TestFailure::new("audit not found"))?;
+        ensure_equal(
+            &audit.action.as_str(),
+            &super::audit_actions::MEMORY_UNTOMBSTONE,
+            "untombstone action",
+        )?;
+        ensure(
+            audit
+                .details
+                .as_ref()
+                .is_some_and(|d| d.contains("restore after review")),
             "audit details contain reason",
         )?;
 

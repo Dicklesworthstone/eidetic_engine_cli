@@ -18,16 +18,29 @@
         "command": {"type": "string", "const": "context"},
         "request": {
           "type": "object",
-          "required": ["query", "profile", "maxTokens", "candidatePool", "sections"],
+          "required": [
+            "query",
+            "profile",
+            "maxTokens",
+            "candidatePool",
+            "memoryScope",
+            "strictScope",
+            "sections"
+          ],
           "additionalProperties": false,
           "properties": {
             "query": {"type": "string"},
             "profile": {"type": "string"},
             "maxTokens": {"type": "integer"},
             "candidatePool": {"type": "integer"},
+            "memoryScope": {"type": "string"},
+            "strictScope": {"type": "boolean"},
             "sections": {"type": "array", "items": {"type": "string"}}
           }
         },
+        "scopeStats": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "consensus": {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        "conflicts": {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
         "pack": {
           "type": "object",
           "required": [
@@ -37,13 +50,16 @@
             "skipped",
             "skippedTotal",
             "provenanceFooter",
-            "selectionCertificate",
+            "selectionAudit",
             "quality",
             "advisoryBanner"
           ],
           "additionalProperties": false,
           "properties": {
             "query": {"type": "string"},
+            "text": {"type": "string"},
+            "meta": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+            "slo": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
             "budget": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
             "hash": {"type": ["string", "null"]},
             "items": {
@@ -72,14 +88,21 @@
                   "why": {"type": "string"},
                   "provenance": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
                   "trust": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-                  "diversityKey": {"type": ["string", "null"]}
+                  "diversityKey": {"type": ["string", "null"]},
+                  "selectedIn": {"type": "string"},
+                  "lifecycle": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+                  "tokenCost": {"type": "integer"},
+                  "feasible": {"type": "boolean"},
+                  "coveredFeatures": {"type": "array", "items": {"type": "string"}},
+                  "sourceIndex": {"type": "integer"}
                 }
               }
             },
             "skipped": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
             "skippedTotal": {"type": "integer"},
             "provenanceFooter": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-            "selectionCertificate": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+            "selectionAudit": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+            "coordination": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
             "quality": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
             "advisoryBanner": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
           }

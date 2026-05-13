@@ -15,9 +15,9 @@ use serde::Serialize;
 
 use super::env_registry::EnvVar;
 use super::file::{
-    CassConfig, ConfigFile, CurationConfig, FeedbackConfig, PackConfig, PolicyConfig,
-    PrivacyConfig, RuntimeConfig, SearchConfig, SearchSpeed, SecretDetectorConfig, StorageConfig,
-    TrustConfig,
+    CassConfig, ConfigFile, CurationConfig, FeedbackConfig, LearnConfig, LearnDecayConfig,
+    PackConfig, PolicyConfig, PrivacyConfig, RuntimeConfig, SearchConfig, SearchSpeed,
+    SecretDetectorConfig, StorageConfig, TrustConfig,
 };
 use super::path::{PathExpander, PathExpansionError};
 
@@ -43,6 +43,19 @@ pub const CURATION_DUPLICATE_SIMILARITY_KEY: &str = "curation.duplicate_similari
 pub const CURATION_HARMFUL_WEIGHT_KEY: &str = "curation.harmful_weight";
 pub const CURATION_DECAY_HALF_LIFE_DAYS_KEY: &str = "curation.decay_half_life_days";
 pub const CURATION_SPECIFICITY_MIN_KEY: &str = "curation.specificity_min";
+pub const LEARN_DECAY_DEMOTE_THRESHOLD_KEY: &str = "learn.decay.demote_threshold";
+pub const LEARN_DECAY_FORGET_THRESHOLD_KEY: &str = "learn.decay.forget_threshold";
+pub const LEARN_DECAY_WORKING_HALF_LIFE_DAYS_KEY: &str = "learn.decay.working_half_life_days";
+pub const LEARN_DECAY_EPISODIC_EVENT_HALF_LIFE_DAYS_KEY: &str =
+    "learn.decay.episodic_event_half_life_days";
+pub const LEARN_DECAY_EPISODIC_FAILURE_HALF_LIFE_DAYS_KEY: &str =
+    "learn.decay.episodic_failure_half_life_days";
+pub const LEARN_DECAY_SEMANTIC_FACT_HALF_LIFE_DAYS_KEY: &str =
+    "learn.decay.semantic_fact_half_life_days";
+pub const LEARN_DECAY_PROCEDURAL_RULE_HALF_LIFE_DAYS_KEY: &str =
+    "learn.decay.procedural_rule_half_life_days";
+pub const LEARN_DECAY_DEFAULT_HALF_LIFE_DAYS_KEY: &str = "learn.decay.default_half_life_days";
+pub const LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY: &str = "learn.cluster_coherence_threshold";
 pub const FEEDBACK_HARMFUL_PER_SOURCE_PER_HOUR_KEY: &str = "feedback.harmful_per_source_per_hour";
 pub const FEEDBACK_HARMFUL_BURST_WINDOW_SECONDS_KEY: &str = "feedback.harmful_burst_window_seconds";
 pub const POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY: &str = "policy.secret_detector.allow_phrases";
@@ -51,6 +64,7 @@ pub const PRIVACY_REDACT_SECRETS_KEY: &str = "privacy.redact_secrets";
 pub const PRIVACY_REDACTION_CLASSES_KEY: &str = "privacy.redaction_classes";
 pub const TRUST_DEFAULT_CLASS_KEY: &str = "trust.default_class";
 pub const TRUST_PROMPT_INJECTION_GUARD_KEY: &str = "trust.prompt_injection_guard";
+pub const TRUST_TEAM_MEMBERS_KEY: &str = "trust.team_members";
 
 const BUILT_IN_DATABASE_PATH: &str = "~/.local/share/ee/ee.db";
 const BUILT_IN_INDEX_DIR: &str = "~/.local/share/ee/indexes";
@@ -279,6 +293,71 @@ impl MergedConfig {
             ));
         }
 
+        // Learn section
+        if let Some(threshold) = self.values.learn.cluster_coherence_threshold {
+            entries.push(ConfigShowEntry::new(
+                LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY,
+                threshold.to_string(),
+                self.source(LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY),
+            ));
+        }
+        if let Some(threshold) = self.values.learn.decay.demote_threshold {
+            entries.push(ConfigShowEntry::new(
+                LEARN_DECAY_DEMOTE_THRESHOLD_KEY,
+                threshold.to_string(),
+                self.source(LEARN_DECAY_DEMOTE_THRESHOLD_KEY),
+            ));
+        }
+        if let Some(threshold) = self.values.learn.decay.forget_threshold {
+            entries.push(ConfigShowEntry::new(
+                LEARN_DECAY_FORGET_THRESHOLD_KEY,
+                threshold.to_string(),
+                self.source(LEARN_DECAY_FORGET_THRESHOLD_KEY),
+            ));
+        }
+        if let Some(days) = self.values.learn.decay.working_half_life_days {
+            entries.push(ConfigShowEntry::new(
+                LEARN_DECAY_WORKING_HALF_LIFE_DAYS_KEY,
+                days.to_string(),
+                self.source(LEARN_DECAY_WORKING_HALF_LIFE_DAYS_KEY),
+            ));
+        }
+        if let Some(days) = self.values.learn.decay.episodic_event_half_life_days {
+            entries.push(ConfigShowEntry::new(
+                LEARN_DECAY_EPISODIC_EVENT_HALF_LIFE_DAYS_KEY,
+                days.to_string(),
+                self.source(LEARN_DECAY_EPISODIC_EVENT_HALF_LIFE_DAYS_KEY),
+            ));
+        }
+        if let Some(days) = self.values.learn.decay.episodic_failure_half_life_days {
+            entries.push(ConfigShowEntry::new(
+                LEARN_DECAY_EPISODIC_FAILURE_HALF_LIFE_DAYS_KEY,
+                days.to_string(),
+                self.source(LEARN_DECAY_EPISODIC_FAILURE_HALF_LIFE_DAYS_KEY),
+            ));
+        }
+        if let Some(days) = self.values.learn.decay.semantic_fact_half_life_days {
+            entries.push(ConfigShowEntry::new(
+                LEARN_DECAY_SEMANTIC_FACT_HALF_LIFE_DAYS_KEY,
+                days.to_string(),
+                self.source(LEARN_DECAY_SEMANTIC_FACT_HALF_LIFE_DAYS_KEY),
+            ));
+        }
+        if let Some(days) = self.values.learn.decay.procedural_rule_half_life_days {
+            entries.push(ConfigShowEntry::new(
+                LEARN_DECAY_PROCEDURAL_RULE_HALF_LIFE_DAYS_KEY,
+                days.to_string(),
+                self.source(LEARN_DECAY_PROCEDURAL_RULE_HALF_LIFE_DAYS_KEY),
+            ));
+        }
+        if let Some(days) = self.values.learn.decay.default_half_life_days {
+            entries.push(ConfigShowEntry::new(
+                LEARN_DECAY_DEFAULT_HALF_LIFE_DAYS_KEY,
+                days.to_string(),
+                self.source(LEARN_DECAY_DEFAULT_HALF_LIFE_DAYS_KEY),
+            ));
+        }
+
         // Feedback section
         if let Some(rate) = self.values.feedback.harmful_per_source_per_hour {
             entries.push(ConfigShowEntry::new(
@@ -333,6 +412,13 @@ impl MergedConfig {
                 TRUST_PROMPT_INJECTION_GUARD_KEY,
                 guard.to_string(),
                 self.source(TRUST_PROMPT_INJECTION_GUARD_KEY),
+            ));
+        }
+        if let Some(ref team_members) = self.values.trust.team_members {
+            entries.push(ConfigShowEntry::new(
+                TRUST_TEAM_MEMBERS_KEY,
+                team_members.join(","),
+                self.source(TRUST_TEAM_MEMBERS_KEY),
             ));
         }
 
@@ -422,6 +508,19 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             decay_half_life_days: Some(60),
             specificity_min: Some(0.45),
         },
+        learn: LearnConfig {
+            cluster_coherence_threshold: Some(0.55),
+            decay: LearnDecayConfig {
+                demote_threshold: Some(0.05),
+                forget_threshold: Some(0.01),
+                working_half_life_days: Some(1.0),
+                episodic_event_half_life_days: Some(30.0),
+                episodic_failure_half_life_days: Some(90.0),
+                semantic_fact_half_life_days: Some(180.0),
+                procedural_rule_half_life_days: Some(365.0),
+                default_half_life_days: Some(30.0),
+            },
+        },
         feedback: FeedbackConfig {
             harmful_per_source_per_hour: Some(5),
             harmful_burst_window_seconds: Some(3600),
@@ -440,6 +539,7 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
         trust: TrustConfig {
             default_class: Some("agent_assertion".to_string()),
             prompt_injection_guard: Some(true),
+            team_members: None,
         },
     })
 }
@@ -471,6 +571,7 @@ pub fn config_from_env(
             candidate_pool: None,
         },
         curation: CurationConfig::default(),
+        learn: LearnConfig::default(),
         feedback: FeedbackConfig {
             harmful_per_source_per_hour: optional_env_u64(
                 env,
@@ -745,6 +846,99 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.defaults.curation.specificity_min,
             ),
         },
+        learn: LearnConfig {
+            cluster_coherence_threshold: pick_field(
+                &mut sources,
+                LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY,
+                &layers.cli.learn.cluster_coherence_threshold,
+                &layers.environment.learn.cluster_coherence_threshold,
+                &layers.project.learn.cluster_coherence_threshold,
+                &layers.user.learn.cluster_coherence_threshold,
+                &layers.defaults.learn.cluster_coherence_threshold,
+            ),
+            decay: LearnDecayConfig {
+                demote_threshold: pick_field(
+                    &mut sources,
+                    LEARN_DECAY_DEMOTE_THRESHOLD_KEY,
+                    &layers.cli.learn.decay.demote_threshold,
+                    &layers.environment.learn.decay.demote_threshold,
+                    &layers.project.learn.decay.demote_threshold,
+                    &layers.user.learn.decay.demote_threshold,
+                    &layers.defaults.learn.decay.demote_threshold,
+                ),
+                forget_threshold: pick_field(
+                    &mut sources,
+                    LEARN_DECAY_FORGET_THRESHOLD_KEY,
+                    &layers.cli.learn.decay.forget_threshold,
+                    &layers.environment.learn.decay.forget_threshold,
+                    &layers.project.learn.decay.forget_threshold,
+                    &layers.user.learn.decay.forget_threshold,
+                    &layers.defaults.learn.decay.forget_threshold,
+                ),
+                working_half_life_days: pick_field(
+                    &mut sources,
+                    LEARN_DECAY_WORKING_HALF_LIFE_DAYS_KEY,
+                    &layers.cli.learn.decay.working_half_life_days,
+                    &layers.environment.learn.decay.working_half_life_days,
+                    &layers.project.learn.decay.working_half_life_days,
+                    &layers.user.learn.decay.working_half_life_days,
+                    &layers.defaults.learn.decay.working_half_life_days,
+                ),
+                episodic_event_half_life_days: pick_field(
+                    &mut sources,
+                    LEARN_DECAY_EPISODIC_EVENT_HALF_LIFE_DAYS_KEY,
+                    &layers.cli.learn.decay.episodic_event_half_life_days,
+                    &layers.environment.learn.decay.episodic_event_half_life_days,
+                    &layers.project.learn.decay.episodic_event_half_life_days,
+                    &layers.user.learn.decay.episodic_event_half_life_days,
+                    &layers.defaults.learn.decay.episodic_event_half_life_days,
+                ),
+                episodic_failure_half_life_days: pick_field(
+                    &mut sources,
+                    LEARN_DECAY_EPISODIC_FAILURE_HALF_LIFE_DAYS_KEY,
+                    &layers.cli.learn.decay.episodic_failure_half_life_days,
+                    &layers
+                        .environment
+                        .learn
+                        .decay
+                        .episodic_failure_half_life_days,
+                    &layers.project.learn.decay.episodic_failure_half_life_days,
+                    &layers.user.learn.decay.episodic_failure_half_life_days,
+                    &layers.defaults.learn.decay.episodic_failure_half_life_days,
+                ),
+                semantic_fact_half_life_days: pick_field(
+                    &mut sources,
+                    LEARN_DECAY_SEMANTIC_FACT_HALF_LIFE_DAYS_KEY,
+                    &layers.cli.learn.decay.semantic_fact_half_life_days,
+                    &layers.environment.learn.decay.semantic_fact_half_life_days,
+                    &layers.project.learn.decay.semantic_fact_half_life_days,
+                    &layers.user.learn.decay.semantic_fact_half_life_days,
+                    &layers.defaults.learn.decay.semantic_fact_half_life_days,
+                ),
+                procedural_rule_half_life_days: pick_field(
+                    &mut sources,
+                    LEARN_DECAY_PROCEDURAL_RULE_HALF_LIFE_DAYS_KEY,
+                    &layers.cli.learn.decay.procedural_rule_half_life_days,
+                    &layers
+                        .environment
+                        .learn
+                        .decay
+                        .procedural_rule_half_life_days,
+                    &layers.project.learn.decay.procedural_rule_half_life_days,
+                    &layers.user.learn.decay.procedural_rule_half_life_days,
+                    &layers.defaults.learn.decay.procedural_rule_half_life_days,
+                ),
+                default_half_life_days: pick_field(
+                    &mut sources,
+                    LEARN_DECAY_DEFAULT_HALF_LIFE_DAYS_KEY,
+                    &layers.cli.learn.decay.default_half_life_days,
+                    &layers.environment.learn.decay.default_half_life_days,
+                    &layers.project.learn.decay.default_half_life_days,
+                    &layers.user.learn.decay.default_half_life_days,
+                    &layers.defaults.learn.decay.default_half_life_days,
+                ),
+            },
+        },
         feedback: FeedbackConfig {
             harmful_per_source_per_hour: pick_field(
                 &mut sources,
@@ -825,6 +1019,15 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.trust.prompt_injection_guard,
                 &layers.user.trust.prompt_injection_guard,
                 &layers.defaults.trust.prompt_injection_guard,
+            ),
+            team_members: pick_field(
+                &mut sources,
+                TRUST_TEAM_MEMBERS_KEY,
+                &layers.cli.trust.team_members,
+                &layers.environment.trust.team_members,
+                &layers.project.trust.team_members,
+                &layers.user.trust.team_members,
+                &layers.defaults.trust.team_members,
             ),
         },
     };
@@ -918,14 +1121,15 @@ mod tests {
 
     use super::{
         CURATION_SPECIFICITY_MIN_KEY, ConfigLayers, ConfigValueSource, EnvironmentConfigError,
-        PACK_DEFAULT_MAX_TOKENS_KEY, PACK_DEFAULT_PROFILE_KEY,
-        POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY, SEARCH_DEFAULT_SPEED_KEY,
-        STORAGE_DATABASE_PATH_KEY, STORAGE_INDEX_DIR_KEY, built_in_config, config_from_env,
-        merge_config,
+        LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY, LEARN_DECAY_DEMOTE_THRESHOLD_KEY,
+        LEARN_DECAY_PROCEDURAL_RULE_HALF_LIFE_DAYS_KEY, PACK_DEFAULT_MAX_TOKENS_KEY,
+        PACK_DEFAULT_PROFILE_KEY, POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY,
+        SEARCH_DEFAULT_SPEED_KEY, STORAGE_DATABASE_PATH_KEY, STORAGE_INDEX_DIR_KEY,
+        built_in_config, config_from_env, merge_config,
     };
     use crate::config::{
-        ConfigFile, CurationConfig, PackConfig, PathExpander, PolicyConfig, SearchConfig,
-        SearchSpeed, SecretDetectorConfig, StorageConfig,
+        ConfigFile, CurationConfig, LearnConfig, LearnDecayConfig, PackConfig, PathExpander,
+        PolicyConfig, SearchConfig, SearchSpeed, SecretDetectorConfig, StorageConfig,
     };
 
     type TestResult = Result<(), String>;
@@ -976,6 +1180,16 @@ mod tests {
             &defaults.curation.specificity_min,
             &Some(0.45),
             "specificity min",
+        )?;
+        ensure_equal(
+            &defaults.learn.cluster_coherence_threshold,
+            &Some(0.55),
+            "cluster coherence threshold",
+        )?;
+        ensure_equal(
+            &defaults.learn.decay.procedural_rule_half_life_days,
+            &Some(365.0),
+            "procedural rule half-life",
         )?;
         ensure_equal(
             &defaults.trust.default_class.as_deref(),
@@ -1068,6 +1282,14 @@ mod tests {
                 specificity_min: Some(0.60),
                 ..CurationConfig::default()
             },
+            learn: LearnConfig {
+                cluster_coherence_threshold: Some(0.80),
+                decay: LearnDecayConfig {
+                    demote_threshold: Some(0.08),
+                    procedural_rule_half_life_days: Some(730.0),
+                    ..LearnDecayConfig::default()
+                },
+            },
             policy: PolicyConfig {
                 secret_detector: SecretDetectorConfig {
                     allow_phrases: Some(vec!["OAuth refresh token".to_string()]),
@@ -1157,6 +1379,36 @@ mod tests {
             &merged.source(CURATION_SPECIFICITY_MIN_KEY),
             &Some(ConfigValueSource::Project),
             "specificity threshold source",
+        )?;
+        ensure_equal(
+            &merged.values.learn.cluster_coherence_threshold,
+            &Some(0.80),
+            "project learn cluster coherence threshold",
+        )?;
+        ensure_equal(
+            &merged.source(LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY),
+            &Some(ConfigValueSource::Project),
+            "learn cluster coherence threshold source",
+        )?;
+        ensure_equal(
+            &merged.values.learn.decay.demote_threshold,
+            &Some(0.08),
+            "project learn decay demote threshold",
+        )?;
+        ensure_equal(
+            &merged.source(LEARN_DECAY_DEMOTE_THRESHOLD_KEY),
+            &Some(ConfigValueSource::Project),
+            "learn decay demote threshold source",
+        )?;
+        ensure_equal(
+            &merged.values.learn.decay.procedural_rule_half_life_days,
+            &Some(730.0),
+            "project procedural rule half-life",
+        )?;
+        ensure_equal(
+            &merged.source(LEARN_DECAY_PROCEDURAL_RULE_HALF_LIFE_DAYS_KEY),
+            &Some(ConfigValueSource::Project),
+            "procedural rule half-life source",
         )?;
         ensure_equal(
             &merged.values.policy.secret_detector.allow_phrases,

@@ -25,6 +25,8 @@
       "Community and query-seed graph features",
       "unavailable"
     ],
-    "repair_contains": "ee graph communities"
+    "repair_contains": "ee graph communities",
+    "repair_string": "ee graph communities && ee search --explain",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

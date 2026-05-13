@@ -3,174 +3,244 @@ source: tests/json_contract_snapshots.rs
 expression: context
 ---
 {
-  "schema": "ee.response.v1",
-  "success": true,
   "data": {
     "command": "context",
-    "request": {
+    "conflicts": [],
+    "consensus": [],
+    "degraded": [
+      {
+        "code": "context_profile_budget_capped",
+        "message": "Context request budget was capped by the active constrained operating profile.",
+        "repair": "ee profile config plan --json",
+        "severity": "low"
+      },
+      {
+        "code": "context_evidence_freshness_missing_source",
+        "message": "Memory mem_00000000000000000000000001 evidence freshness is missing_source: Referenced provenance file [WORKSPACE]/AGENTS.md is missing.",
+        "repair": "Restore the file or revise the memory provenance URI; rebuild the index if the memory content changes.",
+        "severity": "low"
+      },
+      {
+        "code": "deprecated_alias",
+        "message": "`ee context` is a compatibility alias for the promoted triad command.",
+        "repair": "Use `ee pack \"<task>\"`.",
+        "severity": "low"
+      }
+    ],
+    "pack": {
+      "advisoryBanner": {
+        "advisoryCount": 0,
+        "authoritativeCount": 1,
+        "degradationCount": 3,
+        "legacyCount": 0,
+        "notes": [],
+        "status": "degraded",
+        "summary": "Context includes 3 degraded signals; validate advisory memory and repair degraded sources before relying on this pack."
+      },
+      "budget": {
+        "maxTokens": 3000,
+        "usedTokens": 8,
+        "utilization": 0.002667
+      },
+      "hash": "[HASH]",
+      "items": [
+        {
+          "content": "Run cargo fmt --check before release.",
+          "coveredFeatures": [
+            "section:procedural_rules",
+            "diversity:procedural:rule:cargo",
+            "memory:mem_00000000000000000000000001"
+          ],
+          "diversityKey": "procedural:rule:cargo",
+          "estimatedTokens": 8,
+          "feasible": true,
+          "lifecycle": {
+            "status": "unknown",
+            "valid_from": null,
+            "valid_to": null,
+            "validity_status": "unknown",
+            "validity_window_kind": "unbounded"
+          },
+          "memoryId": "mem_00000000000000000000000001",
+          "provenance": [
+            {
+              "label": "AGENTS.md:L164-173",
+              "locator": "L164-173",
+              "note": "Memory mem_00000000000000000000000001 selected for context pack; evidenceFreshness=missing_source",
+              "scheme": "file",
+              "uri": "file://AGENTS.md#L164-173"
+            }
+          ],
+          "rank": 1,
+          "scores": {
+            "marginalGain": 0.02459,
+            "objectiveValue": 0.02459,
+            "relevance": 0.032787,
+            "utility": 0.8
+          },
+          "section": "procedural_rules",
+          "selectedIn": "strict_mmr",
+          "sourceIndex": 1,
+          "tokenCost": 8,
+          "trust": {
+            "class": "human_explicit",
+            "posture": "authoritative",
+            "subclass": "project-rule"
+          },
+          "why": "matched 'format before release' via hybrid (relevance 0.0328, utility 0.8000)"
+        }
+      ],
+      "meta": {
+        "algorithm": {
+          "algorithmDescription": "Deterministic MMR ranking with coverage-fill for relevant candidates that still fit the token budget.",
+          "algorithmId": "mmr_with_coverage_fill_v1",
+          "objective": "mmr_redundancy",
+          "profile": "compact",
+          "properties": {
+            "monotone": false,
+            "submodular": false
+          },
+          "scoringFormula": "unit_score(field)=clamp(field, 0.0, 1.0) for finite fields, otherwise 0.0"
+        },
+        "coverageFillCount": 0,
+        "producer": {
+          "identity": {
+            "agentName": null,
+            "harness": null,
+            "model": null,
+            "status": "unobserved"
+          },
+          "observedAt": null,
+          "run": {
+            "runId": null,
+            "sessionId": null,
+            "workspaceFingerprint": null
+          },
+          "schema": "ee.producer.metadata.v1",
+          "sourceSystem": "cli"
+        }
+      },
+      "provenanceFooter": {
+        "memoryCount": 1,
+        "schemes": [
+          "file"
+        ],
+        "sourceCount": 1
+      },
+      "quality": {
+        "averageRelevance": 0.032787,
+        "averageUtility": 0.8,
+        "budgetUtilization": 0.002667,
+        "coverageFillCount": 0,
+        "itemCount": 1,
+        "maxTokens": 3000,
+        "omissions": {
+          "belowRelevanceFloor": 0,
+          "redundantCandidates": 0,
+          "tokenBudgetExceeded": 0
+        },
+        "omittedCount": 0,
+        "provenanceComplete": true,
+        "provenanceSourceCount": 1,
+        "provenanceSourcesPerItem": 1.0,
+        "sections": [
+          {
+            "itemCount": 1,
+            "section": "procedural_rules",
+            "usedTokens": 8
+          },
+          {
+            "itemCount": 0,
+            "section": "decisions",
+            "usedTokens": 0
+          },
+          {
+            "itemCount": 0,
+            "section": "failures",
+            "usedTokens": 0
+          },
+          {
+            "itemCount": 0,
+            "section": "evidence",
+            "usedTokens": 0
+          },
+          {
+            "itemCount": 0,
+            "section": "artifacts",
+            "usedTokens": 0
+          }
+        ],
+        "usedTokens": 8
+      },
       "query": "format before release",
-      "profile": "compact",
-      "maxTokens": 4000,
+      "selectionAudit": {
+        "algorithmDescription": "Deterministic MMR ranking with coverage-fill for relevant candidates that still fit the token budget.",
+        "algorithmId": "mmr_with_coverage_fill_v1",
+        "budgetLimit": 3000,
+        "budgetUsed": 8,
+        "candidateCount": 1,
+        "monotone": false,
+        "objective": "mmr_redundancy",
+        "omittedCount": 0,
+        "profile": "compact",
+        "selectedCount": 1,
+        "submodular": false,
+        "totalObjectiveValue": 0.02459
+      },
+      "skipped": [],
+      "skippedTotal": 0,
+      "slo": {
+        "actuals": {
+          "candidateCount": 1,
+          "elapsedMs": 0,
+          "graphEdgesTraversed": 0,
+          "graphGeneration": null,
+          "indexGeneration": null,
+          "memoryBytesPeak": 754,
+          "scannedCount": 1
+        },
+        "budgetClass": {
+          "candidatesScannedMax": 240,
+          "concurrentPackMax": 4,
+          "elapsedMsFailure": 0,
+          "elapsedMsTarget": 0,
+          "elapsedMsWarning": 0,
+          "graphTraversalMaxEdges": 8192
+        },
+        "degradations": [],
+        "profile": "standard",
+        "schema": "ee.pack.slo.v1",
+        "status": "within_budget"
+      },
+      "text": "# Context Pack: format before release\n\n**Profile:** compact | **Budget:** 8/3000 tokens\n\n## Advisory Memory Banner\n\n**Status:** `degraded`\n\nContext includes 3 degraded signals; validate advisory memory and repair degraded sources before relying on this pack.\n\n## procedural_rules\n\n### 1. mem_00000000000000000000000001 (8 tokens)\n\n```\nRun cargo fmt --check before release.\n```\n\n**Why:** matched 'format before release' via hybrid (relevance 0.0328, utility 0.8000)\n\n**Trust:** `human_explicit` / `authoritative`\n\n**Provenance:**\n- `file://AGENTS.md#L164-173` (file)\n\n## Degradations\n\n- **[low]** Context request budget was capped by the active constrained operating profile.\n  - *Repair:* `ee profile config plan --json`\n- **[low]** Memory mem_00000000000000000000000001 evidence freshness is missing_source: Referenced provenance file [WORKSPACE]/AGENTS.md is missing.\n  - *Repair:* `Restore the file or revise the memory provenance URI; rebuild the index if the memory content changes.`\n- **[low]** \\`ee context\\` is a compatibility alias for the promoted triad command.\n  - *Repair:* ``Use `ee pack \"<task>\"`.``\n\n---\n\n*Generated by `ee context \"format before release\" --format markdown`*\n\n<!-- pack.hash: [HASH] -->\n<!-- pack.schema: ee.response.v1 -->\n"
+    },
+    "request": {
       "candidatePool": 10,
+      "maxTokens": 3000,
+      "memoryScope": "swarm",
+      "profile": "compact",
+      "query": "format before release",
       "sections": [
         "procedural_rules",
         "decisions",
         "failures",
         "evidence",
         "artifacts"
-      ]
-    },
-    "pack": {
-      "query": "format before release",
-      "hash": "[HASH]",
-      "meta": {
-        "algorithm": {
-          "profile": "compact",
-          "objective": "mmr_redundancy",
-          "name": "deterministic_greedy_mmr",
-          "guarantee": "deterministic redundancy-controlled greedy ranking; no submodular guarantee claimed",
-          "guaranteeStatus": "conditional",
-          "scoringFormula": "unit_score(field)=clamp(field, 0.0, 1.0) for finite fields, otherwise 0.0",
-          "guaranteeEvidence": {
-            "status": "conditional",
-            "certificateId": null,
-            "identityValid": true,
-            "summary": "deterministic redundancy-controlled greedy ranking; no submodular guarantee claimed"
-          },
-          "properties": {
-            "monotone": false,
-            "submodular": false
-          }
-        }
-      },
-      "budget": {
-        "maxTokens": 4000,
-        "usedTokens": 8
-      },
-      "advisoryBanner": {
-        "status": "degraded",
-        "summary": "Context includes 1 degraded signal; validate advisory memory and repair degraded sources before relying on this pack.",
-        "authoritativeCount": 1,
-        "advisoryCount": 0,
-        "legacyCount": 0,
-        "degradationCount": 1,
-        "notes": [
-          {
-            "code": "degraded_context",
-            "severity": "low",
-            "message": "1 degraded context signal present; inspect degraded[] repairs before relying on skipped or fallback sources.",
-            "memoryIds": [],
-            "action": "inspect_degraded_repairs"
-          }
-        ]
-      },
-      "quality": {
-        "itemCount": 1,
-        "omittedCount": 0,
-        "usedTokens": 8,
-        "maxTokens": 4000,
-        "budgetUtilization": 0.002,
-        "averageRelevance": 0.408205,
-        "averageUtility": 0.8,
-        "provenanceSourceCount": 1,
-        "provenanceSourcesPerItem": 1.0,
-        "provenanceComplete": true,
-        "sections": [
-          {
-            "section": "procedural_rules",
-            "itemCount": 1,
-            "usedTokens": 8
-          },
-          {
-            "section": "decisions",
-            "itemCount": 0,
-            "usedTokens": 0
-          },
-          {
-            "section": "failures",
-            "itemCount": 0,
-            "usedTokens": 0
-          },
-          {
-            "section": "evidence",
-            "itemCount": 0,
-            "usedTokens": 0
-          },
-          {
-            "section": "artifacts",
-            "itemCount": 0,
-            "usedTokens": 0
-          }
-        ],
-        "omissions": {
-          "tokenBudgetExceeded": 0,
-          "redundantCandidates": 0
-        }
-      },
-      "selectionCertificate": {
-        "candidateCount": 1,
-        "selectedCount": 1,
-        "omittedCount": 0,
-        "budgetLimit": 4000,
-        "budgetUsed": 8,
-        "totalObjectiveValue": 0.306154
-      },
-      "items": [
-        {
-          "rank": 1,
-          "memoryId": "mem_00000000000000000000000001",
-          "section": "procedural_rules",
-          "content": "Run cargo fmt --check before release.",
-          "estimatedTokens": 8,
-          "scores": {
-            "relevance": 0.408205,
-            "utility": 0.8,
-            "marginalGain": 0.306154,
-            "objectiveValue": 0.306154
-          },
-          "trust": {
-            "class": "human_explicit",
-            "subclass": "project-rule",
-            "posture": "authoritative"
-          },
-          "provenance": [
-            {
-              "uri": "file://AGENTS.md#L164-173",
-              "scheme": "file",
-              "label": "AGENTS.md:L164-173",
-              "locator": "L164-173",
-              "note": "Memory mem_00000000000000000000000001 selected for context pack; evidenceFreshness=missing_source"
-            }
-          ],
-          "why": "matched 'format before release' via semantic_fast (relevance 0.4082, utility 0.8000)",
-          "diversityKey": "procedural:rule:cargo",
-          "tokenCost": 8,
-          "feasible": true,
-          "coveredFeatures": [
-            "section:procedural_rules",
-            "diversity:procedural:rule:cargo",
-            "memory:mem_00000000000000000000000001"
-          ],
-          "sourceIndex": 1
-        }
       ],
-      "skippedTotal": 0,
-      "skipped": [],
-      "provenanceFooter": {
-        "memoryCount": 1,
-        "sourceCount": 1,
-        "schemes": [
-          "file"
-        ]
-      }
+      "strictScope": false
     },
-    "degraded": [
-      {
-        "code": "context_evidence_freshness_missing_source",
-        "severity": "low",
-        "message": "Memory mem_00000000000000000000000001 evidence freshness is missing_source: Referenced provenance file [WORKSPACE]/AGENTS.md is missing.",
-        "repair": "Restore the file or revise the memory provenance URI; rebuild the index if the memory content changes."
-      }
-    ]
-  }
+    "scopeStats": {
+      "candidatesExcludedByScope": 0,
+      "candidatesInScope": 1,
+      "candidatesTotal": 1,
+      "currentAgent": null,
+      "excludedMemoryIds": [],
+      "scopeApplied": "swarm",
+      "strictScope": false,
+      "strictViolations": 0,
+      "teamSize": 0
+    }
+  },
+  "schema": "ee.response.v1",
+  "success": true
 }

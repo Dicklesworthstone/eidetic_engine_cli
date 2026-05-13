@@ -11,11 +11,11 @@
   "severity": "warning",
   "repair_present": false,
   "trigger": {
-    "description": "The direct causal trace helper is pointed at a database path that does not exist.",
+    "description": "The causal trace command is pointed at an explicit database path that does not exist.",
     "setup_commands": [
-      "# call trace helper from a unit harness with database_path set to a missing file"
+      "# use any workspace, but do not create missing.db"
     ],
-    "invocation": "ee causal trace failure-1 --database missing.db --json"
+    "invocation": "ee causal trace failure-1 --database missing.db --database-workspace-id wsp_123 --json"
   },
   "expected_emission": {
     "code": "causal_database_missing",

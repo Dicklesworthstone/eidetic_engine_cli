@@ -3,39 +3,40 @@ source: tests/json_contract_snapshots.rs
 expression: doctor
 ---
 {
-  "schema": "ee.response.v1",
-  "success": false,
-  "fields": "standard",
   "data": {
-    "command": "doctor",
-    "version": "0.1.0",
-    "healthy": false,
     "checks": [
       {
+        "message": "Asupersync runtime initialized successfully.",
         "name": "runtime",
-        "severity": "ok",
-        "message": "Asupersync runtime initialized successfully."
+        "severity": "ok"
       },
       {
+        "message": "Workspace inspected at [WORKSPACE].",
         "name": "workspace",
-        "severity": "ok",
-        "message": "Workspace inspected at [WORKSPACE]."
+        "severity": "ok"
       },
       {
+        "message": "Database opened and schema is current at [DATABASE].",
         "name": "database",
-        "severity": "ok",
-        "message": "Database opened and schema is current at [DATABASE]."
+        "severity": "ok"
       },
       {
+        "message": "Search index is ready at [INDEX].",
         "name": "search_index",
-        "severity": "ok",
-        "message": "Search index is ready at [INDEX]."
+        "severity": "ok"
       },
       {
+        "message": "CASS binary not found in trusted locations.",
         "name": "cass",
-        "severity": "warning",
-        "message": "CASS binary not found in trusted locations."
+        "severity": "warning"
       }
-    ]
-  }
+    ],
+    "command": "doctor",
+    "healthy": false,
+    "posture": "degraded_recoverable",
+    "version": "0.1.0"
+  },
+  "fields": "standard",
+  "schema": "ee.response.v1",
+  "success": false
 }

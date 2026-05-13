@@ -1015,6 +1015,9 @@ fn collect_cache_directory_entries(
             continue;
         };
         let name = name.to_string_lossy().to_ascii_lowercase();
+        if name.starts_with("._") || name == ".ds_store" {
+            continue;
+        }
         let Ok(metadata) = fs::symlink_metadata(&path) else {
             continue;
         };
@@ -1258,9 +1261,9 @@ fn collect_pack_cache_hotset_entries(
             let pack_hash = row_text(row, 5).unwrap_or("missing_hash");
             Some(PackHotsetEntry {
                 key: support_cache_key(&format!(
-                    "pack:selection_certificate:{pack_id}:{profile}:{max_tokens}:{used_tokens}:{item_count}:{pack_hash}"
+                    "pack:selection_audit:{pack_id}:{profile}:{max_tokens}:{used_tokens}:{item_count}:{pack_hash}"
                 )),
-                kind: PackHotsetEntryKind::SelectionCertificate,
+                kind: PackHotsetEntryKind::SelectionAudit,
                 section: None,
                 generation,
                 estimated_bytes: 192_usize.saturating_add(item_count.saturating_mul(40)),
@@ -2248,8 +2251,8 @@ mod tests {
         assert!(
             pack_admitted
                 .iter()
-                .any(|entry| entry.pointer("/kind") == Some(&json!("selection_certificate"))),
-            "pack hotset must include selection certificate entries from pack records"
+                .any(|entry| entry.pointer("/kind") == Some(&json!("selection_audit"))),
+            "pack hotset must include selection audit entries from pack records"
         );
 
         Ok(())

@@ -11,11 +11,12 @@
   "severity": "warning",
   "repair_present": false,
   "trigger": {
-    "description": "The causal trace database opens, but migration fails before trace rows can be read.",
+    "description": "The causal trace command is pointed at an explicit database path whose migration metadata is unreadable.",
     "setup_commands": [
-      "# use a direct-helper fixture whose schema migration fails"
+      "ee init --workspace .",
+      "ee diag database-skew --output-database ./causal-migration-skew.db --skew migration-checksum-column-missing --workspace . --json"
     ],
-    "invocation": "ee causal trace failure-1 --database stale.db --json"
+    "invocation": "ee causal trace failure-1 --database ./causal-migration-skew.db --database-workspace-id <workspace-id> --json"
   },
   "expected_emission": {
     "code": "causal_database_migration_failed",

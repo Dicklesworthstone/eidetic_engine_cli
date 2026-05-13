@@ -14,9 +14,9 @@
     "description": "Integrity diagnostics cannot inspect the requested provenance-chain sample.",
     "setup_commands": [
       "ee init --workspace .",
-      "# use a fixture where sampled provenance-chain queries fail"
+      "ee diag database-skew --workspace . --output-database ./integrity-provenance-skew.db --skew memories-provenance-chain-hash-column-unavailable --json"
     ],
-    "invocation": "ee diag integrity --workspace . --json"
+    "invocation": "ee diag integrity --database ./integrity-provenance-skew.db --workspace . --json"
   },
   "expected_emission": {
     "code": "integrity_provenance_sample_unavailable",
@@ -25,6 +25,8 @@
       "provenance-chain sample",
       "could not be inspected"
     ],
-    "repair_contains": "ee diag integrity"
+    "repair_contains": "ee diag integrity",
+    "repair_string": "ee diag integrity --json",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

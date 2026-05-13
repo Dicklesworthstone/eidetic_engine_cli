@@ -63,6 +63,8 @@ VOLATILE_FIELD_NAMES=(
     ended_at
     ts
     timestamp
+    runIndex
+    run_index
     ee_binary_hash
     databasePath
     workspacePath

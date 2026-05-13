@@ -21,6 +21,9 @@ use ee::core::status::{
     MemoryHealthReport, MemoryHealthStatus, RuntimeReport, StatusReport, WorkspaceDiagnosticReport,
     WorkspaceStatusReport,
 };
+use ee::models::posture::{
+    OperationPostureReport, SubsystemPostureReport, SubsystemPostureStatus, WorkspacePostureReport,
+};
 use ee::models::{CapabilityStatus, error_codes};
 use ee::output::{render_doctor_json, render_status_json};
 use serde_json::{Value, json};
@@ -1097,14 +1100,59 @@ fn graph_snapshot_empty_asset() -> DerivedAssetReport {
     DerivedAssetReport::from_graph_snapshot_artifact(&report)
 }
 
+fn fixture_status_posture(
+    storage: SubsystemPostureStatus,
+    search: SubsystemPostureStatus,
+    memory: SubsystemPostureStatus,
+    pack: SubsystemPostureStatus,
+) -> WorkspacePostureReport {
+    WorkspacePostureReport::new(
+        vec![
+            SubsystemPostureReport::new("runtime", SubsystemPostureStatus::Ok)
+                .with_checks_passed(1),
+            SubsystemPostureReport::new("storage", storage),
+            SubsystemPostureReport::new("search", search),
+            SubsystemPostureReport::new("memory", memory),
+            SubsystemPostureReport::new("graph_compute", SubsystemPostureStatus::Ok)
+                .with_checks_passed(1),
+            SubsystemPostureReport::new("pack", pack),
+            SubsystemPostureReport::new("curate", SubsystemPostureStatus::Ok).with_checks_passed(1),
+            SubsystemPostureReport::new("feedback", SubsystemPostureStatus::Ok)
+                .with_checks_passed(1),
+            SubsystemPostureReport::new("maintenance", SubsystemPostureStatus::Ok)
+                .with_checks_passed(1),
+            SubsystemPostureReport::new("agent_detection", SubsystemPostureStatus::Ok)
+                .with_checks_passed(1),
+        ],
+        OperationPostureReport::ok([
+            "runtime",
+            "storage",
+            "search",
+            "memory",
+            "graph_compute",
+            "curate",
+            "feedback",
+            "maintenance",
+            "agent_detection",
+        ]),
+    )
+}
+
 fn status_missing_db_report() -> StatusReport {
     StatusReport {
         version: env!("CARGO_PKG_VERSION"),
         workspace: Some(fixture_workspace_status(false)),
+        posture: fixture_status_posture(
+            SubsystemPostureStatus::Blocked,
+            SubsystemPostureStatus::Initializing,
+            SubsystemPostureStatus::Blocked,
+            SubsystemPostureStatus::Blocked,
+        ),
         capabilities: CapabilityReport {
             runtime: CapabilityStatus::Ready,
             storage: CapabilityStatus::Pending,
             search: CapabilityStatus::Pending,
+            output_toon: CapabilityStatus::Ready,
             agent_detection: CapabilityStatus::Ready,
         },
         runtime: fixture_runtime_report(),
@@ -1156,10 +1204,17 @@ fn status_pending_migration_report() -> StatusReport {
     StatusReport {
         version: env!("CARGO_PKG_VERSION"),
         workspace: Some(fixture_workspace_status(true)),
+        posture: fixture_status_posture(
+            SubsystemPostureStatus::DegradedRequired,
+            SubsystemPostureStatus::DegradedRequired,
+            SubsystemPostureStatus::Blocked,
+            SubsystemPostureStatus::DegradedRequired,
+        ),
         capabilities: CapabilityReport {
             runtime: CapabilityStatus::Ready,
             storage: CapabilityStatus::Degraded,
             search: CapabilityStatus::Degraded,
+            output_toon: CapabilityStatus::Ready,
             agent_detection: CapabilityStatus::Ready,
         },
         runtime: fixture_runtime_report(),
@@ -1211,10 +1266,17 @@ fn status_stale_index_lexical_only_report() -> StatusReport {
     StatusReport {
         version: env!("CARGO_PKG_VERSION"),
         workspace: Some(fixture_workspace_status(true)),
+        posture: fixture_status_posture(
+            SubsystemPostureStatus::Ok,
+            SubsystemPostureStatus::DegradedRecoverable,
+            SubsystemPostureStatus::Ok,
+            SubsystemPostureStatus::DegradedRecoverable,
+        ),
         capabilities: CapabilityReport {
             runtime: CapabilityStatus::Ready,
             storage: CapabilityStatus::Ready,
             search: CapabilityStatus::Degraded,
+            output_toon: CapabilityStatus::Ready,
             agent_detection: CapabilityStatus::Ready,
         },
         runtime: fixture_runtime_report(),
@@ -1252,10 +1314,17 @@ fn status_search_unimplemented_report() -> StatusReport {
     StatusReport {
         version: env!("CARGO_PKG_VERSION"),
         workspace: Some(fixture_workspace_status(true)),
+        posture: fixture_status_posture(
+            SubsystemPostureStatus::Ok,
+            SubsystemPostureStatus::Unimplemented,
+            SubsystemPostureStatus::Ok,
+            SubsystemPostureStatus::DegradedRecoverable,
+        ),
         capabilities: CapabilityReport {
             runtime: CapabilityStatus::Ready,
             storage: CapabilityStatus::Ready,
             search: CapabilityStatus::Unimplemented,
+            output_toon: CapabilityStatus::Ready,
             agent_detection: CapabilityStatus::Ready,
         },
         runtime: fixture_runtime_report(),

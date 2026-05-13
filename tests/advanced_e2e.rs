@@ -1629,8 +1629,8 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
             .is_some_and(|algorithm| !algorithm.is_empty()),
         "context pack metadata must name the deterministic algorithm",
     )?;
-    // Bead bd-2pe1z (A1 phase 2): selectionCertificate.selectedItems and
-    // selectionCertificate.steps were collapsed into the canonical items[]
+    // Bead bd-2pe1z (A1 phase 2): selectionAudit.selectedItems and
+    // selectionAudit.steps were collapsed into the canonical items[]
     // array. Each items[] entry now carries tokenCost, feasible,
     // scores.marginalGain, scores.objectiveValue, coveredFeatures inline,
     // so the same checks read from items[] instead of two parallel arrays.

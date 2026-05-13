@@ -25,6 +25,8 @@
       "database exists",
       "could not be opened"
     ],
-    "repair_contains": "ee doctor"
+    "repair_contains": "ee doctor",
+    "repair_string": "ee doctor --json",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

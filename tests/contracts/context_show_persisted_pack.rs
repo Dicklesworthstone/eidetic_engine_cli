@@ -28,7 +28,7 @@ use ee::core::context::{ContextPackOptions, run_context_pack};
 use ee::core::index::{IndexRebuildOptions, rebuild_index};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::db::DbConnection;
-use ee::models::QueryFilters;
+use ee::models::{MemoryScope, QueryFilters};
 use ee::search::scoring::SpeedMode;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -104,7 +104,11 @@ fn build_persisted_pack() -> Result<PackFixture, String> {
         include_expired: false,
         include_future: false,
         include_stale: false,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
         pagination: None,
+        coordination_snapshot_path: None,
+        coordination_stale_after_ms: ee::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
         output_options: Default::default(),
     })
     .map_err(|error| format!("run_context_pack: {error:?}"))?;

@@ -9,9 +9,13 @@
     "description": "ee context (or ee pack replay) detected that an evidence source referenced by the persisted pack ledger has changed contents since the pack was built. The pack is still rendered honestly, but the agent should treat its evidence as potentially stale.",
     "setup_commands": [
       "ee init --workspace .",
-      "ee remember 'Original convention.' --workspace . --level semantic --kind fact",
-      "ee context 'project conventions' --workspace . --json",
-      "# mutate the referenced memory's content (e.g. via memory edit / curate replace)"
+      "printf 'J6 changed source freshness marker original source evidence.\\n' > j6-changed-source.md",
+      "ee remember 'J6 changed source freshness marker original source evidence.' --workspace . --level procedural --kind rule --source file://$PWD/j6-changed-source.md#L1 --json",
+      "ee index rebuild --workspace . --json",
+      "ee context 'J6 changed source freshness marker' --workspace . --json",
+      "printf 'J6 changed source freshness marker changed source evidence.\\n' > j6-changed-source.md",
+      "ee context 'J6 changed source freshness marker' --workspace . --json",
+      "ee diag pack-latest --workspace . --query 'J6 changed source freshness marker' --json"
     ],
     "invocation": "ee pack replay <pack-id> --workspace . --json"
   },

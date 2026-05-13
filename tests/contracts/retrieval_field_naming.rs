@@ -12,6 +12,7 @@ use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
 use ee::core::search::{
     RetrievalMetrics, ScoreSource, SearchHit, SearchReport, SearchSourceMode, SearchStatus,
 };
+use ee::models::{MemoryScope, MemoryScopeStats};
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
@@ -80,6 +81,9 @@ fn search_report_data_json_uses_camel_case_fields() -> TestResult {
         source_mode_applied: SearchSourceMode::Hybrid,
         source_mode_fallback: false,
         strict_source_mode: false,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+        scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
     };
 
     let json = report.data_json();
@@ -227,6 +231,9 @@ fn search_hit_fields_are_camel_case_when_populated() -> TestResult {
         source_mode_applied: SearchSourceMode::Hybrid,
         source_mode_fallback: false,
         strict_source_mode: false,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+        scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
     };
 
     let json = report.data_json();
@@ -261,6 +268,7 @@ fn field_naming_contract_is_stable() -> TestResult {
         "resultCount",
         "elapsedMs",
         "request",
+        "scopeStats",
         "metrics",
         "errors",
     ];
@@ -289,6 +297,20 @@ fn field_naming_contract_is_stable() -> TestResult {
         "sourceModeApplied",
         "fallbackApplied",
         "strictSourceMode",
+        "memoryScope",
+        "strictScope",
+    ];
+
+    let expected_scope_stats_fields = [
+        "scopeApplied",
+        "strictScope",
+        "currentAgent",
+        "teamSize",
+        "candidatesTotal",
+        "candidatesInScope",
+        "candidatesExcludedByScope",
+        "strictViolations",
+        "excludedMemoryIds",
     ];
 
     // Build a report that exercises all fields
@@ -320,6 +342,9 @@ fn field_naming_contract_is_stable() -> TestResult {
         source_mode_applied: SearchSourceMode::Hybrid,
         source_mode_fallback: false,
         strict_source_mode: false,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+        scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
     };
 
     let json = report.data_json();
@@ -375,6 +400,14 @@ fn field_naming_contract_is_stable() -> TestResult {
         )?;
     }
 
+    let scope_stats = &json["scopeStats"];
+    for field in expected_scope_stats_fields {
+        ensure(
+            scope_stats.get(field).is_some(),
+            format!("scopeStats missing expected field: {field}"),
+        )?;
+    }
+
     Ok(())
 }
 
@@ -408,6 +441,9 @@ fn optional_hit_fields_absent_when_none() -> TestResult {
         source_mode_applied: SearchSourceMode::Hybrid,
         source_mode_fallback: false,
         strict_source_mode: false,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+        scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
     };
 
     let json = report.data_json();

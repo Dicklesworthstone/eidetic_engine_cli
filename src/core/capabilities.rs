@@ -8,9 +8,10 @@ use std::path::Path;
 use crate::models::CapabilityStatus;
 
 use super::build_info;
+use super::index::{IndexStatusOptions, get_index_status};
 use super::status::{
-    default_workspace_path, probe_cass_capability, probe_runtime_capability,
-    probe_search_capability, probe_storage_capability,
+    default_workspace_path, probe_cass_capability, probe_graph_capability,
+    probe_runtime_capability, probe_search_capability, probe_storage_capability,
 };
 
 /// A single capability entry describing a feature or subsystem.
@@ -167,14 +168,39 @@ pub struct ToonOutputCapability {
 
 impl ToonOutputCapability {
     #[must_use]
-    pub fn ready() -> Self {
+    pub fn gather() -> Self {
         Self {
-            available: true,
+            available: crate::output::toon_output_available(),
             canonical_source_format: "json",
             dependency: ToonDependencySource::local(),
             supported_output_profiles: vec!["minimal", "summary", "standard", "full"],
             default_format_env: "TOON_DEFAULT_FORMAT",
             error_codes: vec!["toon_decode_failed", "toon_encoding_failed"],
+        }
+    }
+}
+
+/// Search-index metadata surfaced through `ee capabilities`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexCapabilitySummary {
+    pub last_full_rebuild_at: Option<String>,
+}
+
+impl IndexCapabilitySummary {
+    #[must_use]
+    pub fn gather(workspace_path: Option<&Path>) -> Self {
+        let last_full_rebuild_at = workspace_path.and_then(|workspace_path| {
+            get_index_status(&IndexStatusOptions {
+                workspace_path: workspace_path.to_path_buf(),
+                database_path: None,
+                index_dir: None,
+            })
+            .ok()
+            .and_then(|report| report.last_rebuild_at)
+        });
+
+        Self {
+            last_full_rebuild_at,
         }
     }
 }
@@ -188,6 +214,7 @@ pub struct CapabilitiesReport {
     pub unimplemented: Vec<UnimplementedCapabilityEntry>,
     pub commands: Vec<CommandEntry>,
     pub output_formats: Vec<OutputFormatEntry>,
+    pub index: IndexCapabilitySummary,
     pub toon: ToonOutputCapability,
 }
 
@@ -210,7 +237,9 @@ impl CapabilitiesReport {
         let runtime_status = probe_runtime_capability();
         let storage_status = probe_storage_capability(workspace_path);
         let search_status = probe_search_capability(workspace_path);
+        let graph_status = probe_graph_capability();
         let cass_status = probe_cass_capability();
+        let index = IndexCapabilitySummary::gather(workspace_path);
 
         let subsystems = vec![
             CapabilityEntry::new("runtime", runtime_status, "Asupersync async runtime"),
@@ -220,15 +249,7 @@ impl CapabilitiesReport {
                 "FrankenSQLite/SQLModel persistence",
             ),
             CapabilityEntry::new("search", search_status, "Frankensearch hybrid retrieval"),
-            CapabilityEntry::new(
-                "graph",
-                if cfg!(feature = "graph") {
-                    CapabilityStatus::Ready
-                } else {
-                    CapabilityStatus::Pending
-                },
-                "FrankenNetworkX graph analytics",
-            ),
+            CapabilityEntry::new("graph", graph_status, "FrankenNetworkX graph analytics"),
             CapabilityEntry::new("cass", cass_status, "CASS session import adapter"),
         ];
 
@@ -291,7 +312,7 @@ impl CapabilitiesReport {
                 "BM25 lexical search is disabled in this build.",
             ));
         }
-        if !cfg!(feature = "graph") {
+        if graph_status == CapabilityStatus::Unimplemented || !cfg!(feature = "graph") {
             unimplemented.push(UnimplementedCapabilityEntry::new(
                 "graph_feature_disabled",
                 "graph",
@@ -364,7 +385,12 @@ impl CapabilitiesReport {
 
         let output_formats = vec![
             OutputFormatEntry::new("json", true, true, "Canonical stable response envelope"),
-            OutputFormatEntry::new("toon", true, false, "TOON renderer over canonical JSON"),
+            OutputFormatEntry::new(
+                "toon",
+                crate::output::toon_output_available(),
+                false,
+                "TOON renderer over canonical JSON",
+            ),
             OutputFormatEntry::new("human", true, false, "Human-readable terminal output"),
             OutputFormatEntry::new("markdown", true, false, "Markdown context output"),
             OutputFormatEntry::new("mermaid", true, false, "Mermaid diagram output"),
@@ -380,7 +406,8 @@ impl CapabilitiesReport {
             unimplemented,
             commands,
             output_formats,
-            toon: ToonOutputCapability::ready(),
+            index,
+            toon: ToonOutputCapability::gather(),
         }
     }
 

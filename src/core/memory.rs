@@ -16,21 +16,27 @@ use serde::Serialize;
 use super::index::{
     DEFAULT_INDEX_SUBDIR, IndexProcessingJobReport, process_index_job_for_connection,
 };
+use super::memory_lifecycle::{
+    LEVEL_TRANSITION_CONCURRENT_CONFLICT_CODE, LEVEL_TRANSITION_REQUIRES_EVIDENCE_CODE,
+    LEVEL_TRANSITION_TOMBSTONED_REJECTED_CODE, MemoryLifecycleState, transition_for,
+};
 use super::search::{SearchOptions, SearchStatus, run_search};
 use crate::config::ConfigFile;
+use crate::curate::cluster_coherence::{ClusterCoherenceConfig, EmbeddingPoint, agglomerate};
 use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
-    CreateAuditInput, CreateCurationCandidateInput, CreateMemoryInput, CreateMemoryLinkInput,
-    CreateSearchIndexJobInput, CreateWorkspaceInput, DbConnection, MemoryLinkRelation,
-    MemoryLinkSource, SearchIndexJobType, StoredMemory, StoredMemoryLink, audit_actions,
-    generate_audit_id,
+    ApplyMemoryLevelTransitionInput, CreateAuditInput, CreateCurationCandidateInput,
+    CreateMemoryInput, CreateMemoryLinkInput, CreateSearchIndexJobInput, CreateWorkspaceInput,
+    DbConnection, MemoryLinkRelation, MemoryLinkSource, SearchIndexJobType, StoredMemory,
+    StoredMemoryLink, audit_actions, generate_audit_id,
 };
 use crate::models::{
     DomainError, MAX_TAG_BYTES, MemoryContent, MemoryId, MemoryKind, MemoryLevel,
-    MemoryValidationError, ProducerMetadata, ProvenanceUri, Tag, TrustClass, UnitScore,
-    WorkspaceId,
+    MemoryValidationError, ProducerMetadata, ProducerSourceSystem, ProvenanceUri, Tag, TrustClass,
+    UnitScore, WorkspaceId,
 };
 use crate::obs::{AuditEvent, AuditOutcome, now_rfc3339_nanos};
+use crate::search::HashEmbedder;
 
 /// A memory with its associated tags for display.
 #[derive(Clone, Debug, PartialEq)]
@@ -151,6 +157,24 @@ pub struct RememberMemoryReport {
     pub curation_candidate_status: String,
     /// Non-fatal degradations encountered while proposing curation candidates.
     pub curation_candidate_degradations: Vec<RememberSuggestedLinkDegradation>,
+}
+
+fn remember_producer_metadata() -> ProducerMetadata {
+    super::memory_scope::current_agent_name().map_or_else(
+        || ProducerMetadata::manual_remember(None, None),
+        |agent| {
+            ProducerMetadata::known_agent(
+                ProducerSourceSystem::Cli,
+                Some(&agent),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        },
+    )
 }
 
 /// Options for closing a workflow lifecycle group.
@@ -425,7 +449,7 @@ pub fn remember_memory(
             confidence: prepared.confidence,
             tags: prepared.tags,
             source: prepared.provenance_uri,
-            producer: ProducerMetadata::manual_remember(None, None),
+            producer: remember_producer_metadata(),
             valid_from: prepared.valid_from,
             valid_to: prepared.valid_to,
             validity_status: prepared.validity_status,
@@ -483,7 +507,7 @@ pub fn remember_memory(
         importance: UnitScore::neutral().into_inner(),
         provenance_uri: prepared.provenance_uri.clone(),
         trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
-        trust_subclass: Some("ee remember".to_owned()),
+        trust_subclass: super::memory_scope::remember_trust_subclass("ee remember"),
         tags: prepared.tags.clone(),
         valid_from: prepared.valid_from.clone(),
         valid_to: prepared.valid_to.clone(),
@@ -647,7 +671,7 @@ pub fn remember_memory(
         confidence: prepared.confidence,
         tags: prepared.tags,
         source: prepared.provenance_uri,
-        producer: ProducerMetadata::manual_remember(None, None),
+        producer: remember_producer_metadata(),
         valid_from: prepared.valid_from,
         valid_to: prepared.valid_to,
         validity_status: prepared.validity_status,
@@ -2122,7 +2146,8 @@ fn auto_link_status(
 }
 
 const REMEMBER_CURATION_NEIGHBOR_LIMIT: usize = 10;
-const REMEMBER_CURATION_CLUSTER_THRESHOLD: usize = 3;
+const REMEMBER_CURATION_CLUSTER_THRESHOLD: usize =
+    crate::curate::cluster_coherence::DEFAULT_MIN_CLUSTER_SIZE;
 #[cfg(not(test))]
 const REMEMBER_CURATION_SYNC_BUDGET_MS: u128 = 50;
 #[cfg(test)]
@@ -2132,6 +2157,14 @@ struct RememberCurationProposalReport {
     candidate: Option<RememberCurationCandidateProposal>,
     status: &'static str,
     degradations: Vec<RememberSuggestedLinkDegradation>,
+}
+
+struct RememberCoherentCurationCluster {
+    members: Vec<StoredMemory>,
+    cluster_id: String,
+    silhouette_score: f64,
+    threshold: f64,
+    embedding_snapshot_hash: String,
 }
 
 fn propose_curation_candidate_for_remember(
@@ -2201,11 +2234,20 @@ fn propose_curation_candidate_for_remember(
             degradations,
         });
     }
+    let Some(coherent_cluster) =
+        remember_candidate_coherent_cluster(connection, &prepared.workspace_path, &cluster)?
+    else {
+        return Ok(RememberCurationProposalReport {
+            candidate: None,
+            status: "skipped_low_coherence",
+            degradations,
+        });
+    };
     if let Some(rule_id) = remember_existing_rule_covering_cluster(
         connection,
         &prepared.workspace_id,
         memory_input,
-        &cluster,
+        &coherent_cluster.members,
     )? {
         degradations.push(RememberSuggestedLinkDegradation {
             code: "auto_propose_skipped_existing_rule_covers".to_owned(),
@@ -2223,7 +2265,8 @@ fn propose_curation_candidate_for_remember(
         });
     }
 
-    let mut member_memory_ids = cluster
+    let mut member_memory_ids = coherent_cluster
+        .members
         .iter()
         .map(|memory| memory.id.clone())
         .collect::<Vec<_>>();
@@ -2276,14 +2319,16 @@ fn propose_curation_candidate_for_remember(
     }
 
     let audit_id = generate_audit_id();
-    let proposed_content = remember_curation_candidate_content(memory_input, &cluster);
-    let proposed_confidence = remember_curation_candidate_confidence(&cluster);
+    let proposed_content =
+        remember_curation_candidate_content(memory_input, &coherent_cluster.members);
+    let proposed_confidence = remember_curation_candidate_confidence(&coherent_cluster.members);
     let source_id = member_memory_ids.join(",");
     let audit_details = remember_curation_candidate_audit_details(
         &candidate_id,
         memory_id,
         &member_memory_ids,
         &reason,
+        &coherent_cluster,
     );
 
     connection
@@ -2341,6 +2386,13 @@ fn remember_search_neighbor_ids(
     prepared: &PreparedRememberMemory,
     memory_input: &CreateMemoryInput,
 ) -> Result<Vec<String>, String> {
+    if remember_search_neighbors_disabled() {
+        return Err(format!(
+            "disabled by {}",
+            crate::config::env_registry::EnvVar::DisableRememberSearchNeighbors.name()
+        ));
+    }
+
     let report = run_search(&SearchOptions {
         workspace_path: prepared.workspace_path.clone(),
         database_path: Some(prepared.database_path.clone()),
@@ -2362,6 +2414,8 @@ fn remember_search_neighbor_ids(
         relevance_floor: Some(0.0),
         source_mode: crate::core::search::SearchSourceMode::Hybrid,
         strict_source_mode: false,
+        memory_scope: crate::models::MemoryScope::Swarm,
+        strict_scope: false,
     })
     .map_err(|error| error.to_string())?;
 
@@ -2467,6 +2521,188 @@ fn remember_candidate_cluster(
     }
     cluster.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(cluster)
+}
+
+fn remember_candidate_coherent_cluster(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    cluster: &[StoredMemory],
+) -> Result<Option<RememberCoherentCurationCluster>, DomainError> {
+    let config = remember_cluster_coherence_config(workspace_path)?;
+    if cluster.len() < config.min_cluster_size {
+        return Ok(None);
+    }
+
+    let memory_ids = cluster
+        .iter()
+        .map(|memory| memory.id.as_str())
+        .collect::<Vec<_>>();
+    let tags_by_memory = connection
+        .get_memory_tags_batch(&memory_ids)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load curation cluster memory tags: {error}"),
+            repair: Some("ee memory tags <memory-id> --json".to_owned()),
+        })?;
+    let embedder = HashEmbedder::default_256();
+    let points = cluster
+        .iter()
+        .map(|memory| {
+            let tags = tags_by_memory
+                .get(&memory.id)
+                .map_or(&[] as &[String], Vec::as_slice);
+            EmbeddingPoint::new(
+                memory.id.clone(),
+                embedder
+                    .embed_sync(&remember_curation_cluster_embedding_text(memory, tags))
+                    .into_iter()
+                    .map(f64::from)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let embedding_snapshot_hash = remember_curation_embedding_snapshot_hash(&points, config);
+    let report = agglomerate(&points, config).map_err(|error| DomainError::SearchIndex {
+        message: format!("Failed to score remember-time curation cluster coherence: {error}"),
+        repair: Some("Run `ee learn cluster --json` to inspect clustering inputs.".to_owned()),
+    })?;
+    let mut clusters = report.clusters;
+    clusters.sort_by(|left, right| {
+        right
+            .member_count
+            .cmp(&left.member_count)
+            .then_with(|| {
+                right
+                    .silhouette_score
+                    .unwrap_or(f64::NEG_INFINITY)
+                    .total_cmp(&left.silhouette_score.unwrap_or(f64::NEG_INFINITY))
+            })
+            .then_with(|| left.cluster_id.cmp(&right.cluster_id))
+    });
+    let Some(best_cluster) = clusters.into_iter().next() else {
+        return Ok(None);
+    };
+    if !best_cluster.accepted {
+        return Ok(None);
+    }
+    let Some(silhouette_score) = best_cluster.silhouette_score else {
+        return Ok(None);
+    };
+
+    let memories_by_id = cluster
+        .iter()
+        .map(|memory| (memory.id.as_str(), memory))
+        .collect::<BTreeMap<_, _>>();
+    let members = best_cluster
+        .member_memory_ids
+        .iter()
+        .filter_map(|memory_id| {
+            memories_by_id
+                .get(memory_id.as_str())
+                .map(|memory| (*memory).clone())
+        })
+        .collect::<Vec<_>>();
+    if members.len() < config.min_cluster_size {
+        return Ok(None);
+    }
+
+    Ok(Some(RememberCoherentCurationCluster {
+        members,
+        cluster_id: best_cluster.cluster_id,
+        silhouette_score,
+        threshold: config.merge_threshold,
+        embedding_snapshot_hash,
+    }))
+}
+
+fn remember_cluster_coherence_config(
+    workspace_path: &Path,
+) -> Result<ClusterCoherenceConfig, DomainError> {
+    let config_path = workspace_path.join(".ee").join("config.toml");
+    let threshold = match fs::read_to_string(&config_path) {
+        Ok(contents) => {
+            let config =
+                ConfigFile::parse(&contents).map_err(|error| DomainError::Configuration {
+                    message: format!(
+                        "Failed to parse workspace learn config {}: {error}",
+                        config_path.display()
+                    ),
+                    repair: Some("Fix [learn] in .ee/config.toml.".to_owned()),
+                })?;
+            config
+                .learn
+                .cluster_coherence_threshold
+                .unwrap_or(crate::curate::cluster_coherence::DEFAULT_CLUSTER_COHERENCE_THRESHOLD)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            crate::curate::cluster_coherence::DEFAULT_CLUSTER_COHERENCE_THRESHOLD
+        }
+        Err(error) => {
+            return Err(DomainError::Configuration {
+                message: format!(
+                    "Failed to read workspace learn config {}: {error}",
+                    config_path.display()
+                ),
+                repair: Some("Check .ee/config.toml and retry `ee remember`.".to_owned()),
+            });
+        }
+    };
+    if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+        return Err(DomainError::Configuration {
+            message: format!(
+                "Config key `learn.cluster_coherence_threshold` must be finite and between 0.0 and 1.0, got {threshold}."
+            ),
+            repair: Some("Use a threshold between 0.0 and 1.0 in [learn].".to_owned()),
+        });
+    }
+
+    Ok(ClusterCoherenceConfig {
+        merge_threshold: threshold,
+        silhouette_cutoff: crate::curate::cluster_coherence::DEFAULT_CLUSTER_SILHOUETTE_CUTOFF,
+        min_cluster_size: crate::curate::cluster_coherence::DEFAULT_MIN_CLUSTER_SIZE,
+    })
+}
+
+fn remember_curation_cluster_embedding_text(memory: &StoredMemory, tags: &[String]) -> String {
+    let mut tags = tags.to_vec();
+    tags.sort();
+    format!(
+        "level:{}\nkind:{}\ntags:{}\ncontent:{}",
+        memory.level,
+        memory.kind,
+        tags.join(" "),
+        memory.content
+    )
+}
+
+fn remember_curation_embedding_snapshot_hash(
+    points: &[EmbeddingPoint],
+    config: ClusterCoherenceConfig,
+) -> String {
+    let mut sorted = points.iter().collect::<Vec<_>>();
+    sorted.sort_by(|left, right| left.memory_id.cmp(&right.memory_id));
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.remember_curation_embedding_snapshot.v1\n");
+    remember_curation_hash_field(
+        &mut hasher,
+        "threshold",
+        &format!("{:.6}", config.merge_threshold),
+    );
+    for point in sorted {
+        remember_curation_hash_field(&mut hasher, "memory_id", &point.memory_id);
+        for value in &point.embedding {
+            remember_curation_hash_field(&mut hasher, "value", &format!("{value:.9}"));
+        }
+    }
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn remember_curation_hash_field(hasher: &mut blake3::Hasher, field: &str, value: &str) {
+    hasher.update(field.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(value.len().to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(value.as_bytes());
+    hasher.update(b"\n");
 }
 
 fn remember_existing_rule_covering_cluster(
@@ -2599,6 +2835,7 @@ fn remember_curation_candidate_audit_details(
     trigger_memory_id: &str,
     member_memory_ids: &[String],
     reason: &str,
+    coherent_cluster: &RememberCoherentCurationCluster,
 ) -> String {
     serde_json::json!({
         "schema": "ee.audit.remember_curation_candidate_create.v1",
@@ -2607,6 +2844,14 @@ fn remember_curation_candidate_audit_details(
         "triggerMemoryId": trigger_memory_id,
         "memberMemoryIds": member_memory_ids,
         "reason": reason,
+        "cluster": {
+            "algorithm": "average_linkage_agglomerative",
+            "clusterId": &coherent_cluster.cluster_id,
+            "memberCount": coherent_cluster.members.len(),
+            "silhouette": coherent_cluster.silhouette_score,
+            "threshold": coherent_cluster.threshold,
+            "embeddingSnapshotHash": &coherent_cluster.embedding_snapshot_hash,
+        },
     })
     .to_string()
 }
@@ -2624,6 +2869,20 @@ fn remember_curation_sync_budget_ms() -> u128 {
 #[cfg(test)]
 fn remember_curation_sync_budget_ms() -> u128 {
     REMEMBER_CURATION_TEST_SYNC_BUDGET_MS
+}
+
+fn remember_search_neighbors_disabled() -> bool {
+    crate::config::env_registry::read(
+        crate::config::env_registry::EnvVar::DisableRememberSearchNeighbors,
+    )
+    .is_some_and(|raw| {
+        let trimmed = raw.trim();
+        !(trimmed.is_empty()
+            || trimmed == "0"
+            || trimmed.eq_ignore_ascii_case("false")
+            || trimmed.eq_ignore_ascii_case("no")
+            || trimmed.eq_ignore_ascii_case("off"))
+    })
 }
 
 fn suggest_links_for_remember(
@@ -3095,6 +3354,9 @@ pub fn list_memories(options: &ListMemoriesOptions<'_>) -> MemoryListReport {
 /// Stable schema name for `ee memory expire` reports.
 pub const MEMORY_EXPIRE_SCHEMA_V1: &str = "ee.memory.expire.v1";
 
+/// Stable schema name for `ee memory level` reports.
+pub const MEMORY_LEVEL_SCHEMA_V1: &str = "ee.memory.level.v1";
+
 /// Stable schema name for `ee memory tags` reports.
 pub const MEMORY_TAGS_SCHEMA_V1: &str = "ee.memory.tags.v1";
 
@@ -3150,6 +3412,70 @@ pub struct MemoryExpireReport {
     /// Audit row ID when an expiration was committed.
     pub audit_id: Option<String>,
     /// Search-index job ID queued after a committed change.
+    pub index_job_id: Option<String>,
+    /// Stable index status string.
+    pub index_status: String,
+    /// Idempotency posture.
+    pub idempotency: String,
+}
+
+/// Options for applying a canonical manual memory-level transition.
+#[derive(Clone, Debug)]
+pub struct MemoryLevelOptions<'a> {
+    /// Workspace path used to derive the canonical workspace ID.
+    pub workspace_path: &'a Path,
+    /// Database path.
+    pub database_path: &'a Path,
+    /// Memory ID to transition.
+    pub memory_id: &'a str,
+    /// Target level (`working`, `episodic`, `semantic`, or `procedural`).
+    pub level: &'a str,
+    /// Optional compare-and-set source level.
+    pub expected_level: Option<&'a str>,
+    /// Operator-supplied transition reason. Required for manual transitions.
+    pub reason: Option<&'a str>,
+    /// Actor recorded in audit rows.
+    pub actor: Option<&'a str>,
+    /// Preview without writing.
+    pub dry_run: bool,
+    /// Return a tombstoned-state report instead of hiding tombstoned memories.
+    pub include_tombstoned: bool,
+}
+
+/// Report for `ee memory level`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct MemoryLevelReport {
+    /// Report schema.
+    pub schema: &'static str,
+    /// Package version for stable output.
+    pub version: &'static str,
+    /// Memory ID.
+    pub memory_id: String,
+    /// Workspace ID.
+    pub workspace_id: String,
+    /// Operation status.
+    pub status: String,
+    /// Whether this was a dry run.
+    pub dry_run: bool,
+    /// Whether durable state changed.
+    pub persisted: bool,
+    /// Whether the command changed memory state or would change it in dry-run mode.
+    pub changed: bool,
+    /// Previous level before the transition.
+    pub previous_level: String,
+    /// Final or previewed level.
+    pub level: String,
+    /// Canonical transition event.
+    pub event: Option<String>,
+    /// Canonical transition reason.
+    pub reason: Option<String>,
+    /// Whether the transition is automatic.
+    pub automatic: bool,
+    /// Evidence references written to the audit row.
+    pub evidence_refs: Vec<String>,
+    /// Audit row ID when a transition was committed.
+    pub audit_id: Option<String>,
+    /// Search-index job ID queued after a committed transition.
     pub index_job_id: Option<String>,
     /// Stable index status string.
     pub index_status: String,
@@ -3488,6 +3814,27 @@ pub fn expire_memory(options: &ExpireMemoryOptions<'_>) -> Result<MemoryExpireRe
                 details: Some(details.clone()),
             },
         )?;
+        if memory.level == "semantic" {
+            let mut evidence_refs = vec![expires_at.clone()];
+            if let Some(reason) = options.reason {
+                evidence_refs.push(reason.to_owned());
+            }
+            let _ = conn.apply_memory_level_transition_in_current_transaction(
+                options.memory_id,
+                &ApplyMemoryLevelTransitionInput {
+                    workspace_id: workspace_id.clone(),
+                    expected_level: Some(memory.level.clone()),
+                    level: "episodic".to_owned(),
+                    updated_at: expires_at.clone(),
+                    actor: actor.map(str::to_owned),
+                    reason: "time_bound_fact".to_owned(),
+                    automatic: true,
+                    event: "valid_to.set".to_owned(),
+                    evidence_refs,
+                    source_action: Some(audit_actions::MEMORY_EXPIRE.to_owned()),
+                },
+            )?;
+        }
         conn.insert_search_index_job(&index_job_id, &index_input)?;
         Ok(Some(()))
     })
@@ -3520,6 +3867,295 @@ pub fn expire_memory(options: &ExpireMemoryOptions<'_>) -> Result<MemoryExpireRe
         previous_tombstoned_at: None,
         tombstoned_at: refreshed.tombstoned_at,
         audit_id: Some(audit_id),
+        index_job_id: Some(index_job_id),
+        index_status: "queued".to_owned(),
+        idempotency: "changed".to_owned(),
+    })
+}
+
+fn memory_lifecycle_state_from_level(level: &str) -> Option<MemoryLifecycleState> {
+    match level {
+        "working" => Some(MemoryLifecycleState::Working),
+        "episodic" => Some(MemoryLifecycleState::Episodic),
+        "semantic" => Some(MemoryLifecycleState::Semantic),
+        "procedural" => Some(MemoryLifecycleState::Procedural),
+        _ => None,
+    }
+}
+
+fn manual_level_transition_event(
+    previous_level: &str,
+    target_level: &str,
+) -> Result<&'static str, DomainError> {
+    match (previous_level, target_level) {
+        ("working", "episodic") => Ok("manual.promote_to_episodic"),
+        ("episodic", "semantic") => Ok("manual.promote_to_semantic"),
+        ("semantic", "procedural") => Ok("manual.promote_to_procedural"),
+        ("procedural", "semantic") => Ok("manual.demote_to_semantic"),
+        _ => Err(DomainError::Usage {
+            message: format!(
+                "Unsupported manual memory level transition: {previous_level} -> {target_level}."
+            ),
+            repair: Some(
+                "Use the canonical adjacent transitions: working->episodic, episodic->semantic, semantic->procedural, or procedural->semantic.".to_owned(),
+            ),
+        }),
+    }
+}
+
+fn required_manual_transition_reason(reason: Option<&str>) -> Result<String, DomainError> {
+    reason
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| DomainError::UsageCodeWithDetails {
+            code: LEVEL_TRANSITION_REQUIRES_EVIDENCE_CODE,
+            message: "Manual memory level transition requires evidence via --reason.".to_owned(),
+            repair: Some(
+                "Use ee memory level <memory-id> --to episodic --reason \"workflow completed\"."
+                    .to_owned(),
+            ),
+            details_json: serde_json::json!({
+                "failureModeCode": LEVEL_TRANSITION_REQUIRES_EVIDENCE_CODE,
+                "transitionSurface": "memory level",
+                "missingEvidence": ["reason"],
+                "requiredFlag": "--reason",
+            })
+            .to_string(),
+        })
+}
+
+fn memory_level_target(level: &str) -> Result<MemoryLevel, DomainError> {
+    MemoryLevel::from_str(level).map_err(|_| DomainError::Usage {
+        message: format!("Unknown memory level: {level}"),
+        repair: Some("Use one of: working, episodic, semantic, procedural.".to_owned()),
+    })
+}
+
+fn level_transition_concurrent_conflict_error(
+    memory_id: &str,
+    planned_previous_level: &str,
+    target_level: &str,
+    observed: Option<&StoredMemory>,
+) -> DomainError {
+    DomainError::UsageCodeWithDetails {
+        code: LEVEL_TRANSITION_CONCURRENT_CONFLICT_CODE,
+        message: format!("Memory level transition for {memory_id} lost a concurrent update race."),
+        repair: Some(format!(
+            "Run ee memory show {memory_id} --json, then retry the transition from the current level."
+        )),
+        details_json: serde_json::json!({
+            "failureModeCode": LEVEL_TRANSITION_CONCURRENT_CONFLICT_CODE,
+            "transitionSurface": "memory level",
+            "memoryId": memory_id,
+            "plannedPreviousLevel": planned_previous_level,
+            "targetLevel": target_level,
+            "observedLevel": observed.map(|memory| memory.level.clone()),
+            "observedTombstonedAt": observed.and_then(|memory| memory.tombstoned_at.clone()),
+        })
+        .to_string(),
+    }
+}
+
+/// Apply a manual memory-level transition using the canonical lifecycle table.
+pub fn update_memory_level(
+    options: &MemoryLevelOptions<'_>,
+) -> Result<MemoryLevelReport, DomainError> {
+    let target_level = memory_level_target(options.level)?;
+    let target_level = target_level.as_str();
+    let expected_level = options
+        .expected_level
+        .map(memory_level_target)
+        .transpose()?
+        .map(|level| level.as_str().to_owned());
+    let conn = open_migrated_memory_database(options.database_path)
+        .map_err(memory_command_storage_error)?;
+    let workspace_id = memory_command_workspace_id(options.workspace_path);
+    let memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
+
+    if memory.tombstoned_at.is_some() {
+        if options.include_tombstoned {
+            return Ok(MemoryLevelReport {
+                schema: MEMORY_LEVEL_SCHEMA_V1,
+                version: env!("CARGO_PKG_VERSION"),
+                memory_id: options.memory_id.to_owned(),
+                workspace_id,
+                status: "tombstoned".to_owned(),
+                dry_run: options.dry_run,
+                persisted: false,
+                changed: false,
+                previous_level: memory.level.clone(),
+                level: memory.level,
+                event: None,
+                reason: None,
+                automatic: false,
+                evidence_refs: Vec::new(),
+                audit_id: None,
+                index_job_id: None,
+                index_status: "not_scheduled".to_owned(),
+                idempotency: "no_change".to_owned(),
+            });
+        }
+
+        return Err(DomainError::UsageCodeWithDetails {
+            code: LEVEL_TRANSITION_TOMBSTONED_REJECTED_CODE,
+            message: "Memory is tombstoned and cannot change level.".to_owned(),
+            repair: Some("Use ee memory history to inspect the tombstone, then ee curate untombstone before applying a level transition.".to_owned()),
+            details_json: serde_json::json!({
+                "failureModeCode": LEVEL_TRANSITION_TOMBSTONED_REJECTED_CODE,
+                "transitionSurface": "memory level",
+                "memoryId": options.memory_id,
+                "currentLevel": memory.level,
+                "targetLevel": target_level,
+                "tombstonedAt": memory.tombstoned_at,
+            })
+            .to_string(),
+        });
+    }
+
+    let planned_previous_level = expected_level.unwrap_or_else(|| memory.level.clone());
+    if memory.level != planned_previous_level {
+        return Err(level_transition_concurrent_conflict_error(
+            options.memory_id,
+            &planned_previous_level,
+            target_level,
+            Some(&memory),
+        ));
+    }
+
+    if memory.level == target_level {
+        return Ok(MemoryLevelReport {
+            schema: MEMORY_LEVEL_SCHEMA_V1,
+            version: env!("CARGO_PKG_VERSION"),
+            memory_id: options.memory_id.to_owned(),
+            workspace_id,
+            status: "already_level".to_owned(),
+            dry_run: options.dry_run,
+            persisted: false,
+            changed: false,
+            previous_level: memory.level.clone(),
+            level: memory.level,
+            event: None,
+            reason: None,
+            automatic: false,
+            evidence_refs: Vec::new(),
+            audit_id: None,
+            index_job_id: None,
+            index_status: "not_scheduled".to_owned(),
+            idempotency: "no_change".to_owned(),
+        });
+    }
+
+    let manual_reason = required_manual_transition_reason(options.reason)?;
+    let event = manual_level_transition_event(&planned_previous_level, target_level)?;
+    let from_state =
+        memory_lifecycle_state_from_level(&planned_previous_level).ok_or_else(|| {
+            DomainError::Storage {
+                message: format!("Memory has unknown stored level: {planned_previous_level}"),
+                repair: Some("Run ee doctor --json to inspect database consistency.".to_owned()),
+            }
+        })?;
+    let transition = transition_for(from_state, event).ok_or_else(|| DomainError::Usage {
+        message: format!(
+            "No canonical memory lifecycle transition exists for {planned_previous_level} via {event}."
+        ),
+        repair: Some("See docs for the memory level lifecycle transition table.".to_owned()),
+    })?;
+    let actor = options.actor.or(Some("ee memory level"));
+    let evidence_refs = vec![
+        format!("actor:{}", actor.unwrap_or("ee memory level")),
+        format!("reason:{manual_reason}"),
+    ];
+
+    if options.dry_run {
+        return Ok(MemoryLevelReport {
+            schema: MEMORY_LEVEL_SCHEMA_V1,
+            version: env!("CARGO_PKG_VERSION"),
+            memory_id: options.memory_id.to_owned(),
+            workspace_id,
+            status: "would_transition".to_owned(),
+            dry_run: true,
+            persisted: false,
+            changed: true,
+            previous_level: planned_previous_level,
+            level: target_level.to_owned(),
+            event: Some(event.to_owned()),
+            reason: Some(transition.reason.to_owned()),
+            automatic: transition.automatic,
+            evidence_refs,
+            audit_id: None,
+            index_job_id: None,
+            index_status: "dry_run_not_queued".to_owned(),
+            idempotency: "would_change".to_owned(),
+        });
+    }
+
+    let updated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let index_job_id = generate_search_index_job_id();
+    let index_input = CreateSearchIndexJobInput {
+        workspace_id: workspace_id.clone(),
+        job_type: SearchIndexJobType::SingleDocument,
+        document_source: Some("memory".to_owned()),
+        document_id: Some(options.memory_id.to_owned()),
+        documents_total: 1,
+    };
+
+    let audit_id = conn
+        .with_transaction(|| {
+            let audit_id = conn.apply_memory_level_transition_in_current_transaction(
+                options.memory_id,
+                &ApplyMemoryLevelTransitionInput {
+                    workspace_id: workspace_id.clone(),
+                    expected_level: Some(planned_previous_level.clone()),
+                    level: target_level.to_owned(),
+                    updated_at: updated_at.clone(),
+                    actor: actor.map(str::to_owned),
+                    reason: transition.reason.to_owned(),
+                    automatic: transition.automatic,
+                    event: event.to_owned(),
+                    evidence_refs: evidence_refs.clone(),
+                    source_action: Some("memory.level".to_owned()),
+                },
+            )?;
+            if audit_id.is_some() {
+                conn.insert_search_index_job(&index_job_id, &index_input)?;
+            }
+            Ok(audit_id)
+        })
+        .map_err(|error| {
+            memory_command_storage_error(format!("Failed to transition memory level: {error}"))
+        })?;
+
+    if audit_id.is_none() {
+        let observed = conn.get_memory(options.memory_id).map_err(|error| {
+            memory_command_storage_error(format!(
+                "Failed to reload memory after concurrent transition conflict: {error}"
+            ))
+        })?;
+        return Err(level_transition_concurrent_conflict_error(
+            options.memory_id,
+            &planned_previous_level,
+            target_level,
+            observed.as_ref(),
+        ));
+    }
+
+    Ok(MemoryLevelReport {
+        schema: MEMORY_LEVEL_SCHEMA_V1,
+        version: env!("CARGO_PKG_VERSION"),
+        memory_id: options.memory_id.to_owned(),
+        workspace_id,
+        status: "transitioned".to_owned(),
+        dry_run: false,
+        persisted: true,
+        changed: true,
+        previous_level: planned_previous_level,
+        level: target_level.to_owned(),
+        event: Some(event.to_owned()),
+        reason: Some(transition.reason.to_owned()),
+        automatic: transition.automatic,
+        evidence_refs,
+        audit_id,
         index_job_id: Some(index_job_id),
         index_status: "queued".to_owned(),
         idempotency: "changed".to_owned(),
@@ -6249,6 +6885,43 @@ mod tests {
             audit.action,
             "curation_candidate.create".to_owned(),
             "candidate audit action",
+        )?;
+        let audit_details = audit
+            .details
+            .as_ref()
+            .ok_or_else(|| "candidate audit details missing".to_owned())?;
+        let audit_details: serde_json::Value =
+            serde_json::from_str(audit_details).map_err(|error| error.to_string())?;
+        ensure(
+            audit_details["cluster"]["algorithm"].as_str(),
+            Some("average_linkage_agglomerative"),
+            "cluster algorithm recorded",
+        )?;
+        ensure(
+            audit_details["cluster"]["memberCount"].as_u64(),
+            Some(3),
+            "cluster member count recorded",
+        )?;
+        ensure(
+            audit_details["cluster"]["silhouette"]
+                .as_f64()
+                .is_some_and(|score| score >= 0.4),
+            true,
+            "accepted cluster silhouette recorded",
+        )?;
+        ensure(
+            audit_details["cluster"]["threshold"]
+                .as_f64()
+                .is_some_and(|threshold| (0.0..=1.0).contains(&threshold)),
+            true,
+            "cluster threshold recorded",
+        )?;
+        ensure(
+            audit_details["cluster"]["embeddingSnapshotHash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            true,
+            "embedding snapshot hash recorded",
         )
     }
 

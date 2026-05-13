@@ -24,6 +24,7 @@
     "message_contains": [
       "Profile mismatch"
     ],
-    "repair_contains": "same profile"
+    "repair_contains": "same profile",
+    "repair_string": "Compare artifacts from the same profile"
   }
 }

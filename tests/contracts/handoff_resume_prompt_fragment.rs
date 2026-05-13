@@ -119,6 +119,7 @@ fn run_resume(
         bound_workspace_id: bound_workspace_id.map(str::to_owned),
         bound_workspace_identity: None,
         include_prompt_fragment,
+        require_fresh: false,
     })
     .map_err(|error| format!("resume_handoff: {error:?}"))
 }

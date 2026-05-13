@@ -19,6 +19,7 @@ the Rust constant, and the shell list together.
 | `startedAt` / `started_at` | Wall-clock start time | v0.1 | Maintenance jobs and long-running operations. |
 | `endedAt` / `ended_at` | Wall-clock end time | v0.1 | Maintenance jobs and long-running operations. |
 | `ts` / `timestamp` | Generic wall-clock timestamp | v0.1 | Log envelopes and event records. |
+| `runIndex` / `run_index` | Measurement run ordinal | v0.1 | Perf gates compare stable payloads across repeated invocations. |
 | `ee_binary_hash` | Per-build artifact hash | v0.1 | Included in run summaries and status-like diagnostics. |
 | `databasePath` / `workspacePath` | Machine-dependent absolute path | v0.1 | Canonicalized but environment-dependent. |
 | `indexDir` | Machine-dependent absolute path | v0.1 | Rebuildable derived asset location. |

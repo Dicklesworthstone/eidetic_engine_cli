@@ -4,6 +4,8 @@
 //! knowledge gaps and prioritizing learning opportunities.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -15,14 +17,20 @@ use crate::core::curate::{
 use crate::core::outcome::{OutcomeRecordOptions, OutcomeRecordReport, record_outcome};
 use crate::db::{
     CreateCurationCandidateInput, CreateLearningObservationInput, CreateWorkspaceInput,
-    DbConnection, StoredCurationCandidate, StoredFeedbackEvent, StoredLearningObservation,
-    StoredMemory,
+    DbConnection, StoredAuditEntry, StoredCurationCandidate, StoredFeedbackEvent,
+    StoredLearningObservation, StoredMemory, audit_actions,
 };
 use crate::models::{
     DomainError, ExperimentOutcome, ExperimentOutcomeStatus, ExperimentSafetyBoundary,
     LearningObservation, LearningObservationSignal, LearningTargetKind, WorkspaceId,
 };
 use crate::search::HashEmbedder;
+
+const DEFAULT_LEARN_CLUSTER_COHERENCE_THRESHOLD: f32 =
+    crate::curate::cluster_coherence::DEFAULT_CLUSTER_COHERENCE_THRESHOLD as f32;
+const DEFAULT_LEARN_CLUSTER_SILHOUETTE_CUTOFF: f32 =
+    crate::curate::cluster_coherence::DEFAULT_CLUSTER_SILHOUETTE_CUTOFF as f32;
+const LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY: &str = "learn.cluster_coherence_threshold";
 
 /// Schema for learning agenda report.
 pub const LEARN_AGENDA_SCHEMA_V1: &str = "ee.learn.agenda.v1";
@@ -255,6 +263,8 @@ pub struct LearningSummary {
     pub memories_created: u32,
     pub memories_promoted: u32,
     pub memories_demoted: u32,
+    pub memories_demoted_via_decay: u32,
+    pub memories_tombstoned_via_decay: u32,
     pub rules_learned: u32,
     pub rules_validated: u32,
     pub gaps_identified: u32,
@@ -311,6 +321,19 @@ pub fn show_summary(options: &LearnSummaryOptions) -> Result<LearnSummaryReport,
         .iter()
         .filter(|event| is_negative_signal(&event.signal))
         .count() as u32;
+    let decay_audit_entries = snapshot
+        .audit_entries
+        .iter()
+        .filter(|entry| since.is_none_or(|since| entry.timestamp.as_str() >= since))
+        .collect::<Vec<_>>();
+    let memories_demoted_via_decay = decay_audit_entries
+        .iter()
+        .filter(|entry| entry.action == audit_actions::MEMORY_DECAY_DEMOTE)
+        .count() as u32;
+    let memories_tombstoned_via_decay = decay_audit_entries
+        .iter()
+        .filter(|entry| entry.action == audit_actions::MEMORY_DECAY_TOMBSTONE)
+        .count() as u32;
     let memories_created = snapshot
         .memories
         .values()
@@ -351,10 +374,11 @@ pub fn show_summary(options: &LearnSummaryOptions) -> Result<LearnSummaryReport,
             )
         })
         .count() as u32;
-    let memories_demoted = harmful_feedback_count;
+    let memories_demoted = harmful_feedback_count.saturating_add(memories_demoted_via_decay);
     let net_knowledge_delta = i32::try_from(memories_promoted + rules_learned + rules_validated)
         .unwrap_or(i32::MAX)
-        - i32::try_from(memories_demoted).unwrap_or(i32::MAX);
+        - i32::try_from(memories_demoted.saturating_add(memories_tombstoned_via_decay))
+            .unwrap_or(i32::MAX);
 
     let mut learning_events = Vec::new();
     if options.detailed {
@@ -387,6 +411,8 @@ pub fn show_summary(options: &LearnSummaryOptions) -> Result<LearnSummaryReport,
             memories_created,
             memories_promoted,
             memories_demoted,
+            memories_demoted_via_decay,
+            memories_tombstoned_via_decay,
             rules_learned,
             rules_validated,
             gaps_identified,
@@ -410,7 +436,7 @@ pub fn show_summary(options: &LearnSummaryOptions) -> Result<LearnSummaryReport,
 #[derive(Clone, Debug)]
 pub struct LearnClusterOptions {
     pub workspace: PathBuf,
-    pub threshold: f32,
+    pub threshold: Option<f32>,
     pub min_cluster_size: usize,
     pub include_singletons: bool,
     pub level: Option<String>,
@@ -421,7 +447,7 @@ impl Default for LearnClusterOptions {
     fn default() -> Self {
         Self {
             workspace: PathBuf::from("."),
-            threshold: 0.55,
+            threshold: None,
             min_cluster_size: 3,
             include_singletons: false,
             level: None,
@@ -447,6 +473,7 @@ pub struct LearnClusterReport {
 
 /// Analyze deterministic memory clusters for learning/curation decisions.
 pub fn analyze_clusters(options: &LearnClusterOptions) -> Result<LearnClusterReport, DomainError> {
+    let threshold = resolve_learn_cluster_threshold(&options.workspace, options.threshold)?;
     let snapshot = load_learning_snapshot(&options.workspace)?;
     let mut memories = snapshot
         .memories
@@ -477,7 +504,7 @@ pub fn analyze_clusters(options: &LearnClusterOptions) -> Result<LearnClusterRep
         })
         .collect::<Vec<_>>();
 
-    let raw_report = silhouette_agglomerative_clusters(&inputs, options.threshold);
+    let raw_report = silhouette_agglomerative_clusters(&inputs, threshold);
     let mut degradations = raw_report.degradations;
     let clusters = raw_report
         .clusters
@@ -495,7 +522,7 @@ pub fn analyze_clusters(options: &LearnClusterOptions) -> Result<LearnClusterRep
         .map(|cluster| cluster.member_memory_ids.len())
         .sum();
 
-    Ok(LearnClusterReport {
+    let report = LearnClusterReport {
         schema: LEARN_CLUSTER_SCHEMA_V1.to_owned(),
         workspace_id: snapshot.workspace_id,
         threshold: raw_report.threshold,
@@ -506,7 +533,9 @@ pub fn analyze_clusters(options: &LearnClusterOptions) -> Result<LearnClusterRep
         clusters,
         degradations,
         generated_at: stable_learning_generated_at(),
-    })
+    };
+    log_learn_cluster_events(&report);
+    Ok(report)
 }
 
 fn cluster_embedding_text(snapshot: &LearningSnapshot, memory: &StoredMemory) -> String {
@@ -519,6 +548,92 @@ fn cluster_embedding_text(snapshot: &LearningSnapshot, memory: &StoredMemory) ->
         "level:{}\nkind:{}\ntags:{}\ncontent:{}",
         memory.level, memory.kind, tags, memory.content
     )
+}
+
+fn resolve_learn_cluster_threshold(
+    workspace: &Path,
+    cli_threshold: Option<f32>,
+) -> Result<f32, DomainError> {
+    if let Some(threshold) = cli_threshold {
+        return Ok(threshold);
+    }
+    let config_path = workspace.join(".ee").join("config.toml");
+    let contents = match fs::read_to_string(&config_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(DEFAULT_LEARN_CLUSTER_COHERENCE_THRESHOLD);
+        }
+        Err(error) => {
+            return Err(DomainError::Configuration {
+                message: format!(
+                    "Failed to read workspace learn config {}: {error}",
+                    config_path.display()
+                ),
+                repair: Some("Check .ee/config.toml and rerun ee learn cluster --json.".to_owned()),
+            });
+        }
+    };
+    let config = crate::config::ConfigFile::parse(&contents).map_err(|error| {
+        DomainError::Configuration {
+            message: format!(
+                "Failed to parse workspace learn config {}: {error}",
+                config_path.display()
+            ),
+            repair: Some(
+                "Fix [learn] in .ee/config.toml and rerun ee learn cluster --json.".to_owned(),
+            ),
+        }
+    })?;
+    let configured = optional_learn_cluster_config_f32(
+        config.learn.cluster_coherence_threshold,
+        LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY,
+    )?;
+    Ok(configured.unwrap_or(DEFAULT_LEARN_CLUSTER_COHERENCE_THRESHOLD))
+}
+
+fn optional_learn_cluster_config_f32(
+    value: Option<f64>,
+    key: &'static str,
+) -> Result<Option<f32>, DomainError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value as f32;
+    if value.is_finite() {
+        Ok(Some(value))
+    } else {
+        Err(DomainError::Configuration {
+            message: format!("Config key `{key}` exceeds supported f32 range."),
+            repair: Some("Use a smaller finite number in [learn].".to_owned()),
+        })
+    }
+}
+
+fn log_learn_cluster_events(report: &LearnClusterReport) {
+    for cluster in &report.clusters {
+        let accepted = cluster.member_memory_ids.len() >= report.min_cluster_size
+            && cluster
+                .silhouette_score
+                .is_some_and(|score| score >= DEFAULT_LEARN_CLUSTER_SILHOUETTE_CUTOFF);
+        let silhouette = cluster
+            .silhouette_score
+            .map_or(serde_json::Value::Null, serde_json::Value::from);
+        crate::obs::log_event(
+            crate::obs::TestEvent::new(
+                crate::obs::test_id_or("learn_cluster"),
+                crate::obs::EventKind::Note,
+            )
+            .with_field("event", "learn_cluster")
+            .with_field("candidate_id", cluster.cluster_id.clone())
+            .with_field(
+                "member_count",
+                serde_json::json!(cluster.member_memory_ids.len()),
+            )
+            .with_field("silhouette", silhouette)
+            .with_field("threshold", serde_json::json!(report.threshold))
+            .with_field("accepted", serde_json::json!(accepted)),
+        );
+    }
 }
 
 // ============================================================================
@@ -2208,6 +2323,7 @@ struct LearningSnapshot {
     memories: BTreeMap<String, StoredMemory>,
     memory_tags: BTreeMap<String, Vec<String>>,
     feedback_events: Vec<StoredFeedbackEvent>,
+    audit_entries: Vec<StoredAuditEntry>,
     learning_observations: Vec<StoredLearningObservation>,
     curation_candidates: Vec<StoredCurationCandidate>,
 }
@@ -2662,6 +2778,12 @@ fn load_learning_snapshot(workspace: &Path) -> Result<LearningSnapshot, DomainEr
             message: format!("Failed to list learning feedback events: {error}"),
             repair: Some("ee outcome list --json".to_string()),
         })?;
+    let audit_entries = connection
+        .list_audit_entries(Some(&workspace_id), None)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list learning audit entries: {error}"),
+            repair: Some("ee audit timeline --json".to_string()),
+        })?;
     let learning_observations = connection
         .list_learning_observations(&workspace_id, None)
         .map_err(|error| DomainError::Storage {
@@ -2684,6 +2806,7 @@ fn load_learning_snapshot(workspace: &Path) -> Result<LearningSnapshot, DomainEr
         memories,
         memory_tags,
         feedback_events,
+        audit_entries,
         learning_observations,
         curation_candidates,
     })
@@ -3277,7 +3400,7 @@ mod tests {
 
     #[test]
     fn observe_experiment_records_feedback_and_audit() -> TestResult {
-        let (dir, database) = seed_learning_database("ee-learn-observe")?;
+        let (dir, database, _) = seed_learning_workspace("ee-learn-observe")?;
         let report = observe_experiment(&LearnObserveOptions {
             workspace: dir.path().to_path_buf(),
             database_path: Some(database.clone()),
@@ -3428,7 +3551,7 @@ mod tests {
 
     #[test]
     fn close_experiment_records_rejected_outcome_feedback() -> TestResult {
-        let (dir, database) = seed_learning_database("ee-learn-close")?;
+        let (dir, database, _) = seed_learning_workspace("ee-learn-close")?;
         let report = close_experiment(&LearnCloseOptions {
             workspace: dir.path().to_path_buf(),
             database_path: Some(database.clone()),

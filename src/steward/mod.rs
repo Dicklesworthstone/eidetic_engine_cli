@@ -24,8 +24,13 @@ use rustix::io::Errno;
 use serde_json::{Value as JsonValue, json};
 
 use crate::db::{
-    ApplyMemoryScoreUpdateInput, CreateCurationCandidateInput, DbConnection, FeedbackCounts,
-    StoredFeedbackEvent, StoredMemory, feedback_scoring,
+    ApplyMemoryDecayDemotionInput, ApplyMemoryScoreUpdateInput, CreateCurationCandidateInput,
+    DbConnection, FeedbackCounts, StoredAuditEntry, StoredFeedbackEvent, StoredMemory,
+    audit_actions, feedback_scoring,
+};
+use crate::policy::{
+    MEMORY_DECAY_SOURCE, MemoryDecayAction, MemoryDecayEvaluation, MemoryDecayHalfLives,
+    MemoryDecaySettings, MemoryDecayThresholds, evaluate_memory_decay_with_settings,
 };
 
 pub const SUBSYSTEM: &str = "steward";
@@ -1374,6 +1379,9 @@ pub struct ScoreDecayJobOptions {
     pub stale_after_days: u32,
     pub decay_interval_days: u32,
     pub min_delta: f32,
+    pub include_decay_actions: bool,
+    pub decay_thresholds: MemoryDecayThresholds,
+    pub decay_half_lives: MemoryDecayHalfLives,
     pub dry_run: bool,
     pub actor: Option<String>,
 }
@@ -1388,6 +1396,9 @@ impl ScoreDecayJobOptions {
             stale_after_days: DEFAULT_SCORE_DECAY_STALE_AFTER_DAYS,
             decay_interval_days: DEFAULT_SCORE_DECAY_INTERVAL_DAYS,
             min_delta: DEFAULT_SCORE_DECAY_MIN_DELTA,
+            include_decay_actions: false,
+            decay_thresholds: MemoryDecayThresholds::default(),
+            decay_half_lives: MemoryDecayHalfLives::default(),
             dry_run: false,
             actor: None,
         }
@@ -1403,13 +1414,30 @@ pub struct ScoreDecayMemoryChange {
     pub delta: f32,
     pub age_days: u32,
     pub stale_periods: u32,
+    pub freshness: f32,
+    pub lifecycle_score: f32,
+    pub utility: f32,
+    pub half_life_days: f32,
+    pub decay_action: MemoryDecayAction,
+    pub old_level: String,
+    pub new_level: String,
+    pub old_importance: f32,
+    pub new_importance: f32,
+    pub demote_threshold: f32,
+    pub forget_threshold: f32,
     pub feedback_total_count: u32,
     pub feedback_event_ids: Vec<String>,
     pub applied: bool,
     pub audit_id: Option<String>,
+    pub lifecycle_audit_id: Option<String>,
 }
 
 impl ScoreDecayMemoryChange {
+    #[must_use]
+    pub fn confidence_changed(&self, min_delta: f32) -> bool {
+        self.delta.abs() >= min_delta
+    }
+
     #[must_use]
     pub fn data_json(&self) -> JsonValue {
         json!({
@@ -1419,10 +1447,22 @@ impl ScoreDecayMemoryChange {
             "delta": score_json(self.delta),
             "ageDays": self.age_days,
             "stalePeriods": self.stale_periods,
+            "freshness": score_json(self.freshness),
+            "lifecycleScore": score_json(self.lifecycle_score),
+            "utility": score_json(self.utility),
+            "halfLifeDays": score_json(self.half_life_days),
+            "decayAction": self.decay_action.as_str(),
+            "oldLevel": self.old_level,
+            "newLevel": self.new_level,
+            "oldImportance": score_json(self.old_importance),
+            "newImportance": score_json(self.new_importance),
+            "demoteThreshold": score_json(self.demote_threshold),
+            "forgetThreshold": score_json(self.forget_threshold),
             "feedbackTotalCount": self.feedback_total_count,
             "feedbackEventIds": self.feedback_event_ids,
             "applied": self.applied,
             "auditId": self.audit_id,
+            "lifecycleAuditId": self.lifecycle_audit_id,
         })
     }
 }
@@ -1440,9 +1480,14 @@ pub struct ScoreDecayJobReport {
     pub changed_count: usize,
     pub applied_count: usize,
     pub skipped_count: usize,
+    pub demoted_count: usize,
+    pub tombstoned_count: usize,
     pub stale_after_days: u32,
     pub decay_interval_days: u32,
     pub min_delta: f32,
+    pub include_decay_actions: bool,
+    pub decay_thresholds: MemoryDecayThresholds,
+    pub decay_half_lives: MemoryDecayHalfLives,
     pub changes: Vec<ScoreDecayMemoryChange>,
 }
 
@@ -1461,11 +1506,31 @@ impl ScoreDecayJobReport {
                 "decayIntervalDays": self.decay_interval_days,
                 "minDelta": score_json(self.min_delta),
             },
+            "decay": {
+                "schema": MEMORY_DECAY_SOURCE,
+                "enabled": self.include_decay_actions,
+                "memoriesDemoted": self.demoted_count,
+                "memoriesTombstoned": self.tombstoned_count,
+                "halfLivesApplied": self.include_decay_actions,
+                "halfLifeDays": {
+                    "working": score_json(self.decay_half_lives.working),
+                    "episodicEvent": score_json(self.decay_half_lives.episodic_event),
+                    "episodicFailure": score_json(self.decay_half_lives.episodic_failure),
+                    "semanticFact": score_json(self.decay_half_lives.semantic_fact),
+                    "proceduralRule": score_json(self.decay_half_lives.procedural_rule),
+                    "default": score_json(self.decay_half_lives.default),
+                },
+                "thresholdDemote": score_json(self.decay_thresholds.demote),
+                "thresholdForget": score_json(self.decay_thresholds.forget),
+                "dryRun": self.dry_run,
+            },
             "summary": {
                 "scannedCount": self.scanned_count,
                 "changedCount": self.changed_count,
                 "appliedCount": self.applied_count,
                 "skippedCount": self.skipped_count,
+                "demotedCount": self.demoted_count,
+                "tombstonedCount": self.tombstoned_count,
             },
             "changes": self
                 .changes
@@ -1488,6 +1553,8 @@ impl ScoreDecayJobReport {
         output.push_str(&format!("  Changed: {}\n", self.changed_count));
         output.push_str(&format!("  Applied: {}\n", self.applied_count));
         output.push_str(&format!("  Skipped: {}\n", self.skipped_count));
+        output.push_str(&format!("  Demoted: {}\n", self.demoted_count));
+        output.push_str(&format!("  Tombstoned: {}\n", self.tombstoned_count));
         if !self.changes.is_empty() {
             output.push_str("\nChanges:\n");
             for change in &self.changes {
@@ -1527,6 +1594,11 @@ pub fn run_score_decay_job(
                 .map_err(|_| "Score decay item limit exceeds platform usize".to_owned())?,
         );
     }
+    let access_times = if options.include_decay_actions {
+        latest_memory_access_timestamps(conn, &options.workspace_id)?
+    } else {
+        BTreeMap::new()
+    };
 
     let mut scanned_count = 0usize;
     let mut changes = Vec::new();
@@ -1550,6 +1622,7 @@ pub fn run_score_decay_job(
             &feedback_counts,
             &feedback_events,
             &as_of_timestamp,
+            access_times.get(&memory.id).copied(),
             options,
         )?
         else {
@@ -1557,34 +1630,47 @@ pub fn run_score_decay_job(
         };
 
         if !options.dry_run {
-            let details = score_decay_audit_details(&change, &as_of);
-            change.audit_id = conn
-                .apply_memory_score_update_audited(
-                    &memory.id,
-                    &ApplyMemoryScoreUpdateInput {
-                        workspace_id: options.workspace_id.clone(),
-                        confidence: change.new_confidence,
-                        utility: memory.utility,
-                        importance: memory.importance,
-                        updated_at: as_of.clone(),
-                        actor: options.actor.clone(),
-                        details,
-                        feedback_event_ids: change.feedback_event_ids.clone(),
-                    },
-                )
-                .map_err(|error| {
-                    format!(
-                        "Failed to apply score decay for memory {}: {error}",
-                        memory.id
+            if change.confidence_changed(options.min_delta) {
+                let details = score_decay_audit_details(&change, &as_of);
+                change.audit_id = conn
+                    .apply_memory_score_update_audited(
+                        &memory.id,
+                        &ApplyMemoryScoreUpdateInput {
+                            workspace_id: options.workspace_id.clone(),
+                            confidence: change.new_confidence,
+                            utility: memory.utility,
+                            importance: memory.importance,
+                            updated_at: as_of.clone(),
+                            actor: options.actor.clone(),
+                            details,
+                            feedback_event_ids: change.feedback_event_ids.clone(),
+                        },
                     )
-                })?;
-            change.applied = change.audit_id.is_some();
+                    .map_err(|error| {
+                        format!(
+                            "Failed to apply score decay for memory {}: {error}",
+                            memory.id
+                        )
+                    })?;
+            }
+            if options.include_decay_actions {
+                apply_decay_lifecycle_action(conn, &memory, &mut change, options, &as_of)?;
+            }
+            change.applied = change.audit_id.is_some() || change.lifecycle_audit_id.is_some();
         }
 
         changes.push(change);
     }
 
     let applied_count = changes.iter().filter(|change| change.applied).count();
+    let demoted_count = changes
+        .iter()
+        .filter(|change| change.decay_action == MemoryDecayAction::Demote)
+        .count();
+    let tombstoned_count = changes
+        .iter()
+        .filter(|change| change.decay_action == MemoryDecayAction::Tombstone)
+        .count();
     let changed_count = changes.len();
     let skipped_count = scanned_count.saturating_sub(changed_count);
 
@@ -1599,9 +1685,14 @@ pub fn run_score_decay_job(
         changed_count,
         applied_count,
         skipped_count,
+        demoted_count,
+        tombstoned_count,
         stale_after_days: options.stale_after_days,
         decay_interval_days: options.decay_interval_days,
         min_delta: options.min_delta,
+        include_decay_actions: options.include_decay_actions,
+        decay_thresholds: options.decay_thresholds,
+        decay_half_lives: options.decay_half_lives,
         changes,
     })
 }
@@ -1616,6 +1707,9 @@ fn validate_score_decay_options(options: &ScoreDecayJobOptions) -> Result<(), St
     if !options.min_delta.is_finite() || options.min_delta < 0.0 {
         return Err("Score decay min_delta must be a finite non-negative number".to_owned());
     }
+    if !options.decay_half_lives.is_valid() {
+        return Err("Score decay half-lives must be finite positive numbers".to_owned());
+    }
     Ok(())
 }
 
@@ -1624,6 +1718,7 @@ fn score_decay_change_for_memory(
     feedback_counts: &FeedbackCounts,
     feedback_events: &[StoredFeedbackEvent],
     as_of: &DateTime<Utc>,
+    last_accessed_at: Option<DateTime<Utc>>,
     options: &ScoreDecayJobOptions,
 ) -> Result<Option<ScoreDecayMemoryChange>, String> {
     let age_days = score_age_days(&memory.updated_at, as_of)?;
@@ -1633,8 +1728,34 @@ fn score_decay_change_for_memory(
     let old_confidence = round_score(memory.confidence);
     let new_confidence = round_score(new_confidence);
     let delta = round_score(new_confidence - old_confidence);
+    let decay_evaluation = if options.include_decay_actions {
+        let reference = memory_decay_reference_time(memory, last_accessed_at, as_of)?;
+        evaluate_memory_decay_with_settings(
+            memory,
+            reference,
+            *as_of,
+            MemoryDecaySettings {
+                thresholds: options.decay_thresholds,
+                half_lives: options.decay_half_lives,
+            },
+        )
+    } else {
+        MemoryDecayEvaluation {
+            action: MemoryDecayAction::Preserve,
+            freshness: 1.0,
+            lifecycle_score: round_score(memory.confidence * memory.utility),
+            half_life_days: 0.0,
+            age_days,
+            previous_level: memory.level.clone(),
+            new_level: memory.level.clone(),
+            previous_importance: round_score(memory.importance),
+            new_importance: round_score(memory.importance),
+            demote_threshold: options.decay_thresholds.demote,
+            forget_threshold: options.decay_thresholds.forget,
+        }
+    };
 
-    if delta.abs() < options.min_delta {
+    if delta.abs() < options.min_delta && decay_evaluation.action == MemoryDecayAction::Preserve {
         return Ok(None);
     }
 
@@ -1645,6 +1766,17 @@ fn score_decay_change_for_memory(
         delta,
         age_days,
         stale_periods,
+        freshness: decay_evaluation.freshness,
+        lifecycle_score: decay_evaluation.lifecycle_score,
+        utility: round_score(memory.utility),
+        half_life_days: decay_evaluation.half_life_days,
+        decay_action: decay_evaluation.action,
+        old_level: decay_evaluation.previous_level,
+        new_level: decay_evaluation.new_level,
+        old_importance: decay_evaluation.previous_importance,
+        new_importance: decay_evaluation.new_importance,
+        demote_threshold: decay_evaluation.demote_threshold,
+        forget_threshold: decay_evaluation.forget_threshold,
         feedback_total_count: feedback_counts.total_count(),
         feedback_event_ids: feedback_events
             .iter()
@@ -1653,7 +1785,143 @@ fn score_decay_change_for_memory(
             .collect::<Vec<_>>(),
         applied: false,
         audit_id: None,
+        lifecycle_audit_id: None,
     }))
+}
+
+fn latest_memory_access_timestamps(
+    conn: &DbConnection,
+    workspace_id: &str,
+) -> Result<BTreeMap<String, DateTime<Utc>>, String> {
+    let entries = conn
+        .list_audit_entries(Some(workspace_id), None)
+        .map_err(|error| format!("Failed to list memory access audit rows: {error}"))?;
+    Ok(memory_access_timestamp_map(&entries))
+}
+
+fn memory_access_timestamp_map(entries: &[StoredAuditEntry]) -> BTreeMap<String, DateTime<Utc>> {
+    let mut timestamps = BTreeMap::new();
+    for entry in entries {
+        if !is_memory_access_audit_action(&entry.action) {
+            continue;
+        }
+        if entry.target_type.as_deref() != Some("memory") {
+            continue;
+        }
+        let Some(memory_id) = entry.target_id.as_deref() else {
+            continue;
+        };
+        let Some(timestamp) = parse_score_decay_timestamp(&entry.timestamp, "audit.timestamp").ok()
+        else {
+            continue;
+        };
+        timestamps
+            .entry(memory_id.to_owned())
+            .and_modify(|existing| {
+                if timestamp > *existing {
+                    *existing = timestamp;
+                }
+            })
+            .or_insert(timestamp);
+    }
+    timestamps
+}
+
+fn is_memory_access_audit_action(action: &str) -> bool {
+    matches!(
+        action,
+        audit_actions::SEARCH_RETURNED_MEM
+            | audit_actions::PACK_INCLUDED_MEM
+            | audit_actions::MEMORY_SHOW
+            | audit_actions::WHY_INSPECTED
+    )
+}
+
+fn memory_decay_reference_time(
+    memory: &StoredMemory,
+    last_accessed_at: Option<DateTime<Utc>>,
+    as_of: &DateTime<Utc>,
+) -> Result<DateTime<Utc>, String> {
+    let updated_at = parse_score_decay_timestamp(&memory.updated_at, "memory.updated_at")?;
+    let created_at = parse_score_decay_timestamp(&memory.created_at, "memory.created_at")?;
+    let reference = [Some(updated_at), Some(created_at), last_accessed_at]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(*as_of);
+    Ok(reference.min(*as_of))
+}
+
+fn apply_decay_lifecycle_action(
+    conn: &DbConnection,
+    memory: &StoredMemory,
+    change: &mut ScoreDecayMemoryChange,
+    options: &ScoreDecayJobOptions,
+    as_of: &str,
+) -> Result<(), String> {
+    let details = decay_lifecycle_audit_details(change, as_of);
+    match change.decay_action {
+        MemoryDecayAction::Preserve => Ok(()),
+        MemoryDecayAction::Demote => {
+            change.lifecycle_audit_id = conn
+                .apply_memory_decay_demotion_audited(
+                    &memory.id,
+                    &ApplyMemoryDecayDemotionInput {
+                        workspace_id: options.workspace_id.clone(),
+                        level: change.new_level.clone(),
+                        importance: change.new_importance,
+                        updated_at: as_of.to_owned(),
+                        actor: options.actor.clone(),
+                        details,
+                    },
+                )
+                .map_err(|error| {
+                    format!(
+                        "Failed to apply decay demotion for memory {}: {error}",
+                        memory.id
+                    )
+                })?;
+            if change.lifecycle_audit_id.is_some() {
+                tracing::info!(
+                    target: "ee::learn::decay",
+                    memory_id = %memory.id,
+                    freshness = change.freshness,
+                    confidence = change.new_confidence,
+                    utility = memory.utility,
+                    action = change.decay_action.as_str(),
+                    "memory demoted by decay"
+                );
+            }
+            Ok(())
+        }
+        MemoryDecayAction::Tombstone => {
+            change.lifecycle_audit_id = conn
+                .tombstone_memory_decay_audited(
+                    &memory.id,
+                    &options.workspace_id,
+                    options.actor.as_deref(),
+                    &details,
+                )
+                .map_err(|error| {
+                    format!(
+                        "Failed to apply decay tombstone for memory {}: {error}",
+                        memory.id
+                    )
+                })?;
+            if change.lifecycle_audit_id.is_some() {
+                tracing::info!(
+                    target: "ee::learn::decay",
+                    memory_id = %memory.id,
+                    freshness = change.freshness,
+                    confidence = change.new_confidence,
+                    utility = memory.utility,
+                    action = change.decay_action.as_str(),
+                    "memory tombstoned by decay"
+                );
+            }
+            Ok(())
+        }
+    }
 }
 
 fn decayed_confidence(
@@ -1750,6 +2018,34 @@ fn score_decay_audit_details(change: &ScoreDecayMemoryChange, as_of: &str) -> St
     .to_string()
 }
 
+fn decay_lifecycle_audit_details(change: &ScoreDecayMemoryChange, as_of: &str) -> String {
+    json!({
+        "schema": "ee.audit.memory_decay_lifecycle.v1",
+        "command": "steward score-decay",
+        "memoryId": change.memory_id,
+        "asOf": as_of,
+        "action": change.decay_action.as_str(),
+        "reason": if change.decay_action == MemoryDecayAction::Tombstone {
+            "auto_forgetting"
+        } else {
+            "auto_decay_demotion"
+        },
+        "previousLevel": change.old_level,
+        "newLevel": change.new_level,
+        "previousImportance": score_json(change.old_importance),
+        "newImportance": score_json(change.new_importance),
+        "freshness": score_json(change.freshness),
+        "confidence": score_json(change.new_confidence),
+        "utility": score_json(change.utility),
+        "lifecycleScore": score_json(change.lifecycle_score),
+        "halfLifeDays": score_json(change.half_life_days),
+        "ageDays": change.age_days,
+        "demoteThreshold": score_json(change.demote_threshold),
+        "forgetThreshold": score_json(change.forget_threshold),
+    })
+    .to_string()
+}
+
 fn round_score(value: f32) -> f32 {
     if value.is_finite() {
         (value * 1_000_000.0).round() / 1_000_000.0
@@ -1830,6 +2126,10 @@ pub struct RunnerOptions {
     pub actor: Option<String>,
     /// Whether to perform a dry run (report what would happen).
     pub dry_run: bool,
+    /// Whether decay_sweep should apply lifecycle demotion/tombstone decisions.
+    pub include_decay_actions: bool,
+    /// Resolved decay settings from defaults and workspace config.
+    pub decay_settings: MemoryDecaySettings,
     /// Whether to continue on non-fatal errors.
     pub continue_on_error: bool,
     /// Verbose diagnostics.
@@ -1887,6 +2187,18 @@ impl RunnerOptions {
     #[must_use]
     pub fn with_dry_run(mut self, dry_run: bool) -> Self {
         self.dry_run = dry_run;
+        self
+    }
+
+    #[must_use]
+    pub fn with_include_decay_actions(mut self, include_decay_actions: bool) -> Self {
+        self.include_decay_actions = include_decay_actions;
+        self
+    }
+
+    #[must_use]
+    pub fn with_decay_settings(mut self, decay_settings: MemoryDecaySettings) -> Self {
+        self.decay_settings = decay_settings;
         self
     }
 
@@ -2487,6 +2799,7 @@ impl ManualRunner {
                 Some(json!({
                     "schema": "ee.steward.decay_sweep.error.v1",
                     "code": "decay_sweep_database_unresolved",
+                    "severity": "medium",
                     "message": message,
                     "repair": "ee init --workspace .",
                 })),
@@ -2506,6 +2819,7 @@ impl ManualRunner {
                 Some(json!({
                     "schema": "ee.steward.decay_sweep.error.v1",
                     "code": "decay_sweep_database_missing",
+                    "severity": "medium",
                     "databasePath": database_path.display().to_string(),
                     "dryRun": self.options.dry_run,
                     "durableMutation": false,
@@ -2533,6 +2847,7 @@ impl ManualRunner {
                     Some(json!({
                         "schema": "ee.steward.decay_sweep.error.v1",
                         "code": "decay_sweep_database_open_failed",
+                        "severity": "high",
                         "databasePath": database_path.display().to_string(),
                         "message": message,
                         "repair": "ee init --workspace .",
@@ -2550,6 +2865,7 @@ impl ManualRunner {
                     Some(json!({
                         "schema": "ee.steward.decay_sweep.error.v1",
                         "code": "decay_sweep_migration_failed",
+                        "severity": "high",
                         "databasePath": database_path.display().to_string(),
                         "message": message,
                         "repair": "ee doctor --json",
@@ -2568,6 +2884,7 @@ impl ManualRunner {
                     Some(json!({
                         "schema": "ee.steward.decay_sweep.error.v1",
                         "code": "decay_sweep_workspace_unresolved",
+                        "severity": "medium",
                         "databasePath": database_path.display().to_string(),
                         "message": message,
                         "repair": "ee remember --workspace . --json",
@@ -2588,6 +2905,7 @@ impl ManualRunner {
                         Some(json!({
                             "schema": "ee.steward.decay_sweep.error.v1",
                             "code": "decay_sweep_item_limit_too_large",
+                            "severity": "medium",
                             "message": message,
                         })),
                     );
@@ -2600,6 +2918,9 @@ impl ManualRunner {
         options.as_of = self.options.as_of.clone();
         options.item_limit = item_limit;
         options.dry_run = self.options.dry_run;
+        options.include_decay_actions = self.options.include_decay_actions;
+        options.decay_thresholds = self.options.decay_settings.thresholds;
+        options.decay_half_lives = self.options.decay_settings.half_lives;
         options.actor = self
             .options
             .actor
@@ -2618,6 +2939,7 @@ impl ManualRunner {
                     Some(json!({
                         "schema": "ee.steward.decay_sweep.error.v1",
                         "code": "decay_sweep_handler_failed",
+                        "severity": "high",
                         "message": message,
                     })),
                 );
@@ -2628,6 +2950,15 @@ impl ManualRunner {
         budget.record(ResourceType::Items, scanned_count);
         let preflight_elapsed_ms = millis_to_u64(started.elapsed());
         budget.record(ResourceType::TimeMs, preflight_elapsed_ms);
+
+        if budget_times_out_before_mutation(budget) {
+            return (
+                RunOutcome::TimedOut,
+                Some(scanned_count),
+                Some("Timed out before durable decay mutations".to_owned()),
+                Some(preflight_report.data_json()),
+            );
+        }
 
         if budget_cancels_before_mutation(budget) {
             return (
@@ -2657,6 +2988,7 @@ impl ManualRunner {
                     Some(json!({
                         "schema": "ee.steward.decay_sweep.error.v1",
                         "code": "decay_sweep_handler_failed",
+                        "severity": "high",
                         "message": message,
                     })),
                 );
@@ -3650,6 +3982,16 @@ fn budget_cancels_before_mutation(budget: &JobBudgetState) -> bool {
             .budgets
             .iter()
             .any(|limit| limit.on_exceed == BudgetExceedAction::Cancel && limit.limit == 0)
+}
+
+fn budget_times_out_before_mutation(budget: &JobBudgetState) -> bool {
+    budget.check_budgets().iter().any(|violation| {
+        violation.resource == ResourceType::TimeMs && violation.action == BudgetExceedAction::Cancel
+    }) || budget.budgets.iter().any(|limit| {
+        limit.resource == ResourceType::TimeMs
+            && limit.on_exceed == BudgetExceedAction::Cancel
+            && limit.limit == 0
+    })
 }
 
 struct OpenedWorkspaceDatabase {
@@ -4681,6 +5023,18 @@ mod tests {
             .map_err(|error| error.to_string())
     }
 
+    fn set_score_memory_timestamp(
+        connection: &DbConnection,
+        memory_id: &str,
+        timestamp: &str,
+    ) -> Result<(), String> {
+        connection
+            .execute_raw(&format!(
+                "UPDATE memories SET created_at = '{timestamp}', updated_at = '{timestamp}' WHERE id = '{memory_id}'"
+            ))
+            .map_err(|error| error.to_string())
+    }
+
     fn insert_score_feedback(
         connection: &DbConnection,
         event_id: &str,
@@ -5180,10 +5534,21 @@ mod tests {
         assert!(opts.workspace_id.is_none());
         assert!(opts.as_of.is_none());
         assert!(opts.actor.is_none());
+        assert_eq!(opts.decay_settings, MemoryDecaySettings::default());
     }
 
     #[test]
     fn runner_options_builder() {
+        let decay_settings = MemoryDecaySettings {
+            thresholds: MemoryDecayThresholds {
+                demote: 0.08,
+                forget: 0.02,
+            },
+            half_lives: MemoryDecayHalfLives {
+                procedural_rule: 730.0,
+                ..MemoryDecayHalfLives::default()
+            },
+        };
         let opts = RunnerOptions::new()
             .with_dry_run(true)
             .with_verbose(true)
@@ -5193,7 +5558,8 @@ mod tests {
             .with_database_path("/tmp/ee-runner/.ee/ee.db")
             .with_workspace_id(SCORE_WORKSPACE_ID)
             .with_as_of("2099-01-01T00:00:00Z")
-            .with_actor("runner-test");
+            .with_actor("runner-test")
+            .with_decay_settings(decay_settings);
 
         assert!(opts.dry_run);
         assert!(opts.verbose);
@@ -5207,6 +5573,7 @@ mod tests {
         assert_eq!(opts.workspace_id, Some(SCORE_WORKSPACE_ID.to_owned()));
         assert_eq!(opts.as_of, Some("2099-01-01T00:00:00Z".to_owned()));
         assert_eq!(opts.actor, Some("runner-test".to_owned()));
+        assert_eq!(opts.decay_settings, decay_settings);
     }
 
     #[test]
@@ -5365,6 +5732,123 @@ mod tests {
         let second = run_score_decay_job(&connection, &options)?;
         ensure(second.changed_count, 0, "second changed count")?;
         ensure(second.applied_count, 0, "second applied count")
+    }
+
+    #[test]
+    fn score_decay_job_include_decay_dry_run_reports_demote_without_mutation() -> TestResult {
+        let connection = open_score_decay_db()?;
+        insert_score_memory(&connection, SCORE_MEMORY_A, 0.8)?;
+        set_score_memory_timestamp(&connection, SCORE_MEMORY_A, "2026-01-01T00:00:00Z")?;
+
+        let mut options = ScoreDecayJobOptions::new(SCORE_WORKSPACE_ID);
+        options.as_of = Some("2030-01-01T00:00:00Z".to_owned());
+        options.include_decay_actions = true;
+        options.dry_run = true;
+        let report = run_score_decay_job(&connection, &options)?;
+
+        ensure(report.changed_count, 1, "changed count")?;
+        ensure(report.demoted_count, 1, "planned demotion count")?;
+        ensure(report.tombstoned_count, 0, "planned tombstone count")?;
+        ensure(
+            report.changes[0].decay_action,
+            MemoryDecayAction::Demote,
+            "decay action",
+        )?;
+        ensure(
+            report.changes[0].new_level.as_str(),
+            "semantic",
+            "demoted level",
+        )?;
+        let memory = connection
+            .get_memory(SCORE_MEMORY_A)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory missing".to_owned())?;
+        ensure(memory.level.as_str(), "procedural", "dry run keeps level")?;
+        let audits = connection
+            .list_audit_by_target("memory", SCORE_MEMORY_A, None)
+            .map_err(|error| error.to_string())?;
+        ensure(audits.is_empty(), true, "dry run writes no audit rows")
+    }
+
+    #[test]
+    fn score_decay_job_uses_configured_decay_half_life_and_thresholds() -> TestResult {
+        let connection = open_score_decay_db()?;
+        insert_score_memory(&connection, SCORE_MEMORY_A, 0.8)?;
+        set_score_memory_timestamp(&connection, SCORE_MEMORY_A, "2026-01-01T00:00:00Z")?;
+
+        let mut options = ScoreDecayJobOptions::new(SCORE_WORKSPACE_ID);
+        options.as_of = Some("2026-01-11T00:00:00Z".to_owned());
+        options.include_decay_actions = true;
+        options.dry_run = true;
+        options.decay_thresholds = MemoryDecayThresholds {
+            demote: 0.3,
+            forget: 0.0001,
+        };
+        options.decay_half_lives = MemoryDecayHalfLives {
+            procedural_rule: 1.0,
+            ..MemoryDecayHalfLives::default()
+        };
+
+        let report = run_score_decay_job(&connection, &options)?;
+
+        ensure(report.demoted_count, 1, "configured demotion count")?;
+        ensure(report.tombstoned_count, 0, "configured tombstone count")?;
+        ensure(
+            report.changes[0].half_life_days,
+            1.0,
+            "configured procedural half-life",
+        )?;
+        ensure(
+            report.changes[0].demote_threshold,
+            0.3,
+            "configured demote threshold",
+        )?;
+        ensure(
+            report.data_json()["decay"]["halfLifeDays"]["proceduralRule"].as_f64(),
+            Some(1.0),
+            "configured half-life JSON",
+        )
+    }
+
+    #[test]
+    fn score_decay_job_include_decay_tombstones_and_audits() -> TestResult {
+        let connection = open_score_decay_db()?;
+        insert_score_memory(&connection, SCORE_MEMORY_A, 0.8)?;
+        set_score_memory_timestamp(&connection, SCORE_MEMORY_A, "2026-01-01T00:00:00Z")?;
+
+        let mut options = ScoreDecayJobOptions::new(SCORE_WORKSPACE_ID);
+        options.as_of = Some("2099-01-01T00:00:00Z".to_owned());
+        options.include_decay_actions = true;
+        options.actor = Some("decay-lifecycle-test".to_owned());
+        let report = run_score_decay_job(&connection, &options)?;
+
+        ensure(report.tombstoned_count, 1, "tombstone count")?;
+        ensure(report.applied_count, 1, "applied count")?;
+        ensure(
+            report.changes[0].decay_action,
+            MemoryDecayAction::Tombstone,
+            "decay action",
+        )?;
+        ensure(
+            report.changes[0].lifecycle_audit_id.is_some(),
+            true,
+            "lifecycle audit id",
+        )?;
+        let memory = connection
+            .get_memory(SCORE_MEMORY_A)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory missing".to_owned())?;
+        ensure(memory.tombstoned_at.is_some(), true, "memory tombstoned")?;
+        let audits = connection
+            .list_audit_by_target("memory", SCORE_MEMORY_A, None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            audits
+                .iter()
+                .any(|entry| entry.action == audit_actions::MEMORY_DECAY_TOMBSTONE),
+            true,
+            "decay tombstone audit row",
+        )
     }
 
     #[test]
@@ -5565,7 +6049,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_runner_decay_sweep_zero_budget_cancels_before_mutation() -> TestResult {
+    fn manual_runner_decay_sweep_zero_time_budget_times_out_before_mutation() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let database_path = temp.path().join("ee.db");
         {
@@ -5602,15 +6086,14 @@ mod tests {
         let result = runner.run_job_type(JobType::DecaySweep, Some("zero budget".to_owned()));
 
         ensure(result.job_type, JobType::DecaySweep, "job type")?;
-        ensure(result.outcome, RunOutcome::Cancelled, "zero-budget outcome")?;
+        ensure(result.outcome, RunOutcome::TimedOut, "zero-budget outcome")?;
         ensure(result.items_processed, Some(1), "preflight scanned count")?;
         ensure(
-            result
-                .error
-                .as_deref()
-                .is_some_and(|message| message.contains("before durable decay mutations")),
+            result.error.as_deref().is_some_and(|message| {
+                message.contains("Timed out before durable decay mutations")
+            }),
             true,
-            "cancel reason",
+            "timeout reason",
         )?;
         let details = result
             .details

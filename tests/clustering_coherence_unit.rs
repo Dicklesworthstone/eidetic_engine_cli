@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
 use ee::core::curate::{ClusterCoherenceInput, silhouette_agglomerative_clusters};
+use ee::curate::cluster_coherence::{
+    ClusterCoherenceConfig, EmbeddingPoint, agglomerate as canonical_agglomerate,
+};
 
 type TestResult = Result<(), String>;
 
@@ -74,7 +77,7 @@ fn agglomerative_clustering_finds_two_stable_clusters() -> TestResult {
 #[test]
 fn threshold_sweep_documents_over_merge_and_over_split() -> TestResult {
     let inputs = synthetic_embeddings();
-    let loose = silhouette_agglomerative_clusters(&inputs, 0.60);
+    let loose = silhouette_agglomerative_clusters(&inputs, 0.20);
     if cluster_sizes(&loose) != vec![14] {
         return Err(format!(
             "loose threshold should over-merge into one cluster, got {:?}",
@@ -87,6 +90,49 @@ fn threshold_sweep_documents_over_merge_and_over_split() -> TestResult {
         return Err(format!(
             "strict threshold should over-split, got {} clusters",
             strict.clusters.len()
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn learn_cluster_adapter_uses_canonical_cluster_ids() -> TestResult {
+    let inputs = synthetic_embeddings();
+    let adapter = silhouette_agglomerative_clusters(&inputs, 0.80);
+    let canonical_points = inputs
+        .iter()
+        .map(|input| {
+            EmbeddingPoint::new(
+                input.memory_id.clone(),
+                input
+                    .embedding
+                    .iter()
+                    .map(|value| f64::from(*value))
+                    .collect(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let canonical = canonical_agglomerate(
+        &canonical_points,
+        ClusterCoherenceConfig {
+            merge_threshold: 0.80,
+            ..ClusterCoherenceConfig::default()
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let adapter_ids = adapter
+        .clusters
+        .iter()
+        .map(|cluster| cluster.cluster_id.as_str())
+        .collect::<Vec<_>>();
+    let canonical_ids = canonical
+        .clusters
+        .iter()
+        .map(|cluster| cluster.cluster_id.as_str())
+        .collect::<Vec<_>>();
+    if adapter_ids != canonical_ids {
+        return Err(format!(
+            "learn cluster adapter diverged from canonical IDs: {adapter_ids:?} vs {canonical_ids:?}"
         ));
     }
     Ok(())

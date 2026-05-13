@@ -23,6 +23,7 @@
     "message_contains": [
       "does not declare requested profile"
     ],
-    "repair_contains": "Regenerate the artifact"
+    "repair_contains": "Regenerate the artifact",
+    "repair_string": "Regenerate the artifact with profile evidence enabled."
   }
 }

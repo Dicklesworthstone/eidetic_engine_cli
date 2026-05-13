@@ -511,7 +511,13 @@ fn collect_files(root: &Path) -> Result<Vec<PathBuf>, LegacyImportScanError> {
                     directories.push(child);
                 }
             } else if metadata.is_file() {
-                files.push(child);
+                let name = child
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                if !name.starts_with("._") && name != ".DS_Store" {
+                    files.push(child);
+                }
             }
         }
     }

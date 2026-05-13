@@ -25,6 +25,8 @@
     "message_contains": [
       "Failed to read feedback quarantine rows"
     ],
-    "repair_contains": "ee db migrate"
+    "repair_contains": "ee db migrate",
+    "repair_string": "ee db migrate --workspace .",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

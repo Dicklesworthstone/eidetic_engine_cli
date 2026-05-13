@@ -14,9 +14,9 @@
     "description": "The decay sweep job opens the database but cannot apply required migrations.",
     "setup_commands": [
       "ee init --workspace .",
-      "# use a fixture database whose migration path fails"
+      "ee diag database-skew --output-database ./decay-migration-skew.db --skew migration-checksum-column-missing --workspace . --json"
     ],
-    "invocation": "ee job run decay_sweep --workspace . --json"
+    "invocation": "ee job run decay_sweep --database ./decay-migration-skew.db --workspace . --json"
   },
   "expected_emission": {
     "code": "decay_sweep_migration_failed",

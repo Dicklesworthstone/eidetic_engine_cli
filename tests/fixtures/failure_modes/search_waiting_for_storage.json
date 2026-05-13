@@ -24,6 +24,8 @@
       "Search readiness is pending",
       "storage is initialized"
     ],
-    "repair_contains": "ee init"
+    "repair_contains": "ee init",
+    "repair_string": "Run `ee init --workspace .`.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
   }
 }

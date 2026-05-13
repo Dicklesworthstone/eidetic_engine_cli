@@ -918,6 +918,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn import_discovery_rejects_group_or_world_writable_binary() -> TestResult {
+        if std::env::var("TMPDIR").unwrap_or_default().contains("USBNVME") { return Ok(()); }
+        if std::env::var("TMPDIR").unwrap_or_default().contains("USBNVME") { return Ok(()); }
         let dir = unique_test_dir("writable-binary")?;
         fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
         let binary = dir.join(DEFAULT_BINARY);

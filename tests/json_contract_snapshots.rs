@@ -227,10 +227,13 @@ fn run_json_command(fixture: &JsonContractFixture, args: Vec<String>) -> Result<
 fn scrub_json_contract(value: &mut Value, fixture: &JsonContractFixture) {
     match value {
         Value::Object(object) => {
-            for (key, child) in object {
+            for (key, child) in object.iter_mut() {
                 scrub_json_contract(child, fixture);
                 scrub_value_for_key(key, child);
             }
+            let mut entries: Vec<_> = std::mem::take(object).into_iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            object.extend(entries);
         }
         Value::Array(items) => {
             for item in items {
@@ -255,6 +258,12 @@ fn scrub_value_for_key(key: &str, value: &mut Value) {
     if normalized == "packid" || normalized == "pack_id" {
         if value.is_string() {
             *value = Value::String("[PACK_ID]".to_string());
+        }
+        return;
+    }
+    if normalized == "auditid" || normalized == "audit_id" {
+        if value.is_string() {
+            *value = Value::String("[AUDIT_ID]".to_string());
         }
         return;
     }
@@ -318,10 +327,29 @@ fn scrub_string(text: &str, fixture: &JsonContractFixture) -> String {
     let database = fixture.database.to_string_lossy();
     let index_dir = fixture.index_dir.to_string_lossy();
     let workspace = fixture.workspace.to_string_lossy();
-    text.replace(database.as_ref(), "[DATABASE]")
+    let scrubbed = text
+        .replace(database.as_ref(), "[DATABASE]")
         .replace(index_dir.as_ref(), "[INDEX]")
         .replace(workspace.as_ref(), "[WORKSPACE]")
-        .replace(env!("CARGO_MANIFEST_DIR"), "[REPO]")
+        .replace(env!("CARGO_MANIFEST_DIR"), "[REPO]");
+    scrub_pack_hash_comments(&scrubbed)
+}
+
+fn scrub_pack_hash_comments(text: &str) -> String {
+    let marker = "<!-- pack.hash: ";
+    let replacement = "<!-- pack.hash: [HASH] -->";
+    let mut scrubbed = text.to_owned();
+    let mut cursor = 0;
+    while let Some(offset) = scrubbed[cursor..].find(marker) {
+        let start = cursor + offset;
+        let Some(end_offset) = scrubbed[start..].find("-->") else {
+            break;
+        };
+        let end = start + end_offset + "-->".len();
+        scrubbed.replace_range(start..end, replacement);
+        cursor = start + replacement.len();
+    }
+    scrubbed
 }
 
 fn looks_like_rfc3339(text: &str) -> bool {

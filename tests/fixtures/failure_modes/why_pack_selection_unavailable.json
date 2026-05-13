@@ -14,9 +14,10 @@
     "description": "ee why cannot read the latest pack-selection evidence for a memory because pack ledger storage is unavailable or needs migration.",
     "setup_commands": [
       "ee init --workspace .",
-      "# induce pack ledger read failure through a test harness"
+      "ee remember 'J6 why pack selection fixture memory.' --level semantic --kind fact --no-auto-link --no-propose-candidates --workspace . --json",
+      "ee diag database-skew --workspace . --output-database .ee/ee-skew.db --skew pack-items-table-unavailable --json"
     ],
-    "invocation": "ee why <memory-id> --workspace . --json"
+    "invocation": "ee why <memory-id> --workspace . --database .ee/ee-skew.db --json"
   },
   "expected_emission": {
     "code": "why_pack_selection_unavailable",
@@ -25,6 +26,8 @@
       "pack",
       "selection"
     ],
-    "repair_contains": "ee db migrate"
+    "repair_contains": "ee db migrate",
+    "repair_string": "ee db migrate",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

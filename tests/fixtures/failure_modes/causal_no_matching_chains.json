@@ -14,9 +14,11 @@
     "description": "Causal evidence rows exist, but none match the artifact or decision filters.",
     "setup_commands": [
       "ee init --workspace .",
-      "# seed causal evidence rows for a different artifact or decision"
+      "ee remember --workspace . --level episodic --kind failure 'J6 causal failure.' --json",
+      "ee remember --workspace . --level episodic --kind root-cause 'J6 causal root cause.' --json",
+      "ee diag causal-edge --edge-id cev_j6_no_matching_root --failure-id <failure-memory-id> --candidate-cause-id <root-memory-id> --workspace . --json"
     ],
-    "invocation": "ee causal estimate --artifact-id absent-artifact --workspace . --json"
+    "invocation": "ee causal estimate --artifact-id mem_00000000000000000000000000 --workspace . --json"
   },
   "expected_emission": {
     "code": "causal_no_matching_chains",

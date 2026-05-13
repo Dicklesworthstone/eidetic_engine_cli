@@ -1,17 +1,24 @@
 {
   "schema": "ee.failure_mode_fixture.v1",
   "code": "index_stale",
-  "introduced_by": { "bead": "bd-17c65.2.1", "epic_letter": "B" },
-  "surfaces": ["search", "context"],
+  "introduced_by": {
+    "bead": "bd-17c65.2.1",
+    "epic_letter": "B"
+  },
+  "surfaces": [
+    "index status"
+  ],
   "severity": "high",
   "repair_present": true,
   "trigger": {
     "description": "Memory database advanced beyond the search index generation. Reads can still return data but may miss recently-added memories until the index is rebuilt.",
     "setup_commands": [
       "ee init --workspace .",
-      "# (synthetic: mutate ee.db without invoking the index writer, e.g. via the test harness's direct DB layer)"
+      "ee remember --workspace . --level semantic --kind fact 'J6 stale index seed' --json",
+      "printf '{\"generation\":0,\"lastRebuildAt\":\"2000-01-01T00:00:00Z\"}' > stale-index/meta.json",
+      "printf 'marker\\n' > stale-index/document.marker"
     ],
-    "invocation": "ee search 'any query' --workspace . --json"
+    "invocation": "ee index status --workspace . --index-dir stale-index --json"
   },
   "expected_emission": {
     "code": "index_stale",
@@ -19,6 +26,8 @@
     "message_contains": [
       "Search index is stale"
     ],
-    "repair_contains": "ee index rebuild"
+    "repair_contains": "ee index rebuild",
+    "repair_string": "ee index rebuild --workspace .",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

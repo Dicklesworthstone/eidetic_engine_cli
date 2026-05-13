@@ -203,7 +203,7 @@ impl AgentInventoryReport {
             degraded: vec![AgentInventoryDegradation {
                 code: "agent_detection_unavailable".to_string(),
                 severity: "medium",
-                message: error.to_string(),
+                message: format!("Agent detection unavailable: {error}"),
                 repair: "ee agent sources --json",
             }],
             inspection_command: "ee agent status --json",

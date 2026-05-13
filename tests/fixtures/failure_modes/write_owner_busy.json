@@ -11,19 +11,18 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "A write request cannot acquire the single-writer owner because another owner is active.",
+    "description": "The write-owner diagnostic enqueues more deterministic write requests than the bounded owner channel can accept while the owner is not running.",
     "setup_commands": [
-      "ee init --workspace .",
-      "# hold the write-owner lock through a concurrency harness"
+      "ee init --workspace ."
     ],
-    "invocation": "ee remember 'queued write' --workspace . --json"
+    "invocation": "ee diag write-owner --capacity 1 --enqueue 2 --workspace . --json"
   },
   "expected_emission": {
     "code": "write_owner_busy",
     "severity": "medium",
     "message_contains": [
-      "write owner"
+      "Write owner busy"
     ],
-    "repair_contains": "retry"
+    "repair_contains": "diag locks"
   }
 }

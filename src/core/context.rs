@@ -23,16 +23,23 @@
 //! of those landing first.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
+#[cfg(unix)]
+use rustix::fs::{FlockOperation, flock};
+#[cfg(unix)]
+use rustix::io::Errno;
 
 use crate::config::WorkspaceLocation;
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
+use crate::core::memory_scope::MemoryScopeContext;
 use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
@@ -43,16 +50,117 @@ use crate::db::{
     CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, DbConnection, StoredMemory,
 };
 use crate::models::{
-    MemoryId, PackId, ProvenanceUri, TrustClass, UnitScore, WorkspaceId, posture_for_trust_class,
+    MemoryId, MemoryScope, MemoryScopeStats, PackId, ProvenanceUri, TrustClass, UnitScore,
+    WorkspaceId, posture_for_trust_class,
 };
 use crate::pack::{
-    ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
-    ContextResponseDegradation, ContextResponseSeverity, PackCandidate, PackCandidateInput,
-    PackItemLifecycle, PackProvenance, PackSection, PackTrustSignal, TokenBudget,
-    assemble_draft_with_profile_and_options, estimate_tokens_default, pack_item_provenance_json,
+    ConflictKind, ConflictRecommendedAction, ConsensusConflictReport, ContextPackProfile,
+    ContextRequest, ContextRequestInput, ContextResponse, ContextResponseDegradation,
+    ContextResponseSeverity, PackAssemblySlo, PackAssemblySloActuals, PackCandidate,
+    PackCandidateInput, PackCoordinationSnapshot, PackItemLifecycle, PackProvenance,
+    PackResourceProfile, PackSection, PackTrustSignal, assemble_draft_with_profile_and_options,
+    estimate_tokens_default, pack_item_provenance_json,
 };
 
 static PACK_HASH_LOG_RUN_INDEX: AtomicU64 = AtomicU64::new(0);
+static PACK_SLOT_PROCESS_GATES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
+const PACK_SLOT_RETRY_AFTER_MS: u64 = 250;
+
+#[derive(Debug)]
+struct PackSlotGuard {
+    path: PathBuf,
+    _file: File,
+}
+
+impl Drop for PackSlotGuard {
+    fn drop(&mut self) {
+        release_pack_slot_process_gate(&self.path);
+    }
+}
+
+#[derive(Debug)]
+enum PackSlotAcquisition {
+    Acquired(PackSlotGuard),
+    LimitReached { retry_after_ms: u64 },
+    Unavailable { path: PathBuf, message: String },
+}
+
+fn pack_slot_process_gates() -> &'static Mutex<BTreeSet<PathBuf>> {
+    PACK_SLOT_PROCESS_GATES.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+fn try_acquire_pack_slot_process_gate(path: &Path) -> bool {
+    let mut active_paths = pack_slot_process_gates()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    active_paths.insert(path.to_path_buf())
+}
+
+fn release_pack_slot_process_gate(path: &Path) {
+    let mut active_paths = pack_slot_process_gates()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    active_paths.remove(path);
+}
+
+fn try_acquire_pack_slot(
+    workspace_path: &Path,
+    profile: PackResourceProfile,
+) -> PackSlotAcquisition {
+    let budget = profile.budget_class();
+    let slots_dir = workspace_path.join(".ee").join("pack-slots");
+    if let Err(error) = std::fs::create_dir_all(&slots_dir) {
+        return PackSlotAcquisition::Unavailable {
+            path: slots_dir,
+            message: format!("Failed to create pack slot directory: {error}"),
+        };
+    }
+
+    for slot_index in 0..budget.concurrent_pack_max {
+        let slot_path = slots_dir.join(format!("{}-{slot_index:02}.lock", profile.as_str()));
+        if !try_acquire_pack_slot_process_gate(&slot_path) {
+            continue;
+        }
+
+        let file = match OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&slot_path)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                release_pack_slot_process_gate(&slot_path);
+                return PackSlotAcquisition::Unavailable {
+                    path: slot_path,
+                    message: format!("Failed to open pack slot lock: {error}"),
+                };
+            }
+        };
+
+        #[cfg(unix)]
+        if let Err(error) = flock(&file, FlockOperation::NonBlockingLockExclusive) {
+            release_pack_slot_process_gate(&slot_path);
+            if error == Errno::WOULDBLOCK || error == Errno::AGAIN {
+                continue;
+            }
+            return PackSlotAcquisition::Unavailable {
+                path: slot_path,
+                message: format!("Failed to acquire pack slot lock: {error}"),
+            };
+        }
+
+        return PackSlotAcquisition::Acquired(PackSlotGuard {
+            path: slot_path,
+            _file: file,
+        });
+    }
+
+    PackSlotAcquisition::LimitReached {
+        retry_after_ms: PACK_SLOT_RETRY_AFTER_MS,
+    }
+}
 
 /// Per-subsystem permission level. `None < Read < Write` under the
 /// derived `Ord`, which is what the narrowing law relies on.
@@ -289,7 +397,11 @@ pub struct ContextPackOptions {
     pub include_expired: bool,
     pub include_future: bool,
     pub include_stale: bool,
+    pub memory_scope: MemoryScope,
+    pub strict_scope: bool,
     pub pagination: Option<ContextPagination>,
+    pub coordination_snapshot_path: Option<PathBuf>,
+    pub coordination_stale_after_ms: u64,
     pub output_options: ContextPackOutputOptions,
 }
 
@@ -315,6 +427,7 @@ impl ContextPackOutputProfile {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ContextPackOutputOptions {
     pub profile: ContextPackOutputProfile,
+    pub resource_profile: PackResourceProfile,
     pub include_coverage_fill: bool,
     pub include_rendered_text: bool,
     pub include_skipped: bool,
@@ -343,6 +456,7 @@ impl ContextPackOutputOptions {
         match profile {
             ContextPackOutputProfile::Lean => Self {
                 profile,
+                resource_profile: PackResourceProfile::Standard,
                 include_coverage_fill: false,
                 include_rendered_text: false,
                 include_skipped: false,
@@ -352,6 +466,7 @@ impl ContextPackOutputOptions {
             },
             ContextPackOutputProfile::Standard => Self {
                 profile,
+                resource_profile: PackResourceProfile::Standard,
                 include_coverage_fill: true,
                 include_rendered_text: true,
                 include_skipped: true,
@@ -361,6 +476,7 @@ impl ContextPackOutputOptions {
             },
             ContextPackOutputProfile::Verbose => Self {
                 profile,
+                resource_profile: PackResourceProfile::Standard,
                 include_coverage_fill: true,
                 include_rendered_text: true,
                 include_skipped: true,
@@ -375,6 +491,7 @@ impl ContextPackOutputOptions {
     pub fn with_overrides(self, overrides: ContextPackOutputOptionOverrides) -> Self {
         Self {
             profile: self.profile,
+            resource_profile: self.resource_profile,
             include_coverage_fill: overrides
                 .no_coverage_fill
                 .map_or(self.include_coverage_fill, |value| !value),
@@ -390,6 +507,12 @@ impl ContextPackOutputOptions {
                 .include_non_affecting_degradations
                 .unwrap_or(self.include_non_affecting_degradations),
         }
+    }
+
+    #[must_use]
+    pub const fn with_resource_profile(mut self, resource_profile: PackResourceProfile) -> Self {
+        self.resource_profile = resource_profile;
+        self
     }
 }
 
@@ -447,6 +570,7 @@ struct CandidateResolutionMetrics {
     tag_filtered_candidates: usize,
     trust_filtered_candidates: usize,
     redaction_filtered_candidates: usize,
+    scope_filtered_candidates: usize,
     temporal_filtered_candidates: usize,
     temporal_relaxed_candidates: usize,
     graph_boosted_candidates: usize,
@@ -470,6 +594,15 @@ impl ContextPerformanceTrace {
             name,
             elapsed: start.elapsed(),
         });
+    }
+
+    fn elapsed_ms(&self, name: &str) -> u64 {
+        self.timings
+            .iter()
+            .find(|timing| timing.name == name)
+            .map_or(0, |timing| {
+                u64::try_from(timing.elapsed.as_millis()).unwrap_or(u64::MAX)
+            })
     }
 }
 
@@ -614,6 +747,8 @@ pub fn run_context_pack_with_performance(
         relevance_floor: Some(0.0),
         source_mode: crate::core::search::SearchSourceMode::Hybrid,
         strict_source_mode: false,
+        memory_scope: options.memory_scope,
+        strict_scope: options.strict_scope,
     }) {
         Ok(report) => report,
         Err(SearchError::NoIndex) => missing_index_search_report(
@@ -808,6 +943,29 @@ pub fn run_context_pack_with_performance(
     }
     trace.record_elapsed("focusState", focus_start);
 
+    let scope_filter_input_count =
+        candidate_filter_input_count.saturating_add(trace.focus_candidate_count);
+    let scope_context = MemoryScopeContext::for_workspace(
+        &options.workspace_path,
+        options.memory_scope,
+        options.strict_scope,
+    );
+    let scope_stats = filter_candidates_by_memory_scope(
+        &connection,
+        &mut candidates,
+        &scope_context,
+        &mut degraded,
+    );
+    if scope_stats.candidates_excluded_by_scope > 0 {
+        candidate_metrics.scope_filtered_candidates = candidate_metrics
+            .scope_filtered_candidates
+            .saturating_add(scope_stats.candidates_excluded_by_scope);
+        trace.filter_input_count = trace.filter_input_count.max(scope_filter_input_count);
+        trace.filtered_count = trace
+            .filtered_count
+            .saturating_add(scope_stats.candidates_excluded_by_scope);
+    }
+
     let redaction_filter_input_count =
         candidate_filter_input_count.saturating_add(trace.focus_candidate_count);
     let redaction_filtered_candidates = filter_candidates_by_redaction_allow_categories(
@@ -872,17 +1030,39 @@ pub fn run_context_pack_with_performance(
 
     let _pagination_info = apply_pagination(&mut candidates, &options.pagination, &mut degraded);
 
+    let pack_slot_acquisition = try_acquire_pack_slot(
+        &options.workspace_path,
+        options.output_options.resource_profile,
+    );
+    let (pack_slot_guard, concurrent_limit_retry_after_ms) = match pack_slot_acquisition {
+        PackSlotAcquisition::Acquired(guard) => (Some(guard), None),
+        PackSlotAcquisition::LimitReached { retry_after_ms } => (None, Some(retry_after_ms)),
+        PackSlotAcquisition::Unavailable { path, message } => {
+            push_degradation(
+                &mut degraded,
+                "pack_slot_lock_unavailable",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Pack slot governance could not acquire a lock at {}: {message}",
+                    path.display()
+                ),
+                Some("Check .ee/pack-slots permissions, then retry.".to_string()),
+            );
+            (None, None)
+        }
+    };
+
     let pack_start = Instant::now();
-    let budget = match options.max_tokens {
-        Some(max_tokens) => TokenBudget::new(max_tokens)
-            .map_err(|error| ContextPackError::Pack(error.to_string()))?,
-        None => TokenBudget::default_context(),
+    let pack_candidates = if concurrent_limit_retry_after_ms.is_some() {
+        Vec::new()
+    } else {
+        candidates
     };
     let mut draft = assemble_draft_with_profile_and_options(
         request.profile,
         request.query.clone(),
-        budget,
-        candidates,
+        request.budget,
+        pack_candidates,
         crate::pack::PackAssemblyOptions {
             include_coverage_fill: options.output_options.include_coverage_fill,
         },
@@ -915,15 +1095,40 @@ pub fn run_context_pack_with_performance(
         );
     }
 
-    draft.hash = Some(compute_pack_hash_with_output_options(
+    let coordination = load_coordination_snapshot(options, &mut degraded);
+
+    draft.hash = Some(compute_pack_hash_with_output_options_and_coordination(
         &request,
         &draft,
         &degraded,
         options.output_options,
+        coordination.as_ref(),
     ));
     trace.record_elapsed("packAssembly", pack_start);
+    let slo = if let Some(retry_after_ms) = concurrent_limit_retry_after_ms {
+        let actuals = PackAssemblySloActuals::from_pack_run(
+            &draft,
+            0,
+            trace.candidate_resolution.graph_traversed_edges,
+            trace.elapsed_ms("packAssembly"),
+        );
+        PackAssemblySlo::concurrent_limit_reached(
+            options.output_options.resource_profile,
+            actuals,
+            retry_after_ms,
+        )
+    } else {
+        pack_assembly_slo_for_run(
+            options.output_options.resource_profile,
+            &draft,
+            &search_report,
+            &trace,
+        )
+    };
+    let _pack_slot_guard = pack_slot_guard;
 
     let mut response_degraded = degraded.clone();
+    response_degraded.extend(slo.context_degradations());
 
     let persist_start = Instant::now();
     trace.pack_record_writes = trace.pack_record_writes.saturating_add(1);
@@ -945,6 +1150,12 @@ pub fn run_context_pack_with_performance(
     trace.record_elapsed("packPersistence", persist_start);
     trace.record_elapsed("total", total_start);
 
+    let consensus_conflicts = crate::pack::analyze_pack_consensus_conflicts(&draft);
+    push_consensus_conflict_degradations(
+        &mut response_degraded,
+        &consensus_conflicts,
+        draft.items.len(),
+    );
     let performance = context_performance_json(
         command,
         options,
@@ -953,9 +1164,15 @@ pub fn run_context_pack_with_performance(
         &draft,
         &response_degraded,
         &trace,
+        &slo,
     );
-    let response = ContextResponse::new(request, draft, response_degraded)
+    let mut response = ContextResponse::new(request, draft, response_degraded)
         .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    response.data.slo = Some(slo);
+    response.data.scope_stats = Some(scope_stats);
+    response.data.consensus = consensus_conflicts.consensus;
+    response.data.conflicts = consensus_conflicts.conflicts;
+    response.data.coordination = coordination;
 
     // Bead bd-17c65.7.7 (G8): best-effort audit-log instrumentation for
     // pack assembly. One `pack.assembled` row per call + one
@@ -992,7 +1209,17 @@ fn audit_context_pack_assembly(
     let assembled_details = serde_json::json!({
         "queryHash": &query_hash,
         "packId": &pack_id_for_audit,
+        "algorithm_id": response.data.pack.selection_audit.algorithm_id,
+        "algorithmId": response.data.pack.selection_audit.algorithm_id,
+        "algorithmDescription": response.data.pack.selection_audit.algorithm_description,
+        "objective": response.data.pack.selection_audit.objective.as_str(),
         "itemCount": response.data.pack.items.len(),
+        "items_selected": response.data.pack.selection_audit.selected_count,
+        "itemsSelected": response.data.pack.selection_audit.selected_count,
+        "items_skipped": response.data.pack.selection_audit.omitted_count,
+        "itemsSkipped": response.data.pack.selection_audit.omitted_count,
+        "objective_value": response.data.pack.selection_audit.total_objective_value,
+        "objectiveValue": response.data.pack.selection_audit.total_objective_value,
         "budget": response.data.pack.budget.max_tokens(),
         "usedTokens": response.data.pack.used_tokens,
     })
@@ -1028,6 +1255,7 @@ fn audit_context_pack_assembly(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn context_performance_json(
     command: &'static str,
     options: &ContextPackOptions,
@@ -1036,6 +1264,7 @@ fn context_performance_json(
     draft: &crate::pack::PackDraft,
     degraded: &[ContextResponseDegradation],
     trace: &ContextPerformanceTrace,
+    slo: &PackAssemblySlo,
 ) -> serde_json::Value {
     serde_json::json!({
         "schema": PERFORMANCE_EXPLAIN_SCHEMA_V1,
@@ -1055,12 +1284,14 @@ fn context_performance_json(
                     || options.include_expired
                     || options.include_future
                     || options.include_stale,
+                "memoryScope": options.memory_scope.as_str(),
+                "strictScope": options.strict_scope,
             },
             "profileRuntime": search_report.runtime_profile.data_json(),
             "dbReads": context_db_reads_json(trace),
             "search": context_search_json(search_report, options.speed),
             "candidates": candidate_resolution_json(trace),
-            "pack": context_pack_json(draft),
+            "pack": context_pack_json(draft, slo),
             "cache": {
                 "status": "fallback",
                 "reason": "pack_cache_governor_not_enabled_for_context_command",
@@ -1075,6 +1306,26 @@ fn context_performance_json(
             "redaction": performance_redaction_json(),
         },
     })
+}
+
+fn pack_assembly_slo_for_run(
+    profile: PackResourceProfile,
+    draft: &crate::pack::PackDraft,
+    search_report: &SearchReport,
+    trace: &ContextPerformanceTrace,
+) -> PackAssemblySlo {
+    let scanned_count = trace
+        .candidate_resolution
+        .search_hits
+        .max(search_report.results.len())
+        .max(draft.selection_audit.candidate_count);
+    let actuals = PackAssemblySloActuals::from_pack_run(
+        draft,
+        scanned_count,
+        trace.candidate_resolution.graph_traversed_edges,
+        trace.elapsed_ms("packAssembly"),
+    );
+    PackAssemblySlo::evaluate(profile, actuals)
 }
 
 fn context_db_reads_json(trace: &ContextPerformanceTrace) -> serde_json::Value {
@@ -1116,6 +1367,7 @@ fn candidate_resolution_json(trace: &ContextPerformanceTrace) -> serde_json::Val
         "skippedCandidates": metrics.skipped_candidates,
         "tagFilteredCandidates": metrics.tag_filtered_candidates,
         "trustFilteredCandidates": metrics.trust_filtered_candidates,
+        "scopeFilteredCandidates": metrics.scope_filtered_candidates,
         "redactionFilteredCandidates": metrics.redaction_filtered_candidates,
         "temporalFilteredCandidates": metrics.temporal_filtered_candidates,
         "temporalRelaxedCandidates": metrics.temporal_relaxed_candidates,
@@ -1131,29 +1383,64 @@ fn candidate_resolution_json(trace: &ContextPerformanceTrace) -> serde_json::Val
     })
 }
 
-fn context_pack_json(draft: &crate::pack::PackDraft) -> serde_json::Value {
+fn context_pack_json(draft: &crate::pack::PackDraft, slo: &PackAssemblySlo) -> serde_json::Value {
     let quality = draft.quality_metrics();
     let producer = crate::models::ProducerMetadata::context_pack(None, None);
     serde_json::json!({
-        "profile": draft.selection_certificate.profile.as_str(),
-        "objective": draft.selection_certificate.objective.as_str(),
-        "algorithm": draft.selection_certificate.algorithm,
+        "profile": draft.selection_audit.profile.as_str(),
+        "objective": draft.selection_audit.objective.as_str(),
+        "algorithmId": draft.selection_audit.algorithm_id,
+        "algorithmDescription": draft.selection_audit.algorithm_description,
         "producer": producer,
-        "candidateCount": draft.selection_certificate.candidate_count,
-        "selectedCount": draft.selection_certificate.selected_count,
-        "omittedCount": draft.selection_certificate.omitted_count,
-        "selectionSteps": draft.selection_certificate.steps.len(),
+        "candidateCount": draft.selection_audit.candidate_count,
+        "selectedCount": draft.selection_audit.selected_count,
+        "omittedCount": draft.selection_audit.omitted_count,
+        "selectionSteps": draft.selection_audit.steps.len(),
         "coverageFillCount": draft.coverage_fill_count(),
         "tokenBudget": {
-            "limit": draft.selection_certificate.budget_limit,
-            "used": draft.selection_certificate.budget_used,
+            "limit": draft.selection_audit.budget_limit,
+            "used": draft.selection_audit.budget_used,
             "utilization": quality.budget_utilization,
         },
         "pruning": {
             "tokenBudgetExceeded": quality.omissions.token_budget_exceeded,
             "redundantCandidates": quality.omissions.redundant_candidates,
         },
+        "slo": pack_assembly_slo_json(slo),
         "hashPresent": draft.hash.is_some(),
+    })
+}
+
+fn pack_assembly_slo_json(slo: &PackAssemblySlo) -> serde_json::Value {
+    serde_json::json!({
+        "schema": slo.schema,
+        "profile": slo.profile.as_str(),
+        "budgetClass": {
+            "candidatesScannedMax": slo.budget_class.candidates_scanned_max,
+            "graphTraversalMaxEdges": slo.budget_class.graph_traversal_max_edges,
+            "elapsedMsTarget": slo.budget_class.elapsed_ms_target,
+            "elapsedMsWarning": slo.budget_class.elapsed_ms_warning,
+            "elapsedMsFailure": slo.budget_class.elapsed_ms_failure,
+            "concurrentPackMax": slo.budget_class.concurrent_pack_max,
+        },
+        "actuals": {
+            "candidateCount": slo.actuals.candidate_count,
+            "scannedCount": slo.actuals.scanned_count,
+            "indexGeneration": slo.actuals.index_generation,
+            "graphGeneration": slo.actuals.graph_generation,
+            "graphEdgesTraversed": slo.actuals.graph_edges_traversed,
+            "elapsedMs": slo.actuals.elapsed_ms,
+            "memoryBytesPeak": slo.actuals.memory_bytes_peak,
+        },
+        "status": slo.status.as_str(),
+        "degradations": slo.degradations.iter().map(|entry| {
+            serde_json::json!({
+                "code": entry.code,
+                "severity": entry.severity.as_str(),
+                "message": &entry.message,
+                "repair": &entry.repair,
+            })
+        }).collect::<Vec<_>>(),
     })
 }
 
@@ -1227,6 +1514,9 @@ fn missing_index_search_report(
         source_mode_applied: crate::core::search::SearchSourceMode::Hybrid,
         source_mode_fallback: false,
         strict_source_mode: false,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+        scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
     }
 }
 
@@ -1803,6 +2093,92 @@ fn persist_pack_record(
         .map_err(|e| format!("insert failed: {e}"))
 }
 
+fn load_coordination_snapshot(
+    options: &ContextPackOptions,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Option<PackCoordinationSnapshot> {
+    let path = options.coordination_snapshot_path.as_ref()?;
+    match std::fs::read_to_string(path) {
+        Ok(contents) => match PackCoordinationSnapshot::from_json_str(
+            &contents,
+            options.coordination_stale_after_ms,
+        ) {
+            Ok(snapshot) => {
+                crate::obs::log_event(
+                    crate::obs::TestEvent::new(
+                        crate::obs::test_id_or("coordination_snapshot"),
+                        crate::obs::EventKind::Note,
+                    )
+                    .with_field(
+                        "kind",
+                        serde_json::Value::String("coordination_snapshot".to_owned()),
+                    )
+                    .with_field(
+                        "source_count",
+                        serde_json::Value::Number(snapshot.summary.source_count.into()),
+                    )
+                    .with_field(
+                        "active_conflict_count",
+                        serde_json::Value::Number(snapshot.summary.active_conflict_count.into()),
+                    ),
+                );
+                push_coordination_snapshot_degradations(degraded, &snapshot);
+                Some(snapshot)
+            }
+            Err(message) => {
+                push_degradation(
+                    degraded,
+                    "coordination_snapshot_unavailable",
+                    ContextResponseSeverity::Low,
+                    message,
+                    Some("Regenerate the redacted coordination snapshot JSON.".to_owned()),
+                );
+                None
+            }
+        },
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "coordination_snapshot_unavailable",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Coordination snapshot at {} could not be read: {error}",
+                    path.display()
+                ),
+                Some("Check --coordination-snapshot path and permissions.".to_owned()),
+            );
+            None
+        }
+    }
+}
+
+fn push_coordination_snapshot_degradations(
+    degraded: &mut Vec<ContextResponseDegradation>,
+    snapshot: &PackCoordinationSnapshot,
+) {
+    if snapshot.summary.stale_source_count > 0 {
+        push_degradation(
+            degraded,
+            "coordination_source_stale",
+            ContextResponseSeverity::Low,
+            "Coordination snapshot contains stale sources.",
+            Some(
+                "Regenerate the redacted coordination snapshot before relying on coordination posture."
+                    .to_owned(),
+            ),
+        );
+    }
+    if snapshot.summary.unavailable_source_count > 0 {
+        push_degradation(
+            degraded,
+            "coordination_source_unavailable",
+            ContextResponseSeverity::Medium,
+            "Coordination snapshot contains unavailable sources.",
+            Some("Provide fresh redacted coordination sources or rerun ee swarm brief.".to_owned()),
+        );
+    }
+}
+
 fn compute_pack_hash(
     request: &ContextRequest,
     draft: &crate::pack::PackDraft,
@@ -1822,7 +2198,24 @@ fn compute_pack_hash_with_output_options(
     degraded: &[ContextResponseDegradation],
     output_options: ContextPackOutputOptions,
 ) -> String {
-    let components = compute_pack_hash_components(request, draft, degraded, output_options);
+    compute_pack_hash_with_output_options_and_coordination(
+        request,
+        draft,
+        degraded,
+        output_options,
+        None,
+    )
+}
+
+fn compute_pack_hash_with_output_options_and_coordination(
+    request: &ContextRequest,
+    draft: &crate::pack::PackDraft,
+    degraded: &[ContextResponseDegradation],
+    output_options: ContextPackOutputOptions,
+    coordination: Option<&PackCoordinationSnapshot>,
+) -> String {
+    let components =
+        compute_pack_hash_components(request, draft, degraded, output_options, coordination);
     log_pack_hash_components(&components);
     components.composite_hash
 }
@@ -1841,6 +2234,7 @@ fn compute_pack_hash_components(
     draft: &crate::pack::PackDraft,
     degraded: &[ContextResponseDegradation],
     output_options: ContextPackOutputOptions,
+    coordination: Option<&PackCoordinationSnapshot>,
 ) -> PackHashComponents {
     use blake3::Hasher;
 
@@ -1849,6 +2243,7 @@ fn compute_pack_hash_components(
     request_hasher.update(request.profile.as_str().as_bytes());
     request_hasher.update(&request.budget.max_tokens().to_le_bytes());
     request_hasher.update(output_options.profile.as_str().as_bytes());
+    request_hasher.update(output_options.resource_profile.as_str().as_bytes());
     request_hasher.update(&[u8::from(output_options.include_coverage_fill)]);
     request_hasher.update(&[u8::from(output_options.include_rendered_text)]);
     request_hasher.update(&[u8::from(output_options.include_skipped)]);
@@ -1858,7 +2253,14 @@ fn compute_pack_hash_components(
     let mut draft_hasher = Hasher::new();
     draft_hasher.update(&draft.used_tokens.to_le_bytes());
 
-    let rendered_text = crate::pack::render_context_markdown(request, draft, degraded);
+    let rendered_text = crate::pack::render_context_markdown_with_analysis(
+        request,
+        draft,
+        degraded,
+        &[],
+        &[],
+        coordination,
+    );
     let mut rendered_text_hasher = Hasher::new();
     rendered_text_hasher.update(rendered_text.as_bytes());
 
@@ -1867,6 +2269,7 @@ fn compute_pack_hash_components(
     composite_hasher.update(request.profile.as_str().as_bytes());
     composite_hasher.update(&request.budget.max_tokens().to_le_bytes());
     composite_hasher.update(output_options.profile.as_str().as_bytes());
+    composite_hasher.update(output_options.resource_profile.as_str().as_bytes());
     composite_hasher.update(&[u8::from(output_options.include_coverage_fill)]);
     composite_hasher.update(&[u8::from(output_options.include_rendered_text)]);
     composite_hasher.update(&[u8::from(output_options.include_skipped)]);
@@ -1875,6 +2278,10 @@ fn compute_pack_hash_components(
     composite_hasher.update(&draft.used_tokens.to_le_bytes());
     if output_options.include_rendered_text {
         composite_hasher.update(rendered_text.as_bytes());
+    }
+    if let Some(coordination) = coordination {
+        let coordination_json = serde_json::to_string(coordination).unwrap_or_default();
+        composite_hasher.update(coordination_json.as_bytes());
     }
 
     for item in &draft.items {
@@ -2708,6 +3115,114 @@ fn redaction_allow_categories(content: &str, filters: &crate::models::RedactionF
         .all(|reason| allowed.contains(reason))
 }
 
+fn filter_candidates_by_memory_scope(
+    connection: &DbConnection,
+    candidates: &mut Vec<PackCandidate>,
+    scope_context: &MemoryScopeContext,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> MemoryScopeStats {
+    let mut stats = scope_context.stats();
+    if candidates.is_empty() {
+        return stats;
+    }
+
+    if matches!(
+        scope_context.scope,
+        MemoryScope::Swarm | MemoryScope::Workspace
+    ) {
+        for _ in candidates.iter() {
+            stats.record_candidate(true);
+        }
+        return stats;
+    }
+
+    if matches!(
+        scope_context.scope,
+        MemoryScope::SelfOnly | MemoryScope::Team
+    ) && scope_context.current_agent.is_none()
+    {
+        push_degradation(
+            degraded,
+            "scope_agent_unavailable",
+            ContextResponseSeverity::Medium,
+            format!(
+                "Memory scope `{}` needs the current agent identity, but EE_AGENT_NAME is unset.",
+                scope_context.scope.as_str()
+            ),
+            Some("Set EE_AGENT_NAME for self/team scoped retrieval.".to_string()),
+        );
+    }
+
+    let mut scoped = Vec::with_capacity(candidates.len());
+    let mut read_error: Option<String> = None;
+    for candidate in std::mem::take(candidates) {
+        let memory_id = candidate.memory_id.to_string();
+        match connection.get_memory(&memory_id) {
+            Ok(Some(memory)) => {
+                let in_scope = scope_context.memory_in_scope(&memory);
+                stats.record_candidate_id(in_scope, Some(&memory_id));
+                if in_scope {
+                    scoped.push(candidate);
+                }
+            }
+            Ok(None) => {
+                stats.record_candidate_id(false, Some(&memory_id));
+            }
+            Err(error) => {
+                stats.record_candidate_id(false, Some(&memory_id));
+                if read_error.is_none() {
+                    read_error = Some(error.to_string());
+                }
+            }
+        }
+    }
+
+    if let Some(error) = read_error {
+        push_degradation(
+            degraded,
+            "scope_metadata_unavailable",
+            ContextResponseSeverity::Medium,
+            format!("Context could not verify memory scope against the memory database: {error}"),
+            Some("ee doctor --json".to_string()),
+        );
+    }
+
+    if scope_context.strict_scope && stats.strict_violations > 0 {
+        let excluded = stats.strict_violations;
+        push_degradation(
+            degraded,
+            "scope_strict_excluded_evidence",
+            ContextResponseSeverity::Medium,
+            format!(
+                "Strict memory scope `{}` found {excluded} relevant candidate{} outside the requested trust lane; returning no scoped results.",
+                scope_context.scope.as_str(),
+                plural_suffix(excluded),
+            ),
+            Some("Retry without --strict-scope or use --memory-scope swarm.".to_string()),
+        );
+        scoped.clear();
+    } else if stats.candidates_excluded_by_scope > 0 {
+        let excluded = stats.candidates_excluded_by_scope;
+        push_degradation(
+            degraded,
+            "scope_excluded_evidence",
+            ContextResponseSeverity::Low,
+            format!(
+                "Memory scope `{}` excluded {excluded} candidate{} outside the requested trust lane.",
+                scope_context.scope.as_str(),
+                plural_suffix(excluded),
+            ),
+            Some(
+                "Use --memory-scope swarm to inspect all candidate evidence, or pass --strict-scope to fail closed."
+                    .to_string(),
+            ),
+        );
+    }
+
+    *candidates = scoped;
+    stats
+}
+
 fn filter_candidates_by_redaction_allow_categories(
     candidates: &mut Vec<PackCandidate>,
     filters: &crate::models::RedactionFilters,
@@ -3499,6 +4014,55 @@ fn push_degradation(
     }
 }
 
+fn push_consensus_conflict_degradations(
+    degraded: &mut Vec<ContextResponseDegradation>,
+    report: &ConsensusConflictReport,
+    selected_count: usize,
+) {
+    if selected_count == 0 && report.consensus.is_empty() && report.conflicts.is_empty() {
+        push_degradation(
+            degraded,
+            "consensus_no_clusters",
+            ContextResponseSeverity::Low,
+            "Context pack did not contain enough query-relevant neighboring memories to surface consensus clusters.",
+            Some(
+                "Broaden the query, increase --candidate-pool, or add tagged memories for this subject."
+                    .to_string(),
+            ),
+        );
+    }
+
+    if report
+        .conflicts
+        .iter()
+        .any(|conflict| conflict.kind == ConflictKind::Direct)
+    {
+        push_degradation(
+            degraded,
+            "conflict_direct",
+            ContextResponseSeverity::Medium,
+            "Context pack contains query-relevant memories with directly conflicting claims.",
+            Some("Review the conflicting memory IDs before acting on either claim.".to_string()),
+        );
+    }
+
+    if report
+        .conflicts
+        .iter()
+        .any(|conflict| conflict.recommended_action == ConflictRecommendedAction::PromoteOne)
+    {
+        push_degradation(
+            degraded,
+            "conflict_trust_mismatch",
+            ContextResponseSeverity::High,
+            "Context pack contains a trust mismatch conflict where a higher-trust memory should be preferred over an unvalidated assertion.",
+            Some(
+                "Promote the higher-trust memory only after reviewing its provenance.".to_string(),
+            ),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -3507,8 +4071,9 @@ mod tests {
 
     use super::{
         AccessLevel, CandidateResolutionMetrics, CapabilitySet, CommandContext,
-        ContextPerformanceTrace, PerformanceTiming, candidate_selection_why,
-        context_performance_json, focus_candidate_why, focus_relevance, unit_score,
+        ContextPerformanceTrace, PackSlotAcquisition, PerformanceTiming, candidate_selection_why,
+        context_performance_json, focus_candidate_why, focus_relevance, pack_assembly_slo_for_run,
+        try_acquire_pack_slot, unit_score,
     };
     use crate::config::WorkspaceLocation;
     use crate::core::budget::RequestBudget;
@@ -3518,13 +4083,14 @@ mod tests {
     };
     use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection, StoredMemory};
     use crate::models::{
-        FocusItem, FocusState, MemoryId, ProvenanceUri, QueryTemporalFilters,
-        QueryTemporalValidity, QueryTemporalValidityPosture, TrustClass, UnitScore, WorkspaceId,
+        FocusItem, FocusState, MemoryId, MemoryScope, MemoryScopeStats, ProvenanceUri,
+        QueryTemporalFilters, QueryTemporalValidity, QueryTemporalValidityPosture, TrustClass,
+        UnitScore, WorkspaceId,
     };
     use crate::pack::{
         ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponseSeverity,
-        PackCandidate, PackCandidateInput, PackProvenance, PackSection, TokenBudget,
-        assemble_draft_with_profile,
+        PackCandidate, PackCandidateInput, PackProvenance, PackResourceProfile, PackSection,
+        TokenBudget, assemble_draft_with_profile,
     };
 
     fn workspace_at(root: &str) -> WorkspaceLocation {
@@ -3541,6 +4107,40 @@ mod tests {
 
     fn test_runtime_profile() -> RuntimeProfileReport {
         RuntimeProfileReport::for_profile(OperatingProfile::Workstation, "test_fixture")
+    }
+
+    #[test]
+    fn pack_slot_guard_enforces_lean_profile_limit() -> Result<(), String> {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+
+        let first = match try_acquire_pack_slot(workspace.path(), PackResourceProfile::Lean) {
+            PackSlotAcquisition::Acquired(guard) => guard,
+            other => {
+                return Err(format!(
+                    "first lean pack slot should be acquired: {other:?}"
+                ));
+            }
+        };
+
+        match try_acquire_pack_slot(workspace.path(), PackResourceProfile::Lean) {
+            PackSlotAcquisition::LimitReached { retry_after_ms } => {
+                assert_eq!(retry_after_ms, super::PACK_SLOT_RETRY_AFTER_MS);
+            }
+            other => {
+                return Err(format!(
+                    "second lean pack slot should be limited: {other:?}"
+                ));
+            }
+        }
+
+        drop(first);
+
+        match try_acquire_pack_slot(workspace.path(), PackResourceProfile::Lean) {
+            PackSlotAcquisition::Acquired(_guard) => Ok(()),
+            other => Err(format!(
+                "lean pack slot should be available after guard drop: {other:?}"
+            )),
+        }
     }
 
     fn query_time(raw: &str) -> chrono::DateTime<chrono::Utc> {
@@ -3733,6 +4333,9 @@ mod tests {
             source_mode_applied: crate::core::search::SearchSourceMode::Hybrid,
             source_mode_fallback: false,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
         };
         let mut degraded = Vec::new();
 
@@ -3870,6 +4473,9 @@ mod tests {
             source_mode_applied: crate::core::search::SearchSourceMode::Hybrid,
             source_mode_fallback: false,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
         };
 
         let mut first_degraded = Vec::new();
@@ -4035,6 +4641,9 @@ mod tests {
             source_mode_applied: crate::core::search::SearchSourceMode::Hybrid,
             source_mode_fallback: false,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
         };
         let options = super::ContextPackOptions {
             workspace_path: PathBuf::from("/tmp/ee-explain"),
@@ -4052,7 +4661,11 @@ mod tests {
             include_expired: false,
             include_future: false,
             include_stale: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
             pagination: None,
+            coordination_snapshot_path: None,
+            coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             output_options: Default::default(),
         };
         let trace = ContextPerformanceTrace {
@@ -4074,6 +4687,12 @@ mod tests {
             }],
             ..ContextPerformanceTrace::default()
         };
+        let slo = pack_assembly_slo_for_run(
+            options.output_options.resource_profile,
+            &draft,
+            &search_report,
+            &trace,
+        );
 
         let json = context_performance_json(
             "pack",
@@ -4083,6 +4702,7 @@ mod tests {
             &draft,
             &[],
             &trace,
+            &slo,
         );
         let rendered = json.to_string();
 
@@ -4166,7 +4786,11 @@ mod tests {
             include_expired: false,
             include_future: false,
             include_stale: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
             pagination: None,
+            coordination_snapshot_path: None,
+            coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             output_options: Default::default(),
         })
         .map_err(|error| error.to_string())?;
@@ -4262,7 +4886,11 @@ mod tests {
             include_expired: false,
             include_future: false,
             include_stale: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
             pagination: None,
+            coordination_snapshot_path: None,
+            coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             output_options: Default::default(),
         };
 
@@ -4373,7 +5001,11 @@ mod tests {
             include_expired: false,
             include_future: false,
             include_stale: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
             pagination: None,
+            coordination_snapshot_path: None,
+            coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             output_options: Default::default(),
         };
 
@@ -4789,10 +5421,9 @@ mod tests {
         };
         use crate::models::{ProvenanceUri, TrustClass, UnitScore};
         use crate::pack::{
-            ContextRequest, PackDraft, PackDraftItem, PackGuaranteeStatus, PackOmission,
-            PackOmissionReason, PackProvenance, PackRejectionStage, PackSection,
-            PackSelectionCertificate, PackSelectionObjective, PackSelectionPhase, PackTrustSignal,
-            TokenBudget,
+            ContextRequest, PackDraft, PackDraftItem, PackOmission, PackOmissionReason,
+            PackProvenance, PackRejectionStage, PackSection, PackSelectionAudit,
+            PackSelectionObjective, PackSelectionPhase, PackTrustSignal, TokenBudget,
         };
 
         let request =
@@ -4831,13 +5462,11 @@ mod tests {
             used_tokens: 10,
             items: vec![base_item.clone()],
             omitted: vec![],
-            selection_certificate: PackSelectionCertificate {
-                certificate_id: None,
+            selection_audit: PackSelectionAudit {
                 profile: request.profile,
                 objective: PackSelectionObjective::MmrRedundancy,
-                algorithm: "test_deterministic_selection",
-                guarantee: "test certificate only",
-                guarantee_status: PackGuaranteeStatus::Conditional,
+                algorithm_id: "test_deterministic_selection",
+                algorithm_description: "Test-only deterministic selection audit.",
                 candidate_count: 1,
                 selected_count: 1,
                 omitted_count: 0,
@@ -4864,6 +5493,17 @@ mod tests {
         assert_ne!(
             hash_base, hash_lean,
             "pack hash must include output-profile field omissions"
+        );
+        let hash_swarm_heavy = compute_pack_hash_with_output_options(
+            &request,
+            &base_draft,
+            &base_degraded,
+            ContextPackOutputOptions::default()
+                .with_resource_profile(crate::pack::PackResourceProfile::SwarmHeavy),
+        );
+        assert_ne!(
+            hash_base, hash_swarm_heavy,
+            "pack hash must include resource-profile SLO output"
         );
         let rendered_base =
             crate::pack::render_context_markdown(&request, &base_draft, &base_degraded);

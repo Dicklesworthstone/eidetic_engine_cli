@@ -23,6 +23,7 @@
     "message_contains": [
       "Fixture tier mismatch"
     ],
-    "repair_contains": "same fixture tier"
+    "repair_contains": "same fixture tier",
+    "repair_string": "Compare artifacts from the same fixture tier"
   }
 }

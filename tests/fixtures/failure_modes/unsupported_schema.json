@@ -25,6 +25,7 @@
       "unsupported",
       "schema"
     ],
-    "repair_contains": "current ee version"
+    "repair_contains": "current ee version",
+    "repair_string": "Normalize the baseline artifact with the current ee version"
   }
 }

@@ -25,6 +25,8 @@
     "message_contains": [
       "missing"
     ],
-    "repair_contains": "ee tripwire list"
+    "repair_contains": "ee tripwire list",
+    "repair_string": "ee tripwire list --json",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

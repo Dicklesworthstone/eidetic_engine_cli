@@ -23,7 +23,7 @@ in the same commit, keeping the catalog complete by construction.
 | `source_mode_fallback` | search | warning | bd-17c65.2.6 (B6) |
 | `low_recall_after_floor` | search | info | bd-17c65.2.1 (B1) |
 | `duplicates_collapsed` | search | low | bd-17c65.2.3 (B3) |
-| `index_stale` | search, context | high | bd-17c65.2.1 (B1) |
+| `index_stale` | index status | high | bd-17c65.2.1 (B1) |
 | `search_index_stale` | search, context | medium | bd-17c65.2.1 (B1) |
 | `index_missing` | search, context | medium | bd-17c65.2.1 (B1) |
 | `index_corrupt` | search, context | high | bd-17c65.2.1 (B1) |
@@ -41,13 +41,13 @@ in the same commit, keeping the catalog complete by construction.
 | `policy_tag_rejected_with_details` | remember, note | low | bd-17c65.3.4 (C4) |
 | `policy_secret_detected_with_offsets` | remember, note | medium | bd-17c65.3.4 (C4) |
 | `runtime_unavailable` | status, doctor | high | bd-17c65.10.6 (J6) |
-| `storage_unavailable` | doctor, dependency contract | high | bd-17c65.10.6 (J6) |
-| `search_unavailable` | doctor, dependency contract | medium | bd-17c65.10.6 (J6) |
+| `storage_unavailable` | status, dependency contract | high | bd-17c65.10.6 (J6) |
+| `search_unavailable` | status, dependency contract | medium | bd-17c65.10.6 (J6) |
 | `graph_unavailable` | diag dependencies, dependency contract | medium | bd-17c65.10.6 (J6) |
 | `cass_unavailable` | doctor, import cass | medium | bd-17c65.10.6 (J6) |
 | `toon_unavailable` | status, doctor | medium | bd-17c65.10.6 (J6) |
 | `diagram_backend_unavailable` | diag dependencies, dependency contract | medium | bd-17c65.10.6 (J6) |
-| `agent_detection_unavailable` | agent sources, doctor | medium | bd-17c65.10.6 (J6) |
+| `agent_detection_unavailable` | agent status, doctor | medium | bd-17c65.10.6 (J6) |
 | `mcp_unavailable` | diag dependencies, dependency contract | medium | bd-17c65.10.6 (J6) |
 | `storage_not_inspected` | status | low | bd-17c65.10.6 (J6) |
 | `storage_not_initialized` | status | medium | bd-17c65.10.6 (J6) |
@@ -80,7 +80,15 @@ in the same commit, keeping the catalog complete by construction.
 | `curation_ttl_policy_missing` | curate disposition | medium | bd-17c65.7.4 (G4) |
 | `curation_harmful_candidate_escalated` | curate disposition, status | high | bd-17c65.7.4 (G4) |
 | `curation_ttl_blocked` | status, curate disposition | medium | bd-17c65.7.4 (G4) |
+| `level_transition_tombstoned_rejected` | workflow close, curate apply, curate tombstone | medium | bd-17c65.7.8 (G9) |
+| `level_transition_requires_evidence` | curate apply, workflow close | medium | bd-17c65.7.8 (G9) |
+| `level_transition_concurrent_conflict` | workflow close, job run | medium | bd-17c65.7.8 (G9) |
 | `verification_evidence_not_found` | why | low | bd-1zb7k.3 (S2) |
+| `consensus_no_clusters` | context | low | bd-1zb7k.9 (S8) |
+| `conflict_direct` | context | medium | bd-1zb7k.9 (S8) |
+| `conflict_trust_mismatch` | context | high | bd-1zb7k.9 (S8) |
+| `coordination_source_stale` | context, pack | low | bd-1zb7k.4 (S3) |
+| `coordination_source_unavailable` | context, pack | medium | bd-1zb7k.4 (S3) |
 | `why_pack_selection_unavailable` | why | low | bd-17c65.10.6 (J6) |
 | `why_result_target_unsupported_source` | why | medium | bd-17c65.10.6 (J6) |
 | `graph_memory_not_in_snapshot` | why | low | bd-17c65.10.6 (J6) |
@@ -141,6 +149,8 @@ in the same commit, keeping the catalog complete by construction.
 | `decay_sweep_workspace_unresolved` | job run | medium | bd-17c65.10.6 (J6) |
 | `decay_sweep_item_limit_too_large` | job run | medium | bd-17c65.10.6 (J6) |
 | `decay_sweep_handler_failed` | job run | high | bd-17c65.10.6 (J6) |
+| `learn_decay_config_invalid` | maintenance run | medium | bd-17c65.10.6 (J6) |
+| `learn_decay_config_read_failed` | maintenance run | medium | bd-17c65.10.6 (J6) |
 | `graph_feature_disabled` | graph, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
 | `graph_snapshot_missing` | graph export, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
 | `graph_snapshot_stale` | graph export, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
@@ -177,6 +187,8 @@ in the same commit, keeping the catalog complete by construction.
 | `agent_mail_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
 | `rch_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
 | `agent_status_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
+| `swarm_scale_budget_exceeded` | swarm-scale benchmark | warning | bd-1zb7k.8 (S7) |
+| `swarm_scale_nondeterminism` | swarm-scale benchmark | high | bd-1zb7k.8 (S7) |
 | `write_owner_busy` | write owner | medium | bd-17c65.10.6 (J6) |
 | `write_spool_backpressure` | write spool | medium | bd-17c65.10.6 (J6) |
 | `situation_decisioning_unavailable` | situation classify | warning | bd-17c65.10.6 (J6) |
@@ -186,6 +198,10 @@ in the same commit, keeping the catalog complete by construction.
 | `science_backend_unavailable` | science status | high | bd-17c65.10.6 (J6) |
 | `science_input_too_large` | science analytics | medium | bd-17c65.10.6 (J6) |
 | `science_budget_exceeded` | science analytics | medium | bd-17c65.10.6 (J6) |
+| `scope_agent_unavailable` | search, context | warning | bd-17c65.10.6 (J6) |
+| `scope_excluded_evidence` | search, context | low | bd-17c65.10.6 (J6) |
+| `scope_metadata_unavailable` | search, context | medium | bd-17c65.10.6 (J6) |
+| `scope_strict_excluded_evidence` | search, context | medium | bd-17c65.10.6 (J6) |
 | `drift_analysis_unavailable` | analyze drift | high | bd-17c65.10.6 (J6) |
 | `drift_no_evaluation_snapshots` | analyze drift | high | bd-17c65.10.6 (J6) |
 | `drift_no_comparable_metrics` | analyze drift | medium | bd-17c65.10.6 (J6) |

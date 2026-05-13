@@ -11,12 +11,11 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "The write spool is full or above its pending-byte budget, so new writes receive backpressure.",
+    "description": "The write-spool diagnostic enqueues more deterministic write intents than the configured pending budget allows, so new writes receive backpressure.",
     "setup_commands": [
-      "ee init --workspace .",
-      "# fill the write spool through a concurrency harness"
+      "ee init --workspace ."
     ],
-    "invocation": "ee remember 'queued write' --workspace . --json"
+    "invocation": "ee diag write-spool --max-pending 1 --enqueue 2 --workspace . --json"
   },
   "expected_emission": {
     "code": "write_spool_backpressure",
@@ -24,6 +23,6 @@
     "message_contains": [
       "backpressure"
     ],
-    "repair_contains": "retry"
+    "repair_contains": "daemon status"
   }
 }

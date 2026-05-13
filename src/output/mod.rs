@@ -42,9 +42,10 @@ use crate::models::{
     RESPONSE_SCHEMA_V0, RESPONSE_SCHEMA_V1, RecoveryAction, RecoveryKind,
 };
 use crate::pack::{
-    ContextResponse, PackAdvisoryBanner, PackAdvisoryNote, PackItemProvenance, PackOmission,
-    PackOmissionMetrics, PackQualityMetrics, PackSectionMetric, PackSelectedItem,
-    PackSelectionCertificate, PackSelectionStep, RenderedPackProvenance,
+    ConflictEntry, ConsensusEntry, ConsensusProducer, ContextResponse, PackAdvisoryBanner,
+    PackAdvisoryNote, PackAssemblySlo, PackItemProvenance, PackOmission, PackOmissionMetrics,
+    PackQualityMetrics, PackSectionMetric, PackSelectedItem, PackSelectionAudit, PackSelectionStep,
+    RenderedPackProvenance,
 };
 use crate::steward::{
     MAINTENANCE_JOB_LIST_SCHEMA_V1, MAINTENANCE_JOB_ROW_SCHEMA_V1, MAINTENANCE_JOB_SHOW_SCHEMA_V1,
@@ -948,6 +949,7 @@ struct OutputEnvironment {
     ee_json: Option<String>,
     ee_output_format: Option<String>,
     ee_format: Option<String>,
+    ee_disable_toon: Option<String>,
     toon_default_format: Option<String>,
     ee_agent_mode: Option<String>,
     ee_hook_mode: Option<String>,
@@ -962,6 +964,7 @@ impl OutputEnvironment {
             ee_json: read(EnvVar::Json),
             ee_output_format: read(EnvVar::OutputFormat),
             ee_format: read(EnvVar::Format),
+            ee_disable_toon: read(EnvVar::DisableToon),
             toon_default_format: env::var("TOON_DEFAULT_FORMAT").ok(),
             ee_agent_mode: read(EnvVar::AgentMode),
             ee_hook_mode: read(EnvVar::HookMode),
@@ -981,6 +984,11 @@ fn env_flag_truthy(value: Option<&str>) -> bool {
             || trimmed.eq_ignore_ascii_case("no")
             || trimmed.eq_ignore_ascii_case("off"))
     })
+}
+
+#[must_use]
+pub fn toon_output_available() -> bool {
+    !env_flag_truthy(read(EnvVar::DisableToon).as_deref())
 }
 
 fn renderer_from_env_value(value: &str) -> Option<Renderer> {
@@ -1057,6 +1065,13 @@ impl OutputContext {
             renderer
         } else {
             Renderer::Human
+        };
+        let renderer = if matches!(renderer, Renderer::Toon)
+            && env_flag_truthy(environment.ee_disable_toon.as_deref())
+        {
+            Renderer::Json
+        } else {
+            renderer
         };
 
         let color_enabled = (is_tty || force_color) && !no_color && !renderer.is_machine_readable();
@@ -1492,11 +1507,14 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
         },
         "status" => match preset {
             FieldProfile::Minimal => &["command", "version", "workspace"],
-            FieldProfile::Summary => &["command", "version", "workspace", "capabilities"],
+            FieldProfile::Summary => {
+                &["command", "version", "workspace", "posture", "capabilities"]
+            }
             FieldProfile::Standard => &[
                 "command",
                 "version",
                 "workspace",
+                "posture",
                 "capabilities",
                 "runtime",
                 "memoryHealth",
@@ -2013,6 +2031,9 @@ pub struct ContextJsonRenderOptions {
     /// pre-E2 verbose behavior, useful for diagnostic mode and the
     /// loud-baseline golden snapshot.
     pub include_non_affecting_degradations: bool,
+    /// Transitional N5.1 compatibility path for consumers explicitly asking for
+    /// the old field name during the one-release rename window.
+    pub include_legacy_selection_certificate: bool,
 }
 
 impl Default for ContextJsonRenderOptions {
@@ -2023,6 +2044,8 @@ impl Default for ContextJsonRenderOptions {
             include_meta: true,
             include_verbose_meta: false,
             include_non_affecting_degradations: false,
+            include_legacy_selection_certificate: env::var_os("EE_LEGACY_SELECTION_CERTIFICATE")
+                .is_some(),
         }
     }
 }
@@ -2035,6 +2058,8 @@ impl From<ContextPackOutputOptions> for ContextJsonRenderOptions {
             include_meta: options.include_meta,
             include_verbose_meta: options.include_verbose_meta,
             include_non_affecting_degradations: options.include_non_affecting_degradations,
+            include_legacy_selection_certificate: env::var_os("EE_LEGACY_SELECTION_CERTIFICATE")
+                .is_some(),
         }
     }
 }
@@ -2067,6 +2092,10 @@ pub fn render_context_response_json_with_options(
             if let Some(max_results) = response.data.request.max_results {
                 request.field_u32("maxResults", max_results);
             }
+            if let Some(scope_stats) = &response.data.scope_stats {
+                request.field_str("memoryScope", scope_stats.scope_applied.as_str());
+                request.field_bool("strictScope", scope_stats.strict_scope);
+            }
             let sections = string_array_json(
                 response
                     .data
@@ -2077,6 +2106,11 @@ pub fn render_context_response_json_with_options(
             );
             request.field_raw("sections", &sections);
         });
+        if let Some(scope_stats) = &response.data.scope_stats {
+            d.field_raw("scopeStats", &scope_stats.data_json().to_string());
+        }
+        d.field_array_of_objects("consensus", &response.data.consensus, build_consensus_entry);
+        d.field_array_of_objects("conflicts", &response.data.conflicts, build_conflict_entry);
         d.field_object("pack", |pack| {
             pack.field_str("query", &response.data.pack.query);
             match &response.data.pack.hash {
@@ -2091,7 +2125,7 @@ pub fn render_context_response_json_with_options(
                     meta.field_object("algorithm", |algorithm| {
                         build_pack_algorithm_metadata(
                             algorithm,
-                            &response.data.pack.selection_certificate,
+                            &response.data.pack.selection_audit,
                         );
                     });
                     if options.include_verbose_meta {
@@ -2127,6 +2161,11 @@ pub fn render_context_response_json_with_options(
                     ),
                 );
             });
+            if let Some(slo) = &response.data.slo {
+                pack.field_object("slo", |slo_obj| {
+                    build_pack_assembly_slo(slo_obj, slo);
+                });
+            }
             let advisory_banner = response.data.advisory_banner();
             pack.field_object("advisoryBanner", |banner| {
                 build_pack_advisory_banner(banner, &advisory_banner);
@@ -2135,15 +2174,31 @@ pub fn render_context_response_json_with_options(
             pack.field_object("quality", |quality| {
                 build_pack_quality_metrics(quality, &quality_metrics);
             });
-            pack.field_object("selectionCertificate", |certificate| {
-                build_pack_selection_certificate(
-                    certificate,
-                    &response.data.pack.selection_certificate,
-                );
+            pack.field_object("selectionAudit", |audit| {
+                build_pack_selection_audit(audit, &response.data.pack.selection_audit);
             });
+            if let Some(coordination) = &response.data.coordination {
+                if let Ok(coordination_json) = serde_json::to_string(coordination) {
+                    pack.field_raw("coordination", &coordination_json);
+                }
+            }
+            if options.include_legacy_selection_certificate {
+                pack.field_object("deprecation", |deprecation| {
+                    deprecation.field_str("deprecatedField", "selectionCertificate");
+                    deprecation.field_str("replacementField", "selectionAudit");
+                    deprecation.field_str("removalRelease", "0.3.0");
+                    deprecation.field_str(
+                        "message",
+                        "selectionCertificate was renamed to selectionAudit by ADR 0031.",
+                    );
+                });
+                pack.field_object("selectionCertificate", |legacy| {
+                    build_pack_selection_audit(legacy, &response.data.pack.selection_audit);
+                });
+            }
             // Bead bd-17c65.1.1 (A1 phase 1): consolidate per-item data from the
-            // four parallel pack structures (`items[]`, `selectionCertificate
-            // .selected_items[]`, `selectionCertificate.steps[]`,
+            // four parallel pack structures (`items[]`, `selectionAudit
+            // .selected_items[]`, `selectionAudit.steps[]`,
             // `provenanceFooter.entries[]`) onto each `items[]` entry. The
             // legacy selected structures no longer emit in JSON. After phase
             // 2, an agent reading `items[i]` gets the union of fields and no
@@ -2152,7 +2207,7 @@ pub fn render_context_response_json_with_options(
             let selected_by_rank: std::collections::BTreeMap<u32, &PackSelectedItem> = response
                 .data
                 .pack
-                .selection_certificate
+                .selection_audit
                 .selected_items
                 .iter()
                 .map(|s| (s.rank, s))
@@ -2160,7 +2215,7 @@ pub fn render_context_response_json_with_options(
             let step_by_rank: std::collections::BTreeMap<u32, &PackSelectionStep> = response
                 .data
                 .pack
-                .selection_certificate
+                .selection_audit
                 .steps
                 .iter()
                 .map(|s| (s.rank, s))
@@ -2183,7 +2238,7 @@ pub fn render_context_response_json_with_options(
                     scores.field_raw("utility", &score_json(item.utility.into_inner()));
                     // A1 phase 1: surface marginalGain / objectiveValue from the
                     // selection-step trace so agents don't have to cross-reference
-                    // selectionCertificate.steps[] by rank.
+                    // selectionAudit.steps[] by rank.
                     if let Some(step) = step_by_rank.get(&item.rank) {
                         scores.field_raw("marginalGain", &score_json(step.marginal_gain));
                         scores.field_raw("objectiveValue", &score_json(step.objective_value));
@@ -2249,8 +2304,8 @@ pub fn render_context_response_json_with_options(
                     obj.field_str("diversityKey", diversity_key);
                 }
                 // A1 phase 1: surface feasibility + tokenCost from the
-                // certificate's selected_items[] lookup so agents reading
-                // items[] don't have to chase selectionCertificate.selectedItems
+                // audit's selected_items[] lookup so agents reading items[]
+                // don't have to chase selectionAudit.selectedItems
                 // for per-item budget feasibility.
                 if let Some(selected) = selected_by_rank.get(&item.rank) {
                     obj.field_u32("tokenCost", selected.token_cost);
@@ -2321,6 +2376,50 @@ pub fn render_context_response_json_with_options(
         });
     });
     b.finish()
+}
+
+fn build_consensus_entry(obj: &mut JsonBuilder, entry: &ConsensusEntry) {
+    obj.field_str("schema", entry.schema);
+    obj.field_str("subjectFingerprint", &entry.subject_fingerprint);
+    obj.field_str("subjectSummary", &entry.subject_summary);
+    obj.field_raw("agreementScore", &score_json(entry.agreement_score));
+    obj.field_raw(
+        "memberMemoryIds",
+        &string_array_json(entry.member_memory_ids.iter().map(ToString::to_string)),
+    );
+    obj.field_array_of_objects(
+        "memberProducers",
+        &entry.member_producers,
+        build_consensus_producer,
+    );
+    obj.field_raw(
+        "semanticSimilarityMin",
+        &score_json(entry.semantic_similarity_min),
+    );
+    field_optional_str(obj, "firstRecordedAt", entry.first_recorded_at.as_deref());
+    field_optional_str(obj, "lastReinforcedAt", entry.last_reinforced_at.as_deref());
+}
+
+fn build_consensus_producer(obj: &mut JsonBuilder, producer: &ConsensusProducer) {
+    field_optional_str(obj, "agentName", producer.agent_name.as_deref());
+    obj.field_str("trustClass", producer.trust_class.as_str());
+}
+
+fn build_conflict_entry(obj: &mut JsonBuilder, entry: &ConflictEntry) {
+    obj.field_str("schema", entry.schema);
+    obj.field_str("subjectFingerprint", &entry.subject_fingerprint);
+    obj.field_str("kind", entry.kind.as_str());
+    obj.field_raw(
+        "conflictingMemoryIds",
+        &string_array_json(entry.conflicting_memory_ids.iter().map(ToString::to_string)),
+    );
+    obj.field_raw(
+        "evidencePointers",
+        &string_array_json(entry.evidence_pointers.iter()),
+    );
+    field_optional_str(obj, "earliestAt", entry.earliest_at.as_deref());
+    field_optional_str(obj, "latestAt", entry.latest_at.as_deref());
+    obj.field_str("recommendedAction", entry.recommended_action.as_str());
 }
 
 /// Render a context response as human-readable text.
@@ -2656,45 +2755,100 @@ fn build_pack_omission_metrics(obj: &mut JsonBuilder, metrics: &PackOmissionMetr
     );
 }
 
-fn build_pack_algorithm_metadata(obj: &mut JsonBuilder, certificate: &PackSelectionCertificate) {
-    obj.field_str("profile", certificate.profile.as_str());
-    obj.field_str("objective", certificate.objective.as_str());
-    obj.field_str("name", certificate.algorithm);
-    obj.field_str("guarantee", certificate.guarantee);
-    obj.field_str("guaranteeStatus", certificate.guarantee_status.as_str());
+fn build_pack_assembly_slo(obj: &mut JsonBuilder, slo: &PackAssemblySlo) {
+    obj.field_str("schema", slo.schema);
+    obj.field_str("profile", slo.profile.as_str());
+    obj.field_object("budgetClass", |budget| {
+        budget.field_raw(
+            "candidatesScannedMax",
+            &slo.budget_class.candidates_scanned_max.to_string(),
+        );
+        budget.field_raw(
+            "graphTraversalMaxEdges",
+            &slo.budget_class.graph_traversal_max_edges.to_string(),
+        );
+        budget.field_raw(
+            "elapsedMsTarget",
+            &slo.budget_class.elapsed_ms_target.to_string(),
+        );
+        budget.field_raw(
+            "elapsedMsWarning",
+            &slo.budget_class.elapsed_ms_warning.to_string(),
+        );
+        budget.field_raw(
+            "elapsedMsFailure",
+            &slo.budget_class.elapsed_ms_failure.to_string(),
+        );
+        budget.field_raw(
+            "concurrentPackMax",
+            &slo.budget_class.concurrent_pack_max.to_string(),
+        );
+    });
+    obj.field_object("actuals", |actuals| {
+        actuals.field_raw("candidateCount", &slo.actuals.candidate_count.to_string());
+        actuals.field_raw("scannedCount", &slo.actuals.scanned_count.to_string());
+        match slo.actuals.index_generation {
+            Some(generation) => actuals.field_raw("indexGeneration", &generation.to_string()),
+            None => actuals.field_raw("indexGeneration", "null"),
+        };
+        match slo.actuals.graph_generation {
+            Some(generation) => actuals.field_raw("graphGeneration", &generation.to_string()),
+            None => actuals.field_raw("graphGeneration", "null"),
+        };
+        actuals.field_raw(
+            "graphEdgesTraversed",
+            &slo.actuals.graph_edges_traversed.to_string(),
+        );
+        actuals.field_raw("elapsedMs", &slo.actuals.elapsed_ms.to_string());
+        actuals.field_raw(
+            "memoryBytesPeak",
+            &slo.actuals.memory_bytes_peak.to_string(),
+        );
+    });
+    obj.field_str("status", slo.status.as_str());
+    obj.field_array_of_objects("degradations", &slo.degradations, |entry_obj, entry| {
+        entry_obj.field_str("code", entry.code);
+        entry_obj.field_str("severity", entry.severity.as_str());
+        entry_obj.field_str("message", &entry.message);
+        match &entry.repair {
+            Some(repair) => entry_obj.field_str("repair", repair),
+            None => entry_obj.field_raw("repair", "null"),
+        };
+    });
+}
+
+fn build_pack_algorithm_metadata(obj: &mut JsonBuilder, audit: &PackSelectionAudit) {
+    obj.field_str("profile", audit.profile.as_str());
+    obj.field_str("objective", audit.objective.as_str());
+    obj.field_str("algorithmId", audit.algorithm_id);
+    obj.field_str("algorithmDescription", audit.algorithm_description);
     obj.field_str(
         "scoringFormula",
         "unit_score(field)=clamp(field, 0.0, 1.0) for finite fields, otherwise 0.0",
     );
-    obj.field_object("guaranteeEvidence", |guarantee| {
-        guarantee.field_str("status", certificate.guarantee_status.as_str());
-        match &certificate.certificate_id {
-            Some(certificate_id) => guarantee.field_str("certificateId", certificate_id),
-            None => guarantee.field_raw("certificateId", "null"),
-        };
-        guarantee.field_bool("identityValid", certificate.has_valid_guarantee_identity());
-        guarantee.field_str("summary", certificate.guarantee);
-    });
     obj.field_object("properties", |properties| {
-        properties.field_bool("monotone", certificate.monotone);
-        properties.field_bool("submodular", certificate.submodular);
+        properties.field_bool("monotone", audit.monotone);
+        properties.field_bool("submodular", audit.submodular);
     });
 }
 
-fn build_pack_selection_certificate(obj: &mut JsonBuilder, certificate: &PackSelectionCertificate) {
-    if let Some(certificate_id) = &certificate.certificate_id {
-        obj.field_str("certificateId", certificate_id);
-    }
-    obj.field_raw("candidateCount", &certificate.candidate_count.to_string());
-    obj.field_raw("selectedCount", &certificate.selected_count.to_string());
-    obj.field_raw("omittedCount", &certificate.omitted_count.to_string());
-    obj.field_u32("budgetLimit", certificate.budget_limit);
-    obj.field_u32("budgetUsed", certificate.budget_used);
+fn build_pack_selection_audit(obj: &mut JsonBuilder, audit: &PackSelectionAudit) {
+    obj.field_str("profile", audit.profile.as_str());
+    obj.field_str("objective", audit.objective.as_str());
+    obj.field_str("algorithmId", audit.algorithm_id);
+    obj.field_str("algorithmDescription", audit.algorithm_description);
+    obj.field_raw("candidateCount", &audit.candidate_count.to_string());
+    obj.field_raw("selectedCount", &audit.selected_count.to_string());
+    obj.field_raw("omittedCount", &audit.omitted_count.to_string());
+    obj.field_u32("budgetLimit", audit.budget_limit);
+    obj.field_u32("budgetUsed", audit.budget_used);
     obj.field_raw(
         "totalObjectiveValue",
-        &score_json(certificate.total_objective_value),
+        &score_json(audit.total_objective_value),
     );
-    // Bead bd-17c65.1.5 (A5): selectionCertificate.rejectedFrontier[] moved
+    obj.field_bool("monotone", audit.monotone);
+    obj.field_bool("submodular", audit.submodular);
+    // Bead bd-17c65.1.5 (A5): selectionAudit.rejectedFrontier[] moved
     // to the canonical pack.skipped[] list beside selected pack.items[].
 }
 
@@ -2791,10 +2945,14 @@ pub fn render_status_json(report: &StatusReport) -> String {
         if let Some(workspace) = report.workspace.as_ref() {
             render_workspace_status_json(d, workspace);
         }
+        render_status_posture_json(d, &report.posture);
         d.field_object("capabilities", |c| {
             c.field_str("runtime", report.capabilities.runtime.as_str());
             c.field_str("storage", report.capabilities.storage.as_str());
             c.field_str("search", report.capabilities.search.as_str());
+            c.field_object("output", |output| {
+                output.field_str("toon", report.capabilities.output_toon.as_str());
+            });
             c.field_str(
                 "agentDetection",
                 report.capabilities.agent_detection.as_str(),
@@ -2821,6 +2979,41 @@ pub fn render_status_json(report: &StatusReport) -> String {
         });
     });
     b.finish()
+}
+
+fn render_status_posture_json(
+    parent: &mut JsonBuilder,
+    posture: &crate::models::posture::WorkspacePostureReport,
+) {
+    parent.field_object("posture", |p| {
+        p.field_str("overall", posture.overall.as_str());
+        p.field_object("thisOperation", |operation| {
+            operation.field_str("status", posture.this_operation.status.as_str());
+            operation.field_raw(
+                "subsystemsUsed",
+                &string_array_json(posture.this_operation.subsystems_used.iter().copied()),
+            );
+            operation.field_raw(
+                "subsystemsSkipped",
+                &string_array_json(posture.this_operation.subsystems_skipped.iter().copied()),
+            );
+            operation.field_raw(
+                "degradationsApplied",
+                &string_array_json(posture.this_operation.degradations_applied.iter().copied()),
+            );
+        });
+        p.field_array_of_objects("subsystems", &posture.subsystems, |obj, subsystem| {
+            obj.field_str("id", subsystem.id);
+            obj.field_str("status", subsystem.status.as_str());
+            obj.field_u32("checksPassed", subsystem.checks_passed);
+            if let Some(reason) = subsystem.reason {
+                obj.field_str("reason", reason);
+            }
+            if let Some(fallback) = subsystem.fallback {
+                obj.field_str("fallback", fallback);
+            }
+        });
+    });
 }
 
 fn render_workspace_status_json(
@@ -2905,6 +3098,7 @@ fn render_memory_health_json(
             if let Some(score) = health.score_components {
                 field_optional_score(components, "activeRatio", Some(score.active_ratio));
                 field_optional_score(components, "freshnessScore", Some(score.freshness_score));
+                components.field_str("sourcedFrom", score.freshness_sourced_from);
                 field_optional_score(components, "confidenceScore", Some(score.confidence_score));
                 field_optional_score(components, "provenanceScore", Some(score.provenance_score));
                 field_optional_score(
@@ -2915,6 +3109,7 @@ fn render_memory_health_json(
             } else {
                 field_optional_score(components, "activeRatio", None);
                 field_optional_score(components, "freshnessScore", None);
+                components.field_raw("sourcedFrom", "null");
                 field_optional_score(components, "confidenceScore", None);
                 field_optional_score(components, "provenanceScore", None);
                 field_optional_score(components, "tombstonePenalty", None);
@@ -3141,6 +3336,7 @@ pub fn render_status_json_with_meta(
         if let Some(workspace) = report.workspace.as_ref() {
             render_workspace_status_json(d, workspace);
         }
+        render_status_posture_json(d, &report.posture);
         d.field_object("capabilities", |c| {
             c.field_str("runtime", report.capabilities.runtime.as_str());
             c.field_str("storage", report.capabilities.storage.as_str());
@@ -3559,6 +3755,10 @@ pub fn render_dependency_diagnostics_json(report: &DependencyDiagnosticsReport) 
         d.field_str("defaultFeatureProfile", report.default_feature_profile);
         render_dependency_diagnostics_summary(d, report);
         d.field_array_of_strs("forbiddenCrates", report.forbidden_crates);
+        let capability_gap_entries = dependency_contract_capability_gap_entries(report);
+        d.field_array_of_objects("capabilityGaps", &capability_gap_entries, |obj, entry| {
+            render_dependency_contract_capability_gap(obj, entry);
+        });
         let degraded_entries = dependency_contract_degraded_entries(report);
         d.field_array_of_objects("degraded", &degraded_entries, |obj, entry| {
             render_dependency_contract_degradation(obj, entry);
@@ -3882,8 +4082,46 @@ fn dependency_contract_degraded_entries(
         .entries
         .iter()
         .copied()
-        .filter(|entry| entry.readiness() != "ready")
+        .filter(|entry| {
+            entry.readiness() != "ready" && !dependency_contract_is_build_time_gap(entry)
+        })
         .collect()
+}
+
+fn dependency_contract_capability_gap_entries(
+    report: &DependencyDiagnosticsReport,
+) -> Vec<DependencyContractEntry> {
+    report
+        .entries
+        .iter()
+        .copied()
+        .filter(|entry| {
+            entry.readiness() != "ready" && dependency_contract_is_build_time_gap(entry)
+        })
+        .collect()
+}
+
+fn dependency_contract_is_build_time_gap(entry: &DependencyContractEntry) -> bool {
+    matches!(
+        entry.degradation_code,
+        "diagram_backend_unavailable" | "mcp_unavailable"
+    )
+}
+
+fn render_dependency_contract_capability_gap(
+    obj: &mut JsonBuilder,
+    entry: &DependencyContractEntry,
+) {
+    obj.field_str("code", entry.degradation_code);
+    obj.field_str("severity", "medium");
+    obj.field_str("message", &dependency_contract_degradation_message(entry));
+    obj.field_str("repair", &dependency_contract_degradation_repair(entry));
+    obj.field_str("dependency", entry.name);
+    obj.field_str("owningSurface", entry.owning_surface);
+    obj.field_str("status", entry.status);
+    obj.field_str("readiness", entry.readiness());
+    obj.field_str("diagnosticCommand", entry.diagnostic_command);
+    obj.field_str("capabilitiesCommand", "ee capabilities --json");
 }
 
 fn render_dependency_contract_degradation(obj: &mut JsonBuilder, entry: &DependencyContractEntry) {
@@ -5337,6 +5575,7 @@ pub fn render_capabilities_json(report: &CapabilitiesReport) -> String {
         // error.recovery hints from F1 are reproducible / verifiable.
         write_capabilities_binaries_block(d);
         write_capabilities_env_overrides_block(d);
+        write_capabilities_index_block(d, report);
         write_capabilities_output_metadata(d, report, true);
         d.field_object("summary", |s| {
             s.field_raw(
@@ -5361,6 +5600,15 @@ pub fn render_capabilities_json(report: &CapabilitiesReport) -> String {
         });
     });
     b.finish()
+}
+
+fn write_capabilities_index_block(builder: &mut JsonBuilder, report: &CapabilitiesReport) {
+    builder.field_object("index", |index| {
+        match report.index.last_full_rebuild_at.as_deref() {
+            Some(timestamp) => index.field_str("last_full_rebuild_at", timestamp),
+            None => index.field_raw("last_full_rebuild_at", "null"),
+        };
+    });
 }
 
 /// Emit `binaries` capability block (F4).
@@ -5518,6 +5766,14 @@ pub fn render_capabilities_human(report: &CapabilitiesReport) -> String {
                 gap.code, gap.feature_flag, gap.user_message
             ));
         }
+    }
+
+    output.push_str("\nIndex:\n");
+    match report.index.last_full_rebuild_at.as_deref() {
+        Some(timestamp) => {
+            output.push_str(&format!("  Last full rebuild: {timestamp}\n"));
+        }
+        None => output.push_str("  Last full rebuild: <not recorded>\n"),
     }
 
     output.push_str("\nCommands:\n");
@@ -7829,6 +8085,7 @@ pub fn error_response_json(error: &DomainError) -> String {
     let message = error.message();
     let recovery_actions = error.recovery_actions();
     let non_recoverable = error_non_recoverable(&recovery_actions);
+    let degraded = domain_error_degraded(error, &message);
     tracing::warn!(
         target: "ee::output::error",
         schema = ERROR_SCHEMA_V2,
@@ -7854,7 +8111,48 @@ pub fn error_response_json(error: &DomainError) -> String {
             obj.field_bool("nonRecoverable", true);
         }
     });
+    if !degraded.is_empty() {
+        envelope.field_array_of_objects("degraded", &degraded, render_error_degradation);
+    }
     envelope.finish()
+}
+
+struct ErrorDegradation {
+    code: &'static str,
+    severity: &'static str,
+    message: String,
+    repair: Option<String>,
+}
+
+fn domain_error_degraded(error: &DomainError, message: &str) -> Vec<ErrorDegradation> {
+    let lower_message = message.to_lowercase();
+    let code = error.code();
+    if code.starts_with("level_transition_") {
+        return vec![ErrorDegradation {
+            code,
+            severity: "medium",
+            message: format!("memory level transition degraded: {message}"),
+            repair: error.repair().map(str::to_owned),
+        }];
+    }
+    if matches!(error, DomainError::Import { .. }) && lower_message.contains("cass binary") {
+        return vec![ErrorDegradation {
+            code: "cass_unavailable",
+            severity: "medium",
+            message: format!("cass unavailable: {message}"),
+            repair: error.repair().map(str::to_owned),
+        }];
+    }
+    Vec::new()
+}
+
+fn render_error_degradation(obj: &mut JsonBuilder, degradation: &ErrorDegradation) {
+    obj.field_str("code", degradation.code);
+    obj.field_str("severity", degradation.severity);
+    obj.field_str("message", &degradation.message);
+    if let Some(repair) = &degradation.repair {
+        obj.field_str("repair", repair);
+    }
 }
 
 #[must_use]
@@ -7863,6 +8161,9 @@ pub fn error_response_toon(error: &DomainError) -> String {
 }
 
 fn domain_error_severity(error: &DomainError) -> &'static str {
+    if error.code().starts_with("level_transition_") {
+        return "medium";
+    }
     match error {
         DomainError::Usage { .. }
         | DomainError::UsageWithDetails { .. }
@@ -8013,10 +8314,14 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
         }
 
         if profile.include_summary_metrics() {
+            render_status_posture_json(d, &report.posture);
             d.field_object("capabilities", |c| {
                 c.field_str("runtime", report.capabilities.runtime.as_str());
                 c.field_str("storage", report.capabilities.storage.as_str());
                 c.field_str("search", report.capabilities.search.as_str());
+                c.field_object("output", |output| {
+                    output.field_str("toon", report.capabilities.output_toon.as_str());
+                });
                 c.field_str(
                     "agentDetection",
                     report.capabilities.agent_detection.as_str(),
@@ -8110,6 +8415,7 @@ pub fn render_capabilities_json_filtered(
             // full) since these are critical for agent discoverability.
             write_capabilities_binaries_block(d);
             write_capabilities_env_overrides_block(d);
+            write_capabilities_index_block(d, report);
             write_capabilities_output_metadata(d, report, true);
         }
 
@@ -11471,8 +11777,9 @@ mod tests {
         UnitScore,
     };
     use crate::pack::{
-        ContextRequest, ContextResponse, PackCandidate, PackCandidateInput, PackProvenance,
-        PackSection, PackTrustSignal, TokenBudget, assemble_draft,
+        ContextRequest, ContextResponse, PackAssemblySlo, PackAssemblySloActuals, PackCandidate,
+        PackCandidateInput, PackProvenance, PackResourceProfile, PackSection, PackTrustSignal,
+        TokenBudget, assemble_draft,
     };
 
     type TestResult = Result<(), String>;
@@ -11976,6 +12283,23 @@ mod tests {
     }
 
     #[test]
+    fn cass_import_error_json_includes_degraded_code() -> TestResult {
+        let error = DomainError::Import {
+            message: "cass binary '/missing/cass' is not allowed: EE_CASS_BINARY path does not exist or is not a file".to_string(),
+            repair: Some(
+                "set EE_CASS_BINARY or [cass.binary] to an absolute trusted cass executable"
+                    .to_string(),
+            ),
+        };
+        let json = error_response_json(&error);
+
+        ensure_contains(&json, "\"code\":\"cass_unavailable\"", "degraded code")?;
+        ensure_contains(&json, "\"severity\":\"medium\"", "degraded severity")?;
+        ensure_contains(&json, "cass unavailable", "degraded message")?;
+        ensure_contains(&json, "EE_CASS_BINARY", "degraded repair")
+    }
+
+    #[test]
     fn escape_json_handles_special_chars() -> TestResult {
         let escaped = escape_json_string("line1\nline2\ttab\"quote\\backslash");
         ensure_contains(&escaped, "\\n", "newline escape")?;
@@ -12226,6 +12550,20 @@ mod tests {
             &ctx.renderer,
             &Renderer::Toon,
             "TOON_DEFAULT_FORMAT fallback",
+        )
+    }
+
+    #[test]
+    fn output_context_disable_toon_falls_back_to_json() -> TestResult {
+        let ctx = output_context_from_env(OutputEnvironment {
+            ee_disable_toon: Some("1".to_string()),
+            toon_default_format: Some("toon".to_string()),
+            ..OutputEnvironment::default()
+        });
+        ensure_equal(
+            &ctx.renderer,
+            &Renderer::Json,
+            "EE_DISABLE_TOON fallback renderer",
         )
     }
 
@@ -12637,8 +12975,38 @@ mod tests {
         )?;
         ensure_contains(
             &json,
-            "\"omissions\":{\"tokenBudgetExceeded\":0,\"redundantCandidates\":0}",
+            "\"omissions\":{\"tokenBudgetExceeded\":0,\"redundantCandidates\":0,\"belowRelevanceFloor\":0}",
             "quality omission metrics",
+        )
+    }
+
+    #[test]
+    fn context_response_json_renders_pack_slo() -> TestResult {
+        let mut response = context_response_fixture()?;
+        response.data.slo = Some(PackAssemblySlo::evaluate(
+            PackResourceProfile::Lean,
+            PackAssemblySloActuals {
+                candidate_count: 80,
+                scanned_count: 80,
+                index_generation: Some(3),
+                graph_generation: Some(3),
+                graph_edges_traversed: 128,
+                elapsed_ms: 25,
+                memory_bytes_peak: 4096,
+            },
+        ));
+        let json = render_context_response_json(&response);
+
+        ensure_contains(
+            &json,
+            "\"slo\":{\"schema\":\"ee.pack.slo.v1\",\"profile\":\"lean\"",
+            "pack SLO object",
+        )?;
+        ensure_contains(&json, "\"status\":\"warning\"", "pack SLO status")?;
+        ensure_contains(
+            &json,
+            "\"code\":\"pack_assembly_slow\"",
+            "pack SLO degradation code",
         )
     }
 
@@ -13825,6 +14193,12 @@ mod tests {
 
         ensure_contains(&json, "\"subsystems\":", "has subsystems")?;
         ensure_contains(&json, "\"unimplemented\":", "has build-time gaps")?;
+        ensure_contains(&json, "\"index\":", "has index metadata")?;
+        ensure_contains(
+            &json,
+            "\"last_full_rebuild_at\":",
+            "has last full rebuild timestamp",
+        )?;
         ensure_contains(&json, "\"description\":", "has descriptions")?;
         ensure_contains(&json, "\"summary\":", "has summary")
     }

@@ -23,6 +23,7 @@
     "message_contains": [
       "No persisted evidence sources"
     ],
-    "repair_contains": "preflight evidence"
+    "repair_contains": "preflight evidence",
+    "repair_string": "Provide explicit preflight evidence sources or run a project-local preflight risk-review skill."
   }
 }

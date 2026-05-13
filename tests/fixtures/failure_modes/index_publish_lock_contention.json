@@ -15,7 +15,9 @@
     "description": "Index rebuild cannot acquire the advisory publish lock because another publisher holds it.",
     "setup_commands": [
       "ee init --workspace .",
-      "# hold the index publish advisory lock through a test harness"
+      "ee remember 'J6 index publish lock contention seed.' --workspace . --json",
+      "# hold the index publish advisory lock through a fixture harness",
+      "export EE_INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS=1"
     ],
     "invocation": "ee index rebuild --workspace . --json"
   },

@@ -11,9 +11,9 @@
   "severity": "warning",
   "repair_present": false,
   "trigger": {
-    "description": "The direct causal trace helper is called with a database path but without a workspace id.",
+    "description": "The causal trace command is pointed at an explicit database path without the database workspace ID needed for replay.",
     "setup_commands": [
-      "# call trace helper from a unit harness with database_path set and workspace_id omitted"
+      "ee init --workspace ."
     ],
     "invocation": "ee causal trace failure-1 --database .ee/ee.db --json"
   },

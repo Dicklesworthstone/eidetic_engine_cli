@@ -16,7 +16,7 @@
       "ee init --workspace .",
       "ee import jsonl --workspace . --source advisory-memory.jsonl --json"
     ],
-    "invocation": "ee pack 'J6 advisory imported memory marker' --workspace . --json"
+    "invocation": "ee pack 'J6 advisory imported memory marker.' --workspace . --json"
   },
   "expected_emission": {
     "code": "advisory_memory",

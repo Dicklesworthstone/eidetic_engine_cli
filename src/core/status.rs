@@ -12,17 +12,21 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use crate::config::{
-    WorkspaceDiagnostic, WorkspaceDiagnosticSeverity, WorkspaceResolution, WorkspaceResolutionMode,
-    WorkspaceResolutionRequest, WorkspaceResolutionSource, diagnose_workspace_resolution,
-    resolve_workspace,
+    EnvVar, WorkspaceDiagnostic, WorkspaceDiagnosticSeverity, WorkspaceResolution,
+    WorkspaceResolutionMode, WorkspaceResolutionRequest, WorkspaceResolutionSource,
+    diagnose_workspace_resolution, read_env_var, resolve_workspace,
 };
 use crate::db::{
     CreateWorkspaceInput, DbConnection, FeedbackSourceHarmfulCount, GraphSnapshotStatus,
     GraphSnapshotType, PROVENANCE_CHAIN_HASH_VERSION, PROVENANCE_STATUS_UNVERIFIED,
-    StoredCurationCandidate, StoredCurationTtlPolicy, StoredMemory,
-    default_curation_ttl_policy_id_for_review_state,
+    StoredAuditEntry, StoredCurationCandidate, StoredCurationTtlPolicy, StoredMemory,
+    audit_actions, default_curation_ttl_policy_id_for_review_state,
+};
+use crate::models::posture::{
+    OperationPostureReport, SubsystemPostureReport, SubsystemPostureStatus, WorkspacePostureReport,
 };
 use crate::models::{CapabilityStatus, MemoryId};
+use crate::policy::{MEMORY_DECAY_SOURCE, MemoryDecayThresholds, evaluate_memory_decay};
 
 use super::agent_detect::AgentInventoryReport;
 use super::curate::stable_workspace_id;
@@ -30,7 +34,6 @@ use super::index::{IndexHealth, IndexStatusOptions, get_index_status};
 use super::outcome::{DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR};
 use super::{build_info, runtime_status};
 
-const MEMORY_STALE_AFTER_DAYS: i64 = 30;
 const GRAPH_SNAPSHOT_ASSET_NAME: &str = "graph_snapshot_artifact";
 const GRAPH_SNAPSHOT_ASSET_KIND: &str = "persisted_snapshot";
 const SEARCH_INDEX_ASSET_KIND: &str = "persisted_index";
@@ -110,6 +113,8 @@ pub struct MemoryHealthScoreComponents {
     pub active_ratio: f32,
     /// Freshness score after accounting for stale active memories.
     pub freshness_score: f32,
+    /// Machine-readable source for the freshness score.
+    pub freshness_sourced_from: &'static str,
     /// Average confidence normalized to 0.0-1.0.
     pub confidence_score: f32,
     /// Provenance coverage normalized to 0.0-1.0.
@@ -164,6 +169,7 @@ impl MemoryHealthReport {
         Some(MemoryHealthScoreComponents {
             active_ratio,
             freshness_score,
+            freshness_sourced_from: "stale_ratio_legacy",
             confidence_score,
             provenance_score,
             tombstone_penalty,
@@ -599,6 +605,7 @@ pub struct CapabilityReport {
     pub runtime: CapabilityStatus,
     pub storage: CapabilityStatus,
     pub search: CapabilityStatus,
+    pub output_toon: CapabilityStatus,
     pub agent_detection: CapabilityStatus,
 }
 
@@ -617,9 +624,10 @@ impl CapabilityReport {
     #[must_use]
     pub fn gather_with_workspace(workspace_path: Option<&Path>) -> Self {
         Self {
-            runtime: CapabilityStatus::Ready,
+            runtime: probe_runtime_capability(),
             storage: probe_storage_capability(workspace_path),
             search: probe_search_capability(workspace_path),
+            output_toon: probe_toon_output_capability(),
             agent_detection: CapabilityStatus::Ready,
         }
     }
@@ -632,6 +640,10 @@ pub fn default_workspace_path() -> Option<PathBuf> {
 
 #[must_use]
 pub fn probe_storage_capability(workspace_path: Option<&Path>) -> CapabilityStatus {
+    if diag_forced_capability_gap("storage") {
+        return CapabilityStatus::Unimplemented;
+    }
+
     let Some(workspace_path) = workspace_path else {
         return CapabilityStatus::Pending;
     };
@@ -652,6 +664,10 @@ pub fn probe_storage_capability(workspace_path: Option<&Path>) -> CapabilityStat
 
 #[must_use]
 pub fn probe_search_capability(workspace_path: Option<&Path>) -> CapabilityStatus {
+    if diag_forced_capability_gap("search") {
+        return CapabilityStatus::Unimplemented;
+    }
+
     let Some(workspace_path) = workspace_path else {
         return CapabilityStatus::Pending;
     };
@@ -676,6 +692,15 @@ pub fn probe_search_capability(workspace_path: Option<&Path>) -> CapabilityStatu
     }
 }
 
+#[must_use]
+pub fn probe_toon_output_capability() -> CapabilityStatus {
+    if crate::output::toon_output_available() {
+        CapabilityStatus::Ready
+    } else {
+        CapabilityStatus::Degraded
+    }
+}
+
 fn workspace_database_path(workspace_path: &Path) -> PathBuf {
     workspace_path.join(".ee").join("ee.db")
 }
@@ -697,10 +722,39 @@ fn cass_discovery_to_capability(
 
 #[must_use]
 pub fn probe_runtime_capability() -> CapabilityStatus {
+    if diag_forced_capability_gap("runtime") {
+        return CapabilityStatus::Unimplemented;
+    }
+
     match super::build_cli_runtime() {
         Ok(_) => CapabilityStatus::Ready,
         Err(_) => CapabilityStatus::Degraded,
     }
+}
+
+#[must_use]
+pub fn probe_graph_capability() -> CapabilityStatus {
+    if diag_forced_capability_gap("graph") {
+        return CapabilityStatus::Unimplemented;
+    }
+
+    if cfg!(feature = "graph") {
+        CapabilityStatus::Ready
+    } else {
+        CapabilityStatus::Pending
+    }
+}
+
+#[must_use]
+pub fn diag_forced_capability_gap(capability: &str) -> bool {
+    let Some(raw) = read_env_var(EnvVar::DiagForceCapabilityGap) else {
+        return false;
+    };
+
+    raw.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .any(|part| part.eq_ignore_ascii_case(capability) || part.eq_ignore_ascii_case("all"))
 }
 
 /// Runtime engine details.
@@ -818,6 +872,7 @@ pub struct DegradationReport {
 pub struct StatusReport {
     pub version: &'static str,
     pub workspace: Option<WorkspaceStatusReport>,
+    pub posture: WorkspacePostureReport,
     pub capabilities: CapabilityReport,
     pub runtime: RuntimeReport,
     pub memory_health: MemoryHealthReport,
@@ -871,6 +926,7 @@ impl StatusReport {
 
         let mut degradations = Vec::new();
 
+        push_runtime_capability_degradation(&mut degradations, capabilities.runtime);
         push_storage_capability_degradation(
             &mut degradations,
             capabilities.storage,
@@ -881,14 +937,28 @@ impl StatusReport {
             capabilities.search,
             options.workspace_path.as_deref(),
         );
+        push_graph_capability_degradation(&mut degradations, graph_compute.status);
+        push_toon_output_capability_degradation(&mut degradations, capabilities.output_toon);
 
         degradations.extend(memory_health_degradations);
         degradations.extend(curation_degradations);
         degradations.extend(feedback_degradations);
 
+        let posture = status_posture_report(
+            options,
+            &capabilities,
+            &memory_health,
+            &curation_health,
+            &feedback_health,
+            &graph_compute,
+            &derived_assets,
+            &degradations,
+        );
+
         Self {
             version: build_info().version,
             workspace,
+            posture,
             capabilities,
             runtime,
             memory_health,
@@ -899,6 +969,535 @@ impl StatusReport {
             derived_assets,
             agent_inventory,
             degradations,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn status_posture_report(
+    options: &StatusOptions,
+    capabilities: &CapabilityReport,
+    memory_health: &MemoryHealthReport,
+    curation_health: &CurationHealthReport,
+    feedback_health: &FeedbackHealthReport,
+    graph_compute: &GraphComputeReport,
+    derived_assets: &[DerivedAssetReport],
+    degradations: &[DegradationReport],
+) -> WorkspacePostureReport {
+    let workspace_path = options.workspace_path.as_deref();
+    let storage_status = storage_posture_status(capabilities.storage, workspace_path);
+    let search_status = search_posture_status(capabilities.search, storage_status);
+    let graph_status = graph_compute_posture_status(graph_compute.status);
+
+    let subsystems = vec![
+        posture_row(
+            "runtime",
+            capability_posture_status(capabilities.runtime, workspace_path),
+            None,
+            None,
+        ),
+        posture_row(
+            "storage",
+            storage_status,
+            storage_posture_reason(capabilities.storage, workspace_path),
+            storage_posture_fallback(capabilities.storage, workspace_path),
+        ),
+        posture_row(
+            "search",
+            search_status,
+            search_posture_reason(capabilities.search, storage_status),
+            search_posture_fallback(capabilities.search, storage_status),
+        ),
+        posture_row(
+            "memory",
+            memory_posture_status(memory_health.status, workspace_path),
+            memory_posture_reason(memory_health.status, workspace_path),
+            memory_posture_fallback(memory_health.status, workspace_path),
+        ),
+        posture_row(
+            "graph_compute",
+            graph_status,
+            graph_compute_posture_reason(graph_compute.status),
+            graph_compute_posture_fallback(graph_compute.status),
+        ),
+        posture_row(
+            "pack",
+            pack_posture_status(storage_status, search_status),
+            pack_posture_reason(storage_status, search_status),
+            pack_posture_fallback(storage_status, search_status),
+        ),
+        posture_row(
+            "curate",
+            curation_posture_status(curation_health.status, storage_status),
+            curation_posture_reason(curation_health.status, storage_status),
+            curation_posture_fallback(curation_health.status, storage_status),
+        ),
+        posture_row(
+            "feedback",
+            feedback_posture_status(feedback_health.status, storage_status),
+            feedback_posture_reason(feedback_health.status, storage_status),
+            feedback_posture_fallback(feedback_health.status, storage_status),
+        ),
+        posture_row(
+            "maintenance",
+            maintenance_posture_status(derived_assets),
+            maintenance_posture_reason(derived_assets),
+            maintenance_posture_fallback(derived_assets),
+        ),
+        posture_row(
+            "agent_detection",
+            capability_posture_status(capabilities.agent_detection, workspace_path),
+            None,
+            None,
+        ),
+    ];
+    let operation = OperationPostureReport {
+        status: operation_posture_status(capabilities),
+        subsystems_used: vec![
+            "runtime",
+            "storage",
+            "search",
+            "memory",
+            "graph_compute",
+            "curate",
+            "feedback",
+            "maintenance",
+            "agent_detection",
+        ],
+        subsystems_skipped: vec!["pack"],
+        degradations_applied: degradations
+            .iter()
+            .map(|degradation| degradation.code)
+            .collect(),
+    };
+
+    WorkspacePostureReport::new(subsystems, operation)
+}
+
+fn posture_row(
+    id: &'static str,
+    status: SubsystemPostureStatus,
+    reason: Option<&'static str>,
+    fallback: Option<&'static str>,
+) -> SubsystemPostureReport {
+    let mut row =
+        SubsystemPostureReport::new(id, status).with_checks_passed(checks_passed_for(status));
+    if let Some(reason) = reason {
+        row = row.with_reason(reason);
+    }
+    if let Some(fallback) = fallback {
+        row = row.with_fallback(fallback);
+    }
+    row
+}
+
+const fn checks_passed_for(status: SubsystemPostureStatus) -> u32 {
+    match status {
+        SubsystemPostureStatus::Ok => 1,
+        SubsystemPostureStatus::DegradedRecoverable
+        | SubsystemPostureStatus::DegradedRequired
+        | SubsystemPostureStatus::Blocked
+        | SubsystemPostureStatus::Unimplemented
+        | SubsystemPostureStatus::Initializing => 0,
+    }
+}
+
+const fn operation_posture_status(capabilities: &CapabilityReport) -> SubsystemPostureStatus {
+    if matches!(capabilities.runtime, CapabilityStatus::Ready)
+        && matches!(capabilities.agent_detection, CapabilityStatus::Ready)
+    {
+        SubsystemPostureStatus::Ok
+    } else {
+        SubsystemPostureStatus::DegradedRecoverable
+    }
+}
+
+const fn capability_posture_status(
+    status: CapabilityStatus,
+    workspace_path: Option<&Path>,
+) -> SubsystemPostureStatus {
+    match status {
+        CapabilityStatus::Ready => SubsystemPostureStatus::Ok,
+        CapabilityStatus::Pending if workspace_path.is_none() => {
+            SubsystemPostureStatus::Initializing
+        }
+        CapabilityStatus::Pending => SubsystemPostureStatus::Initializing,
+        CapabilityStatus::Degraded => SubsystemPostureStatus::DegradedRequired,
+        CapabilityStatus::Unimplemented => SubsystemPostureStatus::Unimplemented,
+    }
+}
+
+const fn storage_posture_status(
+    status: CapabilityStatus,
+    workspace_path: Option<&Path>,
+) -> SubsystemPostureStatus {
+    match status {
+        CapabilityStatus::Ready => SubsystemPostureStatus::Ok,
+        CapabilityStatus::Pending if workspace_path.is_none() => {
+            SubsystemPostureStatus::Initializing
+        }
+        CapabilityStatus::Pending => SubsystemPostureStatus::Blocked,
+        CapabilityStatus::Degraded => SubsystemPostureStatus::DegradedRequired,
+        CapabilityStatus::Unimplemented => SubsystemPostureStatus::Unimplemented,
+    }
+}
+
+const fn storage_posture_reason(
+    status: CapabilityStatus,
+    workspace_path: Option<&Path>,
+) -> Option<&'static str> {
+    match status {
+        CapabilityStatus::Ready => None,
+        CapabilityStatus::Pending if workspace_path.is_none() => Some("workspace_not_selected"),
+        CapabilityStatus::Pending => Some("storage_not_initialized"),
+        CapabilityStatus::Degraded => Some("storage_degraded"),
+        CapabilityStatus::Unimplemented => Some("storage_unimplemented"),
+    }
+}
+
+const fn storage_posture_fallback(
+    status: CapabilityStatus,
+    workspace_path: Option<&Path>,
+) -> Option<&'static str> {
+    match status {
+        CapabilityStatus::Ready => None,
+        CapabilityStatus::Pending if workspace_path.is_none() => {
+            Some("ee status --workspace . --json")
+        }
+        CapabilityStatus::Pending => Some("ee init --workspace ."),
+        CapabilityStatus::Degraded => Some("ee doctor --json"),
+        CapabilityStatus::Unimplemented => Some("use a binary built with storage support"),
+    }
+}
+
+const fn search_posture_status(
+    status: CapabilityStatus,
+    storage_status: SubsystemPostureStatus,
+) -> SubsystemPostureStatus {
+    match status {
+        CapabilityStatus::Ready => SubsystemPostureStatus::Ok,
+        CapabilityStatus::Pending => SubsystemPostureStatus::Initializing,
+        CapabilityStatus::Degraded
+            if matches!(
+                storage_status,
+                SubsystemPostureStatus::Blocked | SubsystemPostureStatus::DegradedRequired
+            ) =>
+        {
+            SubsystemPostureStatus::DegradedRequired
+        }
+        CapabilityStatus::Degraded => SubsystemPostureStatus::DegradedRecoverable,
+        CapabilityStatus::Unimplemented => SubsystemPostureStatus::Unimplemented,
+    }
+}
+
+const fn search_posture_reason(
+    status: CapabilityStatus,
+    storage_status: SubsystemPostureStatus,
+) -> Option<&'static str> {
+    match status {
+        CapabilityStatus::Ready => None,
+        CapabilityStatus::Pending
+            if matches!(
+                storage_status,
+                SubsystemPostureStatus::Blocked
+                    | SubsystemPostureStatus::DegradedRequired
+                    | SubsystemPostureStatus::Initializing
+            ) =>
+        {
+            Some("waiting_for_storage")
+        }
+        CapabilityStatus::Pending => Some("search_initializing"),
+        CapabilityStatus::Degraded => Some("search_index_degraded"),
+        CapabilityStatus::Unimplemented => Some("search_unimplemented"),
+    }
+}
+
+const fn search_posture_fallback(
+    status: CapabilityStatus,
+    storage_status: SubsystemPostureStatus,
+) -> Option<&'static str> {
+    match status {
+        CapabilityStatus::Ready => None,
+        CapabilityStatus::Pending
+            if matches!(
+                storage_status,
+                SubsystemPostureStatus::Blocked | SubsystemPostureStatus::DegradedRequired
+            ) =>
+        {
+            Some("ee init --workspace .")
+        }
+        CapabilityStatus::Pending => Some("ee index status --workspace . --json"),
+        CapabilityStatus::Degraded => Some("ee index status --workspace . --json"),
+        CapabilityStatus::Unimplemented => Some("use a binary built with search support enabled"),
+    }
+}
+
+const fn graph_compute_posture_status(status: GraphComputeStatus) -> SubsystemPostureStatus {
+    match status {
+        GraphComputeStatus::Available => SubsystemPostureStatus::Ok,
+        GraphComputeStatus::Degraded => SubsystemPostureStatus::DegradedRecoverable,
+        GraphComputeStatus::Unavailable => SubsystemPostureStatus::Unimplemented,
+    }
+}
+
+const fn graph_compute_posture_reason(status: GraphComputeStatus) -> Option<&'static str> {
+    match status {
+        GraphComputeStatus::Available => None,
+        GraphComputeStatus::Degraded => Some("graph_compute_degraded"),
+        GraphComputeStatus::Unavailable => Some("graph_compute_unimplemented"),
+    }
+}
+
+const fn graph_compute_posture_fallback(status: GraphComputeStatus) -> Option<&'static str> {
+    match status {
+        GraphComputeStatus::Available => None,
+        GraphComputeStatus::Degraded => Some("ee doctor --json"),
+        GraphComputeStatus::Unavailable => Some("use a binary built with graph support enabled"),
+    }
+}
+
+const fn pack_posture_status(
+    storage_status: SubsystemPostureStatus,
+    search_status: SubsystemPostureStatus,
+) -> SubsystemPostureStatus {
+    match storage_status {
+        SubsystemPostureStatus::Blocked => SubsystemPostureStatus::Blocked,
+        SubsystemPostureStatus::DegradedRequired => SubsystemPostureStatus::DegradedRequired,
+        SubsystemPostureStatus::Initializing => SubsystemPostureStatus::Initializing,
+        SubsystemPostureStatus::Unimplemented => SubsystemPostureStatus::Unimplemented,
+        SubsystemPostureStatus::Ok | SubsystemPostureStatus::DegradedRecoverable => {
+            match search_status {
+                SubsystemPostureStatus::Ok => SubsystemPostureStatus::Ok,
+                SubsystemPostureStatus::Blocked => SubsystemPostureStatus::Blocked,
+                SubsystemPostureStatus::DegradedRequired => {
+                    SubsystemPostureStatus::DegradedRequired
+                }
+                SubsystemPostureStatus::DegradedRecoverable
+                | SubsystemPostureStatus::Unimplemented => {
+                    SubsystemPostureStatus::DegradedRecoverable
+                }
+                SubsystemPostureStatus::Initializing => SubsystemPostureStatus::Initializing,
+            }
+        }
+    }
+}
+
+const fn pack_posture_reason(
+    storage_status: SubsystemPostureStatus,
+    search_status: SubsystemPostureStatus,
+) -> Option<&'static str> {
+    match pack_posture_status(storage_status, search_status) {
+        SubsystemPostureStatus::Ok => None,
+        SubsystemPostureStatus::Blocked => Some("pack_blocked_by_storage"),
+        SubsystemPostureStatus::DegradedRequired => Some("pack_requires_storage_repair"),
+        SubsystemPostureStatus::DegradedRecoverable => Some("pack_uses_degraded_search"),
+        SubsystemPostureStatus::Unimplemented => Some("pack_dependency_unimplemented"),
+        SubsystemPostureStatus::Initializing => Some("pack_waiting_for_workspace"),
+    }
+}
+
+const fn pack_posture_fallback(
+    storage_status: SubsystemPostureStatus,
+    search_status: SubsystemPostureStatus,
+) -> Option<&'static str> {
+    match pack_posture_status(storage_status, search_status) {
+        SubsystemPostureStatus::Ok => None,
+        SubsystemPostureStatus::Blocked | SubsystemPostureStatus::Initializing => {
+            Some("ee init --workspace .")
+        }
+        SubsystemPostureStatus::DegradedRequired => Some("ee doctor --json"),
+        SubsystemPostureStatus::DegradedRecoverable => Some("ee index rebuild --workspace ."),
+        SubsystemPostureStatus::Unimplemented => {
+            Some("use a binary built with required pack dependencies")
+        }
+    }
+}
+
+const fn memory_posture_status(
+    status: MemoryHealthStatus,
+    workspace_path: Option<&Path>,
+) -> SubsystemPostureStatus {
+    match status {
+        MemoryHealthStatus::Healthy | MemoryHealthStatus::Empty => SubsystemPostureStatus::Ok,
+        MemoryHealthStatus::Degraded => SubsystemPostureStatus::DegradedRecoverable,
+        MemoryHealthStatus::Unavailable if workspace_path.is_none() => {
+            SubsystemPostureStatus::Initializing
+        }
+        MemoryHealthStatus::Unavailable => SubsystemPostureStatus::Blocked,
+    }
+}
+
+const fn memory_posture_reason(
+    status: MemoryHealthStatus,
+    workspace_path: Option<&Path>,
+) -> Option<&'static str> {
+    match memory_posture_status(status, workspace_path) {
+        SubsystemPostureStatus::Ok => None,
+        SubsystemPostureStatus::Initializing => Some("memory_waiting_for_workspace"),
+        SubsystemPostureStatus::DegradedRecoverable => Some("memory_health_degraded"),
+        SubsystemPostureStatus::Blocked => Some("memory_unavailable"),
+        SubsystemPostureStatus::DegradedRequired => Some("memory_repair_required"),
+        SubsystemPostureStatus::Unimplemented => Some("memory_unimplemented"),
+    }
+}
+
+const fn memory_posture_fallback(
+    status: MemoryHealthStatus,
+    workspace_path: Option<&Path>,
+) -> Option<&'static str> {
+    match memory_posture_status(status, workspace_path) {
+        SubsystemPostureStatus::Ok => None,
+        SubsystemPostureStatus::Initializing => Some("ee status --workspace . --json"),
+        SubsystemPostureStatus::DegradedRecoverable => Some("ee memory list --workspace . --json"),
+        SubsystemPostureStatus::Blocked => Some("ee init --workspace ."),
+        SubsystemPostureStatus::DegradedRequired => Some("ee doctor --json"),
+        SubsystemPostureStatus::Unimplemented => Some("use a binary built with memory support"),
+    }
+}
+
+const fn curation_posture_status(
+    status: CurationHealthStatus,
+    storage_status: SubsystemPostureStatus,
+) -> SubsystemPostureStatus {
+    match status {
+        CurationHealthStatus::Healthy
+        | CurationHealthStatus::Empty
+        | CurationHealthStatus::NotInspected => SubsystemPostureStatus::Ok,
+        CurationHealthStatus::Due | CurationHealthStatus::Degraded => {
+            SubsystemPostureStatus::DegradedRecoverable
+        }
+        CurationHealthStatus::Escalated => SubsystemPostureStatus::DegradedRequired,
+        CurationHealthStatus::Unavailable
+            if matches!(
+                storage_status,
+                SubsystemPostureStatus::Blocked | SubsystemPostureStatus::Initializing
+            ) =>
+        {
+            SubsystemPostureStatus::Initializing
+        }
+        CurationHealthStatus::Unavailable => SubsystemPostureStatus::DegradedRecoverable,
+    }
+}
+
+const fn curation_posture_reason(
+    status: CurationHealthStatus,
+    storage_status: SubsystemPostureStatus,
+) -> Option<&'static str> {
+    match curation_posture_status(status, storage_status) {
+        SubsystemPostureStatus::Ok => None,
+        SubsystemPostureStatus::Initializing => Some("curation_waiting_for_storage"),
+        SubsystemPostureStatus::DegradedRecoverable => Some("curation_attention_available"),
+        SubsystemPostureStatus::DegradedRequired => Some("curation_escalated"),
+        SubsystemPostureStatus::Blocked => Some("curation_blocked"),
+        SubsystemPostureStatus::Unimplemented => Some("curation_unimplemented"),
+    }
+}
+
+const fn curation_posture_fallback(
+    status: CurationHealthStatus,
+    storage_status: SubsystemPostureStatus,
+) -> Option<&'static str> {
+    match curation_posture_status(status, storage_status) {
+        SubsystemPostureStatus::Ok => None,
+        SubsystemPostureStatus::Initializing => Some("ee init --workspace ."),
+        SubsystemPostureStatus::DegradedRecoverable => {
+            Some("ee curate candidates --workspace . --json")
+        }
+        SubsystemPostureStatus::DegradedRequired => Some("ee curate review --workspace . --json"),
+        SubsystemPostureStatus::Blocked => Some("ee doctor --json"),
+        SubsystemPostureStatus::Unimplemented => Some("use a binary built with curation support"),
+    }
+}
+
+const fn feedback_posture_status(
+    status: FeedbackHealthStatus,
+    storage_status: SubsystemPostureStatus,
+) -> SubsystemPostureStatus {
+    match status {
+        FeedbackHealthStatus::Healthy | FeedbackHealthStatus::NotInspected => {
+            SubsystemPostureStatus::Ok
+        }
+        FeedbackHealthStatus::ReviewQueued => SubsystemPostureStatus::DegradedRecoverable,
+        FeedbackHealthStatus::Unavailable
+            if matches!(
+                storage_status,
+                SubsystemPostureStatus::Blocked | SubsystemPostureStatus::Initializing
+            ) =>
+        {
+            SubsystemPostureStatus::Initializing
+        }
+        FeedbackHealthStatus::Unavailable => SubsystemPostureStatus::DegradedRecoverable,
+    }
+}
+
+const fn feedback_posture_reason(
+    status: FeedbackHealthStatus,
+    storage_status: SubsystemPostureStatus,
+) -> Option<&'static str> {
+    match feedback_posture_status(status, storage_status) {
+        SubsystemPostureStatus::Ok => None,
+        SubsystemPostureStatus::Initializing => Some("feedback_waiting_for_storage"),
+        SubsystemPostureStatus::DegradedRecoverable => Some("feedback_review_available"),
+        SubsystemPostureStatus::DegradedRequired => Some("feedback_repair_required"),
+        SubsystemPostureStatus::Blocked => Some("feedback_blocked"),
+        SubsystemPostureStatus::Unimplemented => Some("feedback_unimplemented"),
+    }
+}
+
+const fn feedback_posture_fallback(
+    status: FeedbackHealthStatus,
+    storage_status: SubsystemPostureStatus,
+) -> Option<&'static str> {
+    match feedback_posture_status(status, storage_status) {
+        SubsystemPostureStatus::Ok => None,
+        SubsystemPostureStatus::Initializing => Some("ee init --workspace ."),
+        SubsystemPostureStatus::DegradedRecoverable => {
+            Some("ee outcome quarantine list --workspace . --json")
+        }
+        SubsystemPostureStatus::DegradedRequired | SubsystemPostureStatus::Blocked => {
+            Some("ee doctor --json")
+        }
+        SubsystemPostureStatus::Unimplemented => Some("use a binary built with feedback support"),
+    }
+}
+
+fn maintenance_posture_status(assets: &[DerivedAssetReport]) -> SubsystemPostureStatus {
+    let statuses = assets
+        .iter()
+        .map(|asset| match asset.status {
+            DerivedAssetStatus::Current
+            | DerivedAssetStatus::Empty
+            | DerivedAssetStatus::NotInspected => SubsystemPostureStatus::Ok,
+            DerivedAssetStatus::Stale
+            | DerivedAssetStatus::Missing
+            | DerivedAssetStatus::Corrupt => SubsystemPostureStatus::DegradedRecoverable,
+            DerivedAssetStatus::Unavailable => SubsystemPostureStatus::DegradedRecoverable,
+            DerivedAssetStatus::Unimplemented => SubsystemPostureStatus::Unimplemented,
+        })
+        .collect::<Vec<_>>();
+    SubsystemPostureStatus::aggregate(&statuses)
+}
+
+fn maintenance_posture_reason(assets: &[DerivedAssetReport]) -> Option<&'static str> {
+    match maintenance_posture_status(assets) {
+        SubsystemPostureStatus::Ok => None,
+        SubsystemPostureStatus::DegradedRecoverable => Some("derived_asset_attention_available"),
+        SubsystemPostureStatus::DegradedRequired => Some("derived_asset_repair_required"),
+        SubsystemPostureStatus::Blocked => Some("derived_asset_blocked"),
+        SubsystemPostureStatus::Unimplemented => Some("derived_asset_unimplemented"),
+        SubsystemPostureStatus::Initializing => Some("derived_asset_initializing"),
+    }
+}
+
+fn maintenance_posture_fallback(assets: &[DerivedAssetReport]) -> Option<&'static str> {
+    match maintenance_posture_status(assets) {
+        SubsystemPostureStatus::Ok => None,
+        SubsystemPostureStatus::DegradedRecoverable => Some("ee index rebuild --workspace ."),
+        SubsystemPostureStatus::DegradedRequired
+        | SubsystemPostureStatus::Blocked
+        | SubsystemPostureStatus::Initializing => Some("ee doctor --json"),
+        SubsystemPostureStatus::Unimplemented => {
+            Some("implement the persistent derived asset before reporting a watermark")
         }
     }
 }
@@ -933,10 +1532,40 @@ fn push_storage_capability_degradation(
                 message: "Workspace storage exists but could not be opened or needs migration.",
                 repair: "Run `ee doctor --json`.",
             });
+            degradations.push(DegradationReport {
+                code: "storage_unavailable",
+                severity: "high",
+                message: "Workspace storage is unavailable because the selected database failed readiness checks.",
+                repair: "Run `ee doctor --json`.",
+            });
         }
-        // Build-time gaps are reported once through `ee capabilities`,
-        // not repeated in per-response `degraded[]`.
-        CapabilityStatus::Unimplemented => {}
+        CapabilityStatus::Unimplemented => {
+            degradations.push(DegradationReport {
+                code: "storage_unimplemented",
+                severity: "high",
+                message: "Storage has no compiled implementation in this binary.",
+                repair: "Use a binary built with the storage subsystem enabled.",
+            });
+        }
+    }
+}
+
+fn push_runtime_capability_degradation(
+    degradations: &mut Vec<DegradationReport>,
+    status: CapabilityStatus,
+) {
+    match status {
+        CapabilityStatus::Ready => {}
+        CapabilityStatus::Pending
+        | CapabilityStatus::Degraded
+        | CapabilityStatus::Unimplemented => {
+            degradations.push(DegradationReport {
+                code: "runtime_unavailable",
+                severity: "high",
+                message: "runtime failed readiness checks for this command.",
+                repair: "Run `ee doctor --json`.",
+            });
+        }
     }
 }
 
@@ -970,10 +1599,60 @@ fn push_search_capability_degradation(
                 message: "Search is compiled but the selected workspace index is missing, stale, corrupt, or unreadable.",
                 repair: "Run `ee index status --workspace . --json`.",
             });
+            degradations.push(DegradationReport {
+                code: "search_unavailable",
+                severity: "medium",
+                message: "Workspace search is unavailable because the selected index is missing, stale, corrupt, or unreadable.",
+                repair: "Run `ee index status --workspace . --json`.",
+            });
         }
-        // Build-time gaps are reported once through `ee capabilities`,
-        // not repeated in per-response `degraded[]`.
-        CapabilityStatus::Unimplemented => {}
+        CapabilityStatus::Unimplemented => {
+            degradations.push(DegradationReport {
+                code: "search_unimplemented",
+                severity: "high",
+                message: "Search has no compiled implementation in this binary.",
+                repair: "Use a binary built with search support enabled.",
+            });
+        }
+    }
+}
+
+fn push_graph_capability_degradation(
+    degradations: &mut Vec<DegradationReport>,
+    status: GraphComputeStatus,
+) {
+    if matches!(status, GraphComputeStatus::Unavailable) {
+        degradations.push(DegradationReport {
+            code: "graph_feature_disabled",
+            severity: "medium",
+            message: "Graph algorithm execution requires the graph feature.",
+            repair: "Rebuild ee with --features graph.",
+        });
+    }
+}
+
+fn push_toon_output_capability_degradation(
+    degradations: &mut Vec<DegradationReport>,
+    status: CapabilityStatus,
+) {
+    match status {
+        CapabilityStatus::Ready | CapabilityStatus::Pending => {}
+        CapabilityStatus::Degraded => {
+            degradations.push(DegradationReport {
+                code: "toon_unavailable",
+                severity: "medium",
+                message: "TOON output is unavailable because the TOON renderer capability is disabled.",
+                repair: "Unset `EE_DISABLE_TOON` or use `--format json`.",
+            });
+        }
+        CapabilityStatus::Unimplemented => {
+            degradations.push(DegradationReport {
+                code: "toon_unavailable",
+                severity: "medium",
+                message: "TOON output is unavailable because the TOON renderer is not linked in this binary.",
+                repair: "Use `--format json` or a binary built with TOON output support.",
+            });
+        }
     }
 }
 
@@ -1023,6 +1702,16 @@ fn gather_derived_assets(
 }
 
 fn gather_graph_compute() -> GraphComputeReport {
+    if diag_forced_capability_gap("graph") {
+        return GraphComputeReport {
+            status: GraphComputeStatus::Unavailable,
+            available_algorithms: &[],
+            live_compute_supported: false,
+            fnx_runtime_version: FNX_RUNTIME_VERSION,
+            last_used_at: None,
+        };
+    }
+
     #[cfg(feature = "graph")]
     {
         GraphComputeReport {
@@ -1319,11 +2008,27 @@ fn gather_memory_health(
             );
         }
     };
+    let access_times = connection
+        .list_audit_entries(Some(&workspace_id), None)
+        .map(|entries| memory_access_timestamp_map(&entries))
+        .unwrap_or_default();
 
-    (memory_health_from_rows(&memories, Utc::now()), Vec::new())
+    (
+        memory_health_from_rows_with_accesses(&memories, Utc::now(), &access_times),
+        Vec::new(),
+    )
 }
 
+#[cfg(test)]
 fn memory_health_from_rows(memories: &[StoredMemory], now: DateTime<Utc>) -> MemoryHealthReport {
+    memory_health_from_rows_with_accesses(memories, now, &BTreeMap::new())
+}
+
+fn memory_health_from_rows_with_accesses(
+    memories: &[StoredMemory],
+    now: DateTime<Utc>,
+    access_times: &BTreeMap<String, DateTime<Utc>>,
+) -> MemoryHealthReport {
     if memories.is_empty() {
         return MemoryHealthReport {
             status: MemoryHealthStatus::Empty,
@@ -1343,6 +2048,7 @@ fn memory_health_from_rows(memories: &[StoredMemory], now: DateTime<Utc>) -> Mem
     let mut tombstoned_count = 0_u32;
     let mut stale_count = 0_u32;
     let mut confidence_sum = 0.0_f32;
+    let mut freshness_sum = 0.0_f32;
     let mut provenance_count = 0_u32;
 
     for memory in memories {
@@ -1360,7 +2066,9 @@ fn memory_health_from_rows(memories: &[StoredMemory], now: DateTime<Utc>) -> Mem
         {
             provenance_count = provenance_count.saturating_add(1);
         }
-        if memory_row_is_stale(memory, now) {
+        let freshness = memory_row_freshness_score(memory, now, access_times.get(&memory.id));
+        freshness_sum += freshness;
+        if freshness < 0.5 {
             stale_count = stale_count.saturating_add(1);
         }
     }
@@ -1375,6 +2083,24 @@ fn memory_health_from_rows(memories: &[StoredMemory], now: DateTime<Utc>) -> Mem
     } else {
         Some(bounded_ratio(provenance_count, active_count))
     };
+    let freshness_score = if active_count == 0 {
+        0.0
+    } else {
+        (freshness_sum / active_count as f32).clamp(0.0, 1.0)
+    };
+    let active_ratio = bounded_ratio(active_count, total_count);
+    let confidence_score = bounded_score(average_confidence);
+    let provenance_score = bounded_score(provenance_coverage);
+    let tombstone_penalty = bounded_ratio(tombstoned_count, total_count);
+    let score_components = Some(MemoryHealthScoreComponents {
+        active_ratio,
+        freshness_score,
+        freshness_sourced_from: MEMORY_DECAY_SOURCE,
+        confidence_score,
+        provenance_score,
+        tombstone_penalty,
+    });
+    let health_score = score_components.map(MemoryHealthScoreComponents::health_score);
 
     let mut report = MemoryHealthReport {
         status: MemoryHealthStatus::Healthy,
@@ -1384,10 +2110,9 @@ fn memory_health_from_rows(memories: &[StoredMemory], now: DateTime<Utc>) -> Mem
         stale_count,
         average_confidence,
         provenance_coverage,
-        health_score: None,
-        score_components: None,
-    }
-    .with_conservative_score();
+        health_score,
+        score_components,
+    };
 
     report.status = match report.health_score {
         _ if active_count == 0 => MemoryHealthStatus::Degraded,
@@ -1398,13 +2123,58 @@ fn memory_health_from_rows(memories: &[StoredMemory], now: DateTime<Utc>) -> Mem
     report
 }
 
-fn memory_row_is_stale(memory: &StoredMemory, now: DateTime<Utc>) -> bool {
+fn memory_row_freshness_score(
+    memory: &StoredMemory,
+    now: DateTime<Utc>,
+    last_accessed_at: Option<&DateTime<Utc>>,
+) -> f32 {
     let Some(reference) = parse_memory_timestamp(&memory.updated_at)
         .or_else(|| parse_memory_timestamp(&memory.created_at))
+        .into_iter()
+        .chain(last_accessed_at.copied())
+        .max()
     else {
-        return true;
+        return 0.0;
     };
-    now.signed_duration_since(reference).num_days() >= MEMORY_STALE_AFTER_DAYS
+    let reference = reference.min(now);
+    evaluate_memory_decay(memory, reference, now, MemoryDecayThresholds::default()).freshness
+}
+
+fn memory_access_timestamp_map(entries: &[StoredAuditEntry]) -> BTreeMap<String, DateTime<Utc>> {
+    let mut timestamps = BTreeMap::new();
+    for entry in entries {
+        if !is_memory_access_audit_action(&entry.action) {
+            continue;
+        }
+        if entry.target_type.as_deref() != Some("memory") {
+            continue;
+        }
+        let Some(memory_id) = entry.target_id.as_deref() else {
+            continue;
+        };
+        let Some(timestamp) = parse_memory_timestamp(&entry.timestamp) else {
+            continue;
+        };
+        timestamps
+            .entry(memory_id.to_owned())
+            .and_modify(|existing| {
+                if timestamp > *existing {
+                    *existing = timestamp;
+                }
+            })
+            .or_insert(timestamp);
+    }
+    timestamps
+}
+
+fn is_memory_access_audit_action(action: &str) -> bool {
+    matches!(
+        action,
+        audit_actions::SEARCH_RETURNED_MEM
+            | audit_actions::PACK_INCLUDED_MEM
+            | audit_actions::MEMORY_SHOW
+            | audit_actions::WHY_INSPECTED
+    )
 }
 
 fn parse_memory_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
@@ -2113,7 +2883,7 @@ fn percentile_ms(samples: &[f64], percentile: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::*;
     use crate::models::CapabilityStatus;
@@ -2274,6 +3044,83 @@ mod tests {
     }
 
     #[test]
+    fn degraded_storage_capability_reports_specific_and_broad_codes() -> TestResult {
+        let mut degradations = Vec::new();
+        push_storage_capability_degradation(
+            &mut degradations,
+            CapabilityStatus::Degraded,
+            Some(Path::new(".")),
+        );
+
+        ensure(
+            degradations
+                .iter()
+                .map(|degradation| degradation.code)
+                .collect(),
+            vec!["storage_degraded", "storage_unavailable"],
+            "storage degraded aliases",
+        )?;
+        ensure(
+            degradations
+                .iter()
+                .map(|degradation| degradation.severity)
+                .collect(),
+            vec!["medium", "high"],
+            "storage degraded severities",
+        )
+    }
+
+    #[test]
+    fn degraded_search_capability_reports_specific_and_broad_codes() -> TestResult {
+        let mut degradations = Vec::new();
+        push_search_capability_degradation(
+            &mut degradations,
+            CapabilityStatus::Degraded,
+            Some(Path::new(".")),
+        );
+
+        ensure(
+            degradations
+                .iter()
+                .map(|degradation| degradation.code)
+                .collect(),
+            vec!["search_index_degraded", "search_unavailable"],
+            "search degraded aliases",
+        )?;
+        ensure(
+            degradations
+                .iter()
+                .map(|degradation| degradation.severity)
+                .collect(),
+            vec!["medium", "medium"],
+            "search degraded severities",
+        )
+    }
+
+    #[test]
+    fn degraded_toon_output_reports_unavailable_code() -> TestResult {
+        let mut degradations = Vec::new();
+        push_toon_output_capability_degradation(&mut degradations, CapabilityStatus::Degraded);
+
+        ensure(
+            degradations
+                .iter()
+                .map(|degradation| degradation.code)
+                .collect(),
+            vec!["toon_unavailable"],
+            "toon degraded code",
+        )?;
+        ensure(
+            degradations
+                .iter()
+                .map(|degradation| degradation.repair)
+                .collect(),
+            vec!["Unset `EE_DISABLE_TOON` or use `--format json`."],
+            "toon degraded repair",
+        )
+    }
+
+    #[test]
     fn memory_health_score_components_are_conservative() -> TestResult {
         let report = MemoryHealthReport::healthy_fixture();
         let components = report
@@ -2371,7 +3218,7 @@ mod tests {
         ensure(report.total_count, 3, "total count")?;
         ensure(report.active_count, 2, "active count")?;
         ensure(report.tombstoned_count, 1, "tombstoned count")?;
-        ensure(report.stale_count, 1, "stale count")?;
+        ensure(report.stale_count, 0, "stale count")?;
         ensure(
             report.average_confidence,
             Some(0.6),
@@ -2387,7 +3234,16 @@ mod tests {
             .score_components
             .ok_or_else(|| "non-empty memory health should include components".to_owned())?;
         ensure(components.active_ratio, 2.0 / 3.0, "active ratio")?;
-        ensure(components.freshness_score, 0.5, "freshness")?;
+        ensure(
+            (0.88..0.89).contains(&components.freshness_score),
+            true,
+            "freshness",
+        )?;
+        ensure(
+            components.freshness_sourced_from,
+            MEMORY_DECAY_SOURCE,
+            "freshness source",
+        )?;
         ensure(components.confidence_score, 0.6, "confidence score")?;
         ensure(components.provenance_score, 0.5, "provenance score")?;
         ensure(components.tombstone_penalty, 1.0 / 3.0, "tombstone penalty")

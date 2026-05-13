@@ -26,6 +26,8 @@
       "Workspace storage exists",
       "could not be opened"
     ],
-    "repair_contains": "ee doctor"
+    "repair_contains": "ee doctor",
+    "repair_string": "Run `ee doctor --json`.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
   }
 }

@@ -13,9 +13,10 @@
   "trigger": {
     "description": "Science analytics input exceeds the supported size for the configured backend.",
     "setup_commands": [
-      "# run science analytics with an oversized input fixture"
+      "printf '{\"snapshotId\":\"baseline\",\"scenariosRun\":2,\"scenariosPassed\":2,\"scienceMetrics\":{\"f1Score\":1.0}}\\n' > baseline.json",
+      "printf '{\"snapshotId\":\"current\",\"scenariosRun\":2,\"scenariosPassed\":1,\"scienceMetrics\":{\"f1Score\":0.5}}\\n' > current.json"
     ],
-    "invocation": "ee analyze drift --workspace . --json"
+    "invocation": "ee analyze drift --baseline baseline.json --current current.json --max-input-bytes 1 --workspace . --json"
   },
   "expected_emission": {
     "code": "science_input_too_large",

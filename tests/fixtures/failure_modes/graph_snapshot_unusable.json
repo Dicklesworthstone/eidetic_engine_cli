@@ -15,7 +15,7 @@
     "description": "A graph snapshot exists but has an archived, invalid, or mismatched graph type/status.",
     "setup_commands": [
       "ee init --workspace .",
-      "# insert an archived or invalid graph snapshot through a test harness"
+      "ee diag graph-snapshot --status invalid --metrics-json '{\"nodes\":[{\"id\":\"mem_j6graphbad000000000000000\",\"label\":\"J6 invalid\",\"pagerank\":1.0,\"betweenness\":0.0}],\"edges\":[]}' --node-count 1 --edge-count 0 --workspace . --json"
     ],
     "invocation": "ee graph export --workspace . --json"
   },
@@ -26,6 +26,8 @@
       "Graph snapshot",
       "status"
     ],
-    "repair_contains": "ee graph centrality-refresh"
+    "repair_contains": "ee graph centrality-refresh",
+    "repair_string": "ee graph centrality-refresh",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

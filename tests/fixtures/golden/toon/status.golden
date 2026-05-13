@@ -21,6 +21,8 @@ data:
     runtime: ready
     storage: pending
     search: pending
+    output:
+      toon: ready
     agentDetection: ready
   runtime:
     engine: asupersync

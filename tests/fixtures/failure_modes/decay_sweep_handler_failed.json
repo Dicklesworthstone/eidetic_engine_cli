@@ -14,9 +14,9 @@
     "description": "The decay sweep job reaches the score-decay handler, but the handler returns an error.",
     "setup_commands": [
       "ee init --workspace .",
-      "# use a fixture that makes run_score_decay_job fail during preflight or mutation"
+      "ee diag database-skew --workspace . --output-database ./decay-handler-skew.db --skew decay-memories-table-unavailable --json"
     ],
-    "invocation": "ee job run decay_sweep --workspace . --json"
+    "invocation": "ee job run decay_sweep --database ./decay-handler-skew.db --workspace . --json"
   },
   "expected_emission": {
     "code": "decay_sweep_handler_failed",

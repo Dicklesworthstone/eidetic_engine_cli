@@ -44,7 +44,8 @@ use crate::core::causal::{
     compare_causal_chains_from_store, compare_causal_evidence, compare_causal_filtered_from_store,
     estimate_causal_chain_from_store, estimate_causal_filtered_from_store, estimate_causal_uplift,
     promote_causal_chain_from_store, promote_causal_plan,
-    stable_workspace_id as stable_causal_workspace_id, trace_causal_chains_from_store,
+    stable_workspace_id as stable_causal_workspace_id, trace_causal_chains,
+    trace_causal_chains_from_store,
 };
 use crate::core::check::CheckReport;
 use crate::core::context::{
@@ -55,11 +56,12 @@ use crate::core::context::{
 use crate::core::curate::{
     CurateApplyOptions, CurateApplyReport, CurateCandidatesOptions, CurateCandidatesReport,
     CurateDispositionOptions, CurateDispositionReport, CurateRetireOptions, CurateReviewAction,
-    CurateReviewOptions, CurateReviewReport, CurateTombstoneOptions, CurateValidateOptions,
-    CurateValidateReport, ReviewSessionOptions, ReviewSessionReport, ReviewWorkspaceOptions,
-    apply_curation_candidate, list_curation_candidates, review_curation_candidate,
-    review_session_proposals, run_curate_retire, run_curate_tombstone, run_curation_disposition,
-    run_review_workspace, validate_curation_candidate,
+    CurateReviewOptions, CurateReviewReport, CurateTombstoneOptions, CurateUntombstoneOptions,
+    CurateValidateOptions, CurateValidateReport, ReviewSessionOptions, ReviewSessionReport,
+    ReviewWorkspaceOptions, apply_curation_candidate, list_curation_candidates,
+    review_curation_candidate, review_session_proposals, run_curate_retire, run_curate_tombstone,
+    run_curate_untombstone, run_curation_disposition, run_review_workspace,
+    validate_curation_candidate,
 };
 use crate::core::doctor::{
     DependencyDiagnosticsReport, DoctorReport, FrankenHealthReport, IntegrityDiagnosticsOptions,
@@ -82,9 +84,9 @@ use crate::core::handoff::{
 };
 use crate::core::health::HealthReport;
 use crate::core::index::{
-    INDEX_PUBLISH_LOCK_CONTENTION_CODE, IndexRebuildError, IndexRebuildOptions,
-    IndexReembedOptions, IndexStatusOptions, IndexVacuumOptions, get_index_status,
-    get_index_vacuum_report, rebuild_index, reembed_index,
+    INDEX_PUBLISH_LOCK_CONTENTION_CODE, IndexRebuildError, IndexRebuildOptions, IndexRebuildReport,
+    IndexRebuildStatus, IndexReembedOptions, IndexStatusOptions, IndexVacuumOptions,
+    get_index_status, get_index_vacuum_report, rebuild_index, reembed_index,
 };
 use crate::core::init::{InitOptions, init_workspace};
 use crate::core::install::{
@@ -103,12 +105,13 @@ use crate::core::learn::{
 };
 use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_source};
 use crate::core::memory::{
-    ExpireMemoryOptions, GetMemoryOptions, ListMemoriesOptions, MemoryExpireReport, MemoryLinkMode,
-    MemoryLinkOptions, MemoryLinkReport, MemoryReviseReport, MemoryTagsMode, MemoryTagsOptions,
-    MemoryTagsReport, RememberMemoryOptions, RememberMemoryReport, ReviseMemoryOptions,
-    ReviseReason, WorkflowCloseOptions, WorkflowCloseReport, WorkflowCreateOptions, close_workflow,
-    create_workflow, expire_memory, get_memory_details, list_memories, remember_memory,
-    revise_memory, update_memory_link, update_memory_tags,
+    ExpireMemoryOptions, GetMemoryOptions, ListMemoriesOptions, MemoryExpireReport,
+    MemoryLevelOptions, MemoryLevelReport, MemoryLinkMode, MemoryLinkOptions, MemoryLinkReport,
+    MemoryReviseReport, MemoryTagsMode, MemoryTagsOptions, MemoryTagsReport, RememberMemoryOptions,
+    RememberMemoryReport, ReviseMemoryOptions, ReviseReason, WorkflowCloseOptions,
+    WorkflowCloseReport, WorkflowCreateOptions, close_workflow, create_workflow, expire_memory,
+    get_memory_details, list_memories, remember_memory, revise_memory, update_memory_level,
+    update_memory_link, update_memory_tags,
 };
 use crate::core::outcome::{
     DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
@@ -151,7 +154,7 @@ use crate::core::rule::{
 use crate::core::search::{
     SearchOptions, SearchReport, SearchSourceMode, run_diag_search, run_search,
 };
-use crate::core::status::StatusReport;
+use crate::core::status::{StatusOptions, StatusReport};
 use crate::core::swarm_brief::{
     SwarmBriefCollectOptions, SwarmBriefReport, SwarmBriefSourceKind, SwarmBriefSourceStatus,
     SystemSwarmBriefCommandRunner, all_swarm_brief_sources, collect_swarm_brief,
@@ -180,13 +183,14 @@ use crate::models::preflight::{
 use crate::models::{
     CertificateKind, CertificateStatus, DEMO_FILE_SCHEMA_V1, DEMO_RUN_RESULT_SCHEMA_V1, DemoEntry,
     DemoFile, DemoId, DemoStatus, DomainError, ExperimentOutcomeStatus, ExperimentSafetyBoundary,
-    FilterOperator, InstallOperation, LearningObservationSignal, OutputVerification,
+    FilterOperator, InstallOperation, LearningObservationSignal, MemoryScope, OutputVerification,
     ProcessExitCode, QUERY_SCHEMA_V1, RedactionLevel, Tag, is_valid_demo_artifact_path,
     parse_demo_file_yaml,
 };
 use crate::output;
 use crate::pack::{
     ContextPackProfile, ContextResponse, ContextResponseDegradation, ContextResponseSeverity,
+    PackResourceProfile,
 };
 use crate::search::{
     CanonicalSearchDocument, DocumentSource, Embedder, EmbedderStack, HashEmbedder, IndexBuilder,
@@ -215,7 +219,7 @@ const HELP_PRELUDE: &str = concat!(
     "Quick categories (the full alphabetical list is below):\n",
     "\n",
     "  Inspect:        status, doctor, capabilities, memory show, memory history\n",
-    "  Memory ops:     link, tag, memory expire, memory revise, outcome\n",
+    "  Memory ops:     link, tag, memory level, memory expire, memory revise, outcome\n",
     "  Curate:         curate (candidates|validate|apply), playbook, review\n",
     "  Graph:          graph (pagerank|hits|communities|neighborhood|centrality-refresh)\n",
     "  Maintenance:    maintenance, job, index, steward, daemon\n",
@@ -1406,6 +1410,14 @@ pub struct MaintenanceRunArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
 
+    /// Include L3 decay lifecycle actions: demotion and reversible tombstoning.
+    #[arg(long = "include-decay", action = ArgAction::SetTrue)]
+    pub include_decay: bool,
+
+    /// Override the maintenance reference time for deterministic replay.
+    #[arg(long = "as-of", value_name = "RFC3339")]
+    pub as_of: Option<String>,
+
     /// Override per-job time budget in milliseconds.
     #[arg(long, value_name = "MS")]
     pub time_limit_ms: Option<u64>,
@@ -1492,6 +1504,10 @@ pub struct ContextArgs {
     #[arg(long = "pack-profile", value_enum, default_value_t = PackOutputProfileArg::Standard)]
     pub pack_profile: PackOutputProfileArg,
 
+    /// Resource SLO profile for pack assembly: lean, standard, or swarm_heavy.
+    #[arg(long = "resource-profile", value_parser = parse_pack_resource_profile_arg, default_value = "standard")]
+    pub resource_profile: PackResourceProfile,
+
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
@@ -1519,6 +1535,14 @@ pub struct ContextArgs {
     /// Suppress data.pack.meta in JSON output.
     #[arg(long = "no-meta", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
     pub no_meta: Option<bool>,
+
+    /// Redacted ee.coordination_snapshot.v1 JSON to embed in the pack.
+    #[arg(long, value_name = "PATH")]
+    pub coordination_snapshot: Option<PathBuf>,
+
+    /// Mark coordination sources stale after this many milliseconds.
+    #[arg(long = "coordination-stale-after-ms", value_name = "MS", default_value_t = crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS)]
+    pub coordination_stale_after_ms: u64,
 
     /// Bead bd-17c65.5.2 (E2): include ALL degraded signals in
     /// `data.degraded[]`, even those whose category indicates they
@@ -1550,6 +1574,14 @@ pub struct ContextArgs {
     /// Include memories marked with stale validity status when present in index metadata.
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_stale: bool,
+
+    /// Trust lane to apply before packing memories: self, team, workspace, verified, or swarm.
+    #[arg(long, value_parser = parse_memory_scope_arg, default_value = "swarm")]
+    pub memory_scope: MemoryScope,
+
+    /// Fail closed when relevant evidence exists outside the requested memory scope.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_scope: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -1643,6 +1675,10 @@ pub struct PackArgs {
     #[arg(long = "pack-profile", value_enum)]
     pub pack_profile: Option<PackOutputProfileArg>,
 
+    /// Resource SLO profile for pack assembly: lean, standard, or swarm_heavy.
+    #[arg(long = "resource-profile", value_parser = parse_pack_resource_profile_arg)]
+    pub resource_profile: Option<PackResourceProfile>,
+
     /// Disable the coverage-fill pass; accepts --no-coverage-fill=false to override a lean profile.
     #[arg(long = "no-coverage-fill", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
     pub no_coverage_fill: Option<bool>,
@@ -1658,6 +1694,14 @@ pub struct PackArgs {
     /// Suppress data.pack.meta in JSON output.
     #[arg(long = "no-meta", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
     pub no_meta: Option<bool>,
+
+    /// Redacted ee.coordination_snapshot.v1 JSON to embed in the pack.
+    #[arg(long, value_name = "PATH")]
+    pub coordination_snapshot: Option<PathBuf>,
+
+    /// Mark coordination sources stale after this many milliseconds.
+    #[arg(long = "coordination-stale-after-ms", value_name = "MS", default_value_t = crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS)]
+    pub coordination_stale_after_ms: u64,
 
     /// Bead bd-17c65.5.2 (E2): include all degraded signals in
     /// `data.degraded[]` regardless of category (build-time gaps,
@@ -1733,6 +1777,10 @@ pub struct PackBuildArgs {
     #[arg(long = "pack-profile", value_enum)]
     pub pack_profile: Option<PackOutputProfileArg>,
 
+    /// Resource SLO profile for pack assembly: lean, standard, or swarm_heavy.
+    #[arg(long = "resource-profile", value_parser = parse_pack_resource_profile_arg)]
+    pub resource_profile: Option<PackResourceProfile>,
+
     /// Disable the coverage-fill pass; accepts --no-coverage-fill=false to override a lean profile.
     #[arg(long = "no-coverage-fill", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
     pub no_coverage_fill: Option<bool>,
@@ -1748,6 +1796,14 @@ pub struct PackBuildArgs {
     /// Suppress data.pack.meta in JSON output.
     #[arg(long = "no-meta", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
     pub no_meta: Option<bool>,
+
+    /// Redacted ee.coordination_snapshot.v1 JSON to embed in the pack.
+    #[arg(long, value_name = "PATH")]
+    pub coordination_snapshot: Option<PathBuf>,
+
+    /// Mark coordination sources stale after this many milliseconds.
+    #[arg(long = "coordination-stale-after-ms", value_name = "MS", default_value_t = crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS)]
+    pub coordination_stale_after_ms: u64,
 
     /// Bead bd-17c65.5.2 (E2): include all degraded signals in
     /// `data.degraded[]` regardless of category (build-time gaps,
@@ -1804,6 +1860,7 @@ impl PackArgs {
             speed: self.speed,
             profile: self.profile.clone(),
             pack_profile: self.pack_profile,
+            resource_profile: self.resource_profile,
             no_coverage_fill: self.no_coverage_fill,
             no_rendered_text: self.no_rendered_text,
             no_skipped: self.no_skipped,
@@ -1816,6 +1873,8 @@ impl PackArgs {
             include_expired: self.include_expired,
             include_future: self.include_future,
             include_stale: self.include_stale,
+            coordination_snapshot: self.coordination_snapshot.clone(),
+            coordination_stale_after_ms: self.coordination_stale_after_ms,
         })
     }
 }
@@ -1850,14 +1909,32 @@ pub struct PackDiffArgs {
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum DiagCommand {
+    /// Acquire a deterministic advisory lock for diagnostic fixture replay.
+    AdvisoryLock(DiagAdvisoryLockArgs),
     /// Report claim verification posture: unverified, stale, and regressed claims.
     Claims(DiagClaimsArgs),
+    /// Seed deterministic causal evidence for diagnostic fixture replay.
+    CausalEdge(DiagCausalEdgeArgs),
+    /// Seed a deterministic curation candidate for diagnostic fixture replay.
+    CurationCandidate(DiagCurationCandidateArgs),
+    /// Copy the workspace database and apply a deterministic diagnostic skew.
+    DatabaseSkew(DiagDatabaseSkewArgs),
     /// Report accepted dependency contracts and forbidden dependency gates.
     Dependencies,
     /// Report graph module readiness, capabilities, and metrics.
     Graph,
+    /// Seed deterministic graph snapshot diagnostic state.
+    GraphSnapshot(DiagGraphSnapshotArgs),
     /// Verify database, provenance-chain, and canary-memory integrity.
     Integrity(DiagIntegrityArgs),
+    /// Skew memory temporal validity metadata for diagnostic fixture replay.
+    MemoryValidity(DiagMemoryValidityArgs),
+    /// Seed a deterministic model registry entry for diagnostic fixture replay.
+    ModelRegistry(DiagModelRegistryArgs),
+    /// Seed a deterministic pack record for diagnostic fixture replay.
+    PackRecord(DiagPackRecordArgs),
+    /// Resolve the newest persisted context pack for a diagnostic query.
+    PackLatest(DiagPackLatestArgs),
     /// Report quarantine status for import sources.
     #[command(subcommand)]
     Quarantine(DiagQuarantineCommand),
@@ -1865,6 +1942,12 @@ pub enum DiagCommand {
     Search(DiagSearchArgs),
     /// Verify stdout/stderr stream separation is correct.
     Streams,
+    /// Seed a deterministic tripwire row for diagnostic fixture replay.
+    Tripwire(DiagTripwireArgs),
+    /// Exercise write-owner queue capacity and busy diagnostics.
+    WriteOwner(DiagWriteOwnerArgs),
+    /// Exercise write-spool budget accounting and backpressure diagnostics.
+    WriteSpool(DiagWriteSpoolArgs),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -1890,6 +1973,314 @@ pub struct DiagQuarantineShowArgs {
     pub source_uri: String,
 }
 
+/// Arguments for `ee diag advisory-lock`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagAdvisoryLockArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Advisory lock resource type.
+    #[arg(long, default_value = "index", value_name = "TYPE")]
+    pub resource_type: String,
+
+    /// Advisory lock resource id. Defaults to the resolved workspace id.
+    #[arg(long, value_name = "ID")]
+    pub resource_id: Option<String>,
+
+    /// Holder id to store in the advisory lock.
+    #[arg(long, default_value = "j6-diagnostic-holder", value_name = "ID")]
+    pub holder: String,
+
+    /// Lock TTL in seconds.
+    #[arg(long, default_value_t = 3600, value_name = "SECONDS")]
+    pub ttl_seconds: u64,
+
+    /// Lock acquisition reason.
+    #[arg(long, default_value = "diagnostic advisory lock", value_name = "TEXT")]
+    pub reason: String,
+}
+
+/// Arguments for `ee diag causal-edge`.
+#[derive(Clone, Debug, PartialEq, Parser)]
+pub struct DiagCausalEdgeArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Workspace ID to store on the causal edge. Defaults to the stable causal workspace ID.
+    #[arg(long, value_name = "WORKSPACE_ID")]
+    pub workspace_id: Option<String>,
+
+    /// Causal evidence edge ID.
+    #[arg(long, value_name = "EDGE_ID")]
+    pub edge_id: String,
+
+    /// Failure memory ID.
+    #[arg(long, value_name = "MEMORY_ID")]
+    pub failure_id: String,
+
+    /// Candidate cause memory ID.
+    #[arg(long, value_name = "MEMORY_ID")]
+    pub candidate_cause_id: String,
+
+    /// Contribution score in [0, 1].
+    #[arg(long, default_value_t = 0.7, value_name = "SCORE")]
+    pub contribution_score: f64,
+
+    /// Evidence URI to preserve on the edge. May be repeated.
+    #[arg(long = "evidence-uri", value_name = "URI")]
+    pub evidence_uris: Vec<String>,
+
+    /// Computed-at timestamp.
+    #[arg(long, value_name = "RFC3339")]
+    pub computed_at: Option<String>,
+
+    /// Causal evidence method: manual, graph-inferred, or cass-derived.
+    #[arg(long, default_value = "manual", value_name = "METHOD")]
+    pub method: String,
+}
+
+/// Arguments for `ee diag database-skew`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagDatabaseSkewArgs {
+    /// Source database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Destination database path to create.
+    #[arg(long, value_name = "PATH", required_unless_present = "in_place")]
+    pub output_database: Option<PathBuf>,
+
+    /// Apply the skew directly to the source database.
+    #[arg(long = "in-place", action = ArgAction::SetTrue, conflicts_with = "output_database")]
+    pub in_place: bool,
+
+    /// Skew to apply for diagnostic fixture replay.
+    #[arg(long, value_name = "SKEW")]
+    pub skew: String,
+}
+
+/// Arguments for `ee diag memory-validity`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagMemoryValidityArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Memory ID to update.
+    #[arg(long, value_name = "MEMORY_ID")]
+    pub memory_id: String,
+
+    /// Raw valid_from value to store. Diagnostic mode intentionally permits malformed values.
+    #[arg(long, value_name = "RFC3339_OR_RAW")]
+    pub valid_from: Option<String>,
+
+    /// Raw valid_to value to store. Diagnostic mode intentionally permits malformed values.
+    #[arg(long, value_name = "RFC3339_OR_RAW")]
+    pub valid_to: Option<String>,
+
+    /// Clear valid_from.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub clear_valid_from: bool,
+
+    /// Clear valid_to.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub clear_valid_to: bool,
+}
+
+/// Arguments for `ee diag model-registry`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagModelRegistryArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Workspace ID to store on the registry entry. Defaults to the registered workspace ID.
+    #[arg(long, value_name = "WORKSPACE_ID")]
+    pub workspace_id: Option<String>,
+
+    /// Model registry row ID. Must be `mdl_` plus 26 characters.
+    #[arg(long, value_name = "MODEL_ID")]
+    pub model_id: String,
+
+    /// Model provider: hash, model2vec, fastembed, external, or custom.
+    #[arg(long, default_value = "hash", value_name = "PROVIDER")]
+    pub provider: String,
+
+    /// Model name.
+    #[arg(long, value_name = "NAME")]
+    pub model_name: String,
+
+    /// Model purpose: embedding, reranker, classifier, or other.
+    #[arg(long, default_value = "embedding", value_name = "PURPOSE")]
+    pub purpose: String,
+
+    /// Embedding dimension.
+    #[arg(long, value_name = "DIMENSION")]
+    pub dimension: Option<u32>,
+
+    /// Distance metric: cosine, dot, or l2.
+    #[arg(long, value_name = "METRIC")]
+    pub distance_metric: Option<String>,
+
+    /// Registry status: available, unavailable, or disabled.
+    #[arg(long, default_value = "available", value_name = "STATUS")]
+    pub status: String,
+
+    /// Model version label.
+    #[arg(long, value_name = "VERSION")]
+    pub version: Option<String>,
+
+    /// Model source URI.
+    #[arg(long, value_name = "URI")]
+    pub source_uri: Option<String>,
+
+    /// blake3 content hash.
+    #[arg(long, value_name = "HASH")]
+    pub content_hash: Option<String>,
+
+    /// JSON metadata stored with the model registry row.
+    #[arg(long, value_name = "JSON")]
+    pub metadata_json: Option<String>,
+
+    /// Last-checked timestamp.
+    #[arg(long, value_name = "RFC3339")]
+    pub last_checked_at: Option<String>,
+}
+
+/// Arguments for `ee diag tripwire`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagTripwireArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Workspace ID to store on the tripwire. Defaults to the registered workspace ID.
+    #[arg(long, value_name = "WORKSPACE_ID")]
+    pub workspace_id: Option<String>,
+
+    /// Tripwire ID.
+    #[arg(long, default_value = "tw_j6_unsupported_condition", value_name = "ID")]
+    pub tripwire_id: String,
+
+    /// Preflight run ID associated with the tripwire.
+    #[arg(
+        long,
+        default_value = "preflight_j6_unsupported",
+        value_name = "RUN_ID"
+    )]
+    pub preflight_run_id: String,
+
+    /// Tripwire type: file_change, resource_threshold, time_limit, error_threshold, service_health, or custom.
+    #[arg(long, default_value = "custom", value_name = "TYPE")]
+    pub tripwire_type: String,
+
+    /// Tripwire condition expression.
+    #[arg(
+        long,
+        default_value = "unsupported_condition_kind(value)",
+        value_name = "CONDITION"
+    )]
+    pub condition: String,
+
+    /// Tripwire action: halt, pause, warn, or audit.
+    #[arg(long, default_value = "warn", value_name = "ACTION")]
+    pub action: String,
+
+    /// Tripwire state: armed, triggered, disarmed, or error.
+    #[arg(long, default_value = "armed", value_name = "STATE")]
+    pub state: String,
+
+    /// Tripwire message.
+    #[arg(
+        long,
+        default_value = "J6 unsupported condition fixture",
+        value_name = "TEXT"
+    )]
+    pub message: String,
+
+    /// Created-at timestamp.
+    #[arg(long, default_value = "2026-05-13T00:00:00Z", value_name = "RFC3339")]
+    pub created_at: String,
+
+    /// Last-checked timestamp.
+    #[arg(long, value_name = "RFC3339")]
+    pub last_checked_at: Option<String>,
+
+    /// Triggered-at timestamp.
+    #[arg(long, value_name = "RFC3339")]
+    pub triggered_at: Option<String>,
+}
+
+/// Arguments for `ee diag pack-latest`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagPackLatestArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Workspace ID to inspect. Defaults to the registered workspace ID.
+    #[arg(long, value_name = "WORKSPACE_ID")]
+    pub workspace_id: Option<String>,
+
+    /// Exact context query whose newest pack should be returned.
+    #[arg(long, value_name = "QUERY")]
+    pub query: String,
+}
+
+/// Arguments for `ee diag pack-record`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagPackRecordArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Workspace ID to store on the pack. Defaults to the registered workspace ID.
+    #[arg(long, value_name = "WORKSPACE_ID")]
+    pub workspace_id: Option<String>,
+
+    /// Pack record ID. Must be `pack_` plus 26 characters.
+    #[arg(
+        long,
+        default_value = "pack_j6referenceissues000000000",
+        value_name = "PACK_ID"
+    )]
+    pub pack_id: String,
+
+    /// Context query to persist on the pack record.
+    #[arg(long, default_value = "j6 reference issue", value_name = "QUERY")]
+    pub query: String,
+
+    /// Context pack profile: compact, balanced, or thorough.
+    #[arg(long, default_value = "compact", value_name = "PROFILE")]
+    pub profile: String,
+
+    /// Maximum token budget recorded on the pack.
+    #[arg(long, default_value_t = 256, value_name = "TOKENS")]
+    pub max_tokens: u32,
+
+    /// Tokens used by the diagnostic pack.
+    #[arg(long, default_value_t = 32, value_name = "TOKENS")]
+    pub used_tokens: u32,
+
+    /// Declared selected item count.
+    #[arg(long, default_value_t = 1, value_name = "COUNT")]
+    pub item_count: u32,
+
+    /// Declared omitted item count.
+    #[arg(long, default_value_t = 0, value_name = "COUNT")]
+    pub omitted_count: u32,
+
+    /// Pack hash to persist.
+    #[arg(long, default_value = "blake3:j6-reference-issue", value_name = "HASH")]
+    pub pack_hash: String,
+
+    /// Created-by marker to persist.
+    #[arg(long, default_value = "bd-17c65.10.6", value_name = "TEXT")]
+    pub created_by: String,
+}
+
 /// Arguments for `ee diag claims`.
 #[derive(Clone, Debug, Eq, PartialEq, Parser)]
 pub struct DiagClaimsArgs {
@@ -1904,6 +2295,82 @@ pub struct DiagClaimsArgs {
     /// Include verified claims in output (normally filtered out).
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_verified: bool,
+}
+
+/// Arguments for `ee diag curation-candidate`.
+#[derive(Clone, Debug, PartialEq, Parser)]
+pub struct DiagCurationCandidateArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Allow a missing target memory for failure-mode fixture replay.
+    #[arg(long)]
+    pub allow_missing_target: bool,
+
+    /// Candidate ID to insert.
+    #[arg(
+        long,
+        default_value = "curate_00000000000000000000000042",
+        value_name = "ID"
+    )]
+    pub candidate_id: String,
+
+    /// Candidate action type.
+    #[arg(long = "candidate-type", default_value = "rule", value_name = "TYPE")]
+    pub candidate_type: String,
+
+    /// Candidate status.
+    #[arg(long, default_value = "pending", value_name = "STATUS")]
+    pub status: String,
+
+    /// Candidate source type.
+    #[arg(long, default_value = "rule_engine", value_name = "TYPE")]
+    pub source_type: String,
+
+    /// Candidate source ID.
+    #[arg(long, value_name = "ID")]
+    pub source_id: Option<String>,
+
+    /// Candidate reason.
+    #[arg(
+        long,
+        default_value = "Diagnostic curation candidate fixture seed.",
+        value_name = "TEXT"
+    )]
+    pub reason: String,
+
+    /// Target memory ID. The default intentionally references a missing memory.
+    #[arg(
+        long,
+        default_value = "mem_j6_missing_embedding_payload",
+        value_name = "ID"
+    )]
+    pub target_memory_id: String,
+
+    /// Proposed content. Omit this with the default missing target to produce no embedding payload.
+    #[arg(long, value_name = "TEXT")]
+    pub proposed_content: Option<String>,
+
+    /// Candidate confidence.
+    #[arg(long, default_value_t = 0.82, value_name = "FLOAT")]
+    pub confidence: f32,
+
+    /// Candidate creation timestamp.
+    #[arg(long, default_value = "2026-05-13T00:00:00Z", value_name = "RFC3339")]
+    pub created_at: String,
+
+    /// Review queue state to store after seeding.
+    #[arg(long, value_name = "STATE")]
+    pub review_state: Option<String>,
+
+    /// Timestamp to store as the review-state transition time.
+    #[arg(long, value_name = "RFC3339")]
+    pub state_entered_at: Option<String>,
+
+    /// TTL policy ID to store after seeding.
+    #[arg(long, value_name = "ID")]
+    pub ttl_policy_id: Option<String>,
 }
 
 /// Arguments for `ee diag integrity`.
@@ -1958,6 +2425,82 @@ pub struct DiagSearchArgs {
     /// Minimum score (0.0..=1.0) for a hit to be included in final results.
     #[arg(long, value_name = "FLOAT")]
     pub relevance_floor: Option<f32>,
+
+    /// Trust lane to apply before returning memories: self, team, workspace, verified, or swarm.
+    #[arg(long, value_parser = parse_memory_scope_arg, default_value = "swarm")]
+    pub memory_scope: MemoryScope,
+
+    /// Fail closed when relevant evidence exists outside the requested memory scope.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_scope: bool,
+}
+
+/// Arguments for `ee diag graph-snapshot`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagGraphSnapshotArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Snapshot status to seed: valid, stale, invalid, or archived.
+    #[arg(long, default_value = "valid", value_name = "STATUS")]
+    pub status: String,
+
+    /// Metrics JSON to persist in the snapshot row.
+    #[arg(long, value_name = "JSON")]
+    pub metrics_json: Option<String>,
+
+    /// Node count recorded in snapshot metadata.
+    #[arg(long, default_value_t = 1)]
+    pub node_count: u32,
+
+    /// Edge count recorded in snapshot metadata.
+    #[arg(long, default_value_t = 0)]
+    pub edge_count: u32,
+
+    /// Source generation recorded in snapshot metadata.
+    #[arg(long, default_value_t = 1)]
+    pub source_generation: u32,
+}
+
+/// Arguments for `ee diag write-owner`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagWriteOwnerArgs {
+    /// Bounded write-owner channel capacity for this diagnostic.
+    #[arg(long, default_value_t = crate::core::write_owner::DEFAULT_CHANNEL_CAPACITY, value_name = "N")]
+    pub capacity: usize,
+
+    /// Number of deterministic write requests to enqueue without running the owner.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    pub enqueue: u32,
+}
+
+/// Arguments for `ee diag write-spool`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagWriteSpoolArgs {
+    /// Maximum number of pending writes accepted before backpressure.
+    #[arg(long, default_value_t = crate::core::write_owner::DEFAULT_SPOOL_MAX_PENDING, value_name = "N")]
+    pub max_pending: usize,
+
+    /// Maximum writes included in one coalesced batch.
+    #[arg(long, default_value_t = crate::core::write_owner::DEFAULT_SPOOL_MAX_BATCH_SIZE, value_name = "N")]
+    pub max_batch_size: usize,
+
+    /// Maximum pending payload bytes accepted before backpressure.
+    #[arg(long, default_value_t = crate::core::write_owner::DEFAULT_SPOOL_MAX_PENDING_BYTES, value_name = "BYTES")]
+    pub max_pending_bytes: usize,
+
+    /// Maximum permitted age for the oldest queued write.
+    #[arg(long, default_value_t = crate::core::write_owner::DEFAULT_SPOOL_QUEUE_TIMEOUT_MS, value_name = "MS")]
+    pub max_queue_age_ms: u64,
+
+    /// Number of deterministic write intents to enqueue for the diagnostic.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    pub enqueue: u32,
+
+    /// Payload bytes assigned to each diagnostic write intent.
+    #[arg(long, default_value_t = 128, value_name = "BYTES")]
+    pub payload_bytes: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
@@ -2511,6 +3054,11 @@ pub struct HandoffResumeArgs {
     /// Maximum sections to include in resume.
     #[arg(long, value_name = "N")]
     pub max_sections: Option<usize>,
+
+    /// Fail with exit code 6 if the capsule snapshot has drifted from
+    /// the current workspace state. Bead bd-17c65.13.5 (M4).
+    #[arg(long = "require-fresh", action = ArgAction::SetTrue)]
+    pub require_fresh: bool,
 }
 
 /// Handoff capsule profile.
@@ -2664,8 +3212,8 @@ pub struct LearnUncertaintyArgs {
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct LearnClusterArgs {
     /// Agglomerative average-linkage similarity threshold.
-    #[arg(long, default_value = "0.55")]
-    pub threshold: String,
+    #[arg(long)]
+    pub threshold: Option<String>,
 
     /// Minimum cluster size to emit.
     #[arg(long, default_value_t = 3)]
@@ -3170,6 +3718,14 @@ pub struct CausalTraceArgs {
     /// Filter by agent ID.
     #[arg(long, value_name = "AGENT_ID")]
     pub agent_id: Option<String>,
+
+    /// Explicit causal database path for diagnostic replay.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Workspace ID stored in the explicit causal database.
+    #[arg(long = "database-workspace-id", value_name = "WORKSPACE_ID")]
+    pub database_workspace_id: Option<String>,
 
     /// Maximum chains to return.
     #[arg(long, short = 'n', default_value_t = 50)]
@@ -4400,6 +4956,14 @@ pub struct SearchArgs {
     /// Fail instead of falling back when the requested source mode is unavailable.
     #[arg(long, action = ArgAction::SetTrue)]
     pub strict_source_mode: bool,
+
+    /// Trust lane to apply before returning memories: self, team, workspace, verified, or swarm.
+    #[arg(long, value_parser = parse_memory_scope_arg, default_value = "swarm")]
+    pub memory_scope: MemoryScope,
+
+    /// Fail closed when relevant evidence exists outside the requested memory scope.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_scope: bool,
 }
 
 /// Arguments for `ee doctor`.
@@ -4665,6 +5229,8 @@ pub enum CurateCommand {
     Retire(CurateRetireArgs),
     /// Write a tombstone audit record for a memory without deleting the row.
     Tombstone(CurateTombstoneArgs),
+    /// Restore a tombstoned memory row with an audited record.
+    Untombstone(CurateUntombstoneArgs),
 }
 
 /// Arguments for `ee curate candidates`.
@@ -4871,6 +5437,29 @@ pub struct CurateTombstoneArgs {
     pub dry_run: bool,
 
     /// Tombstone reason for audit trail.
+    #[arg(long, value_name = "REASON")]
+    pub reason: Option<String>,
+}
+
+/// Arguments for `ee curate untombstone`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct CurateUntombstoneArgs {
+    /// Tombstoned memory ID to restore.
+    pub memory_id: String,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Actor recorded in audit metadata.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+
+    /// Preview without writing restore record.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Restore reason for audit trail.
     #[arg(long, value_name = "REASON")]
     pub reason: Option<String>,
 }
@@ -5751,6 +6340,14 @@ pub struct AnalyzeDriftArgs {
     /// Include metric-level detail in the report.
     #[arg(long, action = ArgAction::SetTrue)]
     pub detailed: bool,
+
+    /// Maximum combined snapshot bytes accepted for this drift analysis.
+    #[arg(long, value_name = "BYTES")]
+    pub max_input_bytes: Option<u64>,
+
+    /// Maximum comparable metric pairs to evaluate before reporting budget exhaustion.
+    #[arg(long, value_name = "COUNT")]
+    pub metric_budget: Option<usize>,
 }
 
 /// Arguments for `ee analyze clustering`.
@@ -5977,6 +6574,8 @@ pub struct ReviewWorkspaceArgs {
 pub enum MemoryCommand {
     /// Expire a memory by writing an audited tombstone.
     Expire(MemoryExpireArgs),
+    /// Apply a canonical manual memory-level transition.
+    Level(MemoryLevelArgs),
     /// List or create durable links between memories.
     Link(MemoryLinkArgs),
     /// List memories in the workspace.
@@ -6011,6 +6610,42 @@ pub struct MemoryExpireArgs {
     pub dry_run: bool,
 
     /// Allow already-tombstoned memories for idempotency reporting.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_tombstoned: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee memory level`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MemoryLevelArgs {
+    /// Memory ID to transition.
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: String,
+
+    /// Target memory level.
+    #[arg(long = "to", alias = "level", value_name = "LEVEL")]
+    pub level: String,
+
+    /// Require the current memory level to match before applying the transition.
+    #[arg(long = "from", value_name = "LEVEL")]
+    pub expected_level: Option<String>,
+
+    /// Required audit reason for the manual transition.
+    #[arg(long, value_name = "REASON")]
+    pub reason: Option<String>,
+
+    /// Actor recorded in the audit row.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+
+    /// Preview without mutating durable state.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Return tombstoned-state reports instead of hiding tombstoned memories.
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_tombstoned: bool,
 
@@ -6474,6 +7109,10 @@ pub struct SwarmBriefArgs {
     #[arg(long, value_name = "PATH")]
     pub agent_mail_snapshot: Option<PathBuf>,
 
+    /// Comma-separated agent connector slugs to inspect when agent-inventory is enabled.
+    #[arg(long, value_name = "SLUGS")]
+    pub agent_inventory_only: Option<String>,
+
     /// Number of recent git commits to include when the git source is enabled.
     #[arg(long, value_name = "N", default_value_t = 8)]
     pub max_recent_commits: usize,
@@ -6851,7 +7490,17 @@ where
             MigrateCommand::Run(args) => handle_migrate_run(&cli, args, stdout, stderr),
         },
         Some(Command::Diag(ref diag_cmd)) => match diag_cmd {
+            DiagCommand::AdvisoryLock(args) => {
+                handle_diag_advisory_lock(&cli, args, stdout, stderr)
+            }
             DiagCommand::Claims(args) => handle_diag_claims(&cli, args, stdout),
+            DiagCommand::CausalEdge(args) => handle_diag_causal_edge(&cli, args, stdout, stderr),
+            DiagCommand::CurationCandidate(args) => {
+                handle_diag_curation_candidate(&cli, args, stdout, stderr)
+            }
+            DiagCommand::DatabaseSkew(args) => {
+                handle_diag_database_skew(&cli, args, stdout, stderr)
+            }
             DiagCommand::Dependencies => {
                 let report = DependencyDiagnosticsReport::gather();
                 match cli.renderer() {
@@ -6873,7 +7522,18 @@ where
                 }
             }
             DiagCommand::Graph => handle_diag_graph(&cli, stdout),
+            DiagCommand::GraphSnapshot(args) => {
+                handle_diag_graph_snapshot(&cli, args, stdout, stderr)
+            }
             DiagCommand::Integrity(args) => handle_diag_integrity(&cli, args, stdout),
+            DiagCommand::MemoryValidity(args) => {
+                handle_diag_memory_validity(&cli, args, stdout, stderr)
+            }
+            DiagCommand::ModelRegistry(args) => {
+                handle_diag_model_registry(&cli, args, stdout, stderr)
+            }
+            DiagCommand::PackRecord(args) => handle_diag_pack_record(&cli, args, stdout, stderr),
+            DiagCommand::PackLatest(args) => handle_diag_pack_latest(&cli, args, stdout, stderr),
             DiagCommand::Quarantine(subcmd) => match subcmd {
                 DiagQuarantineCommand::List(args) => {
                     handle_diag_quarantine_list(&cli, args, stdout, stderr)
@@ -6900,6 +7560,9 @@ where
                     }
                 }
             }
+            DiagCommand::Tripwire(args) => handle_diag_tripwire(&cli, args, stdout, stderr),
+            DiagCommand::WriteOwner(args) => handle_diag_write_owner(&cli, args, stdout),
+            DiagCommand::WriteSpool(args) => handle_diag_write_spool(&cli, args, stdout),
         },
         Some(Command::Doctor(ref args)) => {
             let report = cli
@@ -7083,6 +7746,7 @@ where
                     bound_workspace_id: None,
                     bound_workspace_identity: None,
                     include_prompt_fragment: true,
+                    require_fresh: args.require_fresh,
                 };
                 match resume_handoff(&options) {
                     Ok(report) => match cli.renderer() {
@@ -7253,6 +7917,9 @@ where
         },
         Some(Command::Memory(MemoryCommand::Expire(ref args))) => {
             handle_memory_expire(&cli, args, stdout, stderr)
+        }
+        Some(Command::Memory(MemoryCommand::Level(ref args))) => {
+            handle_memory_level(&cli, args, stdout, stderr)
         }
         Some(Command::Memory(MemoryCommand::Link(ref args))) => {
             handle_memory_link(&cli, args, stdout, stderr)
@@ -7605,6 +8272,9 @@ where
         Some(Command::Curate(CurateCommand::Tombstone(ref args))) => {
             handle_curate_tombstone(&cli, args, stdout, stderr)
         }
+        Some(Command::Curate(CurateCommand::Untombstone(ref args))) => {
+            handle_curate_untombstone(&cli, args, stdout, stderr)
+        }
         Some(Command::Rule(RuleCommand::Add(ref args))) => {
             handle_rule_add(&cli, args, stdout, stderr)
         }
@@ -7647,8 +8317,17 @@ where
         }
         Some(Command::Status) => {
             let timing_capture = crate::models::TimingCapture::start();
-            let workspace_path = cli.resolve_workspace();
-            let report = StatusReport::gather_for_workspace(&workspace_path);
+            let (workspace_path, workspace_source) =
+                resolve_workspace_for_cli(cli.workspace.as_deref());
+            let report = if workspace_source == WorkspaceSource::Cwd
+                && !workspace_path.join(".ee").is_dir()
+            {
+                StatusReport::gather_with_options(&StatusOptions {
+                    workspace_path: None,
+                })
+            } else {
+                StatusReport::gather_for_workspace(&workspace_path)
+            };
             let timing = timing_capture.finish();
             let profile = cli.fields_level().to_field_profile();
             match cli.renderer() {
@@ -8371,6 +9050,8 @@ fn pack_quality_actuals_for_cases(
             relevance_floor: None,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
         })
         .map_err(|error| DomainError::SearchIndex {
             message: format!("pack-quality eval search failed for `{query}`: {error}"),
@@ -8664,6 +9345,8 @@ fn run_eval_retrieval_queries(
             relevance_floor: None,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
         })
         .map_err(|error| DomainError::SearchIndex {
             message: format!("eval fixture search failed for `{query}`: {error}"),
@@ -9192,6 +9875,7 @@ fn science_status_data_json(report: &crate::science::ScienceStatusReport) -> ser
         .map(|degradation| {
             serde_json::json!({
                 "code": degradation.code,
+                "severity": degradation.severity,
                 "message": degradation.message,
                 "repair": degradation.repair,
             })
@@ -9265,6 +9949,8 @@ where
         workspace: workspace_path,
         threshold: args.threshold,
         detailed: args.detailed,
+        max_input_bytes: args.max_input_bytes,
+        metric_budget: args.metric_budget,
     };
     let report = crate::science::analyze_drift(&options);
     let data = report.data_json();
@@ -11227,18 +11913,20 @@ where
     W: Write,
     E: Write,
 {
-    let threshold = match args.threshold.parse::<f32>() {
-        Ok(value) if value.is_finite() && (-1.0..=1.0).contains(&value) => value,
-        _ => {
-            let error = DomainError::Usage {
-                message: format!(
-                    "Invalid cluster threshold `{}`: expected a finite number from -1.0 to 1.0",
-                    args.threshold
-                ),
-                repair: Some("Use --threshold 0.55".to_owned()),
-            };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-        }
+    let threshold = match &args.threshold {
+        Some(raw) => match raw.parse::<f32>() {
+            Ok(value) if value.is_finite() && (0.0..=1.0).contains(&value) => Some(value),
+            _ => {
+                let error = DomainError::Usage {
+                    message: format!(
+                        "Invalid cluster threshold `{raw}`: expected a finite number from 0.0 to 1.0"
+                    ),
+                    repair: Some("Use --threshold 0.55".to_owned()),
+                };
+                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            }
+        },
+        None => None,
     };
     let options = crate::core::learn::LearnClusterOptions {
         workspace: cli.resolve_workspace(),
@@ -12613,7 +13301,9 @@ where
         | output::Renderer::Hook => {
             let degraded = VerificationRecipe::for_profile(report.profile.effective).degraded;
             let mut data = serde_json::json!(report);
-            if !degraded.is_empty() && let Some(object) = data.as_object_mut() {
+            if !degraded.is_empty()
+                && let Some(object) = data.as_object_mut()
+            {
                 object.insert("degraded".to_string(), serde_json::json!(degraded.clone()));
             }
             let mut rendered = serde_json::json!({
@@ -12621,7 +13311,9 @@ where
                 "success": !report.has_conflicts(),
                 "data": data,
             });
-            if !degraded.is_empty() && let Some(object) = rendered.as_object_mut() {
+            if !degraded.is_empty()
+                && let Some(object) = rendered.as_object_mut()
+            {
                 object.insert("degraded".to_string(), serde_json::json!(degraded));
             }
             write_stdout(stdout, &(rendered.to_string() + "\n"))
@@ -14585,6 +15277,191 @@ where
 // EE-243: Graph Diagnostic Output
 // ============================================================================
 
+fn handle_diag_write_owner<W>(
+    cli: &Cli,
+    args: &DiagWriteOwnerArgs,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let capacity = args.capacity.max(1);
+    let (owner, handle) = crate::core::write_owner::WriteOwner::new(capacity);
+    let mut accepted = 0_u32;
+    let mut busy = None;
+
+    for index in 0..args.enqueue {
+        let operation = crate::core::write_owner::WriteOperation::Custom {
+            operation_type: "diag_write_owner".to_owned(),
+            payload: serde_json::json!({ "index": index }),
+        };
+        if handle.try_submit(operation).is_some() {
+            accepted = accepted.saturating_add(1);
+        } else {
+            busy = Some(crate::core::write_owner::WriteOwnerBusyError::new(
+                owner.status().queue_depth,
+            ));
+            break;
+        }
+    }
+
+    let status = owner.status();
+    let degraded = busy.as_ref().map_or_else(Vec::new, |error| {
+        vec![serde_json::json!({
+            "code": error.code,
+            "severity": "medium",
+            "message": format!("Write owner busy: {}", error.message),
+            "repair": error.repair,
+            "queueDepth": error.queue_depth,
+        })]
+    });
+    let data = serde_json::json!({
+        "schema": "ee.write_owner.diagnostics.v1",
+        "command": "diag write-owner",
+        "capacity": capacity,
+        "attempted": args.enqueue,
+        "accepted": accepted,
+        "status": status,
+        "degraded": degraded,
+    });
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": data,
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let queue_depth = response["data"]["status"]["queueDepth"]
+                .as_u64()
+                .unwrap_or(0);
+            let accepted = response["data"]["accepted"].as_u64().unwrap_or(0);
+            let mut out = format!(
+                "write owner diagnostics\n\naccepted: {accepted}\nqueue depth: {queue_depth}\n"
+            );
+            if let Some(entry) = response["data"]["degraded"]
+                .as_array()
+                .and_then(|v| v.first())
+            {
+                out.push_str(&format!(
+                    "\nDegraded: {}\nNext: {}\n",
+                    entry["message"].as_str().unwrap_or("write owner degraded"),
+                    entry["repair"].as_str().unwrap_or("ee diag locks --json")
+                ));
+            }
+            write_stdout(stdout, &out)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&response.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    }
+}
+
+fn handle_diag_write_spool<W>(
+    cli: &Cli,
+    args: &DiagWriteSpoolArgs,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let config = crate::core::write_owner::WriteSpoolConfig::new(
+        args.max_pending,
+        args.max_batch_size,
+        args.max_pending_bytes,
+        args.max_queue_age_ms,
+    );
+    let mut spool = crate::core::write_owner::WriteSpool::new(config, 0);
+    let mut tickets = Vec::new();
+    let mut backpressure = None;
+
+    for index in 0..args.enqueue {
+        let intent = crate::core::write_owner::WriteSpoolIntent::new(
+            crate::core::write_owner::WriteSpoolIntentKind::Remember,
+            "diag-write-spool",
+            format!("diag-write-spool-{index}"),
+            args.payload_bytes,
+        );
+        match spool.enqueue(intent, u64::from(index)) {
+            Ok(ticket) => tickets.push(ticket),
+            Err(error) => {
+                backpressure = Some(error);
+                break;
+            }
+        }
+    }
+
+    let now_ms = u64::from(args.enqueue);
+    let status = spool.status(now_ms);
+    let degraded = backpressure.as_ref().map_or_else(Vec::new, |error| {
+        vec![serde_json::json!({
+            "code": error.code,
+            "severity": "medium",
+            "reason": error.reason.as_str(),
+            "message": format!("Write spool backpressure: {}", error.message),
+            "repair": error.repair,
+            "next": error.next,
+            "queueDepth": error.queue_depth,
+            "maxPending": error.max_pending,
+            "pendingBytes": error.pending_bytes,
+            "maxPendingBytes": error.max_pending_bytes,
+            "oldestQueuedAgeMs": error.oldest_queued_age_ms,
+        })]
+    });
+    let data = serde_json::json!({
+        "schema": "ee.write_spool.diagnostics.v1",
+        "command": "diag write-spool",
+        "attempted": args.enqueue,
+        "accepted": tickets.len(),
+        "tickets": tickets,
+        "status": status,
+        "degraded": degraded,
+    });
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": data,
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let queue_depth = response["data"]["status"]["queueDepth"]
+                .as_u64()
+                .unwrap_or(0);
+            let accepted = response["data"]["accepted"].as_u64().unwrap_or(0);
+            let mut out = format!(
+                "write spool diagnostics\n\naccepted: {accepted}\nqueue depth: {queue_depth}\n"
+            );
+            if let Some(entry) = response["data"]["degraded"]
+                .as_array()
+                .and_then(|v| v.first())
+            {
+                out.push_str(&format!(
+                    "\nDegraded: {}\nNext: {}\n",
+                    entry["message"].as_str().unwrap_or("write spool degraded"),
+                    entry["repair"]
+                        .as_str()
+                        .unwrap_or("ee daemon status --json")
+                ));
+            }
+            write_stdout(stdout, &out)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&response.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    }
+}
+
 fn handle_diag_integrity<W>(cli: &Cli, args: &DiagIntegrityArgs, stdout: &mut W) -> ProcessExitCode
 where
     W: Write,
@@ -14639,6 +15516,1403 @@ where
     }
 }
 
+fn handle_diag_advisory_lock<W, E>(
+    cli: &Cli,
+    args: &DiagAdvisoryLockArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: None,
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    if let Err(error) = conn.migrate() {
+        let domain_error = DomainError::MigrationRequired {
+            message: format!("Failed to migrate advisory lock diagnostic database: {error}"),
+            repair: Some("ee db migrate --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
+        Ok(workspace_id) => workspace_id,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let resource_id = args
+        .resource_id
+        .clone()
+        .unwrap_or_else(|| workspace_id.clone());
+    let lock_id = crate::db::AdvisoryLockId::new(&args.resource_type, &resource_id);
+
+    let lock_result = match conn.acquire_advisory_lock(
+        &lock_id,
+        &args.holder,
+        Some(args.ttl_seconds),
+        Some(&args.reason),
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to acquire advisory lock: {error}"),
+                repair: Some("ee diag advisory-lock --workspace . --json".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let (status, holder_id, acquired_at) = match &lock_result {
+        crate::db::AcquireLockResult::Acquired(lock) => (
+            "acquired",
+            lock.holder_id.clone(),
+            Some(lock.acquired_at.clone()),
+        ),
+        crate::db::AcquireLockResult::AlreadyHeld {
+            holder_id,
+            acquired_at,
+        } => ("already_held", holder_id.clone(), Some(acquired_at.clone())),
+        crate::db::AcquireLockResult::Expired { previous_holder } => {
+            ("expired_replaced", previous_holder.clone(), None)
+        }
+    };
+
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "command": "diag advisory-lock",
+            "version": env!("CARGO_PKG_VERSION"),
+            "workspaceId": workspace_id,
+            "databasePath": database_path.display().to_string(),
+            "resourceType": args.resource_type,
+            "resourceId": resource_id,
+            "canonicalKey": lock_id.canonical_key(),
+            "holderId": holder_id,
+            "requestedHolderId": args.holder,
+            "status": status,
+            "acquiredAt": acquired_at,
+            "ttlSeconds": args.ttl_seconds,
+            "reason": args.reason,
+            "degraded": []
+        }
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            &format!(
+                "advisory lock {status}\n  resource: {}\n  holder: {holder_id}\n",
+                lock_id.canonical_key()
+            ),
+        ),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&response.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    }
+}
+
+fn handle_diag_causal_edge<W, E>(
+    cli: &Cli,
+    args: &DiagCausalEdgeArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let method = match args.method.as_str() {
+        "manual" | "graph-inferred" | "cass-derived" => args.method.clone(),
+        _ => {
+            let domain_error = DomainError::Usage {
+                message: format!("Invalid causal evidence method: {}", args.method),
+                repair: Some("Use manual, graph-inferred, or cass-derived.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: None,
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    if let Err(error) = conn.migrate() {
+        let domain_error = DomainError::MigrationRequired {
+            message: format!("Failed to migrate causal diagnostic database: {error}"),
+            repair: Some("ee db migrate --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let workspace_id = args
+        .workspace_id
+        .clone()
+        .unwrap_or_else(|| stable_causal_workspace_id(&workspace));
+    let evidence_uris = if args.evidence_uris.is_empty() {
+        vec![format!("agent-mail://bd-17c65.10.6/{}", args.edge_id)]
+    } else {
+        args.evidence_uris.clone()
+    };
+
+    if let Err(error) = conn.insert_causal_evidence(
+        &args.edge_id,
+        &crate::db::CreateCausalEvidenceInput {
+            workspace_id: workspace_id.clone(),
+            failure_id: args.failure_id.clone(),
+            candidate_cause_id: args.candidate_cause_id.clone(),
+            contribution_score: args.contribution_score.clamp(0.0, 1.0),
+            evidence_uris: evidence_uris.clone(),
+            computed_at: args.computed_at.clone(),
+            method,
+        },
+    ) {
+        let domain_error = DomainError::Storage {
+            message: format!("Failed to seed causal evidence diagnostic row: {error}"),
+            repair: Some("Check memory IDs and workspace database health.".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "command": "diag causal-edge",
+            "version": env!("CARGO_PKG_VERSION"),
+            "workspaceId": workspace_id,
+            "databasePath": database_path.display().to_string(),
+            "edgeId": args.edge_id,
+            "failureId": args.failure_id,
+            "candidateCauseId": args.candidate_cause_id,
+            "contributionScore": args.contribution_score.clamp(0.0, 1.0),
+            "evidenceUris": evidence_uris,
+            "degraded": []
+        }
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            &format!(
+                "causal edge seeded\n  edge: {}\n  workspace: {}\n",
+                response["data"]["edgeId"].as_str().unwrap_or("unknown"),
+                response["data"]["workspaceId"]
+                    .as_str()
+                    .unwrap_or("unknown")
+            ),
+        ),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&response.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    }
+}
+
+fn handle_diag_database_skew<W, E>(
+    cli: &Cli,
+    args: &DiagDatabaseSkewArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let source_database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+    if !source_database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", source_database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let skew_sql = match args.skew.as_str() {
+        "causal-evidence-table-missing" => {
+            "ALTER TABLE causal_evidence RENAME TO j6_missing_causal_evidence"
+        }
+        "curation-ttl-policies-table-unavailable" => {
+            "ALTER TABLE curation_ttl_policies RENAME TO j6_unavailable_curation_ttl_policies"
+        }
+        "decay-memories-table-unavailable" => {
+            "ALTER TABLE memories RENAME TO j6_unavailable_decay_memories"
+        }
+        "feedback-quarantine-table-unavailable" => {
+            "ALTER TABLE feedback_quarantine RENAME TO j6_unavailable_feedback_quarantine"
+        }
+        "memory-links-table-unavailable" => {
+            "ALTER TABLE memory_links RENAME TO j6_unavailable_memory_links"
+        }
+        "memories-provenance-chain-hash-column-unavailable" => {
+            "ALTER TABLE memories RENAME COLUMN provenance_chain_hash TO j6_unavailable_provenance_chain_hash"
+        }
+        "migration-checksum-column-missing" => {
+            "ALTER TABLE ee_schema_migrations RENAME COLUMN checksum TO j6_unavailable_checksum"
+        }
+        "pack-items-table-unavailable" => {
+            "ALTER TABLE pack_items RENAME TO j6_unavailable_pack_items"
+        }
+        "procedural-rules-table-unavailable" => {
+            "ALTER TABLE procedural_rules RENAME TO j6_unavailable_procedural_rules"
+        }
+        "workspaces-table-unavailable" => {
+            "ALTER TABLE workspaces RENAME TO j6_unavailable_workspaces"
+        }
+        "schema-migration-required" => {
+            "DELETE FROM ee_schema_migrations WHERE version = (SELECT MAX(version) FROM ee_schema_migrations)"
+        }
+        _ => {
+            let domain_error = DomainError::Usage {
+                message: format!("Invalid diagnostic database skew: {}", args.skew),
+                repair: Some(
+                    "Use a supported diag database-skew value such as causal-evidence-table-missing, migration-checksum-column-missing, or schema-migration-required."
+                        .to_string(),
+                ),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let output_database_path = match (&args.output_database, args.in_place) {
+        (Some(path), false) if path.is_absolute() => path.clone(),
+        (Some(path), false) => workspace.join(path),
+        (None, true) => source_database_path.clone(),
+        (None, false) => {
+            let domain_error = DomainError::Usage {
+                message: "`ee diag database-skew` requires --output-database or --in-place."
+                    .to_string(),
+                repair: Some(
+                    "Pass --output-database <path> for a copied skew or --in-place for fixture-only mutation."
+                        .to_string(),
+                ),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+        (Some(_), true) => {
+            let domain_error = DomainError::Usage {
+                message: "--output-database cannot be combined with --in-place.".to_string(),
+                repair: Some("Choose copied skew output or in-place mutation.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    if !args.in_place && output_database_path.exists() {
+        let domain_error = DomainError::Usage {
+            message: format!(
+                "Refusing to overwrite existing database at {}.",
+                output_database_path.display()
+            ),
+            repair: Some("Choose a fresh --output-database path.".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let source_conn = match crate::db::DbConnection::open_file(&source_database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open source database: {error}"),
+                repair: Some("ee init --workspace .".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    if let Err(error) = source_conn.migrate() {
+        let domain_error = DomainError::MigrationRequired {
+            message: format!("Failed to migrate source database before diagnostic skew: {error}"),
+            repair: Some("ee db migrate --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    let workspace_id = stable_causal_workspace_id(&workspace);
+
+    let target_conn = if args.in_place {
+        source_conn
+    } else {
+        if let Err(error) = source_conn.close() {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to close source database before diagnostic copy: {error}"),
+                repair: Some("Retry after closing other ee processes.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+
+        if let Some(parent) = output_database_path.parent()
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to create output database directory: {error}"),
+                repair: Some("Choose a writable --output-database path.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+        if let Err(error) = fs::copy(&source_database_path, &output_database_path) {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to copy diagnostic database: {error}"),
+                repair: Some("Choose a writable --output-database path.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+
+        match crate::db::DbConnection::open_file(&output_database_path) {
+            Ok(conn) => conn,
+            Err(error) => {
+                let domain_error = DomainError::Storage {
+                    message: format!("Failed to open diagnostic database copy: {error}"),
+                    repair: Some("Choose a fresh --output-database path.".to_string()),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        }
+    };
+    if let Err(error) = target_conn.execute_raw(skew_sql) {
+        let domain_error = DomainError::Storage {
+            message: format!("Failed to apply diagnostic database skew: {error}"),
+            repair: Some(
+                "Check that the source database is migrated with the current binary.".to_string(),
+            ),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "command": "diag database-skew",
+            "version": env!("CARGO_PKG_VERSION"),
+            "workspaceId": workspace_id,
+            "sourceDatabasePath": source_database_path.display().to_string(),
+            "databasePath": output_database_path.display().to_string(),
+            "skew": args.skew,
+            "inPlace": args.in_place,
+            "degraded": []
+        }
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            &format!(
+                "diagnostic database skewed\n  skew: {}\n  database: {}\n",
+                response["data"]["skew"].as_str().unwrap_or("unknown"),
+                response["data"]["databasePath"]
+                    .as_str()
+                    .unwrap_or("unknown")
+            ),
+        ),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&response.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    }
+}
+
+fn handle_diag_graph_snapshot<W, E>(
+    cli: &Cli,
+    args: &DiagGraphSnapshotArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let snapshot_status = match args.status.parse::<crate::db::GraphSnapshotStatus>() {
+        Ok(status) => status,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: error,
+                repair: Some("Use one of valid, stale, invalid, or archived.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: None,
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    if let Err(error) = conn.migrate() {
+        let domain_error = DomainError::MigrationRequired {
+            message: format!("Failed to migrate graph diagnostic database: {error}"),
+            repair: Some("ee db migrate --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
+        Ok(workspace_id) => workspace_id,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    let latest_version = match conn.list_graph_snapshots(
+        &workspace_id,
+        Some(crate::db::GraphSnapshotType::MemoryLinks),
+        1,
+    ) {
+        Ok(snapshots) => snapshots
+            .first()
+            .map_or(0, |snapshot| snapshot.snapshot_version),
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to inspect graph snapshots: {error}"),
+                repair: Some("ee graph centrality-refresh".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let snapshot_version = latest_version.saturating_add(1).max(1);
+    let memory_id = crate::models::MemoryId::now().to_string();
+    let snapshot_suffix: String = memory_id
+        .trim_start_matches("mem_")
+        .chars()
+        .take(25)
+        .collect();
+    let snapshot_id = format!("gsnap_{snapshot_suffix}");
+    let metrics_json = args.metrics_json.clone().unwrap_or_else(|| {
+        r#"{"nodes":[{"id":"mem_j6_graph_snapshot_node","label":"J6 graph snapshot node","pagerank":1.0,"betweenness":0.0}],"edges":[]}"#
+            .to_string()
+    });
+
+    if let Err(error) = conn.insert_graph_snapshot(
+        &snapshot_id,
+        &crate::db::CreateGraphSnapshotInput {
+            workspace_id: workspace_id.clone(),
+            snapshot_version,
+            schema_version: crate::graph::GRAPH_EXPORT_SCHEMA_V1.to_string(),
+            graph_type: crate::db::GraphSnapshotType::MemoryLinks,
+            node_count: args.node_count,
+            edge_count: args.edge_count,
+            metrics_json,
+            content_hash: format!("blake3:j6-diag-graph-snapshot-{snapshot_version}"),
+            source_generation: args.source_generation,
+            expires_at: None,
+        },
+    ) {
+        let domain_error = DomainError::Storage {
+            message: format!("Failed to seed graph snapshot diagnostic row: {error}"),
+            repair: Some("Check --metrics-json and workspace database health.".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    if snapshot_status != crate::db::GraphSnapshotStatus::Valid {
+        if let Err(error) = conn.update_graph_snapshot_status(&snapshot_id, snapshot_status) {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to update graph snapshot diagnostic status: {error}"),
+                repair: Some("Retry `ee diag graph-snapshot`.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    }
+
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "command": "diag graph-snapshot",
+            "version": env!("CARGO_PKG_VERSION"),
+            "workspaceId": workspace_id,
+            "snapshotId": snapshot_id,
+            "snapshotVersion": snapshot_version,
+            "status": snapshot_status.as_str(),
+            "graphType": crate::db::GraphSnapshotType::MemoryLinks.as_str(),
+            "nodeCount": args.node_count,
+            "edgeCount": args.edge_count,
+            "sourceGeneration": args.source_generation,
+            "degraded": []
+        }
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            &format!(
+                "Seeded graph snapshot {} ({})\n",
+                response["data"]["snapshotId"].as_str().unwrap_or(""),
+                snapshot_status.as_str()
+            ),
+        ),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&response.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    }
+}
+
+fn handle_diag_memory_validity<W, E>(
+    cli: &Cli,
+    args: &DiagMemoryValidityArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    if args.valid_from.is_some() && args.clear_valid_from {
+        let domain_error = DomainError::Usage {
+            message: "Use either --valid-from or --clear-valid-from, not both.".to_string(),
+            repair: Some("Choose one diagnostic mutation for valid_from.".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    if args.valid_to.is_some() && args.clear_valid_to {
+        let domain_error = DomainError::Usage {
+            message: "Use either --valid-to or --clear-valid-to, not both.".to_string(),
+            repair: Some("Choose one diagnostic mutation for valid_to.".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    if args.valid_from.is_none()
+        && args.valid_to.is_none()
+        && !args.clear_valid_from
+        && !args.clear_valid_to
+    {
+        let domain_error = DomainError::Usage {
+            message: "No memory validity mutation was requested.".to_string(),
+            repair: Some(
+                "Pass --valid-to, --valid-from, --clear-valid-to, or --clear-valid-from."
+                    .to_string(),
+            ),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: None,
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    if let Err(error) = conn.migrate() {
+        let domain_error = DomainError::MigrationRequired {
+            message: format!("Failed to migrate memory-validity diagnostic database: {error}"),
+            repair: Some("ee db migrate --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    let memory = match conn.get_memory(&args.memory_id) {
+        Ok(Some(memory)) => memory,
+        Ok(None) => {
+            let domain_error = DomainError::NotFound {
+                resource: "memory".to_string(),
+                id: args.memory_id.clone(),
+                repair: Some("ee remember --workspace . '<content>' --json".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to inspect memory diagnostic row: {error}"),
+                repair: Some("ee status --workspace . --json".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let changed = match conn.set_memory_validity_for_diagnostic(
+        &args.memory_id,
+        args.valid_from.as_deref(),
+        args.valid_to.as_deref(),
+        args.clear_valid_from,
+        args.clear_valid_to,
+    ) {
+        Ok(changed) => changed,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to seed memory validity diagnostic row: {error}"),
+                repair: Some("Check --memory-id and workspace database health.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let seed_status = if changed { "updated" } else { "unchanged" };
+
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "command": "diag memory-validity",
+            "version": env!("CARGO_PKG_VERSION"),
+            "workspaceId": memory.workspace_id,
+            "databasePath": database_path.display().to_string(),
+            "memoryId": args.memory_id,
+            "validFrom": args.valid_from,
+            "validTo": args.valid_to,
+            "clearValidFrom": args.clear_valid_from,
+            "clearValidTo": args.clear_valid_to,
+            "seedStatus": seed_status,
+            "degraded": []
+        }
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            &format!(
+                "memory validity {seed_status}\n  memory: {}\n",
+                response["data"]["memoryId"].as_str().unwrap_or("unknown")
+            ),
+        ),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&response.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    }
+}
+
+fn handle_diag_model_registry<W, E>(
+    cli: &Cli,
+    args: &DiagModelRegistryArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    if !args.model_id.starts_with("mdl_") || args.model_id.len() != 30 {
+        let domain_error = DomainError::Usage {
+            message: "Diagnostic model registry IDs must match `mdl_` plus 26 characters."
+                .to_string(),
+            repair: Some("Use --model-id mdl_j6000000000000000000000001.".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let provider = match args
+        .provider
+        .parse::<crate::models::model_registry::ModelProvider>()
+    {
+        Ok(provider) => provider,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: error.to_string(),
+                repair: Some("Use hash, model2vec, fastembed, external, or custom.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let purpose = match args
+        .purpose
+        .parse::<crate::models::model_registry::ModelPurpose>()
+    {
+        Ok(purpose) => purpose,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: error.to_string(),
+                repair: Some("Use embedding, reranker, classifier, or other.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let distance_metric = match &args.distance_metric {
+        Some(metric) => {
+            match metric.parse::<crate::models::model_registry::ModelDistanceMetric>() {
+                Ok(metric) => Some(metric),
+                Err(error) => {
+                    let domain_error = DomainError::Usage {
+                        message: error.to_string(),
+                        repair: Some("Use cosine, dot, or l2.".to_string()),
+                    };
+                    return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                }
+            }
+        }
+        None => None,
+    };
+    let status = match args
+        .status
+        .parse::<crate::models::model_registry::ModelRegistryStatus>()
+    {
+        Ok(status) => status,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: error.to_string(),
+                repair: Some("Use available, unavailable, or disabled.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    if let Some(metadata) = &args.metadata_json {
+        if let Err(error) = serde_json::from_str::<serde_json::Value>(metadata) {
+            let domain_error = DomainError::Usage {
+                message: format!("Invalid model registry metadata JSON: {error}"),
+                repair: Some("Pass valid JSON to --metadata-json.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    }
+
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: None,
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    if let Err(error) = conn.migrate() {
+        let domain_error = DomainError::MigrationRequired {
+            message: format!("Failed to migrate model registry diagnostic database: {error}"),
+            repair: Some("ee db migrate --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    let workspace_id =
+        match resolve_graph_workspace_id(&conn, &workspace, args.workspace_id.as_deref()) {
+            Ok(workspace_id) => workspace_id,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+
+    let seed_status = match conn.get_model_registry_entry(&args.model_id) {
+        Ok(Some(_)) => "already_present",
+        Ok(None) => {
+            if let Err(error) = conn.insert_model_registry_entry(
+                &args.model_id,
+                &crate::db::CreateModelRegistryInput {
+                    workspace_id: workspace_id.clone(),
+                    provider,
+                    model_name: args.model_name.clone(),
+                    purpose,
+                    dimension: args.dimension,
+                    distance_metric,
+                    status,
+                    version: args.version.clone(),
+                    source_uri: args.source_uri.clone(),
+                    content_hash: args.content_hash.clone(),
+                    metadata_json: args.metadata_json.clone(),
+                    last_checked_at: args.last_checked_at.clone(),
+                },
+            ) {
+                let domain_error = DomainError::Storage {
+                    message: format!("Failed to seed model registry diagnostic row: {error}"),
+                    repair: Some(
+                        "Check --model-id, --provider, --purpose, --status, and workspace database health."
+                            .to_string(),
+                    ),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+            "inserted"
+        }
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to inspect model registry diagnostic row: {error}"),
+                repair: Some("ee model list --workspace . --json".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "command": "diag model-registry",
+            "version": env!("CARGO_PKG_VERSION"),
+            "workspaceId": workspace_id,
+            "databasePath": database_path.display().to_string(),
+            "modelId": args.model_id,
+            "provider": provider.as_str(),
+            "modelName": args.model_name,
+            "purpose": purpose.as_str(),
+            "dimension": args.dimension,
+            "distanceMetric": distance_metric.map(|metric| metric.as_str()),
+            "status": status.as_str(),
+            "seedStatus": seed_status,
+            "degraded": []
+        }
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            &format!(
+                "model registry row {seed_status}\n  model: {}\n  workspace: {}\n",
+                response["data"]["modelId"].as_str().unwrap_or("unknown"),
+                response["data"]["workspaceId"]
+                    .as_str()
+                    .unwrap_or("unknown")
+            ),
+        ),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&response.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    }
+}
+
+fn handle_diag_tripwire<W, E>(
+    cli: &Cli,
+    args: &DiagTripwireArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    if !args.tripwire_id.starts_with("tw_") || args.tripwire_id.trim().len() <= 3 {
+        let domain_error = DomainError::Usage {
+            message: "Diagnostic tripwire IDs must start with `tw_`.".to_string(),
+            repair: Some("Use --tripwire-id tw_j6_unsupported_condition.".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let tripwire_type = match args.tripwire_type.parse::<TripwireType>() {
+        Ok(tripwire_type) => tripwire_type,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: error.to_string(),
+                repair: Some(
+                    "Use file_change, resource_threshold, time_limit, error_threshold, service_health, or custom."
+                        .to_string(),
+                ),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let action = match args.action.parse::<TripwireAction>() {
+        Ok(action) => action,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: error.to_string(),
+                repair: Some("Use halt, pause, warn, or audit.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let state = match args.state.parse::<TripwireState>() {
+        Ok(state) => state,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: error.to_string(),
+                repair: Some("Use armed, triggered, disarmed, or error.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: None,
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    if let Err(error) = conn.migrate() {
+        let domain_error = DomainError::MigrationRequired {
+            message: format!("Failed to migrate tripwire diagnostic database: {error}"),
+            repair: Some("ee db migrate --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    let workspace_id =
+        match resolve_graph_workspace_id(&conn, &workspace, args.workspace_id.as_deref()) {
+            Ok(workspace_id) => workspace_id,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+
+    let seed_status = match conn.get_tripwire(&args.tripwire_id) {
+        Ok(Some(_)) => "already_present",
+        Ok(None) => {
+            if let Err(error) = conn.insert_tripwire(
+                &args.tripwire_id,
+                &crate::db::CreateTripwireInput {
+                    workspace_id: workspace_id.clone(),
+                    preflight_run_id: args.preflight_run_id.clone(),
+                    tripwire_type: tripwire_type.as_str().to_string(),
+                    condition: args.condition.clone(),
+                    action: action.as_str().to_string(),
+                    state: state.as_str().to_string(),
+                    message: Some(args.message.clone()),
+                    created_at: args.created_at.clone(),
+                    last_checked_at: args.last_checked_at.clone(),
+                    triggered_at: args.triggered_at.clone(),
+                },
+            ) {
+                let domain_error = DomainError::Storage {
+                    message: format!("Failed to seed tripwire diagnostic row: {error}"),
+                    repair: Some(
+                        "Check --tripwire-id, --tripwire-type, --action, --state, and workspace database health."
+                            .to_string(),
+                    ),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+            "inserted"
+        }
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to inspect tripwire diagnostic row: {error}"),
+                repair: Some("ee tripwire list --workspace . --json".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "command": "diag tripwire",
+            "version": env!("CARGO_PKG_VERSION"),
+            "workspaceId": workspace_id,
+            "databasePath": database_path.display().to_string(),
+            "tripwireId": args.tripwire_id,
+            "preflightRunId": args.preflight_run_id,
+            "tripwireType": tripwire_type.as_str(),
+            "condition": args.condition,
+            "action": action.as_str(),
+            "state": state.as_str(),
+            "seedStatus": seed_status,
+            "degraded": []
+        }
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            &format!(
+                "tripwire row {seed_status}\n  tripwire: {}\n  workspace: {}\n",
+                response["data"]["tripwireId"].as_str().unwrap_or("unknown"),
+                response["data"]["workspaceId"]
+                    .as_str()
+                    .unwrap_or("unknown")
+            ),
+        ),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&response.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    }
+}
+
+fn handle_diag_pack_latest<W, E>(
+    cli: &Cli,
+    args: &DiagPackLatestArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: None,
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    if let Err(error) = conn.migrate() {
+        let domain_error = DomainError::MigrationRequired {
+            message: format!("Failed to migrate pack diagnostic database: {error}"),
+            repair: Some("ee db migrate --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    let workspace_id =
+        match resolve_graph_workspace_id(&conn, &workspace, args.workspace_id.as_deref()) {
+            Ok(workspace_id) => workspace_id,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+
+    let record = match conn.get_latest_pack_record_for_query(&workspace_id, &args.query) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            let domain_error = DomainError::NotFound {
+                resource: "pack".to_string(),
+                id: args.query.clone(),
+                repair: Some("ee context <query> --workspace . --json".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to resolve latest pack record: {error}"),
+                repair: Some("ee doctor --workspace . --json".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "command": "diag pack-latest",
+            "version": env!("CARGO_PKG_VERSION"),
+            "workspaceId": workspace_id,
+            "databasePath": database_path.display().to_string(),
+            "query": args.query,
+            "packId": record.id,
+            "packHash": record.pack_hash,
+            "ledgerHash": record.ledger_hash,
+            "createdAt": record.created_at,
+            "itemCount": record.item_count,
+            "omittedCount": record.omitted_count,
+            "degraded": []
+        }
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            &format!(
+                "latest pack\n  pack: {}\n  query: {}\n",
+                response["data"]["packId"].as_str().unwrap_or("unknown"),
+                response["data"]["query"].as_str().unwrap_or("unknown")
+            ),
+        ),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&response.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    }
+}
+
+fn handle_diag_pack_record<W, E>(
+    cli: &Cli,
+    args: &DiagPackRecordArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    if !args.pack_id.starts_with("pack_") || args.pack_id.len() != 31 {
+        let domain_error = DomainError::Usage {
+            message: "Diagnostic pack IDs must match `pack_` plus 26 characters.".to_string(),
+            repair: Some("Use --pack-id pack_j6referenceissues000000000.".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    if !matches!(args.profile.as_str(), "compact" | "balanced" | "thorough") {
+        let domain_error = DomainError::Usage {
+            message: format!("Invalid diagnostic pack profile: {}", args.profile),
+            repair: Some("Use compact, balanced, or thorough.".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    if args.used_tokens > args.max_tokens {
+        let domain_error = DomainError::Usage {
+            message: format!(
+                "Diagnostic pack used_tokens ({}) cannot exceed max_tokens ({}).",
+                args.used_tokens, args.max_tokens
+            ),
+            repair: Some("Pass --used-tokens less than or equal to --max-tokens.".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    if args.pack_hash.trim().is_empty() {
+        let domain_error = DomainError::Usage {
+            message: "Diagnostic pack hash cannot be empty.".to_string(),
+            repair: Some("Pass --pack-hash with a stable diagnostic value.".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: None,
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    if let Err(error) = conn.migrate() {
+        let domain_error = DomainError::MigrationRequired {
+            message: format!("Failed to migrate pack diagnostic database: {error}"),
+            repair: Some("ee db migrate --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    let workspace_id =
+        match resolve_graph_workspace_id(&conn, &workspace, args.workspace_id.as_deref()) {
+            Ok(workspace_id) => workspace_id,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+
+    let seed_status = match conn.get_pack_record(&args.pack_id) {
+        Ok(Some(_)) => "already_present",
+        Ok(None) => {
+            if let Err(error) = conn.insert_pack_record(
+                &args.pack_id,
+                &crate::db::CreatePackRecordInput {
+                    workspace_id: workspace_id.clone(),
+                    query: args.query.clone(),
+                    profile: args.profile.clone(),
+                    max_tokens: args.max_tokens,
+                    used_tokens: args.used_tokens,
+                    item_count: args.item_count,
+                    omitted_count: args.omitted_count,
+                    pack_hash: args.pack_hash.clone(),
+                    degraded_json: None,
+                    created_by: Some(args.created_by.clone()),
+                },
+                &[],
+                &[],
+            ) {
+                let domain_error = DomainError::Storage {
+                    message: format!("Failed to seed pack diagnostic row: {error}"),
+                    repair: Some(
+                        "Check --pack-id, --profile, token counts, and workspace database health."
+                            .to_string(),
+                    ),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+            "inserted"
+        }
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to inspect pack diagnostic row: {error}"),
+                repair: Some("ee diag integrity --workspace . --json".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "command": "diag pack-record",
+            "version": env!("CARGO_PKG_VERSION"),
+            "workspaceId": workspace_id,
+            "databasePath": database_path.display().to_string(),
+            "packId": args.pack_id,
+            "query": args.query,
+            "profile": args.profile,
+            "maxTokens": args.max_tokens,
+            "usedTokens": args.used_tokens,
+            "itemCount": args.item_count,
+            "omittedCount": args.omitted_count,
+            "packHash": args.pack_hash,
+            "createdBy": args.created_by,
+            "seedStatus": seed_status,
+            "degraded": []
+        }
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            &format!(
+                "pack record {seed_status}\n  pack: {}\n  workspace: {}\n",
+                response["data"]["packId"].as_str().unwrap_or("unknown"),
+                response["data"]["workspaceId"]
+                    .as_str()
+                    .unwrap_or("unknown")
+            ),
+        ),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&response.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    }
+}
+
 fn handle_diag_claims<W>(cli: &Cli, args: &DiagClaimsArgs, stdout: &mut W) -> ProcessExitCode
 where
     W: Write,
@@ -14665,6 +16939,258 @@ where
         | output::Renderer::Hook => {
             write_stdout(stdout, &(output::render_diag_claims_json(&report) + "\n"))
         }
+    }
+}
+
+fn handle_diag_curation_candidate<W, E>(
+    cli: &Cli,
+    args: &DiagCurationCandidateArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    let candidate_type = match crate::curate::CandidateType::from_str(&args.candidate_type) {
+        Ok(candidate_type) => candidate_type,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: error.to_string(),
+                repair: Some("Use a valid curation candidate type such as `rule`.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let candidate_status = match crate::curate::CandidateStatus::from_str(&args.status) {
+        Ok(candidate_status) => candidate_status,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: error.to_string(),
+                repair: Some("Use pending, approved, rejected, expired, or applied.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let source_type = match crate::curate::CandidateSource::from_str(&args.source_type) {
+        Ok(source_type) => source_type,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: error.to_string(),
+                repair: Some(
+                    "Use agent_inference, rule_engine, human_request, feedback_event, contradiction_detected, decay_trigger, or counterfactual_replay."
+                        .to_string(),
+                ),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let review_state = match args.review_state.as_deref() {
+        Some(raw) => match crate::curate::ReviewQueueState::from_str(raw) {
+            Ok(review_state) => Some(review_state),
+            Err(error) => {
+                let domain_error = DomainError::Usage {
+                    message: error.to_string(),
+                    repair: Some(
+                        "Use new, needs_evidence, needs_scope, duplicate, snoozed, accepted, rejected, merged, superseded, expired, or applied."
+                            .to_string(),
+                    ),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        },
+        None => None,
+    };
+    if !args.candidate_id.starts_with("curate_") || args.candidate_id.len() != 33 {
+        let domain_error = DomainError::Usage {
+            message: "Diagnostic curation candidate IDs must match `curate_` plus 26 characters."
+                .to_string(),
+            repair: Some("Use --candidate-id curate_00000000000000000000000042.".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    if !args.confidence.is_finite() || !(0.0..=1.0).contains(&args.confidence) {
+        let domain_error = DomainError::Usage {
+            message: format!(
+                "Diagnostic curation candidate confidence must be between 0.0 and 1.0, got {}.",
+                args.confidence
+            ),
+            repair: Some("Use --confidence 0.82.".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: None,
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    if let Err(error) = conn.migrate() {
+        let domain_error = DomainError::MigrationRequired {
+            message: format!("Failed to migrate curation diagnostic database: {error}"),
+            repair: Some("ee db migrate --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
+        Ok(workspace_id) => workspace_id,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    if args.allow_missing_target {
+        if let Err(error) = conn.execute_raw("PRAGMA foreign_keys = OFF") {
+            let domain_error = DomainError::Storage {
+                message: format!(
+                    "Failed to relax foreign key checks for curation candidate diagnostic row: {error}"
+                ),
+                repair: Some("Check workspace database health.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    }
+    let insert_result = conn.insert_curation_candidate(
+        &args.candidate_id,
+        &crate::db::CreateCurationCandidateInput {
+            workspace_id: workspace_id.clone(),
+            candidate_type: candidate_type.as_str().to_string(),
+            target_memory_id: args.target_memory_id.clone(),
+            proposed_content: args.proposed_content.clone(),
+            proposed_confidence: Some(args.confidence),
+            proposed_trust_class: None,
+            source_type: source_type.as_str().to_string(),
+            source_id: args.source_id.clone(),
+            reason: args.reason.clone(),
+            confidence: args.confidence,
+            status: Some(candidate_status.as_str().to_string()),
+            created_at: Some(args.created_at.clone()),
+            ttl_expires_at: None,
+        },
+    );
+    if args.allow_missing_target {
+        if let Err(error) = conn.execute_raw("PRAGMA foreign_keys = ON") {
+            let domain_error = DomainError::Storage {
+                message: format!(
+                    "Failed to restore foreign key checks after curation candidate diagnostic row: {error}"
+                ),
+                repair: Some("Check workspace database health.".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    }
+    if let Err(error) = insert_result {
+        let domain_error = DomainError::Storage {
+            message: format!("Failed to seed curation candidate diagnostic row: {error}"),
+            repair: Some(
+                "Check --candidate-type, --status, and workspace database health.".to_string(),
+            ),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    if review_state.is_some() || args.state_entered_at.is_some() || args.ttl_policy_id.is_some() {
+        let review_state_text = review_state
+            .map_or_else(
+                || crate::curate::ReviewQueueState::from_candidate_status(candidate_status),
+                |state| state,
+            )
+            .as_str()
+            .to_string();
+        let state_entered_at = args.state_entered_at.as_deref().unwrap_or(&args.created_at);
+        match conn.update_curation_candidate_review(
+            &workspace_id,
+            &args.candidate_id,
+            crate::db::CurationCandidateReviewUpdate {
+                status: candidate_status.as_str(),
+                review_state: &review_state_text,
+                reviewed_at: state_entered_at,
+                reviewed_by: "diag-curation-candidate",
+                snoozed_until: None,
+                merged_into_candidate_id: None,
+                ttl_policy_id: args.ttl_policy_id.as_deref(),
+            },
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                let domain_error = DomainError::Storage {
+                    message: format!(
+                        "Curation candidate {} was not found after diagnostic seed.",
+                        args.candidate_id
+                    ),
+                    repair: Some("Retry `ee diag curation-candidate --json`.".to_string()),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+            Err(error) => {
+                let domain_error = DomainError::Storage {
+                    message: format!(
+                        "Failed to set curation candidate diagnostic review state: {error}"
+                    ),
+                    repair: Some(
+                        "Check --review-state, --state-entered-at, --ttl-policy-id, and workspace database health."
+                            .to_string(),
+                    ),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        }
+    }
+
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "command": "diag curation-candidate",
+            "version": env!("CARGO_PKG_VERSION"),
+            "workspaceId": workspace_id,
+            "databasePath": database_path.display().to_string(),
+            "candidateId": args.candidate_id,
+            "candidateType": candidate_type.as_str(),
+            "status": candidate_status.as_str(),
+            "sourceType": source_type.as_str(),
+            "sourceId": args.source_id,
+            "targetMemoryId": args.target_memory_id,
+            "allowMissingTarget": args.allow_missing_target,
+            "hasProposedContent": args.proposed_content.as_deref().is_some_and(|content| !content.trim().is_empty()),
+            "reviewState": review_state.map(|state| state.as_str()),
+            "ttlPolicyId": args.ttl_policy_id,
+            "degraded": []
+        }
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            &format!(
+                "Seeded curation candidate {}\n",
+                response["data"]["candidateId"].as_str().unwrap_or("")
+            ),
+        ),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&response.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
     }
 }
 
@@ -14703,6 +17229,8 @@ where
         relevance_floor: args.relevance_floor,
         source_mode: SearchSourceMode::Hybrid,
         strict_source_mode: false,
+        memory_scope: args.memory_scope,
+        strict_scope: args.strict_scope,
     };
 
     match run_diag_search(&options) {
@@ -16585,6 +19113,60 @@ where
     }
 }
 
+fn handle_memory_level<W, E>(
+    cli: &Cli,
+    args: &MemoryLevelArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli.resolve_workspace();
+
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let options = MemoryLevelOptions {
+        workspace_path: &workspace,
+        database_path: &database_path,
+        memory_id: &args.memory_id,
+        level: &args.level,
+        expected_level: args.expected_level.as_deref(),
+        reason: args.reason.as_deref(),
+        actor: args.actor.as_deref(),
+        dry_run: args.dry_run,
+        include_tombstoned: args.include_tombstoned,
+    };
+
+    let report = match update_memory_level(&options) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_output())
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
+    }
+}
+
 // ============================================================================
 // Bead bd-17c65.6.2 (F2) — top-level alias handlers
 // ============================================================================
@@ -17373,21 +19955,28 @@ fn parse_context_profile(value: &str) -> Result<ContextPackProfile, String> {
 
 fn resolve_context_output_options(
     pack_profile: PackOutputProfileArg,
+    resource_profile: PackResourceProfile,
     no_coverage_fill: Option<bool>,
     no_rendered_text: Option<bool>,
     no_skipped: Option<bool>,
     no_meta: Option<bool>,
     include_non_affecting_degradations: Option<bool>,
 ) -> ContextPackOutputOptions {
-    ContextPackOutputOptions::for_profile(pack_profile.to_core()).with_overrides(
-        ContextPackOutputOptionOverrides {
+    ContextPackOutputOptions::for_profile(pack_profile.to_core())
+        .with_overrides(ContextPackOutputOptionOverrides {
             no_coverage_fill,
             no_rendered_text,
             no_skipped,
             no_meta,
             include_non_affecting_degradations,
-        },
-    )
+        })
+        .with_resource_profile(resource_profile)
+}
+
+fn parse_pack_resource_profile_arg(value: &str) -> Result<PackResourceProfile, String> {
+    value
+        .parse::<PackResourceProfile>()
+        .map_err(|error| error.to_string())
 }
 
 fn parse_operating_profile(value: &str) -> Result<OperatingProfile, String> {
@@ -17411,6 +20000,14 @@ fn parse_search_source_mode_arg(value: &str) -> Result<SearchSourceMode, String>
             "Invalid source mode '{value}'. Expected lexical_only, semantic_only, or hybrid."
         )),
     }
+}
+
+fn parse_memory_scope_arg(value: &str) -> Result<MemoryScope, String> {
+    MemoryScope::parse(value).ok_or_else(|| {
+        format!(
+            "Invalid memory scope '{value}'. Expected self, team, workspace, verified, or swarm."
+        )
+    })
 }
 
 fn parse_rfc3339_arg(value: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
@@ -17704,6 +20301,7 @@ where
     let workspace_path = cli.resolve_workspace();
     let output_options = resolve_context_output_options(
         args.pack_profile,
+        args.resource_profile,
         args.no_coverage_fill,
         args.no_rendered_text,
         args.no_skipped,
@@ -17727,7 +20325,11 @@ where
         include_expired: args.include_expired,
         include_future: args.include_future,
         include_stale: args.include_stale,
+        memory_scope: args.memory_scope,
+        strict_scope: args.strict_scope,
         pagination: None,
+        coordination_snapshot_path: args.coordination_snapshot.clone(),
+        coordination_stale_after_ms: args.coordination_stale_after_ms,
         filters,
         output_options,
     };
@@ -18634,6 +21236,270 @@ where
     }
 }
 
+const POST_MIGRATION_INDEX_REBUILD_STEP_ID: &str = "v0_2_010_index_rebuild";
+
+fn migration_index_rebuild_dry_run_json(pending_count: usize) -> serde_json::Value {
+    let required = pending_count > 0;
+    serde_json::json!({
+        "stepId": POST_MIGRATION_INDEX_REBUILD_STEP_ID,
+        "required": required,
+        "dryRun": true,
+        "status": if required { "planned" } else { "skipped_no_migrations_pending" },
+        "reason": if required {
+            "pending_migrations_require_derived_search_index_rebuild"
+        } else {
+            "no_pending_migrations"
+        },
+    })
+}
+
+fn migration_index_rebuild_skipped_json() -> serde_json::Value {
+    serde_json::json!({
+        "stepId": POST_MIGRATION_INDEX_REBUILD_STEP_ID,
+        "required": false,
+        "dryRun": false,
+        "status": "skipped_no_migrations_applied",
+        "reason": "migration_run_applied_no_schema_changes",
+    })
+}
+
+fn migration_audit_workspace_id(
+    conn: &crate::db::DbConnection,
+    workspace_path: &Path,
+) -> Option<String> {
+    let mut candidates = Vec::new();
+    if let Ok(canonical) = workspace_path.canonicalize() {
+        candidates.push(canonical);
+    }
+    candidates.push(workspace_path.to_path_buf());
+
+    for candidate in candidates {
+        let path = candidate.to_string_lossy();
+        if let Ok(Some(workspace)) = conn.get_workspace_by_path(path.as_ref()) {
+            return Some(workspace.id);
+        }
+    }
+
+    conn.list_workspaces()
+        .ok()
+        .and_then(|workspaces| workspaces.into_iter().next())
+        .map(|workspace| workspace.id)
+}
+
+fn migration_index_rebuild_audit_details(
+    database_path: &Path,
+    applied: &[u32],
+    schema_version: Option<u32>,
+    status: &str,
+    report: Option<&IndexRebuildReport>,
+    error: Option<&str>,
+) -> serde_json::Value {
+    let report_json = report.map(|report| {
+        serde_json::json!({
+            "indexDir": report.index_dir.display().to_string(),
+            "memoriesIndexed": report.memories_indexed,
+            "sessionsIndexed": report.sessions_indexed,
+            "artifactsIndexed": report.artifacts_indexed,
+            "documentsTotal": report.documents_total,
+            "elapsedMs": report.elapsed_ms,
+            "dryRun": report.dry_run,
+            "errors": &report.errors,
+        })
+    });
+
+    serde_json::json!({
+        "stepId": POST_MIGRATION_INDEX_REBUILD_STEP_ID,
+        "databasePath": database_path.display().to_string(),
+        "appliedMigrations": applied,
+        "appliedCount": applied.len(),
+        "schemaVersion": schema_version,
+        "status": status,
+        "report": report_json,
+        "error": error,
+    })
+}
+
+struct MigrationIndexRebuildAudit<'a> {
+    workspace_path: &'a Path,
+    database_path: &'a Path,
+    applied: &'a [u32],
+    schema_version: Option<u32>,
+    status: &'a str,
+    report: Option<&'a IndexRebuildReport>,
+    error: Option<&'a str>,
+}
+
+fn insert_migration_index_rebuild_audit(
+    conn: &crate::db::DbConnection,
+    audit: MigrationIndexRebuildAudit<'_>,
+) -> Result<String, DomainError> {
+    let audit_id = crate::db::generate_audit_id();
+    let details = migration_index_rebuild_audit_details(
+        audit.database_path,
+        audit.applied,
+        audit.schema_version,
+        audit.status,
+        audit.report,
+        audit.error,
+    );
+    let details_json =
+        serde_json::to_string(&details).map_err(|serialize_error| DomainError::Storage {
+            message: format!(
+                "Failed to serialize migration index rebuild audit: {serialize_error}"
+            ),
+            repair: Some("ee doctor".to_string()),
+        })?;
+
+    conn.insert_audit(
+        &audit_id,
+        &crate::db::CreateAuditInput {
+            workspace_id: migration_audit_workspace_id(conn, audit.workspace_path),
+            actor: Some("ee migrate run".to_string()),
+            action: crate::db::audit_actions::MIGRATION_INDEX_REBUILD.to_string(),
+            target_type: Some("migration".to_string()),
+            target_id: Some(POST_MIGRATION_INDEX_REBUILD_STEP_ID.to_string()),
+            details: Some(details_json),
+        },
+    )
+    .map_err(|audit_error| DomainError::Storage {
+        message: format!("Failed to audit migration index rebuild: {audit_error}"),
+        repair: Some("ee audit verify --json".to_string()),
+    })?;
+
+    Ok(audit_id)
+}
+
+fn migration_index_rebuild_report_json(
+    report: &IndexRebuildReport,
+    audit_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "stepId": POST_MIGRATION_INDEX_REBUILD_STEP_ID,
+        "required": true,
+        "dryRun": false,
+        "status": report.status.as_str(),
+        "auditId": audit_id,
+        "memoriesIndexed": report.memories_indexed,
+        "sessionsIndexed": report.sessions_indexed,
+        "artifactsIndexed": report.artifacts_indexed,
+        "documentsTotal": report.documents_total,
+        "indexDir": report.index_dir.display().to_string(),
+        "elapsedMs": report.elapsed_ms,
+        "errors": &report.errors,
+    })
+}
+
+fn run_post_migration_index_rebuild(
+    conn: &crate::db::DbConnection,
+    workspace_path: &Path,
+    database_path: &Path,
+    applied: &[u32],
+    schema_version: Option<u32>,
+) -> Result<serde_json::Value, DomainError> {
+    if applied.is_empty() {
+        return Ok(migration_index_rebuild_skipped_json());
+    }
+
+    let options = IndexRebuildOptions {
+        workspace_path: workspace_path.to_path_buf(),
+        database_path: Some(database_path.to_path_buf()),
+        index_dir: None,
+        dry_run: false,
+    };
+
+    let report = match rebuild_index(&options) {
+        Ok(report) => report,
+        Err(error) => {
+            let message = error.to_string();
+            let audit_result = insert_migration_index_rebuild_audit(
+                conn,
+                MigrationIndexRebuildAudit {
+                    workspace_path,
+                    database_path,
+                    applied,
+                    schema_version,
+                    status: "failed",
+                    report: None,
+                    error: Some(&message),
+                },
+            );
+            match audit_result {
+                Ok(audit_id) => {
+                    tracing::error!(
+                        target: "ee::migration",
+                        step_id = POST_MIGRATION_INDEX_REBUILD_STEP_ID,
+                        audit_id = %audit_id,
+                        error = %message,
+                        "post-migration index rebuild failed"
+                    );
+                }
+                Err(audit_error) => {
+                    tracing::error!(
+                        target: "ee::migration",
+                        step_id = POST_MIGRATION_INDEX_REBUILD_STEP_ID,
+                        error = %message,
+                        audit_error = %audit_error,
+                        "post-migration index rebuild failed and audit insertion failed"
+                    );
+                }
+            }
+            return Err(DomainError::SearchIndex {
+                message: format!("Post-migration index rebuild failed: {message}"),
+                repair: error
+                    .repair_hint()
+                    .map(str::to_string)
+                    .or_else(|| Some("ee index rebuild --workspace . --json".to_string())),
+            });
+        }
+    };
+
+    let audit_status = if matches!(
+        report.status,
+        IndexRebuildStatus::Success | IndexRebuildStatus::NoDocuments
+    ) && report.errors.is_empty()
+    {
+        "completed"
+    } else {
+        "failed"
+    };
+    let audit_id = insert_migration_index_rebuild_audit(
+        conn,
+        MigrationIndexRebuildAudit {
+            workspace_path,
+            database_path,
+            applied,
+            schema_version,
+            status: audit_status,
+            report: Some(&report),
+            error: None,
+        },
+    )?;
+
+    tracing::info!(
+        target: "ee::migration",
+        step_id = POST_MIGRATION_INDEX_REBUILD_STEP_ID,
+        audit_id = %audit_id,
+        status = report.status.as_str(),
+        applied_count = applied.len(),
+        documents_total = report.documents_total,
+        memories_indexed = report.memories_indexed,
+        index_dir = %report.index_dir.display(),
+        "post-migration index rebuild completed"
+    );
+
+    if audit_status == "completed" {
+        Ok(migration_index_rebuild_report_json(&report, &audit_id))
+    } else {
+        Err(DomainError::SearchIndex {
+            message: format!(
+                "Post-migration index rebuild ended with status {}",
+                report.status.as_str()
+            ),
+            repair: Some("ee index rebuild --workspace . --json".to_string()),
+        })
+    }
+}
+
 fn handle_migrate_run<W, E>(
     cli: &Cli,
     args: &MigrateRunArgs,
@@ -18683,6 +21549,7 @@ where
 
     // Dry-run: report what would be applied without mutating.
     if args.dry_run {
+        let pending_count = pending_summaries.len();
         let json = serde_json::json!({
             "schema": "ee.response.v1",
             "success": true,
@@ -18691,7 +21558,8 @@ where
                 "databasePath": database_path.display().to_string(),
                 "dryRun": true,
                 "wouldApply": pending_summaries,
-                "wouldApplyCount": pending_summaries.len(),
+                "wouldApplyCount": pending_count,
+                "postMigrationIndexRebuild": migration_index_rebuild_dry_run_json(pending_count),
                 "schemaVersion": conn.schema_version().unwrap_or(None),
             },
             "degraded": []
@@ -18710,7 +21578,7 @@ where
                 let mut out = String::new();
                 out.push_str(&format!(
                     "DRY RUN: would apply {} migration(s) to {}\n",
-                    pending_summaries.len(),
+                    pending_count,
                     database_path.display()
                 ));
                 for m in crate::db::MIGRATIONS
@@ -18739,6 +21607,23 @@ where
     let post_version = conn.schema_version().unwrap_or(None);
     let applied: Vec<u32> = result.applied().to_vec();
     let skipped: Vec<u32> = result.skipped().to_vec();
+    let post_migration_index_rebuild = match run_post_migration_index_rebuild(
+        &conn,
+        &workspace_path,
+        &database_path,
+        &applied,
+        post_version,
+    ) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let post_migration_index_rebuild_status = post_migration_index_rebuild
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let applied_count = applied.len();
+    let skipped_count = skipped.len();
     let json = serde_json::json!({
         "schema": "ee.response.v1",
         "success": true,
@@ -18746,11 +21631,12 @@ where
             "command": "migrate run",
             "databasePath": database_path.display().to_string(),
             "dryRun": false,
-            "applied": applied,
-            "appliedCount": applied.len(),
-            "skipped": skipped,
-            "skippedCount": skipped.len(),
+            "applied": applied.clone(),
+            "appliedCount": applied_count,
+            "skipped": skipped.clone(),
+            "skippedCount": skipped_count,
             "schemaVersion": post_version,
+            "postMigrationIndexRebuild": post_migration_index_rebuild.clone(),
             "upToDate": true,
         },
         "degraded": []
@@ -18769,7 +21655,7 @@ where
             let mut out = String::new();
             out.push_str(&format!(
                 "Applied {} migration(s) to {}\n",
-                applied.len(),
+                applied_count,
                 database_path.display()
             ));
             for version in &applied {
@@ -18778,12 +21664,15 @@ where
             if !skipped.is_empty() {
                 out.push_str(&format!(
                     "Skipped {} already-applied migration(s)\n",
-                    skipped.len()
+                    skipped_count
                 ));
             }
             if let Some(v) = post_version {
                 out.push_str(&format!("Workspace is now at schema v{v}.\n"));
             }
+            out.push_str(&format!(
+                "Post-migration index rebuild: {post_migration_index_rebuild_status}\n"
+            ));
             let _ = write_stdout(stdout, &out);
         }
     }
@@ -18980,6 +21869,7 @@ where
                 .clone()
                 .unwrap_or_else(|| "balanced".to_string()),
             pack_profile: args.pack_profile.unwrap_or_default(),
+            resource_profile: args.resource_profile.unwrap_or_default(),
             database: args.database.clone(),
             index_dir: args.index_dir.clone(),
             explain_performance: args.explain_performance,
@@ -18993,6 +21883,10 @@ where
             include_expired: args.include_expired,
             include_future: args.include_future,
             include_stale: args.include_stale,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            coordination_snapshot: args.coordination_snapshot.clone(),
+            coordination_stale_after_ms: args.coordination_stale_after_ms,
         };
         return handle_context_with_alias_notice(cli, &context_args, stdout, stderr, false);
     }
@@ -19047,6 +21941,7 @@ where
         .unwrap_or_else(|| PathBuf::from("."));
     let output_options = resolve_context_output_options(
         args.pack_profile.unwrap_or_default(),
+        args.resource_profile.unwrap_or_default(),
         args.no_coverage_fill,
         args.no_rendered_text,
         args.no_skipped,
@@ -19118,7 +22013,11 @@ where
         include_expired: args.include_expired,
         include_future: args.include_future,
         include_stale: args.include_stale,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
         pagination,
+        coordination_snapshot_path: args.coordination_snapshot.clone(),
+        coordination_stale_after_ms: args.coordination_stale_after_ms,
         output_options,
     };
     let renderer = effective_pack_renderer(cli, request.renderer);
@@ -20803,8 +23702,8 @@ fn output_from_document(
                 ContextResponseDegradation::new(
                     "query_output_explain_already_included",
                     ContextResponseSeverity::Low,
-                    "output.explain was accepted; JSON context packs already include algorithm metadata, selection certificates, and per-item why explanations.",
-                    Some("Inspect data.pack.meta.algorithm, data.pack.selectionCertificate, and data.pack.items[].why.".to_string()),
+                    "output.explain was accepted; JSON context packs already include algorithm metadata, the selection audit, and per-item why explanations.",
+                    Some("Inspect data.pack.meta.algorithm, data.pack.selectionAudit, and data.pack.items[].why.".to_string()),
                 )
                 .map_err(|error| {
                     QueryFileError::new(
@@ -21019,6 +23918,8 @@ where
         relevance_floor: args.relevance_floor,
         source_mode: args.source_mode,
         strict_source_mode: args.strict_source_mode,
+        memory_scope: args.memory_scope,
+        strict_scope: args.strict_scope,
     };
 
     match run_search(&options) {
@@ -22110,6 +25011,67 @@ impl MemoryExpireReport {
     }
 }
 
+impl MemoryLevelReport {
+    #[must_use]
+    pub fn human_output(&self) -> String {
+        let mut output = format!(
+            "Memory level: {}\n  Status: {}\n  Level: {} -> {}\n  Persisted: {}\n",
+            self.memory_id, self.status, self.previous_level, self.level, self.persisted
+        );
+        if self.dry_run {
+            output.push_str("  Dry run: true\n");
+        }
+        if let Some(event) = &self.event {
+            output.push_str(&format!("  Event: {event}\n"));
+        }
+        if let Some(audit_id) = &self.audit_id {
+            output.push_str(&format!("  Audit: {audit_id}\n"));
+        }
+        if let Some(index_job_id) = &self.index_job_id {
+            output.push_str(&format!("  Index job: {index_job_id}\n"));
+        }
+        output
+    }
+
+    #[must_use]
+    pub fn toon_output(&self) -> String {
+        format!(
+            "memory_level|{}|{}|{}|{}|{}",
+            self.memory_id, self.status, self.previous_level, self.level, self.index_status
+        )
+    }
+
+    #[must_use]
+    pub fn json_output(&self) -> String {
+        serde_json::json!({
+            "schema": "ee.response.v1",
+            "success": true,
+            "data": {
+                "command": "memory level",
+                "schema": self.schema,
+                "version": self.version,
+                "memory_id": self.memory_id,
+                "workspace_id": self.workspace_id,
+                "status": self.status,
+                "dry_run": self.dry_run,
+                "persisted": self.persisted,
+                "changed": self.changed,
+                "previous_level": self.previous_level,
+                "level": self.level,
+                "event": self.event,
+                "reason": self.reason,
+                "automatic": self.automatic,
+                "evidence_refs": self.evidence_refs,
+                "audit_id": self.audit_id,
+                "index_job_id": self.index_job_id,
+                "index_status": self.index_status,
+                "idempotency": self.idempotency,
+            }
+        })
+        .to_string()
+    }
+}
+
 impl MemoryLinkReport {
     #[must_use]
     pub fn human_output(&self) -> String {
@@ -23169,6 +26131,42 @@ where
     }
 }
 
+fn handle_curate_untombstone<W, E>(
+    cli: &Cli,
+    args: &CurateUntombstoneArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli.resolve_workspace();
+
+    let options = CurateUntombstoneOptions {
+        workspace_path: &workspace,
+        database_path: args.database.as_deref(),
+        memory_id: &args.memory_id,
+        actor: args.actor.as_deref(),
+        dry_run: args.dry_run,
+        reason: args.reason.as_deref(),
+    };
+
+    match run_curate_untombstone(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_output())
+            }
+            output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
 fn handle_review_workspace<W, E>(
     cli: &Cli,
     args: &ReviewWorkspaceArgs,
@@ -23839,7 +26837,7 @@ fn handle_agent_status<W, E>(
     cli: &Cli,
     args: &AgentStatusArgs,
     stdout: &mut W,
-    stderr: &mut E,
+    _stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
@@ -23875,11 +26873,21 @@ where
             }
         },
         Err(err) => {
-            let domain_error = DomainError::Usage {
-                message: err.to_string(),
-                repair: Some("ee agent status --help".to_string()),
-            };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            let report = crate::core::agent_detect::AgentInventoryReport::unavailable(&err);
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &output::render_agent_status_human(&report))
+                }
+                output::Renderer::Toon => {
+                    write_stdout(stdout, &(output::render_agent_status_toon(&report) + "\n"))
+                }
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    write_stdout(stdout, &(output::render_agent_status_json(&report) + "\n"))
+                }
+            }
         }
     }
 }
@@ -24684,9 +27692,19 @@ where
         options
     };
 
-    match open_causal_database(cli).and_then(|(conn, workspace_id)| {
-        trace_causal_chains_from_store(&conn, &workspace_id, &options)
-    }) {
+    let result = if let Some(database_path) = args.database.clone() {
+        let options = options.with_database_path(database_path).apply_if(
+            args.database_workspace_id.clone(),
+            TraceOptions::with_workspace_id,
+        );
+        Ok(trace_causal_chains(&options))
+    } else {
+        open_causal_database(cli).and_then(|(conn, workspace_id)| {
+            trace_causal_chains_from_store(&conn, &workspace_id, &options)
+        })
+    };
+
+    match result {
         Ok(report) => write_causal_report(cli, report.data_json(), report.human_summary(), stdout),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
@@ -24791,7 +27809,9 @@ where
         && options.chain_a_id.is_none()
         && options.chain_b_id.is_none()
     {
-        Ok(compare_causal_evidence(&options))
+        open_causal_database(cli).and_then(|(conn, workspace_id)| {
+            compare_causal_filtered_from_store(&conn, &workspace_id, &options)
+        })
     } else if options.chain_a_id.is_some() && options.chain_b_id.is_some() {
         open_causal_database(cli).and_then(|(conn, workspace_id)| {
             compare_causal_chains_from_store(&conn, &workspace_id, &options)
@@ -26793,6 +29813,8 @@ where
             job_type: args.kind,
             database: args.database.as_ref(),
             dry_run: args.dry_run,
+            include_decay: false,
+            as_of: None,
             time_limit_ms: args.time_limit_ms,
             item_limit: args.item_limit,
         },
@@ -26815,6 +29837,8 @@ where
             job_type: args.job,
             database: args.database.as_ref(),
             dry_run: args.dry_run,
+            include_decay: args.include_decay,
+            as_of: args.as_of.as_deref(),
             time_limit_ms: args.time_limit_ms,
             item_limit: args.item_limit,
         },
@@ -26827,6 +29851,8 @@ struct MaintenanceJobRunRequest<'a> {
     job_type: JobType,
     database: Option<&'a PathBuf>,
     dry_run: bool,
+    include_decay: bool,
+    as_of: Option<&'a str>,
     time_limit_ms: Option<u64>,
     item_limit: Option<u64>,
 }
@@ -26839,46 +29865,96 @@ fn run_maintenance_job<W>(
 where
     W: Write,
 {
-    let workspace_path = cli.resolve_workspace();
+    let (workspace_path, workspace_source) = resolve_workspace_for_cli(cli.workspace.as_deref());
+    let selected_workspace = selected_maintenance_workspace_path(
+        workspace_path,
+        workspace_source,
+        request.database.is_some(),
+    );
     let lock_holder = format!(
         "ee-{}-{}",
         request.command.replace(' ', "_"),
         uuid::Uuid::now_v7().simple()
     );
-    let _lock =
-        match crate::steward::try_acquire_maintenance_job_lock(&workspace_path, &lock_holder) {
-            Ok(lock) => lock,
+    let _lock = if let Some(workspace_path) = selected_workspace.as_ref() {
+        Some(
+            match crate::steward::try_acquire_maintenance_job_lock(workspace_path, &lock_holder) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    let data = serde_json::json!({
+                        "schema": MAINTENANCE_RUN_SCHEMA_V1,
+                        "command": request.command,
+                        "requestedJob": request.job_type.as_str(),
+                        "workspace": workspace_path.display().to_string(),
+                        "dryRun": request.dry_run,
+                        "includeDecay": request.include_decay,
+                        "asOf": request.as_of,
+                        "durableMutation": false,
+                        "summary": {
+                            "total": 1,
+                            "succeeded": 0,
+                            "skipped": 0,
+                            "failed": 1,
+                        },
+                        "job": null,
+                        "history": {
+                            "persisted": false,
+                            "path": maintenance_job_history_path(workspace_path).display().to_string(),
+                        },
+                        "results": [],
+                        "degraded": [error.data_json()],
+                    });
+                    return write_maintenance_response(cli, stdout, false, data);
+                }
+            },
+        )
+    } else {
+        None
+    };
+    let decay_settings = if request.include_decay {
+        match load_maintenance_decay_settings(selected_workspace.as_deref()) {
+            Ok(settings) => settings,
             Err(error) => {
                 let data = serde_json::json!({
                     "schema": MAINTENANCE_RUN_SCHEMA_V1,
                     "command": request.command,
                     "requestedJob": request.job_type.as_str(),
-                    "workspace": workspace_path.display().to_string(),
+                    "workspace": selected_workspace
+                        .as_deref()
+                        .map(|workspace_path| workspace_path.display().to_string()),
                     "dryRun": request.dry_run,
-                    "durableMutation": false,
-                    "summary": {
-                        "total": 1,
-                        "succeeded": 0,
-                        "skipped": 0,
-                        "failed": 1,
-                    },
-                    "job": null,
-                    "history": {
-                        "persisted": false,
-                        "path": maintenance_job_history_path(&workspace_path).display().to_string(),
-                    },
-                    "results": [],
-                    "degraded": [error.data_json()],
+                    "includeDecay": request.include_decay,
+                    "asOf": request.as_of,
+                    "code": error.code,
+                    "severity": "medium",
+                    "message": error.message,
+                    "repair": error.repair,
+                    "degraded": [{
+                        "code": error.code,
+                        "severity": "medium",
+                        "message": error.message,
+                        "repair": error.repair,
+                    }],
                 });
                 return write_maintenance_response(cli, stdout, false, data);
             }
-        };
+        }
+    } else {
+        crate::policy::MemoryDecaySettings::default()
+    };
     let mut runner_options = crate::steward::RunnerOptions::new()
-        .with_workspace_path(workspace_path.clone())
         .with_actor("ee-maintenance")
-        .with_dry_run(request.dry_run);
+        .with_dry_run(request.dry_run)
+        .with_include_decay_actions(request.include_decay)
+        .with_decay_settings(decay_settings);
+    if let Some(workspace_path) = selected_workspace.as_ref() {
+        runner_options = runner_options.with_workspace_path(workspace_path.clone());
+    }
     if let Some(database) = request.database {
         runner_options = runner_options.with_database_path(database.clone());
+    }
+    if let Some(as_of) = request.as_of {
+        runner_options = runner_options.with_as_of(as_of.to_owned());
     }
     if let Some(time_limit_ms) = request.time_limit_ms {
         runner_options = runner_options.with_time_limit(time_limit_ms);
@@ -26894,15 +29970,23 @@ where
         Some(format!("{} {}", request.command, request.job_type.as_str())),
     );
     let result_json = result.data_json();
-    let row =
-        maintenance_job_history_row(request.command, request.job_type, &workspace_path, &result);
+    let row = maintenance_job_history_row(
+        request.command,
+        request.job_type,
+        selected_workspace.as_deref(),
+        &result,
+    );
     let mut history = serde_json::json!({
         "persisted": false,
-        "path": maintenance_job_history_path(&workspace_path).display().to_string(),
+        "path": selected_workspace
+            .as_deref()
+            .map(|workspace_path| maintenance_job_history_path(workspace_path).display().to_string()),
     });
 
-    if !request.dry_run {
-        match append_maintenance_job_history(&workspace_path, &row) {
+    if !request.dry_run
+        && let Some(workspace_path) = selected_workspace.as_ref()
+    {
+        match append_maintenance_job_history(workspace_path, &row) {
             Ok(path) => {
                 history["persisted"] = serde_json::json!(true);
                 history["path"] = serde_json::json!(path.display().to_string());
@@ -26950,8 +30034,12 @@ where
         "schema": MAINTENANCE_RUN_SCHEMA_V1,
         "command": request.command,
         "requestedJob": request.job_type.as_str(),
-        "workspace": workspace_path.display().to_string(),
+        "workspace": selected_workspace
+            .as_deref()
+            .map(|workspace_path| workspace_path.display().to_string()),
         "dryRun": request.dry_run,
+        "includeDecay": request.include_decay,
+        "asOf": request.as_of,
         "durableMutation": durable_mutation,
         "summary": {
             "total": 1,
@@ -26965,6 +30053,139 @@ where
         "degraded": degraded,
     });
     write_maintenance_response(cli, stdout, success, data)
+}
+
+fn selected_maintenance_workspace_path(
+    workspace_path: PathBuf,
+    workspace_source: WorkspaceSource,
+    has_explicit_database: bool,
+) -> Option<PathBuf> {
+    if !has_explicit_database
+        && workspace_source == WorkspaceSource::Cwd
+        && !workspace_path.join(".ee").is_dir()
+    {
+        None
+    } else {
+        Some(workspace_path)
+    }
+}
+
+struct MaintenanceConfigError {
+    code: &'static str,
+    message: String,
+    repair: &'static str,
+}
+
+fn load_maintenance_decay_settings(
+    workspace_path: Option<&Path>,
+) -> Result<crate::policy::MemoryDecaySettings, MaintenanceConfigError> {
+    let Some(workspace_path) = workspace_path else {
+        return Ok(crate::policy::MemoryDecaySettings::default());
+    };
+    let config_path = workspace_path.join(".ee").join("config.toml");
+    let contents = match fs::read_to_string(&config_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(crate::policy::MemoryDecaySettings::default());
+        }
+        Err(error) => {
+            return Err(MaintenanceConfigError {
+                code: "learn_decay_config_read_failed",
+                message: format!(
+                    "Failed to read workspace decay config {}: {error}",
+                    config_path.display()
+                ),
+                repair: "Check .ee/config.toml permissions and rerun ee maintenance run --include-decay --json.",
+            });
+        }
+    };
+    let config = crate::config::ConfigFile::parse(&contents).map_err(|error| {
+        MaintenanceConfigError {
+            code: "learn_decay_config_invalid",
+            message: format!(
+                "Failed to parse workspace decay config {}: {error}",
+                config_path.display()
+            ),
+            repair: "Fix [learn.decay] in .ee/config.toml and rerun ee maintenance run --include-decay --json.",
+        }
+    })?;
+    decay_settings_from_config(&config)
+}
+
+fn decay_settings_from_config(
+    config: &crate::config::ConfigFile,
+) -> Result<crate::policy::MemoryDecaySettings, MaintenanceConfigError> {
+    let mut settings = crate::policy::MemoryDecaySettings::default();
+    let decay = &config.learn.decay;
+    if let Some(threshold) =
+        optional_config_f32(decay.demote_threshold, "learn.decay.demote_threshold")?
+    {
+        settings.thresholds.demote = threshold;
+    }
+    if let Some(threshold) =
+        optional_config_f32(decay.forget_threshold, "learn.decay.forget_threshold")?
+    {
+        settings.thresholds.forget = threshold;
+    }
+    settings.thresholds.forget = settings.thresholds.forget.min(settings.thresholds.demote);
+
+    if let Some(days) = optional_config_f32(
+        decay.working_half_life_days,
+        "learn.decay.working_half_life_days",
+    )? {
+        settings.half_lives.working = days;
+    }
+    if let Some(days) = optional_config_f32(
+        decay.episodic_event_half_life_days,
+        "learn.decay.episodic_event_half_life_days",
+    )? {
+        settings.half_lives.episodic_event = days;
+    }
+    if let Some(days) = optional_config_f32(
+        decay.episodic_failure_half_life_days,
+        "learn.decay.episodic_failure_half_life_days",
+    )? {
+        settings.half_lives.episodic_failure = days;
+    }
+    if let Some(days) = optional_config_f32(
+        decay.semantic_fact_half_life_days,
+        "learn.decay.semantic_fact_half_life_days",
+    )? {
+        settings.half_lives.semantic_fact = days;
+    }
+    if let Some(days) = optional_config_f32(
+        decay.procedural_rule_half_life_days,
+        "learn.decay.procedural_rule_half_life_days",
+    )? {
+        settings.half_lives.procedural_rule = days;
+    }
+    if let Some(days) = optional_config_f32(
+        decay.default_half_life_days,
+        "learn.decay.default_half_life_days",
+    )? {
+        settings.half_lives.default = days;
+    }
+
+    Ok(settings)
+}
+
+fn optional_config_f32(
+    value: Option<f64>,
+    key: &'static str,
+) -> Result<Option<f32>, MaintenanceConfigError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value as f32;
+    if value.is_finite() {
+        Ok(Some(value))
+    } else {
+        Err(MaintenanceConfigError {
+            code: "learn_decay_config_invalid",
+            message: format!("Config key `{key}` exceeds supported f32 range."),
+            repair: "Use a smaller finite positive number in [learn.decay].",
+        })
+    }
 }
 
 fn handle_maintenance_status<W>(
@@ -27134,7 +30355,7 @@ where
 fn maintenance_job_history_row(
     command: &str,
     job_type: JobType,
-    workspace_path: &Path,
+    workspace_path: Option<&Path>,
     result: &crate::steward::JobRunResult,
 ) -> serde_json::Value {
     let result_json = result.data_json();
@@ -27147,7 +30368,7 @@ fn maintenance_job_history_row(
         "jobType": job_type.as_str(),
         "requestedJob": job_type.as_str(),
         "command": command,
-        "workspace": workspace_path.display().to_string(),
+        "workspace": workspace_path.map(|path| path.display().to_string()),
         "recordedAt": now,
         "completedAt": now,
         "outcome": result.outcome.as_str(),
@@ -27608,6 +30829,10 @@ where
     options.include_rch = enabled_sources.contains(&SwarmBriefSourceKind::Rch);
     options.enabled_sources = enabled_sources;
     options.agent_mail_snapshot_path = args.agent_mail_snapshot.clone();
+    options.agent_inventory_only_connectors = args
+        .agent_inventory_only
+        .as_deref()
+        .map(parse_comma_separated_values);
     options.command_timeout_ms = args.command_timeout_ms;
 
     let runner = SystemSwarmBriefCommandRunner;
@@ -27710,6 +30935,14 @@ fn parse_swarm_brief_sources(
         sources.insert(SwarmBriefSourceKind::Rch);
     }
     Ok(sources)
+}
+
+fn parse_comma_separated_values(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn swarm_brief_unavailable_sources(report: &SwarmBriefReport) -> Vec<String> {
@@ -28232,15 +31465,31 @@ const CURATE_SUBCOMMANDS: &[&str] = &[
     "snooze",
     "merge",
     "disposition",
+    "retire",
+    "tombstone",
+    "untombstone",
 ];
 const DEMO_SUBCOMMANDS: &[&str] = &["list", "run", "verify"];
 const DIAG_SUBCOMMANDS: &[&str] = &[
+    "advisory-lock",
+    "causal-edge",
     "claims",
+    "curation-candidate",
+    "database-skew",
     "dependencies",
     "graph",
+    "graph-snapshot",
     "integrity",
+    "memory-validity",
+    "model-registry",
+    "pack-latest",
+    "pack-record",
     "quarantine",
+    "search",
     "streams",
+    "tripwire",
+    "write-owner",
+    "write-spool",
 ];
 const ECONOMY_SUBCOMMANDS: &[&str] = &["report", "score", "simulate", "prune-plan"];
 const EVAL_SUBCOMMANDS: &[&str] = &["run", "list"];
@@ -28435,18 +31684,31 @@ impl NormalizedInvocation {
                     CurateCommand::Disposition(_) => "curate disposition".to_string(),
                     CurateCommand::Retire(_) => "curate retire".to_string(),
                     CurateCommand::Tombstone(_) => "curate tombstone".to_string(),
+                    CurateCommand::Untombstone(_) => "curate untombstone".to_string(),
                 },
                 Command::Diag(diag) => match diag {
+                    DiagCommand::AdvisoryLock(_) => "diag advisory-lock".to_string(),
+                    DiagCommand::CausalEdge(_) => "diag causal-edge".to_string(),
                     DiagCommand::Claims(_) => "diag claims".to_string(),
+                    DiagCommand::CurationCandidate(_) => "diag curation-candidate".to_string(),
+                    DiagCommand::DatabaseSkew(_) => "diag database-skew".to_string(),
                     DiagCommand::Dependencies => "diag dependencies".to_string(),
                     DiagCommand::Graph => "diag graph".to_string(),
+                    DiagCommand::GraphSnapshot(_) => "diag graph-snapshot".to_string(),
                     DiagCommand::Integrity(_) => "diag integrity".to_string(),
+                    DiagCommand::MemoryValidity(_) => "diag memory-validity".to_string(),
+                    DiagCommand::ModelRegistry(_) => "diag model-registry".to_string(),
+                    DiagCommand::PackLatest(_) => "diag pack-latest".to_string(),
+                    DiagCommand::PackRecord(_) => "diag pack-record".to_string(),
                     DiagCommand::Quarantine(subcmd) => match subcmd {
                         DiagQuarantineCommand::List(_) => "diag quarantine list".to_string(),
                         DiagQuarantineCommand::Show(_) => "diag quarantine show".to_string(),
                     },
                     DiagCommand::Search(_) => "diag search".to_string(),
                     DiagCommand::Streams => "diag streams".to_string(),
+                    DiagCommand::Tripwire(_) => "diag tripwire".to_string(),
+                    DiagCommand::WriteOwner(_) => "diag write-owner".to_string(),
+                    DiagCommand::WriteSpool(_) => "diag write-spool".to_string(),
                 },
                 Command::Doctor(_) => "doctor".to_string(),
                 Command::Economy(econ) => match econ {
@@ -28530,6 +31792,7 @@ impl NormalizedInvocation {
                 },
                 Command::Memory(mem) => match mem {
                     MemoryCommand::Expire(_) => "memory expire".to_string(),
+                    MemoryCommand::Level(_) => "memory level".to_string(),
                     MemoryCommand::Link(_) => "memory link".to_string(),
                     MemoryCommand::List(_) => "memory list".to_string(),
                     MemoryCommand::Show(_) => "memory show".to_string(),
@@ -29287,7 +32550,7 @@ mod tests {
         LearnExperimentCommand, MaintenanceCommand, MemoryCommand, OutcomeQuarantineCommand,
         OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand, RuleCommand, ShadowMode,
         SituationCommand, SwarmBriefArgs, SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand,
-        VerifyCommand, WorkflowCommand, run, write_index_rebuild_error,
+        VerifyCommand, WorkflowCommand, decay_settings_from_config, run, write_index_rebuild_error,
     };
     use crate::core::index::IndexRebuildError;
     use crate::core::search::{
@@ -29299,8 +32562,11 @@ mod tests {
         SelectionExplanation, StorageExplanation, WhyReport,
     };
     use crate::models::error_codes::ALL_ERROR_CODES;
-    use crate::models::{ALL_DEGRADATION_CODES, MemoryId, ProcessExitCode};
+    use crate::models::{
+        ALL_DEGRADATION_CODES, MemoryId, MemoryScope, MemoryScopeStats, ProcessExitCode,
+    };
     use crate::output;
+    use crate::pack::PackResourceProfile;
     use crate::steward::JobType;
 
     type TestResult = Result<(), String>;
@@ -29715,6 +32981,7 @@ mod tests {
                 sources,
                 include_rch,
                 agent_mail_snapshot,
+                agent_inventory_only,
                 max_recent_commits,
                 command_timeout_ms,
                 require_sources,
@@ -29725,6 +32992,11 @@ mod tests {
                     &agent_mail_snapshot,
                     &Some(PathBuf::from("agent-mail-snapshot.json")),
                     "agent mail snapshot path",
+                )?;
+                ensure_equal(
+                    &agent_inventory_only,
+                    &None,
+                    "agent inventory connector filter",
                 )?;
                 ensure_equal(&max_recent_commits, &3, "max recent commits")?;
                 ensure_equal(&command_timeout_ms, &250, "command timeout")?;
@@ -29965,6 +33237,9 @@ mod tests {
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
         }
     }
 
@@ -33233,6 +36508,214 @@ mod tests {
     }
 
     #[test]
+    fn diag_write_spool_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "diag",
+            "write-spool",
+            "--max-pending",
+            "1",
+            "--max-batch-size",
+            "4",
+            "--max-pending-bytes",
+            "64",
+            "--max-queue-age-ms",
+            "1000",
+            "--enqueue",
+            "2",
+            "--payload-bytes",
+            "32",
+        ])
+        .map_err(|e| format!("failed to parse diag write-spool: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::WriteSpool(args))) => {
+                ensure_equal(&args.max_pending, &1, "max pending")?;
+                ensure_equal(&args.max_batch_size, &4, "max batch size")?;
+                ensure_equal(&args.max_pending_bytes, &64, "max pending bytes")?;
+                ensure_equal(&args.max_queue_age_ms, &1000, "max queue age")?;
+                ensure_equal(&args.enqueue, &2, "enqueue")?;
+                ensure_equal(&args.payload_bytes, &32, "payload bytes")
+            }
+            _ => Err("expected diag write-spool command".to_string()),
+        }
+    }
+
+    #[test]
+    fn diag_write_owner_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "diag",
+            "write-owner",
+            "--capacity",
+            "1",
+            "--enqueue",
+            "2",
+        ])
+        .map_err(|e| format!("failed to parse diag write-owner: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::WriteOwner(args))) => {
+                ensure_equal(&args.capacity, &1, "capacity")?;
+                ensure_equal(&args.enqueue, &2, "enqueue")
+            }
+            _ => Err("expected diag write-owner command".to_string()),
+        }
+    }
+
+    #[test]
+    fn diag_curation_candidate_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "diag",
+            "curation-candidate",
+            "--allow-missing-target",
+            "--candidate-type",
+            "rule",
+            "--status",
+            "pending",
+            "--candidate-id",
+            "curate_00000000000000000000000042",
+        ])
+        .map_err(|e| format!("failed to parse diag curation-candidate: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::CurationCandidate(args))) => {
+                ensure_equal(&args.allow_missing_target, &true, "allow missing target")?;
+                ensure_equal(&args.candidate_type, &"rule".to_string(), "candidate type")?;
+                ensure_equal(&args.status, &"pending".to_string(), "status")?;
+                ensure_equal(
+                    &args.candidate_id,
+                    &"curate_00000000000000000000000042".to_string(),
+                    "candidate id",
+                )
+            }
+            _ => Err("expected diag curation-candidate command".to_string()),
+        }
+    }
+
+    #[test]
+    fn diag_database_skew_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "diag",
+            "database-skew",
+            "--output-database",
+            "j6-skew.db",
+            "--skew",
+            "causal-evidence-table-missing",
+        ])
+        .map_err(|e| format!("failed to parse diag database-skew: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::DatabaseSkew(args))) => {
+                ensure_equal(
+                    &args.output_database,
+                    &Some(PathBuf::from("j6-skew.db")),
+                    "output database",
+                )?;
+                ensure_equal(&args.in_place, &false, "in-place default")?;
+                ensure_equal(
+                    &args.skew,
+                    &"causal-evidence-table-missing".to_string(),
+                    "skew",
+                )
+            }
+            _ => Err("expected diag database-skew command".to_string()),
+        }
+    }
+
+    #[test]
+    fn diag_database_skew_in_place_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "diag",
+            "database-skew",
+            "--in-place",
+            "--skew",
+            "memory-links-table-unavailable",
+        ])
+        .map_err(|e| {
+            format!(
+                "failed to parse diag database-skew --in-place: {:?}",
+                e.kind()
+            )
+        })?;
+
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::DatabaseSkew(args))) => {
+                ensure_equal(&args.output_database, &None, "output database absent")?;
+                ensure_equal(&args.in_place, &true, "in-place set")?;
+                ensure_equal(
+                    &args.skew,
+                    &"memory-links-table-unavailable".to_string(),
+                    "skew",
+                )
+            }
+            _ => Err("expected diag database-skew command".to_string()),
+        }
+    }
+
+    #[test]
+    fn diag_memory_validity_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "diag",
+            "memory-validity",
+            "--memory-id",
+            "mem_j6_validity_marker",
+            "--valid-to",
+            "not-a-time",
+        ])
+        .map_err(|e| format!("failed to parse diag memory-validity: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::MemoryValidity(args))) => {
+                ensure_equal(
+                    &args.memory_id,
+                    &"mem_j6_validity_marker".to_string(),
+                    "memory id",
+                )?;
+                ensure_equal(&args.valid_to, &Some("not-a-time".to_string()), "valid to")?;
+                ensure_equal(&args.clear_valid_to, &false, "clear valid to")
+            }
+            _ => Err("expected diag memory-validity command".to_string()),
+        }
+    }
+
+    #[test]
+    fn diag_pack_record_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "diag",
+            "pack-record",
+            "--pack-id",
+            "pack_j6referenceissues000000000",
+            "--query",
+            "j6 reference issue",
+            "--item-count",
+            "1",
+            "--omitted-count",
+            "0",
+        ])
+        .map_err(|e| format!("failed to parse diag pack-record: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::PackRecord(args))) => {
+                ensure_equal(
+                    &args.pack_id,
+                    &"pack_j6referenceissues000000000".to_string(),
+                    "pack id",
+                )?;
+                ensure_equal(&args.query, &"j6 reference issue".to_string(), "query")?;
+                ensure_equal(&args.item_count, &1, "item count")?;
+                ensure_equal(&args.omitted_count, &0, "omitted count")
+            }
+            _ => Err("expected diag pack-record command".to_string()),
+        }
+    }
+
+    #[test]
     fn daemon_foreground_command_parses() -> TestResult {
         let parsed = Cli::try_parse_from([
             "ee",
@@ -33357,10 +36840,69 @@ mod tests {
             Some(Command::Maintenance(MaintenanceCommand::Run(args))) => {
                 ensure_equal(&args.job, &JobType::DecaySweep, "job")?;
                 ensure_equal(&args.dry_run, &true, "dry run")?;
+                ensure_equal(&args.include_decay, &false, "include decay default")?;
+                ensure_equal(&args.as_of, &None, "as of default")?;
                 ensure_equal(&args.item_limit, &Some(10), "item limit")
             }
             other => Err(format!("expected maintenance run command, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn maintenance_run_accepts_include_decay_flag() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "maintenance",
+            "run",
+            "--include-decay",
+            "--as-of",
+            "2030-01-01T00:00:00Z",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse maintenance run: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Maintenance(MaintenanceCommand::Run(args))) => {
+                ensure_equal(&args.job, &JobType::DecaySweep, "job")?;
+                ensure_equal(&args.include_decay, &true, "include decay")?;
+                ensure_equal(
+                    &args.as_of,
+                    &Some("2030-01-01T00:00:00Z".to_string()),
+                    "as of",
+                )
+            }
+            other => Err(format!("expected maintenance run command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn learn_decay_workspace_config_maps_to_runner_settings() -> TestResult {
+        let config = crate::config::ConfigFile::parse(
+            r#"
+[learn.decay]
+demote_threshold = 0.08
+forget_threshold = 0.02
+working_half_life_days = 2
+episodic_event_half_life_days = 31
+episodic_failure_half_life_days = 91
+semantic_fact_half_life_days = 181
+procedural_rule_half_life_days = 730
+default_half_life_days = 45
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let settings = decay_settings_from_config(&config).map_err(|error| error.message)?;
+
+        ensure_equal(&settings.thresholds.demote, &0.08, "demote threshold")?;
+        ensure_equal(&settings.thresholds.forget, &0.02, "forget threshold")?;
+        ensure_equal(&settings.half_lives.working, &2.0, "working half-life")?;
+        ensure_equal(
+            &settings.half_lives.procedural_rule,
+            &730.0,
+            "procedural rule half-life",
+        )?;
+        ensure_equal(&settings.half_lives.default, &45.0, "default half-life")
     }
 
     #[test]
@@ -33581,6 +37123,37 @@ mod tests {
     }
 
     #[test]
+    fn maintenance_run_leaves_unselected_cwd_unmaterialized() -> TestResult {
+        let cwd = PathBuf::from(unique_temp_workspace("ee-job-unselected-cwd")?);
+
+        let selected =
+            super::selected_maintenance_workspace_path(cwd, super::WorkspaceSource::Cwd, false);
+
+        ensure_equal(
+            &selected,
+            &None,
+            "fallback cwd without .ee should not become a maintenance workspace",
+        )
+    }
+
+    #[test]
+    fn maintenance_run_preserves_explicit_database_workspace_context() -> TestResult {
+        let cwd = PathBuf::from(unique_temp_workspace("ee-job-explicit-db")?);
+
+        let selected = super::selected_maintenance_workspace_path(
+            cwd.clone(),
+            super::WorkspaceSource::Cwd,
+            true,
+        );
+
+        ensure_equal(
+            &selected,
+            &Some(cwd),
+            "explicit database keeps cwd available for lock and history context",
+        )
+    }
+
+    #[test]
     fn job_run_failed_outcome_is_persisted_in_history() -> TestResult {
         let workspace = unique_temp_workspace("ee-job-failure")?;
 
@@ -33759,6 +37332,81 @@ mod tests {
         ensure_contains(&stdout, "\"forbiddenCrates\":[", "forbidden crates array")?;
         ensure_contains(&stdout, "\"entries\":[", "dependency entries array")?;
         ensure(stderr.is_empty(), "diag dependencies json stderr empty")
+    }
+
+    #[test]
+    fn diag_write_spool_json_reports_backpressure_contract() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "diag",
+            "write-spool",
+            "--max-pending",
+            "1",
+            "--enqueue",
+            "2",
+            "--json",
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "diag write-spool json exit",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"schema\":\"ee.write_spool.diagnostics.v1\"",
+            "write-spool diagnostics schema",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"code\":\"write_spool_backpressure\"",
+            "write-spool backpressure code",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"reason\":\"queue_depth\"",
+            "write-spool backpressure reason",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"repair\":\"ee daemon status --json\"",
+            "write-spool repair",
+        )?;
+        ensure(stderr.is_empty(), "diag write-spool json stderr empty")
+    }
+
+    #[test]
+    fn diag_write_owner_json_reports_busy_contract() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "diag",
+            "write-owner",
+            "--capacity",
+            "1",
+            "--enqueue",
+            "2",
+            "--json",
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "diag write-owner json exit",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"schema\":\"ee.write_owner.diagnostics.v1\"",
+            "write-owner diagnostics schema",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"code\":\"write_owner_busy\"",
+            "write-owner busy code",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"repair\":\"ee diag locks --json\"",
+            "write-owner repair",
+        )?;
+        ensure(stderr.is_empty(), "diag write-owner json stderr empty")
     }
 
     #[test]
@@ -34257,6 +37905,8 @@ mod tests {
             "test",
             "--pack-profile",
             "lean",
+            "--resource-profile",
+            "swarm-heavy",
             "--no-skipped=false",
             "--no-meta",
         ])
@@ -34268,6 +37918,11 @@ mod tests {
                     &args.pack_profile,
                     &PackOutputProfileArg::Lean,
                     "context pack profile",
+                )?;
+                ensure_equal(
+                    &args.resource_profile,
+                    &PackResourceProfile::SwarmHeavy,
+                    "context resource profile",
                 )?;
                 ensure_equal(&args.no_skipped, &Some(false), "context no_skipped")?;
                 ensure_equal(&args.no_meta, &Some(true), "context no_meta")
@@ -35478,6 +39133,46 @@ mod tests {
     }
 
     #[test]
+    fn memory_level_command_parses_manual_transition_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "memory",
+            "level",
+            "mem_test123",
+            "--to",
+            "episodic",
+            "--reason",
+            "workflow completed",
+            "--actor",
+            "CopperDuck",
+            "--dry-run",
+            "--database",
+            "/tmp/ee.db",
+        ])
+        .map_err(|e| format!("failed to parse memory level: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Memory(MemoryCommand::Level(ref args))) => {
+                ensure_equal(&args.memory_id, &"mem_test123".to_string(), "memory id")?;
+                ensure_equal(&args.level, &"episodic".to_string(), "level")?;
+                ensure_equal(
+                    &args.reason,
+                    &Some("workflow completed".to_string()),
+                    "reason",
+                )?;
+                ensure_equal(&args.actor, &Some("CopperDuck".to_string()), "actor")?;
+                ensure_equal(&args.dry_run, &true, "dry_run")?;
+                ensure_equal(
+                    &args.database,
+                    &Some(std::path::PathBuf::from("/tmp/ee.db")),
+                    "database path",
+                )
+            }
+            _ => Err("expected Memory Level command".to_string()),
+        }
+    }
+
+    #[test]
     fn memory_show_command_accepts_database_path() -> TestResult {
         let parsed = Cli::try_parse_from([
             "ee",
@@ -35876,7 +39571,7 @@ mod tests {
             "--workspace",
             &workspace,
             "remember",
-            "Document redacted sample sk-FAKEabc123def456ghi789jkl012.",
+            "Document redacted sample sk-FAKEabc123def456ghi789jkl0123456789mno3456789pqr.",
             "--allow-secret-mention",
             "--json",
         ]);
@@ -36547,6 +40242,44 @@ mod tests {
                 )
             }
             _ => Err("expected Curate Disposition command".to_string()),
+        }
+    }
+
+    #[test]
+    fn curate_untombstone_command_parses_restore_options() -> TestResult {
+        let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(9)).to_string();
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "curate",
+            "untombstone",
+            memory_id.as_str(),
+            "--actor",
+            "MistySalmon",
+            "--dry-run",
+            "--reason",
+            "restore reversible decay tombstone",
+            "--database",
+            "review.db",
+        ])
+        .map_err(|error| format!("failed to parse curate untombstone: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Curate(CurateCommand::Untombstone(ref args))) => {
+                ensure_equal(&args.memory_id, &memory_id, "memory id")?;
+                ensure_equal(&args.actor, &Some("MistySalmon".to_string()), "actor")?;
+                ensure_equal(&args.dry_run, &true, "dry run")?;
+                ensure_equal(
+                    &args.reason,
+                    &Some("restore reversible decay tombstone".to_string()),
+                    "reason",
+                )?;
+                ensure_equal(
+                    &args.database,
+                    &Some(std::path::PathBuf::from("review.db")),
+                    "database path",
+                )
+            }
+            _ => Err("expected Curate Untombstone command".to_string()),
         }
     }
 
@@ -37469,8 +41202,8 @@ mod tests {
             .ok_or_else(|| "explain degradation must exist".to_string())?;
         ensure_contains(
             &explain_degradation.message,
-            "selection certificates",
-            "degradation message should mention selection certificates",
+            "selection audit",
+            "degradation message should mention selection audit",
         )
     }
 

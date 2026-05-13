@@ -14,9 +14,11 @@
     "description": "Causal comparison filters match fewer than two chains.",
     "setup_commands": [
       "ee init --workspace .",
-      "# seed only one matching causal chain"
+      "ee remember --workspace . --level episodic --kind failure 'J6 causal failure.' --json",
+      "ee remember --workspace . --level episodic --kind root-cause 'J6 causal root cause.' --json",
+      "ee diag causal-edge --edge-id cev_j6_insufficient_root --failure-id <failure-memory-id> --candidate-cause-id <root-memory-id> --workspace . --json"
     ],
-    "invocation": "ee causal compare --artifact-id artifact-1 --workspace . --json"
+    "invocation": "ee causal compare --artifact-id <root-memory-id> --workspace . --json"
   },
   "expected_emission": {
     "code": "causal_insufficient_chains",

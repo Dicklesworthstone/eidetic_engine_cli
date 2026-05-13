@@ -9,7 +9,8 @@ use tiktoken_rs::{CoreBPE, cl100k_base};
 use crate::cache::{CacheBudget, MemoryPressure, assess_pressure};
 use crate::models::{
     ContextProfile, ContextProfileName, ContextProfileSection, ContextProfileSectionMix,
-    ERROR_SCHEMA_V2, MemoryId, ProvenanceUri, RESPONSE_SCHEMA_V1, TrustClass, UnitScore,
+    ERROR_SCHEMA_V2, MemoryId, MemoryScopeStats, ProvenanceUri, RESPONSE_SCHEMA_V1, TrustClass,
+    UnitScore,
 };
 
 pub const SUBSYSTEM: &str = "pack";
@@ -22,6 +23,8 @@ pub const FACILITY_LOCATION_UTILITY_WEIGHT: f32 = 0.30;
 pub const FACILITY_LOCATION_EPSILON: f32 = 0.000_001;
 pub const DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR: f32 = 0.05;
 pub const MAX_PACK_SKIPPED_ITEMS: usize = 50;
+pub const COORDINATION_SNAPSHOT_SCHEMA_V1: &str = "ee.coordination_snapshot.v1";
+pub const DEFAULT_COORDINATION_STALE_AFTER_MS: u64 = 86_400_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PackAssemblyOptions {
@@ -33,6 +36,420 @@ impl Default for PackAssemblyOptions {
         Self {
             include_coverage_fill: true,
         }
+    }
+}
+
+/// Compact coordination posture embedded in context packs.
+///
+/// The snapshot is intentionally source-agnostic and side-effect free. It is
+/// loaded from a caller-provided JSON file so pack assembly can stay
+/// deterministic and avoid requiring a live Agent Mail server.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackCoordinationSnapshot {
+    pub schema: &'static str,
+    pub captured_at: Option<String>,
+    pub scope: String,
+    pub freshness: PackCoordinationFreshness,
+    pub summary: PackCoordinationSummary,
+    pub sources: Vec<PackCoordinationSource>,
+}
+
+impl PackCoordinationSnapshot {
+    /// Parse a redacted coordination snapshot from JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable message when the JSON cannot be parsed or does not
+    /// contain a `sources[]` array compatible with `ee.coordination_snapshot.v1`.
+    pub fn from_json_str(input: &str, stale_after_ms: u64) -> Result<Self, String> {
+        let root = serde_json::from_str::<serde_json::Value>(input)
+            .map_err(|error| format!("Coordination snapshot JSON could not be parsed: {error}"))?;
+        let value = coordination_payload_value(&root);
+        let schema = coordination_string_field(value, &["schema"]).unwrap_or_default();
+        if !schema.is_empty() && schema != COORDINATION_SNAPSHOT_SCHEMA_V1 {
+            return Err(format!(
+                "Unsupported coordination snapshot schema `{schema}`; expected {COORDINATION_SNAPSHOT_SCHEMA_V1}."
+            ));
+        }
+        let source_values = value
+            .get("sources")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "Coordination snapshot is missing sources[].".to_owned())?;
+        let mut sources = source_values
+            .iter()
+            .enumerate()
+            .map(|(index, source)| parse_coordination_source(source, index, stale_after_ms))
+            .collect::<Vec<_>>();
+        sources.sort();
+        sources.dedup();
+
+        let summary = PackCoordinationSummary::from_sources(&sources);
+        let freshness = PackCoordinationFreshness {
+            status: coordination_overall_status(&summary).to_owned(),
+            stale_after_ms,
+        };
+
+        Ok(Self {
+            schema: COORDINATION_SNAPSHOT_SCHEMA_V1,
+            captured_at: coordination_string_field(value, &["captured_at", "capturedAt"]),
+            scope: coordination_string_field(value, &["scope"])
+                .unwrap_or_else(|| "workspace".to_owned()),
+            freshness,
+            summary,
+            sources,
+        })
+    }
+
+    #[must_use]
+    pub fn active_conflict_entries(&self) -> Vec<&PackCoordinationEntry> {
+        self.sources
+            .iter()
+            .flat_map(|source| source.entries.iter())
+            .filter(|entry| entry.conflict)
+            .collect()
+    }
+
+    #[must_use]
+    pub fn notable_entries(&self) -> Vec<&PackCoordinationEntry> {
+        self.sources
+            .iter()
+            .flat_map(|source| source.entries.iter())
+            .filter(|entry| {
+                entry.conflict
+                    || entry.kind == "file_reservation"
+                    || entry.status.as_deref() == Some("in_progress")
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackCoordinationFreshness {
+    pub status: String,
+    pub stale_after_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackCoordinationSummary {
+    pub source_count: usize,
+    pub entry_count: usize,
+    pub stale_source_count: usize,
+    pub degraded_source_count: usize,
+    pub unavailable_source_count: usize,
+    pub active_conflict_count: usize,
+    pub active_reservation_count: usize,
+    pub in_progress_bead_count: usize,
+}
+
+impl PackCoordinationSummary {
+    #[must_use]
+    pub fn from_sources(sources: &[PackCoordinationSource]) -> Self {
+        let mut summary = Self {
+            source_count: sources.len(),
+            entry_count: 0,
+            stale_source_count: 0,
+            degraded_source_count: 0,
+            unavailable_source_count: 0,
+            active_conflict_count: 0,
+            active_reservation_count: 0,
+            in_progress_bead_count: 0,
+        };
+        for source in sources {
+            summary.entry_count = summary.entry_count.saturating_add(source.entries.len());
+            if source.stale {
+                summary.stale_source_count = summary.stale_source_count.saturating_add(1);
+            }
+            if matches!(
+                source.status.as_str(),
+                "degraded" | "unavailable" | "not_configured" | "skipped"
+            ) || !source.degraded.is_empty()
+            {
+                summary.degraded_source_count = summary.degraded_source_count.saturating_add(1);
+            }
+            if matches!(
+                source.status.as_str(),
+                "unavailable" | "not_configured" | "skipped"
+            ) {
+                summary.unavailable_source_count =
+                    summary.unavailable_source_count.saturating_add(1);
+            }
+            for entry in &source.entries {
+                if entry.conflict {
+                    summary.active_conflict_count = summary.active_conflict_count.saturating_add(1);
+                }
+                if entry.kind == "file_reservation" {
+                    summary.active_reservation_count =
+                        summary.active_reservation_count.saturating_add(1);
+                }
+                if entry.kind == "bead" && entry.status.as_deref() == Some("in_progress") {
+                    summary.in_progress_bead_count =
+                        summary.in_progress_bead_count.saturating_add(1);
+                }
+            }
+        }
+        summary
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackCoordinationSource {
+    pub kind: String,
+    pub source_id: String,
+    pub status: String,
+    pub freshness_ms: Option<u64>,
+    pub last_synced_at: Option<String>,
+    pub stale: bool,
+    pub entry_count: usize,
+    pub entries: Vec<PackCoordinationEntry>,
+    pub degraded: Vec<PackCoordinationDegradation>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackCoordinationEntry {
+    pub kind: String,
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    pub summary: String,
+    pub severity: String,
+    pub conflict: bool,
+    pub provenance: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackCoordinationDegradation {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair: Option<String>,
+}
+
+fn coordination_payload_value(root: &serde_json::Value) -> &serde_json::Value {
+    if root.get("schema").and_then(serde_json::Value::as_str) == Some(RESPONSE_SCHEMA_V1) {
+        root.get("data").unwrap_or(root)
+    } else {
+        root
+    }
+}
+
+fn parse_coordination_source(
+    value: &serde_json::Value,
+    index: usize,
+    stale_after_ms: u64,
+) -> PackCoordinationSource {
+    let kind = coordination_string_field(value, &["kind", "source"])
+        .unwrap_or_else(|| format!("source_{index}"));
+    let source_id = coordination_string_field(value, &["source_id", "sourceId", "id"])
+        .unwrap_or_else(|| kind.clone());
+    let freshness_ms = coordination_u64_field(value, &["freshness_ms", "freshnessMs"])
+        .or_else(|| {
+            value
+                .get("freshness")
+                .and_then(|freshness| coordination_u64_field(freshness, &["age_ms", "ageMs"]))
+        })
+        .or_else(|| {
+            value
+                .get("freshness")
+                .and_then(|freshness| {
+                    coordination_u64_field(freshness, &["age_seconds", "ageSeconds"])
+                })
+                .map(|seconds| seconds.saturating_mul(1_000))
+        });
+    let explicitly_stale = coordination_bool_field(value, &["stale"]).unwrap_or(false);
+    let status_field =
+        coordination_string_field(value, &["status"]).map(|status| status.to_ascii_lowercase());
+    let stale = explicitly_stale
+        || freshness_ms.is_some_and(|age| age > stale_after_ms)
+        || status_field.as_deref() == Some("stale");
+    let mut entries = value
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .enumerate()
+                .map(|(entry_index, entry)| {
+                    parse_coordination_entry(entry, &kind, &source_id, entry_index)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    entries.sort();
+    entries.dedup();
+
+    let mut degraded = parse_coordination_degradations(value);
+    degraded.sort();
+    degraded.dedup();
+    let status = status_field.unwrap_or_else(|| {
+        if !degraded.is_empty() {
+            "degraded".to_owned()
+        } else if stale {
+            "stale".to_owned()
+        } else {
+            "fresh".to_owned()
+        }
+    });
+
+    PackCoordinationSource {
+        kind,
+        source_id,
+        status,
+        freshness_ms,
+        last_synced_at: coordination_string_field(value, &["last_synced_at", "lastSyncedAt"]),
+        stale,
+        entry_count: entries.len(),
+        entries,
+        degraded,
+    }
+}
+
+fn parse_coordination_entry(
+    value: &serde_json::Value,
+    source_kind: &str,
+    source_id: &str,
+    index: usize,
+) -> PackCoordinationEntry {
+    let kind = coordination_string_field(value, &["kind"])
+        .unwrap_or_else(|| coordination_entry_kind_from_source(source_kind));
+    let id = coordination_string_field(
+        value,
+        &[
+            "id",
+            "bead_id",
+            "beadId",
+            "thread_id",
+            "threadId",
+            "path_pattern",
+            "pathPattern",
+            "mailbox",
+        ],
+    )
+    .unwrap_or_else(|| format!("{source_id}:{index}"));
+    let status = coordination_string_field(value, &["status"]);
+    let conflict = coordination_bool_field(value, &["conflict", "activeConflict"]).unwrap_or(false);
+    let severity = coordination_string_field(value, &["severity"]).unwrap_or_else(|| {
+        if conflict {
+            "warning".to_owned()
+        } else {
+            "info".to_owned()
+        }
+    });
+    let provenance = coordination_provenance(value).unwrap_or_else(|| vec![source_id.to_owned()]);
+    PackCoordinationEntry {
+        summary: coordination_entry_summary(value, &kind, &id),
+        kind,
+        id,
+        status,
+        severity,
+        conflict,
+        provenance,
+    }
+}
+
+fn coordination_entry_kind_from_source(source_kind: &str) -> String {
+    if source_kind.contains("reservation") {
+        "file_reservation".to_owned()
+    } else if source_kind.contains("bead") {
+        "bead".to_owned()
+    } else if source_kind.contains("thread") || source_kind.contains("mail") {
+        "agent_mail_thread".to_owned()
+    } else {
+        source_kind.to_owned()
+    }
+}
+
+fn coordination_entry_summary(value: &serde_json::Value, kind: &str, id: &str) -> String {
+    if let Some(summary) = coordination_string_field(value, &["summary", "title", "subject"]) {
+        return summary;
+    }
+    if kind == "file_reservation" {
+        let path = coordination_string_field(value, &["path_pattern", "pathPattern", "path"])
+            .unwrap_or_else(|| id.to_owned());
+        let holder = coordination_string_field(value, &["holder", "agent", "agent_name"]);
+        let exclusive = coordination_bool_field(value, &["exclusive"]).unwrap_or(false);
+        return match holder {
+            Some(holder) if exclusive => {
+                format!("exclusive reservation on {path} held by {holder}")
+            }
+            Some(holder) => format!("reservation on {path} held by {holder}"),
+            None if exclusive => format!("exclusive reservation on {path}"),
+            None => format!("reservation on {path}"),
+        };
+    }
+    id.to_owned()
+}
+
+fn parse_coordination_degradations(value: &serde_json::Value) -> Vec<PackCoordinationDegradation> {
+    value
+        .get("degraded")
+        .or_else(|| value.get("degradations"))
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| PackCoordinationDegradation {
+                    code: coordination_string_field(item, &["code"])
+                        .unwrap_or_else(|| format!("coordination_source_degraded_{index}")),
+                    severity: coordination_string_field(item, &["severity"])
+                        .unwrap_or_else(|| "warning".to_owned()),
+                    message: coordination_string_field(item, &["message"])
+                        .unwrap_or_else(|| "Coordination source is degraded.".to_owned()),
+                    repair: coordination_string_field(item, &["repair"]),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn coordination_string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn coordination_u64_field(value: &serde_json::Value, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_u64))
+}
+
+fn coordination_bool_field(value: &serde_json::Value, keys: &[&str]) -> Option<bool> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_bool))
+}
+
+fn coordination_provenance(value: &serde_json::Value) -> Option<Vec<String>> {
+    match value.get("provenance") {
+        Some(serde_json::Value::Array(items)) => {
+            let provenance = items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            (!provenance.is_empty()).then_some(provenance)
+        }
+        Some(serde_json::Value::String(item)) => Some(vec![item.clone()]),
+        _ => None,
+    }
+}
+
+fn coordination_overall_status(summary: &PackCoordinationSummary) -> &'static str {
+    if summary.unavailable_source_count > 0 || summary.degraded_source_count > 0 {
+        "degraded"
+    } else if summary.stale_source_count > 0 {
+        "stale"
+    } else {
+        "fresh"
     }
 }
 
@@ -860,13 +1277,11 @@ impl PackCandidate {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct PackSelectionCertificate {
-    pub certificate_id: Option<String>,
+pub struct PackSelectionAudit {
     pub profile: ContextPackProfile,
     pub objective: PackSelectionObjective,
-    pub algorithm: &'static str,
-    pub guarantee: &'static str,
-    pub guarantee_status: PackGuaranteeStatus,
+    pub algorithm_id: &'static str,
+    pub algorithm_description: &'static str,
     pub candidate_count: usize,
     pub selected_count: usize,
     pub omitted_count: usize,
@@ -877,31 +1292,6 @@ pub struct PackSelectionCertificate {
     pub submodular: bool,
     pub selected_items: Vec<PackSelectedItem>,
     pub steps: Vec<PackSelectionStep>,
-}
-
-impl PackSelectionCertificate {
-    #[must_use]
-    pub fn has_valid_guarantee_identity(&self) -> bool {
-        self.guarantee_status != PackGuaranteeStatus::Valid || self.certificate_id.is_some()
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PackGuaranteeStatus {
-    Valid,
-    Conditional,
-    Invalid,
-}
-
-impl PackGuaranteeStatus {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Valid => "valid",
-            Self::Conditional => "conditional",
-            Self::Invalid => "invalid",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -946,7 +1336,7 @@ pub struct PackDraft {
     pub used_tokens: u32,
     pub items: Vec<PackDraftItem>,
     pub omitted: Vec<PackOmission>,
-    pub selection_certificate: PackSelectionCertificate,
+    pub selection_audit: PackSelectionAudit,
     pub hash: Option<String>,
 }
 
@@ -1206,6 +1596,635 @@ pub struct PackOmissionMetrics {
     pub below_relevance_floor: usize,
 }
 
+pub const PACK_ASSEMBLY_SLO_SCHEMA_V1: &str = "ee.pack.slo.v1";
+pub const PACK_ASSEMBLY_SLOW_CODE: &str = "pack_assembly_slow";
+pub const PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE: &str = "pack_assembly_budget_exceeded";
+pub const PACK_CONCURRENT_LIMIT_REACHED_CODE: &str = "pack_concurrent_limit_reached";
+pub const CONSENSUS_SCHEMA_V1: &str = "ee.consensus.v1";
+pub const CONFLICT_SCHEMA_V1: &str = "ee.conflict.v1";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PackResourceProfile {
+    Lean,
+    #[default]
+    Standard,
+    SwarmHeavy,
+}
+
+impl PackResourceProfile {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Lean => "lean",
+            Self::Standard => "standard",
+            Self::SwarmHeavy => "swarm_heavy",
+        }
+    }
+
+    #[must_use]
+    pub const fn budget_class(self) -> PackSloBudgetClass {
+        match self {
+            Self::Lean => PackSloBudgetClass {
+                candidates_scanned_max: 80,
+                graph_traversal_max_edges: 1_024,
+                elapsed_ms_target: 50,
+                elapsed_ms_warning: 100,
+                elapsed_ms_failure: 200,
+                concurrent_pack_max: 1,
+            },
+            Self::Standard => PackSloBudgetClass {
+                candidates_scanned_max: 240,
+                graph_traversal_max_edges: 8_192,
+                elapsed_ms_target: 200,
+                elapsed_ms_warning: 500,
+                elapsed_ms_failure: 2_000,
+                concurrent_pack_max: 4,
+            },
+            Self::SwarmHeavy => PackSloBudgetClass {
+                candidates_scanned_max: 1_600,
+                graph_traversal_max_edges: 65_536,
+                elapsed_ms_target: 1_000,
+                elapsed_ms_warning: 2_000,
+                elapsed_ms_failure: 10_000,
+                concurrent_pack_max: 16,
+            },
+        }
+    }
+}
+
+impl fmt::Display for PackResourceProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for PackResourceProfile {
+    type Err = ParsePackResourceProfileError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input {
+            "lean" => Ok(Self::Lean),
+            "standard" => Ok(Self::Standard),
+            "swarm_heavy" | "swarm-heavy" => Ok(Self::SwarmHeavy),
+            other => Err(ParsePackResourceProfileError {
+                value: other.to_string(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParsePackResourceProfileError {
+    value: String,
+}
+
+impl fmt::Display for ParsePackResourceProfileError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "invalid resource profile `{}`; expected lean, standard, or swarm_heavy",
+            self.value
+        )
+    }
+}
+
+impl std::error::Error for ParsePackResourceProfileError {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PackSloBudgetClass {
+    pub candidates_scanned_max: usize,
+    pub graph_traversal_max_edges: usize,
+    pub elapsed_ms_target: u64,
+    pub elapsed_ms_warning: u64,
+    pub elapsed_ms_failure: u64,
+    pub concurrent_pack_max: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PackAssemblySloActuals {
+    pub candidate_count: usize,
+    pub scanned_count: usize,
+    pub index_generation: Option<u64>,
+    pub graph_generation: Option<u64>,
+    pub graph_edges_traversed: usize,
+    pub elapsed_ms: u64,
+    pub memory_bytes_peak: u64,
+}
+
+impl PackAssemblySloActuals {
+    #[must_use]
+    pub fn from_pack_run(
+        draft: &PackDraft,
+        scanned_count: usize,
+        graph_edges_traversed: usize,
+        elapsed_ms: u64,
+    ) -> Self {
+        Self {
+            candidate_count: draft.selection_audit.candidate_count,
+            scanned_count,
+            index_generation: None,
+            graph_generation: None,
+            graph_edges_traversed,
+            elapsed_ms,
+            memory_bytes_peak: deterministic_pack_memory_bytes_peak(draft, scanned_count),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackAssemblySloStatus {
+    WithinBudget,
+    Warning,
+    Failure,
+}
+
+impl PackAssemblySloStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WithinBudget => "within_budget",
+            Self::Warning => "warning",
+            Self::Failure => "failure",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackAssemblySloDegradation {
+    pub code: &'static str,
+    pub severity: ContextResponseSeverity,
+    pub message: String,
+    pub repair: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackAssemblySlo {
+    pub schema: &'static str,
+    pub profile: PackResourceProfile,
+    pub budget_class: PackSloBudgetClass,
+    pub actuals: PackAssemblySloActuals,
+    pub status: PackAssemblySloStatus,
+    pub degradations: Vec<PackAssemblySloDegradation>,
+}
+
+impl PackAssemblySlo {
+    #[must_use]
+    pub fn evaluate(profile: PackResourceProfile, actuals: PackAssemblySloActuals) -> Self {
+        let budget_class = profile.budget_class();
+        let mut degradations = Vec::new();
+        let scanned_over_budget = actuals.scanned_count > budget_class.candidates_scanned_max;
+        let graph_over_budget =
+            actuals.graph_edges_traversed > budget_class.graph_traversal_max_edges;
+
+        let status = if scanned_over_budget || graph_over_budget {
+            degradations.push(pack_assembly_budget_exceeded_degradation(
+                profile,
+                &budget_class,
+                &actuals,
+            ));
+            PackAssemblySloStatus::Failure
+        } else if actuals.scanned_count == budget_class.candidates_scanned_max {
+            degradations.push(pack_assembly_slow_degradation(
+                profile,
+                &budget_class,
+                &actuals,
+            ));
+            PackAssemblySloStatus::Warning
+        } else {
+            PackAssemblySloStatus::WithinBudget
+        };
+
+        Self {
+            schema: PACK_ASSEMBLY_SLO_SCHEMA_V1,
+            profile,
+            budget_class,
+            actuals,
+            status,
+            degradations,
+        }
+    }
+
+    #[must_use]
+    pub fn concurrent_limit_reached(
+        profile: PackResourceProfile,
+        actuals: PackAssemblySloActuals,
+        retry_after_ms: u64,
+    ) -> Self {
+        let budget_class = profile.budget_class();
+        Self {
+            schema: PACK_ASSEMBLY_SLO_SCHEMA_V1,
+            profile,
+            budget_class,
+            actuals,
+            status: PackAssemblySloStatus::Warning,
+            degradations: vec![pack_concurrent_limit_reached_degradation(
+                profile,
+                &budget_class,
+                retry_after_ms,
+            )],
+        }
+    }
+
+    #[must_use]
+    pub fn context_degradations(&self) -> Vec<ContextResponseDegradation> {
+        self.degradations
+            .iter()
+            .filter_map(|entry| {
+                ContextResponseDegradation::new(
+                    entry.code,
+                    entry.severity,
+                    entry.message.clone(),
+                    entry.repair.clone(),
+                )
+                .ok()
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConsensusProducer {
+    pub agent_name: Option<String>,
+    pub trust_class: TrustClass,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConsensusEntry {
+    pub schema: &'static str,
+    pub subject_fingerprint: String,
+    pub subject_summary: String,
+    pub agreement_score: f32,
+    pub member_memory_ids: Vec<MemoryId>,
+    pub member_producers: Vec<ConsensusProducer>,
+    pub semantic_similarity_min: f32,
+    pub first_recorded_at: Option<String>,
+    pub last_reinforced_at: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConflictKind {
+    Direct,
+    StaleReplacement,
+    PartialOverlap,
+}
+
+impl ConflictKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::StaleReplacement => "stale_replacement",
+            Self::PartialOverlap => "partial_overlap",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConflictRecommendedAction {
+    Review,
+    PromoteOne,
+    TombstoneOlder,
+    RequestClarification,
+}
+
+impl ConflictRecommendedAction {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Review => "review",
+            Self::PromoteOne => "promote_one",
+            Self::TombstoneOlder => "tombstone_older",
+            Self::RequestClarification => "request_clarification",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConflictEntry {
+    pub schema: &'static str,
+    pub subject_fingerprint: String,
+    pub kind: ConflictKind,
+    pub conflicting_memory_ids: Vec<MemoryId>,
+    pub evidence_pointers: Vec<String>,
+    pub earliest_at: Option<String>,
+    pub latest_at: Option<String>,
+    pub recommended_action: ConflictRecommendedAction,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ConsensusConflictReport {
+    pub consensus: Vec<ConsensusEntry>,
+    pub conflicts: Vec<ConflictEntry>,
+}
+
+#[must_use]
+pub fn analyze_pack_consensus_conflicts(pack: &PackDraft) -> ConsensusConflictReport {
+    let mut groups: BTreeMap<String, Vec<&PackDraftItem>> = BTreeMap::new();
+    for item in &pack.items {
+        groups
+            .entry(subject_key_for_item(item))
+            .or_default()
+            .push(item);
+    }
+
+    let mut report = ConsensusConflictReport::default();
+    for (subject_key, mut items) in groups {
+        if items.len() < 2 {
+            continue;
+        }
+        items.sort_by_key(|item| item.memory_id.to_string());
+        let fingerprint = subject_fingerprint(&subject_key);
+        if let Some(conflict) = conflict_for_group(&items, &fingerprint) {
+            report.conflicts.push(conflict);
+        } else if let Some(consensus) = consensus_for_group(&items, &fingerprint) {
+            report.consensus.push(consensus);
+        }
+    }
+    report.consensus.sort_by(|left, right| {
+        left.subject_fingerprint
+            .cmp(&right.subject_fingerprint)
+            .then_with(|| left.member_memory_ids.cmp(&right.member_memory_ids))
+    });
+    report.conflicts.sort_by(|left, right| {
+        left.subject_fingerprint
+            .cmp(&right.subject_fingerprint)
+            .then_with(|| {
+                left.conflicting_memory_ids
+                    .cmp(&right.conflicting_memory_ids)
+            })
+    });
+    report
+}
+
+fn subject_key_for_item(item: &PackDraftItem) -> String {
+    item.diversity_key.clone().unwrap_or_else(|| {
+        let tokens = normalized_content_tokens(&item.content)
+            .into_iter()
+            .filter(|token| !SUBJECT_STOP_WORDS.contains(&token.as_str()))
+            .take(6)
+            .collect::<Vec<_>>();
+        if tokens.is_empty() {
+            item.memory_id.to_string()
+        } else {
+            tokens.join(":")
+        }
+    })
+}
+
+fn subject_fingerprint(subject_key: &str) -> String {
+    let hash = blake3::hash(format!("ee.consensus.subject.v1:{subject_key}").as_bytes());
+    format!("blake3:{}", hash.to_hex())
+}
+
+fn consensus_for_group(items: &[&PackDraftItem], fingerprint: &str) -> Option<ConsensusEntry> {
+    let semantic_similarity_min = min_pairwise_similarity(items);
+    if semantic_similarity_min < 0.85 {
+        return None;
+    }
+    Some(ConsensusEntry {
+        schema: CONSENSUS_SCHEMA_V1,
+        subject_fingerprint: fingerprint.to_string(),
+        subject_summary: subject_summary(items.first().copied()?),
+        agreement_score: semantic_similarity_min,
+        member_memory_ids: items.iter().map(|item| item.memory_id).collect(),
+        member_producers: items.iter().map(|item| producer_for_item(item)).collect(),
+        semantic_similarity_min,
+        first_recorded_at: earliest_item_time(items),
+        last_reinforced_at: latest_item_time(items),
+    })
+}
+
+fn conflict_for_group(items: &[&PackDraftItem], fingerprint: &str) -> Option<ConflictEntry> {
+    let mut best_pair: Option<(&PackDraftItem, &PackDraftItem, ConflictKind)> = None;
+    for (left_index, left) in items.iter().enumerate() {
+        for right in items.iter().skip(left_index + 1) {
+            if is_direct_conflict(left, right) {
+                best_pair = Some((left, right, ConflictKind::Direct));
+                break;
+            }
+            if is_stale_replacement_conflict(left, right) {
+                best_pair = Some((left, right, ConflictKind::StaleReplacement));
+                break;
+            }
+            if is_partial_overlap(left, right) {
+                best_pair = Some((left, right, ConflictKind::PartialOverlap));
+            }
+        }
+        if best_pair.is_some_and(|(_, _, kind)| kind != ConflictKind::PartialOverlap) {
+            break;
+        }
+    }
+
+    let (left, right, kind) = best_pair?;
+    let mut memory_ids = vec![left.memory_id, right.memory_id];
+    memory_ids.sort_by_key(ToString::to_string);
+    Some(ConflictEntry {
+        schema: CONFLICT_SCHEMA_V1,
+        subject_fingerprint: fingerprint.to_string(),
+        kind,
+        conflicting_memory_ids: memory_ids,
+        evidence_pointers: vec![evidence_pointer(left), evidence_pointer(right)],
+        earliest_at: earliest_item_time(&[left, right]),
+        latest_at: latest_item_time(&[left, right]),
+        recommended_action: recommended_action_for_conflict(left, right, kind),
+    })
+}
+
+fn producer_for_item(item: &PackDraftItem) -> ConsensusProducer {
+    ConsensusProducer {
+        agent_name: item.trust.subclass.clone(),
+        trust_class: item.trust.class,
+    }
+}
+
+fn subject_summary(item: &PackDraftItem) -> String {
+    let mut summary = item
+        .content
+        .split_whitespace()
+        .take(16)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if summary.len() > 120 {
+        summary.truncate(120);
+    }
+    summary
+}
+
+fn evidence_pointer(item: &PackDraftItem) -> String {
+    item.provenance.first().map_or_else(
+        || format!("ee://memory/{}", item.memory_id),
+        |provenance| provenance.uri.to_string(),
+    )
+}
+
+fn earliest_item_time(items: &[&PackDraftItem]) -> Option<String> {
+    items
+        .iter()
+        .filter_map(|item| item.lifecycle.as_ref())
+        .filter_map(|lifecycle| {
+            lifecycle
+                .valid_from
+                .as_ref()
+                .or(lifecycle.valid_to.as_ref())
+        })
+        .min()
+        .cloned()
+}
+
+fn latest_item_time(items: &[&PackDraftItem]) -> Option<String> {
+    items
+        .iter()
+        .filter_map(|item| item.lifecycle.as_ref())
+        .filter_map(|lifecycle| {
+            lifecycle
+                .valid_from
+                .as_ref()
+                .or(lifecycle.valid_to.as_ref())
+        })
+        .max()
+        .cloned()
+}
+
+fn min_pairwise_similarity(items: &[&PackDraftItem]) -> f32 {
+    let mut min_similarity = 1.0_f32;
+    for (left_index, left) in items.iter().enumerate() {
+        for right in items.iter().skip(left_index + 1) {
+            min_similarity = min_similarity.min(content_similarity(&left.content, &right.content));
+        }
+    }
+    min_similarity
+}
+
+fn content_similarity(left: &str, right: &str) -> f32 {
+    let left_tokens = normalized_content_tokens(left);
+    let right_tokens = normalized_content_tokens(right);
+    if left_tokens.is_empty() || right_tokens.is_empty() {
+        return 0.0;
+    }
+    let left_set = left_tokens.into_iter().collect::<BTreeSet<_>>();
+    let right_set = right_tokens.into_iter().collect::<BTreeSet<_>>();
+    let intersection = left_set.intersection(&right_set).count() as f32;
+    let union = left_set.union(&right_set).count() as f32;
+    if union == 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
+}
+
+fn normalized_content_tokens(content: &str) -> Vec<String> {
+    content
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter_map(|token| {
+            let token = token.trim().to_ascii_lowercase();
+            (token.len() >= 2).then_some(token)
+        })
+        .collect()
+}
+
+fn is_direct_conflict(left: &PackDraftItem, right: &PackDraftItem) -> bool {
+    let left_polarity = claim_polarity(&left.content);
+    let right_polarity = claim_polarity(&right.content);
+    left_polarity != ClaimPolarity::Unknown
+        && right_polarity != ClaimPolarity::Unknown
+        && left_polarity != right_polarity
+        && content_similarity(&left.content, &right.content) >= 0.2
+}
+
+fn is_stale_replacement_conflict(left: &PackDraftItem, right: &PackDraftItem) -> bool {
+    match (
+        version_marker(&left.content),
+        version_marker(&right.content),
+        earliest_item_time(&[left, right]),
+        latest_item_time(&[left, right]),
+    ) {
+        (Some(left_version), Some(right_version), Some(earliest), Some(latest)) => {
+            left_version != right_version
+                && earliest != latest
+                && content_similarity(&left.content, &right.content) >= 0.2
+        }
+        _ => false,
+    }
+}
+
+fn is_partial_overlap(left: &PackDraftItem, right: &PackDraftItem) -> bool {
+    let similarity = content_similarity(&left.content, &right.content);
+    (0.2..0.85).contains(&similarity)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClaimPolarity {
+    Positive,
+    Negative,
+    Unknown,
+}
+
+fn claim_polarity(content: &str) -> ClaimPolarity {
+    let content = format!(" {} ", content.to_ascii_lowercase());
+    if [
+        " never ",
+        " not ",
+        " no ",
+        " don't ",
+        " do not ",
+        " forbid ",
+        " forbidden ",
+    ]
+    .iter()
+    .any(|needle| content.contains(needle))
+    {
+        ClaimPolarity::Negative
+    } else if [
+        " always ",
+        " must ",
+        " should ",
+        " use ",
+        " run ",
+        " require ",
+    ]
+    .iter()
+    .any(|needle| content.contains(needle))
+    {
+        ClaimPolarity::Positive
+    } else {
+        ClaimPolarity::Unknown
+    }
+}
+
+fn version_marker(content: &str) -> Option<String> {
+    normalized_content_tokens(content)
+        .into_iter()
+        .find(|token| token.starts_with('v') && token.chars().skip(1).all(|c| c.is_ascii_digit()))
+}
+
+fn recommended_action_for_conflict(
+    left: &PackDraftItem,
+    right: &PackDraftItem,
+    kind: ConflictKind,
+) -> ConflictRecommendedAction {
+    match kind {
+        ConflictKind::StaleReplacement => ConflictRecommendedAction::TombstoneOlder,
+        ConflictKind::Direct if has_human_vs_agent_assertion(left, right) => {
+            ConflictRecommendedAction::PromoteOne
+        }
+        ConflictKind::Direct => ConflictRecommendedAction::RequestClarification,
+        ConflictKind::PartialOverlap => ConflictRecommendedAction::Review,
+    }
+}
+
+fn has_human_vs_agent_assertion(left: &PackDraftItem, right: &PackDraftItem) -> bool {
+    matches!(
+        (left.trust.class, right.trust.class),
+        (TrustClass::HumanExplicit, TrustClass::AgentAssertion)
+            | (TrustClass::AgentAssertion, TrustClass::HumanExplicit)
+    )
+}
+
+const SUBJECT_STOP_WORDS: &[&str] = &[
+    "always", "before", "check", "do", "does", "for", "in", "must", "never", "not", "release",
+    "run", "should", "the", "use",
+];
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContextResponse {
     pub schema: &'static str,
@@ -1240,6 +2259,11 @@ impl ContextResponse {
                 command: CONTEXT_COMMAND,
                 request,
                 pack,
+                slo: None,
+                scope_stats: None,
+                consensus: Vec::new(),
+                conflicts: Vec::new(),
+                coordination: None,
                 degraded,
             },
         })
@@ -1251,6 +2275,11 @@ pub struct ContextResponseData {
     pub command: &'static str,
     pub request: ContextRequest,
     pub pack: PackDraft,
+    pub slo: Option<PackAssemblySlo>,
+    pub scope_stats: Option<MemoryScopeStats>,
+    pub consensus: Vec<ConsensusEntry>,
+    pub conflicts: Vec<ConflictEntry>,
+    pub coordination: Option<PackCoordinationSnapshot>,
     pub degraded: Vec<ContextResponseDegradation>,
 }
 
@@ -1264,10 +2293,13 @@ impl ContextResponseData {
 /// Render a context response as the canonical Markdown prompt fragment.
 #[must_use]
 pub fn render_context_response_markdown(response: &ContextResponse) -> String {
-    let mut body = render_context_markdown(
+    let mut body = render_context_markdown_with_analysis(
         &response.data.request,
         &response.data.pack,
         &response.data.degraded,
+        &response.data.consensus,
+        &response.data.conflicts,
+        response.data.coordination.as_ref(),
     );
     // Bead bd-17c65.4.3 (D3): append pack metadata as trailing HTML
     // comments. Invisible to standard markdown rendering and to LLMs
@@ -1308,6 +2340,18 @@ pub fn render_context_markdown(
     pack: &PackDraft,
     degraded: &[ContextResponseDegradation],
 ) -> String {
+    render_context_markdown_with_analysis(request, pack, degraded, &[], &[], None)
+}
+
+#[must_use]
+pub fn render_context_markdown_with_analysis(
+    request: &ContextRequest,
+    pack: &PackDraft,
+    degraded: &[ContextResponseDegradation],
+    consensus: &[ConsensusEntry],
+    conflicts: &[ConflictEntry],
+    coordination: Option<&PackCoordinationSnapshot>,
+) -> String {
     let mut output = String::new();
 
     output.push_str(&format!(
@@ -1341,6 +2385,31 @@ pub fn render_context_markdown(
             ));
         }
         output.push('\n');
+    }
+
+    if !consensus.is_empty() || !conflicts.is_empty() {
+        output.push_str("## Consensus and Conflicts\n\n");
+        for entry in consensus {
+            output.push_str(&format!(
+                "- **Consensus:** {} ({}) across {} memories.\n",
+                escape_markdown_text(&entry.subject_summary),
+                markdown_inline_code(&entry.subject_fingerprint),
+                entry.member_memory_ids.len()
+            ));
+        }
+        for entry in conflicts {
+            output.push_str(&format!(
+                "- **Conflict:** {} {}; action: {}.\n",
+                markdown_inline_code(entry.kind.as_str()),
+                markdown_inline_code(&entry.subject_fingerprint),
+                markdown_inline_code(entry.recommended_action.as_str())
+            ));
+        }
+        output.push('\n');
+    }
+
+    if let Some(coordination) = coordination {
+        render_coordination_markdown(&mut output, coordination);
     }
 
     if pack.items.is_empty() {
@@ -1439,6 +2508,71 @@ pub fn render_context_markdown(
     ));
 
     output
+}
+
+fn render_coordination_markdown(output: &mut String, coordination: &PackCoordinationSnapshot) {
+    output.push_str("## Coordination\n\n");
+    output.push_str(&format!(
+        "**Status:** `{}` | **Sources:** {} | **Conflicts:** {} | **Reservations:** {} | **In-progress Beads:** {}\n\n",
+        coordination.freshness.status,
+        coordination.summary.source_count,
+        coordination.summary.active_conflict_count,
+        coordination.summary.active_reservation_count,
+        coordination.summary.in_progress_bead_count
+    ));
+
+    for source in coordination
+        .sources
+        .iter()
+        .filter(|source| source.stale || source.status != "fresh" || !source.degraded.is_empty())
+        .take(4)
+    {
+        output.push_str(&format!(
+            "- **Source:** {} is `{}`",
+            markdown_inline_code(&source.kind),
+            source.status
+        ));
+        if source.stale {
+            output.push_str(" and stale");
+        }
+        output.push_str(".\n");
+    }
+
+    let conflicts = coordination.active_conflict_entries();
+    for entry in conflicts.iter().take(6) {
+        output.push_str(&format!(
+            "- **Conflict:** {} ({})\n",
+            escape_markdown_text(&entry.summary),
+            markdown_inline_code(&entry.id)
+        ));
+    }
+
+    if conflicts.len() > 6 {
+        output.push_str(&format!(
+            "- **Conflict:** {} additional coordination conflict{} omitted.\n",
+            conflicts.len() - 6,
+            if conflicts.len() == 7 { "" } else { "s" }
+        ));
+    }
+
+    let mut rendered_notable = 0_usize;
+    for entry in coordination.notable_entries() {
+        if entry.conflict {
+            continue;
+        }
+        if rendered_notable >= 6 {
+            break;
+        }
+        rendered_notable = rendered_notable.saturating_add(1);
+        output.push_str(&format!(
+            "- **{}:** {} ({})\n",
+            escape_markdown_text(&entry.kind),
+            escape_markdown_text(&entry.summary),
+            markdown_inline_code(&entry.id)
+        ));
+    }
+
+    output.push('\n');
 }
 
 fn context_advisory_banner(
@@ -1859,6 +2993,87 @@ impl fmt::Display for ContextResponseSeverity {
     }
 }
 
+fn pack_assembly_slow_degradation(
+    profile: PackResourceProfile,
+    budget: &PackSloBudgetClass,
+    actuals: &PackAssemblySloActuals,
+) -> PackAssemblySloDegradation {
+    PackAssemblySloDegradation {
+        code: PACK_ASSEMBLY_SLOW_CODE,
+        severity: ContextResponseSeverity::Low,
+        message: format!(
+            "Pack assembly reached the {} resource-profile warning threshold: scanned {} candidate{} in {} ms.",
+            profile.as_str(),
+            actuals.scanned_count,
+            plural_s(actuals.scanned_count),
+            actuals.elapsed_ms
+        ),
+        repair: Some(format!(
+            "Use --resource-profile swarm_heavy or reduce --candidate-pool below {}.",
+            budget.candidates_scanned_max
+        )),
+    }
+}
+
+fn pack_assembly_budget_exceeded_degradation(
+    profile: PackResourceProfile,
+    budget: &PackSloBudgetClass,
+    actuals: &PackAssemblySloActuals,
+) -> PackAssemblySloDegradation {
+    PackAssemblySloDegradation {
+        code: PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE,
+        severity: ContextResponseSeverity::Medium,
+        message: format!(
+            "Pack assembly exceeded the {} resource-profile budget: scanned {}/{} candidates, traversed {}/{} graph edges, elapsed {} ms.",
+            profile.as_str(),
+            actuals.scanned_count,
+            budget.candidates_scanned_max,
+            actuals.graph_edges_traversed,
+            budget.graph_traversal_max_edges,
+            actuals.elapsed_ms
+        ),
+        repair: Some(
+            "Use --resource-profile swarm_heavy, reduce --candidate-pool, or narrow the query."
+                .to_string(),
+        ),
+    }
+}
+
+fn pack_concurrent_limit_reached_degradation(
+    profile: PackResourceProfile,
+    budget: &PackSloBudgetClass,
+    retry_after_ms: u64,
+) -> PackAssemblySloDegradation {
+    PackAssemblySloDegradation {
+        code: PACK_CONCURRENT_LIMIT_REACHED_CODE,
+        severity: ContextResponseSeverity::Low,
+        message: format!(
+            "Concurrent pack limit reached for the {} resource profile: {} pack slot{} already in use.",
+            profile.as_str(),
+            budget.concurrent_pack_max,
+            plural_s(budget.concurrent_pack_max)
+        ),
+        repair: Some(format!(
+            "Wait and retry in about {retry_after_ms} ms, reduce concurrent ee context calls, or use --resource-profile swarm_heavy."
+        )),
+    }
+}
+
+fn deterministic_pack_memory_bytes_peak(draft: &PackDraft, scanned_count: usize) -> u64 {
+    let item_bytes = draft.items.iter().fold(0_u64, |total, item| {
+        total
+            .saturating_add(usize_to_u64(item.content.len()))
+            .saturating_add(usize_to_u64(item.why.len()))
+            .saturating_add(usize_to_u64(item.provenance.len()).saturating_mul(128))
+            .saturating_add(256)
+    });
+    let omitted_bytes = usize_to_u64(draft.omitted.len()).saturating_mul(128);
+    let scanned_bytes = usize_to_u64(scanned_count).saturating_mul(256);
+    item_bytes
+        .saturating_add(omitted_bytes)
+        .saturating_add(scanned_bytes)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PackSelectionPhase {
     StrictMmr,
@@ -2198,7 +3413,7 @@ fn advisory_summary(
                 counts.legacy(),
                 plural_suffix(total, "y", "ies")
             )
-        },
+        }
         PackAdvisoryStatus::Degraded => format!(
             "Context includes {} degraded signal{}; validate advisory memory and repair degraded sources before relying on this pack.",
             degradation_count,
@@ -2312,7 +3527,7 @@ pub fn assemble_draft(
 ///
 /// The default profiles keep the existing MMR-style redundancy objective.
 /// The `submodular` profile switches to a deterministic facility-location
-/// greedy objective and records the same certificate shape for inspection.
+/// greedy objective and records the same audit shape for inspection.
 ///
 /// # Errors
 ///
@@ -2342,11 +3557,25 @@ pub fn assemble_draft_with_profile_and_options(
 ) -> Result<PackDraft, PackValidationError> {
     match profile {
         ContextPackProfile::Submodular => {
+            tracing::info!(
+                target: "ee::pack::submodular",
+                algorithm_id = "deterministic_greedy_facility_location_gain_per_token",
+                objective = "facility_location",
+                profile = profile.as_str(),
+                "starting pack assembly"
+            );
             assemble_facility_location_draft(profile, query, budget, candidates)
         }
         ContextPackProfile::Compact
         | ContextPackProfile::Balanced
         | ContextPackProfile::Thorough => {
+            tracing::info!(
+                target: "ee::pack::submodular",
+                algorithm_id = "mmr_with_coverage_fill_v1",
+                objective = "mmr_redundancy",
+                profile = profile.as_str(),
+                "starting pack assembly"
+            );
             assemble_mmr_draft(profile, query, budget, candidates, options)
         }
     }
@@ -2556,13 +3785,11 @@ fn assemble_mmr_draft(
         query,
         budget,
         used_tokens,
-        selection_certificate: PackSelectionCertificate {
-            certificate_id: None,
+        selection_audit: PackSelectionAudit {
             profile,
             objective: PackSelectionObjective::MmrRedundancy,
-            algorithm: "deterministic_greedy_mmr",
-            guarantee: "deterministic redundancy-controlled greedy ranking; no submodular guarantee claimed",
-            guarantee_status: PackGuaranteeStatus::Conditional,
+            algorithm_id: "mmr_with_coverage_fill_v1",
+            algorithm_description: "Deterministic MMR ranking with coverage-fill for relevant candidates that still fit the token budget.",
             candidate_count,
             selected_count: items.len(),
             omitted_count: omitted.len(),
@@ -2691,13 +3918,11 @@ fn assemble_facility_location_draft(
         query,
         budget,
         used_tokens,
-        selection_certificate: PackSelectionCertificate {
-            certificate_id: None,
+        selection_audit: PackSelectionAudit {
             profile,
             objective: PackSelectionObjective::FacilityLocation,
-            algorithm: "deterministic_greedy_facility_location_gain_per_token",
-            guarantee: "monotone submodular facility-location objective; deterministic budgeted greedy certificate, exact optimum not claimed",
-            guarantee_status: PackGuaranteeStatus::Conditional,
+            algorithm_id: "deterministic_greedy_facility_location_gain_per_token",
+            algorithm_description: "Deterministic budgeted greedy selection over the facility-location objective.",
             candidate_count,
             selected_count: items.len(),
             omitted_count: omitted.len(),
@@ -3577,7 +4802,7 @@ impl SectionBudgetReport {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum PackHotsetEntryKind {
     PackSection,
-    SelectionCertificate,
+    SelectionAudit,
 }
 
 impl PackHotsetEntryKind {
@@ -3585,7 +4810,7 @@ impl PackHotsetEntryKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::PackSection => "pack_section",
-            Self::SelectionCertificate => "selection_certificate",
+            Self::SelectionAudit => "selection_audit",
         }
     }
 }
@@ -3608,21 +4833,21 @@ pub struct PackHotsetEntry {
 
 impl PackHotsetEntry {
     #[must_use]
-    pub fn selection_certificate(draft: &PackDraft, generation: u64, hit_count: u64) -> Self {
+    pub fn selection_audit(draft: &PackDraft, generation: u64, hit_count: u64) -> Self {
         let payload = format!(
             "{}:{}:{}:{}",
-            draft.selection_certificate.objective.as_str(),
-            draft.selection_certificate.algorithm,
-            draft.selection_certificate.candidate_count,
-            draft.selection_certificate.selected_count
+            draft.selection_audit.objective.as_str(),
+            draft.selection_audit.algorithm_id,
+            draft.selection_audit.candidate_count,
+            draft.selection_audit.selected_count
         );
         Self {
-            key: pack_cache_key("pack:selection_certificate", &payload),
-            kind: PackHotsetEntryKind::SelectionCertificate,
+            key: pack_cache_key("pack:selection_audit", &payload),
+            kind: PackHotsetEntryKind::SelectionAudit,
             section: None,
             generation,
             estimated_bytes: 192_usize
-                .saturating_add(draft.selection_certificate.steps.len().saturating_mul(40)),
+                .saturating_add(draft.selection_audit.steps.len().saturating_mul(40)),
             hit_count,
             redaction_status: "content_not_stored",
         }
@@ -3721,7 +4946,7 @@ impl PackHotset {
                 usize_to_u64(items.len()),
             ));
         }
-        entries.push(PackHotsetEntry::selection_certificate(draft, generation, 1));
+        entries.push(PackHotsetEntry::selection_audit(draft, generation, 1));
         Self::new(entries)
     }
 
@@ -4082,16 +5307,18 @@ mod tests {
         CHARACTER_HEURISTIC_CHARS_PER_TOKEN_NUMERATOR, CONTEXT_COMMAND, CandidateSignature,
         ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
         ContextResponseDegradation, ContextResponseSeverity, DEFAULT_CHARS_PER_TOKEN,
-        FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR, PackCacheGovernor, PackCacheStatus,
-        PackCandidate, PackCandidateInput, PackHotset, PackHotsetEntry, PackItemRedaction,
-        PackOmissionReason, PackProvenance, PackRejectionStage, PackSection,
-        PackSelectionObjective, PackSelectionPhase, PackTrustSignal, PackValidationError,
-        SectionQuota, SectionQuotas, TokenBudget, TokenEstimationStrategy,
-        WORD_HEURISTIC_TOKEN_MULTIPLIER_DENOMINATOR, WORD_HEURISTIC_TOKEN_MULTIPLIER_NUMERATOR,
-        assemble_draft, assemble_draft_with_cache_governor, assemble_draft_with_profile,
-        candidate_similarity, estimate_character_heuristic_tokens, estimate_tokens,
-        estimate_tokens_default, estimate_word_heuristic_tokens, facility_similarity,
-        pack_item_provenance_json, prewarm_pack_hotset, subsystem_name,
+        FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR, PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE,
+        PACK_ASSEMBLY_SLOW_CODE, PackAssemblySlo, PackAssemblySloActuals, PackAssemblySloStatus,
+        PackCacheGovernor, PackCacheStatus, PackCandidate, PackCandidateInput, PackHotset,
+        PackHotsetEntry, PackItemRedaction, PackOmissionReason, PackProvenance, PackRejectionStage,
+        PackResourceProfile, PackSection, PackSelectionObjective, PackSelectionPhase,
+        PackTrustSignal, PackValidationError, SectionQuota, SectionQuotas, TokenBudget,
+        TokenEstimationStrategy, WORD_HEURISTIC_TOKEN_MULTIPLIER_DENOMINATOR,
+        WORD_HEURISTIC_TOKEN_MULTIPLIER_NUMERATOR, assemble_draft,
+        assemble_draft_with_cache_governor, assemble_draft_with_profile, candidate_similarity,
+        estimate_character_heuristic_tokens, estimate_tokens, estimate_tokens_default,
+        estimate_word_heuristic_tokens, facility_similarity, pack_item_provenance_json,
+        prewarm_pack_hotset, subsystem_name,
     };
     use crate::cache::{CacheBudget, MemoryPressure};
     use crate::models::{ContextProfile, MemoryId, ProvenanceUri, TrustClass, UnitScore};
@@ -5784,12 +7011,12 @@ mod tests {
             "draft used tokens match rendered selected content",
         )?;
         ensure_equal(
-            &draft.selection_certificate.budget_used,
+            &draft.selection_audit.budget_used,
             &expected_rendered_tokens,
-            "selection certificate budget uses rendered selected content",
+            "selection audit budget uses rendered selected content",
         )?;
         let selected_token_cost = draft
-            .selection_certificate
+            .selection_audit
             .selected_items
             .first()
             .map(|item| item.token_cost)
@@ -5797,18 +7024,18 @@ mod tests {
         ensure_equal(
             &selected_token_cost,
             &expected_rendered_tokens,
-            "selection certificate selected token cost uses rendered content",
+            "selection audit selected token cost uses rendered content",
         )?;
         let step_token_cost = draft
-            .selection_certificate
+            .selection_audit
             .steps
             .first()
             .map(|step| step.token_cost)
-            .ok_or_else(|| "expected selection certificate step".to_string())?;
+            .ok_or_else(|| "expected selection audit step".to_string())?;
         ensure_equal(
             &step_token_cost,
             &expected_rendered_tokens,
-            "selection certificate step token cost uses rendered content",
+            "selection audit step token cost uses rendered content",
         )?;
         ensure_equal(
             &item.redactions,
@@ -5863,13 +7090,13 @@ mod tests {
             "submodular draft used tokens match rendered content",
         )?;
         ensure_equal(
-            &draft.selection_certificate.budget_used,
+            &draft.selection_audit.budget_used,
             &expected_rendered_tokens,
             "submodular certificate budget uses rendered content",
         )?;
         ensure_equal(
             &draft
-                .selection_certificate
+                .selection_audit
                 .selected_items
                 .first()
                 .map(|item| item.token_cost),
@@ -5878,7 +7105,7 @@ mod tests {
         )?;
         ensure_equal(
             &draft
-                .selection_certificate
+                .selection_audit
                 .steps
                 .first()
                 .map(|step| step.token_cost),
@@ -6093,7 +7320,7 @@ mod tests {
         .map_err(|error| format!("draft rejected: {error:?}"))?;
 
         ensure_equal(
-            &draft.selection_certificate.candidate_count,
+            &draft.selection_audit.candidate_count,
             &8,
             "candidate count",
         )?;
@@ -6132,7 +7359,7 @@ mod tests {
         .map_err(|error| format!("draft rejected: {error:?}"))?;
 
         ensure_equal(
-            &draft.selection_certificate.candidate_count,
+            &draft.selection_audit.candidate_count,
             &8,
             "candidate count",
         )?;
@@ -6508,39 +7735,39 @@ mod tests {
         .map_err(|error| format!("draft rejected: {error:?}"))?;
 
         ensure_equal(
-            &draft.selection_certificate.profile,
+            &draft.selection_audit.profile,
             &ContextPackProfile::Submodular,
             "certificate profile",
         )?;
         ensure_equal(
-            &draft.selection_certificate.objective,
+            &draft.selection_audit.objective,
             &PackSelectionObjective::FacilityLocation,
             "certificate objective",
         )?;
         ensure(
-            draft.selection_certificate.monotone,
+            draft.selection_audit.monotone,
             "facility-location certificate should mark monotone",
         )?;
         ensure(
-            draft.selection_certificate.submodular,
+            draft.selection_audit.submodular,
             "facility-location certificate should mark submodular",
         )?;
         ensure_equal(
-            &draft.selection_certificate.candidate_count,
+            &draft.selection_audit.candidate_count,
             &3,
             "candidate count",
         )?;
         ensure_equal(
-            &draft.selection_certificate.steps.len(),
+            &draft.selection_audit.steps.len(),
             &3,
             "all candidates fitting overall and section budgets receive certificate steps",
         )?;
         ensure(
-            draft.selection_certificate.total_objective_value > 0.0,
+            draft.selection_audit.total_objective_value > 0.0,
             "objective value should be positive",
         )?;
         ensure(
-            draft.selection_certificate.steps.iter().any(|step| {
+            draft.selection_audit.steps.iter().any(|step| {
                 step.covered_features
                     .iter()
                     .any(|feature| feature == "diversity:release-artifacts")
@@ -6641,6 +7868,65 @@ mod tests {
                 .and_then(|degraded| degraded.repair.as_deref()),
             &Some("ee index rebuild --workspace ."),
             "degradation repair",
+        )
+    }
+
+    fn slo_actuals(
+        scanned_count: usize,
+        graph_edges_traversed: usize,
+        elapsed_ms: u64,
+    ) -> PackAssemblySloActuals {
+        PackAssemblySloActuals {
+            candidate_count: scanned_count,
+            scanned_count,
+            index_generation: Some(12),
+            graph_generation: Some(12),
+            graph_edges_traversed,
+            elapsed_ms,
+            memory_bytes_peak: 4096,
+        }
+    }
+
+    #[test]
+    fn pack_assembly_slo_classifies_within_warning_and_failure() -> TestResult {
+        let within =
+            PackAssemblySlo::evaluate(PackResourceProfile::Standard, slo_actuals(12, 100, 25));
+        ensure_equal(
+            &within.status,
+            &PackAssemblySloStatus::WithinBudget,
+            "within-budget SLO status",
+        )?;
+        ensure_equal(&within.degradations.len(), &0, "within-budget degradations")?;
+        ensure_equal(
+            &within.budget_class.candidates_scanned_max,
+            &240,
+            "standard candidate cap",
+        )?;
+
+        let warning =
+            PackAssemblySlo::evaluate(PackResourceProfile::Lean, slo_actuals(80, 100, 25));
+        ensure_equal(
+            &warning.status,
+            &PackAssemblySloStatus::Warning,
+            "lean cap boundary is warning",
+        )?;
+        ensure_equal(
+            &warning.degradations.first().map(|entry| entry.code),
+            &Some(PACK_ASSEMBLY_SLOW_CODE),
+            "warning degradation code",
+        )?;
+
+        let failure =
+            PackAssemblySlo::evaluate(PackResourceProfile::Lean, slo_actuals(81, 100, 25));
+        ensure_equal(
+            &failure.status,
+            &PackAssemblySloStatus::Failure,
+            "over-cap SLO status",
+        )?;
+        ensure_equal(
+            &failure.degradations.first().map(|entry| entry.code),
+            &Some(PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE),
+            "failure degradation code",
         )
     }
 
@@ -6917,7 +8203,7 @@ mod tests {
         )
         .map_err(|e| format!("greedy draft: {e:?}"))?;
 
-        let greedy_value = greedy_draft.selection_certificate.total_objective_value;
+        let greedy_value = greedy_draft.selection_audit.total_objective_value;
         let greedy_count = greedy_draft.items.len();
 
         // Brute force: find best subset that fits in section quota (40 tokens for procedural_rules)
@@ -6984,7 +8270,7 @@ mod tests {
         )
         .map_err(|e| format!("greedy draft: {e:?}"))?;
 
-        let greedy_value = greedy_draft.selection_certificate.total_objective_value;
+        let greedy_value = greedy_draft.selection_audit.total_objective_value;
         let greedy_used = greedy_draft.used_tokens;
 
         ensure(
@@ -7365,8 +8651,8 @@ mod tests {
         ensure_equal(&warm_ids, &cold_ids, "cache-on selected memory ids")?;
         ensure_equal(&warm.omitted, &cold.omitted, "cache-on omissions")?;
         ensure_equal(
-            &warm.selection_certificate.selected_items,
-            &cold.selection_certificate.selected_items,
+            &warm.selection_audit.selected_items,
+            &cold.selection_audit.selected_items,
             "cache-on certificate selected items",
         )?;
         ensure_equal(&report.status, &PackCacheStatus::Warm, "cache status")?;

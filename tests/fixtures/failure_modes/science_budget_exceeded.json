@@ -13,9 +13,10 @@
   "trigger": {
     "description": "Science analytics exhausts its explicit compute or latency budget.",
     "setup_commands": [
-      "# run science analytics with a very small budget"
+      "printf '{\"snapshotId\":\"baseline\",\"scenariosRun\":2,\"scenariosPassed\":2,\"scienceMetrics\":{\"f1Score\":1.0}}\\n' > baseline.json",
+      "printf '{\"snapshotId\":\"current\",\"scenariosRun\":2,\"scenariosPassed\":1,\"scienceMetrics\":{\"f1Score\":0.5}}\\n' > current.json"
     ],
-    "invocation": "ee analyze drift --workspace . --json"
+    "invocation": "ee analyze drift --baseline baseline.json --current current.json --metric-budget 0 --workspace . --json"
   },
   "expected_emission": {
     "code": "science_budget_exceeded",

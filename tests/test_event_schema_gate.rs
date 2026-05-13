@@ -110,6 +110,7 @@ fn validate_kind_fields(kind: &str, fields: Option<&Value>) -> TestResult {
             "rejected_field_count",
             "elapsed_us",
         ],
+        "bench_iteration" => &["operation", "status", "profile", "workload_tier"],
         _ => &[],
     };
     if required.is_empty() {

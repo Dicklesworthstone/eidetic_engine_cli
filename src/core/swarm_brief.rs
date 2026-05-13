@@ -39,6 +39,7 @@ pub struct SwarmBriefCollectOptions {
     pub include_rch: bool,
     pub enabled_sources: BTreeSet<SwarmBriefSourceKind>,
     pub agent_mail_snapshot_path: Option<PathBuf>,
+    pub agent_inventory_only_connectors: Option<Vec<String>>,
     pub command_timeout_ms: u64,
 }
 
@@ -51,6 +52,7 @@ impl SwarmBriefCollectOptions {
             include_rch: false,
             enabled_sources: default_swarm_brief_sources(),
             agent_mail_snapshot_path: None,
+            agent_inventory_only_connectors: None,
             command_timeout_ms: 1_500,
         }
     }
@@ -1105,9 +1107,12 @@ impl SwarmBriefSourceAdapter for HostProfileSourceAdapter {
 pub struct AgentInventorySourceAdapter;
 
 impl SwarmBriefSourceAdapter for AgentInventorySourceAdapter {
-    fn collect(&self, _options: &SwarmBriefCollectOptions) -> SwarmBriefSourceOutput {
+    fn collect(&self, options: &SwarmBriefCollectOptions) -> SwarmBriefSourceOutput {
         let provenance = SwarmBriefSourceProvenance::local_probe();
-        match gather_agent_status(&AgentStatusOptions::default()) {
+        match gather_agent_status(&AgentStatusOptions {
+            only_connectors: options.agent_inventory_only_connectors.clone(),
+            ..AgentStatusOptions::default()
+        }) {
             Ok(report) => {
                 let summary = SwarmBriefAgentInventorySummary {
                     status: report.status.as_str().to_string(),

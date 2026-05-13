@@ -315,7 +315,8 @@ fn normal_verify_test_gate_excludes_criterion_benches() {
         "verify.sh normal test gate must not use `{BENCH_INCLUDED_TEST_GATE}`; benches belong behind --include-bench"
     );
     assert!(
-        verify_script.contains("--include-bench") && verify_script.contains("./scripts/bench.sh"),
+        verify_script.contains("--include-bench")
+            && verify_script.contains("./scripts/bench_perf_regression.sh"),
         "verify.sh should preserve an explicit benchmark gate"
     );
 }
@@ -348,7 +349,8 @@ fn agent_docs_match_normal_non_benchmark_test_gate() {
         "AGENTS.md should not document `{BENCH_INCLUDED_TEST_GATE}` as the normal verify test gate"
     );
     assert!(
-        agent_docs.contains("--include-bench") && agent_docs.contains("./scripts/bench.sh"),
+        agent_docs.contains("--include-bench")
+            && agent_docs.contains("./scripts/bench_perf_regression.sh"),
         "AGENTS.md should point benchmark verification at the explicit benchmark gate"
     );
 }

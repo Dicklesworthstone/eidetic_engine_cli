@@ -27,6 +27,7 @@
       "existing procedural rule",
       "covers"
     ],
-    "repair_contains": "ee rule show"
+    "repair_contains": "ee rule show",
+    "repair_string": "Review the existing rule with `ee rule show <rule-id> --json` before proposing another candidate."
   }
 }

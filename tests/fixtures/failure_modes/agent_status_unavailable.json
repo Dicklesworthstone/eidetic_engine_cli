@@ -11,17 +11,17 @@
   "severity": "warning",
   "repair_present": true,
   "trigger": {
-    "description": "Swarm brief cannot collect local agent status inventory.",
+    "description": "Swarm brief cannot collect local agent status inventory because the requested agent-inventory connector filter is invalid.",
     "setup_commands": [
-      "# run swarm brief where agent inventory probing fails"
+      "# request an unknown agent-inventory connector"
     ],
-    "invocation": "ee swarm brief --workspace . --json"
+    "invocation": "ee swarm brief --sources agent-inventory --agent-inventory-only not-a-real-agent --workspace . --json"
   },
   "expected_emission": {
     "code": "agent_status_unavailable",
     "severity": "warning",
     "message_contains": [
-      "agent status"
+      "unknown connector"
     ],
     "repair_contains": "agent",
     "repair_string": "ee agent status --json",

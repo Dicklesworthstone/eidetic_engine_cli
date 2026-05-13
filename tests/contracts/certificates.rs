@@ -19,7 +19,6 @@ use ee::models::certificate::{
     ShareableAggregateKind, ShareableAggregateReport,
 };
 use ee::output::render_certificate_verify_json;
-use ee::pack::{PackGuaranteeStatus, PackSelectionCertificate};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -677,31 +676,27 @@ fn certificate_cli_reads_explicit_manifest_records() -> TestResult {
 }
 
 #[test]
-fn guarantee_status_valid_requires_certificate_id() -> TestResult {
-    let base = ee::pack::assemble_draft_with_profile(
+fn pack_selection_audit_has_algorithm_identity_without_guarantee_status() -> TestResult {
+    let audit = ee::pack::assemble_draft_with_profile(
         ee::pack::ContextPackProfile::Submodular,
         "prepare release",
         ee::pack::TokenBudget::new(100).map_err(|error| format!("{error:?}"))?,
         crate::submodular_packer::fixture_candidates()?,
     )
     .map_err(|error| format!("{error:?}"))?
-    .selection_certificate;
+    .selection_audit;
 
     ensure(
-        base.has_valid_guarantee_identity(),
-        "conditional guarantee without certificate id is allowed",
+        !audit.algorithm_id.is_empty(),
+        "selection audit names the algorithm",
     )?;
-    let mut invalid: PackSelectionCertificate = base.clone();
-    invalid.guarantee_status = PackGuaranteeStatus::Valid;
-    invalid.certificate_id = None;
     ensure(
-        !invalid.has_valid_guarantee_identity(),
-        "valid guarantee without certificate id is rejected",
+        !audit.algorithm_description.is_empty(),
+        "selection audit describes the algorithm",
     )?;
-    invalid.certificate_id = Some("cert_pack_001".to_string());
     ensure(
-        invalid.has_valid_guarantee_identity(),
-        "valid guarantee with certificate id is accepted",
+        audit.submodular,
+        "submodular profile reports descriptive flag",
     )
 }
 

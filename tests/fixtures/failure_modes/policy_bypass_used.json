@@ -25,6 +25,7 @@
       "Secret-like content persisted",
       "--allow-secret-mention"
     ],
-    "repair_contains": "Review the memory"
+    "repair_contains": "Review the memory",
+    "repair_string": "Review the memory and its audit row before relying on this content."
   }
 }

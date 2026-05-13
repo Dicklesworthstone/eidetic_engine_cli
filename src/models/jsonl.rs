@@ -1785,7 +1785,9 @@ mod tests {
         field: &'static str,
         ctx: &str,
     ) -> TestResult {
-        let error = result.map(|_| ()).expect_err("avoid unwrap_err in production code");
+        let error = result
+            .map(|_| ())
+            .expect_err("avoid unwrap_err in production code");
         ensure(
             error.record_type,
             record_type,

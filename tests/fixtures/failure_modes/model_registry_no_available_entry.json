@@ -15,7 +15,7 @@
     "description": "The model registry contains entries, but every entry is disabled or unavailable.",
     "setup_commands": [
       "ee init --workspace .",
-      "# insert only disabled/unavailable model registry rows through a test harness"
+      "ee diag model-registry --workspace . --model-id mdl_j6000000000000000000000001 --provider hash --model-name j6-disabled-hash --purpose embedding --dimension 256 --distance-metric cosine --status disabled --version j6 --last-checked-at 2026-05-13T00:00:00Z --json"
     ],
     "invocation": "ee model status --workspace . --json"
   },
@@ -26,6 +26,8 @@
       "none are marked available",
       "semantic search is degraded"
     ],
-    "repair_contains": "ee doctor"
+    "repair_contains": "ee doctor",
+    "repair_string": "ee doctor --json",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

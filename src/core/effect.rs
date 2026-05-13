@@ -1472,6 +1472,11 @@ impl EffectManifest {
                 "Expire a memory through an audited tombstone without deleting data",
             ),
             CommandEffect::durable_write(
+                "memory level",
+                vec!["memories", "search_index_jobs", "audit_log"],
+                "Apply a canonical manual memory-level transition with audit provenance",
+            ),
+            CommandEffect::durable_write(
                 "memory link",
                 vec!["memory_links", "audit_log"],
                 "List or create explicit memory links with deterministic idempotent audits",

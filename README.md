@@ -462,6 +462,19 @@ Attach `swarm_brief_summary.json` in support bundles and handoffs when you need
 coordination posture without leaking content; attach fresh live output only when
 the recipient is allowed to see the underlying repo and coordination metadata.
 
+### Swarm schema contracts
+
+Swarm-scale JSON contracts live in [`docs/schemas/swarm/`](docs/schemas/swarm/)
+with companion agent-facing notes in [`docs/swarm/`](docs/swarm/). The catalog
+covers producer metadata, trust lanes, verification evidence, coordination
+snapshots, resource profiles, pack SLOs, recommendations, consensus, conflicts,
+fixture manifests, and planned handoff memory-set fingerprints.
+
+Every schema carries an `x-ee-status` marker. Agents should treat
+`"shipped": false` as documentation for a future surface, not runtime
+availability. The schema catalog does not turn `ee` into a scheduler, web
+service, mail sender, Beads mutator, or agent loop.
+
 ### Import & ingestion
 
 | Command | Purpose |
@@ -492,6 +505,7 @@ the recipient is allowed to see the underlying repo and coordination metadata.
 | `ee memory show <id> [--json]` | Full record with provenance, links, audit trail |
 | `ee memory list [--workspace .] [--level <l>] [--tag <t>]` | Filtered listing |
 | `ee memory history <id>` | Audit trail for a memory |
+| `ee memory level <id> --to <level> --reason <why> [--dry-run]` | Manual adjacent level transition with `memory.level_transition` audit |
 | `ee memory expire <id> [--dry-run]` | Audited soft expiration without deleting memory rows |
 | `ee memory link <id> [target-id] --relation <type> [--dry-run]` | Deterministic memory link listing and audited explicit link creation |
 | `ee memory tags <id> [--add <tags>] [--remove <tags>] [--set <tags>] [--clear]` | Deterministic audited tag listing and mutation |
@@ -598,6 +612,19 @@ duplicate_similarity = 0.92
 harmful_weight       = 2.5            # harmful feedback hits harder than helpful
 decay_half_life_days = 60
 
+[learn]
+cluster_coherence_threshold = 0.55     # average-linkage merge floor for `ee learn cluster`
+
+[learn.decay]
+demote_threshold = 0.05
+forget_threshold = 0.01
+working_half_life_days = 1
+episodic_event_half_life_days = 30
+episodic_failure_half_life_days = 90
+semantic_fact_half_life_days = 180
+procedural_rule_half_life_days = 365
+default_half_life_days = 30
+
 [feedback]
 harmful_per_source_per_hour = 5        # excess harmful events are quarantined
 harmful_burst_window_seconds = 3600
@@ -621,6 +648,9 @@ Environment variable overrides:
 | `EE_MAX_TOKENS`    | `[pack].default_max_tokens` |
 | `EE_HARMFUL_PER_SOURCE_PER_HOUR` | `[feedback].harmful_per_source_per_hour` |
 | `EE_HARMFUL_BURST_WINDOW_SECONDS` | `[feedback].harmful_burst_window_seconds` |
+| `EE_SCIENCE_BACKEND_PATH` | optional science analytics backend health path |
+| `EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS` | disables Frankensearch neighbors for remember-time curation proposal |
+| `EE_DISABLE_TOON` | disables TOON capability reporting and auto-selection |
 | `EE_NO_COLOR`      | disables ANSI styling on stderr |
 | `EE_TRACE`         | enables structured tracing to stderr |
 
@@ -700,6 +730,17 @@ Workspaces are first-class rows inside the user-global DB. A project can opt int
 | `episodic` | "On 2026-03-12 the release failed because…" | medium | medium |
 | `semantic` | Project conventions, architectural facts | slow | high |
 | `procedural` | Rules, anti-patterns, playbooks | slowest, decays only on contradiction | highest |
+
+Level changes are explicit lifecycle transitions, not silent rewrites. Automatic
+paths include workflow close (`working` -> `episodic`), curate apply for repeated
+observations (`episodic` -> `semantic`), curate apply for validated rules
+(`semantic` -> `procedural`), `memory expire` for time-bound facts
+(`semantic` -> `episodic`), and decay/tombstone maintenance. Manual transitions
+use `ee memory level <id> --to <level> --reason <why>` and are restricted to the
+same adjacent edges: `working` -> `episodic`, `episodic` -> `semantic`,
+`semantic` -> `procedural`, and `procedural` -> `semantic`. Every successful
+transition writes a `memory.level_transition` audit row with previous level, new
+level, event, reason, evidence references, and a stable details hash.
 
 Memory `kind` is orthogonal: `rule`, `fact`, `decision`, `failure`, `command`, `convention`, `anti-pattern`, `risk`, `playbook-step`, …
 
@@ -855,10 +896,13 @@ Measured on a 2024 MacBook Pro M3 against a workspace with 25 projects, 14k memo
 | `ee remember` (single record) | 8 ms | 22 ms |
 | `ee search "<q>"` (hybrid) | 38 ms | 110 ms |
 | `ee context "<task>"` (markdown, 4k tokens) | 95 ms | 240 ms |
-| `ee why <id>` | 6 ms | 14 ms |
+| `ee why <id>` | 25 ms | 100 ms |
+| `ee init --workspace <dir>` (clean) | 100 ms | 250 ms |
+| `ee audit timeline --limit 1000` | 35 ms | 100 ms |
 | `ee import cass --limit 50` (cold) | 4.1 s | 11 s |
-| `ee graph centrality-refresh` (full refresh) | 2.3 s | 5.8 s |
+| `ee graph centrality-refresh` (PageRank, 5k links) | 350 ms | 2.0 s |
 | `ee index rebuild` (full) | 18 s | 41 s |
+| 4 concurrent audited memory writers | 120 ms | 350 ms |
 
 Benchmark profiles are explicit so agents and CI can pick the right cost tier:
 
@@ -871,12 +915,17 @@ rch exec -- env TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp CARGO_TARGET_DI
 
 # Exploratory large-machine run for 256GB+/64-core hosts
 ./scripts/bench.sh --profile stress
+
+# J9 broad regression wrapper pinned to benches/baselines/perf_v0_2.json
+./scripts/bench_perf_regression.sh --profile nightly --check-regression
 ```
 
 Budgets are currently advisory while deterministic scale fixtures stabilize.
 The harness emits `ee.perf.v1` JSON with profile, workload, artifact paths,
-latency fields, resource fields when available, and regression status. Profiles
-can become release-blocking once their fixture variance is low enough for CI.
+latency fields, resource fields when available, and regression status. A J10
+coverage test keeps every row in the table above tied to a benchmark/baseline
+or an explicit advisory marker. Profiles can become release-blocking once their
+fixture variance is low enough for CI.
 
 ### Codex RCH Workaround
 

@@ -16,9 +16,9 @@
     "description": "The causal evidence table is absent from an older or malformed database schema.",
     "setup_commands": [
       "ee init --workspace .",
-      "# use a fixture database without causal_evidence"
+      "ee diag database-skew --output-database ./causal-missing-table.db --skew causal-evidence-table-missing --workspace . --json"
     ],
-    "invocation": "ee causal trace failure-1 --workspace . --json"
+    "invocation": "ee causal trace failure-1 --database ./causal-missing-table.db --database-workspace-id <workspace-id> --workspace . --json"
   },
   "expected_emission": {
     "code": "causal_evidence_table_missing",

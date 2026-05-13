@@ -22,7 +22,7 @@
     "code": "causal_sample_underpowered",
     "severity": "warning",
     "message_contains": [
-      "Sample size 0",
+      "sample size 0",
       "no causal"
     ]
   }

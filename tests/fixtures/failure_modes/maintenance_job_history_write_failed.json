@@ -14,9 +14,9 @@
     "description": "A maintenance job runs, but its history row cannot be appended to the workspace .ee directory.",
     "setup_commands": [
       "ee init --workspace .",
-      "# make the workspace .ee directory unwritable through a test harness"
+      "# make .ee/maintenance-jobs.jsonl a directory through the test harness"
     ],
-    "invocation": "ee job run decay_sweep --workspace . --json"
+    "invocation": "ee job run custom --workspace . --json"
   },
   "expected_emission": {
     "code": "maintenance_job_history_write_failed",

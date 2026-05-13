@@ -15,7 +15,7 @@
     "description": "A persisted graph snapshot is marked stale, so graph-derived output may lag memory links.",
     "setup_commands": [
       "ee init --workspace .",
-      "# insert or mark a graph snapshot with stale status through a test harness"
+      "ee diag graph-snapshot --status stale --metrics-json '{\"nodes\":[{\"id\":\"mem_j6graphnode00000000000000\",\"label\":\"J6 node\",\"pagerank\":1.0,\"betweenness\":0.0}],\"edges\":[]}' --node-count 1 --edge-count 0 --workspace . --json"
     ],
     "invocation": "ee graph export --workspace . --json"
   },
@@ -25,6 +25,8 @@
     "message_contains": [
       "Graph snapshot is marked stale"
     ],
-    "repair_contains": "ee graph centrality-refresh"
+    "repair_contains": "ee graph centrality-refresh",
+    "repair_string": "ee graph centrality-refresh",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

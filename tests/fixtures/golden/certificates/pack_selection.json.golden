@@ -1,8 +1,14 @@
 {
+  "profile": "submodular",
+  "objective": "facility_location",
+  "algorithmId": "deterministic_greedy_facility_location_gain_per_token",
+  "algorithmDescription": "Deterministic budgeted greedy selection over the facility-location objective.",
   "candidateCount": 3,
   "selectedCount": 2,
   "omittedCount": 1,
   "budgetLimit": 100,
   "budgetUsed": 20,
-  "totalObjectiveValue": 1.784
+  "totalObjectiveValue": 1.784,
+  "monotone": true,
+  "submodular": true
 }

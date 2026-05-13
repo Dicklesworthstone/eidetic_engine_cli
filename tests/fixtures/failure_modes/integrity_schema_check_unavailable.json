@@ -14,9 +14,9 @@
     "description": "Integrity diagnostics cannot inspect the migration state of the opened database.",
     "setup_commands": [
       "ee init --workspace .",
-      "# use a fixture database whose migration metadata query fails"
+      "ee diag database-skew --output-database ./integrity-schema-check-skew.db --skew migration-checksum-column-missing --workspace . --json"
     ],
-    "invocation": "ee diag integrity --workspace . --json"
+    "invocation": "ee diag integrity --database ./integrity-schema-check-skew.db --workspace . --json"
   },
   "expected_emission": {
     "code": "integrity_schema_check_unavailable",
@@ -25,6 +25,8 @@
       "migration state",
       "could not be inspected"
     ],
-    "repair_contains": "ee doctor"
+    "repair_contains": "ee doctor",
+    "repair_string": "ee doctor --json",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

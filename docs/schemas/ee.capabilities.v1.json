@@ -23,6 +23,7 @@
         "commands": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
         "binaries": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "envOverrides": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "index": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "output": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "summary": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
       }

@@ -6,7 +6,7 @@
     "epic_letter": "J"
   },
   "surfaces": [
-    "doctor",
+    "status",
     "dependency contract"
   ],
   "severity": "high",
@@ -14,9 +14,9 @@
   "trigger": {
     "description": "The FrankenSQLite/SQLModel storage capability probe cannot open or verify workspace storage.",
     "setup_commands": [
-      "ee doctor --workspace . --json"
+      "mkdir -p .ee/ee.db"
     ],
-    "invocation": "ee doctor --workspace . --json"
+    "invocation": "ee status --workspace . --json"
   },
   "expected_emission": {
     "code": "storage_unavailable",
@@ -25,6 +25,8 @@
       "storage",
       "unavailable"
     ],
-    "repair_contains": "ee doctor"
+    "repair_contains": "ee doctor",
+    "repair_string": "Run `ee doctor --json`.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
   }
 }

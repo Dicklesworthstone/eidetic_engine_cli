@@ -11,12 +11,13 @@
   "severity": "warning",
   "repair_present": true,
   "trigger": {
-    "description": "Preflight evidence exists but is stale relative to the task or workspace state.",
+    "description": "A matching preflight run exists in the workspace-local run store, but its observed timestamp is older than the freshness window.",
     "setup_commands": [
       "ee init --workspace .",
-      "# seed stale preflight evidence through a test harness"
+      "ee preflight run 'J6 stale preflight evidence task.' --workspace . --json",
+      "# set the stored run's started_at/completed_at to 2000-01-01"
     ],
-    "invocation": "ee preflight run 'task' --workspace . --json"
+    "invocation": "ee preflight run 'J6 stale preflight evidence task.' --workspace . --json"
   },
   "expected_emission": {
     "code": "preflight_evidence_stale",
@@ -25,6 +26,8 @@
       "evidence",
       "stale"
     ],
-    "repair_contains": "ee preflight run"
+    "repair_contains": "ee preflight run",
+    "repair_string": "ee preflight run <task> --json",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

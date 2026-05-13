@@ -13,10 +13,10 @@
   "trigger": {
     "description": "The database opens, but pending migrations block provenance sampling and canary writes.",
     "setup_commands": [
-      "ee init --workspace .",
-      "# use a fixture database whose schema version is behind current migrations"
+      "ee init --workspace . --json",
+      "ee diag database-skew --workspace . --output-database ./integrity-schema-required-skew.db --skew schema-migration-required --json"
     ],
-    "invocation": "ee diag integrity --workspace . --json"
+    "invocation": "ee diag integrity --database ./integrity-schema-required-skew.db --workspace . --json"
   },
   "expected_emission": {
     "code": "integrity_schema_migration_required",
@@ -25,6 +25,8 @@
       "current ee schema",
       "sampling provenance"
     ],
-    "repair_contains": "ee init"
+    "repair_contains": "ee init",
+    "repair_string": "ee init --workspace .",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

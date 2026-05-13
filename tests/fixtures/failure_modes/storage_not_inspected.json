@@ -22,6 +22,8 @@
       "Storage readiness was not inspected",
       "no workspace"
     ],
-    "repair_contains": "ee status --workspace"
+    "repair_contains": "ee status --workspace",
+    "repair_string": "Run `ee status --workspace . --json`.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
   }
 }

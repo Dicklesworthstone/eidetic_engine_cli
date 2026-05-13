@@ -1,16 +1,27 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
 use crate::db::{CreateAuditInput, DbConnection, audit_actions, generate_audit_id};
+use crate::models::{
+    MemoryId, MemoryScope, MemoryScopeStats, ProvenanceUri, TrustClass, UnitScore,
+};
 use crate::obs::audit_events::query_hash as audit_query_hash;
+use crate::pack::{
+    ConflictEntry, ConsensusConflictReport, ConsensusEntry, ConsensusProducer, ContextPackProfile,
+    PackDraft, PackDraftItem, PackItemLifecycle, PackProvenance, PackSection, PackSelectedItem,
+    PackSelectionAudit, PackSelectionObjective, PackSelectionPhase, PackTrustSignal, TokenBudget,
+    analyze_pack_consensus_conflicts, estimate_tokens_default,
+};
 
 use super::index::{
     IndexHealth, IndexStatusError, IndexStatusOptions, IndexStatusReport, get_index_status,
 };
+use super::memory_scope::MemoryScopeContext;
 use super::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 #[cfg(feature = "lexical-bm25")]
 use crate::search::TantivyIndex;
@@ -23,6 +34,11 @@ pub const DEFAULT_INDEX_SUBDIR: &str = "index";
 pub const DIAG_SEARCH_SCHEMA_V1: &str = "ee.diag.search.v1";
 pub const PERFORMANCE_EXPLAIN_SCHEMA_V1: &str = "ee.explain.performance.v1";
 const INDEX_STATUS_CACHE_TTL: Duration = Duration::from_secs(1);
+const SEARCH_ANALYSIS_CONTENT_KEY: &str = "_ee_analysis_content";
+const SEARCH_ANALYSIS_CONFIDENCE_KEY: &str = "_ee_analysis_confidence";
+const SEARCH_ANALYSIS_UTILITY_KEY: &str = "_ee_analysis_utility";
+const SEARCH_ANALYSIS_PROVENANCE_URI_KEY: &str = "_ee_analysis_provenance_uri";
+const SEARCH_ANALYSIS_CREATED_AT_KEY: &str = "_ee_analysis_created_at";
 
 static SEARCH_INDEX_STATUS_CACHE: OnceLock<Mutex<HashMap<IndexStatusCacheKey, CachedIndexStatus>>> =
     OnceLock::new();
@@ -71,9 +87,9 @@ pub struct SearchOptions {
     pub include_expired: bool,
     /// Include memories whose `valid_from` is after the validity reference time.
     pub include_future: bool,
-    /// Include search hits whose indexed validity status is explicitly stale.
-    /// The current memory row schema derives validity from windows and does not
-    /// persist a stale status, but older indexes may carry the field.
+    /// Include search hits whose indexed validity metadata is stale.
+    /// Search indexes are derived assets, so validity-window metadata can lag
+    /// the database row until the next rebuild.
     pub include_stale: bool,
     /// Minimum score (0.0..=1.0) for a hit to be returned. `None` falls
     /// back to [`DEFAULT_RELEVANCE_FLOOR`]. Set to `Some(0.0)` to disable.
@@ -83,6 +99,10 @@ pub struct SearchOptions {
     pub source_mode: SearchSourceMode,
     /// Fail closed when the requested source mode cannot be applied.
     pub strict_source_mode: bool,
+    /// Trust lane applied to retrieved memories.
+    pub memory_scope: MemoryScope,
+    /// Fail closed when relevant evidence exists outside the requested scope.
+    pub strict_scope: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -200,6 +220,9 @@ pub struct SearchReport {
     pub source_mode_applied: SearchSourceMode,
     pub source_mode_fallback: bool,
     pub strict_source_mode: bool,
+    pub memory_scope: MemoryScope,
+    pub strict_scope: bool,
+    pub scope_stats: MemoryScopeStats,
 }
 
 #[derive(Clone, Debug)]
@@ -663,6 +686,62 @@ impl SearchDegradation {
     }
 
     #[must_use]
+    fn scope_excluded_evidence(scope: MemoryScope, excluded: usize) -> Self {
+        Self {
+            code: "scope_excluded_evidence".to_string(),
+            severity: "low".to_string(),
+            message: format!(
+                "Memory scope `{}` excluded {excluded} candidate{suffix} outside the requested trust lane.",
+                scope.as_str(),
+                suffix = if excluded == 1 { "" } else { "s" },
+            ),
+            repair: Some(
+                "Use --memory-scope swarm to inspect all candidate evidence, or pass --strict-scope to fail closed."
+                    .to_string(),
+            ),
+        }
+    }
+
+    #[must_use]
+    fn scope_strict_excluded_evidence(scope: MemoryScope, excluded: usize) -> Self {
+        Self {
+            code: "scope_strict_excluded_evidence".to_string(),
+            severity: "medium".to_string(),
+            message: format!(
+                "Strict memory scope `{}` found {excluded} relevant candidate{suffix} outside the requested trust lane; returning no scoped results.",
+                scope.as_str(),
+                suffix = if excluded == 1 { "" } else { "s" },
+            ),
+            repair: Some("Retry without --strict-scope or use --memory-scope swarm.".to_string()),
+        }
+    }
+
+    #[must_use]
+    fn scope_agent_unavailable(scope: MemoryScope) -> Self {
+        Self {
+            code: "scope_agent_unavailable".to_string(),
+            severity: "warning".to_string(),
+            message: format!(
+                "Memory scope `{}` needs the current agent identity, but EE_AGENT_NAME is unset.",
+                scope.as_str()
+            ),
+            repair: Some("Set EE_AGENT_NAME for self/team scoped retrieval.".to_string()),
+        }
+    }
+
+    #[must_use]
+    fn scope_metadata_unavailable(error: &str) -> Self {
+        Self {
+            code: "scope_metadata_unavailable".to_string(),
+            severity: "medium".to_string(),
+            message: format!(
+                "Search could not verify memory scope against the memory database: {error}"
+            ),
+            repair: Some("ee doctor --json".to_string()),
+        }
+    }
+
+    #[must_use]
     fn tombstone_visibility_unavailable(error: &str) -> Self {
         Self {
             code: "tombstone_visibility_unavailable".to_string(),
@@ -840,6 +919,14 @@ impl SearchReport {
                 "strictSourceMode".to_string(),
                 serde_json::json!(self.strict_source_mode),
             );
+            metrics_obj.insert(
+                "memoryScope".to_string(),
+                serde_json::json!(self.memory_scope.as_str()),
+            );
+            metrics_obj.insert(
+                "strictScope".to_string(),
+                serde_json::json!(self.strict_scope),
+            );
         }
         let results: Vec<serde_json::Value> = self
             .results
@@ -866,7 +953,7 @@ impl SearchReport {
                         obj_map.insert("rerankScore".to_string(), serde_json::json!(rerank));
                     }
                     if let Some(ref meta) = hit.metadata {
-                        obj_map.insert("metadata".to_string(), meta.clone());
+                        obj_map.insert("metadata".to_string(), public_search_metadata(meta));
                         if metadata_bool(meta, "tombstoned").unwrap_or(false) {
                             obj_map.insert("tombstoned".to_string(), serde_json::json!(true));
                             if let Some(tombstoned_at) = metadata_string(meta, "tombstoned_at") {
@@ -916,6 +1003,7 @@ impl SearchReport {
                 obj
             })
             .collect();
+        let consensus_conflicts = search_consensus_conflict_report(&self.query, &self.results);
 
         serde_json::json!({
             "command": "search",
@@ -924,8 +1012,13 @@ impl SearchReport {
             "request": {
                 "sourceMode": self.source_mode_requested.as_str(),
                 "strictSourceMode": self.strict_source_mode,
+                "memoryScope": self.memory_scope.as_str(),
+                "strictScope": self.strict_scope,
             },
+            "scopeStats": self.scope_stats.data_json(),
             "results": results,
+            "consensus": consensus_conflicts.consensus.iter().map(consensus_entry_data_json).collect::<Vec<_>>(),
+            "conflicts": consensus_conflicts.conflicts.iter().map(conflict_entry_data_json).collect::<Vec<_>>(),
             "resultCount": self.results.len(),
             "elapsedMs": self.elapsed_ms,
             "metrics": metrics,
@@ -968,6 +1061,8 @@ impl SearchReport {
                 "sourceModeApplied": self.source_mode_applied.as_str(),
                 "strictSourceMode": self.strict_source_mode,
                 "fallbackApplied": self.source_mode_fallback,
+                "memoryScope": self.memory_scope.as_str(),
+                "strictScope": self.strict_scope,
             },
             "profileRuntime": self.runtime_profile.data_json(),
             "dbReads": {
@@ -1129,6 +1224,230 @@ fn metadata_string<'a>(metadata: &'a serde_json::Value, key: &str) -> Option<&'a
 
 fn metadata_bool(metadata: &serde_json::Value, key: &str) -> Option<bool> {
     metadata.get(key).and_then(serde_json::Value::as_bool)
+}
+
+fn metadata_f32(metadata: &serde_json::Value, key: &str) -> Option<f32> {
+    metadata
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_f64()
+                .map(|number| number as f32)
+                .or_else(|| value.as_str()?.parse::<f32>().ok())
+        })
+        .filter(|value| value.is_finite())
+}
+
+fn public_search_metadata(metadata: &serde_json::Value) -> serde_json::Value {
+    let Some(object) = metadata.as_object() else {
+        return metadata.clone();
+    };
+    serde_json::Value::Object(
+        object
+            .iter()
+            .filter(|(key, _)| !key.starts_with("_ee_"))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    )
+}
+
+fn search_consensus_conflict_report(query: &str, hits: &[SearchHit]) -> ConsensusConflictReport {
+    let items = hits
+        .iter()
+        .enumerate()
+        .filter_map(|(index, hit)| search_hit_pack_item(index, hit))
+        .collect::<Vec<_>>();
+    if items.len() < 2 {
+        return ConsensusConflictReport::default();
+    }
+
+    let used_tokens = items.iter().fold(0_u32, |total, item| {
+        total.saturating_add(item.estimated_tokens)
+    });
+    let selected_items = items
+        .iter()
+        .map(|item| PackSelectedItem {
+            rank: item.rank,
+            memory_id: item.memory_id,
+            token_cost: item.estimated_tokens,
+            feasible: true,
+        })
+        .collect::<Vec<_>>();
+    let selected_count = selected_items.len();
+    let draft = PackDraft {
+        query: query.to_string(),
+        budget: TokenBudget::default_context(),
+        used_tokens,
+        items,
+        omitted: Vec::new(),
+        selection_audit: PackSelectionAudit {
+            profile: ContextPackProfile::Balanced,
+            objective: PackSelectionObjective::FacilityLocation,
+            algorithm_id: "search_consensus_analysis",
+            algorithm_description: "Query-relevant selected hits used for consensus analysis.",
+            candidate_count: selected_count,
+            selected_count,
+            omitted_count: 0,
+            budget_limit: TokenBudget::default_context().max_tokens(),
+            budget_used: used_tokens,
+            total_objective_value: 0.0,
+            monotone: true,
+            submodular: false,
+            selected_items,
+            steps: Vec::new(),
+        },
+        hash: None,
+    };
+
+    analyze_pack_consensus_conflicts(&draft)
+}
+
+fn search_hit_pack_item(index: usize, hit: &SearchHit) -> Option<PackDraftItem> {
+    let metadata = hit.metadata.as_ref()?;
+    let content = metadata_string(metadata, SEARCH_ANALYSIS_CONTENT_KEY)
+        .or_else(|| metadata_string(metadata, "content"))?
+        .to_string();
+    let memory_id = MemoryId::from_str(&hit.doc_id).ok()?;
+    let level = metadata_string(metadata, "level");
+    let kind = metadata_string(metadata, "kind");
+    let tags = metadata_string(metadata, "tags")
+        .map(split_tags)
+        .unwrap_or_default();
+    let provenance = search_hit_pack_provenance(metadata, memory_id);
+    let trust = search_hit_pack_trust(metadata);
+    let lifecycle = search_hit_pack_lifecycle(metadata);
+    let rank = u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX);
+
+    Some(PackDraftItem {
+        rank,
+        memory_id,
+        section: search_pack_section(level, kind),
+        content,
+        estimated_tokens: estimate_tokens_default(
+            metadata_string(metadata, SEARCH_ANALYSIS_CONTENT_KEY)
+                .or_else(|| metadata_string(metadata, "content"))
+                .unwrap_or_default(),
+        ),
+        relevance: UnitScore::parse(hit.score.clamp(0.0, 1.0))
+            .unwrap_or_else(|_| UnitScore::neutral()),
+        utility: metadata_f32(metadata, SEARCH_ANALYSIS_UTILITY_KEY)
+            .and_then(|value| UnitScore::parse(value.clamp(0.0, 1.0)).ok())
+            .unwrap_or_else(UnitScore::neutral),
+        provenance,
+        why: hit.why(),
+        diversity_key: tags.first().map(|tag| {
+            format!(
+                "{}:{}:{}",
+                level.unwrap_or("memory"),
+                kind.unwrap_or("memory"),
+                tag
+            )
+        }),
+        trust,
+        redactions: Vec::new(),
+        tombstoned_at: metadata_string(metadata, "tombstoned_at").map(str::to_string),
+        lifecycle,
+        selected_in: PackSelectionPhase::FacilityLocation,
+    })
+}
+
+fn split_tags(tags: &str) -> Vec<String> {
+    tags.split(',')
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn search_pack_section(level: Option<&str>, kind: Option<&str>) -> PackSection {
+    match (level.unwrap_or_default(), kind.unwrap_or_default()) {
+        ("procedural", _) | (_, "rule" | "convention" | "playbook-step") => {
+            PackSection::ProceduralRules
+        }
+        (_, "decision") => PackSection::Decisions,
+        (_, "failure" | "anti-pattern" | "risk") => PackSection::Failures,
+        ("episodic", _) => PackSection::Evidence,
+        _ => PackSection::Artifacts,
+    }
+}
+
+fn search_hit_pack_provenance(
+    metadata: &serde_json::Value,
+    memory_id: MemoryId,
+) -> Vec<PackProvenance> {
+    let uri = metadata_string(metadata, SEARCH_ANALYSIS_PROVENANCE_URI_KEY)
+        .or_else(|| metadata_string(metadata, "provenanceUri"))
+        .or_else(|| metadata_string(metadata, "provenance_uri"))
+        .and_then(|uri| ProvenanceUri::from_str(uri).ok())
+        .unwrap_or(ProvenanceUri::EeMemory(memory_id));
+    PackProvenance::new(uri, "search result memory evidence")
+        .map(|provenance| vec![provenance])
+        .unwrap_or_default()
+}
+
+fn search_hit_pack_trust(metadata: &serde_json::Value) -> PackTrustSignal {
+    let trust_class = metadata_string(metadata, "trust_class")
+        .and_then(|value| TrustClass::from_str(value).ok())
+        .unwrap_or(TrustClass::AgentAssertion);
+    let producer = metadata_string(metadata, "producerAgent")
+        .or_else(|| metadata_string(metadata, "trust_subclass"))
+        .map(str::to_string);
+    PackTrustSignal::new(trust_class, producer)
+}
+
+fn search_hit_pack_lifecycle(metadata: &serde_json::Value) -> Option<PackItemLifecycle> {
+    let valid_from = metadata_string(metadata, "valid_from")
+        .or_else(|| metadata_string(metadata, SEARCH_ANALYSIS_CREATED_AT_KEY))
+        .or_else(|| metadata_string(metadata, "created_at"))
+        .map(str::to_string);
+    let valid_to = metadata_string(metadata, "valid_to").map(str::to_string);
+    if valid_from.is_none() && valid_to.is_none() {
+        return None;
+    }
+    Some(PackItemLifecycle {
+        validity_status: metadata_string(metadata, "validity_status")
+            .unwrap_or("active")
+            .to_string(),
+        validity_window_kind: metadata_string(metadata, "validity_window_kind")
+            .unwrap_or("unbounded")
+            .to_string(),
+        valid_from,
+        valid_to,
+    })
+}
+
+fn consensus_entry_data_json(entry: &ConsensusEntry) -> serde_json::Value {
+    serde_json::json!({
+        "schema": entry.schema,
+        "subjectFingerprint": entry.subject_fingerprint,
+        "subjectSummary": entry.subject_summary,
+        "agreementScore": entry.agreement_score,
+        "memberMemoryIds": entry.member_memory_ids.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "memberProducers": entry.member_producers.iter().map(consensus_producer_data_json).collect::<Vec<_>>(),
+        "semanticSimilarityMin": entry.semantic_similarity_min,
+        "firstRecordedAt": entry.first_recorded_at,
+        "lastReinforcedAt": entry.last_reinforced_at,
+    })
+}
+
+fn consensus_producer_data_json(producer: &ConsensusProducer) -> serde_json::Value {
+    serde_json::json!({
+        "agentName": producer.agent_name,
+        "trustClass": producer.trust_class.as_str(),
+    })
+}
+
+fn conflict_entry_data_json(entry: &ConflictEntry) -> serde_json::Value {
+    serde_json::json!({
+        "schema": entry.schema,
+        "subjectFingerprint": entry.subject_fingerprint,
+        "kind": entry.kind.as_str(),
+        "conflictingMemoryIds": entry.conflicting_memory_ids.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "evidencePointers": entry.evidence_pointers,
+        "earliestAt": entry.earliest_at,
+        "latestAt": entry.latest_at,
+        "recommendedAction": entry.recommended_action.as_str(),
+    })
 }
 
 impl RetrievalMetrics {
@@ -1666,6 +1985,14 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
             source_mode_applied: source_mode.applied,
             source_mode_fallback: source_mode.fallback_applied,
             strict_source_mode: options.strict_source_mode,
+            memory_scope: options.memory_scope,
+            strict_scope: options.strict_scope,
+            scope_stats: MemoryScopeContext::for_workspace(
+                &options.workspace_path,
+                options.memory_scope,
+                options.strict_scope,
+            )
+            .stats(),
         });
     }
     let search_result = search_sync(
@@ -1714,6 +2041,8 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
                 });
             let dropped = below_floor.len();
             let above_floor = apply_tombstone_visibility(options, above_floor, &mut degraded);
+            let (above_floor, scope_stats) =
+                apply_memory_scope_visibility(options, above_floor, &mut degraded);
             let kept = above_floor.len();
 
             // Representative floor for degradation reporting + metrics:
@@ -1852,6 +2181,9 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
                 source_mode_applied: source_mode.applied,
                 source_mode_fallback: source_mode.fallback_applied,
                 strict_source_mode: options.strict_source_mode,
+                memory_scope: options.memory_scope,
+                strict_scope: options.strict_scope,
+                scope_stats,
             })
         }
         Err(e) => {
@@ -1878,6 +2210,14 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
                 source_mode_applied: source_mode.applied,
                 source_mode_fallback: source_mode.fallback_applied,
                 strict_source_mode: options.strict_source_mode,
+                memory_scope: options.memory_scope,
+                strict_scope: options.strict_scope,
+                scope_stats: MemoryScopeContext::for_workspace(
+                    &options.workspace_path,
+                    options.memory_scope,
+                    options.strict_scope,
+                )
+                .stats(),
             })
         }
     }
@@ -1927,6 +2267,8 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
             user_floor_override.unwrap_or_else(|| default_floor_for_source(hit.source));
         hit.score.is_finite() && hit.score >= per_hit_floor
     });
+    let (above_floor, scope_stats) =
+        apply_memory_scope_visibility(options, above_floor, &mut degraded);
     let kept = above_floor.len();
     let dropped = below_floor.len();
     let floor = user_floor_override.unwrap_or_else(|| {
@@ -1984,6 +2326,9 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
         source_mode_applied: options.source_mode,
         source_mode_fallback: false,
         strict_source_mode: options.strict_source_mode,
+        memory_scope: options.memory_scope,
+        strict_scope: options.strict_scope,
+        scope_stats,
     };
 
     Ok(SearchDiagnosticReport {
@@ -2646,7 +2991,8 @@ fn apply_tombstone_visibility(
                     }
                 }
 
-                let indexed_stale = hit_indexed_validity_status(&hit) == Some("stale");
+                let indexed_stale = hit_indexed_validity_status(&hit) == Some("stale")
+                    || hit_indexed_validity_window_is_stale(&hit, &memory);
                 if indexed_stale && !options.include_stale {
                     stale_filtered = stale_filtered.saturating_add(1);
                     continue;
@@ -2750,6 +3096,165 @@ fn apply_tombstone_visibility(
     visible_hits
 }
 
+fn apply_memory_scope_visibility(
+    options: &SearchOptions,
+    hits: Vec<SearchHit>,
+    degraded: &mut Vec<SearchDegradation>,
+) -> (Vec<SearchHit>, MemoryScopeStats) {
+    let scope_context = MemoryScopeContext::for_workspace(
+        &options.workspace_path,
+        options.memory_scope,
+        options.strict_scope,
+    );
+    let mut stats = scope_context.stats();
+    if hits.is_empty() {
+        return (hits, stats);
+    }
+
+    if matches!(
+        options.memory_scope,
+        MemoryScope::SelfOnly | MemoryScope::Team
+    ) && scope_context.current_agent.is_none()
+    {
+        degraded.push(SearchDegradation::scope_agent_unavailable(
+            options.memory_scope,
+        ));
+    }
+
+    let passthrough_scope = matches!(
+        options.memory_scope,
+        MemoryScope::Swarm | MemoryScope::Workspace
+    );
+
+    let explicit_database_path = options.database_path.is_some();
+    let database_path = options
+        .database_path
+        .clone()
+        .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
+    if !explicit_database_path && !database_path.exists() {
+        for hit in &hits {
+            stats.record_candidate_id(passthrough_scope, Some(&hit.doc_id));
+        }
+        if passthrough_scope {
+            return (hits, stats);
+        }
+        degraded.push(SearchDegradation::scope_metadata_unavailable(
+            "memory database does not exist",
+        ));
+        return (Vec::new(), stats);
+    }
+
+    let connection = match DbConnection::open_file(&database_path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            for hit in &hits {
+                stats.record_candidate_id(passthrough_scope, Some(&hit.doc_id));
+            }
+            if passthrough_scope {
+                return (hits, stats);
+            }
+            degraded.push(SearchDegradation::scope_metadata_unavailable(
+                &error.to_string(),
+            ));
+            return (Vec::new(), stats);
+        }
+    };
+
+    let mut scoped_hits = Vec::with_capacity(hits.len());
+    let mut read_error: Option<String> = None;
+    for mut hit in hits {
+        match connection.get_memory(&hit.doc_id) {
+            Ok(Some(memory)) => {
+                let in_scope = scope_context.memory_in_scope(&memory);
+                stats.record_candidate_id(in_scope, Some(&hit.doc_id));
+                if in_scope {
+                    mark_hit_scope(&mut hit, options.memory_scope, &memory);
+                    scoped_hits.push(hit);
+                }
+            }
+            Ok(None) => {
+                stats.record_candidate_id(passthrough_scope, Some(&hit.doc_id));
+                if passthrough_scope {
+                    scoped_hits.push(hit);
+                }
+            }
+            Err(error) => {
+                stats.record_candidate_id(passthrough_scope, Some(&hit.doc_id));
+                if passthrough_scope {
+                    scoped_hits.push(hit);
+                } else if read_error.is_none() {
+                    read_error = Some(error.to_string());
+                }
+            }
+        }
+    }
+
+    if let Some(error) = read_error {
+        degraded.push(SearchDegradation::scope_metadata_unavailable(&error));
+    }
+
+    if options.strict_scope && stats.strict_violations > 0 {
+        degraded.push(SearchDegradation::scope_strict_excluded_evidence(
+            options.memory_scope,
+            stats.strict_violations,
+        ));
+        scoped_hits.clear();
+    } else if stats.candidates_excluded_by_scope > 0 {
+        degraded.push(SearchDegradation::scope_excluded_evidence(
+            options.memory_scope,
+            stats.candidates_excluded_by_scope,
+        ));
+    }
+
+    (scoped_hits, stats)
+}
+
+fn mark_hit_scope(hit: &mut SearchHit, scope: MemoryScope, memory: &crate::db::StoredMemory) {
+    let mut metadata = hit.metadata.take().unwrap_or_else(|| serde_json::json!({}));
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "memory_scope".to_string(),
+            serde_json::json!(scope.as_str()),
+        );
+        object.insert(
+            "trust_class".to_string(),
+            serde_json::json!(&memory.trust_class),
+        );
+        object.insert(
+            SEARCH_ANALYSIS_CONTENT_KEY.to_string(),
+            serde_json::json!(&memory.content),
+        );
+        object.insert(
+            SEARCH_ANALYSIS_CONFIDENCE_KEY.to_string(),
+            serde_json::json!(memory.confidence),
+        );
+        object.insert(
+            SEARCH_ANALYSIS_UTILITY_KEY.to_string(),
+            serde_json::json!(memory.utility),
+        );
+        object.insert(
+            SEARCH_ANALYSIS_CREATED_AT_KEY.to_string(),
+            serde_json::json!(&memory.created_at),
+        );
+        if let Some(provenance_uri) = &memory.provenance_uri {
+            object.insert(
+                SEARCH_ANALYSIS_PROVENANCE_URI_KEY.to_string(),
+                serde_json::json!(provenance_uri),
+            );
+        }
+        if let Some(trust_subclass) = &memory.trust_subclass {
+            object.insert(
+                "trust_subclass".to_string(),
+                serde_json::json!(trust_subclass),
+            );
+        }
+        if let Some(agent) = super::memory_scope::memory_producer_agent(memory) {
+            object.insert("producerAgent".to_string(), serde_json::json!(agent));
+        }
+    }
+    hit.metadata = Some(metadata);
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MemoryValidityVisibility {
     Visible,
@@ -2801,6 +3306,23 @@ fn hit_indexed_validity_status(hit: &SearchHit) -> Option<&str> {
                 .as_ref()
                 .and_then(|metadata| metadata_string(metadata, "validityStatus"))
         })
+}
+
+fn hit_indexed_validity_window_is_stale(hit: &SearchHit, memory: &crate::db::StoredMemory) -> bool {
+    let Some(metadata) = hit.metadata.as_ref() else {
+        return false;
+    };
+    let indexed_valid_from =
+        metadata_string(metadata, "valid_from").or_else(|| metadata_string(metadata, "validFrom"));
+    let indexed_valid_to =
+        metadata_string(metadata, "valid_to").or_else(|| metadata_string(metadata, "validTo"));
+
+    if indexed_valid_from.is_none() && indexed_valid_to.is_none() {
+        return false;
+    }
+
+    indexed_valid_from != memory.valid_from.as_deref()
+        || indexed_valid_to != memory.valid_to.as_deref()
 }
 
 fn validity_status_at(
@@ -2867,9 +3389,15 @@ fn mark_hit_validity(
     valid_to: &Option<String>,
     reference_time: DateTime<Utc>,
 ) {
-    let indexed_status = hit_indexed_validity_status(hit).map(str::to_owned);
+    let indexed_status = hit_indexed_validity_status(hit)
+        .filter(|status| *status == "stale")
+        .map(str::to_owned);
     let mut metadata = hit.metadata.take().unwrap_or_else(|| serde_json::json!({}));
     if let Some(object) = metadata.as_object_mut() {
+        object.remove("valid_from");
+        object.remove("validFrom");
+        object.remove("valid_to");
+        object.remove("validTo");
         if let Some(valid_from) = valid_from {
             object.insert("valid_from".to_string(), serde_json::json!(valid_from));
         }
@@ -2970,6 +3498,10 @@ mod tests {
         )
     }
 
+    fn test_scope_stats() -> MemoryScopeStats {
+        MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0)
+    }
+
     fn source_mode_test_options(
         source_mode: SearchSourceMode,
         strict_source_mode: bool,
@@ -2991,6 +3523,8 @@ mod tests {
             relevance_floor: None,
             source_mode,
             strict_source_mode,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
         }
     }
 
@@ -3036,6 +3570,9 @@ mod tests {
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
         };
 
         let json = report.data_json();
@@ -3205,6 +3742,8 @@ mod tests {
             relevance_floor: None,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
         };
 
         let mut degraded = Vec::new();
@@ -3234,6 +3773,9 @@ mod tests {
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
         };
         let json = report.data_json();
         assert_eq!(json["results"][0]["tombstoned"], true);
@@ -3350,6 +3892,8 @@ mod tests {
             relevance_floor: None,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
         };
 
         let mut degraded = Vec::new();
@@ -3377,10 +3921,123 @@ mod tests {
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
         };
         let json = report.data_json();
         assert_eq!(json["results"][0]["validityStatus"], "stale");
         assert_eq!(json["results"][0]["metadata"]["validity_status"], "stale");
+        Ok(())
+    }
+
+    #[test]
+    fn indexed_validity_window_mismatch_is_stale_and_opt_in() -> TestResult {
+        let workspace = unique_test_dir("stale-validity-window-visibility");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let database_path = workspace.join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                "wsp_21234567890123456789012345",
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("stale validity window visibility".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_20000000000000000000000001",
+                &CreateMemoryInput {
+                    workspace_id: "wsp_21234567890123456789012345".to_string(),
+                    level: "semantic".to_string(),
+                    kind: "fact".to_string(),
+                    content: "Indexed stale validity window should be opt-in only.".to_string(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "agent_assertion".to_string(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        let hit = SearchHit {
+            doc_id: "mem_20000000000000000000000001".to_string(),
+            score: 0.9,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(0.9),
+            rerank_score: None,
+            metadata: Some(serde_json::json!({
+                "valid_to": "2026-05-01T00:00:00Z",
+                "validity_window_kind": "ends_at",
+            })),
+            explanation: None,
+        };
+        let base_options = SearchOptions {
+            workspace_path: workspace,
+            database_path: Some(database_path),
+            index_dir: None,
+            query: "stale validity window".to_string(),
+            limit: 10,
+            speed: SpeedMode::Default,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        };
+
+        let mut degraded = Vec::new();
+        let visible = apply_tombstone_visibility(&base_options, vec![hit.clone()], &mut degraded);
+        assert!(visible.is_empty());
+        assert_eq!(degraded[0].code, "stale_validity_filtered");
+
+        let mut include_options = base_options;
+        include_options.include_stale = true;
+        let mut degraded = Vec::new();
+        let visible = apply_tombstone_visibility(&include_options, vec![hit], &mut degraded);
+        assert_eq!(visible.len(), 1);
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "stale validity window".to_string(),
+            requested_limit: 10,
+            results: visible,
+            elapsed_ms: 1.0,
+            errors: Vec::new(),
+            degraded,
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        };
+        let json = report.data_json();
+        assert_eq!(json["results"][0]["validityStatus"], "unknown");
+        assert_eq!(json["results"][0]["metadata"]["validity_status"], "unknown");
+        assert!(json["results"][0]["metadata"].get("valid_to").is_none());
         Ok(())
     }
 
@@ -3413,6 +4070,9 @@ mod tests {
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
         };
 
         let json = report.performance_explain_json(SpeedMode::Instant, false);
@@ -3450,6 +4110,8 @@ mod tests {
             relevance_floor: None,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
         };
 
         let degraded = search_degradations(&options, &index_dir);
@@ -3487,6 +4149,8 @@ mod tests {
             relevance_floor: None,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
         };
 
         let degraded = search_degradations(&options, &index_dir);
@@ -3520,6 +4184,8 @@ mod tests {
             relevance_floor: None,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
         };
 
         let degraded = search_degradations(&options, &index_dir);
@@ -3659,6 +4325,8 @@ mod tests {
             relevance_floor: Some(0.0),
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
         })
         .map_err(|error| error.to_string())?;
         let json = report.data_json();
@@ -3759,6 +4427,8 @@ mod tests {
             relevance_floor: None,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
         };
 
         assert_eq!(
@@ -3785,6 +4455,8 @@ mod tests {
             relevance_floor: None,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
         };
         let config = options.two_tier_config();
         assert!(!config.fast_only);
@@ -3825,6 +4497,8 @@ mod tests {
             relevance_floor: None,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
         };
 
         assert_eq!(options.resolve_index_dir(), PathBuf::from("/custom/index"));
@@ -3878,6 +4552,9 @@ mod tests {
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
         };
 
         let json = report.data_json();
@@ -3927,6 +4604,9 @@ mod tests {
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
         };
 
         let json = report.data_json();
@@ -3978,6 +4658,9 @@ mod tests {
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
         };
 
         let json = report.data_json();
@@ -4034,6 +4717,9 @@ mod tests {
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
         };
 
         let metrics = report.retrieval_metrics();
@@ -4083,6 +4769,9 @@ mod tests {
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
         };
 
         let json = report.data_json();
@@ -4209,6 +4898,9 @@ mod tests {
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
         };
 
         let json = report.data_json();
@@ -4269,6 +4961,9 @@ mod tests {
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
             strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
         };
 
         let summary = report.human_summary();

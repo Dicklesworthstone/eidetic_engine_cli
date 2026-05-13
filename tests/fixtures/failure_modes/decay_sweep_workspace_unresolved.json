@@ -14,9 +14,9 @@
     "description": "The decay sweep job opens storage but cannot resolve a workspace id for scoring.",
     "setup_commands": [
       "ee init --workspace .",
-      "# use a database fixture without resolvable workspace metadata"
+      "ee diag database-skew --workspace . --output-database ./decay-workspace-unresolved.db --skew workspaces-table-unavailable --json"
     ],
-    "invocation": "ee job run decay_sweep --workspace . --json"
+    "invocation": "ee job run decay_sweep --database ./decay-workspace-unresolved.db --dry-run --json"
   },
   "expected_emission": {
     "code": "decay_sweep_workspace_unresolved",

@@ -1,102 +1,146 @@
 ---
 source: tests/json_contract_snapshots.rs
-assertion_line: 378
 expression: search
 ---
 {
-  "schema": "ee.response.v1",
-  "success": true,
   "data": {
     "command": "search",
-    "status": "success",
+    "conflicts": [],
+    "consensus": [],
+    "degraded": [],
+    "elapsedMs": 0,
+    "errors": [],
+    "metrics": {
+      "candidatesAboveFloor": 1,
+      "candidatesBelowFloor": 0,
+      "elapsedMs": 0,
+      "errorCount": 0,
+      "fallbackApplied": false,
+      "fieldCoverage": {
+        "explanationCount": 0,
+        "fastScoreCount": 1,
+        "lexicalScoreCount": 1,
+        "metadataCount": 1,
+        "qualityScoreCount": 0,
+        "rerankScoreCount": 0
+      },
+      "honestQualityScore": 0.7292900085449219,
+      "memoryScope": "swarm",
+      "qualityAssessment": "good",
+      "relevanceFloor": 0.004999999888241291,
+      "requestedLimit": 10,
+      "returnedCount": 1,
+      "scoreDistribution": {
+        "max": 0.03278699889779091,
+        "mean": 0.03278699889779091,
+        "min": 0.03278699889779091,
+        "top": 0.03278699889779091
+      },
+      "sourceCounts": {
+        "hybrid": 1,
+        "lexical": 0,
+        "reranked": 0,
+        "semanticFast": 0,
+        "semanticQuality": 0
+      },
+      "sourceModeApplied": "hybrid",
+      "sourceModeRequested": "hybrid",
+      "strictScope": false,
+      "strictSourceMode": false
+    },
+    "profileRuntime": {
+      "activeProfile": "constrained",
+      "budgets": {
+        "cache": {
+          "entryCap": 512,
+          "hotsetPrewarmLimit": 0,
+          "memoryCapMb": 128
+        },
+        "diagnostics": {
+          "redaction": "strict",
+          "supportBundleProfile": "minimal"
+        },
+        "pack": {
+          "explanationVerbosity": "standard",
+          "maxCandidateMemories": 24,
+          "maxTokens": 3000
+        },
+        "search": {
+          "candidateLimit": 48,
+          "concurrentIndexReaders": 1,
+          "staleIndexTolerance": "strict"
+        },
+        "steward": {
+          "daemonPrewarm": false,
+          "graphRefreshBudget": 128,
+          "maintenanceWindowMs": 0
+        },
+        "verification": {
+          "heavyStrategy": "manual",
+          "recipe": "quick",
+          "targetDirPosture": "shared",
+          "timeoutClass": "short"
+        },
+        "writeSpool": {
+          "batchCap": 32,
+          "queueCap": 512,
+          "retryBudget": 3
+        }
+      },
+      "schema": "ee.profile.runtime.v1",
+      "source": "host_probe"
+    },
     "query": "format before release",
+    "request": {
+      "memoryScope": "swarm",
+      "sourceMode": "hybrid",
+      "strictScope": false,
+      "strictSourceMode": false
+    },
+    "resultCount": 1,
     "results": [
       {
         "docId": "mem_00000000000000000000000001",
-        "score": 0.40820467472076416,
-        "source": "semantic_fast",
-        "why": "Selected by semantic_fast retrieval with score 0.4082.",
+        "fastScore": 0.40820467472076416,
+        "lexicalScore": 0.5753642320632935,
+        "metadata": {
+          "created_at": "[TIMESTAMP]",
+          "kind": "rule",
+          "level": "procedural",
+          "memory_scope": "swarm",
+          "schema": "ee.search.document.v1",
+          "source": "memory",
+          "trust_class": "human_explicit",
+          "trust_subclass": "project-rule",
+          "validity_status": "unknown",
+          "validity_window_kind": "unbounded"
+        },
         "provenance": [
           {
-            "kind": "search_document",
-            "docId": "mem_00000000000000000000000001"
+            "docId": "mem_00000000000000000000000001",
+            "kind": "search_document"
           }
         ],
-        "fastScore": 0.40820467472076416
+        "score": 0.032786883413791656,
+        "source": "hybrid",
+        "validityStatus": "unknown",
+        "validityWindowKind": "unbounded",
+        "why": "Selected by hybrid retrieval with score 0.0328."
       }
     ],
-    "resultCount": 1,
-    "elapsedMs": 0,
-    "metrics": {
-      "requestedLimit": 10,
-      "returnedCount": 1,
-      "errorCount": 0,
-      "elapsedMs": 0,
-      "sourceCounts": {
-        "lexical": 0,
-        "semanticFast": 1,
-        "semanticQuality": 0,
-        "hybrid": 0,
-        "reranked": 0
-      },
-      "scoreDistribution": {
-        "top": 0.4082050025463104,
-        "min": 0.4082050025463104,
-        "max": 0.4082050025463104,
-        "mean": 0.4082050025463104
-      },
-      "fieldCoverage": {
-        "fastScoreCount": 1,
-        "qualityScoreCount": 0,
-        "lexicalScoreCount": 0,
-        "rerankScoreCount": 0,
-        "metadataCount": 0,
-        "explanationCount": 0
-      }
+    "scopeStats": {
+      "candidatesExcludedByScope": 0,
+      "candidatesInScope": 1,
+      "candidatesTotal": 1,
+      "currentAgent": null,
+      "excludedMemoryIds": [],
+      "scopeApplied": "swarm",
+      "strictScope": false,
+      "strictViolations": 0,
+      "teamSize": 0
     },
-    "profileRuntime": {
-      "schema": "ee.profile.runtime.v1",
-      "activeProfile": "swarm",
-      "source": "host_probe",
-      "budgets": {
-        "search": {
-          "candidateLimit": 240,
-          "concurrentIndexReaders": 8,
-          "staleIndexTolerance": "repair_hint"
-        },
-        "pack": {
-          "maxTokens": 8000,
-          "maxCandidateMemories": 160,
-          "explanationVerbosity": "full"
-        },
-        "cache": {
-          "memoryCapMb": 2048,
-          "entryCap": 8192,
-          "hotsetPrewarmLimit": 512
-        },
-        "writeSpool": {
-          "queueCap": 8192,
-          "batchCap": 256,
-          "retryBudget": 12
-        },
-        "steward": {
-          "maintenanceWindowMs": 0,
-          "graphRefreshBudget": 4096,
-          "daemonPrewarm": true
-        },
-        "verification": {
-          "recipe": "full",
-          "targetDirPosture": "isolated",
-          "timeoutClass": "extended",
-          "heavyStrategy": "rch_default"
-        },
-        "diagnostics": {
-          "supportBundleProfile": "full",
-          "redaction": "policy_applied"
-        }
-      }
-    },
-    "errors": [],
-    "degraded": []
-  }
+    "status": "success"
+  },
+  "schema": "ee.response.v1",
+  "success": true
 }

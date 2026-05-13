@@ -122,9 +122,10 @@ pub fn validate_repair_command(repair: &str) -> HonestyCheckResult {
         );
     }
 
-    let placeholder_patterns = ["TODO", "FIXME", "<placeholder>", "xxx", "???"];
+    let placeholder_patterns = ["todo", "fixme", "<placeholder>", "xxx", "???"];
+    let lower_repair = repair.to_lowercase();
     for pattern in placeholder_patterns {
-        if repair.to_lowercase().contains(&pattern.to_lowercase()) {
+        if lower_repair.contains(pattern) {
             return HonestyCheckResult::fail(
                 "repair_no_placeholders",
                 format!("Repair command contains placeholder pattern: {}", pattern),
@@ -196,8 +197,9 @@ pub fn validate_message_quality(code: &DegradationCode) -> HonestyCheckResult {
         "unknown error",
         "failed",
     ];
+    let lower_description = code.description.to_lowercase();
     for pattern in generic_patterns {
-        if code.description.to_lowercase() == pattern {
+        if lower_description == pattern {
             return HonestyCheckResult::fail_for(
                 "message_not_generic",
                 code.id,

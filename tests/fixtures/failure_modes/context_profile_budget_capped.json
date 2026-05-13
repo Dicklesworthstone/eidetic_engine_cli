@@ -25,6 +25,8 @@
       "Context request budget was capped",
       "operating profile"
     ],
-    "repair_contains": "ee profile config plan"
+    "repair_contains": "ee profile config plan",
+    "repair_string": "ee profile config plan --json",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

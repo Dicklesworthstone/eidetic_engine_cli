@@ -6,7 +6,7 @@ Date: 2026-05-09
 ## Context
 
 ADR 0007 makes context packs the primary `ee` user experience. A pack already
-contains a hash, provenance, a selection certificate, per-item explanations,
+contains a hash, provenance, a selection audit, per-item explanations,
 and degradation records. The database also persists pack records and pack items
 so `ee why` can connect a memory back to the packs that selected it.
 

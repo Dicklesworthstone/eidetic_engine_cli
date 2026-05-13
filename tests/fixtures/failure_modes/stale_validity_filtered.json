@@ -11,10 +11,11 @@
   "severity": "low",
   "repair_present": true,
   "trigger": {
-    "description": "Search encounters an indexed memory whose stored validity_status is stale and excludes it unless stale memories are explicitly requested.",
+    "description": "Search encounters an indexed memory whose validity-window metadata no longer matches the database row and excludes it unless stale memories are explicitly requested.",
     "setup_commands": [
       "ee init --workspace .",
-      "# inject or age an indexed validity_status through a fixture harness"
+      "ee remember 'J6 stale validity marker.' --workspace . --valid-to 2000-01-01T00:00:00Z --json",
+      "ee diag memory-validity --workspace . --memory-id <memory-id> --clear-valid-to --json"
     ],
     "invocation": "ee search 'stale validity marker' --workspace . --json"
   },

@@ -4,685 +4,731 @@ expression: profile_config_apply
 ---
 {
   "missingConfigDryRun": {
-    "schema": "ee.response.v1",
-    "success": true,
     "data": {
-      "schema": "ee.profile.config.plan.v1",
-      "command": "profile config apply",
-      "dryRun": true,
-      "configPath": "[WORKSPACE]/.ee/config.toml",
-      "pathRedaction": "operator_requested_config_path",
-      "configExists": false,
-      "profile": {
-        "recommended": "[PROFILE]",
-        "effective": "[PROFILE]",
-        "confidence": "high",
-        "reasons": [
-          "[HOST_REASON]"
-        ]
-      },
+      "applied": false,
       "budgets": {
+        "cache": {
+          "entryCap": 0,
+          "hotsetPrewarmLimit": 0,
+          "memoryCapMb": 0
+        },
+        "diagnostics": {
+          "redaction": "strict",
+          "supportBundleProfile": "standard"
+        },
+        "pack": {
+          "explanationVerbosity": "standard",
+          "maxCandidateMemories": 0,
+          "maxTokens": 0
+        },
         "search": {
           "candidateLimit": 0,
           "concurrentIndexReaders": 0,
           "staleIndexTolerance": "strict"
         },
-        "pack": {
-          "maxTokens": 0,
-          "maxCandidateMemories": 0,
-          "explanationVerbosity": "standard"
-        },
-        "cache": {
-          "memoryCapMb": 0,
-          "entryCap": 0,
-          "hotsetPrewarmLimit": 0
-        },
-        "writeSpool": {
-          "queueCap": 0,
-          "batchCap": 0,
-          "retryBudget": 0
-        },
         "steward": {
-          "maintenanceWindowMs": 0,
+          "daemonPrewarm": false,
           "graphRefreshBudget": 0,
-          "daemonPrewarm": false
+          "maintenanceWindowMs": 0
         },
         "verification": {
+          "heavyStrategy": "rch_preferred",
           "recipe": "workspace",
           "targetDirPosture": "isolated",
-          "timeoutClass": "standard",
-          "heavyStrategy": "rch_preferred"
+          "timeoutClass": "standard"
         },
-        "diagnostics": {
-          "supportBundleProfile": "standard",
-          "redaction": "strict"
+        "writeSpool": {
+          "batchCap": 0,
+          "queueCap": 0,
+          "retryBudget": 0
         }
       },
+      "command": "profile config apply",
+      "configExists": false,
+      "configPath": "[WORKSPACE]/.ee/config.toml",
+      "conflicts": [],
+      "degraded": [
+        {
+          "code": "heavy_gates_skipped",
+          "message": "2 heavy verification gate(s) skipped by profile: integration_tests, e2e_tests",
+          "repair": "Run skipped gates manually or upgrade to a higher-resource profile.",
+          "severity": "info"
+        }
+      ],
+      "dryRun": true,
+      "edits": [
+        {
+          "after": "portable",
+          "before": null,
+          "key": "profile.selected",
+          "status": "planned"
+        },
+        {
+          "after": "96",
+          "before": null,
+          "key": "profile.budgets.search_candidate_limit",
+          "status": "planned"
+        },
+        {
+          "after": "2",
+          "before": null,
+          "key": "profile.budgets.search_concurrent_index_readers",
+          "status": "planned"
+        },
+        {
+          "after": "strict",
+          "before": null,
+          "key": "profile.budgets.search_stale_index_tolerance",
+          "status": "planned"
+        },
+        {
+          "after": "4500",
+          "before": null,
+          "key": "profile.budgets.pack_max_tokens",
+          "status": "planned"
+        },
+        {
+          "after": "48",
+          "before": null,
+          "key": "profile.budgets.pack_max_candidate_memories",
+          "status": "planned"
+        },
+        {
+          "after": "standard",
+          "before": null,
+          "key": "profile.budgets.pack_explanation_verbosity",
+          "status": "planned"
+        },
+        {
+          "after": "512",
+          "before": null,
+          "key": "profile.budgets.cache_memory_cap_mb",
+          "status": "planned"
+        },
+        {
+          "after": "1024",
+          "before": null,
+          "key": "profile.budgets.cache_entry_cap",
+          "status": "planned"
+        },
+        {
+          "after": "64",
+          "before": null,
+          "key": "profile.budgets.cache_hotset_prewarm_limit",
+          "status": "planned"
+        },
+        {
+          "after": "1024",
+          "before": null,
+          "key": "profile.budgets.write_spool_queue_cap",
+          "status": "planned"
+        },
+        {
+          "after": "64",
+          "before": null,
+          "key": "profile.budgets.write_spool_batch_cap",
+          "status": "planned"
+        },
+        {
+          "after": "5",
+          "before": null,
+          "key": "profile.budgets.write_spool_retry_budget",
+          "status": "planned"
+        },
+        {
+          "after": "1000",
+          "before": null,
+          "key": "profile.budgets.steward_maintenance_window_ms",
+          "status": "planned"
+        },
+        {
+          "after": "256",
+          "before": null,
+          "key": "profile.budgets.steward_graph_refresh_budget",
+          "status": "planned"
+        },
+        {
+          "after": "false",
+          "before": null,
+          "key": "profile.budgets.steward_daemon_prewarm",
+          "status": "planned"
+        },
+        {
+          "after": "workspace",
+          "before": null,
+          "key": "profile.budgets.verification_recipe",
+          "status": "planned"
+        },
+        {
+          "after": "isolated",
+          "before": null,
+          "key": "profile.budgets.verification_target_dir_posture",
+          "status": "planned"
+        },
+        {
+          "after": "standard",
+          "before": null,
+          "key": "profile.budgets.verification_timeout_class",
+          "status": "planned"
+        },
+        {
+          "after": "rch_preferred",
+          "before": null,
+          "key": "profile.budgets.verification_heavy_strategy",
+          "status": "planned"
+        },
+        {
+          "after": "standard",
+          "before": null,
+          "key": "profile.budgets.diagnostics_support_bundle_profile",
+          "status": "planned"
+        },
+        {
+          "after": "strict",
+          "before": null,
+          "key": "profile.budgets.diagnostics_redaction",
+          "status": "planned"
+        }
+      ],
       "overrides": [
         {
           "key": "profile.effective",
-          "value": "portable",
-          "source": "cli"
+          "source": "cli",
+          "value": "portable"
         }
       ],
-      "edits": [
-        {
-          "key": "profile.selected",
-          "before": null,
-          "after": "portable",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.search_candidate_limit",
-          "before": null,
-          "after": "96",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.search_concurrent_index_readers",
-          "before": null,
-          "after": "2",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.search_stale_index_tolerance",
-          "before": null,
-          "after": "strict",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.pack_max_tokens",
-          "before": null,
-          "after": "4500",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.pack_max_candidate_memories",
-          "before": null,
-          "after": "48",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.pack_explanation_verbosity",
-          "before": null,
-          "after": "standard",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.cache_memory_cap_mb",
-          "before": null,
-          "after": "512",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.cache_entry_cap",
-          "before": null,
-          "after": "1024",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.cache_hotset_prewarm_limit",
-          "before": null,
-          "after": "64",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.write_spool_queue_cap",
-          "before": null,
-          "after": "1024",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.write_spool_batch_cap",
-          "before": null,
-          "after": "64",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.write_spool_retry_budget",
-          "before": null,
-          "after": "5",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.steward_maintenance_window_ms",
-          "before": null,
-          "after": "1000",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.steward_graph_refresh_budget",
-          "before": null,
-          "after": "256",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.steward_daemon_prewarm",
-          "before": null,
-          "after": "false",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.verification_recipe",
-          "before": null,
-          "after": "workspace",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.verification_target_dir_posture",
-          "before": null,
-          "after": "isolated",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.verification_timeout_class",
-          "before": null,
-          "after": "standard",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.verification_heavy_strategy",
-          "before": null,
-          "after": "rch_preferred",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.diagnostics_support_bundle_profile",
-          "before": null,
-          "after": "standard",
-          "status": "planned"
-        },
-        {
-          "key": "profile.budgets.diagnostics_redaction",
-          "before": null,
-          "after": "strict",
-          "status": "planned"
-        }
-      ],
-      "conflicts": [],
-      "wouldWrite": true,
-      "applied": false,
-      "repair": "Review plannedToml, then run `ee profile config apply` without `--dry-run`.",
+      "pathRedaction": "operator_requested_config_path",
       "plannedToml": "profile = { selected = \"portable\", budgets = { search_candidate_limit = 96, search_concurrent_index_readers = 2, search_stale_index_tolerance = \"strict\", pack_max_tokens = 4500, pack_max_candidate_memories = 48, pack_explanation_verbosity = \"standard\", cache_memory_cap_mb = 512, cache_entry_cap = 1024, cache_hotset_prewarm_limit = 64, write_spool_queue_cap = 1024, write_spool_batch_cap = 64, write_spool_retry_budget = 5, steward_maintenance_window_ms = 1000, steward_graph_refresh_budget = 256, steward_daemon_prewarm = false, verification_recipe = \"workspace\", verification_target_dir_posture = \"isolated\", verification_timeout_class = \"standard\", verification_heavy_strategy = \"rch_preferred\", diagnostics_support_bundle_profile = \"standard\", diagnostics_redaction = \"strict\" } }\n",
       "probe": {
-        "schema": "ee.profile.probe.v1",
-        "sideEffectFree": true,
-        "redaction": "label_only_paths_presence_only_env",
-        "complete": true,
-        "workspace": {
-          "label": "workspace",
-          "initialized": true,
-          "redaction": "path_not_emitted"
-        },
+        "complete": false,
         "cpu": {
           "logicalCores": 0,
           "physicalCores": null,
           "source": "std_thread_available_parallelism"
         },
-        "memory": {
-          "totalBytes": 0,
-          "availableBytes": 0,
-          "cgroupLimitBytes": null,
-          "source": "proc_meminfo"
-        },
-        "paths": [
+        "degraded": [
           {
-            "label": "workspace",
-            "role": "workspace_root",
-            "exists": true,
-            "nearestExistingAncestor": false,
-            "sameFilesystemAsWorkspace": true,
-            "totalBytes": 0,
-            "availableBytes": 0,
-            "redaction": "path_not_emitted"
-          },
-          {
-            "label": "ee_state",
-            "role": "workspace_state_dir",
-            "exists": true,
-            "nearestExistingAncestor": false,
-            "sameFilesystemAsWorkspace": true,
-            "totalBytes": 0,
-            "availableBytes": 0,
-            "redaction": "path_not_emitted"
-          },
-          {
-            "label": "database",
-            "role": "frankensqlite_database",
-            "exists": true,
-            "nearestExistingAncestor": false,
-            "sameFilesystemAsWorkspace": true,
-            "totalBytes": 0,
-            "availableBytes": 0,
-            "redaction": "path_not_emitted"
-          },
-          {
-            "label": "index",
-            "role": "frankensearch_index",
-            "exists": true,
-            "nearestExistingAncestor": false,
-            "sameFilesystemAsWorkspace": true,
-            "totalBytes": 0,
-            "availableBytes": 0,
-            "redaction": "path_not_emitted"
-          },
-          {
-            "label": "cache",
-            "role": "derived_cache",
-            "exists": false,
-            "nearestExistingAncestor": true,
-            "sameFilesystemAsWorkspace": true,
-            "totalBytes": 0,
-            "availableBytes": 0,
-            "redaction": "path_not_emitted"
-          },
-          {
-            "label": "temp",
-            "role": "temporary_directory",
-            "exists": true,
-            "nearestExistingAncestor": false,
-            "sameFilesystemAsWorkspace": true,
-            "totalBytes": 0,
-            "availableBytes": 0,
-            "redaction": "path_not_emitted"
-          },
-          {
-            "label": "cargo_target",
-            "role": "build_cache_directory",
-            "exists": true,
-            "nearestExistingAncestor": false,
-            "sameFilesystemAsWorkspace": true,
-            "totalBytes": 0,
-            "availableBytes": 0,
-            "redaction": "path_not_emitted"
-          }
-        ],
-        "tools": [
-          {
-            "name": "cargo",
-            "available": true,
-            "source": "path_lookup_presence_only"
-          },
-          {
-            "name": "rustfmt",
-            "available": true,
-            "source": "path_lookup_presence_only"
-          },
-          {
-            "name": "clippy",
-            "available": false,
-            "source": "path_lookup_presence_only"
-          },
-          {
-            "name": "br",
-            "available": true,
-            "source": "path_lookup_presence_only"
-          },
-          {
-            "name": "bv",
-            "available": true,
-            "source": "path_lookup_presence_only"
-          },
-          {
-            "name": "rch",
-            "available": true,
-            "source": "path_lookup_presence_only"
-          },
-          {
-            "name": "gh",
-            "available": true,
-            "source": "path_lookup_presence_only"
+            "code": "memory_probe_unavailable",
+            "message": "Host memory totals could not be inspected.",
+            "repair": "Run on a platform with /proc/meminfo or provide explicit profile config.",
+            "severity": "warning"
           }
         ],
         "environment": {
-          "tmpdirConfigured": true,
           "cargoTargetDirConfigured": true,
           "rchHintConfigured": false,
-          "redaction": "presence_only"
+          "redaction": "presence_only",
+          "tmpdirConfigured": true
         },
-        "degraded": []
+        "memory": {
+          "availableBytes": null,
+          "cgroupLimitBytes": null,
+          "source": "unavailable",
+          "totalBytes": null
+        },
+        "paths": [
+          {
+            "availableBytes": 0,
+            "exists": true,
+            "label": "workspace",
+            "nearestExistingAncestor": false,
+            "redaction": "path_not_emitted",
+            "role": "workspace_root",
+            "sameFilesystemAsWorkspace": true,
+            "totalBytes": 0
+          },
+          {
+            "availableBytes": 0,
+            "exists": true,
+            "label": "ee_state",
+            "nearestExistingAncestor": false,
+            "redaction": "path_not_emitted",
+            "role": "workspace_state_dir",
+            "sameFilesystemAsWorkspace": true,
+            "totalBytes": 0
+          },
+          {
+            "availableBytes": 0,
+            "exists": true,
+            "label": "database",
+            "nearestExistingAncestor": false,
+            "redaction": "path_not_emitted",
+            "role": "frankensqlite_database",
+            "sameFilesystemAsWorkspace": true,
+            "totalBytes": 0
+          },
+          {
+            "availableBytes": 0,
+            "exists": true,
+            "label": "index",
+            "nearestExistingAncestor": false,
+            "redaction": "path_not_emitted",
+            "role": "frankensearch_index",
+            "sameFilesystemAsWorkspace": true,
+            "totalBytes": 0
+          },
+          {
+            "availableBytes": 0,
+            "exists": false,
+            "label": "cache",
+            "nearestExistingAncestor": true,
+            "redaction": "path_not_emitted",
+            "role": "derived_cache",
+            "sameFilesystemAsWorkspace": true,
+            "totalBytes": 0
+          },
+          {
+            "availableBytes": 0,
+            "exists": true,
+            "label": "temp",
+            "nearestExistingAncestor": false,
+            "redaction": "path_not_emitted",
+            "role": "temporary_directory",
+            "sameFilesystemAsWorkspace": true,
+            "totalBytes": 0
+          },
+          {
+            "availableBytes": 0,
+            "exists": true,
+            "label": "cargo_target",
+            "nearestExistingAncestor": false,
+            "redaction": "path_not_emitted",
+            "role": "build_cache_directory",
+            "sameFilesystemAsWorkspace": true,
+            "totalBytes": 0
+          }
+        ],
+        "redaction": "label_only_paths_presence_only_env",
+        "schema": "ee.profile.probe.v1",
+        "sideEffectFree": true,
+        "tools": [
+          {
+            "available": true,
+            "name": "cargo",
+            "source": "path_lookup_presence_only"
+          },
+          {
+            "available": true,
+            "name": "rustfmt",
+            "source": "path_lookup_presence_only"
+          },
+          {
+            "available": false,
+            "name": "clippy",
+            "source": "path_lookup_presence_only"
+          },
+          {
+            "available": true,
+            "name": "br",
+            "source": "path_lookup_presence_only"
+          },
+          {
+            "available": true,
+            "name": "bv",
+            "source": "path_lookup_presence_only"
+          },
+          {
+            "available": true,
+            "name": "rch",
+            "source": "path_lookup_presence_only"
+          },
+          {
+            "available": true,
+            "name": "gh",
+            "source": "path_lookup_presence_only"
+          }
+        ],
+        "workspace": {
+          "initialized": true,
+          "label": "workspace",
+          "redaction": "path_not_emitted"
+        }
+      },
+      "profile": {
+        "confidence": "medium",
+        "effective": "[PROFILE]",
+        "reasons": [
+          "[HOST_REASON]"
+        ],
+        "recommended": "[PROFILE]"
+      },
+      "repair": "Review plannedToml, then run `ee profile config apply` without `--dry-run`.",
+      "schema": "ee.profile.config.plan.v1",
+      "wouldWrite": true
+    },
+    "degraded": [
+      {
+        "code": "heavy_gates_skipped",
+        "message": "2 heavy verification gate(s) skipped by profile: integration_tests, e2e_tests",
+        "repair": "Run skipped gates manually or upgrade to a higher-resource profile.",
+        "severity": "info"
       }
-    }
+    ],
+    "schema": "ee.response.v1",
+    "success": true
   },
   "existingConfigDryRun": {
-    "schema": "ee.response.v1",
-    "success": true,
     "data": {
-      "schema": "ee.profile.config.plan.v1",
-      "command": "profile config apply",
-      "dryRun": true,
-      "configPath": "[WORKSPACE]/.ee/config.toml",
-      "pathRedaction": "operator_requested_config_path",
-      "configExists": true,
-      "profile": {
-        "recommended": "[PROFILE]",
-        "effective": "[PROFILE]",
-        "confidence": "high",
-        "reasons": [
-          "[HOST_REASON]"
-        ]
-      },
+      "applied": false,
       "budgets": {
+        "cache": {
+          "entryCap": 0,
+          "hotsetPrewarmLimit": 0,
+          "memoryCapMb": 0
+        },
+        "diagnostics": {
+          "redaction": "strict",
+          "supportBundleProfile": "standard"
+        },
+        "pack": {
+          "explanationVerbosity": "standard",
+          "maxCandidateMemories": 0,
+          "maxTokens": 0
+        },
         "search": {
           "candidateLimit": 0,
           "concurrentIndexReaders": 0,
           "staleIndexTolerance": "strict"
         },
-        "pack": {
-          "maxTokens": 0,
-          "maxCandidateMemories": 0,
-          "explanationVerbosity": "standard"
-        },
-        "cache": {
-          "memoryCapMb": 0,
-          "entryCap": 0,
-          "hotsetPrewarmLimit": 0
-        },
-        "writeSpool": {
-          "queueCap": 0,
-          "batchCap": 0,
-          "retryBudget": 0
-        },
         "steward": {
-          "maintenanceWindowMs": 0,
+          "daemonPrewarm": false,
           "graphRefreshBudget": 0,
-          "daemonPrewarm": false
+          "maintenanceWindowMs": 0
         },
         "verification": {
+          "heavyStrategy": "rch_preferred",
           "recipe": "workspace",
           "targetDirPosture": "isolated",
-          "timeoutClass": "standard",
-          "heavyStrategy": "rch_preferred"
+          "timeoutClass": "standard"
         },
-        "diagnostics": {
-          "supportBundleProfile": "standard",
-          "redaction": "strict"
+        "writeSpool": {
+          "batchCap": 0,
+          "queueCap": 0,
+          "retryBudget": 0
         }
       },
+      "command": "profile config apply",
+      "configExists": true,
+      "configPath": "[WORKSPACE]/.ee/config.toml",
+      "conflicts": [],
+      "degraded": [
+        {
+          "code": "heavy_gates_skipped",
+          "message": "2 heavy verification gate(s) skipped by profile: integration_tests, e2e_tests",
+          "repair": "Run skipped gates manually or upgrade to a higher-resource profile.",
+          "severity": "info"
+        }
+      ],
+      "dryRun": true,
+      "edits": [
+        {
+          "after": "portable",
+          "before": "portable",
+          "key": "profile.selected",
+          "status": "unchanged"
+        },
+        {
+          "after": "96",
+          "before": "96",
+          "key": "profile.budgets.search_candidate_limit",
+          "status": "unchanged"
+        },
+        {
+          "after": "2",
+          "before": "2",
+          "key": "profile.budgets.search_concurrent_index_readers",
+          "status": "unchanged"
+        },
+        {
+          "after": "strict",
+          "before": "strict",
+          "key": "profile.budgets.search_stale_index_tolerance",
+          "status": "unchanged"
+        },
+        {
+          "after": "4500",
+          "before": "4500",
+          "key": "profile.budgets.pack_max_tokens",
+          "status": "unchanged"
+        },
+        {
+          "after": "48",
+          "before": "48",
+          "key": "profile.budgets.pack_max_candidate_memories",
+          "status": "unchanged"
+        },
+        {
+          "after": "standard",
+          "before": "standard",
+          "key": "profile.budgets.pack_explanation_verbosity",
+          "status": "unchanged"
+        },
+        {
+          "after": "512",
+          "before": "512",
+          "key": "profile.budgets.cache_memory_cap_mb",
+          "status": "unchanged"
+        },
+        {
+          "after": "1024",
+          "before": "1024",
+          "key": "profile.budgets.cache_entry_cap",
+          "status": "unchanged"
+        },
+        {
+          "after": "64",
+          "before": "64",
+          "key": "profile.budgets.cache_hotset_prewarm_limit",
+          "status": "unchanged"
+        },
+        {
+          "after": "1024",
+          "before": "1024",
+          "key": "profile.budgets.write_spool_queue_cap",
+          "status": "unchanged"
+        },
+        {
+          "after": "64",
+          "before": "64",
+          "key": "profile.budgets.write_spool_batch_cap",
+          "status": "unchanged"
+        },
+        {
+          "after": "5",
+          "before": "5",
+          "key": "profile.budgets.write_spool_retry_budget",
+          "status": "unchanged"
+        },
+        {
+          "after": "1000",
+          "before": "1000",
+          "key": "profile.budgets.steward_maintenance_window_ms",
+          "status": "unchanged"
+        },
+        {
+          "after": "256",
+          "before": "256",
+          "key": "profile.budgets.steward_graph_refresh_budget",
+          "status": "unchanged"
+        },
+        {
+          "after": "false",
+          "before": "false",
+          "key": "profile.budgets.steward_daemon_prewarm",
+          "status": "unchanged"
+        },
+        {
+          "after": "workspace",
+          "before": "workspace",
+          "key": "profile.budgets.verification_recipe",
+          "status": "unchanged"
+        },
+        {
+          "after": "isolated",
+          "before": "isolated",
+          "key": "profile.budgets.verification_target_dir_posture",
+          "status": "unchanged"
+        },
+        {
+          "after": "standard",
+          "before": "standard",
+          "key": "profile.budgets.verification_timeout_class",
+          "status": "unchanged"
+        },
+        {
+          "after": "rch_preferred",
+          "before": "rch_preferred",
+          "key": "profile.budgets.verification_heavy_strategy",
+          "status": "unchanged"
+        },
+        {
+          "after": "standard",
+          "before": "standard",
+          "key": "profile.budgets.diagnostics_support_bundle_profile",
+          "status": "unchanged"
+        },
+        {
+          "after": "strict",
+          "before": "strict",
+          "key": "profile.budgets.diagnostics_redaction",
+          "status": "unchanged"
+        }
+      ],
       "overrides": [
         {
           "key": "profile.effective",
-          "value": "portable",
-          "source": "cli"
+          "source": "cli",
+          "value": "portable"
         }
       ],
-      "edits": [
-        {
-          "key": "profile.selected",
-          "before": "portable",
-          "after": "portable",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.search_candidate_limit",
-          "before": "96",
-          "after": "96",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.search_concurrent_index_readers",
-          "before": "2",
-          "after": "2",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.search_stale_index_tolerance",
-          "before": "strict",
-          "after": "strict",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.pack_max_tokens",
-          "before": "4500",
-          "after": "4500",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.pack_max_candidate_memories",
-          "before": "48",
-          "after": "48",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.pack_explanation_verbosity",
-          "before": "standard",
-          "after": "standard",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.cache_memory_cap_mb",
-          "before": "512",
-          "after": "512",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.cache_entry_cap",
-          "before": "1024",
-          "after": "1024",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.cache_hotset_prewarm_limit",
-          "before": "64",
-          "after": "64",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.write_spool_queue_cap",
-          "before": "1024",
-          "after": "1024",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.write_spool_batch_cap",
-          "before": "64",
-          "after": "64",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.write_spool_retry_budget",
-          "before": "5",
-          "after": "5",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.steward_maintenance_window_ms",
-          "before": "1000",
-          "after": "1000",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.steward_graph_refresh_budget",
-          "before": "256",
-          "after": "256",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.steward_daemon_prewarm",
-          "before": "false",
-          "after": "false",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.verification_recipe",
-          "before": "workspace",
-          "after": "workspace",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.verification_target_dir_posture",
-          "before": "isolated",
-          "after": "isolated",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.verification_timeout_class",
-          "before": "standard",
-          "after": "standard",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.verification_heavy_strategy",
-          "before": "rch_preferred",
-          "after": "rch_preferred",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.diagnostics_support_bundle_profile",
-          "before": "standard",
-          "after": "standard",
-          "status": "unchanged"
-        },
-        {
-          "key": "profile.budgets.diagnostics_redaction",
-          "before": "strict",
-          "after": "strict",
-          "status": "unchanged"
-        }
-      ],
-      "conflicts": [],
-      "wouldWrite": false,
-      "applied": false,
-      "repair": null,
+      "pathRedaction": "operator_requested_config_path",
       "plannedToml": "profile = { selected = \"portable\", budgets = { search_candidate_limit = 96, search_concurrent_index_readers = 2, search_stale_index_tolerance = \"strict\", pack_max_tokens = 4500, pack_max_candidate_memories = 48, pack_explanation_verbosity = \"standard\", cache_memory_cap_mb = 512, cache_entry_cap = 1024, cache_hotset_prewarm_limit = 64, write_spool_queue_cap = 1024, write_spool_batch_cap = 64, write_spool_retry_budget = 5, steward_maintenance_window_ms = 1000, steward_graph_refresh_budget = 256, steward_daemon_prewarm = false, verification_recipe = \"workspace\", verification_target_dir_posture = \"isolated\", verification_timeout_class = \"standard\", verification_heavy_strategy = \"rch_preferred\", diagnostics_support_bundle_profile = \"standard\", diagnostics_redaction = \"strict\" } }\n",
       "probe": {
-        "schema": "ee.profile.probe.v1",
-        "sideEffectFree": true,
-        "redaction": "label_only_paths_presence_only_env",
-        "complete": true,
-        "workspace": {
-          "label": "workspace",
-          "initialized": true,
-          "redaction": "path_not_emitted"
-        },
+        "complete": false,
         "cpu": {
           "logicalCores": 0,
           "physicalCores": null,
           "source": "std_thread_available_parallelism"
         },
-        "memory": {
-          "totalBytes": 0,
-          "availableBytes": 0,
-          "cgroupLimitBytes": null,
-          "source": "proc_meminfo"
-        },
-        "paths": [
+        "degraded": [
           {
-            "label": "workspace",
-            "role": "workspace_root",
-            "exists": true,
-            "nearestExistingAncestor": false,
-            "sameFilesystemAsWorkspace": true,
-            "totalBytes": 0,
-            "availableBytes": 0,
-            "redaction": "path_not_emitted"
-          },
-          {
-            "label": "ee_state",
-            "role": "workspace_state_dir",
-            "exists": true,
-            "nearestExistingAncestor": false,
-            "sameFilesystemAsWorkspace": true,
-            "totalBytes": 0,
-            "availableBytes": 0,
-            "redaction": "path_not_emitted"
-          },
-          {
-            "label": "database",
-            "role": "frankensqlite_database",
-            "exists": true,
-            "nearestExistingAncestor": false,
-            "sameFilesystemAsWorkspace": true,
-            "totalBytes": 0,
-            "availableBytes": 0,
-            "redaction": "path_not_emitted"
-          },
-          {
-            "label": "index",
-            "role": "frankensearch_index",
-            "exists": true,
-            "nearestExistingAncestor": false,
-            "sameFilesystemAsWorkspace": true,
-            "totalBytes": 0,
-            "availableBytes": 0,
-            "redaction": "path_not_emitted"
-          },
-          {
-            "label": "cache",
-            "role": "derived_cache",
-            "exists": false,
-            "nearestExistingAncestor": true,
-            "sameFilesystemAsWorkspace": true,
-            "totalBytes": 0,
-            "availableBytes": 0,
-            "redaction": "path_not_emitted"
-          },
-          {
-            "label": "temp",
-            "role": "temporary_directory",
-            "exists": true,
-            "nearestExistingAncestor": false,
-            "sameFilesystemAsWorkspace": true,
-            "totalBytes": 0,
-            "availableBytes": 0,
-            "redaction": "path_not_emitted"
-          },
-          {
-            "label": "cargo_target",
-            "role": "build_cache_directory",
-            "exists": true,
-            "nearestExistingAncestor": false,
-            "sameFilesystemAsWorkspace": true,
-            "totalBytes": 0,
-            "availableBytes": 0,
-            "redaction": "path_not_emitted"
-          }
-        ],
-        "tools": [
-          {
-            "name": "cargo",
-            "available": true,
-            "source": "path_lookup_presence_only"
-          },
-          {
-            "name": "rustfmt",
-            "available": true,
-            "source": "path_lookup_presence_only"
-          },
-          {
-            "name": "clippy",
-            "available": false,
-            "source": "path_lookup_presence_only"
-          },
-          {
-            "name": "br",
-            "available": true,
-            "source": "path_lookup_presence_only"
-          },
-          {
-            "name": "bv",
-            "available": true,
-            "source": "path_lookup_presence_only"
-          },
-          {
-            "name": "rch",
-            "available": true,
-            "source": "path_lookup_presence_only"
-          },
-          {
-            "name": "gh",
-            "available": true,
-            "source": "path_lookup_presence_only"
+            "code": "memory_probe_unavailable",
+            "message": "Host memory totals could not be inspected.",
+            "repair": "Run on a platform with /proc/meminfo or provide explicit profile config.",
+            "severity": "warning"
           }
         ],
         "environment": {
-          "tmpdirConfigured": true,
           "cargoTargetDirConfigured": true,
           "rchHintConfigured": false,
-          "redaction": "presence_only"
+          "redaction": "presence_only",
+          "tmpdirConfigured": true
         },
-        "degraded": []
+        "memory": {
+          "availableBytes": null,
+          "cgroupLimitBytes": null,
+          "source": "unavailable",
+          "totalBytes": null
+        },
+        "paths": [
+          {
+            "availableBytes": 0,
+            "exists": true,
+            "label": "workspace",
+            "nearestExistingAncestor": false,
+            "redaction": "path_not_emitted",
+            "role": "workspace_root",
+            "sameFilesystemAsWorkspace": true,
+            "totalBytes": 0
+          },
+          {
+            "availableBytes": 0,
+            "exists": true,
+            "label": "ee_state",
+            "nearestExistingAncestor": false,
+            "redaction": "path_not_emitted",
+            "role": "workspace_state_dir",
+            "sameFilesystemAsWorkspace": true,
+            "totalBytes": 0
+          },
+          {
+            "availableBytes": 0,
+            "exists": true,
+            "label": "database",
+            "nearestExistingAncestor": false,
+            "redaction": "path_not_emitted",
+            "role": "frankensqlite_database",
+            "sameFilesystemAsWorkspace": true,
+            "totalBytes": 0
+          },
+          {
+            "availableBytes": 0,
+            "exists": true,
+            "label": "index",
+            "nearestExistingAncestor": false,
+            "redaction": "path_not_emitted",
+            "role": "frankensearch_index",
+            "sameFilesystemAsWorkspace": true,
+            "totalBytes": 0
+          },
+          {
+            "availableBytes": 0,
+            "exists": false,
+            "label": "cache",
+            "nearestExistingAncestor": true,
+            "redaction": "path_not_emitted",
+            "role": "derived_cache",
+            "sameFilesystemAsWorkspace": true,
+            "totalBytes": 0
+          },
+          {
+            "availableBytes": 0,
+            "exists": true,
+            "label": "temp",
+            "nearestExistingAncestor": false,
+            "redaction": "path_not_emitted",
+            "role": "temporary_directory",
+            "sameFilesystemAsWorkspace": true,
+            "totalBytes": 0
+          },
+          {
+            "availableBytes": 0,
+            "exists": true,
+            "label": "cargo_target",
+            "nearestExistingAncestor": false,
+            "redaction": "path_not_emitted",
+            "role": "build_cache_directory",
+            "sameFilesystemAsWorkspace": true,
+            "totalBytes": 0
+          }
+        ],
+        "redaction": "label_only_paths_presence_only_env",
+        "schema": "ee.profile.probe.v1",
+        "sideEffectFree": true,
+        "tools": [
+          {
+            "available": true,
+            "name": "cargo",
+            "source": "path_lookup_presence_only"
+          },
+          {
+            "available": true,
+            "name": "rustfmt",
+            "source": "path_lookup_presence_only"
+          },
+          {
+            "available": false,
+            "name": "clippy",
+            "source": "path_lookup_presence_only"
+          },
+          {
+            "available": true,
+            "name": "br",
+            "source": "path_lookup_presence_only"
+          },
+          {
+            "available": true,
+            "name": "bv",
+            "source": "path_lookup_presence_only"
+          },
+          {
+            "available": true,
+            "name": "rch",
+            "source": "path_lookup_presence_only"
+          },
+          {
+            "available": true,
+            "name": "gh",
+            "source": "path_lookup_presence_only"
+          }
+        ],
+        "workspace": {
+          "initialized": true,
+          "label": "workspace",
+          "redaction": "path_not_emitted"
+        }
+      },
+      "profile": {
+        "confidence": "medium",
+        "effective": "[PROFILE]",
+        "reasons": [
+          "[HOST_REASON]"
+        ],
+        "recommended": "[PROFILE]"
+      },
+      "repair": null,
+      "schema": "ee.profile.config.plan.v1",
+      "wouldWrite": false
+    },
+    "degraded": [
+      {
+        "code": "heavy_gates_skipped",
+        "message": "2 heavy verification gate(s) skipped by profile: integration_tests, e2e_tests",
+        "repair": "Run skipped gates manually or upgrade to a higher-resource profile.",
+        "severity": "info"
       }
-    }
+    ],
+    "schema": "ee.response.v1",
+    "success": true
   }
 }

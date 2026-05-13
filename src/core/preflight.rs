@@ -12,7 +12,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::core::feedback::{PreflightFeedbackKind, RecordFeedbackReport, TaskOutcome};
@@ -38,6 +38,9 @@ pub const DEFAULT_TRIPWIRE_SOURCE_SCORE: f64 = 0.5;
 
 /// Default maximum number of generated tripwires per run.
 pub const DEFAULT_MAX_GENERATED_TRIPWIRES: usize = 8;
+
+/// Default age after which persisted preflight evidence must be refreshed.
+pub const DEFAULT_STALE_EVIDENCE_DAYS: i64 = 14;
 
 /// Configuration for deterministic tripwire generation.
 #[derive(Clone, Debug, PartialEq)]
@@ -1041,6 +1044,12 @@ pub fn run_preflight(options: &RunOptions) -> Result<RunReport, DomainError> {
             "review_evidence_matches_before_proceeding".to_owned()
         };
     }
+    if let Some(degradation) = stale_preflight_evidence_degradation(&options.workspace, &report)? {
+        report.degraded.push(degradation);
+        if report.next_action == "proceed_after_evidence_review" {
+            report.next_action = "refresh_stale_preflight_evidence_before_proceeding".to_owned();
+        }
+    }
 
     report.status = PreflightStatus::Completed.as_str().to_owned();
     report.completed_at = Some(Utc::now().to_rfc3339());
@@ -1239,6 +1248,45 @@ fn preflight_unavailable_degradation(
     PreflightDegradation::evidence_unavailable(format!("{source_message} {heuristic_message}"))
 }
 
+fn stale_preflight_evidence_degradation(
+    workspace: &Path,
+    report: &RunReport,
+) -> Result<Option<PreflightDegradation>, DomainError> {
+    let store_path = preflight_run_store_path(workspace);
+    let store = read_preflight_run_store(&store_path)?;
+    let now = Utc::now();
+    let stale_before = now - Duration::days(DEFAULT_STALE_EVIDENCE_DAYS);
+    let latest_matching = store
+        .runs
+        .iter()
+        .filter(|stored| stored.report.task_input == report.task_input)
+        .filter(|stored| stored.report.run_id != report.run_id)
+        .filter_map(|stored| {
+            preflight_report_observed_at(&stored.report).map(|observed_at| (stored, observed_at))
+        })
+        .max_by(|(_, left), (_, right)| left.cmp(right));
+
+    let Some((stored, observed_at)) = latest_matching else {
+        return Ok(None);
+    };
+    if observed_at >= stale_before {
+        return Ok(None);
+    }
+
+    Ok(Some(PreflightDegradation::evidence_stale(format!(
+        "Persisted preflight evidence for this task is stale: previous run {} was observed at {}.",
+        stored.report.run_id,
+        observed_at.to_rfc3339()
+    ))))
+}
+
+fn preflight_report_observed_at(report: &RunReport) -> Option<DateTime<Utc>> {
+    let timestamp = report.completed_at.as_deref().unwrap_or(&report.started_at);
+    DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|parsed| parsed.with_timezone(&Utc))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1394,6 +1442,43 @@ mod tests {
             "shown source id",
         )?;
         ensure(shown.degraded.is_empty(), true, "no degraded evidence")
+    }
+
+    #[test]
+    fn run_reports_matching_stale_persisted_preflight_evidence() -> TestResult {
+        let workspace = temp_workspace()?;
+        let mut stale_report = RunReport::new(
+            "pf_stale000000000000000000000000".to_owned(),
+            "prepare release".to_owned(),
+        );
+        stale_report.status = PreflightStatus::Completed.as_str().to_owned();
+        stale_report.started_at = "2000-01-01T00:00:00Z".to_owned();
+        stale_report.completed_at = Some("2000-01-01T00:00:01Z".to_owned());
+
+        let mut store = PreflightRunStoreDocument::default();
+        store.runs.push(StoredPreflightRun {
+            report: stale_report,
+            close_report: None,
+        });
+        write_preflight_run_store(&preflight_run_store_path(workspace.path()), &mut store)
+            .map_err(|error| error.message())?;
+
+        let report = run_preflight(&RunOptions {
+            workspace: workspace.path().to_path_buf(),
+            task_input: "prepare release".to_owned(),
+            persist_run: false,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "preflight_evidence_stale"),
+            true,
+            "stale evidence degradation present",
+        )
     }
 
     #[test]

@@ -1,3 +1,4 @@
+#![allow(clippy::useless_format)]
 //! N4.1 (bd-17c65.14.4.1) — validate the static randomness audit
 //! inventory at `tests/randomness_inventory.json`.
 //!
@@ -275,7 +276,7 @@ fn rows_content_hash_is_present_and_well_formed() -> TestResult {
         hex_part.len() == 64,
         format!(
             "inventory: rows_content_hash hex part has length {}; expected 64 \
-             (SHA-256 hex). The script uses shasum -a 256 as a blake3 \
+             format!(SHA-256 hex). The script uses shasum -a 256 as a blake3 \
              stand-in; bumping the hash algorithm requires updating both the \
              script and this test in the same PR.",
             hex_part.len()

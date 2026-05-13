@@ -1,8 +1,14 @@
 {
   "schema": "ee.failure_mode_fixture.v1",
   "code": "index_corrupt",
-  "introduced_by": { "bead": "bd-17c65.2.1", "epic_letter": "B" },
-  "surfaces": ["search", "context"],
+  "introduced_by": {
+    "bead": "bd-17c65.2.1",
+    "epic_letter": "B"
+  },
+  "surfaces": [
+    "search",
+    "context"
+  ],
   "severity": "high",
   "repair_present": true,
   "trigger": {
@@ -19,6 +25,8 @@
     "message_contains": [
       "index"
     ],
-    "repair_contains": "ee index rebuild"
+    "repair_contains": "ee index rebuild",
+    "repair_string": "ee index rebuild --workspace .",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

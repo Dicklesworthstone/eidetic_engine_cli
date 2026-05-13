@@ -24,6 +24,7 @@
     "message_contains": [
       "Heavy tests require manual invocation"
     ],
-    "repair_contains": "rch exec"
+    "repair_contains": "rch exec",
+    "repair_string": "Use `rch exec -- cargo test` for heavy gates, or configure rch_preferred."
   }
 }

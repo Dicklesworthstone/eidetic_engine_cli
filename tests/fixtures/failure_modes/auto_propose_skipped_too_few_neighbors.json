@@ -24,6 +24,7 @@
       "No tags were supplied",
       "proposal"
     ],
-    "repair_contains": "ee remember --tags"
+    "repair_contains": "ee remember --tags",
+    "repair_string": "Use `ee remember --tags <tag>` for memories that should participate in proposal clustering."
   }
 }

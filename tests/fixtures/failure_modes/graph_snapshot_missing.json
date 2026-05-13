@@ -24,6 +24,8 @@
     "message_contains": [
       "No graph snapshot exists"
     ],
-    "repair_contains": "ee graph centrality-refresh"
+    "repair_contains": "ee graph centrality-refresh",
+    "repair_string": "ee graph centrality-refresh",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

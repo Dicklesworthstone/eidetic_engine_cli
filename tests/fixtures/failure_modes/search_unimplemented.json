@@ -11,11 +11,11 @@
   "severity": "high",
   "repair_present": true,
   "trigger": {
-    "description": "The binary was built without the search implementation.",
+    "description": "The diagnostics capability-gap override forces search to report as unimplemented.",
     "setup_commands": [
-      "# build fixture binary without search support"
+      "export EE_DIAG_FORCE_CAPABILITY_GAP=search"
     ],
-    "invocation": "ee status --workspace . --json"
+    "invocation": "EE_DIAG_FORCE_CAPABILITY_GAP=search ee status --workspace . --json"
   },
   "expected_emission": {
     "code": "search_unimplemented",
@@ -23,6 +23,7 @@
     "message_contains": [
       "Search has no compiled implementation"
     ],
-    "repair_contains": "search support"
+    "repair_contains": "search support",
+    "repair_string": "Use a binary built with search support enabled."
   }
 }

@@ -15,7 +15,7 @@
     "setup_commands": [
       "ee init --workspace ."
     ],
-    "invocation": "ee job run decay_sweep --time-limit-ms 0 --workspace . --json"
+    "invocation": "ee job run decay_sweep --item-limit 0 --workspace . --json"
   },
   "expected_emission": {
     "code": "maintenance_job_cancelled",

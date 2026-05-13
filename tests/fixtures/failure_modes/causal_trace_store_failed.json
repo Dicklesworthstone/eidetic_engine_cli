@@ -11,12 +11,15 @@
   "severity": "warning",
   "repair_present": false,
   "trigger": {
-    "description": "Causal trace storage opens, but reading trace rows returns a storage error.",
+    "description": "Causal trace storage opens, but the persisted causal ledger contains a rejected cycle.",
     "setup_commands": [
       "ee init --workspace .",
-      "# use a fixture that makes causal trace row reads fail"
+      "ee remember 'Cycle failure.' --level episodic --kind failure --workspace . --json",
+      "ee remember 'Cycle root.' --level episodic --kind root-cause --workspace . --json",
+      "ee diag causal-edge --edge-id cev_j6_trace_store_cycle_a --failure-id <failure-memory-id> --candidate-cause-id <root-memory-id> --workspace . --json",
+      "ee diag causal-edge --edge-id cev_j6_trace_store_cycle_b --failure-id <root-memory-id> --candidate-cause-id <failure-memory-id> --workspace . --json"
     ],
-    "invocation": "ee causal trace failure-1 --workspace . --json"
+    "invocation": "ee causal trace <failure-memory-id> --database .ee/ee.db --database-workspace-id <workspace-id> --workspace . --json"
   },
   "expected_emission": {
     "code": "causal_trace_store_failed",

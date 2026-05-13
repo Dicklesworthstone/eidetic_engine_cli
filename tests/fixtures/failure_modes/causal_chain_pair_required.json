@@ -11,7 +11,7 @@
   "severity": "warning",
   "repair_present": false,
   "trigger": {
-    "description": "Persisted causal chain comparison is requested without two chain ids.",
+    "description": "Persisted causal chain comparison is requested with a blank second chain id.",
     "setup_commands": [
       "ee init --workspace ."
     ],

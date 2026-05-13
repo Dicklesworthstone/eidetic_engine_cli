@@ -5,7 +5,7 @@ schema:
   query_file: ee.query.v1
   response: ee.response.v1
 contracts:
-  - output.explain=true is accepted and reports that JSON packs already include selection certificates and per-item why details
+  - output.explain=true is accepted and reports that JSON packs already include selection audits and per-item why details
   - output.explain rejects non-boolean values with stable machine errors
   - budget.maxResults constrains candidate count through the query-file execution path
   - maxResults appears in the request echo or degradation metadata so users can verify it was applied

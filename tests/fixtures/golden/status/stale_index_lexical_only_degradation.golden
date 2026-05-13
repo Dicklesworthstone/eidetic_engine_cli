@@ -7,6 +7,9 @@
       "runtime": "ready",
       "storage": "ready",
       "search": "degraded",
+      "output": {
+        "toon": "ready"
+      },
       "agentDetection": "ready"
     },
     "memoryHealth": {

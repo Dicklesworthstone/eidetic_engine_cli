@@ -14,7 +14,7 @@
     "description": "An index publish lock is held while index vacuum previews reclaimable files.",
     "setup_commands": [
       "ee init --workspace .",
-      "# write an active index publish lock row through a test harness"
+      "ee diag advisory-lock --workspace . --resource-type index --holder j6-index-lock-holder --ttl-seconds 3600 --reason 'j6 index lock fixture' --json"
     ],
     "invocation": "ee index vacuum --workspace . --json"
   },
@@ -25,6 +25,7 @@
       "index publish lock",
       "currently held"
     ],
-    "repair_contains": "Wait for the active index operation"
+    "repair_contains": "Wait for the active index operation",
+    "repair_string": "Wait for the active index operation to finish, then retry ee index vacuum --workspace . --json."
   }
 }

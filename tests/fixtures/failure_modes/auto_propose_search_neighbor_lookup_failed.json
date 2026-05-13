@@ -11,12 +11,13 @@
   "severity": "info",
   "repair_present": true,
   "trigger": {
-    "description": "Frankensearch neighbor lookup is unavailable during remember-time curation proposal, so proposal falls back to tag-overlap clustering.",
+    "description": "Frankensearch neighbor lookup is disabled during remember-time curation proposal, so proposal falls back to tag-overlap clustering.",
     "setup_commands": [
       "ee init --workspace .",
-      "ee remember 'Tagged cluster seed.' --workspace . --tags cluster"
+      "ee remember 'Tagged cluster seed.' --workspace . --tags cluster --no-propose-candidates",
+      "export EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS=1"
     ],
-    "invocation": "ee remember 'Tagged cluster follow-up.' --workspace . --tags cluster --json"
+    "invocation": "EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS=1 ee remember 'Tagged cluster follow-up.' --workspace . --tags cluster --json"
   },
   "expected_emission": {
     "code": "auto_propose_search_neighbor_lookup_failed",
@@ -25,6 +26,7 @@
       "Frankensearch neighbor lookup",
       "unavailable"
     ],
-    "repair_contains": "tag-overlap"
+    "repair_contains": "tag-overlap",
+    "repair_string": "Falling back to deterministic tag-overlap clustering."
   }
 }

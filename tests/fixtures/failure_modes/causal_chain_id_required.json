@@ -12,11 +12,11 @@
   "severity": "warning",
   "repair_present": false,
   "trigger": {
-    "description": "A causal estimate or promotion helper requires a persisted chain id but none was supplied.",
+    "description": "A persisted-chain causal estimate is explicitly requested with a blank chain id.",
     "setup_commands": [
       "ee init --workspace ."
     ],
-    "invocation": "ee causal estimate --workspace . --json"
+    "invocation": "ee causal estimate --chain-id \"\" --workspace . --json"
   },
   "expected_emission": {
     "code": "causal_chain_id_required",

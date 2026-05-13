@@ -7,7 +7,7 @@ interpret stale evidence warnings, and how to attach safe support artifacts.
 
 Context packs are the primary `ee` user experience (ADR 0007). A pack includes:
 - Selected memories with provenance and explanations
-- A selection certificate proving deterministic ranking
+- A selection audit describing the deterministic ranking method
 - Score components, token estimates, and diversity keys
 - Degradation records when dependencies are unavailable
 

@@ -26,6 +26,8 @@
       "Unknown field",
       "--fields"
     ],
-    "repair_contains": "ee schema list"
+    "repair_contains": "ee schema list",
+    "repair_string": "Run `ee schema list --json` and choose a canonical field name.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
   }
 }

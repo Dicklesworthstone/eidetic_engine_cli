@@ -13,9 +13,9 @@
   "trigger": {
     "description": "Science analytics were compiled, but the backend dependency is unavailable.",
     "setup_commands": [
-      "# run science diagnostics with an unavailable analytics backend"
+      "export EE_SCIENCE_BACKEND_PATH=./missing-science-backend"
     ],
-    "invocation": "ee analyze science-status --json"
+    "invocation": "EE_SCIENCE_BACKEND_PATH=./missing-science-backend ee analyze science-status --json"
   },
   "expected_emission": {
     "code": "science_backend_unavailable",

@@ -15,9 +15,10 @@
     "description": "One or more curation candidates could not be evaluated against TTL policy.",
     "setup_commands": [
       "ee init --workspace .",
-      "# seed curation candidate with TTL policy evaluation error"
+      "ee remember --workspace . --level semantic --kind fact 'J6 curation missing_policy target memory.' --json",
+      "ee diag curation-candidate --workspace . --candidate-id curate_j6000000000000000000000002 --candidate-type deprecate --status pending --target-memory-id <memory-id> --source-type feedback_event --source-id j6-ttl_blocked --reason 'J6 missing TTL policy fixture' --confidence 0.8 --created-at 2026-05-01T00:00:00Z --review-state new --state-entered-at 2026-05-01T00:00:00Z --ttl-policy-id curation.j6.missing --json"
     ],
-    "invocation": "ee status --workspace . --json"
+    "invocation": "ee --fields full status --workspace . --json"
   },
   "expected_emission": {
     "code": "curation_ttl_blocked",
@@ -26,6 +27,8 @@
       "could not be evaluated",
       "TTL policy"
     ],
-    "repair_contains": "ee curate disposition"
+    "repair_contains": "ee curate disposition",
+    "repair_string": "Run `ee curate disposition --json` for candidate-level errors.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
   }
 }

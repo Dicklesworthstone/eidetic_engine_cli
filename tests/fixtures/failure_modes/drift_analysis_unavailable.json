@@ -13,15 +13,15 @@
   "trigger": {
     "description": "Drift analysis cannot run because the science analytics capability is unavailable.",
     "setup_commands": [
-      "# run drift analysis in a build or environment without science analytics"
+      "export EE_SCIENCE_BACKEND_PATH=./missing-science-backend"
     ],
-    "invocation": "ee analyze drift --workspace . --json"
+    "invocation": "EE_SCIENCE_BACKEND_PATH=./missing-science-backend ee analyze drift --workspace . --json"
   },
   "expected_emission": {
     "code": "drift_analysis_unavailable",
     "severity": "high",
     "message_contains": [
-      "drift analysis",
+      "Drift analysis",
       "unavailable"
     ],
     "repair_contains": "science"

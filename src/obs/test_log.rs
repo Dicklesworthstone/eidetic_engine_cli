@@ -42,6 +42,10 @@ pub const ENV_TEST_LOG_PATH: &str = EnvVar::TestLogPath.name();
 pub const ENV_TEST_LOG_LEVEL: &str = EnvVar::TestLogLevel.name();
 /// Env var naming the current test scenario.
 pub const ENV_TEST_LOG_TEST_ID: &str = EnvVar::TestLogTestId.name();
+/// S7 benchmark gate degraded code for measurements beyond tolerance.
+pub const SWARM_SCALE_BUDGET_EXCEEDED_CODE: &str = "swarm_scale_budget_exceeded";
+/// S7 benchmark gate degraded code for non-identical normalized outputs.
+pub const SWARM_SCALE_NONDETERMINISM_CODE: &str = "swarm_scale_nondeterminism";
 
 /// Event kinds emitted by the harness. `timer_lap` is suppressed at the
 /// `normal` level; everything else is always emitted when a log path is
@@ -73,6 +77,8 @@ pub enum EventKind {
     SchemaGate,
     /// Output field selector application summary.
     FieldSelector,
+    /// Performance benchmark iteration summary emitted by scripts/bench.sh.
+    BenchIteration,
 }
 
 impl EventKind {
@@ -91,11 +97,12 @@ impl EventKind {
             Self::VolatileStrip => "volatile_strip",
             Self::SchemaGate => "schema_gate",
             Self::FieldSelector => "field_selector",
+            Self::BenchIteration => "bench_iteration",
         }
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 12] {
+    pub const fn all() -> [Self; 13] {
         [
             Self::CommandStart,
             Self::CommandEnd,
@@ -109,6 +116,7 @@ impl EventKind {
             Self::VolatileStrip,
             Self::SchemaGate,
             Self::FieldSelector,
+            Self::BenchIteration,
         ]
     }
 }

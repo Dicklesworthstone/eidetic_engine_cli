@@ -681,6 +681,13 @@ pub struct ResumeOptions {
     /// want the structured data. Defaults to `true`.
     /// Bead bd-17c65.13.2 (M1).
     pub include_prompt_fragment: bool,
+    /// When true, any non-zero drift between the capsule's captured
+    /// workspace state and the current workspace state turns the
+    /// resume into an error (`handoff_snapshot_stale`, exit code 6 —
+    /// degraded). When false (default), drift surfaces as a
+    /// `degraded[]` entry but the resume still completes.
+    /// Bead bd-17c65.13.5 (M4).
+    pub require_fresh: bool,
 }
 
 impl Default for ResumeOptions {
@@ -694,6 +701,7 @@ impl Default for ResumeOptions {
             bound_workspace_id: None,
             bound_workspace_identity: None,
             include_prompt_fragment: true,
+            require_fresh: false,
         }
     }
 }
@@ -878,6 +886,55 @@ pub struct ResumeReport {
     /// `workspace_mismatch` is derived from it via
     /// `to_mismatch_severity()` so both fields stay in sync.
     pub workspace_match: Option<WorkspaceMatch>,
+    /// Memory-set drift between capsule capture and resume time
+    /// (M4 / bd-17c65.13.5). Always present in the resume output even
+    /// when no drift is detected — agents inspect `drift_detected` to
+    /// decide whether to refresh. `None` only when the capsule did
+    /// not carry a captured state hash (legacy capsules pre-M3) or
+    /// the current state hash could not be computed (no database).
+    pub stale_snapshot: Option<StaleSnapshot>,
+}
+
+/// Memory-set drift report comparing the workspace state at capsule
+/// capture against the workspace state at resume time
+/// (M4 / bd-17c65.13.5).
+///
+/// Phase-1 ships hash-based drift detection: any change to the
+/// non-tombstoned memory set's content/level/kind/tags projection
+/// flips `drift_detected` to `true`. The per-signal counts
+/// (`memories_added_since` et al.) report `None` ("unknown") in
+/// phase 1 because they require the capsule to embed the memory ID
+/// set at capture time. That richer capture is tracked as a
+/// follow-up bead.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StaleSnapshot {
+    /// Workspace state hash captured when the capsule was created.
+    /// 16-char hex BLAKE3 prefix. `None` only for legacy capsules
+    /// captured before M3.
+    pub captured_state_hash: Option<String>,
+    /// Workspace state hash recomputed at resume time. `None` when
+    /// the workspace database is unavailable (e.g. resuming from a
+    /// capsule against a directory that no longer has `.ee/ee.db`).
+    pub current_state_hash: Option<String>,
+    /// True when both hashes are available and differ. The honest
+    /// fail-closed default: when either hash is missing, drift is
+    /// reported as `false` — we lack the evidence to claim drift.
+    /// Callers that want strict mode pass `require_fresh: true` and
+    /// inspect the degraded array directly.
+    pub drift_detected: bool,
+    /// Count of new memories created in the workspace after the
+    /// capsule's capture timestamp. `None` in phase 1 because the
+    /// capsule does not embed the captured memory ID set; emitting
+    /// `Some(0)` would be a lie when in fact we cannot tell.
+    pub memories_added_since: Option<u64>,
+    /// Count of capsule-included memories whose `valid_to` has
+    /// elapsed since capture. `None` in phase 1 for the same reason.
+    pub memories_expired_since: Option<u64>,
+    /// Count of capsule-included memories whose content hash has
+    /// changed since capture. `None` until N15.1 (immutable
+    /// revisions) lands; the underlying content_hash mutation
+    /// pathway is not yet observable.
+    pub memories_revised_since: Option<u64>,
 }
 
 /// A memory selected for the resume payload.
@@ -920,6 +977,7 @@ impl ResumeReport {
             prompt_fragment: None,
             workspace_mismatch: WorkspaceMismatchSeverity::None,
             workspace_match: None,
+            stale_snapshot: None,
             resumed_at: Utc::now().to_rfc3339(),
         }
     }
@@ -1852,6 +1910,37 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
         }
     }
 
+    // Bead bd-17c65.13.5 (M4): stale-snapshot detection. Compare the
+    // workspace_state_hash captured in the capsule body against the
+    // current workspace_state_hash recomputed from the live database.
+    // When both hashes are available and differ, fire
+    // `handoff_snapshot_stale` so the agent knows the resumed pack
+    // may have drifted from current ground truth. When
+    // `require_fresh` is set, drift converts to a hard error.
+    let stale = compute_stale_snapshot_state(&capsule, &options.workspace);
+    if let Some(s) = &stale {
+        if s.drift_detected {
+            report.degradations.push(
+                DegradationInfo::new(
+                    "handoff_snapshot_stale",
+                    "Workspace memory set has drifted since this capsule was captured; the resumed pack may not reflect current ground truth.".to_owned(),
+                )
+                .with_next_action("ee handoff create --workspace . --refresh"),
+            );
+        }
+    }
+    report.stale_snapshot = stale;
+    if options.require_fresh {
+        if let Some(s) = &report.stale_snapshot {
+            if s.drift_detected {
+                return Err(DomainError::UnsatisfiedDegradedMode {
+                    message: "Capsule snapshot is stale and --require-fresh was set; refresh the capsule before resuming.".to_owned(),
+                    repair: Some("ee handoff create --workspace . --refresh".to_owned()),
+                });
+            }
+        }
+    }
+
     // Bead bd-17c65.13.2 (M1): prompt fragment. Render a markdown body
     // the next agent can prepend to its prompt. Stable structure for
     // greppability; pack.text in A4 follows the same pattern.
@@ -1860,6 +1949,43 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
     }
 
     Ok(report)
+}
+
+/// Compute the stale-snapshot drift report by comparing the capsule's
+/// embedded `workspace_state_hash` against the current workspace
+/// state. Returns `None` only when neither side carries a hash —
+/// otherwise emits a `StaleSnapshot` with explicit `Some`/`None`
+/// fields so downstream callers know exactly what's measurable.
+/// Bead bd-17c65.13.5 (M4).
+fn compute_stale_snapshot_state(
+    capsule: &serde_json::Value,
+    workspace_path: &Path,
+) -> Option<StaleSnapshot> {
+    let captured = capsule
+        .get("workspace_state_hash")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+
+    let db_path = workspace_path.join(".ee").join("ee.db");
+    let current = compute_workspace_state_hash(&db_path);
+
+    if captured.is_none() && current.is_none() {
+        return None;
+    }
+
+    let drift_detected = match (captured.as_deref(), current.as_deref()) {
+        (Some(a), Some(b)) => a != b,
+        _ => false,
+    };
+
+    Some(StaleSnapshot {
+        captured_state_hash: captured,
+        current_state_hash: current,
+        drift_detected,
+        memories_added_since: None,
+        memories_expired_since: None,
+        memories_revised_since: None,
+    })
 }
 
 /// Render the ready-to-prepend markdown body for `ee handoff resume`.

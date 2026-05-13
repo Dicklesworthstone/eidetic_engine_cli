@@ -14,7 +14,8 @@
     "description": "Search encounters an indexed memory whose validity timestamp is malformed and excludes it from results.",
     "setup_commands": [
       "ee init --workspace .",
-      "# inject a malformed valid_from or valid_to timestamp through a fixture harness"
+      "ee remember --workspace . --level semantic --kind fact 'J6 malformed validity marker.' --json",
+      "ee diag memory-validity --workspace . --memory-id <memory-id> --valid-to not-a-time --json"
     ],
     "invocation": "ee search 'malformed validity marker' --workspace . --json"
   },
@@ -24,6 +25,7 @@
     "message_contains": [
       "malformed validity timestamps"
     ],
-    "repair_contains": "ee why"
+    "repair_contains": "ee why",
+    "repair_string": "Use `ee why <memory-id> --json` or `ee doctor --json` to inspect validity metadata."
   }
 }

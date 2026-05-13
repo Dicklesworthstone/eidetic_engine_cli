@@ -247,11 +247,23 @@ fn failure_mode_fixtures_pinned_repairs_are_consistent() -> TestResult {
 
 #[test]
 fn failure_mode_fixtures_show_some_pinned_coverage() -> TestResult {
-    // Soft floor: at least 5 fixtures must have a pinning field
-    // populated (so the contract is exercised and we have working
-    // examples for future backfill agents to copy). The full backfill
-    // across all 138 `repair_present: true` fixtures is tracked
-    // separately under follow-up `bd-17c65.10.6.1.1`.
+    // Ratcheted floor for the J6.1.1 backfill (bd-17c65.10.6.1.1).
+    //
+    // The floor only ratchets UP — never down. It is the minimum count
+    // of fixtures that MUST carry a pinned `repair_string` or
+    // `repair_strings` field. When new fixtures are added with pinned
+    // repairs, raise this constant in the same PR. When new fixtures
+    // are added without pinning, the floor stays where it is and the
+    // unpinned fixtures contribute backfill debt against
+    // `bd-17c65.10.6.1.1`.
+    //
+    // History:
+    //   - 2026-05-13 J6.1 seed: 6 pinned (swarm-brief connector codes).
+    //   - 2026-05-13 J6.1.1 first backfill pass: 82 pinned via
+    //     `scripts/audit_randomness_sources.sh`-pattern grep + jq
+    //     patching against verified production literals.
+    const PINNED_FLOOR: usize = 80;
+
     let dir = fixtures_dir();
     let fixtures = list_fixture_files(&dir)?;
     let mut pinned_count = 0usize;
@@ -276,11 +288,13 @@ fn failure_mode_fixtures_show_some_pinned_coverage() -> TestResult {
         }
     }
     ensure(
-        pinned_count >= 5,
+        pinned_count >= PINNED_FLOOR,
         format!(
-            "J6.1 expects at least 5 fixtures to be pinned with `repair_string` \
-             or `repair_strings`; found {pinned_count}. Add pinning to more \
-             fixtures or open `bd-17c65.10.6.1.1` to track backfill progress."
+            "J6.1.1 floor: at least {PINNED_FLOOR} fixtures must be pinned with \
+             `repair_string` or `repair_strings`; found {pinned_count}. The floor \
+             ratchets UP only — never down. If you removed a pinned fixture, pin \
+             a replacement to keep the floor satisfied OR raise the floor when \
+             adding new pinned fixtures."
         ),
     )
 }

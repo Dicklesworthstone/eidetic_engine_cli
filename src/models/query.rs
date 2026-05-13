@@ -38,6 +38,123 @@ impl QueryFilters {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MemoryScope {
+    SelfOnly,
+    Team,
+    Workspace,
+    Verified,
+    #[default]
+    Swarm,
+}
+
+impl MemoryScope {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SelfOnly => "self",
+            Self::Team => "team",
+            Self::Workspace => "workspace",
+            Self::Verified => "verified",
+            Self::Swarm => "swarm",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "self" => Some(Self::SelfOnly),
+            "team" => Some(Self::Team),
+            "workspace" => Some(Self::Workspace),
+            "verified" => Some(Self::Verified),
+            "swarm" => Some(Self::Swarm),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoryScopeStats {
+    pub scope_applied: MemoryScope,
+    pub strict_scope: bool,
+    pub current_agent: Option<String>,
+    pub team_size: usize,
+    pub candidates_total: usize,
+    pub candidates_in_scope: usize,
+    pub candidates_excluded_by_scope: usize,
+    pub strict_violations: usize,
+    pub excluded_memory_ids: Vec<String>,
+}
+
+impl MemoryScopeStats {
+    #[must_use]
+    pub fn new(
+        scope_applied: MemoryScope,
+        strict_scope: bool,
+        current_agent: Option<String>,
+        team_size: usize,
+    ) -> Self {
+        Self {
+            scope_applied,
+            strict_scope,
+            current_agent,
+            team_size,
+            candidates_total: 0,
+            candidates_in_scope: 0,
+            candidates_excluded_by_scope: 0,
+            strict_violations: 0,
+            excluded_memory_ids: Vec::new(),
+        }
+    }
+
+    pub fn record_candidate(&mut self, in_scope: bool) {
+        self.record_candidate_id(in_scope, None);
+    }
+
+    pub fn record_candidate_id(&mut self, in_scope: bool, memory_id: Option<&str>) {
+        self.candidates_total = self.candidates_total.saturating_add(1);
+        if in_scope {
+            self.candidates_in_scope = self.candidates_in_scope.saturating_add(1);
+        } else {
+            self.candidates_excluded_by_scope = self.candidates_excluded_by_scope.saturating_add(1);
+            self.strict_violations = self.strict_violations.saturating_add(1);
+            if let Some(memory_id) = memory_id {
+                self.excluded_memory_ids.push(memory_id.to_owned());
+            }
+        }
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        self.candidates_total = self.candidates_total.saturating_add(other.candidates_total);
+        self.candidates_in_scope = self
+            .candidates_in_scope
+            .saturating_add(other.candidates_in_scope);
+        self.candidates_excluded_by_scope = self
+            .candidates_excluded_by_scope
+            .saturating_add(other.candidates_excluded_by_scope);
+        self.strict_violations = self
+            .strict_violations
+            .saturating_add(other.strict_violations);
+        self.excluded_memory_ids
+            .extend(other.excluded_memory_ids.iter().cloned());
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "scopeApplied": self.scope_applied.as_str(),
+            "strictScope": self.strict_scope,
+            "currentAgent": self.current_agent,
+            "teamSize": self.team_size,
+            "candidatesTotal": self.candidates_total,
+            "candidatesInScope": self.candidates_in_scope,
+            "candidatesExcludedByScope": self.candidates_excluded_by_scope,
+            "strictViolations": self.strict_violations,
+            "excludedMemoryIds": &self.excluded_memory_ids,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct QueryTemporalFilters {
     pub after: Option<DateTime<Utc>>,
@@ -1464,6 +1581,27 @@ mod tests {
             Ok(_) => Err("confidence filter should reject invalid input".to_owned()),
             Err(err) => Ok(err),
         }
+    }
+
+    #[test]
+    fn memory_scope_stats_carry_excluded_memory_ids() {
+        let mut stats =
+            MemoryScopeStats::new(MemoryScope::Verified, true, Some("BlueLake".to_owned()), 2);
+
+        stats.record_candidate_id(true, Some("mem-in-scope"));
+        stats.record_candidate_id(false, Some("mem-excluded"));
+
+        let json = stats.data_json();
+        assert_eq!(json["scopeApplied"], "verified");
+        assert_eq!(json["strictScope"], true);
+        assert_eq!(json["candidatesTotal"], 2);
+        assert_eq!(json["candidatesInScope"], 1);
+        assert_eq!(json["candidatesExcludedByScope"], 1);
+        assert_eq!(json["strictViolations"], 1);
+        assert_eq!(
+            json["excludedMemoryIds"],
+            serde_json::json!(["mem-excluded"])
+        );
     }
 
     #[test]

@@ -14,9 +14,10 @@
     "description": "The memory was persisted, but bounded workflow auto-linking failed.",
     "setup_commands": [
       "ee init --workspace .",
-      "# induce memory link index/storage failure through a test harness"
+      "ee remember 'J6 workflow auto-link seed.' --workflow j6-auto-link --no-propose-candidates --workspace . --json",
+      "ee diag database-skew --workspace . --in-place --skew memory-links-table-unavailable --json"
     ],
-    "invocation": "ee remember 'Workflow link fixture.' --workspace . --workflow wf-j6 --json"
+    "invocation": "ee remember 'J6 workflow auto-link trigger.' --workflow j6-auto-link --no-propose-candidates --workspace . --json"
   },
   "expected_emission": {
     "code": "remember_auto_link_failed",
@@ -25,6 +26,8 @@
       "Remembered the memory",
       "workflow auto-linking failed"
     ],
-    "repair_contains": "memory link indexes"
+    "repair_contains": "memory link indexes",
+    "repair_string": "Run `ee doctor --json` and inspect memory link indexes.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
   }
 }

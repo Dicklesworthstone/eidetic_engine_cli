@@ -3,118 +3,138 @@ source: tests/json_contract_snapshots.rs
 expression: why
 ---
 {
-  "schema": "ee.response.v1",
-  "success": true,
   "data": {
     "command": "why",
-    "version": "0.1.0",
-    "memoryId": "mem_00000000000000000000000001",
+    "content": "Run cargo fmt --check before release.",
+    "contradictions": [],
+    "degraded": [
+      {
+        "code": "why_evidence_freshness_missing_source",
+        "message": "Memory mem_00000000000000000000000001 evidence freshness is missing_source: Referenced provenance file [WORKSPACE]/AGENTS.md is missing.",
+        "repair": "Restore the file or revise the memory provenance URI; rebuild the index if the memory content changes.",
+        "severity": "low"
+      }
+    ],
     "found": true,
-    "storage": {
-      "origin": "Explicitly remembered via `ee remember`",
-      "trustClass": "human_explicit",
-      "trustSubclass": "project-rule",
-      "provenanceUri": "file://AGENTS.md#L164-173",
-      "workflowId": null,
-      "createdAt": "[TIMESTAMP]",
-      "validFrom": null,
-      "validTo": null,
-      "validityStatus": "unknown",
-      "validityWindowKind": "unbounded"
+    "graphRetrievalFeatures": {
+      "authorityScore": 0.0,
+      "betweenness": {
+        "contribution": 0.0,
+        "formula": "metric unavailable",
+        "normalized": 0.0,
+        "rank": null,
+        "raw": 0.0,
+        "weight": 0.0
+      },
+      "centralityFormula": "centrality_score = 0.6 * pagerank.normalized + 0.4 * betweenness.normalized",
+      "centralityScore": 0.0,
+      "communityId": null,
+      "contradictionCount": 0,
+      "degraded": [
+        {
+          "code": "graph_snapshot_missing",
+          "message": "No persisted graph snapshot exists for feature enrichment.",
+          "repair": "ee graph centrality-refresh",
+          "severity": "medium"
+        },
+        {
+          "code": "graph_query_relative_features_unavailable",
+          "message": "Community and query-seed graph features are present as stable fields but unavailable without community detection and query-seed expansion.",
+          "repair": "ee graph communities && ee search --explain",
+          "severity": "low"
+        }
+      ],
+      "distanceToQuerySeed": null,
+      "evidenceSupportCount": 0,
+      "hubScore": 0.0,
+      "labels": [],
+      "orphanPenalty": 1.0,
+      "orphanPenaltyFormula": "orphan_penalty = 1.0 when no incident memory_links exist, else 0.0",
+      "pagerank": {
+        "contribution": 0.0,
+        "formula": "metric unavailable",
+        "normalized": 0.0,
+        "rank": null,
+        "raw": 0.0,
+        "weight": 0.0
+      },
+      "reasons": [],
+      "sameClusterAsTopResult": null,
+      "source": {
+        "graphType": "memory_links",
+        "kind": "graph_snapshot",
+        "snapshot": null,
+        "workspaceId": "[WORKSPACE_ID]"
+      },
+      "staleBridgePenalty": 0.0,
+      "staleBridgePenaltyFormula": "stale_bridge_penalty = betweenness.normalized when validity_status is expired, else 0.0",
+      "status": "scores_unavailable"
     },
+    "history": {
+      "entries": [
+        {
+          "action": "search.returned_mem",
+          "actor": null,
+          "auditId": "[AUDIT_ID]",
+          "details": "{\"queryHash\":\"blake3:e7a628a91b8c840c\",\"rank\":1,\"score\":0.032786883413791656,\"source\":\"hybrid\"}",
+          "timestamp": "[TIMESTAMP]"
+        }
+      ],
+      "totalCount": 1,
+      "truncated": false
+    },
+    "lifecycle": {
+      "status": "active",
+      "tombstoned_at": null,
+      "tombstoned_reason": null
+    },
+    "links": [],
+    "memoryId": "mem_00000000000000000000000001",
     "retrieval": {
       "confidence": 0.92,
-      "utility": 0.8,
       "importance": 0.7,
+      "kind": "rule",
+      "level": "procedural",
       "tags": [
         "cargo",
         "formatting"
       ],
-      "level": "procedural",
-      "kind": "rule"
-    },
-    "graphRetrievalFeatures": {
-      "status": "scores_unavailable",
-      "source": {
-        "kind": "graph_snapshot",
-        "workspaceId": "[WORKSPACE_ID]",
-        "graphType": "memory_links",
-        "snapshot": null
-      },
-      "centralityScore": 0.0,
-      "authorityScore": 0.0,
-      "hubScore": 0.0,
-      "communityId": null,
-      "distanceToQuerySeed": null,
-      "sameClusterAsTopResult": null,
-      "evidenceSupportCount": 0,
-      "contradictionCount": 0,
-      "orphanPenalty": 1.0,
-      "staleBridgePenalty": 0.0,
-      "pagerank": {
-        "raw": 0.0,
-        "normalized": 0.0,
-        "rank": null,
-        "weight": 0.0,
-        "contribution": 0.0,
-        "formula": "metric unavailable"
-      },
-      "betweenness": {
-        "raw": 0.0,
-        "normalized": 0.0,
-        "rank": null,
-        "weight": 0.0,
-        "contribution": 0.0,
-        "formula": "metric unavailable"
-      },
-      "labels": [],
-      "reasons": [],
-      "centralityFormula": "centrality_score = 0.6 * pagerank.normalized + 0.4 * betweenness.normalized",
-      "orphanPenaltyFormula": "orphan_penalty = 1.0 when no incident memory_links exist, else 0.0",
-      "staleBridgePenaltyFormula": "stale_bridge_penalty = betweenness.normalized when validity_status is expired, else 0.0",
-      "degraded": [
-        {
-          "code": "graph_snapshot_missing",
-          "severity": "medium",
-          "message": "No persisted graph snapshot exists for feature enrichment.",
-          "repair": "ee graph centrality-refresh"
-        },
-        {
-          "code": "graph_query_relative_features_unavailable",
-          "severity": "low",
-          "message": "Community and query-seed graph features are present as stable fields but unavailable without community detection and query-seed expansion.",
-          "repair": "ee graph communities && ee search --explain"
-        }
-      ]
+      "utility": 0.8
     },
     "selection": {
-      "selectionScore": 0.84,
       "aboveConfidenceThreshold": true,
       "isActive": true,
-      "scoreBreakdown": "selection_score = 0.5 * confidence(0.92) + 0.3 * utility(0.80) + 0.2 * importance(0.70) = 0.84",
       "latestPackSelection": {
-        "packId": "[PACK_ID]",
-        "query": "format before release",
-        "profile": "compact",
-        "rank": 1,
-        "section": "procedural_rules",
         "estimatedTokens": 8,
-        "relevance": 0.91,
-        "utility": 0.8,
-        "why": "Selected because the memory matches release-formatting work.",
         "packHash": "[HASH]",
-        "selectedAt": "[TIMESTAMP]"
-      }
+        "packId": "[PACK_ID]",
+        "profile": "compact",
+        "query": "format before release",
+        "rank": 1,
+        "relevance": 0.91,
+        "section": "procedural_rules",
+        "selectedAt": "[TIMESTAMP]",
+        "utility": 0.8,
+        "why": "Selected because the memory matches release-formatting work."
+      },
+      "scoreBreakdown": "selection_score = 0.5 * confidence(0.92) + 0.3 * utility(0.80) + 0.2 * importance(0.70) = 0.84",
+      "selectionScore": 0.84
     },
-    "contradictions": [],
-    "links": [],
-    "degraded": [
-      {
-        "code": "why_evidence_freshness_missing_source",
-        "severity": "low",
-        "message": "Memory mem_00000000000000000000000001 evidence freshness is missing_source: Referenced provenance file [WORKSPACE]/AGENTS.md is missing.",
-        "repair": "Restore the file or revise the memory provenance URI; rebuild the index if the memory content changes."
-      }
-    ]
-  }
+    "storage": {
+      "createdAt": "[TIMESTAMP]",
+      "origin": "Explicitly remembered via `ee remember`",
+      "provenanceUri": "file://AGENTS.md#L164-173",
+      "trustClass": "human_explicit",
+      "trustSubclass": "project-rule",
+      "validFrom": null,
+      "validTo": null,
+      "validityStatus": "unknown",
+      "validityWindowKind": "unbounded",
+      "workflowId": null
+    },
+    "verificationEvidence": [],
+    "version": "0.1.0"
+  },
+  "schema": "ee.response.v1",
+  "success": true
 }

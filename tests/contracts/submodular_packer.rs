@@ -247,26 +247,23 @@ fn normalize_content(content: &str) -> String {
 #[test]
 fn pack_skipped_list_replaces_rejected_frontier() -> TestResult {
     let draft = submodular_draft()?;
-    let certificate = &draft.selection_certificate;
-    ensure(
-        !certificate.selected_items.is_empty(),
-        "selected items present",
-    )?;
+    let audit = &draft.selection_audit;
+    ensure(!audit.selected_items.is_empty(), "selected items present")?;
     ensure(
         !draft.skipped_for_output().is_empty(),
         "skipped items present",
     )?;
     ensure(
-        certificate.steps.iter().all(|step| step.token_cost > 0),
+        audit.steps.iter().all(|step| step.token_cost > 0),
         "steps include token costs",
     )?;
     ensure(
-        certificate.steps.iter().all(|step| step.feasible),
+        audit.steps.iter().all(|step| step.feasible),
         "selected steps are feasible",
     )?;
     ensure(
-        certificate.guarantee_status.as_str() == "conditional",
-        "certificate has guarantee status",
+        audit.algorithm_id == "deterministic_greedy_facility_location_gain_per_token",
+        "audit names the deterministic algorithm",
     )?;
     let request = ContextRequest::new(ContextRequestInput {
         query: "prepare release".to_string(),
@@ -283,9 +280,9 @@ fn pack_skipped_list_replaces_rejected_frontier() -> TestResult {
     let value: Value = serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
     ensure(
         value
-            .pointer("/data/pack/selectionCertificate/rejectedFrontier")
+            .pointer("/data/pack/selectionAudit/rejectedFrontier")
             .is_none(),
-        "selection certificate no longer emits rejectedFrontier",
+        "selection audit no longer emits rejectedFrontier",
     )?;
     ensure(
         value.pointer("/data/pack/omitted").is_none(),
@@ -317,7 +314,7 @@ fn pack_skipped_list_replaces_rejected_frontier() -> TestResult {
 }
 
 #[test]
-fn pack_selection_certificate_golden_is_stable() -> TestResult {
+fn pack_selection_audit_golden_is_stable() -> TestResult {
     let request = ContextRequest::new(ContextRequestInput {
         query: "prepare release".to_string(),
         profile: Some(ContextPackProfile::Submodular),
@@ -331,17 +328,23 @@ fn pack_selection_certificate_golden_is_stable() -> TestResult {
         .map_err(|error| format!("{error:?}"))?;
     let rendered = render_context_response_json(&response);
     let value: Value = serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
-    let certificate = value
-        .pointer("/data/pack/selectionCertificate")
-        .ok_or_else(|| "selection certificate missing".to_string())?;
+    let audit = value
+        .pointer("/data/pack/selectionAudit")
+        .ok_or_else(|| "selection audit missing".to_string())?;
     let algorithm = value
         .pointer("/data/pack/meta/algorithm")
         .ok_or_else(|| "pack algorithm metadata missing".to_string())?;
     ensure(
-        algorithm["name"]
+        algorithm["algorithmId"]
             .as_str()
             .is_some_and(|name| !name.is_empty()),
         "pack meta algorithm names the deterministic algorithm",
+    )?;
+    ensure(
+        algorithm["algorithmDescription"]
+            .as_str()
+            .is_some_and(|description| !description.is_empty()),
+        "pack meta algorithm describes the deterministic algorithm",
     )?;
     ensure(
         algorithm["scoringFormula"]
@@ -350,16 +353,16 @@ fn pack_selection_certificate_golden_is_stable() -> TestResult {
         "pack meta algorithm carries the shared scoring formula",
     )?;
     ensure(
-        certificate.get("algorithm").is_none(),
-        "selection certificate no longer repeats pack meta algorithm",
+        audit.get("guaranteeStatus").is_none(),
+        "selection audit does not emit guarantee status",
     )?;
-    assert_golden("pack_selection", &pretty(certificate)?)
+    assert_golden("pack_selection", &pretty(audit)?)
 }
 
 #[test]
-fn sampled_diminishing_returns_are_recorded_in_certificate_steps() -> TestResult {
+fn sampled_diminishing_returns_are_recorded_in_audit_steps() -> TestResult {
     let draft = submodular_draft()?;
-    let steps = &draft.selection_certificate.steps;
+    let steps = &draft.selection_audit.steps;
     ensure(steps.len() >= 2, "need at least two sampled steps")?;
     for window in steps.windows(2) {
         ensure(
@@ -403,10 +406,10 @@ fn tiny_fixture_greedy_matches_exact_budgeted_subset_optimum() -> TestResult {
     }
 
     ensure(
-        (greedy.selection_certificate.total_objective_value - exact_best).abs() <= 0.000_001,
+        (greedy.selection_audit.total_objective_value - exact_best).abs() <= 0.000_001,
         format!(
             "greedy objective {} should equal exact optimum {}",
-            greedy.selection_certificate.total_objective_value, exact_best
+            greedy.selection_audit.total_objective_value, exact_best
         ),
     )
 }

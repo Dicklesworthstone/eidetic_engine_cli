@@ -25,6 +25,7 @@
       "heavy verification gate",
       "skipped by profile"
     ],
-    "repair_contains": "Run skipped gates manually"
+    "repair_contains": "Run skipped gates manually",
+    "repair_string": "Run skipped gates manually or upgrade to a higher-resource profile."
   }
 }

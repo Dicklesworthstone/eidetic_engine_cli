@@ -14,7 +14,7 @@
     "description": "A graph snapshot cannot be exported because its metrics JSON has no exportable topology.",
     "setup_commands": [
       "ee init --workspace .",
-      "# insert a graph snapshot whose metrics JSON omits nodes or edges"
+      "ee diag graph-snapshot --metrics-json '{\"nodes\":[],\"edges\":[]}' --node-count 0 --edge-count 0 --workspace . --json"
     ],
     "invocation": "ee graph export --workspace . --json"
   },
@@ -24,6 +24,7 @@
     "message_contains": [
       "topology"
     ],
-    "repair_contains": "Regenerate a graph snapshot"
+    "repair_contains": "Regenerate a graph snapshot",
+    "repair_string": "Regenerate a graph snapshot that includes nodes and edges."
   }
 }

@@ -10,6 +10,8 @@ use std::str::FromStr;
 /// Every `EE_*` environment variable honored by ee.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum EnvVar {
+    /// `EE_AGENT_NAME`
+    AgentName,
     /// `EE_AGENT_MODE`
     AgentMode,
     /// `EE_CASS_BINARY`
@@ -18,6 +20,12 @@ pub enum EnvVar {
     DatabasePath,
     /// `EE_DEMO_EVIDENCE_ROOT`
     DemoEvidenceRoot,
+    /// `EE_DIAG_FORCE_CAPABILITY_GAP`
+    DiagForceCapabilityGap,
+    /// `EE_DISABLE_TOON`
+    DisableToon,
+    /// `EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS`
+    DisableRememberSearchNeighbors,
     /// `EE_EXPERIMENTAL_TRIAD`
     ExperimentalTriad,
     /// `EE_FORMAT`
@@ -30,6 +38,8 @@ pub enum EnvVar {
     HookMode,
     /// `EE_INDEX_DIR`
     IndexDir,
+    /// `EE_INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS`
+    IndexPublishLockRetryAttempts,
     /// `EE_JSON`
     Json,
     /// `EE_LOG_FORMAT`
@@ -50,6 +60,8 @@ pub enum EnvVar {
     RememberCurationSyncBudgetMs,
     /// `EE_SECURITY_PROFILE`
     SecurityProfile,
+    /// `EE_SCIENCE_BACKEND_PATH`
+    ScienceBackendPath,
     /// `EE_TEST_LOG_LEVEL`
     TestLogLevel,
     /// `EE_TEST_LOG_PATH`
@@ -67,16 +79,21 @@ impl EnvVar {
     #[must_use]
     pub const fn all() -> &'static [Self] {
         &[
+            Self::AgentName,
             Self::AgentMode,
             Self::CassBinary,
             Self::DatabasePath,
             Self::DemoEvidenceRoot,
+            Self::DiagForceCapabilityGap,
+            Self::DisableToon,
+            Self::DisableRememberSearchNeighbors,
             Self::ExperimentalTriad,
             Self::Format,
             Self::HarmfulBurstWindowSeconds,
             Self::HarmfulPerSourcePerHour,
             Self::HookMode,
             Self::IndexDir,
+            Self::IndexPublishLockRetryAttempts,
             Self::Json,
             Self::LogFormat,
             Self::LogJson,
@@ -87,6 +104,7 @@ impl EnvVar {
             Self::Profile,
             Self::RememberCurationSyncBudgetMs,
             Self::SecurityProfile,
+            Self::ScienceBackendPath,
             Self::TestLogLevel,
             Self::TestLogPath,
             Self::TestLogTestId,
@@ -99,16 +117,21 @@ impl EnvVar {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
+            Self::AgentName => "EE_AGENT_NAME",
             Self::AgentMode => "EE_AGENT_MODE",
             Self::CassBinary => "EE_CASS_BINARY",
             Self::DatabasePath => "EE_DATABASE_PATH",
             Self::DemoEvidenceRoot => "EE_DEMO_EVIDENCE_ROOT",
+            Self::DiagForceCapabilityGap => "EE_DIAG_FORCE_CAPABILITY_GAP",
+            Self::DisableToon => "EE_DISABLE_TOON",
+            Self::DisableRememberSearchNeighbors => "EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS",
             Self::ExperimentalTriad => "EE_EXPERIMENTAL_TRIAD",
             Self::Format => "EE_FORMAT",
             Self::HarmfulBurstWindowSeconds => "EE_HARMFUL_BURST_WINDOW_SECONDS",
             Self::HarmfulPerSourcePerHour => "EE_HARMFUL_PER_SOURCE_PER_HOUR",
             Self::HookMode => "EE_HOOK_MODE",
             Self::IndexDir => "EE_INDEX_DIR",
+            Self::IndexPublishLockRetryAttempts => "EE_INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS",
             Self::Json => "EE_JSON",
             Self::LogFormat => "EE_LOG_FORMAT",
             Self::LogJson => "EE_LOG_JSON",
@@ -119,6 +142,7 @@ impl EnvVar {
             Self::Profile => "EE_PROFILE",
             Self::RememberCurationSyncBudgetMs => "EE_REMEMBER_CURATION_SYNC_BUDGET_MS",
             Self::SecurityProfile => "EE_SECURITY_PROFILE",
+            Self::ScienceBackendPath => "EE_SCIENCE_BACKEND_PATH",
             Self::TestLogLevel => "EE_TEST_LOG_LEVEL",
             Self::TestLogPath => "EE_TEST_LOG_PATH",
             Self::TestLogTestId => "EE_TEST_LOG_TEST_ID",
@@ -131,10 +155,18 @@ impl EnvVar {
     #[must_use]
     pub const fn description(self) -> &'static str {
         match self {
+            Self::AgentName => "Identify the current agent for scoped memory retrieval.",
             Self::AgentMode => "Use agent-oriented output defaults.",
             Self::CassBinary => "Override the trusted cass import binary path.",
             Self::DatabasePath => "Override the configured storage database path.",
             Self::DemoEvidenceRoot => "Override the demo evidence storage root.",
+            Self::DiagForceCapabilityGap => {
+                "Force selected capability probes to report build-gap diagnostics."
+            }
+            Self::DisableToon => "Disable TOON output capability reporting and auto-selection.",
+            Self::DisableRememberSearchNeighbors => {
+                "Disable Frankensearch neighbors during remember-time proposal."
+            }
             Self::ExperimentalTriad => {
                 "Compatibility no-op for the promoted ee pack/note/why aliases."
             }
@@ -145,6 +177,9 @@ impl EnvVar {
             Self::HarmfulPerSourcePerHour => "Override the harmful feedback rate limit per source.",
             Self::HookMode => "Use hook-oriented machine output defaults.",
             Self::IndexDir => "Override the configured search index directory.",
+            Self::IndexPublishLockRetryAttempts => {
+                "Override index publish advisory-lock retry attempts."
+            }
             Self::Json => "Request JSON output from renderer auto-detection.",
             Self::LogFormat => "Select structured log format.",
             Self::LogJson => "Enable JSON command-start logs on stderr.",
@@ -157,6 +192,9 @@ impl EnvVar {
                 "Override remember-time curation sync budget in milliseconds."
             }
             Self::SecurityProfile => "Select security profile.",
+            Self::ScienceBackendPath => {
+                "Configure an optional science analytics backend path; missing paths report backend-unavailable."
+            }
             Self::TestLogLevel => "Control structured test-log verbosity.",
             Self::TestLogPath => "Enable structured test logging at this JSONL path.",
             Self::TestLogTestId => "Name the active structured test-log scenario.",
@@ -169,6 +207,7 @@ impl EnvVar {
     #[must_use]
     pub const fn default_value(self) -> Option<&'static str> {
         match self {
+            Self::IndexPublishLockRetryAttempts => Some("200"),
             Self::RememberCurationSyncBudgetMs => Some("50"),
             _ => None,
         }
@@ -190,7 +229,10 @@ impl EnvVar {
             | Self::IndexDir
             | Self::Workspace
             | Self::WorkspaceRegistry => "paths",
+            Self::DiagForceCapabilityGap => "diagnostics",
             Self::AgentMode
+            | Self::AgentName
+            | Self::DisableToon
             | Self::ExperimentalTriad
             | Self::Format
             | Self::HookMode
@@ -206,7 +248,10 @@ impl EnvVar {
             | Self::HarmfulPerSourcePerHour
             | Self::MaxTokens
             | Self::Profile
+            | Self::DisableRememberSearchNeighbors
+            | Self::IndexPublishLockRetryAttempts
             | Self::RememberCurationSyncBudgetMs => "tuning",
+            Self::ScienceBackendPath => "integration",
             Self::PreflightBypassSecret | Self::SecurityProfile => "policy",
         }
     }

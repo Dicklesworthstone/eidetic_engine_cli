@@ -86,12 +86,12 @@ e2e_log_assert_eq "$PERSIST_FAIL_COUNT" "0" "a9_no_pack_persist_failure_for_cano
 
 # ------------------------------------------------------------
 # A1 (not shipped) — canonical items[] consolidates the four parallel
-# structures (selectedItems, items, selectionCertificate.steps,
+# structures (selectedItems, items, selectionAudit.steps,
 # provenanceFooter.entries) into one. Today these are still distinct, so we
 # record TODOs.
 # ------------------------------------------------------------
 todo_assert "a1_single_canonical_items_array" "bd-17c65.1.1" \
-    "Currently has selectedItems[], items[], selectionCertificate.steps[], provenanceFooter.entries[] as four parallel structures."
+    "Currently has selectedItems[], items[], selectionAudit.steps[], provenanceFooter.entries[] as four parallel structures."
 
 # A4 — pack.text (markdown render embedded in JSON).
 todo_assert "a4_pack_text_field_present" "bd-17c65.1.4" \
@@ -103,7 +103,7 @@ e2e_log_note "a4_pack_has_text_field=$HAS_PACK_TEXT"
 todo_assert "a5_unified_skipped_array" "bd-17c65.1.6" \
     "Currently omitted[] and rejectedFrontier[] are separate parallel skip lists."
 
-# A2 — collapse per-item math why into shared selectionCertificate.formula.
+# A2 — collapse per-item math why into shared selectionAudit.formula.
 todo_assert "a2_shared_selection_formula_block" "bd-17c65.1.2" \
     "Per-item why no longer contains the math (A3 done), but the shared formula block isn't surfaced yet."
 

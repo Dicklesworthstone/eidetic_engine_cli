@@ -183,6 +183,15 @@ const DEG_NO_AVAILABLE_MODEL: ModelDegradation = ModelDegradation {
     repair: "ee doctor --json",
 };
 
+const SEMANTIC_DIMENSION_BUDGET: u32 = 384;
+
+const DEG_SEMANTIC_DIMENSION_EXCEEDS_BUDGET: ModelDegradation = ModelDegradation {
+    code: "semantic_dimension_exceeds_budget",
+    severity: "medium",
+    message: "Available embedding model dimension exceeds the configured budget; semantic search is degraded.",
+    repair: "select a smaller local embedding model or run `ee index reembed --workspace .`",
+};
+
 /// Report shape returned by `ee model status`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelStatusReport {
@@ -442,6 +451,9 @@ pub fn build_model_status_report(
     } else if available_count == 0 {
         degradations.push(DEG_NO_AVAILABLE_MODEL);
     }
+    if entries.iter().any(entry_exceeds_semantic_dimension_budget) {
+        degradations.push(DEG_SEMANTIC_DIMENSION_EXCEEDS_BUDGET);
+    }
 
     Ok(ModelStatusReport {
         schema: MODEL_STATUS_SCHEMA_V1,
@@ -452,6 +464,14 @@ pub fn build_model_status_report(
         available_count,
         degradations,
     })
+}
+
+fn entry_exceeds_semantic_dimension_budget(entry: &StoredModelRegistryEntry) -> bool {
+    entry.status.as_str() == "available"
+        && entry.purpose.as_str() == "embedding"
+        && entry
+            .dimension
+            .is_some_and(|dimension| dimension > SEMANTIC_DIMENSION_BUDGET)
 }
 
 /// Build a `ee model list` report.
@@ -548,6 +568,26 @@ mod tests {
         name: &str,
         status: ModelRegistryStatus,
     ) -> TestResult {
+        insert_registry_entry_with_dimension(
+            database_path,
+            workspace_id,
+            id,
+            provider,
+            name,
+            status,
+            384,
+        )
+    }
+
+    fn insert_registry_entry_with_dimension(
+        database_path: &Path,
+        workspace_id: &str,
+        id: &str,
+        provider: ModelProvider,
+        name: &str,
+        status: ModelRegistryStatus,
+        dimension: u32,
+    ) -> TestResult {
         let connection = DbConnection::open_file(database_path)
             .map_err(|error| format!("reopen db: {error}"))?;
         connection
@@ -558,7 +598,7 @@ mod tests {
                     provider,
                     model_name: name.to_string(),
                     purpose: ModelPurpose::Embedding,
-                    dimension: Some(384),
+                    dimension: Some(dimension),
                     distance_metric: Some(ModelDistanceMetric::Cosine),
                     status,
                     version: Some("v1".to_string()),
@@ -645,6 +685,37 @@ mod tests {
             .as_ref()
             .ok_or("missing selected entry")?;
         ensure(selected.status == "available", "selected available")
+    }
+
+    #[test]
+    fn status_marks_oversized_available_embedding_model() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+        let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+        insert_registry_entry_with_dimension(
+            &database_path,
+            &workspace_id,
+            "mdl_01HQ3K5Z000000000000000006",
+            ModelProvider::Hash,
+            "oversized-4096",
+            ModelRegistryStatus::Available,
+            SEMANTIC_DIMENSION_BUDGET + 1,
+        )?;
+
+        let report = build_model_status_report(&ModelStatusOptions {
+            workspace_path: &workspace_path,
+            database_path: None,
+        })
+        .map_err(|error| format!("status: {error:?}"))?;
+
+        ensure(report.registered_count == 1, "registered_count")?;
+        ensure(report.available_count == 1, "available_count")?;
+        ensure(
+            report
+                .degradations
+                .iter()
+                .any(|degradation| degradation.code == "semantic_dimension_exceeds_budget"),
+            "semantic dimension degradation",
+        )
     }
 
     #[test]

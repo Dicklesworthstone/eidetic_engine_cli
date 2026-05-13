@@ -7,7 +7,7 @@
   },
   "surfaces": [
     "semantic model admissibility",
-    "search"
+    "model status"
   ],
   "severity": "medium",
   "repair_present": true,
@@ -15,9 +15,9 @@
     "description": "A configured local embedding model exceeds the semantic dimension budget, so retrieval falls back to lexical mode.",
     "setup_commands": [
       "ee init --workspace .",
-      "# register an embedding model with dimension greater than the configured semantic budget"
+      "ee diag model-registry --workspace . --model-id mdl_j6000000000000000000000002 --provider custom --model-name j6-oversized-embedder --purpose embedding --dimension 4096 --distance-metric cosine --status available --version j6 --last-checked-at 2026-05-13T00:00:00Z --json"
     ],
-    "invocation": "ee search 'query' --workspace . --json"
+    "invocation": "ee model status --workspace . --json"
   },
   "expected_emission": {
     "code": "semantic_dimension_exceeds_budget",
@@ -26,6 +26,7 @@
       "embedding dimension exceeds",
       "configured budget"
     ],
-    "repair_contains": "select a smaller local embedding model"
+    "repair_contains": "select a smaller local embedding model",
+    "repair_string": "select a smaller local embedding model or run `ee index reembed --workspace .`"
   }
 }

@@ -17,17 +17,18 @@ use crate::curate::{
     validate_review_queue_transition,
 };
 use crate::db::{
-    ApplyMemoryCurationInput, CreateAuditInput, CreateCurationCandidateInput,
-    CreateProceduralRuleInput, CreateProcedureEventInput, CreateProcedureInput,
-    CreateSearchIndexJobInput, CurationCandidateReviewUpdate, DbConnection, SearchIndexJobType,
-    StoredCurationCandidate, StoredCurationTtlPolicy, StoredEvidenceSpan, StoredMemory,
-    StoredSession, audit_actions, default_curation_ttl_policy_id_for_review_state,
-    generate_audit_id,
+    ApplyMemoryCurationInput, ApplyMemoryLevelTransitionInput, CreateAuditInput,
+    CreateCurationCandidateInput, CreateProceduralRuleInput, CreateProcedureEventInput,
+    CreateProcedureInput, CreateSearchIndexJobInput, CurationCandidateReviewUpdate, DbConnection,
+    MemoryLevelTransitionAuditInput, SearchIndexJobType, StoredCurationCandidate,
+    StoredCurationTtlPolicy, StoredEvidenceSpan, StoredMemory, StoredSession, audit_actions,
+    default_curation_ttl_policy_id_for_review_state, generate_audit_id,
 };
 use crate::models::{
     CandidateId, DomainError, MemoryId, ProducerMetadata, REVIEW_SESSION_SCHEMA_V1, RuleId,
     WorkspaceId,
 };
+use crate::search::HashEmbedder;
 
 /// Stable schema for `ee curate candidates` response data.
 pub const CURATE_CANDIDATES_SCHEMA_V1: &str = "ee.curate.candidates.v1";
@@ -43,6 +44,8 @@ pub const CURATE_DISPOSITION_SCHEMA_V1: &str = "ee.curate.disposition.v1";
 pub const CURATE_RETIRE_SCHEMA_V1: &str = "ee.curate.retire.v1";
 /// Stable schema for curate tombstone reports.
 pub const CURATE_TOMBSTONE_SCHEMA_V1: &str = "ee.curate.tombstone.v1";
+/// Stable schema for curate untombstone reports.
+pub const CURATE_UNTOMBSTONE_SCHEMA_V1: &str = "ee.curate.untombstone.v1";
 /// Stable schema for review workspace reports.
 pub const REVIEW_WORKSPACE_SCHEMA_V1: &str = "ee.review.workspace.v1";
 const MAX_CANDIDATE_LIST_LIMIT: u32 = 1000;
@@ -230,6 +233,23 @@ pub struct CurateTombstoneOptions<'a> {
     /// Preview without writing tombstone record.
     pub dry_run: bool,
     /// Tombstone reason for audit trail.
+    pub reason: Option<&'a str>,
+}
+
+/// Options for restoring a tombstoned memory through the curation surface.
+#[derive(Clone, Debug)]
+pub struct CurateUntombstoneOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Tombstoned memory ID to restore.
+    pub memory_id: &'a str,
+    /// Actor recorded in audit metadata.
+    pub actor: Option<&'a str>,
+    /// Preview without writing restore record.
+    pub dry_run: bool,
+    /// Restore reason for audit trail.
     pub reason: Option<&'a str>,
 }
 
@@ -513,6 +533,66 @@ impl CurateTombstoneReport {
     pub fn toon_output(&self) -> String {
         format!(
             "CURATE_TOMBSTONE|id={}|dry_run={}|persisted={}",
+            self.memory_id, self.dry_run, self.persisted
+        )
+    }
+}
+
+/// Result of restoring a tombstoned memory through curation.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurateUntombstoneReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub memory_id: String,
+    pub reason: Option<String>,
+    pub previous_tombstoned_at: Option<String>,
+    pub restored_at: String,
+    pub restored_by: Option<String>,
+    pub dry_run: bool,
+    pub persisted: bool,
+    pub audit_id: Option<String>,
+    pub degraded: Vec<CurateCandidatesDegradation>,
+    pub next_action: String,
+}
+
+impl CurateUntombstoneReport {
+    #[must_use]
+    pub fn json_output(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            format!(
+                r#"{{"schema":"{}","command":"curate untombstone","error":"serialization_failed"}}"#,
+                CURATE_UNTOMBSTONE_SCHEMA_V1
+            )
+        })
+    }
+
+    #[must_use]
+    pub fn human_output(&self) -> String {
+        let mode = if self.dry_run { "DRY RUN" } else { "RESTORED" };
+        let mut output = format!("{mode}: {}\n\n", self.memory_id);
+        if let Some(reason) = &self.reason {
+            output.push_str(&format!("  reason: {reason}\n"));
+        }
+        if let Some(previous) = &self.previous_tombstoned_at {
+            output.push_str(&format!("  previous_tombstoned_at: {previous}\n"));
+        }
+        output.push_str(&format!("  restored_at: {}\n", self.restored_at));
+        output.push_str(&format!("  persisted: {}\n", self.persisted));
+        output.push_str("\nNext:\n  ");
+        output.push_str(&self.next_action);
+        output.push('\n');
+        output
+    }
+
+    #[must_use]
+    pub fn toon_output(&self) -> String {
+        format!(
+            "CURATE_UNTOMBSTONE|id={}|dry_run={}|persisted={}",
             self.memory_id, self.dry_run, self.persisted
         )
     }
@@ -945,6 +1025,7 @@ pub struct CurateApplyChange {
 #[serde(rename_all = "camelCase")]
 pub struct CurateApplyMemoryState {
     pub id: String,
+    pub level: String,
     pub content: String,
     pub confidence: f32,
     pub trust_class: String,
@@ -2472,33 +2553,23 @@ pub fn run_curate_tombstone(
         });
     }
 
-    let audit_id = generate_audit_id();
-    let details = serde_json::json!({
-        "tombstoned_at": tombstoned_at,
-        "reason": reason,
-    })
-    .to_string();
-    let audit_input = CreateAuditInput {
-        workspace_id: Some(prepared.workspace_id.clone()),
-        actor: actor.clone(),
-        action: audit_actions::MEMORY_TOMBSTONE.to_string(),
-        target_type: Some("memory".to_string()),
-        target_id: Some(options.memory_id.to_owned()),
-        details: Some(details),
-    };
-
-    connection
-        .insert_audit(&audit_id, &audit_input)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to create audit record: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
-
-    connection
-        .tombstone_memory(options.memory_id)
+    let audit_id = connection
+        .tombstone_memory_audited(
+            options.memory_id,
+            &prepared.workspace_id,
+            actor.as_deref(),
+            reason.as_deref(),
+        )
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to tombstone memory: {error}"),
             repair: Some("ee doctor".to_string()),
+        })?
+        .ok_or_else(|| DomainError::Storage {
+            message: format!(
+                "Failed to tombstone memory {}: no row updated.",
+                options.memory_id
+            ),
+            repair: Some("ee memory list --json".to_owned()),
         })?;
 
     Ok(CurateTombstoneReport {
@@ -2512,6 +2583,123 @@ pub fn run_curate_tombstone(
         reason,
         tombstoned_at,
         tombstoned_by: actor,
+        dry_run: false,
+        persisted: true,
+        audit_id: Some(audit_id),
+        degraded: Vec::new(),
+        next_action,
+    })
+}
+
+/// Restore a tombstoned memory row and record an audit entry.
+pub fn run_curate_untombstone(
+    options: &CurateUntombstoneOptions<'_>,
+) -> Result<CurateUntombstoneReport, DomainError> {
+    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let actor = options
+        .actor
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let reason = options
+        .reason
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let restored_at = Utc::now().to_rfc3339();
+
+    let next_action = format!("ee memory show {} --json", options.memory_id);
+
+    if options.dry_run {
+        return Ok(CurateUntombstoneReport {
+            schema: CURATE_UNTOMBSTONE_SCHEMA_V1,
+            command: "curate untombstone",
+            version: env!("CARGO_PKG_VERSION"),
+            workspace_id: prepared.workspace_id,
+            workspace_path: prepared.workspace_path.display().to_string(),
+            database_path: prepared.database_path.display().to_string(),
+            memory_id: options.memory_id.to_owned(),
+            reason,
+            previous_tombstoned_at: None,
+            restored_at,
+            restored_by: actor,
+            dry_run: true,
+            persisted: false,
+            audit_id: None,
+            degraded: Vec::new(),
+            next_action,
+        });
+    }
+
+    let connection = open_existing_database(&prepared.database_path)?;
+    let memory = connection
+        .get_memory(options.memory_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to fetch memory: {error}"),
+            repair: Some("ee memory list --json".to_owned()),
+        })?
+        .ok_or_else(|| DomainError::NotFound {
+            resource: "memory".to_owned(),
+            id: options.memory_id.to_owned(),
+            repair: Some("ee memory list --json".to_owned()),
+        })?;
+
+    if memory.workspace_id != prepared.workspace_id {
+        return Err(DomainError::NotFound {
+            resource: "memory".to_owned(),
+            id: options.memory_id.to_owned(),
+            repair: Some("ee memory list --json".to_owned()),
+        });
+    }
+
+    let previous_tombstoned_at =
+        memory
+            .tombstoned_at
+            .clone()
+            .ok_or_else(|| DomainError::Usage {
+                message: format!("Memory {} is not tombstoned.", options.memory_id),
+                repair: Some("ee memory list --json".to_owned()),
+            })?;
+
+    let details = serde_json::json!({
+        "previous_tombstoned_at": previous_tombstoned_at,
+        "restored_at": restored_at,
+        "reason": reason,
+    })
+    .to_string();
+
+    let audit_id = connection
+        .untombstone_memory_audited(
+            options.memory_id,
+            &prepared.workspace_id,
+            actor.as_deref(),
+            &restored_at,
+            &details,
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to restore memory: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?
+        .ok_or_else(|| DomainError::Storage {
+            message: format!(
+                "Failed to restore memory {}: no row updated.",
+                options.memory_id
+            ),
+            repair: Some("ee memory list --json".to_owned()),
+        })?;
+
+    Ok(CurateUntombstoneReport {
+        schema: CURATE_UNTOMBSTONE_SCHEMA_V1,
+        command: "curate untombstone",
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_id: prepared.workspace_id,
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        memory_id: options.memory_id.to_owned(),
+        reason,
+        previous_tombstoned_at: Some(previous_tombstoned_at),
+        restored_at,
+        restored_by: actor,
         dry_run: false,
         persisted: true,
         audit_id: Some(audit_id),
@@ -3108,6 +3296,15 @@ fn evaluate_candidate_for_apply(
                     "Use consolidate, supersede, merge, or split when content should change.",
                 ));
             }
+            if candidate_type == CandidateType::Promote && target_memory.level == "episodic" {
+                push_apply_change(
+                    &mut changes,
+                    "level",
+                    Some(target_after.level.clone()),
+                    Some("semantic".to_owned()),
+                );
+                target_after.level = "semantic".to_owned();
+            }
         }
         CandidateType::Rule | CandidateType::Procedure => {
             let proposed_content = stored.proposed_content.as_deref().map(str::trim);
@@ -3264,6 +3461,15 @@ fn evaluate_candidate_for_apply(
             Some(trust_class.clone()),
         );
         target_after.trust_class = trust_class.clone();
+    }
+    if (rule_create.is_some() || procedure_create.is_some()) && target_after.level != "procedural" {
+        push_apply_change(
+            &mut changes,
+            "level",
+            Some(target_after.level.clone()),
+            Some("procedural".to_owned()),
+        );
+        target_after.level = "procedural".to_owned();
     }
 
     if !errors.is_empty() {
@@ -3803,7 +4009,7 @@ fn evaluate_candidate_for_disposition(
                 code: "curation_harmful_candidate_escalated".to_owned(),
                 severity: "high".to_owned(),
                 message: format!(
-                    "Curation candidate {} requires harmful-feedback review.",
+                    "Curation candidate {} requires harmful-feedback escalation review.",
                     stored.id
                 ),
                 repair: format!(
@@ -4293,6 +4499,7 @@ fn validation_repair(error: &CandidateValidationError) -> &'static str {
 fn memory_state_from_stored(memory: &StoredMemory) -> CurateApplyMemoryState {
     CurateApplyMemoryState {
         id: memory.id.clone(),
+        level: memory.level.clone(),
         content: memory.content.clone(),
         confidence: memory.confidence,
         trust_class: memory.trust_class.clone(),
@@ -4630,12 +4837,37 @@ fn persist_candidate_application_inner(
     applied_by: &str,
 ) -> Result<String, DomainError> {
     let memory_changed = if decision.tombstone_memory {
-        connection
+        let changed = connection
             .tombstone_memory(&stored.target_memory_id)
             .map_err(|error| DomainError::Storage {
                 message: format!("Failed to tombstone target memory: {error}"),
                 repair: Some("ee memory show <memory-id> --json".to_owned()),
-            })?
+            })?;
+        if changed {
+            let previous_level = decision
+                .target_before
+                .as_ref()
+                .map(|state| state.level.clone())
+                .unwrap_or_else(|| "unknown".to_owned());
+            let _ = connection
+                .insert_memory_level_transition_audit(&MemoryLevelTransitionAuditInput {
+                    workspace_id: workspace_id.to_owned(),
+                    actor: Some(applied_by.to_owned()),
+                    memory_id: stored.target_memory_id.clone(),
+                    previous_level,
+                    new_level: "tombstoned".to_owned(),
+                    reason: "manual_tombstone".to_owned(),
+                    automatic: false,
+                    event: "manual.tombstone".to_owned(),
+                    evidence_refs: vec![stored.id.clone()],
+                    source_action: Some(audit_actions::CURATION_CANDIDATE_APPLY.to_owned()),
+                })
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to write memory level transition audit: {error}"),
+                    repair: Some("ee memory history <memory-id> --json".to_owned()),
+                })?;
+        }
+        changed
     } else if let Some(update) = &decision.memory_update {
         connection
             .apply_memory_curation_update(&stored.target_memory_id, update)
@@ -4679,6 +4911,37 @@ fn persist_candidate_application_inner(
                 repair: Some("ee procedure show <id> --json".to_owned()),
             })?;
         created_procedure_id = Some(procedure_create.procedure_id.clone());
+    }
+    if let Some((previous_level, new_level)) = applied_level_change(
+        decision.target_before.as_ref(),
+        decision.target_after.as_ref(),
+    ) {
+        let evidence_refs =
+            level_transition_evidence_refs(stored, &created_rule_id, &created_procedure_id);
+        let (reason, event, automatic) =
+            curate_level_transition_metadata(&stored.candidate_type, &previous_level, &new_level);
+        let _ = connection
+            .apply_memory_level_transition_in_current_transaction(
+                &stored.target_memory_id,
+                &ApplyMemoryLevelTransitionInput {
+                    workspace_id: workspace_id.to_owned(),
+                    expected_level: Some(previous_level.clone()),
+                    level: new_level,
+                    updated_at: applied_at.to_owned(),
+                    actor: Some(applied_by.to_owned()),
+                    reason,
+                    automatic,
+                    event,
+                    evidence_refs,
+                    source_action: Some(audit_actions::CURATION_CANDIDATE_APPLY.to_owned()),
+                },
+            )
+            .map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to apply memory level transition from curation apply: {error}"
+                ),
+                repair: Some("ee memory history <memory-id> --json".to_owned()),
+            })?;
     }
     if !memory_changed && created_rule_id.is_none() && created_procedure_id.is_none() {
         return Err(DomainError::Storage {
@@ -4746,6 +5009,68 @@ fn persist_candidate_application_inner(
             repair: Some("ee doctor".to_owned()),
         })?;
     Ok(audit_id)
+}
+
+fn applied_level_change(
+    before: Option<&CurateApplyMemoryState>,
+    after: Option<&CurateApplyMemoryState>,
+) -> Option<(String, String)> {
+    let before = before?;
+    let after = after?;
+    if before.tombstoned || after.tombstoned || before.level == after.level {
+        return None;
+    }
+    Some((before.level.clone(), after.level.clone()))
+}
+
+fn level_transition_evidence_refs(
+    stored: &StoredCurationCandidate,
+    created_rule_id: &Option<String>,
+    created_procedure_id: &Option<String>,
+) -> Vec<String> {
+    let mut evidence_refs = BTreeSet::new();
+    evidence_refs.insert(stored.id.clone());
+    evidence_refs.insert(stored.target_memory_id.clone());
+    if let Some(source_id) = stored.source_id.as_deref() {
+        evidence_refs.extend(
+            source_id
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    if let Some(rule_id) = created_rule_id {
+        evidence_refs.insert(rule_id.clone());
+    }
+    if let Some(procedure_id) = created_procedure_id {
+        evidence_refs.insert(procedure_id.clone());
+    }
+    evidence_refs.into_iter().collect()
+}
+
+fn curate_level_transition_metadata(
+    candidate_type: &str,
+    previous_level: &str,
+    new_level: &str,
+) -> (String, String, bool) {
+    match (candidate_type, previous_level, new_level) {
+        ("promote", "episodic", "semantic") => (
+            "clustered_repeated_observation".to_owned(),
+            "repeated_observation".to_owned(),
+            true,
+        ),
+        ("rule" | "procedure", _, "procedural") => (
+            "procedural_rule_proposal".to_owned(),
+            "curate.apply".to_owned(),
+            true,
+        ),
+        _ => (
+            "curation_apply".to_owned(),
+            "curate.apply".to_owned(),
+            false,
+        ),
+    }
 }
 
 fn normalized_review_state(stored: &StoredCurationCandidate) -> String {
@@ -5026,29 +5351,34 @@ impl CandidateEvidenceFacts {
 
         let member_memory_ids = member_memory_ids.into_iter().collect::<Vec<_>>();
         let mut tombstoned_member_count = 0_usize;
+        let mut member_memories = Vec::new();
         for memory_id in &member_memory_ids {
-            if connection
-                .get_memory(memory_id)
-                .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to load curation candidate member memory: {error}"),
-                    repair: Some("ee memory show <memory-id> --json".to_owned()),
-                })?
-                .is_some_and(|memory| memory.tombstoned_at.is_some())
+            if let Some(memory) =
+                connection
+                    .get_memory(memory_id)
+                    .map_err(|error| DomainError::Storage {
+                        message: format!(
+                            "Failed to load curation candidate member memory: {error}"
+                        ),
+                        repair: Some("ee memory show <memory-id> --json".to_owned()),
+                    })?
             {
-                tombstoned_member_count = tombstoned_member_count.saturating_add(1);
+                if memory.tombstoned_at.is_some() {
+                    tombstoned_member_count = tombstoned_member_count.saturating_add(1);
+                }
+                member_memories.push(memory);
             }
         }
 
         let support_count = evidence.len().saturating_sub(contradiction_count);
+        let cluster_coherence =
+            candidate_cluster_coherence_from_memories(connection, &member_memories)?
+                .or_else(|| candidate_cluster_coherence(evidence.len(), contradiction_count, None));
         Ok(Self {
             member_memory_ids,
             support_count,
             contradiction_count,
-            cluster_coherence: candidate_cluster_coherence(
-                evidence.len(),
-                contradiction_count,
-                None,
-            ),
+            cluster_coherence,
             tombstoned_member_count,
         })
     }
@@ -5142,6 +5472,66 @@ fn candidate_cluster_coherence(
     Some((coherence * 1000.0).round() / 1000.0)
 }
 
+fn candidate_cluster_coherence_from_memories(
+    connection: &DbConnection,
+    memories: &[StoredMemory],
+) -> Result<Option<f32>, DomainError> {
+    if memories.len() < crate::curate::cluster_coherence::DEFAULT_MIN_CLUSTER_SIZE {
+        return Ok(None);
+    }
+    let memory_ids = memories
+        .iter()
+        .map(|memory| memory.id.as_str())
+        .collect::<Vec<&str>>();
+    let memory_tags = connection
+        .get_memory_tags_batch(&memory_ids)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load curation candidate memory tags: {error}"),
+            repair: Some("ee memory tags <memory-id> --json".to_owned()),
+        })?;
+    let embedder = HashEmbedder::default_256();
+    let inputs = memories
+        .iter()
+        .map(|memory| {
+            let tags = memory_tags
+                .get(&memory.id)
+                .map_or(&[] as &[String], Vec::as_slice);
+            ClusterCoherenceInput {
+                memory_id: memory.id.clone(),
+                embedding: embedder.embed_sync(&candidate_cluster_embedding_text(memory, tags)),
+            }
+        })
+        .collect::<Vec<_>>();
+    let report = silhouette_agglomerative_clusters(
+        &inputs,
+        crate::curate::cluster_coherence::DEFAULT_CLUSTER_COHERENCE_THRESHOLD as f32,
+    );
+    Ok(report
+        .clusters
+        .iter()
+        .filter_map(|cluster| {
+            cluster
+                .silhouette_score
+                .map(|score| (cluster.member_memory_ids.len(), score))
+        })
+        .max_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.total_cmp(&right.1))
+        })
+        .map(|(_, score)| score))
+}
+
+fn candidate_cluster_embedding_text(memory: &StoredMemory, tags: &[String]) -> String {
+    format!(
+        "level:{}\nkind:{}\ntags:{}\ncontent:{}",
+        memory.level,
+        memory.kind,
+        tags.join(" "),
+        memory.content
+    )
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ClusterCoherenceInput {
     pub memory_id: String,
@@ -5170,207 +5560,82 @@ pub fn silhouette_agglomerative_clusters(
     threshold: f32,
 ) -> ClusterCoherenceReport {
     let threshold = if threshold.is_finite() {
-        threshold.clamp(-1.0, 1.0)
+        threshold.clamp(0.0, 1.0)
     } else {
-        0.55
+        crate::curate::cluster_coherence::DEFAULT_CLUSTER_COHERENCE_THRESHOLD as f32
     };
-    if inputs.is_empty() {
-        return ClusterCoherenceReport {
+    let points = inputs
+        .iter()
+        .map(|input| {
+            crate::curate::cluster_coherence::EmbeddingPoint::new(
+                input.memory_id.clone(),
+                input
+                    .embedding
+                    .iter()
+                    .map(|value| f64::from(*value))
+                    .collect(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let config = crate::curate::cluster_coherence::ClusterCoherenceConfig {
+        merge_threshold: f64::from(threshold),
+        silhouette_cutoff: crate::curate::cluster_coherence::DEFAULT_CLUSTER_SILHOUETTE_CUTOFF,
+        min_cluster_size: crate::curate::cluster_coherence::DEFAULT_MIN_CLUSTER_SIZE,
+    };
+    match crate::curate::cluster_coherence::agglomerate(&points, config) {
+        Ok(report) => cluster_coherence_report_from_canonical(report),
+        Err(_error) => ClusterCoherenceReport {
             threshold,
             clusters: Vec::new(),
-            degradations: vec!["degraded.clustering_insufficient_data".to_owned()],
-        };
-    }
-
-    let mut ordered = inputs.to_vec();
-    ordered.sort_by(|left, right| left.memory_id.cmp(&right.memory_id));
-    let similarities = pairwise_cosine_similarities(&ordered);
-    let mut clusters = (0..ordered.len())
-        .map(|index| vec![index])
-        .collect::<Vec<_>>();
-
-    while let Some((left_index, right_index, merged)) =
-        best_average_linkage_merge(&clusters, &similarities, threshold)
-    {
-        clusters[left_index] = merged;
-        clusters.remove(right_index);
-    }
-
-    let mut rendered = clusters
-        .into_iter()
-        .map(|members| render_cluster(&ordered, &similarities, &members, &threshold))
-        .collect::<Vec<_>>();
-    rendered.sort_by(|left, right| left.member_memory_ids.cmp(&right.member_memory_ids));
-
-    ClusterCoherenceReport {
-        threshold,
-        clusters: rendered,
-        degradations: Vec::new(),
-    }
-}
-
-fn pairwise_cosine_similarities(inputs: &[ClusterCoherenceInput]) -> Vec<Vec<f32>> {
-    let mut similarities = vec![vec![1.0; inputs.len()]; inputs.len()];
-    for left in 0..inputs.len() {
-        for right in (left + 1)..inputs.len() {
-            let similarity = cosine_similarity(&inputs[left].embedding, &inputs[right].embedding);
-            similarities[left][right] = similarity;
-            similarities[right][left] = similarity;
-        }
-    }
-    similarities
-}
-
-fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
-    let len = left.len().min(right.len());
-    if len == 0 {
-        return 0.0;
-    }
-    let mut dot = 0.0_f32;
-    let mut left_norm = 0.0_f32;
-    let mut right_norm = 0.0_f32;
-    for index in 0..len {
-        dot += left[index] * right[index];
-        left_norm += left[index] * left[index];
-        right_norm += right[index] * right[index];
-    }
-    if left_norm <= f32::EPSILON || right_norm <= f32::EPSILON {
-        return 0.0;
-    }
-    dot / (left_norm.sqrt() * right_norm.sqrt())
-}
-
-fn best_average_linkage_merge(
-    clusters: &[Vec<usize>],
-    similarities: &[Vec<f32>],
-    threshold: f32,
-) -> Option<(usize, usize, Vec<usize>)> {
-    let mut best: Option<(usize, usize, Vec<usize>, f32)> = None;
-    for left_index in 0..clusters.len() {
-        for right_index in (left_index + 1)..clusters.len() {
-            let mut merged = clusters[left_index].clone();
-            merged.extend(clusters[right_index].iter().copied());
-            merged.sort_unstable();
-            let Some(average) = average_internal_similarity(&merged, similarities) else {
-                continue;
-            };
-            if average < threshold {
-                continue;
-            }
-            let replace = best
-                .as_ref()
-                .is_none_or(|(_, _, best_members, best_average)| {
-                    average > *best_average
-                        || ((average - *best_average).abs() <= f32::EPSILON
-                            && merged < *best_members)
-                });
-            if replace {
-                best = Some((left_index, right_index, merged, average));
-            }
-        }
-    }
-    best.map(|(left, right, members, _)| (left, right, members))
-}
-
-fn average_internal_similarity(members: &[usize], similarities: &[Vec<f32>]) -> Option<f32> {
-    if members.len() < 2 {
-        return None;
-    }
-    let mut total = 0.0_f32;
-    let mut count = 0_usize;
-    for (offset, left) in members.iter().enumerate() {
-        for right in members.iter().skip(offset + 1) {
-            total += similarities[*left][*right];
-            count += 1;
-        }
-    }
-    Some(round_similarity(total / count as f32))
-}
-
-fn render_cluster(
-    inputs: &[ClusterCoherenceInput],
-    similarities: &[Vec<f32>],
-    members: &[usize],
-    threshold: &f32,
-) -> ClusterCoherenceCluster {
-    let member_memory_ids = members
-        .iter()
-        .map(|index| inputs[*index].memory_id.clone())
-        .collect::<Vec<_>>();
-    let average_internal_similarity = average_internal_similarity(members, similarities);
-    let mut degradations = Vec::new();
-    let silhouette_score = cluster_silhouette(members, similarities, inputs.len()).map_or_else(
-        || {
-            let code = if members.len() < 2 {
-                "degraded.clustering_silhouette_undefined_for_singleton"
-            } else {
-                "degraded.clustering_silhouette_requires_two_clusters"
-            };
-            degradations.push(code.to_owned());
-            None
+            degradations: vec![format!(
+                "degraded.{}",
+                crate::curate::cluster_coherence::CLUSTERING_INSUFFICIENT_DATA_CODE
+            )],
         },
-        Some,
-    );
-    let cluster_id = cluster_coherence_id(&member_memory_ids, *threshold);
+    }
+}
+
+fn cluster_coherence_report_from_canonical(
+    report: crate::curate::cluster_coherence::ClusterCoherenceReport,
+) -> ClusterCoherenceReport {
+    let cluster_count = report.clusters.len();
+    let clusters = report
+        .clusters
+        .into_iter()
+        .map(|cluster| cluster_coherence_cluster_from_canonical(cluster, cluster_count))
+        .collect::<Vec<_>>();
+    ClusterCoherenceReport {
+        threshold: report.threshold_used as f32,
+        clusters,
+        degradations: report
+            .degraded
+            .into_iter()
+            .map(|degradation| format!("degraded.{}", degradation.code))
+            .collect(),
+    }
+}
+
+fn cluster_coherence_cluster_from_canonical(
+    cluster: crate::curate::cluster_coherence::CoherentCluster,
+    cluster_count: usize,
+) -> ClusterCoherenceCluster {
+    let mut degradations = Vec::new();
+    let silhouette_score = if cluster.member_count < 2 {
+        degradations.push("degraded.clustering_silhouette_undefined_for_singleton".to_owned());
+        None
+    } else if cluster_count < 2 {
+        degradations.push("degraded.clustering_silhouette_requires_two_clusters".to_owned());
+        None
+    } else {
+        cluster.silhouette_score.map(|score| score as f32)
+    };
     ClusterCoherenceCluster {
-        cluster_id,
-        member_memory_ids,
-        average_internal_similarity,
+        cluster_id: cluster.cluster_id,
+        member_memory_ids: cluster.member_memory_ids,
+        average_internal_similarity: Some(cluster.average_internal_similarity as f32),
         silhouette_score,
         degradations,
     }
-}
-
-fn cluster_silhouette(
-    members: &[usize],
-    similarities: &[Vec<f32>],
-    total_members: usize,
-) -> Option<f32> {
-    if members.len() < 2 || members.len() == total_members {
-        return None;
-    }
-    let member_set = members.iter().copied().collect::<BTreeSet<_>>();
-    let mut total = 0.0_f32;
-    for member in members {
-        let intra_distance = mean_distance_to(*member, members.iter().copied(), similarities)?;
-        let non_members = (0..total_members).filter(|candidate| !member_set.contains(candidate));
-        let nearest_other_distance = mean_distance_to(*member, non_members, similarities)?;
-        let denominator = intra_distance.max(nearest_other_distance);
-        if denominator <= f32::EPSILON {
-            continue;
-        }
-        total += (nearest_other_distance - intra_distance) / denominator;
-    }
-    Some(round_similarity(total / members.len() as f32))
-}
-
-fn mean_distance_to(
-    member: usize,
-    others: impl Iterator<Item = usize>,
-    similarities: &[Vec<f32>],
-) -> Option<f32> {
-    let mut total = 0.0_f32;
-    let mut count = 0_usize;
-    for other in others {
-        if other == member {
-            continue;
-        }
-        total += 1.0 - similarities[member][other];
-        count += 1;
-    }
-    (count > 0).then(|| total / count as f32)
-}
-
-fn cluster_coherence_id(member_memory_ids: &[String], threshold: f32) -> String {
-    let payload = format!("{threshold:.3}:{}", member_memory_ids.join("\u{1f}"));
-    format!(
-        "cluster_{}",
-        &blake3::hash(payload.as_bytes()).to_hex()[..16]
-    )
-}
-
-fn round_similarity(value: f32) -> f32 {
-    (value * 1000.0).round() / 1000.0
 }
 
 fn feedback_signal_contradicts_candidate(signal: &str) -> bool {
@@ -6295,6 +6560,156 @@ mod tests {
     }
 
     #[test]
+    fn list_curation_candidates_scores_cluster_coherence_from_member_memories() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = stable_workspace_id(workspace_path);
+        let memory_ids = [
+            MemoryId::from_uuid(uuid::Uuid::from_u128(0x7101)).to_string(),
+            MemoryId::from_uuid(uuid::Uuid::from_u128(0x7102)).to_string(),
+            MemoryId::from_uuid(uuid::Uuid::from_u128(0x7103)).to_string(),
+            MemoryId::from_uuid(uuid::Uuid::from_u128(0x7104)).to_string(),
+        ];
+        let candidate_id = curate_id(0x7105);
+        let feedback_id = feedback_id(0x7106);
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("curate-g5-coherence".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for (memory_id, content, tags) in [
+            (
+                &memory_ids[0],
+                "cargo release format verification cargo release format",
+                vec!["cargo".to_owned(), "release".to_owned()],
+            ),
+            (
+                &memory_ids[1],
+                "cargo release format verification cargo release format",
+                vec!["cargo".to_owned(), "release".to_owned()],
+            ),
+            (
+                &memory_ids[2],
+                "sqlmodel frankensqlite storage migration sqlmodel storage",
+                vec!["sqlmodel".to_owned(), "storage".to_owned()],
+            ),
+            (
+                &memory_ids[3],
+                "sqlmodel frankensqlite storage migration sqlmodel storage",
+                vec!["sqlmodel".to_owned(), "storage".to_owned()],
+            ),
+        ] {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence: 0.7,
+                        utility: 0.6,
+                        importance: 0.5,
+                        provenance_uri: None,
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags,
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection
+            .insert_feedback_event(
+                &feedback_id,
+                &CreateFeedbackEventInput {
+                    workspace_id: workspace_id.clone(),
+                    target_type: "memory".to_owned(),
+                    target_id: memory_ids[0].clone(),
+                    signal: "stale".to_owned(),
+                    weight: 1.0,
+                    source_type: "agent_inference".to_owned(),
+                    source_id: Some("cluster-coherence-fixture".to_owned()),
+                    reason: Some(
+                        "Contradictory evidence should affect only fallback scoring.".to_owned(),
+                    ),
+                    evidence_json: None,
+                    session_id: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_curation_candidate(
+                &candidate_id,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.clone(),
+                    candidate_type: "rule".to_owned(),
+                    target_memory_id: memory_ids[0].clone(),
+                    proposed_content: Some(
+                        "Separate repeated cargo and storage rules before promotion.".to_owned(),
+                    ),
+                    proposed_confidence: Some(0.67),
+                    proposed_trust_class: Some("agent_validated".to_owned()),
+                    source_type: "feedback_event".to_owned(),
+                    source_id: Some(format!(
+                        "{},{},{},{},{}",
+                        memory_ids[0], memory_ids[1], memory_ids[2], memory_ids[3], feedback_id
+                    )),
+                    reason: "Learning cluster proposed a mixed evidence candidate.".to_owned(),
+                    confidence: 0.67,
+                    status: Some("pending".to_owned()),
+                    created_at: Some("2026-05-01T00:00:02Z".to_owned()),
+                    ttl_expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let report = list_curation_candidates(&CurateCandidatesOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_type: Some("rule"),
+            status: Some("pending"),
+            target_memory_id: None,
+            limit: 10,
+            offset: 0,
+            sort: "review_state",
+            group_duplicates: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let candidate = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == candidate_id)
+            .ok_or_else(|| "G5 coherence candidate missing from queue".to_owned())?;
+        let coherence = candidate
+            .evidence_summary
+            .cluster_coherence
+            .ok_or_else(|| "candidate should surface a cluster coherence score".to_owned())?;
+        assert!(
+            (-1.0..=1.0).contains(&coherence),
+            "cluster coherence must be a silhouette score, got {coherence}"
+        );
+        assert!(
+            (coherence - 0.8).abs() > f32::EPSILON,
+            "database-backed candidate should not fall back to support ratio coherence"
+        );
+        assert_eq!(candidate.evidence_summary.contradiction_count, 1);
+        Ok(())
+    }
+
+    #[test]
     fn list_curation_candidates_supports_sorting_and_duplicate_grouping() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
@@ -7104,6 +7519,78 @@ mod tests {
         assert_eq!(stored.status, "pending");
         assert_eq!(stored.review_state, "new");
         assert!(stored.reviewed_at.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn run_curate_untombstone_restores_tombstoned_memory_and_audits() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = stable_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(27)).to_string();
+        let candidate_id = curate_id(28);
+        let connection = seed_candidate_database(
+            &database_path,
+            &workspace_id,
+            &memory_id,
+            &candidate_id,
+            "promote",
+            Some("pending"),
+            None,
+        )?;
+        connection
+            .tombstone_memory(&memory_id)
+            .map_err(|error| error.to_string())?;
+        let previous_tombstoned_at = connection
+            .get_memory(&memory_id)
+            .map_err(|error| error.to_string())?
+            .and_then(|memory| memory.tombstoned_at)
+            .ok_or_else(|| "memory should be tombstoned before restore".to_owned())?;
+
+        let report = super::run_curate_untombstone(&super::CurateUntombstoneOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            memory_id: &memory_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+            reason: Some("restore reversible decay tombstone"),
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.schema, super::CURATE_UNTOMBSTONE_SCHEMA_V1);
+        assert_eq!(report.memory_id, memory_id);
+        assert_eq!(
+            report.previous_tombstoned_at.as_deref(),
+            Some(previous_tombstoned_at.as_str())
+        );
+        assert_eq!(report.restored_by.as_deref(), Some("MistySalmon"));
+        assert!(report.persisted);
+        let audit_id = report
+            .audit_id
+            .as_ref()
+            .ok_or_else(|| "restore should return an audit id".to_owned())?;
+
+        let restored = connection
+            .get_memory(&report.memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory missing after restore".to_owned())?;
+        assert!(restored.tombstoned_at.is_none());
+        assert_eq!(restored.updated_at, report.restored_at);
+
+        let audit = connection
+            .get_audit(audit_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "audit entry missing".to_owned())?;
+        assert_eq!(audit.action, audit_actions::MEMORY_UNTOMBSTONE);
+        assert_eq!(audit.target_id.as_deref(), Some(report.memory_id.as_str()));
+        assert_eq!(audit.actor.as_deref(), Some("MistySalmon"));
+        assert!(
+            audit
+                .details
+                .as_ref()
+                .is_some_and(|details| details.contains("restore reversible decay tombstone"))
+        );
         Ok(())
     }
 

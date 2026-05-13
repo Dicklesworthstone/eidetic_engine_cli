@@ -166,7 +166,12 @@ impl DaemonStatusReport {
                 "code": "daemon_background_mode_unimplemented",
                 "capabilitiesCommand": "ee capabilities --json"
             },
-            "degraded": [],
+            "degraded": [{
+                "code": "daemon_background_mode_unimplemented",
+                "severity": "low",
+                "message": "Only bounded foreground daemon mode is available; background daemonization is not implemented.",
+                "repair": "Run `ee daemon --foreground --once --json` for bounded maintenance."
+            }],
         })
     }
 }

@@ -34,7 +34,8 @@
         "db_generation_observed",
         "volatile_strip",
         "schema_gate",
-        "field_selector"
+        "field_selector",
+        "bench_iteration"
       ]
     },
     "command": {
@@ -168,6 +169,22 @@
               "fields_in_response",
               "rejected_field_count",
               "elapsed_us"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "bench_iteration"}}},
+      "then": {
+        "properties": {
+          "fields": {
+            "type": "object",
+            "required": [
+              "operation",
+              "status",
+              "profile",
+              "workload_tier"
             ]
           }
         }

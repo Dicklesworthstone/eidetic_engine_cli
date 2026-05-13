@@ -26,6 +26,8 @@
       "Search is compiled",
       "index is missing"
     ],
-    "repair_contains": "ee index status"
+    "repair_contains": "ee index status",
+    "repair_string": "Run `ee index status --workspace . --json`.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
   }
 }

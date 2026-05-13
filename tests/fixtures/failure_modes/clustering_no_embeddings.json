@@ -11,12 +11,12 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "Science clustering has candidates, but candidate embeddings are unavailable.",
+    "description": "Science clustering has a curation candidate whose target memory is missing and whose proposed content is empty, so there is no semantic payload to embed.",
     "setup_commands": [
       "ee init --workspace .",
-      "# seed candidates without embeddings"
+      "ee diag curation-candidate --allow-missing-target --candidate-type rule --status pending --workspace . --json"
     ],
-    "invocation": "ee analyze clustering --workspace . --json"
+    "invocation": "ee analyze clustering --workspace . --candidate-type rule --status pending --json"
   },
   "expected_emission": {
     "code": "clustering_no_embeddings",

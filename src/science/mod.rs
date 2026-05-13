@@ -24,13 +24,15 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::config::env_registry::{EnvVar, read, read_os};
+
 /// Science analytics subsystem identifier.
 pub const SUBSYSTEM: &str = "science";
 
 /// Check if deterministic science analytics are available at runtime.
 #[must_use]
-pub const fn is_available() -> bool {
-    true
+pub fn is_available() -> bool {
+    status().is_available()
 }
 
 /// Science analytics availability status for JSON output.
@@ -62,8 +64,37 @@ impl ScienceStatus {
 
 /// Get the current science analytics status.
 #[must_use]
-pub const fn status() -> ScienceStatus {
+pub fn status() -> ScienceStatus {
+    if diag_forced_capability_gap("science") {
+        return ScienceStatus::NotCompiled;
+    }
+
+    if configured_backend_path_is_missing() {
+        return ScienceStatus::BackendUnavailable;
+    }
+
     ScienceStatus::Available
+}
+
+fn configured_backend_path_is_missing() -> bool {
+    let Some(path) = read_os(EnvVar::ScienceBackendPath) else {
+        return false;
+    };
+    if path.as_os_str().is_empty() {
+        return false;
+    }
+    !PathBuf::from(path).exists()
+}
+
+fn diag_forced_capability_gap(capability: &str) -> bool {
+    let Some(raw) = read(EnvVar::DiagForceCapabilityGap) else {
+        return false;
+    };
+
+    raw.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .any(|part| part.eq_ignore_ascii_case(capability) || part.eq_ignore_ascii_case("all"))
 }
 
 /// Degradation code for science analytics unavailable.
@@ -153,7 +184,7 @@ impl ScienceStatusReport {
             status,
             available,
             feature: ScienceFeatureStatus::current(),
-            capabilities: science_capabilities(available),
+            capabilities: science_capabilities(status),
             degradations: science_degradations(status),
             next_actions: science_next_actions(status),
         }
@@ -300,12 +331,16 @@ impl ScienceCapabilityStatus {
     }
 
     #[must_use]
-    pub const fn degraded(name: &'static str, description: &'static str) -> Self {
+    pub const fn degraded(
+        name: &'static str,
+        description: &'static str,
+        degradation_code: &'static str,
+    ) -> Self {
         Self {
             name,
             state: ScienceCapabilityState::Degraded,
             required_feature: SCIENCE_ANALYTICS_FEATURE,
-            degradation_code: Some(DEGRADATION_CODE_NOT_COMPILED),
+            degradation_code: Some(degradation_code),
             description,
         }
     }
@@ -326,6 +361,7 @@ impl ScienceCapabilityStatus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScienceDegradation {
     pub code: &'static str,
+    pub severity: &'static str,
     pub message: &'static str,
     pub repair: &'static str,
 }
@@ -335,6 +371,7 @@ impl ScienceDegradation {
     pub const fn not_compiled() -> Self {
         Self {
             code: DEGRADATION_CODE_NOT_COMPILED,
+            severity: "high",
             message: "Science analytics were not compiled into this binary.",
             repair: "Rebuild ee with --features science-analytics.",
         }
@@ -344,6 +381,7 @@ impl ScienceDegradation {
     pub const fn backend_unavailable() -> Self {
         Self {
             code: DEGRADATION_CODE_BACKEND_UNAVAILABLE,
+            severity: "high",
             message: "Science analytics backend is unavailable.",
             repair: "Run ee doctor --json and inspect science diagnostics.",
         }
@@ -353,6 +391,7 @@ impl ScienceDegradation {
     pub const fn input_too_large() -> Self {
         Self {
             code: DEGRADATION_CODE_INPUT_TOO_LARGE,
+            severity: "medium",
             message: "Science analytics input exceeds the supported size.",
             repair: "Reduce the science analytics input size and retry.",
         }
@@ -362,6 +401,7 @@ impl ScienceDegradation {
     pub const fn budget_exceeded() -> Self {
         Self {
             code: DEGRADATION_CODE_BUDGET_EXCEEDED,
+            severity: "medium",
             message: "Science analytics budget was exhausted.",
             repair: "Increase the science analytics budget or use a smaller input.",
         }
@@ -371,6 +411,7 @@ impl ScienceDegradation {
     fn data_json(&self) -> serde_json::Value {
         serde_json::json!({
             "code": self.code,
+            "severity": self.severity,
             "message": self.message,
             "repair": self.repair,
         })
@@ -394,6 +435,10 @@ pub struct DriftAnalysisOptions {
     pub threshold: f64,
     /// Include metric-level detail in the report.
     pub detailed: bool,
+    /// Optional maximum combined snapshot bytes accepted for one analysis run.
+    pub max_input_bytes: Option<u64>,
+    /// Optional maximum comparable metric pairs to evaluate.
+    pub metric_budget: Option<usize>,
 }
 
 /// Report from analyzing drift between frozen evaluation snapshots.
@@ -569,6 +614,17 @@ impl DriftDegradation {
 #[must_use]
 pub fn analyze_drift(options: &DriftAnalysisOptions) -> DriftAnalysisReport {
     let threshold = finite_threshold(options.threshold);
+    let science_status = status();
+    if !science_status.is_available() {
+        return degraded_drift_report(
+            threshold,
+            None,
+            None,
+            drift_analysis_unavailable_degradation(science_status),
+            vec!["ee analyze science-status --json".to_string()],
+        );
+    }
+
     let (baseline, current) = match load_snapshot_pair(options) {
         Ok(pair) => pair,
         Err(degradation) => {
@@ -579,7 +635,27 @@ pub fn analyze_drift(options: &DriftAnalysisOptions) -> DriftAnalysisReport {
         }
     };
 
+    if input_bytes_exceed_budget(&baseline, &current, options.max_input_bytes) {
+        return degraded_drift_report(
+            threshold,
+            Some(baseline.id),
+            Some(current.id),
+            science_drift_degradation(ScienceDegradation::input_too_large(), "medium"),
+            vec!["Reduce snapshot size or pass a larger --max-input-bytes value.".to_string()],
+        );
+    }
+
     let comparable = metric_drifts(&baseline.metrics, &current.metrics, threshold);
+    if metric_budget_exhausted(comparable.len(), options.metric_budget) {
+        return degraded_drift_report(
+            threshold,
+            Some(baseline.id),
+            Some(current.id),
+            science_drift_degradation(ScienceDegradation::budget_exceeded(), "medium"),
+            vec!["Increase --metric-budget or analyze a narrower snapshot pair.".to_string()],
+        );
+    }
+
     if comparable.is_empty() {
         return DriftAnalysisReport {
             schema: DRIFT_ANALYSIS_SCHEMA_V1,
@@ -647,6 +723,77 @@ struct EvaluationSnapshot {
     source_path: PathBuf,
     sort_key: String,
     metrics: BTreeMap<String, f64>,
+}
+
+fn input_bytes_exceed_budget(
+    baseline: &EvaluationSnapshot,
+    current: &EvaluationSnapshot,
+    max_input_bytes: Option<u64>,
+) -> bool {
+    let Some(max_input_bytes) = max_input_bytes else {
+        return false;
+    };
+    let total_bytes =
+        snapshot_size(&baseline.source_path).saturating_add(snapshot_size(&current.source_path));
+    total_bytes > max_input_bytes
+}
+
+fn snapshot_size(path: &Path) -> u64 {
+    std::fs::metadata(path).map_or(0, |metadata| metadata.len())
+}
+
+fn metric_budget_exhausted(metric_count: usize, metric_budget: Option<usize>) -> bool {
+    metric_budget.is_some_and(|budget| metric_count > budget)
+}
+
+fn science_drift_degradation(
+    degradation: ScienceDegradation,
+    severity: impl Into<String>,
+) -> DriftDegradation {
+    DriftDegradation {
+        code: degradation.code.to_string(),
+        message: degradation.message.to_string(),
+        severity: severity.into(),
+        repair: degradation.repair.to_string(),
+    }
+}
+
+fn drift_analysis_unavailable_degradation(status: ScienceStatus) -> DriftDegradation {
+    let reason = match status {
+        ScienceStatus::Available => "science analytics reported available",
+        ScienceStatus::NotCompiled => "science analytics were not compiled into this binary",
+        ScienceStatus::BackendUnavailable => {
+            "the configured science analytics backend is unavailable"
+        }
+    };
+    DriftDegradation {
+        code: DEGRADATION_CODE_DRIFT_UNAVAILABLE.to_string(),
+        message: format!("Drift analysis is unavailable because {reason}."),
+        severity: "high".to_string(),
+        repair: "Run ee analyze science-status --json and inspect science diagnostics.".to_string(),
+    }
+}
+
+fn degraded_drift_report(
+    threshold: f64,
+    baseline_id: Option<String>,
+    current_id: Option<String>,
+    degradation: DriftDegradation,
+    next_actions: Vec<String>,
+) -> DriftAnalysisReport {
+    DriftAnalysisReport {
+        schema: DRIFT_ANALYSIS_SCHEMA_V1,
+        command: DRIFT_ANALYSIS_COMMAND,
+        drift_detected: false,
+        drift_magnitude: 0.0,
+        threshold,
+        baseline_id,
+        current_id,
+        metric_drifts: Vec::new(),
+        degradations: vec![degradation],
+        next_actions,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+    }
 }
 
 fn finite_threshold(value: f64) -> f64 {
@@ -1039,6 +1186,27 @@ impl ClusteringAnalysisReport {
         }
     }
 
+    /// Build a degraded report when the configured science backend is unavailable.
+    #[must_use]
+    pub fn backend_unavailable() -> Self {
+        Self {
+            schema: CLUSTERING_ANALYSIS_SCHEMA_V1,
+            command: CLUSTERING_ANALYSIS_COMMAND,
+            available: false,
+            computed: false,
+            candidate_count: 0,
+            diagnostics: ClusteringDiagnostics::default(),
+            degradations: vec![ClusteringDegradation {
+                code: DEGRADATION_CODE_BACKEND_UNAVAILABLE.to_string(),
+                message: "Science analytics backend is unavailable.".to_string(),
+                severity: "high".to_string(),
+                repair: "ee analyze science-status --json".to_string(),
+            }],
+            next_actions: vec!["ee analyze science-status --json".to_string()],
+            generated_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
     /// Build a degraded report when no candidates are available.
     #[must_use]
     pub fn no_candidates() -> Self {
@@ -1157,8 +1325,13 @@ impl ClusteringDegradation {
 /// candidate embeddings cannot be retrieved.
 #[must_use]
 pub fn analyze_clustering(options: &ClusteringAnalysisOptions) -> ClusteringAnalysisReport {
-    if !is_available() {
-        return ClusteringAnalysisReport::not_compiled();
+    let science_status = status();
+    if !science_status.is_available() {
+        return match science_status {
+            ScienceStatus::NotCompiled => ClusteringAnalysisReport::not_compiled(),
+            ScienceStatus::BackendUnavailable => ClusteringAnalysisReport::backend_unavailable(),
+            ScienceStatus::Available => unreachable!(),
+        };
     }
 
     let Some(workspace_path) = resolve_clustering_workspace_path(&options.workspace) else {
@@ -1194,17 +1367,22 @@ pub fn analyze_clustering(options: &ClusteringAnalysisOptions) -> ClusteringAnal
     let workspace_path_text = workspace_path.to_string_lossy().to_string();
     let embeddings = candidates
         .iter()
-        .map(|candidate| {
+        .filter_map(|candidate| {
             let target_memory = connection
                 .get_memory(&candidate.target_memory_id)
                 .ok()
                 .flatten();
-            crate::search::curation_candidate_embedding(
-                candidate,
-                target_memory.as_ref(),
-                Some(&workspace_path_text),
+            if !candidate_has_clustering_payload(candidate, target_memory.as_ref()) {
+                return None;
+            }
+            Some(
+                crate::search::curation_candidate_embedding(
+                    candidate,
+                    target_memory.as_ref(),
+                    Some(&workspace_path_text),
+                )
+                .embedding,
             )
-            .embedding
         })
         .filter(|embedding| embedding.iter().all(|value| value.is_finite()))
         .collect::<Vec<_>>();
@@ -1218,6 +1396,17 @@ pub fn analyze_clustering(options: &ClusteringAnalysisOptions) -> ClusteringAnal
     }
 
     ClusteringAnalysisReport::computed(embeddings.len(), diagnostics)
+}
+
+fn candidate_has_clustering_payload(
+    candidate: &crate::db::StoredCurationCandidate,
+    target_memory: Option<&crate::db::StoredMemory>,
+) -> bool {
+    target_memory.is_some()
+        || candidate
+            .proposed_content
+            .as_deref()
+            .is_some_and(|content| !content.trim().is_empty())
 }
 
 fn resolve_clustering_workspace_path(path: &Path) -> Option<PathBuf> {
@@ -1249,21 +1438,34 @@ pub fn science_status_report() -> ScienceStatusReport {
     ScienceStatusReport::current()
 }
 
-fn science_capabilities(available: bool) -> Vec<ScienceCapabilityStatus> {
+fn science_capabilities(status: ScienceStatus) -> Vec<ScienceCapabilityStatus> {
     const EVALUATION_METRICS: &str =
         "Deterministic precision, recall, and F1 metrics for evaluation runs.";
     const CLUSTERING_DIAGNOSTICS: &str =
         "Deterministic clustering diagnostics for consolidation candidates.";
 
-    if available {
+    if status.is_available() {
         vec![
             ScienceCapabilityStatus::available("clustering_diagnostics", CLUSTERING_DIAGNOSTICS),
             ScienceCapabilityStatus::available("evaluation_metrics", EVALUATION_METRICS),
         ]
     } else {
+        let degradation_code = match status {
+            ScienceStatus::Available => unreachable!(),
+            ScienceStatus::NotCompiled => DEGRADATION_CODE_NOT_COMPILED,
+            ScienceStatus::BackendUnavailable => DEGRADATION_CODE_BACKEND_UNAVAILABLE,
+        };
         vec![
-            ScienceCapabilityStatus::degraded("clustering_diagnostics", CLUSTERING_DIAGNOSTICS),
-            ScienceCapabilityStatus::degraded("evaluation_metrics", EVALUATION_METRICS),
+            ScienceCapabilityStatus::degraded(
+                "clustering_diagnostics",
+                CLUSTERING_DIAGNOSTICS,
+                degradation_code,
+            ),
+            ScienceCapabilityStatus::degraded(
+                "evaluation_metrics",
+                EVALUATION_METRICS,
+                degradation_code,
+            ),
         ]
     }
 }
@@ -1845,6 +2047,8 @@ mod tests {
             workspace: temp.path().to_path_buf(),
             threshold: 0.10,
             detailed: true,
+            max_input_bytes: None,
+            metric_budget: None,
         });
 
         ensure(report.degradations.is_empty(), true, "no degradations")?;
@@ -2040,9 +2244,48 @@ mod tests {
             "backend unavailable degradation",
         )?;
         ensure(
+            super::science_capabilities(ScienceStatus::BackendUnavailable)
+                .iter()
+                .map(|entry| entry.degradation_code)
+                .collect(),
+            vec![
+                Some(DEGRADATION_CODE_BACKEND_UNAVAILABLE),
+                Some(DEGRADATION_CODE_BACKEND_UNAVAILABLE),
+            ],
+            "backend unavailable capability degradations",
+        )?;
+        ensure(
             super::science_next_actions(ScienceStatus::BackendUnavailable),
             vec!["Inspect science backend diagnostics and rebuild if required."],
             "backend unavailable next action",
+        )
+    }
+
+    #[test]
+    fn drift_analysis_unavailable_degradation_is_stable() -> TestResult {
+        let degradation =
+            super::drift_analysis_unavailable_degradation(ScienceStatus::BackendUnavailable);
+        ensure(
+            degradation.code.as_str(),
+            DEGRADATION_CODE_DRIFT_UNAVAILABLE,
+            "drift unavailable code",
+        )?;
+        ensure(
+            degradation.severity.as_str(),
+            "high",
+            "drift unavailable severity",
+        )?;
+        ensure(
+            degradation
+                .message
+                .contains("configured science analytics backend"),
+            true,
+            "drift unavailable reason",
+        )?;
+        ensure(
+            degradation.repair.as_str(),
+            "Run ee analyze science-status --json and inspect science diagnostics.",
+            "drift unavailable repair",
         )
     }
 
@@ -2061,6 +2304,11 @@ mod tests {
                 DEGRADATION_CODE_BUDGET_EXCEEDED,
             ],
             "operational degradation codes",
+        )?;
+        ensure(
+            entries.iter().map(|entry| entry.severity).collect(),
+            vec!["high", "medium", "medium"],
+            "operational degradation severities",
         )?;
         ensure(
             entries.iter().map(|entry| entry.repair).collect(),
@@ -2236,6 +2484,52 @@ mod tests {
             json.get("computed").and_then(serde_json::Value::as_bool),
             Some(true),
             "json computed",
+        )
+    }
+
+    #[test]
+    fn analyze_clustering_reports_no_embeddings_for_payloadless_candidates() -> TestResult {
+        let (_tempdir, workspace_path) = seed_clustering_workspace()?;
+        let database_path = workspace_path.join(".ee").join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database_path)
+            .map_err(|error| error.to_string())?;
+        let workspace_id = super::stable_workspace_id(&workspace_path);
+        connection
+            .insert_curation_candidate(
+                "curate_00000000000000000000000015",
+                &crate::db::CreateCurationCandidateInput {
+                    workspace_id,
+                    candidate_type: "orphan".to_string(),
+                    target_memory_id: "mem_00000000000000000000999999".to_string(),
+                    proposed_content: None,
+                    proposed_confidence: None,
+                    proposed_trust_class: None,
+                    source_type: "rule_engine".to_string(),
+                    source_id: Some("cluster-fixture".to_string()),
+                    reason: "Payloadless candidate should not synthesize an embedding.".to_string(),
+                    confidence: 0.82,
+                    status: Some("pending".to_string()),
+                    created_at: Some("2026-05-04T12:05:00Z".to_string()),
+                    ttl_expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let report = analyze_clustering(&ClusteringAnalysisOptions {
+            workspace: workspace_path,
+            candidate_type: Some("orphan".to_string()),
+            status: Some("pending".to_string()),
+            limit: 10,
+            detailed: false,
+        });
+
+        ensure(report.available, true, "science available")?;
+        ensure(report.computed, false, "clustering not computed")?;
+        ensure(report.candidate_count, 1, "candidate counted")?;
+        ensure(
+            report.degradations.first().map(|entry| entry.code.as_str()),
+            Some(DEGRADATION_CODE_NO_EMBEDDINGS),
+            "no embeddings degradation",
         )
     }
 

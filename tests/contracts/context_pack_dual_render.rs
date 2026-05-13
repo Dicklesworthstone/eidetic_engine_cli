@@ -656,8 +656,8 @@ fn json_pack_text_can_be_suppressed_for_structured_only_consumers() -> TestResul
 #[test]
 fn pack_items_carry_merged_certificate_and_step_fields() -> TestResult {
     // A1 phase 1 (bd-17c65.1.1): items[] now carries per-item data that
-    // previously required walking selectionCertificate.selected_items[],
-    // selectionCertificate.steps[], and provenanceFooter.entries[] in
+    // previously required walking selectionAudit.selected_items[],
+    // selectionAudit.steps[], and provenanceFooter.entries[] in
     // parallel. This test pins the merge invariant: when a pack has any
     // items, every item must expose tokenCost, feasible, marginalGain,
     // objectiveValue, coveredFeatures, and sourceIndex inline.

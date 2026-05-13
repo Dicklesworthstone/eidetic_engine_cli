@@ -108,14 +108,14 @@ proptest! {
 
         prop_assert_eq!(draft.used_tokens, selected_tokens);
         prop_assert!(draft.used_tokens <= budget.max_tokens());
-        prop_assert_eq!(draft.selection_certificate.budget_used, draft.used_tokens);
-        prop_assert_eq!(draft.selection_certificate.budget_limit, budget.max_tokens());
+        prop_assert_eq!(draft.selection_audit.budget_used, draft.used_tokens);
+        prop_assert_eq!(draft.selection_audit.budget_limit, budget.max_tokens());
         prop_assert_eq!(
-            draft.selection_certificate.selected_count,
+            draft.selection_audit.selected_count,
             draft.items.len(),
         );
         prop_assert_eq!(
-            draft.selection_certificate.omitted_count,
+            draft.selection_audit.omitted_count,
             draft.omitted.len(),
         );
         for item in &draft.items {
@@ -124,7 +124,7 @@ proptest! {
         for omission in &draft.omitted {
             prop_assert!(omission.estimated_tokens > 0);
         }
-        for step in &draft.selection_certificate.steps {
+        for step in &draft.selection_audit.steps {
             prop_assert!(step.objective_value.is_finite());
             prop_assert!(step.token_cost > 0);
         }

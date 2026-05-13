@@ -11,11 +11,11 @@
   "severity": "warning",
   "repair_present": false,
   "trigger": {
-    "description": "The causal trace database path exists but cannot be opened.",
+    "description": "The causal trace command is pointed at an explicit database path that exists but cannot be opened as a database.",
     "setup_commands": [
-      "# use a direct-helper fixture with an unreadable or invalid database"
+      "mkdir bad.db"
     ],
-    "invocation": "ee causal trace failure-1 --database bad.db --json"
+    "invocation": "ee causal trace failure-1 --database bad.db --database-workspace-id wsp_123 --json"
   },
   "expected_emission": {
     "code": "causal_database_open_failed",

@@ -13,11 +13,11 @@
   "severity": "high",
   "repair_present": true,
   "trigger": {
-    "description": "A science analytics command is invoked from a build without the science analytics feature.",
+    "description": "The diagnostics capability-gap override forces science analytics to report as not compiled.",
     "setup_commands": [
-      "# build ee without --features science-analytics"
+      "export EE_DIAG_FORCE_CAPABILITY_GAP=science"
     ],
-    "invocation": "ee analyze science-status --json"
+    "invocation": "EE_DIAG_FORCE_CAPABILITY_GAP=science ee analyze science-status --json"
   },
   "expected_emission": {
     "code": "science_not_compiled",

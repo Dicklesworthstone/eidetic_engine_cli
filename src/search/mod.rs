@@ -246,10 +246,24 @@ impl MemoryDocumentBuilder {
             CanonicalSearchDocument::new(&memory.id, &memory.content, DocumentSource::Memory)
                 .with_level(&memory.level)
                 .with_kind(&memory.kind)
-                .with_created_at(&memory.created_at);
+                .with_created_at(&memory.created_at)
+                .with_metadata_entry(
+                    "validity_window_kind",
+                    memory_validity_window_kind(
+                        memory.valid_from.as_deref(),
+                        memory.valid_to.as_deref(),
+                    ),
+                );
 
         if let Some(workspace) = self.workspace_path {
             doc = doc.with_workspace(workspace);
+        }
+
+        if let Some(valid_from) = &memory.valid_from {
+            doc = doc.with_metadata_entry("valid_from", valid_from);
+        }
+        if let Some(valid_to) = &memory.valid_to {
+            doc = doc.with_metadata_entry("valid_to", valid_to);
         }
 
         if !self.tags.is_empty() {
@@ -263,6 +277,16 @@ impl MemoryDocumentBuilder {
 impl Default for MemoryDocumentBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn memory_validity_window_kind(valid_from: Option<&str>, valid_to: Option<&str>) -> &'static str {
+    match (valid_from, valid_to) {
+        (None, None) => "unbounded",
+        (Some(from), Some(to)) if from == to => "instant",
+        (Some(_), Some(_)) => "bounded",
+        (Some(_), None) => "starts_at",
+        (None, Some(_)) => "ends_at",
     }
 }
 
@@ -2386,6 +2410,28 @@ mod tests {
             Some(&"2026-04-29T12:00:00Z".to_owned())
         );
         assert!(!indexable.metadata.contains_key("workspace"));
+    }
+
+    #[test]
+    fn memory_document_builder_indexes_validity_window_metadata() {
+        let mut memory = make_test_memory();
+        memory.valid_from = Some("2026-05-01T00:00:00Z".to_owned());
+        memory.valid_to = Some("2026-05-31T23:59:59Z".to_owned());
+
+        let indexable = super::memory_to_document(&memory).into_indexable();
+
+        assert_eq!(
+            indexable.metadata.get("valid_from"),
+            Some(&"2026-05-01T00:00:00Z".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("valid_to"),
+            Some(&"2026-05-31T23:59:59Z".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("validity_window_kind"),
+            Some(&"bounded".to_owned())
+        );
     }
 
     #[test]

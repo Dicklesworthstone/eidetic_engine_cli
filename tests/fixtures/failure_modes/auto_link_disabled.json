@@ -1,8 +1,13 @@
 {
   "schema": "ee.failure_mode_fixture.v1",
   "code": "auto_link_disabled",
-  "introduced_by": { "bead": "bd-17c65.7.6", "epic_letter": "G" },
-  "surfaces": ["remember"],
+  "introduced_by": {
+    "bead": "bd-17c65.7.6",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "remember"
+  ],
   "severity": "info",
   "repair_present": true,
   "trigger": {
@@ -19,7 +24,9 @@
       "Automatic memory linking requires a workflow context",
       "ee memory link"
     ],
-    "repair_contains": "ee memory link"
+    "repair_contains": "ee memory link",
+    "repair_string": "ee memory link --help",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   },
   "notes": "Status string is `auto_link_status: \"no_workflow_required\"` (a non-failure honest state). The degraded entry serves as the agent-readable signal that no workflow was supplied and explicit linking is the path forward."
 }

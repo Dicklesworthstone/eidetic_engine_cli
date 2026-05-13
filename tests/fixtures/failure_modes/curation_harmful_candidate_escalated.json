@@ -15,7 +15,8 @@
     "description": "A rejected curation candidate reached its harmful-feedback escalation TTL.",
     "setup_commands": [
       "ee init --workspace .",
-      "# seed rejected candidate whose escalation TTL has expired"
+      "ee remember --workspace . --level semantic --kind fact 'J6 curation harmful target memory.' --json",
+      "ee diag curation-candidate --workspace . --candidate-id curate_j6000000000000000000000001 --candidate-type deprecate --status rejected --target-memory-id <memory-id> --source-type feedback_event --source-id j6-harmful --reason 'J6 harmful candidate escalation fixture' --confidence 0.8 --created-at 2026-05-01T00:00:00Z --review-state rejected --state-entered-at 2000-01-01T00:00:00Z --ttl-policy-id curation.harmful.default --json"
     ],
     "invocation": "ee curate disposition --workspace . --json"
   },
@@ -26,6 +27,8 @@
       "harmful-feedback",
       "escalation"
     ],
-    "repair_contains": "ee curate"
+    "repair_contains": "ee curate",
+    "repair_string": "Run `ee curate disposition --json` and review escalated candidates.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
   }
 }

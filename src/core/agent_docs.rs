@@ -216,6 +216,18 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         category: EnvVar::DemoEvidenceRoot.category(),
     },
     EnvVarEntry {
+        name: EnvVar::DisableToon.name(),
+        description: EnvVar::DisableToon.description(),
+        default: EnvVar::DisableToon.default_value(),
+        category: EnvVar::DisableToon.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::DisableRememberSearchNeighbors.name(),
+        description: EnvVar::DisableRememberSearchNeighbors.description(),
+        default: EnvVar::DisableRememberSearchNeighbors.default_value(),
+        category: EnvVar::DisableRememberSearchNeighbors.category(),
+    },
+    EnvVarEntry {
         name: EnvVar::ExperimentalTriad.name(),
         description: EnvVar::ExperimentalTriad.description(),
         default: EnvVar::ExperimentalTriad.default_value(),
@@ -250,6 +262,12 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         description: EnvVar::IndexDir.description(),
         default: EnvVar::IndexDir.default_value(),
         category: EnvVar::IndexDir.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::IndexPublishLockRetryAttempts.name(),
+        description: EnvVar::IndexPublishLockRetryAttempts.description(),
+        default: EnvVar::IndexPublishLockRetryAttempts.default_value(),
+        category: EnvVar::IndexPublishLockRetryAttempts.category(),
     },
     EnvVarEntry {
         name: EnvVar::Json.name(),
@@ -310,6 +328,12 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         description: EnvVar::SecurityProfile.description(),
         default: EnvVar::SecurityProfile.default_value(),
         category: EnvVar::SecurityProfile.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::ScienceBackendPath.name(),
+        description: EnvVar::ScienceBackendPath.description(),
+        default: EnvVar::ScienceBackendPath.default_value(),
+        category: EnvVar::ScienceBackendPath.category(),
     },
     EnvVarEntry {
         name: EnvVar::TestLogLevel.name(),

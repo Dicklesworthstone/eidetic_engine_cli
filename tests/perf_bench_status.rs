@@ -9,6 +9,7 @@ use serde_json::Value;
 use toml_edit::{DocumentMut, Item};
 
 const BASELINE_PATH: &str = "benches/baselines/v0.1.json";
+const PERF_BASELINE_PATH: &str = "benches/baselines/perf_v0_2.json";
 const BUDGETS_PATH: &str = "benches/budgets.toml";
 const REGRESSION_TOLERANCE: f64 = 1.30;
 // Debug `cargo test` runs include instrumentation and can execute this
@@ -122,17 +123,23 @@ fn bench_script_exposes_rch_safe_profiles_and_report_fields() -> TestResult {
         "stress",
         "${TMPDIR:-/tmp}",
         "EE_BENCH_ARTIFACT_DIR",
+        "EE_TEST_LOG_PATH",
         "ee.perf.v1",
+        "bench_iteration",
         "workload_tier",
         "p95_ms",
         "p99_ms",
+        "samples_count",
         "max_rss_kb",
         "allocation_count",
         "rows_per_sec",
         "artifact_redaction",
         "regression_status",
+        "baseline_ref",
         "--advisory",
         "CARGO_TARGET_DIR",
+        "EE_BENCH_BASELINE_FILE",
+        "EE_BENCH_PROFILE",
         "pack-replay-freshness-smoke",
         "ee_context_pack_assembly_no_ledger",
         "ee_context_pack_persistence_ledger",
@@ -148,6 +155,164 @@ fn bench_script_exposes_rch_safe_profiles_and_report_fields() -> TestResult {
 
     if source.contains("/tmp/bench_output") {
         return Err("scripts/bench.sh must not depend on hard-coded /tmp temp files".to_owned());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn s4_benchmark_surface_covers_resource_scale_acceptance() -> TestResult {
+    let context_source = fs::read_to_string("benches/context.rs")
+        .map_err(|error| format!("failed to read benches/context.rs: {error}"))?;
+    let search_source = fs::read_to_string("benches/search.rs")
+        .map_err(|error| format!("failed to read benches/search.rs: {error}"))?;
+    let bench_script = fs::read_to_string("scripts/bench.sh")
+        .map_err(|error| format!("failed to read scripts/bench.sh: {error}"))?;
+    let budgets = budgets_manifest()?;
+    let operations = budgets
+        .get("operations")
+        .ok_or_else(|| "missing TOML field `operations`".to_owned())?
+        .as_table()
+        .ok_or_else(|| "`operations` must be a TOML table".to_owned())?;
+    let baseline = fs::read_to_string(BASELINE_PATH)
+        .map_err(|error| format!("failed to read `{BASELINE_PATH}`: {error}"))?;
+    let baseline: Value = serde_json::from_str(&baseline)
+        .map_err(|error| format!("invalid baseline JSON: {error}"))?;
+
+    for expected in [
+        "ee_context_s4_resource_scales",
+        "run_context_pack_with_performance",
+        "packAssembly",
+        "memoryBytesPeak",
+        "memory_bytes_peak",
+        "S4_RESOURCE_SCALES",
+        "1000_memories",
+        "10000_memories",
+        "100000_memories",
+        "EE_BENCH_PROFILE",
+    ] {
+        if !context_source.contains(expected) {
+            return Err(format!("benches/context.rs missing `{expected}`"));
+        }
+    }
+
+    for expected in [
+        "S4_SEARCH_COUNTS",
+        "search_counts_for_profile",
+        "1000_memories",
+        "10000_memories",
+        "100000_memories",
+        "EE_BENCH_PROFILE",
+    ] {
+        if !search_source.contains(expected) {
+            return Err(format!("benches/search.rs missing `{expected}`"));
+        }
+    }
+
+    if !bench_script.contains("export EE_BENCH_PROFILE=\"$PROFILE\"") {
+        return Err("scripts/bench.sh must pass the active profile into benches".to_owned());
+    }
+
+    if !operations.contains_key("ee_context_s4_resource_scales") {
+        return Err("benches/budgets.toml missing `ee_context_s4_resource_scales`".to_owned());
+    }
+
+    for (operation, scales) in [
+        (
+            "ee_context_s4_resource_scales",
+            ["1000_memories", "10000_memories", "100000_memories"],
+        ),
+        (
+            "ee_search",
+            ["1000_memories", "10000_memories", "100000_memories"],
+        ),
+    ] {
+        for scale in scales {
+            let pointer = format!("/operations/{operation}/scales/{scale}");
+            if baseline.pointer(&pointer).is_none() {
+                return Err(format!("baseline missing `{operation}` scale `{scale}`"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn j9_benchmark_surface_covers_required_operations() -> TestResult {
+    let cargo_toml = fs::read_to_string("Cargo.toml")
+        .map_err(|error| format!("failed to read Cargo.toml: {error}"))?;
+    let bench_script = fs::read_to_string("scripts/bench.sh")
+        .map_err(|error| format!("failed to read scripts/bench.sh: {error}"))?;
+    let regression_script = fs::read_to_string("scripts/bench_perf_regression.sh")
+        .map_err(|error| format!("failed to read scripts/bench_perf_regression.sh: {error}"))?;
+    let budgets = budgets_manifest()?;
+    let operations = budgets
+        .get("operations")
+        .ok_or_else(|| "missing TOML field `operations`".to_owned())?
+        .as_table()
+        .ok_or_else(|| "`operations` must be a TOML table".to_owned())?;
+    let baseline = fs::read_to_string(BASELINE_PATH)
+        .map_err(|error| format!("failed to read `{BASELINE_PATH}`: {error}"))?;
+    let baseline: Value = serde_json::from_str(&baseline)
+        .map_err(|error| format!("invalid baseline JSON: {error}"))?;
+    let perf_baseline = fs::read_to_string(PERF_BASELINE_PATH)
+        .map_err(|error| format!("failed to read `{PERF_BASELINE_PATH}`: {error}"))?;
+    let perf_baseline: Value = serde_json::from_str(&perf_baseline)
+        .map_err(|error| format!("invalid J9 perf baseline JSON: {error}"))?;
+
+    for expected in [
+        "perf_v0_2.json",
+        "EE_BENCH_BASELINE_FILE",
+        "scripts/bench.sh",
+        "--check-regression",
+    ] {
+        if !regression_script.contains(expected) {
+            return Err(format!(
+                "scripts/bench_perf_regression.sh missing `{expected}`"
+            ));
+        }
+    }
+
+    for (bench_name, operation) in [
+        ("search", "ee_search"),
+        ("index_rebuild", "ee_index_rebuild"),
+        ("workspace_init", "ee_workspace_init"),
+        ("audit_query", "ee_audit_query"),
+        ("context", "ee_context"),
+        ("concurrent_writes", "ee_concurrent_writes"),
+    ] {
+        if !cargo_toml.contains(&format!("name = \"{bench_name}\"")) {
+            return Err(format!("Cargo.toml missing J9 bench `{bench_name}`"));
+        }
+        if !bench_script.contains(bench_name) {
+            return Err(format!("scripts/bench.sh missing J9 bench `{bench_name}`"));
+        }
+        if !operations.contains_key(operation) {
+            return Err(format!("benches/budgets.toml missing `{operation}`"));
+        }
+        if baseline
+            .pointer(&format!("/operations/{operation}"))
+            .is_none()
+        {
+            return Err(format!("baseline missing `{operation}`"));
+        }
+        let perf_operation = perf_baseline
+            .pointer(&format!("/operations/{operation}"))
+            .ok_or_else(|| format!("J9 perf baseline missing `{operation}`"))?;
+        for field in [
+            "p50_ms",
+            "p99_ms",
+            "tolerance_pct_p50",
+            "tolerance_pct_p99",
+            "unstable",
+        ] {
+            if perf_operation.get(field).is_none() {
+                return Err(format!(
+                    "J9 perf baseline operation `{operation}` missing `{field}`"
+                ));
+            }
+        }
     }
 
     Ok(())

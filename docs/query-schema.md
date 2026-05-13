@@ -282,7 +282,7 @@ linked neighbors outside the active workspace scope are ignored and reported via
 | `output.profile` | enum | `"balanced"` | `"compact"`, `"balanced"`, `"thorough"`, `"submodular"` (`"custom"` not implemented) |
 | `output.format` | enum | `"json"` | Hint for renderer selection |
 | `output.fields` | enum | `"standard"` | `"minimal"`, `"summary"`, `"standard"`, `"full"` (validated; projection controlled by `--fields` CLI flag) |
-| `output.explain` | bool | false | Include scoring/selection explanations (JSON packs include `selectionCertificate` and per-item `why` by default; setting `true` emits an informational degradation confirming this) |
+| `output.explain` | bool | false | Include scoring/selection explanations (JSON packs include `selectionAudit` and per-item `why` by default; setting `true` emits an informational degradation confirming this) |
 
 ### Budget and Limits
 
@@ -581,7 +581,7 @@ This schema **does not**:
 | `output.profile` | **Implemented** | compact, balanced, thorough, submodular |
 | `output.format` | **Implemented** | json, markdown, toon, human, jsonl, compact, hook |
 | `output.fields` | Validated | Projection controlled by `--fields` CLI flag |
-| `output.explain` | **Implemented** | Accepted; JSON packs already include selection certificates and per-item `why` |
+| `output.explain` | **Implemented** | Accepted; JSON packs already include selection audits and per-item `why` |
 | `pagination.*` | **Implemented** | Cursor-based pagination with deterministic ordering |
 | `eval.*` | **Implemented** | Evaluation labels captured in output |
 

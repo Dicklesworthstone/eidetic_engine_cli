@@ -52,9 +52,18 @@ fn acquire_index_publish_lock(
         db,
         workspace_id,
         holder_id,
-        INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS,
+        index_publish_lock_retry_attempts(),
         index_publish_lock_retry_delay,
     )
+}
+
+fn index_publish_lock_retry_attempts() -> usize {
+    crate::config::env_registry::read(
+        crate::config::env_registry::EnvVar::IndexPublishLockRetryAttempts,
+    )
+    .and_then(|raw| raw.parse::<usize>().ok())
+    .filter(|attempts| *attempts > 0)
+    .unwrap_or(INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS)
 }
 
 fn acquire_index_publish_lock_with_retry<F>(
@@ -662,7 +671,7 @@ impl std::fmt::Display for IndexRebuildError {
             Self::Index(e) => write!(f, "Index error: {e}"),
             Self::LockContention(contention) => write!(
                 f,
-                "Index publish lock contention: lock {} held by {} since {}; exhausted {} attempts after {}ms",
+                "index publish lock contention: lock {} held by {} since {}; exhausted {} attempts after {}ms",
                 contention.lock_id,
                 contention.holder_id,
                 contention.acquired_at,
@@ -2042,10 +2051,16 @@ impl IndexStatusReport {
 
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
+        let degraded = self
+            .degraded()
+            .into_iter()
+            .map(IndexStatusDegradation::data_json)
+            .collect::<Vec<_>>();
         serde_json::json!({
             "command": "index_status",
             "health": self.health.as_str(),
             "degradationCode": self.health.degradation_code(),
+            "degraded": degraded,
             "indexDir": self.index_dir.to_string_lossy(),
             "databasePath": self.database_path.to_string_lossy(),
             "indexExists": self.index_exists,
@@ -2059,6 +2074,52 @@ impl IndexStatusReport {
             "lastCheckError": self.last_check_error,
             "repairHint": self.repair_hint,
             "elapsedMs": self.elapsed_ms,
+        })
+    }
+
+    fn degraded(&self) -> Option<IndexStatusDegradation> {
+        let repair = self
+            .repair_hint
+            .unwrap_or("ee index rebuild --workspace .")
+            .to_owned();
+        match self.health {
+            IndexHealth::Ready => None,
+            IndexHealth::Stale => Some(IndexStatusDegradation {
+                code: "index_stale",
+                severity: "high",
+                message: "Search index is stale.",
+                repair,
+            }),
+            IndexHealth::Missing => Some(IndexStatusDegradation {
+                code: "index_missing",
+                severity: "medium",
+                message: "Search index is missing.",
+                repair,
+            }),
+            IndexHealth::Corrupt => Some(IndexStatusDegradation {
+                code: "index_corrupt",
+                severity: "high",
+                message: "Search index metadata is corrupt.",
+                repair,
+            }),
+        }
+    }
+}
+
+struct IndexStatusDegradation {
+    code: &'static str,
+    severity: &'static str,
+    message: &'static str,
+    repair: String,
+}
+
+impl IndexStatusDegradation {
+    fn data_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "code": self.code,
+            "severity": self.severity,
+            "message": self.message,
+            "repair": self.repair,
         })
     }
 }
@@ -3306,6 +3367,8 @@ mod tests {
         let json = report.data_json();
         assert_eq!(json["health"], "stale");
         assert_eq!(json["degradationCode"], "index_stale");
+        assert_eq!(json["degraded"][0]["code"], "index_stale");
+        assert_eq!(json["degraded"][0]["severity"], "high");
         assert_eq!(json["dbGeneration"], 12);
         assert_eq!(json["indexGeneration"], 9);
         assert_eq!(json["dbMemoryCount"], 10);

@@ -14,9 +14,9 @@
     "description": "Protected procedural rule rows cannot be read from the workspace database.",
     "setup_commands": [
       "ee init --workspace .",
-      "# corrupt or migrate-drift protected-rule storage through a test harness"
+      "ee diag database-skew --workspace . --output-database <workspace-with-protected-rule-skew>/.ee/ee.db --skew procedural-rules-table-unavailable --json"
     ],
-    "invocation": "ee status --workspace . --json"
+    "invocation": "ee --fields full status --workspace <workspace-with-protected-rule-skew> --json"
   },
   "expected_emission": {
     "code": "feedback_protected_rules_unavailable",
@@ -25,6 +25,8 @@
       "Protected procedural rule rows",
       "could not be read"
     ],
-    "repair_contains": "ee db migrate"
+    "repair_contains": "ee db migrate",
+    "repair_string": "Run `ee db migrate --workspace .`.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
   }
 }

@@ -14,7 +14,7 @@
     "description": "A graph snapshot exists but its centrality-score payload cannot be parsed for feature enrichment.",
     "setup_commands": [
       "ee init --workspace .",
-      "# insert a graph snapshot with malformed centrality metrics"
+      "ee diag graph-snapshot --metrics-json '{\"nodes\":[],\"edges\":[]}' --node-count 0 --edge-count 0 --workspace . --json"
     ],
     "invocation": "ee graph feature-enrichment --workspace . --json"
   },

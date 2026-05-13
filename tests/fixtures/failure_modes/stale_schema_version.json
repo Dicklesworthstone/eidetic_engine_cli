@@ -24,6 +24,7 @@
     "message_contains": [
       "schema version"
     ],
-    "repair_contains": "current ee version"
+    "repair_contains": "current ee version",
+    "repair_string": "Re-export artifact with current ee version"
   }
 }

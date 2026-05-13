@@ -24,6 +24,7 @@
       "CASS evidence span listing",
       "not yet implemented"
     ],
-    "repair_contains": "ee review session"
+    "repair_contains": "ee review session",
+    "repair_string": "Use `ee review session` for session-specific evidence review."
   }
 }

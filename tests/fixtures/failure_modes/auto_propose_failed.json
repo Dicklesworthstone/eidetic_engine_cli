@@ -14,9 +14,11 @@
     "description": "The memory was persisted, but remember-time curation candidate proposal failed.",
     "setup_commands": [
       "ee init --workspace .",
-      "# induce curation proposal storage/index failure through a test harness"
+      "ee remember 'J6 auto propose seed one.' --level semantic --kind fact --tags j6-auto-propose --no-auto-link --no-propose-candidates --workspace . --json",
+      "ee remember 'J6 auto propose seed two.' --level semantic --kind fact --tags j6-auto-propose --no-auto-link --no-propose-candidates --workspace . --json",
+      "printf '[learn]\\ncluster_coherence_threshold = 2.0\\n' > .ee/config.toml"
     ],
-    "invocation": "ee remember 'Candidate proposal failure fixture.' --workspace . --tags cluster --json"
+    "invocation": "ee remember 'J6 auto propose triggering memory.' --level semantic --kind fact --tags j6-auto-propose --no-auto-link --workspace . --json"
   },
   "expected_emission": {
     "code": "auto_propose_failed",
@@ -25,6 +27,8 @@
       "Remembered the memory",
       "curation candidate proposal failed"
     ],
-    "repair_contains": "ee curate candidates"
+    "repair_contains": "ee curate candidates",
+    "repair_string": "Run `ee curate candidates --json` and inspect the review queue.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
   }
 }

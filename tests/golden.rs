@@ -1928,7 +1928,7 @@ mod tests {
             &serde_json::json!("mmr_redundancy"),
             "context algorithm objective",
         )?;
-        // Bead bd-2pe1z (A1 phase 2): selectionCertificate.steps[] is gone;
+        // Bead bd-2pe1z (A1 phase 2): selectionAudit.steps[] is gone;
         // the per-item rank trace is now inline on items[]. Read from the
         // canonical items[] location instead.
         ensure_equal(
@@ -2004,6 +2004,7 @@ mod tests {
             .arg("--workspace")
             .arg(&workspace)
             .arg("pack")
+            .arg("build")
             .arg("--query-file")
             .arg(&query_file)
             .arg("--database")
@@ -2051,6 +2052,71 @@ mod tests {
             &value["data"]["request"]["profile"],
             &serde_json::json!("compact"),
             "pack query-file profile",
+        )?;
+        ensure(
+            value.pointer("/data/pack/selectionAudit").is_some(),
+            "pack build output must include selectionAudit",
+        )?;
+        ensure(
+            value.pointer("/data/pack/selectionCertificate").is_none(),
+            "pack build output must omit deprecated selectionCertificate by default",
+        )?;
+        ensure(
+            value
+                .pointer("/data/pack/meta/algorithm/guaranteeStatus")
+                .is_none(),
+            "pack build output must omit guaranteeStatus",
+        )?;
+
+        let legacy_output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .env("EE_LEGACY_SELECTION_CERTIFICATE", "1")
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("pack")
+            .arg("build")
+            .arg("--query-file")
+            .arg(&query_file)
+            .arg("--database")
+            .arg(&database)
+            .arg("--index-dir")
+            .arg(&index_dir)
+            .output()
+            .map_err(|error| format!("failed to run legacy ee pack build --query-file: {error}"))?;
+        let legacy_stdout = String::from_utf8(legacy_output.stdout)
+            .map_err(|error| format!("legacy pack query-file stdout was not UTF-8: {error}"))?;
+        let legacy_stderr = String::from_utf8(legacy_output.stderr)
+            .map_err(|error| format!("legacy pack query-file stderr was not UTF-8: {error}"))?;
+        ensure(
+            legacy_output.status.success(),
+            format!("legacy pack query-file should succeed; stderr: {legacy_stderr}"),
+        )?;
+        ensure(
+            legacy_stderr.is_empty(),
+            format!("legacy pack query-file stderr must be empty, got: {legacy_stderr:?}"),
+        )?;
+        let legacy_value: serde_json::Value =
+            serde_json::from_str(&legacy_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &legacy_value["data"]["pack"]["deprecation"]["deprecatedField"],
+            &serde_json::json!("selectionCertificate"),
+            "legacy selectionCertificate deprecation field",
+        )?;
+        ensure_equal(
+            &legacy_value["data"]["pack"]["deprecation"]["replacementField"],
+            &serde_json::json!("selectionAudit"),
+            "legacy selectionCertificate replacement field",
+        )?;
+        ensure(
+            legacy_value
+                .pointer("/data/pack/selectionCertificate/algorithmId")
+                .is_some(),
+            "legacy pack output must include selectionCertificate when opted in",
+        )?;
+        ensure(
+            legacy_value
+                .pointer("/data/pack/selectionCertificate/guaranteeStatus")
+                .is_none(),
+            "legacy pack output must still omit guaranteeStatus",
         )?;
 
         let normalized = normalize_context_pack_json(&stdout);
@@ -2663,15 +2729,76 @@ mod tests {
             Err(_) => return json.to_string(),
         };
 
+        normalize_context_pack_json_strings(&mut value);
+
         if let Some(data) = value.get_mut("data") {
             if let Some(pack) = data.get_mut("pack") {
                 if pack.get("elapsedMs").is_some() {
                     pack["elapsedMs"] = serde_json::json!(0.0);
                 }
+                if pack.get("hash").is_some() {
+                    pack["hash"] = serde_json::json!("blake3:normalized-context-pack-hash");
+                }
             }
         }
 
         serde_json::to_string_pretty(&value).unwrap_or_else(|_| json.to_string()) + "\n"
+    }
+
+    fn normalize_context_pack_json_strings(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::String(text) => {
+                *text = normalize_context_pack_text(text);
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    normalize_context_pack_json_strings(item);
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for item in fields.values_mut() {
+                    normalize_context_pack_json_strings(item);
+                }
+            }
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            }
+        }
+    }
+
+    fn normalize_context_pack_text(text: &str) -> String {
+        let mut normalized = normalize_context_pack_artifact_paths(text);
+        normalized = normalize_context_pack_hash_comments(&normalized);
+        normalized
+    }
+
+    fn normalize_context_pack_artifact_paths(text: &str) -> String {
+        let marker = format!("{}/target/ee-golden-artifacts/", env!("CARGO_MANIFEST_DIR"));
+        let mut normalized = text.to_owned();
+        while let Some(start) = normalized.find(&marker) {
+            let suffix_start = start + marker.len();
+            let Some(workspace_offset) = normalized[suffix_start..].find("/workspace") else {
+                break;
+            };
+            let end = suffix_start + workspace_offset + "/workspace".len();
+            normalized.replace_range(start..end, "<ee-golden-workspace>");
+        }
+        normalized
+    }
+
+    fn normalize_context_pack_hash_comments(text: &str) -> String {
+        let mut normalized = text.to_owned();
+        let marker = "<!-- pack.hash: blake3:";
+        while let Some(start) = normalized.find(marker) {
+            let Some(end_offset) = normalized[start..].find("-->") else {
+                break;
+            };
+            let end = start + end_offset + "-->".len();
+            normalized.replace_range(
+                start..end,
+                "<!-- pack.hash: normalized-context-pack-hash -->",
+            );
+        }
+        normalized
     }
 
     #[test]

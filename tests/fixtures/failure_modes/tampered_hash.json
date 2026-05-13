@@ -24,6 +24,7 @@
     "message_contains": [
       "hash"
     ],
-    "repair_contains": "Verify artifact integrity"
+    "repair_contains": "Verify artifact integrity",
+    "repair_string": "Verify artifact integrity or re-export"
   }
 }

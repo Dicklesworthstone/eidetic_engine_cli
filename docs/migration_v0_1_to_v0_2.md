@@ -194,7 +194,7 @@ for d in response["data"].get("degraded", []):
 
 ---
 
-### A1 phase 2 — collapse `selectionCertificate.*` + `provenanceFooter` into `items[]`
+### A1 phase 2 — collapse selection audit arrays + `provenanceFooter` into `items[]`
 
 **Bead.** bd-17c65.1.1 (A1) phase 2 (commit bd-2pe1z).
 
@@ -206,7 +206,10 @@ for d in response["data"].get("degraded", []):
 - `data.pack.selectionCertificate.steps[]` — selection trace
 - `data.pack.provenanceFooter.entries[]` — provenance schemes per rank
 
-An agent reading `items[i]` had to chase three more arrays by rank.
+An agent reading `items[i]` had to chase three more arrays by rank. The
+v0.2 canonical audit path is `data.pack.selectionAudit`; the legacy
+`selectionCertificate` name is available only when explicitly requested during
+the transition window.
 
 **After (v0.2).** Each `pack.items[i]` carries the union of fields (rank, memoryId, section, content, estimatedTokens, scores, marginalGain, objectiveValue, feasibility, sourceIndex, provenance). The legacy arrays are **dropped**.
 
@@ -223,16 +226,15 @@ An agent reading `items[i]` had to chase three more arrays by rank.
     "sourceIndex":0,
     "provenance":[{"scheme":"ee-mem","uri":"ee-mem://mem_…"}]
   }],
-  "selectionCertificate":{
+  "selectionAudit":{
     "algorithmId":"mmr_with_coverage_fill_v1",
-    "algorithmDescription":"Two-pass MMR with coverage fill",
-    "guaranteeStatus":"empirical"
+    "algorithmDescription":"Two-pass MMR with coverage fill"
   },
   "provenanceFooter":{"memoryCount":1,"sourceCount":1,"schemes":["ee-mem"]}
 }}}
 ```
 
-`selectionCertificate` is retained as a top-level field carrying `algorithmId` + `algorithmDescription` + `guaranteeStatus`. Its sub-arrays are gone. `provenanceFooter` is retained as a summary; its `entries[]` array is gone.
+`selectionAudit` is retained as a top-level field carrying `algorithmId` + `algorithmDescription`. Its sub-arrays are gone. `provenanceFooter` is retained as a summary; its `entries[]` array is gone.
 
 **Agent rewrite.**
 ```python

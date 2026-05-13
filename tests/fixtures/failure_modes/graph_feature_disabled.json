@@ -12,11 +12,11 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "A graph command is invoked from a build that does not enable the optional graph feature.",
+    "description": "The diagnostics capability-gap override forces graph compute to report the optional graph feature disabled.",
     "setup_commands": [
-      "# build ee without --features graph"
+      "export EE_DIAG_FORCE_CAPABILITY_GAP=graph"
     ],
-    "invocation": "ee graph centrality --workspace . --json"
+    "invocation": "EE_DIAG_FORCE_CAPABILITY_GAP=graph ee status --workspace . --fields full --json"
   },
   "expected_emission": {
     "code": "graph_feature_disabled",

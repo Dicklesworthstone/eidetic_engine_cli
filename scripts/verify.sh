@@ -22,7 +22,7 @@ set -euo pipefail
 #   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
 #   7. Advanced E2E            - scripts/e2e_advanced.sh
 #   8. Boundary Migration      - scripts/e2e_boundary_migration.sh
-#   9. Benchmarks (optional)   - scripts/bench.sh --check-regression
+#   9. Benchmarks (optional)   - scripts/bench_perf_regression.sh --check-regression
 #
 # Exit codes match AGENTS.md conventions (0=success, 1=usage, 3=storage, etc.)
 # Artifacts are written to /tmp/ee-e2e-*/artifacts by E2E scripts.
@@ -253,7 +253,7 @@ run_stage "Boundary Migration Scripts" "./scripts/e2e_boundary_migration.sh"
 
 # Gate 9: Performance Benchmarks (optional, gated behind --include-bench)
 if [ "$INCLUDE_BENCH" = "true" ]; then
-    run_stage "Performance Benchmarks" "./scripts/bench.sh --check-regression"
+    run_stage "Performance Benchmarks" "./scripts/bench_perf_regression.sh --check-regression"
 fi
 
 TOTAL_END=$(date +%s)

@@ -4,8 +4,8 @@
 # Verifies `ee doctor`, `ee status`, and related diagnostics surfaces emit the
 # three-state posture (E1) and that the banner-emission honesty work landed.
 #
-# Shipped (real assertions):  E1, E2, E3, E4, E5
-# Not yet shipped (todo):     E6
+# Shipped (real assertions):  E1, E2, E3, E4, E5, E6
+# Not yet shipped (todo):     none
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,7 +57,7 @@ e2e_log_note "e1_doctor_has_healthy_or_report=$HAS_HEALTHY"
 # caller passes `--include-non-affecting-degradations`.
 #
 # Three assertions:
-#   - quiet baseline: a fresh-workspace `ee context` query produces
+#   - quiet baseline: a fresh-workspace `ee pack` query produces
 #     `data.degraded[] | length == 0` after the filter (the only
 #     signals fired are build-time / workspace-state).
 #   - verbose: the same query with --include-non-affecting-degradations
@@ -78,15 +78,15 @@ e2e_log_command "$EE_BINARY" remember "Run cargo fmt --check before release." \
     --workspace "$WS_E2" --level procedural --kind rule --tags release --json >/dev/null
 
 # Quiet baseline — default filter, expect zero degraded entries.
-QUIET_JSON=$(e2e_log_command "$EE_BINARY" context "prepare release" \
-    --workspace "$WS_E2" --max-tokens 1000 --json)
+QUIET_JSON=$(e2e_log_command "$EE_BINARY" pack "prepare release" \
+    --workspace "$WS_E2" --max-tokens 1000 --candidate-pool 24 --json)
 QUIET_LEN=$(printf '%s' "$QUIET_JSON" | jq -r '.data.degraded | length' 2>/dev/null || echo "?")
 e2e_log_assert_eq "$QUIET_LEN" "0" \
     "e2_quiet_baseline_degraded_array_empty"
 
 # Verbose mode — every signal surfaces.
-VERBOSE_JSON=$(e2e_log_command "$EE_BINARY" context "prepare release" \
-    --workspace "$WS_E2" --max-tokens 1000 \
+VERBOSE_JSON=$(e2e_log_command "$EE_BINARY" pack "prepare release" \
+    --workspace "$WS_E2" --max-tokens 1000 --candidate-pool 24 \
     --include-non-affecting-degradations=true --json)
 VERBOSE_LEN=$(printf '%s' "$VERBOSE_JSON" | jq -r '.data.degraded | length' 2>/dev/null || echo "?")
 # Verbose must be >= quiet — we expand the set, never shrink it.
@@ -243,6 +243,50 @@ else
         "e5_response_time_search_index_stale_still_emitted"
 fi
 
-# E6 — per-subsystem doctor checks.
-todo_assert "e6_per_subsystem_doctor_checks" "bd-17c65.5.6" \
-    "ee doctor lacks per-subsystem isolation (db/search/graph/cass/policy)."
+# ------------------------------------------------------------
+# E6 (SHIPPED 2026-05-13) — bead bd-17c65.5.6:
+# Status posture separates workspace-wide subsystem readiness from the
+# operation that just ran.
+# ------------------------------------------------------------
+E6_STATUS_JSON=$(ee_workspace status --json || true)
+assert_jq "$E6_STATUS_JSON" '.data.command' "status" \
+    "e6_status_command"
+assert_jq "$E6_STATUS_JSON" '.data.posture.thisOperation.status' "ok" \
+    "e6_this_operation_status_ok"
+assert_jq "$E6_STATUS_JSON" \
+    '[.data.posture.subsystems[]?.id] | sort | join(",")' \
+    "agent_detection,curate,feedback,graph_compute,maintenance,memory,pack,runtime,search,storage" \
+    "e6_fixed_subsystem_ids_present"
+
+E6_BAD_POSTURE_STATUS_COUNT=$(printf '%s' "$E6_STATUS_JSON" \
+    | jq -r '[.data.posture.overall, .data.posture.thisOperation.status, (.data.posture.subsystems[]?.status)]
+        | map(select(. as $s | ["ok","degraded_recoverable","degraded_required","blocked","unimplemented","initializing"] | index($s) | not))
+        | length' 2>/dev/null || echo "?")
+if [ "$E6_BAD_POSTURE_STATUS_COUNT" = "?" ]; then
+    e2e_log_assert_eq "parse_failed" "numeric" "e6_posture_status_enum_parsed"
+else
+    e2e_log_assert_eq "$E6_BAD_POSTURE_STATUS_COUNT" "0" \
+        "e6_posture_status_enum_valid"
+fi
+
+E6_SUBSYSTEMS_USED_COUNT=$(printf '%s' "$E6_STATUS_JSON" \
+    | jq -r '.data.posture.thisOperation.subsystemsUsed | length' \
+    2>/dev/null || echo "?")
+if [ "$E6_SUBSYSTEMS_USED_COUNT" = "?" ]; then
+    e2e_log_assert_eq "parse_failed" "numeric" "e6_this_operation_used_count_parsed"
+else
+    e2e_log_assert_num "$E6_SUBSYSTEMS_USED_COUNT" -gt 0 \
+        "e6_this_operation_subsystems_used_nonempty"
+fi
+
+E6_DEGRADED_LEN=$(printf '%s' "$E6_STATUS_JSON" \
+    | jq -r '.data.degraded | length' 2>/dev/null || echo "?")
+E6_OPERATION_DEGRADATIONS_LEN=$(printf '%s' "$E6_STATUS_JSON" \
+    | jq -r '.data.posture.thisOperation.degradationsApplied | length' \
+    2>/dev/null || echo "?")
+if [ "$E6_DEGRADED_LEN" = "?" ] || [ "$E6_OPERATION_DEGRADATIONS_LEN" = "?" ]; then
+    e2e_log_assert_eq "parse_failed" "numeric" "e6_degradation_count_parsed"
+else
+    e2e_log_assert_eq "$E6_OPERATION_DEGRADATIONS_LEN" "$E6_DEGRADED_LEN" \
+        "e6_this_operation_degradation_count_matches_status"
+fi

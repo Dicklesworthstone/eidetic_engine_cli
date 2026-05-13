@@ -6,7 +6,7 @@
     "epic_letter": "J"
   },
   "surfaces": [
-    "agent sources",
+    "agent status",
     "doctor",
     "dependency contract"
   ],
@@ -15,9 +15,9 @@
   "trigger": {
     "description": "The agent-detection adapter cannot inspect local agent roots or source probes.",
     "setup_commands": [
-      "ee agent sources --workspace . --json"
+      "ee agent status --workspace . --only not-a-real-agent --json"
     ],
-    "invocation": "ee agent sources --workspace . --json"
+    "invocation": "ee agent status --workspace . --only not-a-real-agent --json"
   },
   "expected_emission": {
     "code": "agent_detection_unavailable",
@@ -26,6 +26,8 @@
       "agent",
       "unavailable"
     ],
-    "repair_contains": "agent"
+    "repair_contains": "agent",
+    "repair_string": "ee agent sources --json",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

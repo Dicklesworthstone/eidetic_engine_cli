@@ -24,6 +24,8 @@
       "Workspace storage is unavailable",
       ".ee/ee.db is missing"
     ],
-    "repair_contains": "ee init"
+    "repair_contains": "ee init",
+    "repair_string": "Run `ee init --workspace .`.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
   }
 }

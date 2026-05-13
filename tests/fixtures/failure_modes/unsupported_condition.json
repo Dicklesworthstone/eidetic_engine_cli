@@ -15,7 +15,7 @@
     "description": "A persisted tripwire condition uses a condition kind the evaluator refuses to guess about.",
     "setup_commands": [
       "ee init --workspace .",
-      "# create a tripwire with an unsupported condition kind through a test harness"
+      "ee diag tripwire --workspace . --tripwire-id tw_j6_unsupported_condition --preflight-run-id preflight_j6_unsupported --tripwire-type custom --condition 'unsupported_condition_kind(value)' --action warn --state armed --message 'J6 unsupported condition fixture' --created-at 2026-05-13T00:00:00Z --json"
     ],
     "invocation": "ee tripwire check <id> --workspace . --json"
   },

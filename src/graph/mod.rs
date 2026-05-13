@@ -3066,7 +3066,7 @@ fn unsupported_snapshot_report(
         degraded: vec![GraphExportDegradation {
             code: "graph_snapshot_topology_unavailable",
             severity: "medium",
-            message,
+            message: format!("Graph snapshot topology is unavailable: {message}"),
             repair: "Regenerate a graph snapshot that includes nodes and edges.".to_owned(),
         }],
     }

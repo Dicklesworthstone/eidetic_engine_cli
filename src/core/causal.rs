@@ -327,6 +327,7 @@ pub struct TraceDegradation {
     pub code: String,
     pub message: String,
     pub severity: String,
+    pub repair: Option<String>,
 }
 
 impl std::fmt::Display for TraceDegradation {
@@ -338,11 +339,17 @@ impl std::fmt::Display for TraceDegradation {
 impl TraceDegradation {
     #[must_use]
     pub fn data_json(&self) -> JsonValue {
-        json!({
+        let mut value = json!({
             "code": self.code,
             "message": self.message,
             "severity": self.severity,
-        })
+        });
+        if let Some(repair) = self.repair.as_ref()
+            && let Some(object) = value.as_object_mut()
+        {
+            object.insert("repair".to_string(), json!(repair));
+        }
+        value
     }
 }
 
@@ -355,6 +362,21 @@ fn trace_degradation(
         code: code.into(),
         message: message.into(),
         severity: severity.into(),
+        repair: None,
+    }
+}
+
+fn trace_degradation_with_repair(
+    code: impl Into<String>,
+    message: impl Into<String>,
+    severity: impl Into<String>,
+    repair: impl Into<String>,
+) -> TraceDegradation {
+    TraceDegradation {
+        code: code.into(),
+        message: message.into(),
+        severity: severity.into(),
+        repair: Some(repair.into()),
     }
 }
 
@@ -849,10 +871,11 @@ fn load_causal_ledger_edges(
         Err(error) if db_error_mentions_missing_causal_table(&error) => {
             return Ok((
                 Vec::new(),
-                vec![trace_degradation(
+                vec![trace_degradation_with_repair(
                     "causal_evidence_table_missing",
                     "The causal_evidence table is missing; run `ee init --workspace .` with the current binary or migrate the database.",
                     "warning",
+                    "ee init --workspace .",
                 )],
             ));
         }
@@ -1357,18 +1380,21 @@ pub fn estimate_causal_uplift(options: &EstimateOptions) -> EstimateReport {
             code: "no_filters".to_string(),
             message: "No artifact or decision ID provided; cannot compute estimate".to_string(),
             severity: "warning".to_string(),
+            repair: None,
         });
     } else if !options.dry_run {
         degradations.push(TraceDegradation {
             code: "causal_sample_underpowered".to_string(),
             message: "Sample size 0 with no observed baseline/outcome ledger; no causal estimate is actionable.".to_string(),
             severity: "warning".to_string(),
+            repair: None,
         });
         if options.include_confounders {
             degradations.push(TraceDegradation {
                 code: "causal_confounders_unavailable".to_string(),
                 message: "No explicit confounder ledger rows were supplied; refusing to fabricate confounders.".to_string(),
                 severity: "warning".to_string(),
+                repair: None,
             });
         }
     }
@@ -1410,7 +1436,11 @@ pub fn estimate_causal_chain_from_store(
         degradation.code != "causal_sample_underpowered" && degradation.code != "no_filters"
     });
 
-    let Some(chain_id) = options.chain_id.as_deref() else {
+    let Some(chain_id) = options
+        .chain_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+    else {
         report.degradations.push(trace_degradation(
             "causal_chain_id_required",
             "Provide a chain ID from `ee causal trace ... --json`.",
@@ -1932,6 +1962,7 @@ pub fn compare_causal_evidence(options: &CompareOptions) -> CompareReport {
             message: "No comparison scope provided; add at least one source or scope filter."
                 .to_string(),
             severity: "warning".to_string(),
+            repair: None,
         });
         return CompareReport {
             schema: CAUSAL_COMPARE_SCHEMA_V1,
@@ -1950,6 +1981,7 @@ pub fn compare_causal_evidence(options: &CompareOptions) -> CompareReport {
             message: "No source IDs provided; add fixture replay, shadow run, counterfactual episode, or experiment ID."
                 .to_string(),
             severity: "warning".to_string(),
+            repair: None,
         });
         return CompareReport {
             schema: CAUSAL_COMPARE_SCHEMA_V1,
@@ -1969,6 +2001,7 @@ pub fn compare_causal_evidence(options: &CompareOptions) -> CompareReport {
             code: "causal_comparison_evidence_unavailable".to_string(),
             message: "No persisted comparison evidence ledger rows are available; refusing to synthesize baseline/candidate comparisons from source IDs.".to_string(),
             severity: "warning".to_string(),
+            repair: None,
         });
     }
 
@@ -1996,9 +2029,15 @@ pub fn compare_causal_chains_from_store(
         )
     });
 
-    let (Some(chain_a_id), Some(chain_b_id)) =
-        (options.chain_a_id.as_deref(), options.chain_b_id.as_deref())
-    else {
+    let chain_a_id = options
+        .chain_a_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty());
+    let chain_b_id = options
+        .chain_b_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty());
+    let (Some(chain_a_id), Some(chain_b_id)) = (chain_a_id, chain_b_id) else {
         report.degradations.push(trace_degradation(
             "causal_chain_pair_required",
             "Provide two chain IDs: `ee causal compare <chain-a> <chain-b> --json`.",
@@ -3134,6 +3173,7 @@ fn normalize_method(method: &str, degradations: &mut Vec<TraceDegradation>) -> S
                     "Unknown method `{method}`; falling back to `naive` for conservative planning."
                 ),
                 severity: "warning".to_string(),
+                repair: None,
             });
             "naive".to_string()
         }
@@ -3323,6 +3363,52 @@ mod tests {
 
         assert_eq!(first.data_json(), second.data_json());
         assert_eq!(first.estimates[0].uplift, 0.5);
+        Ok(())
+    }
+
+    #[test]
+    fn estimate_from_store_treats_blank_chain_id_as_missing() -> Result<(), String> {
+        let fixture = CausalStoreFixture::new()?;
+        let report = estimate_causal_chain_from_store(
+            &fixture.connection,
+            &fixture.workspace_id,
+            &EstimateOptions::new().with_chain_id("  "),
+        )
+        .map_err(|error| error.message())?;
+
+        assert!(report.estimates.is_empty());
+        assert!(
+            report
+                .degradations
+                .iter()
+                .any(|degradation| degradation.code == "causal_chain_id_required"),
+            "expected causal_chain_id_required, got {:?}",
+            report.degradations
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compare_from_store_treats_blank_chain_id_as_missing() -> Result<(), String> {
+        let fixture = CausalStoreFixture::new()?;
+        let report = compare_causal_chains_from_store(
+            &fixture.connection,
+            &fixture.workspace_id,
+            &CompareOptions::new()
+                .with_chain_a_id("chain-a")
+                .with_chain_b_id(""),
+        )
+        .map_err(|error| error.message())?;
+
+        assert!(report.comparisons.is_empty());
+        assert!(
+            report
+                .degradations
+                .iter()
+                .any(|degradation| degradation.code == "causal_chain_pair_required"),
+            "expected causal_chain_pair_required, got {:?}",
+            report.degradations
+        );
         Ok(())
     }
 

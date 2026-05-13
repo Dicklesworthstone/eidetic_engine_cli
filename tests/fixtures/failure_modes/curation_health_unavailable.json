@@ -15,7 +15,7 @@
     "setup_commands": [
       "mkdir -p <workspace>"
     ],
-    "invocation": "ee status --workspace <workspace> --json"
+    "invocation": "ee --fields full status --workspace <workspace> --json"
   },
   "expected_emission": {
     "code": "curation_health_unavailable",
@@ -24,6 +24,8 @@
       "Curation health is unavailable",
       "database is missing"
     ],
-    "repair_contains": "ee init"
+    "repair_contains": "ee init",
+    "repair_string": "Run `ee init --workspace .` before inspecting curation health.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
   }
 }

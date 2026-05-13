@@ -25,6 +25,8 @@
       "No models are registered",
       "deterministic hash fallback"
     ],
-    "repair_contains": "ee index reembed"
+    "repair_contains": "ee index reembed",
+    "repair_string": "ee index reembed --workspace .",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

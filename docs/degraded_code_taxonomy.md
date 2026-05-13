@@ -75,7 +75,7 @@ A degraded entry's `code` is classified into one of three buckets:
 | `runtime_unavailable` | status, doctor | `asupersync` | Runtime feature off (defensive; should never fire in a real build). |
 | `search_unimplemented` | status | `frankensearch` core feature | Whole search subsystem disabled. |
 | `storage_unimplemented` | status | `fsqlite` core feature | Whole storage subsystem disabled. |
-| `toon_unavailable` | status, doctor | TOON renderer feature | TOON format renderer not linked. |
+| `toon_unavailable` | status, doctor | TOON renderer feature | TOON format renderer unavailable or explicitly disabled. |
 
 ### `mixed` (3 codes — feature + state)
 
@@ -83,13 +83,18 @@ A degraded entry's `code` is classified into one of three buckets:
 |------|---------|-------|
 | `cass_unavailable` | doctor, import cass | Build-time: `cass` not on PATH at install. Response-time: PATH check fails per call. After E5, presence in capabilities.available[]; per-call resolution failure stays in degraded[]. |
 | `graph_unavailable` | doctor, diag graph | Build-time: `fnx-*` feature. Response-time: snapshot generation failed. Split per E5. |
-| `search_unavailable` | doctor, dependency contract | Build-time: `frankensearch`. Response-time: index manifest missing. Split per E5. |
+| `search_unavailable` | status, dependency contract | Build-time: `frankensearch`. Response-time: index manifest missing. Split per E5. |
 
-### `response_time` (89 codes — stay in `degraded[]`)
+### `response_time` (104 codes — stay in `degraded[]`)
 
-#### Search and pack quality (15)
+#### Search and pack quality (32)
 | Code | Severity (canonical) | Bead |
 |------|----------------------|------|
+| `conflict_direct` | medium | bd-1zb7k.9 (S8) |
+| `conflict_trust_mismatch` | high | bd-1zb7k.9 (S8) |
+| `consensus_no_clusters` | low | bd-1zb7k.9 (S8) |
+| `coordination_source_stale` | low | bd-1zb7k.4 (S3) |
+| `coordination_source_unavailable` | medium | bd-1zb7k.4 (S3) |
 | `context_evidence_freshness_changed_source` | info | bd-17c65.1.2 (A2) |
 | `context_profile_budget_capped` | info | bd-17c65.2.4 (B7) |
 | `duplicates_collapsed` | low | bd-17c65.2.3 (B3) |
@@ -101,7 +106,16 @@ A degraded entry's `code` is classified into one of three buckets:
 | `low_recall_after_floor` | info | bd-17c65.2.1 (B1) |
 | `malformed_validity_filtered` | medium | bd-17c65.2.10 (B11) |
 | `no_relevant_results` | medium | bd-17c65.2.1 (B1) |
+| `pack_assembly_budget_exceeded` | medium | bd-1zb7k.5 (S4) |
+| `pack_assembly_slow` | low | bd-1zb7k.5 (S4) |
+| `pack_concurrent_limit_reached` | low | bd-1zb7k.5 (S4) |
+| `swarm_scale_budget_exceeded` | warning | bd-1zb7k.8 (S7) |
+| `swarm_scale_nondeterminism` | high | bd-1zb7k.8 (S7) |
 | `profile_search_limit_capped` | low | bd-17c65.2.4 (B7) |
+| `scope_agent_unavailable` | warning | bd-17c65.10.6 (J6) |
+| `scope_excluded_evidence` | low | bd-17c65.10.6 (J6) |
+| `scope_metadata_unavailable` | medium | bd-17c65.10.6 (J6) |
+| `scope_strict_excluded_evidence` | medium | bd-17c65.10.6 (J6) |
 | `source_mode_fallback` | warning | bd-17c65.2.6 (B6) |
 | `stale_validity_filtered` | low | bd-17c65.2.10 (B11) |
 | `tombstoned_filtered` | low | bd-17c65.2.8 (B8) |
@@ -130,7 +144,7 @@ A degraded entry's `code` is classified into one of three buckets:
 | `policy_secret_detected_with_offsets` | medium | bd-17c65.3.4 (C4) |
 | `policy_tag_rejected_with_details` | low | bd-17c65.3.4 (C4) |
 
-#### Learn / curate (13)
+#### Learn / curate (16)
 | Code | Severity | Bead |
 |------|----------|------|
 | `auto_propose_deferred_to_maintenance` | info | bd-17c65.7.3 (G3) |
@@ -144,6 +158,9 @@ A degraded entry's `code` is classified into one of three buckets:
 | `curation_ttl_blocked` | medium | bd-17c65.7.4 (G4) |
 | `curation_ttl_policy_missing` | medium | bd-17c65.7.4 (G4) |
 | `curation_ttl_policy_unavailable` | medium | bd-17c65.10.6 (J6) |
+| `level_transition_concurrent_conflict` | medium | bd-17c65.7.8 (G9) |
+| `level_transition_requires_evidence` | medium | bd-17c65.7.8 (G9) |
+| `level_transition_tombstoned_rejected` | medium | bd-17c65.7.8 (G9) |
 | `auto_link_disabled` | info | bd-17c65.7.6 (G7) — workflow-less honest-unimplemented marker |
 | `remember_auto_link_failed` | low | bd-17c65.7.3 (G3) |
 | `remember_link_suggestion_failed` | low | bd-17c65.7.3 (G3) |
@@ -190,7 +207,7 @@ A degraded entry's `code` is classified into one of three buckets:
 | `duplicate_rule_insufficient_signal` | low | bd-17c65.7.4 (G4) |
 | `review_queue_invalid_transition` | medium | bd-17c65.7.4 (G4) |
 
-#### Maintenance + steward (10)
+#### Maintenance + steward (14)
 | Code | Severity | Bead |
 |------|----------|------|
 | `decay_sweep_database_missing` | high | bd-17c65.12.4 (L3) |
@@ -200,6 +217,8 @@ A degraded entry's `code` is classified into one of three buckets:
 | `decay_sweep_item_limit_too_large` | low | bd-17c65.12.4 (L3) |
 | `decay_sweep_migration_failed` | high | bd-17c65.12.4 (L3) |
 | `decay_sweep_workspace_unresolved` | medium | bd-17c65.12.4 (L3) |
+| `learn_decay_config_invalid` | medium | bd-17c65.12.4 (L3) |
+| `learn_decay_config_read_failed` | medium | bd-17c65.12.4 (L3) |
 | `maintenance_job_history_read_failed` | medium | bd-17c65.10.6 (J6) |
 | `maintenance_job_history_write_failed` | medium | bd-17c65.10.6 (J6) |
 | `maintenance_job_lock_busy` | warning | bd-17c65.10.6 (J6) |
@@ -316,8 +335,8 @@ A degraded entry's `code` is classified into one of three buckets:
 #### Model registry / science (5)
 | Code | Severity | Bead |
 |------|----------|------|
-| `model_registry_empty` | medium | (TBD) |
-| `model_registry_no_available_entry` | high | (TBD) |
+| `model_registry_empty` | low | bd-17c65.10.6 (J6) |
+| `model_registry_no_available_entry` | medium | bd-17c65.10.6 (J6) |
 | `science_backend_unavailable` | medium | bd-17c65.11.7 (K7) |
 | `science_budget_exceeded` | warning | bd-17c65.11.7 (K7) |
 | `science_input_too_large` | warning | bd-17c65.11.7 (K7) |
@@ -338,10 +357,10 @@ A degraded entry's `code` is classified into one of three buckets:
 | `dry_run_recommended` | info | (TBD) |
 | `fixture_tier_mismatch` | low | (TBD) |
 | `heavy_gates_skipped` | info | (TBD) |
-| `index_locked` | warning | bd-17c65.12.2 (L1) |
+| `index_locked` | medium | bd-17c65.10.6 (J6) |
 | `lab_replay_unavailable` | medium | bd-17c65.14.15.5 (N15.4) — slated for retirement once N15 lands |
 | `legacy_memory` | info | (TBD) — legacy import marker |
-| `manual_heavy_strategy` | info | (TBD) |
+| `manual_heavy_strategy` | warning | bd-17c65.10.6 (J6) |
 | `profile_mismatch` | medium | (TBD) |
 | `profile_missing` | low | (TBD) |
 | `redaction_uncertain` | warning | bd-17c65.11.6 (K6) |
@@ -357,7 +376,7 @@ A degraded entry's `code` is classified into one of three buckets:
 #### Mixed: storage_unavailable
 | Code | Severity | Bead |
 |------|----------|------|
-| `storage_unavailable` | medium | bd-17c65.10.6 (J6) — also classified in mixed table above; appears as response_time when storage feature is built |
+| `storage_unavailable` | high | bd-17c65.10.6 (J6) — also classified in mixed table above; appears as response_time when storage feature is built |
 
 ## Capabilities surface
 

@@ -23,6 +23,7 @@ use ee::core::memory::{
 use ee::core::search::{SearchOptions, run_search};
 use ee::core::why::{WhyOptions, explain_memory};
 use ee::db::{DbConnection, audit_actions};
+use ee::models::MemoryScope;
 use ee::search::scoring::SpeedMode;
 use tempfile::TempDir;
 
@@ -106,6 +107,8 @@ fn ee_search_writes_search_executed_and_returned_mem_rows() -> TestResult {
         relevance_floor: Some(0.0),
         source_mode: ee::core::search::SearchSourceMode::Hybrid,
         strict_source_mode: false,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
     })
     .map_err(|error| format!("run_search: {error:?}"))?;
     if report.results.is_empty() {
@@ -154,6 +157,8 @@ fn ee_search_audit_row_carries_query_hash_not_raw_query() -> TestResult {
         relevance_floor: Some(0.0),
         source_mode: ee::core::search::SearchSourceMode::Hybrid,
         strict_source_mode: false,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
     })
     .map_err(|error| format!("run_search: {error:?}"))?;
 
@@ -196,7 +201,11 @@ fn ee_context_writes_pack_assembled_and_included_mem_rows() -> TestResult {
         include_expired: false,
         include_future: false,
         include_stale: false,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
         pagination: None,
+        coordination_snapshot_path: None,
+        coordination_stale_after_ms: ee::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
         output_options: Default::default(),
     })
     .map_err(|error| format!("run_context_pack: {error:?}"))?;
@@ -214,6 +223,35 @@ fn ee_context_writes_pack_assembled_and_included_mem_rows() -> TestResult {
     if included_audit != included {
         return Err(format!(
             "expected {included} pack.included_mem rows, got {included_audit}"
+        ));
+    }
+    let assembled_details = audit
+        .iter()
+        .find(|(a, _)| a == audit_actions::PACK_ASSEMBLED)
+        .and_then(|(_, d)| d.clone())
+        .ok_or_else(|| "missing pack.assembled details".to_string())?;
+    let details_json: serde_json::Value = serde_json::from_str(&assembled_details)
+        .map_err(|error| format!("pack.assembled details should parse: {error}"))?;
+    for key in [
+        "algorithm_id",
+        "algorithmDescription",
+        "items_selected",
+        "items_skipped",
+        "objective_value",
+    ] {
+        if details_json.get(key).is_none() {
+            return Err(format!(
+                "pack.assembled details missing {key}: {assembled_details}"
+            ));
+        }
+    }
+    if details_json
+        .get("algorithm_id")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        return Err(format!(
+            "pack.assembled details missing non-empty algorithm_id: {assembled_details}"
         ));
     }
     Ok(())

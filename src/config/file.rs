@@ -22,6 +22,7 @@ pub struct ConfigFile {
     pub search: SearchConfig,
     pub pack: PackConfig,
     pub curation: CurationConfig,
+    pub learn: LearnConfig,
     pub feedback: FeedbackConfig,
     pub policy: PolicyConfig,
     pub privacy: PrivacyConfig,
@@ -70,6 +71,7 @@ impl ConfigFile {
             search: SearchConfig::parse(&document)?,
             pack: PackConfig::parse(&document)?,
             curation: CurationConfig::parse(&document)?,
+            learn: LearnConfig::parse(&document)?,
             feedback: FeedbackConfig::parse(&document)?,
             policy: PolicyConfig::parse(&document)?,
             privacy: PrivacyConfig::parse(&document)?,
@@ -230,6 +232,77 @@ impl CurationConfig {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LearnConfig {
+    pub cluster_coherence_threshold: Option<f64>,
+    pub decay: LearnDecayConfig,
+}
+
+impl LearnConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            cluster_coherence_threshold: optional_unit_float_path(
+                document,
+                &["learn"],
+                "cluster_coherence_threshold",
+            )?,
+            decay: LearnDecayConfig::parse(document)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LearnDecayConfig {
+    pub demote_threshold: Option<f64>,
+    pub forget_threshold: Option<f64>,
+    pub working_half_life_days: Option<f64>,
+    pub episodic_event_half_life_days: Option<f64>,
+    pub episodic_failure_half_life_days: Option<f64>,
+    pub semantic_fact_half_life_days: Option<f64>,
+    pub procedural_rule_half_life_days: Option<f64>,
+    pub default_half_life_days: Option<f64>,
+}
+
+impl LearnDecayConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        const SECTIONS: &[&str] = &["learn", "decay"];
+        Ok(Self {
+            demote_threshold: optional_unit_float_path(document, SECTIONS, "demote_threshold")?,
+            forget_threshold: optional_unit_float_path(document, SECTIONS, "forget_threshold")?,
+            working_half_life_days: optional_positive_float_path(
+                document,
+                SECTIONS,
+                "working_half_life_days",
+            )?,
+            episodic_event_half_life_days: optional_positive_float_path(
+                document,
+                SECTIONS,
+                "episodic_event_half_life_days",
+            )?,
+            episodic_failure_half_life_days: optional_positive_float_path(
+                document,
+                SECTIONS,
+                "episodic_failure_half_life_days",
+            )?,
+            semantic_fact_half_life_days: optional_positive_float_path(
+                document,
+                SECTIONS,
+                "semantic_fact_half_life_days",
+            )?,
+            procedural_rule_half_life_days: optional_positive_float_path(
+                document,
+                SECTIONS,
+                "procedural_rule_half_life_days",
+            )?,
+            default_half_life_days: optional_positive_float_path(
+                document,
+                SECTIONS,
+                "default_half_life_days",
+            )?,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FeedbackConfig {
     pub harmful_per_source_per_hour: Option<u64>,
@@ -308,6 +381,7 @@ impl PrivacyConfig {
 pub struct TrustConfig {
     pub default_class: Option<String>,
     pub prompt_injection_guard: Option<bool>,
+    pub team_members: Option<Vec<String>>,
 }
 
 impl TrustConfig {
@@ -315,6 +389,7 @@ impl TrustConfig {
         Ok(Self {
             default_class: optional_string(document, "trust", "default_class")?,
             prompt_injection_guard: optional_bool(document, "trust", "prompt_injection_guard")?,
+            team_members: optional_string_array(document, "trust", "team_members")?,
         })
     }
 }
@@ -472,6 +547,31 @@ fn optional_float(
     }
 }
 
+fn optional_float_path(
+    document: &DocumentMut,
+    sections: &[&str],
+    key: &str,
+) -> Result<Option<f64>, ConfigParseError> {
+    match item_path(document, sections, key) {
+        Some(value) => match value
+            .as_float()
+            .or_else(|| value.as_integer().map(|i| i as f64))
+        {
+            Some(number) if number.is_finite() => Ok(Some(number)),
+            Some(number) => Err(ConfigParseError::InvalidValue {
+                key: key_path_name(sections, key),
+                value: number.to_string(),
+                message: "expected a finite number".to_string(),
+            }),
+            None => Err(ConfigParseError::InvalidType {
+                key: key_path_name(sections, key),
+                expected: "a number",
+            }),
+        },
+        None => Ok(None),
+    }
+}
+
 fn optional_unit_float(
     document: &DocumentMut,
     section: &str,
@@ -481,6 +581,22 @@ fn optional_unit_float(
         Some(number) if (0.0..=1.0).contains(&number) => Ok(Some(number)),
         Some(number) => Err(ConfigParseError::InvalidValue {
             key: key_name(section, key),
+            value: number.to_string(),
+            message: "expected a number in 0.0..=1.0".to_string(),
+        }),
+        None => Ok(None),
+    }
+}
+
+fn optional_unit_float_path(
+    document: &DocumentMut,
+    sections: &[&str],
+    key: &str,
+) -> Result<Option<f64>, ConfigParseError> {
+    match optional_float_path(document, sections, key)? {
+        Some(number) if (0.0..=1.0).contains(&number) => Ok(Some(number)),
+        Some(number) => Err(ConfigParseError::InvalidValue {
+            key: key_path_name(sections, key),
             value: number.to_string(),
             message: "expected a number in 0.0..=1.0".to_string(),
         }),
@@ -499,6 +615,22 @@ fn optional_nonnegative_float(
             key: key_name(section, key),
             value: number.to_string(),
             message: "expected a non-negative number".to_string(),
+        }),
+        None => Ok(None),
+    }
+}
+
+fn optional_positive_float_path(
+    document: &DocumentMut,
+    sections: &[&str],
+    key: &str,
+) -> Result<Option<f64>, ConfigParseError> {
+    match optional_float_path(document, sections, key)? {
+        Some(number) if number > 0.0 => Ok(Some(number)),
+        Some(number) => Err(ConfigParseError::InvalidValue {
+            key: key_path_name(sections, key),
+            value: number.to_string(),
+            message: "expected a positive number".to_string(),
         }),
         None => Ok(None),
     }
@@ -689,6 +821,19 @@ harmful_weight = 2.5
 decay_half_life_days = 60
 specificity_min = 0.45
 
+[learn]
+cluster_coherence_threshold = 0.55
+
+[learn.decay]
+demote_threshold = 0.05
+forget_threshold = 0.01
+working_half_life_days = 1
+episodic_event_half_life_days = 30
+episodic_failure_half_life_days = 90
+semantic_fact_half_life_days = 180
+procedural_rule_half_life_days = 365
+default_half_life_days = 30
+
 [policy.secret_detector]
 allow_phrases = ["OAuth refresh token", "secret ballot"]
 allow_regex = ["fake-key-[A-Z]{4}"]
@@ -752,6 +897,26 @@ prompt_injection_guard = true
             "specificity min",
         )?;
         ensure_equal(
+            &config.learn.decay.demote_threshold,
+            &Some(0.05),
+            "learn decay demote threshold",
+        )?;
+        ensure_equal(
+            &config.learn.cluster_coherence_threshold,
+            &Some(0.55),
+            "learn cluster coherence threshold",
+        )?;
+        ensure_equal(
+            &config.learn.decay.forget_threshold,
+            &Some(0.01),
+            "learn decay forget threshold",
+        )?;
+        ensure_equal(
+            &config.learn.decay.procedural_rule_half_life_days,
+            &Some(365.0),
+            "procedural rule half-life",
+        )?;
+        ensure_equal(
             &config.policy.secret_detector.allow_phrases,
             &Some(vec![
                 "OAuth refresh token".to_string(),
@@ -788,6 +953,16 @@ prompt_injection_guard = true
         ensure_equal(&config.storage.database_path, &None, "database path")?;
         ensure_equal(&config.runtime.daemon, &None, "runtime daemon")?;
         ensure_equal(&config.search.default_speed, &None, "search default speed")?;
+        ensure_equal(
+            &config.learn.decay.demote_threshold,
+            &None,
+            "learn decay threshold",
+        )?;
+        ensure_equal(
+            &config.learn.cluster_coherence_threshold,
+            &None,
+            "learn cluster coherence threshold",
+        )?;
         ensure_equal(
             &config.policy.secret_detector.allow_phrases,
             &None,
@@ -838,6 +1013,40 @@ prompt_injection_guard = true
                 ConfigParseError::InvalidValue { ref key, .. } if key == "pack.mmr_lambda"
             ),
             format!("unexpected error: {error:?}"),
+        )
+    }
+
+    #[test]
+    fn rejects_invalid_learn_decay_values() -> TestResult {
+        let cluster_error = expect_config_error("[learn]\ncluster_coherence_threshold = 1.5\n")?;
+        ensure(
+            matches!(
+                cluster_error,
+                ConfigParseError::InvalidValue { ref key, .. }
+                    if key == "learn.cluster_coherence_threshold"
+            ),
+            format!("unexpected cluster threshold error: {cluster_error:?}"),
+        )?;
+
+        let threshold_error = expect_config_error("[learn.decay]\ndemote_threshold = 1.5\n")?;
+        ensure(
+            matches!(
+                threshold_error,
+                ConfigParseError::InvalidValue { ref key, .. }
+                    if key == "learn.decay.demote_threshold"
+            ),
+            format!("unexpected threshold error: {threshold_error:?}"),
+        )?;
+
+        let half_life_error =
+            expect_config_error("[learn.decay]\nprocedural_rule_half_life_days = 0\n")?;
+        ensure(
+            matches!(
+                half_life_error,
+                ConfigParseError::InvalidValue { ref key, .. }
+                    if key == "learn.decay.procedural_rule_half_life_days"
+            ),
+            format!("unexpected half-life error: {half_life_error:?}"),
         )
     }
 

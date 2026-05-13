@@ -12,11 +12,11 @@
   "severity": "high",
   "repair_present": true,
   "trigger": {
-    "description": "The Asupersync runtime capability probe fails, so runtime-backed command paths are unavailable.",
+    "description": "The diagnostics capability-gap override forces the runtime probe to report unavailable.",
     "setup_commands": [
-      "ee status --workspace . --json"
+      "export EE_DIAG_FORCE_CAPABILITY_GAP=runtime"
     ],
-    "invocation": "ee status --workspace . --json"
+    "invocation": "EE_DIAG_FORCE_CAPABILITY_GAP=runtime ee status --workspace . --json"
   },
   "expected_emission": {
     "code": "runtime_unavailable",
@@ -25,6 +25,8 @@
       "runtime",
       "failed"
     ],
-    "repair_contains": "doctor"
+    "repair_contains": "doctor",
+    "repair_string": "Run `ee doctor --json`.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
   }
 }

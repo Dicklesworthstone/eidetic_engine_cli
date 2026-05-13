@@ -11,11 +11,11 @@
   "severity": "high",
   "repair_present": true,
   "trigger": {
-    "description": "The binary was built without the storage subsystem implementation.",
+    "description": "The diagnostics capability-gap override forces storage to report as unimplemented.",
     "setup_commands": [
-      "# build fixture binary without storage support"
+      "export EE_DIAG_FORCE_CAPABILITY_GAP=storage"
     ],
-    "invocation": "ee status --workspace . --json"
+    "invocation": "EE_DIAG_FORCE_CAPABILITY_GAP=storage ee status --workspace . --json"
   },
   "expected_emission": {
     "code": "storage_unimplemented",
@@ -23,6 +23,7 @@
     "message_contains": [
       "Storage has no compiled implementation"
     ],
-    "repair_contains": "storage subsystem"
+    "repair_contains": "storage subsystem",
+    "repair_string": "Use a binary built with the storage subsystem enabled."
   }
 }

@@ -14,7 +14,7 @@
     "description": "Link or pack reference integrity checks find dangling or inconsistent references.",
     "setup_commands": [
       "ee init --workspace .",
-      "# insert a dangling link or pack reference through a test harness"
+      "ee diag pack-record --workspace . --pack-id pack_j6referenceissues000000000 --query 'j6 reference issue' --item-count 1 --omitted-count 0 --json"
     ],
     "invocation": "ee diag integrity --workspace . --json"
   },
@@ -24,6 +24,8 @@
     "message_contains": [
       "reference integrity issue"
     ],
-    "repair_contains": "ee diag integrity"
+    "repair_contains": "ee diag integrity",
+    "repair_string": "ee diag integrity --json",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

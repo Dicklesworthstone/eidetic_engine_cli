@@ -19,6 +19,7 @@ pub mod claims;
 pub mod context;
 pub mod curate;
 pub mod degraded_honesty;
+pub mod determinism;
 pub mod doctor;
 pub mod economy;
 pub mod effect;
@@ -34,6 +35,8 @@ pub mod lab;
 pub mod learn;
 pub mod legacy_import;
 pub mod memory;
+pub mod memory_lifecycle;
+pub mod memory_scope;
 pub mod model;
 pub mod outcome;
 pub mod perf_forensics;
@@ -522,6 +525,8 @@ mod tests {
                 "artifact_summary",
                 "compare_result",
                 "budget_check",
+                "swarm_brief",
+                "pack_quality_report",
             ],
             "schema names",
         )
