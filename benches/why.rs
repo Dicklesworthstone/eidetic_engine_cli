@@ -23,8 +23,10 @@ use ee::search::HashEmbedder;
 use tempfile::TempDir;
 
 const GROUP_NAME: &str = "ee_why";
-const TARGET_P50_MS: f64 = 25.0;
-const HARD_CEILING_MS: f64 = 100.0;
+const BUDGET_P50_MS: f64 = 25.0;
+const BUDGET_P99_MS: f64 = 100.0;
+const TARGET_P50_MS: f64 = BUDGET_P50_MS;
+const HARD_CEILING_MS: f64 = BUDGET_P99_MS;
 const REGRESSION_THRESHOLD: f64 = 0.30;
 const BASELINE_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/benches/baselines/v0.1.json");
 const QUICK_ITERATIONS: usize = 24;

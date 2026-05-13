@@ -59,7 +59,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DEFAULT_AGENT_BUILD_ROOT="/Volumes/USBNVME16TB/temp_agent_space"
 BUDGETS_FILE="$PROJECT_ROOT/benches/budgets.toml"
-BASELINE_FILE="$PROJECT_ROOT/benches/baselines/v0.1.json"
+BASELINE_FILE="${EE_BENCH_BASELINE_FILE:-$PROJECT_ROOT/benches/baselines/v0.1.json}"
 WORKLOAD_FILE="$PROJECT_ROOT/tests/fixtures/swarm_scale/workloads.json"
 if [ -d "$DEFAULT_AGENT_BUILD_ROOT" ]; then
     mkdir -p "$DEFAULT_AGENT_BUILD_ROOT/cargo-target" "$DEFAULT_AGENT_BUILD_ROOT/tmp" 2>/dev/null || true
@@ -77,6 +77,7 @@ ARTIFACT_DIR="${EE_BENCH_ARTIFACT_DIR:-$TARGET_ROOT/ee-bench}"
 OUTPUT_FILE="${EE_BENCH_OUTPUT:-$ARTIFACT_DIR/ee-perf.v1.json}"
 EE_BIN="$TARGET_ROOT/release/ee"
 export CARGO_TARGET_DIR="$TARGET_ROOT"
+export EE_BENCH_PROFILE="$PROFILE"
 
 if [ ! -f "$BUDGETS_FILE" ]; then
     echo "Error: budgets.toml not found at $BUDGETS_FILE" >&2
@@ -97,14 +98,14 @@ case "$PROFILE" in
         RELEASE_BLOCKING=false
         ;;
     nightly)
-        BENCHMARKS="remember search context pack_size why outcome status import_cass link graph_pagerank curate_candidates"
+        BENCHMARKS="remember search context pack_size why outcome status workspace_init audit_query index_rebuild concurrent_writes import_cass link graph_pagerank curate_candidates"
         BENCH_ARGS="--warm-up-time 0.5 --measurement-time 2 --sample-size 20"
         PROFILE_CLASS="nightly_ci"
         WORKLOAD_TIER="medium"
         RELEASE_BLOCKING=false
         ;;
     stress)
-        BENCHMARKS="remember search context pack_size why outcome status import_cass link graph_pagerank curate_candidates"
+        BENCHMARKS="remember search context pack_size why outcome status workspace_init audit_query index_rebuild concurrent_writes import_cass link graph_pagerank curate_candidates"
         BENCH_ARGS=""
         PROFILE_CLASS="local_256gb"
         WORKLOAD_TIER="stress"
@@ -166,6 +167,7 @@ append_result() {
       \"p50_ms\": $p50_ms,
       \"p95_ms\": $p95_ms,
       \"p99_ms\": $p99_ms,
+      \"samples_count\": null,
       \"max_ms\": $max_ms,
       \"max_rss_kb\": null,
       \"allocation_count\": null,
@@ -173,8 +175,68 @@ append_result() {
       \"index_size_bytes\": null,
       \"rows_per_sec\": $rows_per_sec,
       \"regression_status\": \"$regression_status\",
+      \"baseline_ref\": {
+        \"file\": \"$BASELINE_FILE\",
+        \"operation\": \"$key\"
+      },
       \"budget_mode\": \"advisory\"
     }"
+
+    append_bench_iteration_event "$key" "$status" "$p50_ms" "$p95_ms" "$p99_ms" "$max_ms" "$rows_per_sec" "$regression_status"
+}
+
+append_bench_iteration_event() {
+    key="$1"
+    status="$2"
+    p50_ms="$3"
+    p95_ms="$4"
+    p99_ms="$5"
+    max_ms="$6"
+    rows_per_sec="$7"
+    regression_status="$8"
+
+    if [ -z "${EE_TEST_LOG_PATH:-}" ] || ! command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+
+    log_dir=$(dirname "$EE_TEST_LOG_PATH")
+    mkdir -p "$log_dir"
+    ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    test_id="${EE_TEST_LOG_TEST_ID:-bench_$PROFILE}"
+
+    jq -cn \
+        --arg ts "$ts" \
+        --arg test_id "$test_id" \
+        --arg operation "$key" \
+        --arg status "$status" \
+        --arg profile "$PROFILE" \
+        --arg workload_tier "$WORKLOAD_TIER" \
+        --arg p50_ms "$p50_ms" \
+        --arg p95_ms "$p95_ms" \
+        --arg p99_ms "$p99_ms" \
+        --arg max_ms "$max_ms" \
+        --arg rows_per_sec "$rows_per_sec" \
+        --arg regression_status "$regression_status" \
+        'def maybe_number($value):
+            if $value == "" or $value == "null" then null else ($value | tonumber) end;
+          {
+            schema: "ee.test_event.v1",
+            ts: $ts,
+            test_id: $test_id,
+            kind: "bench_iteration",
+            fields: {
+              operation: $operation,
+              status: $status,
+              profile: $profile,
+              workload_tier: $workload_tier,
+              p50_ms: maybe_number($p50_ms),
+              p95_ms: maybe_number($p95_ms),
+              p99_ms: maybe_number($p99_ms),
+              max_ms: maybe_number($max_ms),
+              rows_per_sec: maybe_number($rows_per_sec),
+              regression_status: $regression_status
+            }
+          }' >>"$EE_TEST_LOG_PATH"
 }
 
 append_measured_ms() {
@@ -328,6 +390,8 @@ run_status_smoke() {
 
 run_criterion_bench() {
     bench="$1"
+    # BENCH_ARGS intentionally expands into separate Criterion CLI arguments.
+    # shellcheck disable=SC2086
     if output=$(cargo bench --bench "$bench" -- $BENCH_ARGS 2>&1); then
         printf '%s\n' "$output" >&2
         parsed=$(parse_time_value "$output" || true)
@@ -611,7 +675,7 @@ PERF_JSON=$(cat <<EOF
     $RESULTS
   },
   "budgets_file": "benches/budgets.toml",
-  "baseline_file": "benches/baselines/v0.1.json"
+  "baseline_file": "$BASELINE_FILE"
 }
 EOF
 )
@@ -634,7 +698,9 @@ if [ "$CHECK_REGRESSION" = "true" ]; then
 
         # Read thresholds from budgets.toml (defaults: 20% p50, 50% p99).
         # This gate remains advisory unless --check-regression is requested.
-        P50_THRESHOLD=20
+        P50_THRESHOLD=$(jq -r '.meta.regression_pct_p50 // 20' "$BUDGETS_FILE" 2>/dev/null || printf '%s\n' 20)
+        # Reserved for the p99 gate once Criterion summaries are normalized.
+        # shellcheck disable=SC2034
         P99_THRESHOLD=50
 
         REGRESSION_FOUND=false

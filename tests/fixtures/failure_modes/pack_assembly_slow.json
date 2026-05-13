@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "pack_assembly_slow",
+  "introduced_by": {
+    "bead": "bd-1zb7k.5",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "context",
+    "pack"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "A context pack reaches the warning threshold for the selected resource profile without exceeding the hard budget.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "seed enough memories for the selected --resource-profile to hit its candidate scan warning threshold"
+    ],
+    "invocation": "ee context \"large workspace task\" --resource-profile lean --json"
+  },
+  "expected_emission": {
+    "code": "pack_assembly_slow",
+    "severity": "low",
+    "message_contains": [
+      "Pack assembly",
+      "warning threshold"
+    ],
+    "repair_contains": "--resource-profile"
+  }
+}

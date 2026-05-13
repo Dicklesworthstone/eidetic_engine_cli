@@ -1,0 +1,48 @@
+{
+  "schema": "ee.perf.v1",
+  "profile": "ci-smoke",
+  "profile_class": "normal_ci",
+  "timestamp": "2026-05-13T00:00:00Z",
+  "version": "0.1.0",
+  "git_sha": "0000000",
+  "target_dir": "/Volumes/USBNVME16TB/temp_agent_space/cargo-target",
+  "criterion_dir": "/Volumes/USBNVME16TB/temp_agent_space/cargo-target/criterion",
+  "artifact_dir": "/Volumes/USBNVME16TB/temp_agent_space/cargo-target/ee-bench",
+  "budget_mode": "advisory",
+  "release_blocking": false,
+  "artifact_redaction": {
+    "status": "redaction_safe",
+    "raw_secret_material": "not_used",
+    "policy": "synthetic placeholders only; command artifacts are JSON/stderr files under artifact_dir"
+  },
+  "workload": {
+    "schema": "ee.perf.workload_ref.v1",
+    "manifest": "tests/fixtures/swarm_scale/workloads.json",
+    "tier": "small"
+  },
+  "operations": {
+    "ee_status": {
+      "status": "measured",
+      "profile": "ci-smoke",
+      "workload_tier": "small",
+      "p50_ms": 12.5,
+      "p95_ms": 20.0,
+      "p99_ms": 25.0,
+      "samples_count": 10,
+      "max_ms": 30.0,
+      "max_rss_kb": null,
+      "allocation_count": null,
+      "db_size_bytes": null,
+      "index_size_bytes": null,
+      "rows_per_sec": null,
+      "regression_status": "within_budget",
+      "baseline_ref": {
+        "file": "benches/baselines/perf_v0_2.json",
+        "operation": "ee_status"
+      },
+      "budget_mode": "advisory"
+    }
+  },
+  "budgets_file": "benches/budgets.toml",
+  "baseline_file": "benches/baselines/perf_v0_2.json"
+}

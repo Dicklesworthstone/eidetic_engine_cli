@@ -129,6 +129,22 @@ name = "status"
 harness = false
 
 [[bench]]
+name = "workspace_init"
+harness = false
+
+[[bench]]
+name = "audit_query"
+harness = false
+
+[[bench]]
+name = "index_rebuild"
+harness = false
+
+[[bench]]
+name = "concurrent_writes"
+harness = false
+
+[[bench]]
 name = "import_cass"
 harness = false
 

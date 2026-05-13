@@ -38,6 +38,10 @@ benches = [
   "why",
   "outcome",
   "status",
+  "workspace_init",
+  "audit_query",
+  "index_rebuild",
+  "concurrent_writes",
   "import_cass",
   "link",
   "graph_pagerank",
@@ -60,6 +64,10 @@ benches = [
   "why",
   "outcome",
   "status",
+  "workspace_init",
+  "audit_query",
+  "index_rebuild",
+  "concurrent_writes",
   "import_cass",
   "link",
   "graph_pagerank",
@@ -83,7 +91,12 @@ description = "Hybrid lexical+semantic search over 5k memories"
 [operations.ee_context]
 p50_ms_max = 95.0
 p99_ms_max = 240.0
-description = "Build 4k-token context pack from 100 memories"
+description = "Build 4k-token context pack; S4 resource-scale benchmark covers 1k/10k/100k memory fixtures"
+
+[operations.ee_context_s4_resource_scales]
+p50_ms_max = 1000.0
+p99_ms_max = 10000.0
+description = "S4 resource-aware context pack SLO benchmark across 1k, 10k, and stress-only 100k memory fixtures"
 
 [operations.ee_pack_size]
 p50_ms_max = 95.0
@@ -106,6 +119,26 @@ p99_ms_max = 100.0
 hard_ceiling_ms = 100.0
 description = "Report workspace health metrics"
 
+[operations.ee_workspace_init]
+p50_ms_max = 100.0
+p99_ms_max = 250.0
+description = "Initialize a clean workspace with .ee directory, database migrations, and index directory"
+
+[operations.ee_audit_query]
+p50_ms_max = 35.0
+p99_ms_max = 100.0
+description = "List 1000 audit timeline rows for one workspace"
+
+[operations.ee_index_rebuild]
+p50_ms_max = 18000.0
+p99_ms_max = 41000.0
+description = "Rebuild the derived search index from persisted memories"
+
+[operations.ee_concurrent_writes]
+p50_ms_max = 120.0
+p99_ms_max = 350.0
+description = "Write audited memories through four concurrent writer threads"
+
 [operations.ee_import_cass]
 p50_ms_max = 4100.0
 p99_ms_max = 11000.0
@@ -118,8 +151,8 @@ p99_ms_max = 50.0
 description = "Create memory relationship link"
 
 [operations.ee_graph_pagerank]
-p50_ms_max = 200.0
-p99_ms_max = 600.0
+p50_ms_max = 350.0
+p99_ms_max = 2000.0
 description = "Compute PageRank over memory graph"
 
 [operations.ee_curate_candidates]

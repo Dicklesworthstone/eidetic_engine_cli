@@ -13,6 +13,7 @@ use tempfile::TempDir;
 use ee::core::context::{ContextPackOptions, run_context_pack};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::db::DbConnection;
+use ee::models::MemoryScope;
 use ee::output::{render_context_response_json, render_context_response_markdown};
 use ee::search::SpeedMode;
 
@@ -309,7 +310,11 @@ impl PackSizeFixture {
             include_expired: false,
             include_future: false,
             include_stale: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
             pagination: None,
+            coordination_snapshot_path: None,
+            coordination_stale_after_ms: ee::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             output_options: Default::default(),
         };
         let response =

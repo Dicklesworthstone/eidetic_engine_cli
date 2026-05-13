@@ -6,6 +6,7 @@
 //! - empty: fresh workspace without persisted memories
 //! - 100_memories: small realistic workspace
 //! - 5000_memories: plan-scale workspace
+//! - S4 resource scales: 1000, 10000, and 100000 memories
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -19,7 +20,7 @@ use tempfile::TempDir;
 use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
 use ee::core::search::{SearchOptions, SearchSourceMode, run_search};
 use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
-use ee::models::WorkspaceId;
+use ee::models::{MemoryScope, WorkspaceId};
 use ee::search::SpeedMode;
 
 const BENCH_GROUP_NAME: &str = "ee_search";
@@ -39,6 +40,8 @@ const REGRESSION_THRESHOLD: f64 = 0.30;
 const QUICK_WARMUP_ITERS: usize = 5;
 const QUICK_MEASURE_ITERS: usize = 31;
 const LAB_RUNTIME_SEED: u64 = 42;
+const QUICK_SEARCH_COUNTS: &[usize] = &[0, 100, 5000];
+const S4_SEARCH_COUNTS: &[usize] = &[1_000, 10_000, 100_000];
 
 #[derive(Clone, Debug)]
 struct QuickStats {
@@ -64,7 +67,10 @@ fn scale_label(count: usize) -> &'static str {
     match count {
         0 => "empty",
         100 => "100_memories",
+        1000 => "1000_memories",
         5000 => "5000_memories",
+        10000 => "10000_memories",
+        100000 => "100000_memories",
         _ => "unknown",
     }
 }
@@ -73,8 +79,23 @@ fn query_for_scale(count: usize) -> &'static str {
     match count {
         0 => "search benchmark empty workspace",
         100 => "search benchmark seeded memory",
+        1000 => "search benchmark S4 resource scale",
         5000 => "search benchmark large workspace retrieval",
+        10000 => "search benchmark S4 nightly resource scale",
+        100000 => "search benchmark S4 stress resource scale",
         _ => "search benchmark",
+    }
+}
+
+fn active_bench_profile() -> String {
+    std::env::var("EE_BENCH_PROFILE").unwrap_or_else(|_| "manual".to_owned())
+}
+
+fn search_counts_for_profile(profile: &str) -> Vec<usize> {
+    match profile {
+        "stress" => S4_SEARCH_COUNTS.to_vec(),
+        "nightly" => vec![1_000, 10_000],
+        _ => QUICK_SEARCH_COUNTS.to_vec(),
     }
 }
 
@@ -255,6 +276,8 @@ fn quick_stats_for_scale(count: usize) -> QuickStats {
         relevance_floor: None,
         source_mode: SearchSourceMode::Hybrid,
         strict_source_mode: false,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
     };
 
     for _ in 0..QUICK_WARMUP_ITERS {
@@ -351,7 +374,7 @@ fn assert_hard_budget(scale: &str, stats: &QuickStats) -> Result<(), String> {
 
 fn run_quick_mode(compare_only: bool) -> Result<(), String> {
     let mut samples = Vec::new();
-    for &count in &[0usize, 100, 5000] {
+    for &count in QUICK_SEARCH_COUNTS {
         let label = scale_label(count);
         let stats = quick_stats_for_scale(count);
         assert_hard_budget(label, &stats)?;
@@ -400,7 +423,7 @@ fn run_quick_mode(compare_only: bool) -> Result<(), String> {
 fn run_criterion_mode() {
     let mut criterion = Criterion::default().configure_from_args();
     let mut group = criterion.benchmark_group(BENCH_GROUP_NAME);
-    for &count in &[0usize, 100, 5000] {
+    for count in search_counts_for_profile(&active_bench_profile()) {
         let label = scale_label(count);
         group.bench_with_input(BenchmarkId::new("search", label), &count, |b, &n| {
             let temp_dir = match TempDir::new() {
@@ -428,6 +451,8 @@ fn run_criterion_mode() {
                 relevance_floor: None,
                 source_mode: SearchSourceMode::Hybrid,
                 strict_source_mode: false,
+                memory_scope: MemoryScope::Swarm,
+                strict_scope: false,
             };
 
             b.iter(|| {
@@ -492,13 +517,30 @@ mod tests {
 
     #[test]
     fn baseline_contains_all_search_scales() {
-        for scale in ["empty", "100_memories", "5000_memories"] {
+        for scale in [
+            "empty",
+            "100_memories",
+            "5000_memories",
+            "1000_memories",
+            "10000_memories",
+            "100000_memories",
+        ] {
             let baseline = load_baseline(scale);
             assert!(
                 baseline.is_ok(),
                 "baseline should include scale '{scale}': {baseline:?}"
             );
         }
+    }
+
+    #[test]
+    fn s4_search_scales_cover_required_fixture_sizes() {
+        assert_eq!(S4_SEARCH_COUNTS, &[1_000, 10_000, 100_000]);
+        assert_eq!(
+            search_counts_for_profile("stress"),
+            vec![1_000, 10_000, 100_000]
+        );
+        assert_eq!(search_counts_for_profile("nightly"), vec![1_000, 10_000]);
     }
 
     #[test]

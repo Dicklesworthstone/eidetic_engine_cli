@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "pack_assembly_budget_exceeded",
+  "introduced_by": {
+    "bead": "bd-1zb7k.5",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "context",
+    "pack"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A context pack exceeds the candidate, graph traversal, or elapsed hard budget for the selected resource profile.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "seed a corpus or graph expansion larger than the selected --resource-profile budget"
+    ],
+    "invocation": "ee context \"huge workspace task\" --resource-profile lean --candidate-pool 1000 --json"
+  },
+  "expected_emission": {
+    "code": "pack_assembly_budget_exceeded",
+    "severity": "medium",
+    "message_contains": [
+      "Pack assembly",
+      "exceeded"
+    ],
+    "repair_contains": "--resource-profile"
+  }
+}

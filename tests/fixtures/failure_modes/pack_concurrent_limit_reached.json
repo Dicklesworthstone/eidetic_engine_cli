@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "pack_concurrent_limit_reached",
+  "introduced_by": {
+    "bead": "bd-1zb7k.5",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "context",
+    "pack"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "A pack request cannot acquire a profile-governed read slot because concurrent pack assembly is already at the selected resource profile limit.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "run more simultaneous ee context calls than the selected profile's concurrentPackMax"
+    ],
+    "invocation": "ee context \"swarm task\" --resource-profile lean --json"
+  },
+  "expected_emission": {
+    "code": "pack_concurrent_limit_reached",
+    "severity": "low",
+    "message_contains": [
+      "concurrent",
+      "pack"
+    ],
+    "repair_contains": "retry"
+  }
+}
