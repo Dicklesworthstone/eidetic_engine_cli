@@ -61,6 +61,19 @@ pub mod audit_actions {
     pub const MEMORY_TAG_REMOVE: &str = "memory.tag.remove";
     pub const MEMORY_TAG_SET: &str = "memory.tag.set";
     pub const MEMORY_LINK_CREATE: &str = "memory.link.create";
+
+    /// Beta-Bernoulli posterior updated on a feedback/outcome event
+    /// (N7.1 / ADR 0032). Details carry prior (alpha, beta), event
+    /// signal + weight, posterior (alpha, beta), and the new mean.
+    pub const MEMORY_BAYES_POSTERIOR_UPDATED: &str = "memory.bayes_posterior_updated";
+
+    /// Trust-class transitioned for a memory because its 90% credible
+    /// interval crossed a transition threshold (N7.1 / ADR 0032
+    /// amendment to ADR 0009). Details carry from_class, to_class,
+    /// trigger ("ci90_lo_crossed_up" | "ci90_hi_crossed_down"), and
+    /// the (alpha, beta, ci90_lo, ci90_hi) snapshot at transition time.
+    pub const TRUST_CLASS_TRANSITION: &str = "trust_class.transition";
+
     pub const PROCEDURE_CREATE: &str = "procedure.create";
     pub const PROCEDURE_PROMOTE: &str = "procedure.promote";
     pub const PROCEDURE_RETIRE: &str = "procedure.retire";
@@ -3609,6 +3622,67 @@ CREATE INDEX idx_pack_records_ledger_hash ON pack_records(ledger_hash);
     "blake3:v040_pack_selection_ledgers_2026_05_08",
 );
 
+/// V041: Add Bayesian (alpha, beta) posterior columns to memories
+/// (N7.1, bd-17c65.14.7.2; ADR 0032).
+///
+/// Replaces the ad-hoc linear `confidence`/`utility` deltas with a
+/// proper Beta-Bernoulli posterior over the latent helpful-rate.
+/// Jeffreys default (0.5, 0.5). CHECK constraints enforce positivity
+/// and finiteness (within REAL bounds). The `confidence` column stays
+/// as a derived view (mean of the posterior) for backward
+/// compatibility within the same envelope version.
+///
+/// Backfill: existing rows get Jeffreys defaults at migration time.
+/// Operators can opt into richer backfill via
+/// `ee migrate run --bayes-backfill-from-utility` or
+/// `--bayes-backfill-from-feedback-events` (N7.1 Phase 7 follow-up).
+pub const V041_BAYES_POSTERIOR: Migration = Migration::new(
+    41,
+    "bayes_posterior",
+    r#"
+-- Beta-Bernoulli posterior per memory (N7.1 / ADR 0032).
+-- Existing rows default to the Jeffreys prior (0.5, 0.5).
+ALTER TABLE memories ADD COLUMN bayes_alpha REAL NOT NULL DEFAULT 0.5
+    CHECK (bayes_alpha > 0.0 AND bayes_alpha < 1e9);
+ALTER TABLE memories ADD COLUMN bayes_beta REAL NOT NULL DEFAULT 0.5
+    CHECK (bayes_beta > 0.0 AND bayes_beta < 1e9);
+"#,
+    "blake3:v041_bayes_posterior_2026_05_13",
+);
+
+/// V042: Allow every pack omission reason emitted by the packer.
+pub const V042_PACK_OMISSION_REASONS: Migration = Migration::new(
+    42,
+    "pack_omission_reasons",
+    r#"
+-- Keep persisted pack omissions aligned with PackOmissionReason.
+DROP INDEX IF EXISTS idx_pack_omissions_memory;
+ALTER TABLE pack_omissions RENAME TO pack_omissions_v041;
+
+CREATE TABLE pack_omissions (
+    pack_id TEXT NOT NULL REFERENCES pack_records(id) ON DELETE CASCADE,
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    estimated_tokens INTEGER NOT NULL CHECK (estimated_tokens > 0),
+    reason TEXT NOT NULL CHECK (reason IN (
+        'token_budget_exceeded',
+        'redundant_candidate',
+        'below_relevance_floor',
+        'excluded_by_policy',
+        'excluded_by_filter'
+    )),
+    PRIMARY KEY (pack_id, memory_id)
+);
+
+INSERT INTO pack_omissions (pack_id, memory_id, estimated_tokens, reason)
+SELECT pack_id, memory_id, estimated_tokens, reason
+FROM pack_omissions_v041;
+
+DROP TABLE pack_omissions_v041;
+CREATE INDEX idx_pack_omissions_memory ON pack_omissions(memory_id);
+"#,
+    "blake3:v042_pack_omission_reasons_2026_05_13",
+);
+
 /// V039: Allow UUID-v7 audit IDs while preserving legacy audit IDs.
 pub const V039_AUDIT_UUID_V7_IDS: Migration = Migration::new(
     39,
@@ -3732,6 +3806,8 @@ pub const MIGRATIONS: &[Migration] = &[
     V038_PROCEDURE_FEEDBACK_TARGETS,
     V039_AUDIT_UUID_V7_IDS,
     V040_PACK_SELECTION_LEDGERS,
+    V041_BAYES_POSTERIOR,
+    V042_PACK_OMISSION_REASONS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -7787,6 +7863,70 @@ impl DbConnection {
     }
 
     /// Set temporal validity fields for deterministic diagnostic fixture replay.
+    /// Get the Beta-Bernoulli posterior `(alpha, beta)` for a memory
+    /// (N7.1 / ADR 0032). Returns `None` if the memory does not
+    /// exist; returns the Jeffreys default `(0.5, 0.5)` for rows that
+    /// existed before V041 was applied (the DEFAULT clause guarantees
+    /// the column has a value).
+    pub fn get_memory_bayes_posterior(&self, id: &str) -> Result<Option<(f64, f64)>> {
+        // Local helper: SQLite stores REAL columns as Double, but
+        // earlier writes via Value::Float (f32) round-trip back as
+        // Float and integer literals come back as BigInt/Int. Tolerate
+        // all three so the helper is robust against future
+        // serialization tweaks.
+        fn bayes_value_to_f64(v: Option<&Value>) -> Option<f64> {
+            match v? {
+                Value::Double(f) => Some(*f),
+                Value::Float(f) => Some(f64::from(*f)),
+                Value::BigInt(i) => Some(*i as f64),
+                Value::Int(i) => Some(f64::from(*i)),
+                _ => None,
+            }
+        }
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT bayes_alpha, bayes_beta FROM memories WHERE id = ?1 LIMIT 1",
+            &[Value::Text(id.to_string())],
+        )?;
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        let alpha = bayes_value_to_f64(row.get(0));
+        let beta = bayes_value_to_f64(row.get(1));
+        match (alpha, beta) {
+            (Some(a), Some(b)) => Ok(Some((a, b))),
+            _ => Ok(None),
+        }
+    }
+
+    /// Update the Beta-Bernoulli posterior for a memory
+    /// (N7.1 / ADR 0032). Returns `true` if a row was updated, `false`
+    /// if the memory does not exist or is tombstoned. The caller is
+    /// responsible for emitting the matching
+    /// `audit_actions::MEMORY_BAYES_POSTERIOR_UPDATED` audit entry —
+    /// this helper does NOT touch the audit log so callers can compose
+    /// it within larger transactions.
+    ///
+    /// Takes raw `(alpha, beta)` rather than the `BetaPosterior` type
+    /// to keep this module dependency-free; the caller is responsible
+    /// for ensuring both are finite + positive. The DB's CHECK
+    /// constraint catches any contract violation at the storage layer.
+    pub fn update_memory_bayes_posterior(&self, id: &str, alpha: f64, beta: f64) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET bayes_alpha = ?1, bayes_beta = ?2, updated_at = ?3 \
+             WHERE id = ?4 AND tombstoned_at IS NULL",
+            &[
+                Value::Double(alpha),
+                Value::Double(beta),
+                Value::Text(now),
+                Value::Text(id.to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
     pub fn set_memory_validity_for_diagnostic(
         &self,
         id: &str,
@@ -19640,11 +19780,19 @@ mod tests {
     }
 
     fn pack_omission_input(pack_id: &str, memory_id: &str) -> super::CreatePackOmissionInput {
+        pack_omission_input_with_reason(pack_id, memory_id, "token_budget_exceeded")
+    }
+
+    fn pack_omission_input_with_reason(
+        pack_id: &str,
+        memory_id: &str,
+        reason: &str,
+    ) -> super::CreatePackOmissionInput {
         super::CreatePackOmissionInput {
             pack_id: pack_id.to_string(),
             memory_id: memory_id.to_string(),
             estimated_tokens: 50,
-            reason: "token_budget_exceeded".to_string(),
+            reason: reason.to_string(),
         }
     }
 
@@ -20176,6 +20324,70 @@ mod tests {
             &"token_budget_exceeded",
             "omission reason",
         )?;
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_pack_record_accepts_all_known_omission_reasons() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let reasons = [
+            "token_budget_exceeded",
+            "redundant_candidate",
+            "below_relevance_floor",
+            "excluded_by_policy",
+            "excluded_by_filter",
+        ];
+        let memory_ids = [
+            "mem_00000000000000000000omrs01",
+            "mem_00000000000000000000omrs02",
+            "mem_00000000000000000000omrs03",
+            "mem_00000000000000000000omrs04",
+            "mem_00000000000000000000omrs05",
+        ];
+        for (memory_id, reason) in memory_ids.iter().zip(reasons.iter().copied()) {
+            insert_pack_test_memory(
+                &connection,
+                memory_id,
+                &format!("Pack omission reason fixture: {reason}"),
+            )?;
+        }
+
+        let pack_id = "pack_000000000000000000000omrs1";
+        let input = super::CreatePackRecordInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            query: "omission reasons".to_string(),
+            profile: "balanced".to_string(),
+            max_tokens: 4000,
+            used_tokens: 0,
+            item_count: 0,
+            omitted_count: reasons.len() as u32,
+            pack_hash: "blake3:omission-reasons".to_string(),
+            degraded_json: None,
+            created_by: Some("test".to_string()),
+        };
+        let omissions = memory_ids
+            .iter()
+            .zip(reasons.iter().copied())
+            .map(|(memory_id, reason)| pack_omission_input_with_reason(pack_id, memory_id, reason))
+            .collect::<Vec<_>>();
+
+        connection.insert_pack_record(pack_id, &input, &[], &omissions)?;
+
+        let rows = connection.query(
+            "SELECT reason FROM pack_omissions WHERE pack_id = ?1 ORDER BY reason ASC",
+            &[Value::Text(pack_id.to_string())],
+        )?;
+        let stored = rows
+            .iter()
+            .map(|row| super::required_text(row, 0, DbOperation::Query, "reason"))
+            .collect::<super::Result<Vec<_>>>()?;
+        let mut expected = reasons.to_vec();
+        expected.sort_unstable();
+        ensure_equal(&stored, &expected, "all omission reasons persisted")?;
         connection.close()?;
         Ok(())
     }

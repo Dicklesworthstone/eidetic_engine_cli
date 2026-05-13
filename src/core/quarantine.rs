@@ -171,7 +171,7 @@ impl QuarantineReport {
                     vec![QuarantineDegradation {
                         code: "quarantine_workspace_unavailable",
                         severity: "medium",
-                        message,
+                        message: format!("Workspace unavailable: {message}"),
                         repair: "ee init --workspace .",
                     }],
                 );

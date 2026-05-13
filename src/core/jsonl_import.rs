@@ -40,6 +40,7 @@ pub struct JsonlImportOptions {
 /// Stable issue severity for JSONL import diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JsonlImportIssueSeverity {
+    Info,
     Error,
     Warning,
 }
@@ -48,6 +49,7 @@ impl JsonlImportIssueSeverity {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Info => "info",
             Self::Error => "error",
             Self::Warning => "warning",
         }
@@ -64,6 +66,15 @@ pub struct JsonlImportIssue {
 }
 
 impl JsonlImportIssue {
+    fn info(line: Option<u32>, code: &str, message: impl Into<String>) -> Self {
+        Self {
+            line,
+            code: code.to_owned(),
+            severity: JsonlImportIssueSeverity::Info,
+            message: message.into(),
+        }
+    }
+
     fn error(line: Option<u32>, code: &str, message: impl Into<String>) -> Self {
         Self {
             line,
@@ -639,6 +650,16 @@ fn parse_memory_record(
                     Some(line_number),
                     "duplicate_memory_id",
                     format!("duplicate memory id `{}` in JSONL source", memory.memory_id),
+                ));
+            }
+            if memory.redacted || memory.redaction_reason.is_some() {
+                parsed.issues.push(JsonlImportIssue::info(
+                    Some(line_number),
+                    "redaction_round_trip_marker_preserved",
+                    format!(
+                        "redaction marker preserved for imported memory `{}`",
+                        memory.memory_id
+                    ),
                 ));
             }
             parsed.memories.push(memory);

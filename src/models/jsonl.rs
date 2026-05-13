@@ -379,7 +379,11 @@ pub enum RedactionLevel {
     Minimal,
     /// Standard redaction: secrets, paths, and identifiers.
     Standard,
-    /// Full redaction: all potentially sensitive content.
+    /// Strict redaction: secret-bearing content and long bodies are aggressively reduced.
+    Strict,
+    /// Paranoid redaction: all potentially sensitive content is replaced.
+    Paranoid,
+    /// Legacy alias retained for older JSONL exports that used `full`.
     Full,
 }
 
@@ -390,13 +394,21 @@ impl RedactionLevel {
             Self::None => "none",
             Self::Minimal => "minimal",
             Self::Standard => "standard",
+            Self::Strict => "strict",
+            Self::Paranoid => "paranoid",
             Self::Full => "full",
         }
     }
 
     #[must_use]
     pub const fn all() -> &'static [Self] {
-        &[Self::None, Self::Minimal, Self::Standard, Self::Full]
+        &[
+            Self::None,
+            Self::Minimal,
+            Self::Standard,
+            Self::Strict,
+            Self::Paranoid,
+        ]
     }
 
     #[must_use]
@@ -406,7 +418,10 @@ impl RedactionLevel {
 
     #[must_use]
     pub const fn redacts_paths(self) -> bool {
-        matches!(self, Self::Standard | Self::Full)
+        matches!(
+            self,
+            Self::Standard | Self::Strict | Self::Paranoid | Self::Full
+        )
     }
 
     #[must_use]
@@ -416,7 +431,7 @@ impl RedactionLevel {
 
     #[must_use]
     pub const fn redacts_content(self) -> bool {
-        matches!(self, Self::Full)
+        matches!(self, Self::Strict | Self::Paranoid | Self::Full)
     }
 }
 
@@ -435,7 +450,7 @@ impl fmt::Display for ParseRedactionLevelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "invalid redaction level '{}'; expected one of: none, minimal, standard, full",
+            "invalid redaction level '{}'; expected one of: none, minimal, standard, strict, paranoid",
             self.invalid
         )
     }
@@ -451,6 +466,8 @@ impl FromStr for RedactionLevel {
             "none" => Ok(Self::None),
             "minimal" => Ok(Self::Minimal),
             "standard" => Ok(Self::Standard),
+            "strict" => Ok(Self::Strict),
+            "paranoid" => Ok(Self::Paranoid),
             "full" => Ok(Self::Full),
             _ => Err(ParseRedactionLevelError {
                 invalid: s.to_owned(),
@@ -1896,6 +1913,8 @@ mod tests {
         assert!(RedactionLevel::Standard.redacts_paths());
         assert!(RedactionLevel::Standard.redacts_identifiers());
         assert!(!RedactionLevel::Standard.redacts_content());
+        assert!(RedactionLevel::Strict.redacts_content());
+        assert!(RedactionLevel::Paranoid.redacts_content());
         assert!(RedactionLevel::Full.redacts_content());
     }
 

@@ -232,7 +232,7 @@ impl CassInvocation {
 
         let output =
             retry_cass_spawn(|| command.output()).map_err(|error| cass_spawn_error(self, error))?;
-            std::thread::sleep(TIMEOUT_POLL_INTERVAL);
+        std::thread::sleep(TIMEOUT_POLL_INTERVAL);
         let elapsed = started.elapsed();
         let exit_code = output.status.code();
         let stdout = output.stdout;
@@ -869,7 +869,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_times_out_when_descendant_keeps_pipe_open_after_parent_exit() -> Result<(), String> {
-        if std::env::var("TMPDIR").unwrap_or_default().contains("USBNVME") { return Ok(()); }
+        if std::env::var("TMPDIR")
+            .unwrap_or_default()
+            .contains("USBNVME")
+        {
+            return Ok(());
+        }
         let dir = unique_test_dir("inherited-pipe-timeout")?;
         fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
         let binary = dir.join("cass");
@@ -910,7 +915,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_rejects_world_writable_absolute_binary_before_spawn() -> Result<(), String> {
-        if std::env::var("TMPDIR").unwrap_or_default().contains("USBNVME") { return Ok(()); }
+        if std::env::var("TMPDIR")
+            .unwrap_or_default()
+            .contains("USBNVME")
+        {
+            return Ok(());
+        }
         let dir = unique_test_dir("writable-absolute-binary")?;
         fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
         let binary = dir.join("cass");

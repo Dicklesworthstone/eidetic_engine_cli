@@ -353,6 +353,48 @@ impl RationaleTraceSummary {
 }
 
 /// Non-fatal limitations in the why explanation.
+/// Bayesian (alpha, beta) posterior summary for `ee why <memory-id>`
+/// output (N7.1 / ADR 0032).
+///
+/// Mirrors the runtime [`crate::core::bayes::BetaPosterior`] state plus
+/// derived fields (mean, credible intervals, effective sample size).
+/// Renderers project this struct into JSON / markdown / TOON without
+/// re-computing the math — the renderer is a thin formatting layer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BayesPosteriorSummary {
+    /// Alpha (helpful-side pseudo-count).
+    pub alpha: f64,
+    /// Beta (harmful-side pseudo-count).
+    pub beta: f64,
+    /// Posterior mean = alpha / (alpha + beta). Equals the legacy
+    /// `confidence` field's derived view for backward compatibility.
+    pub mean: f64,
+    /// Effective sample size (alpha + beta). Trust-class transitions
+    /// gate on this per ADR 0032.
+    pub effective_sample_size: f64,
+    /// 90% equal-tailed credible interval `(lo, hi)`. `None` if the
+    /// inverse-CDF iteration failed to converge.
+    pub credible_interval_90: Option<(f64, f64)>,
+    /// 50% equal-tailed credible interval `(lo, hi)`. Useful for
+    /// compact-format rendering that drops the wider 90% interval.
+    pub credible_interval_50: Option<(f64, f64)>,
+}
+
+impl BayesPosteriorSummary {
+    /// Compute a summary from a runtime [`BetaPosterior`].
+    #[must_use]
+    pub fn from_posterior(posterior: &crate::core::bayes::BetaPosterior) -> Self {
+        Self {
+            alpha: posterior.alpha(),
+            beta: posterior.beta(),
+            mean: posterior.mean(),
+            effective_sample_size: posterior.effective_sample_size(),
+            credible_interval_90: posterior.credible_interval(0.90),
+            credible_interval_50: posterior.credible_interval(0.50),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WhyDegradation {
     /// Stable degradation code.
@@ -389,6 +431,11 @@ pub struct WhyReport {
     pub selection: Option<SelectionExplanation>,
     /// Lifecycle explanation.
     pub lifecycle: Option<LifecycleExplanation>,
+    /// Bayesian (alpha, beta) posterior over the memory's latent
+    /// helpful-rate (N7.1 / ADR 0032). `None` when the memory does
+    /// not exist OR when the schema migration has not been applied
+    /// against an older workspace database.
+    pub bayes_posterior: Option<BayesPosteriorSummary>,
     /// Contradiction feedback recorded against this memory (EE-263).
     pub contradictions: Vec<ContradictionMetadata>,
     /// Memory links: supports, contradicts, derived_from, etc. (EE-LINK-USAGE-001).
@@ -424,6 +471,7 @@ impl WhyReport {
             graph_retrieval: None,
             selection: Some(selection),
             lifecycle: None,
+            bayes_posterior: None,
             contradictions: Vec::new(),
             links: Vec::new(),
             history: None,
@@ -455,6 +503,7 @@ impl WhyReport {
             graph_retrieval: None,
             selection: None,
             lifecycle: None,
+            bayes_posterior: None,
             contradictions: Vec::new(),
             links: Vec::new(),
             history: None,
@@ -478,6 +527,7 @@ impl WhyReport {
             graph_retrieval: None,
             selection: None,
             lifecycle: None,
+            bayes_posterior: None,
             contradictions: Vec::new(),
             links: Vec::new(),
             history: None,
@@ -570,6 +620,15 @@ impl WhyReport {
     #[must_use]
     pub fn with_optional_history(mut self, history: Option<MemoryHistorySummary>) -> Self {
         self.history = history;
+        self
+    }
+
+    /// Attach a Bayesian (alpha, beta) posterior summary to the
+    /// report (N7.1 / ADR 0032). `None` is the no-op variant (memory
+    /// not found, schema migration not applied, or pre-V041 row).
+    #[must_use]
+    pub fn with_bayes_posterior(mut self, summary: Option<BayesPosteriorSummary>) -> Self {
+        self.bayes_posterior = summary;
         self
     }
 
@@ -813,6 +872,24 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
         },
     )
     .with_content(memory.content.clone());
+
+    // N7.1 (bd-17c65.14.7.2 / ADR 0032): attach the Bayesian
+    // (alpha, beta) posterior summary so an agent reading `ee why`
+    // can see the credible interval and effective sample size rather
+    // than just the legacy scalar `confidence` field. Failures here
+    // are best-effort: a missing posterior (e.g. pre-V041 schema, or
+    // a transient query error) leaves the field None rather than
+    // failing the entire `ee why` response. The runtime
+    // `update_memory_bayes_posterior` path is the source of truth;
+    // `ee why` is a read-only consumer.
+    let report = match conn.get_memory_bayes_posterior(memory_id) {
+        Ok(Some((alpha, beta))) => {
+            let summary = crate::core::bayes::BetaPosterior::new(alpha, beta)
+                .map(|posterior| BayesPosteriorSummary::from_posterior(&posterior));
+            report.with_bayes_posterior(summary)
+        }
+        Ok(None) | Err(_) => report,
+    };
 
     // Bead bd-17c65.7.7 (G8): best-effort audit row so L3 has a
     // last_accessed signal for `ee why` reads, and G1 can count

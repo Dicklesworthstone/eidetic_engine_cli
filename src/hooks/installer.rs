@@ -1124,7 +1124,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn install_preflights_special_file_targets_before_writing() -> TestResult {
-        if std::env::var("TMPDIR").unwrap_or_default().contains("USBNVME") { return Ok(()); }
+        if std::env::var("TMPDIR")
+            .unwrap_or_default()
+            .contains("USBNVME")
+        {
+            return Ok(());
+        }
         use std::os::unix::net::UnixListener;
 
         let temp = TempDir::new().map_err(|e| e.to_string())?;

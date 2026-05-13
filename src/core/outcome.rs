@@ -30,6 +30,7 @@ use asupersync::types::{CancelKind, CancelReason, PanicPayload};
 use chrono::{Duration, Utc};
 use serde::Serialize;
 
+use crate::core::bayes::{BetaPosterior, DEFAULT_HARMFUL_WEIGHT};
 use crate::db::{
     ApplyProcedureFeedbackInput, AuditedFeedbackEventInput, CreateAuditInput,
     CreateFeedbackEventInput, CreateFeedbackQuarantineInput, DbConnection, FeedbackCounts,
@@ -858,6 +859,79 @@ pub fn record_outcome(
                 message: format!("Failed to update procedure feedback score: {error}"),
                 repair: Some("ee procedure show <id> --json".to_string()),
             })?;
+    }
+
+    // Bayesian (alpha, beta) posterior update — N7.1 / ADR 0032.
+    // Helpful: alpha += 1. Harmful: beta += harmful_weight (default
+    // 2.5 per README [curation] config; future Phase 7 wires the
+    // config override). Only memories carry posteriors today;
+    // procedures use the older scalar-score path above.
+    if target_type == "memory" {
+        let stored = connection
+            .get_memory_bayes_posterior(&target_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to read Bayesian posterior: {error}"),
+                repair: Some("ee doctor".to_string()),
+            })?;
+        if let Some((current_alpha, current_beta)) = stored {
+            let prior = BetaPosterior::new(current_alpha, current_beta)
+                .unwrap_or_else(BetaPosterior::jeffreys);
+            let (posterior, applied_weight) = match signal.as_str() {
+                "helpful" => (prior.update_helpful(), 1.0_f64),
+                "harmful" => {
+                    let w = DEFAULT_HARMFUL_WEIGHT;
+                    (prior.update_harmful(w), w)
+                }
+                // Unknown signals (validated to helpful|harmful above
+                // by require_allowed) cannot reach this branch — leave
+                // posterior unchanged as a defensive fallthrough.
+                _ => (prior, 0.0),
+            };
+            if posterior != prior {
+                connection
+                    .update_memory_bayes_posterior(&target_id, posterior.alpha(), posterior.beta())
+                    .map_err(|error| DomainError::Storage {
+                        message: format!("Failed to update Bayesian posterior: {error}"),
+                        repair: Some("ee doctor".to_string()),
+                    })?;
+
+                let posterior_audit_id = generate_audit_id();
+                let details = serde_json::json!({
+                    "schema": "ee.audit.bayes_posterior_updated.v1",
+                    "feedbackEventId": &event_id,
+                    "signal": &signal,
+                    "appliedWeight": applied_weight,
+                    "priorAlpha": prior.alpha(),
+                    "priorBeta": prior.beta(),
+                    "posteriorAlpha": posterior.alpha(),
+                    "posteriorBeta": posterior.beta(),
+                    "priorMean": prior.mean(),
+                    "posteriorMean": posterior.mean(),
+                })
+                .to_string();
+                connection
+                    .insert_audit(
+                        &posterior_audit_id,
+                        &CreateAuditInput {
+                            workspace_id: Some(target.workspace_id.clone()),
+                            actor: options.actor.clone(),
+                            action: audit_actions::MEMORY_BAYES_POSTERIOR_UPDATED.to_string(),
+                            target_type: Some("memory".to_string()),
+                            target_id: Some(target_id.clone()),
+                            details: Some(details),
+                        },
+                    )
+                    .map_err(|error| DomainError::Storage {
+                        message: format!("Failed to audit Bayesian posterior update: {error}"),
+                        repair: Some("ee doctor".to_string()),
+                    })?;
+            }
+        }
+        // Posterior is None ⇒ memory row doesn't exist; the
+        // target-resolution step above already validated existence, so
+        // this only fires on a race with concurrent delete. Skip
+        // silently — the feedback event is already persisted and the
+        // posterior update was best-effort.
     }
 
     let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;

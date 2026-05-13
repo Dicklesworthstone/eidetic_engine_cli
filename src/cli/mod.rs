@@ -152,7 +152,7 @@ use crate::core::rule::{
     protect_rule, show_rule, update_rule,
 };
 use crate::core::search::{
-    SearchOptions, SearchReport, SearchSourceMode, run_diag_search, run_search,
+    SearchDegradation, SearchOptions, SearchReport, SearchSourceMode, run_diag_search, run_search,
 };
 use crate::core::status::{StatusOptions, StatusReport};
 use crate::core::swarm_brief::{
@@ -936,7 +936,12 @@ pub enum BackupRedaction {
     /// Redact secrets, paths, and identifiers.
     #[default]
     Standard,
-    /// Redact all potentially sensitive content.
+    /// Strict redaction for agent handoff and shared artifacts.
+    Strict,
+    /// Maximum redaction for third-party-facing bundles.
+    Paranoid,
+    /// Legacy spelling retained for older command invocations.
+    #[value(hide = true)]
     Full,
 }
 
@@ -946,6 +951,8 @@ impl BackupRedaction {
             Self::None => RedactionLevel::None,
             Self::Minimal => RedactionLevel::Minimal,
             Self::Standard => RedactionLevel::Standard,
+            Self::Strict => RedactionLevel::Strict,
+            Self::Paranoid => RedactionLevel::Paranoid,
             Self::Full => RedactionLevel::Full,
         }
     }
@@ -2433,6 +2440,10 @@ pub struct DiagSearchArgs {
     /// Fail closed when relevant evidence exists outside the requested memory scope.
     #[arg(long, action = ArgAction::SetTrue)]
     pub strict_scope: bool,
+
+    /// Inject a synthetic duplicate final hit signal for diagnostic fixture replay.
+    #[arg(long, hide = true, action = ArgAction::SetTrue)]
+    pub inject_duplicate_hit: bool,
 }
 
 /// Arguments for `ee diag graph-snapshot`.
@@ -11079,6 +11090,53 @@ fn args_request_json_slice(args: &[OsString]) -> bool {
     args_request_json(args.iter())
 }
 
+const CANONICAL_REDACTION_LEVELS: &[&str] = &["none", "minimal", "standard", "strict", "paranoid"];
+
+fn redaction_level_invalid_parse_error(args: &[OsString]) -> Option<DomainError> {
+    let mut next_is_redaction_value = false;
+    for arg in args {
+        let value = arg.to_string_lossy();
+        let raw_value = if let Some((flag, raw)) = value.split_once('=') {
+            if flag == "--redaction" {
+                Some(raw)
+            } else {
+                None
+            }
+        } else if next_is_redaction_value {
+            Some(value.as_ref())
+        } else {
+            if value == "--redaction" {
+                next_is_redaction_value = true;
+            }
+            None
+        };
+
+        let Some(raw_value) = raw_value else {
+            continue;
+        };
+        if CANONICAL_REDACTION_LEVELS.contains(&raw_value) || raw_value == "full" {
+            return None;
+        }
+
+        let accepted_values = CANONICAL_REDACTION_LEVELS.to_vec();
+        return Some(DomainError::UsageCodeWithDetails {
+            code: "redaction_level_invalid",
+            message: format!(
+                "invalid redaction level '{raw_value}'; expected one of: {}",
+                CANONICAL_REDACTION_LEVELS.join(", ")
+            ),
+            repair: Some("Use --redaction none|minimal|standard|strict|paranoid.".to_owned()),
+            details_json: serde_json::json!({
+                "flag": "--redaction",
+                "providedValue": raw_value,
+                "acceptedValues": accepted_values,
+            })
+            .to_string(),
+        });
+    }
+    None
+}
+
 fn write_parse_error<W, E>(
     error: clap::Error,
     args: &[OsString],
@@ -11095,6 +11153,20 @@ where
             ProcessExitCode::Success
         }
         _ => {
+            if let Some(domain_error) = redaction_level_invalid_parse_error(args) {
+                if args_request_json_slice(args) {
+                    let json = output::error_response_json(&domain_error);
+                    let _ = stdout.write_all(json.as_bytes());
+                    let _ = stdout.write_all(b"\n");
+                } else {
+                    let _ = writeln!(stderr, "error: {}", domain_error.message());
+                    if let Some(repair) = domain_error.repair() {
+                        let _ = writeln!(stderr, "\nNext:\n  {repair}");
+                    }
+                }
+                return domain_error.exit_code();
+            }
+
             let base_message = clap_error_message(&error);
             let suggestion = enhance_error_with_suggestion(&error, args);
             let message = match suggestion {
@@ -15799,6 +15871,9 @@ where
         "feedback-quarantine-table-unavailable" => {
             "ALTER TABLE feedback_quarantine RENAME TO j6_unavailable_feedback_quarantine"
         }
+        "feedback-events-table-unavailable" => {
+            "ALTER TABLE feedback_events RENAME TO j6_unavailable_feedback_events"
+        }
         "memory-links-table-unavailable" => {
             "ALTER TABLE memory_links RENAME TO j6_unavailable_memory_links"
         }
@@ -15813,6 +15888,9 @@ where
         }
         "procedural-rules-table-unavailable" => {
             "ALTER TABLE procedural_rules RENAME TO j6_unavailable_procedural_rules"
+        }
+        "trust-quarantine-table-unavailable" => {
+            "ALTER TABLE trust_quarantine RENAME TO j6_unavailable_trust_quarantine"
         }
         "workspaces-table-unavailable" => {
             "ALTER TABLE workspaces RENAME TO j6_unavailable_workspaces"
@@ -16393,6 +16471,26 @@ where
             Ok(workspace_id) => workspace_id,
             Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         };
+    let workspace_path = workspace.to_string_lossy().into_owned();
+    let workspace_name = workspace
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
+    if let Err(error) = conn.upsert_workspace_with_scope(
+        &workspace_id,
+        &crate::db::CreateWorkspaceInput {
+            path: workspace_path,
+            name: workspace_name,
+        },
+        &crate::db::WorkspaceScopeFields::standalone(),
+    ) {
+        let domain_error = DomainError::Storage {
+            message: format!("Failed to ensure model registry diagnostic workspace row: {error}"),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
 
     let seed_status = match conn.get_model_registry_entry(&args.model_id) {
         Ok(Some(_)) => "already_present",
@@ -17234,7 +17332,13 @@ where
     };
 
     match run_diag_search(&options) {
-        Ok(report) => {
+        Ok(mut report) => {
+            if args.inject_duplicate_hit {
+                report
+                    .final_report
+                    .degraded
+                    .push(SearchDegradation::duplicates_collapsed(1));
+            }
             let json = report.data_json().to_string();
             match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
@@ -36654,6 +36758,66 @@ mod tests {
             }
             _ => Err("expected diag database-skew command".to_string()),
         }
+    }
+
+    #[test]
+    fn diag_database_skew_supports_quarantine_table_skews() -> TestResult {
+        let workspace = init_cli_workspace("diag-database-skew-quarantine")?;
+        for skew in [
+            "feedback-events-table-unavailable",
+            "feedback-quarantine-table-unavailable",
+            "trust-quarantine-table-unavailable",
+        ] {
+            let output_database = PathBuf::from(&workspace)
+                .join(format!("{skew}.db"))
+                .to_string_lossy()
+                .into_owned();
+            let (exit, stdout, stderr) = invoke(&[
+                "ee",
+                "--workspace",
+                workspace.as_str(),
+                "--json",
+                "diag",
+                "database-skew",
+                "--output-database",
+                output_database.as_str(),
+                "--skew",
+                skew,
+            ]);
+
+            ensure_equal(&exit, &ProcessExitCode::Success, &format!("{skew} exit"))?;
+            ensure(stderr.is_empty(), format!("{skew} stderr clean"))?;
+            ensure_contains(&stdout, "\"command\":\"diag database-skew\"", "command")?;
+            ensure_contains(&stdout, &format!("\"skew\":\"{skew}\""), "skew")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn diag_quarantine_missing_workspace_message_names_unavailable() -> TestResult {
+        let workspace = unique_temp_workspace("diag-quarantine-missing-workspace")?;
+        let missing_workspace = PathBuf::from(&workspace)
+            .join("missing")
+            .to_string_lossy()
+            .into_owned();
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "diag",
+            "quarantine",
+            "list",
+            "--workspace",
+            missing_workspace.as_str(),
+        ]);
+
+        ensure_equal(&exit, &ProcessExitCode::Success, "quarantine exit")?;
+        ensure(stderr.is_empty(), "quarantine stderr clean")?;
+        ensure_contains(
+            &stdout,
+            "\"code\":\"quarantine_workspace_unavailable\"",
+            "code",
+        )?;
+        ensure_contains(&stdout, "Workspace unavailable", "message")
     }
 
     #[test]

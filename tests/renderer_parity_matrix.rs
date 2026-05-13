@@ -73,13 +73,7 @@ type TestResult = Result<(), String>;
 /// renderer name**, not by the input format. So `markdown` covers
 /// both the `--format markdown` and `--format mermaid` cases.
 const KNOWN_RENDERERS: &[&str] = &[
-    "human",
-    "json",
-    "toon",
-    "jsonl",
-    "compact",
-    "hook",
-    "markdown",
+    "human", "json", "toon", "jsonl", "compact", "hook", "markdown",
 ];
 
 /// The canonical set of `reason` enum values that may appear in
@@ -94,10 +88,7 @@ const KNOWN_RENDERERS: &[&str] = &[
 /// Adding a new reason value requires (a) documenting it in the
 /// omissions.toml header comment, (b) adding it here, and (c) writing
 /// a rationale describing when it applies.
-const KNOWN_REASONS: &[&str] = &[
-    "format_native_omission",
-    "compact_intentional_drop",
-];
+const KNOWN_REASONS: &[&str] = &["format_native_omission", "compact_intentional_drop"];
 
 /// Minimum length (after trimming whitespace) for the `rationale`
 /// field on each omission entry. Catches the "left it empty" or
@@ -125,8 +116,7 @@ struct OmissionEntry {
 }
 
 fn parse_omissions_toml(path: &Path) -> Result<Vec<OmissionEntry>, String> {
-    let raw = fs::read_to_string(path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let raw = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let document = raw
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| format!("parse TOML {}: {e}", path.display()))?;
@@ -134,9 +124,9 @@ fn parse_omissions_toml(path: &Path) -> Result<Vec<OmissionEntry>, String> {
     let omissions = document
         .get("omission")
         .ok_or_else(|| "missing top-level `omission` array".to_string())?;
-    let array_of_tables = omissions
-        .as_array_of_tables()
-        .ok_or_else(|| "top-level `omission` must be an [[omission]] array of tables".to_string())?;
+    let array_of_tables = omissions.as_array_of_tables().ok_or_else(|| {
+        "top-level `omission` must be an [[omission]] array of tables".to_string()
+    })?;
 
     let mut out: Vec<OmissionEntry> = Vec::with_capacity(array_of_tables.len());
     for (index, table) in array_of_tables.iter().enumerate() {
@@ -271,9 +261,7 @@ fn every_omission_field_path_is_well_formed() -> TestResult {
     for (i, entry) in entries.iter().enumerate() {
         let field = &entry.field;
         if field.trim().is_empty() {
-            return Err(format!(
-                "[[omission]] #{i}: empty `field` path",
-            ));
+            return Err(format!("[[omission]] #{i}: empty `field` path",));
         }
         if field.contains(char::is_whitespace) {
             return Err(format!(

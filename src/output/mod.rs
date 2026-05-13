@@ -6880,6 +6880,16 @@ pub fn render_mcp_manifest_json() -> String {
         if !cfg!(feature = "mcp") {
             d.field_object("capabilityGap", |gap| {
                 gap.field_str("code", "mcp_feature_disabled");
+                gap.field_str("severity", "low");
+                gap.field_str(
+                    "message",
+                    "MCP stdio adapter feature is not enabled in this build.",
+                );
+                gap.field_str(
+                    "repair",
+                    "Build ee with the mcp feature enabled, or use the CLI surfaces directly.",
+                );
+                gap.field_str("feature", "mcp");
                 gap.field_str("capabilitiesCommand", "ee capabilities --json");
             });
         }
@@ -6965,6 +6975,7 @@ pub fn render_mcp_manifest_human() -> String {
     output.push_str(&format!("Schemas: {}\n", public_schemas().len()));
     if !cfg!(feature = "mcp") {
         output.push_str("\nCapability gap: mcp_feature_disabled\n");
+        output.push_str("MCP stdio adapter feature is not enabled in this build.\n");
         output.push_str("Inspect build-time gaps with `ee capabilities --json`.\n");
     }
     output.push_str("\nUse `ee mcp manifest --json` for the machine-readable manifest.\n");
@@ -8356,9 +8367,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
                 obj.field_str("code", deg.code);
                 obj.field_str("severity", deg.severity);
                 obj.field_str("message", deg.message);
-                if profile.include_verbose_details() {
-                    obj.field_str("repair", deg.repair);
-                }
+                obj.field_str("repair", deg.repair);
             });
         }
     });
@@ -8514,9 +8523,7 @@ pub fn render_health_json_filtered(report: &HealthReport, profile: FieldProfile)
                 obj.field_str("subsystem", issue.subsystem);
                 obj.field_str("code", issue.code);
                 obj.field_str("severity", issue.severity);
-                if profile.include_verbose_details() {
-                    obj.field_str("message", issue.message);
-                }
+                obj.field_str("message", issue.message);
             });
         }
     });
@@ -14150,8 +14157,20 @@ mod tests {
         ensure_contains(&json, "\"capabilities\":", "has capabilities")?;
         ensure_contains(&json, "\"runtime\":", "has runtime")?;
         ensure_contains(&json, "\"degraded\":", "has degraded")?;
-        // Standard should NOT have repair in degraded items
-        ensure(!json.contains("\"repair\":"), "no repair in degraded")
+        // Standard degraded entries keep repair guidance because agents rely on
+        // the default JSON profile for recovery planning.
+        ensure_contains(&json, "\"repair\":", "has repair in degraded")
+    }
+
+    #[test]
+    fn render_health_json_filtered_standard_keeps_issue_messages() -> TestResult {
+        use super::{FieldProfile, render_health_json_filtered};
+        let report = HealthReport::gather();
+        let json = render_health_json_filtered(&report, FieldProfile::Standard);
+
+        ensure_contains(&json, "\"fields\":\"standard\"", "fields indicator")?;
+        ensure_contains(&json, "\"issues\":", "has issues")?;
+        ensure_contains(&json, "\"message\":", "has issue message")
     }
 
     #[test]

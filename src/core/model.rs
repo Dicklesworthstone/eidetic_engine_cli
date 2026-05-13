@@ -188,7 +188,7 @@ const SEMANTIC_DIMENSION_BUDGET: u32 = 384;
 const DEG_SEMANTIC_DIMENSION_EXCEEDS_BUDGET: ModelDegradation = ModelDegradation {
     code: "semantic_dimension_exceeds_budget",
     severity: "medium",
-    message: "Available embedding model dimension exceeds the configured budget; semantic search is degraded.",
+    message: "Available embedding dimension exceeds the configured budget; semantic search is degraded.",
     repair: "select a smaller local embedding model or run `ee index reembed --workspace .`",
 };
 

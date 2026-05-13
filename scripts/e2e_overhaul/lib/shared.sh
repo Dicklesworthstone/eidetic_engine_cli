@@ -68,6 +68,7 @@ require_ee_binary() {
 # Globals populated by epic_setup. Read-only after the call.
 EPIC_WORKSPACE=""
 EPIC_NAME=""
+EPIC_SETUP_BASHPID=""
 
 # Usage: epic_setup <epic_name>
 #   Creates a temp workspace, calls `ee init`, and arms a teardown trap.
@@ -80,9 +81,13 @@ EPIC_NAME=""
 #   out explicitly with `exit 3` instead of relying on errexit.
 epic_setup() {
     EPIC_NAME="${1:?epic name required}"
+    EPIC_SETUP_BASHPID="${BASHPID:-$$}"
     require_ee_binary
 
-    EPIC_WORKSPACE="$(mktemp -d "/tmp/ee-e2e-${EPIC_NAME}.XXXXXX")"
+    local epic_tmp_root
+    epic_tmp_root="${EE_E2E_TMPDIR:-${TMPDIR:-/tmp}}"
+    mkdir -p "$epic_tmp_root"
+    EPIC_WORKSPACE="$(mktemp -d "${epic_tmp_root%/}/ee-e2e-${EPIC_NAME}.XXXXXX")"
     export EPIC_WORKSPACE
 
     e2e_log_start "$EPIC_NAME"
@@ -108,6 +113,9 @@ epic_setup() {
 
 _epic_teardown() {
     local code=$?
+    if [ -n "$EPIC_SETUP_BASHPID" ] && [ "${BASHPID:-$$}" != "$EPIC_SETUP_BASHPID" ]; then
+        return "$code"
+    fi
     e2e_log_end
     if [ -n "$EPIC_WORKSPACE" ] && [ -d "$EPIC_WORKSPACE" ]; then
         if [ "${EE_E2E_KEEP_WORKSPACE:-0}" = "1" ]; then

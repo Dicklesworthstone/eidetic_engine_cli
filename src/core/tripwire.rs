@@ -483,7 +483,7 @@ pub fn check_tripwire(options: &CheckOptions) -> Result<CheckReport, DomainError
         options.tripwire_id
     ));
     report.degraded.push(TripwireDegradation::inputs_incomplete(
-        "No persisted tripwire matched the requested ID, so the check could not evaluate a concrete event payload.",
+        "Missing persisted tripwire inputs for the requested ID, so the check could not evaluate a concrete event payload.",
     ));
     Ok(report)
 }

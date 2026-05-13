@@ -2105,6 +2105,12 @@ pub fn compare_causal_filtered_from_store(
     options: &CompareOptions,
 ) -> Result<CompareReport, DomainError> {
     let mut report = compare_causal_evidence(options);
+    let missing_source_degradations = report
+        .degradations
+        .iter()
+        .filter(|degradation| degradation.code == "no_sources")
+        .cloned()
+        .collect::<Vec<_>>();
     report.degradations.retain(|d| {
         !matches!(
             d.code.as_str(),
@@ -2118,6 +2124,7 @@ pub fn compare_causal_filtered_from_store(
 
     let (edges, _) = load_causal_ledger_edges(conn, workspace_id)?;
     if edges.is_empty() {
+        report.degradations.extend(missing_source_degradations);
         report.degradations.push(trace_degradation(
             "causal_ledger_empty",
             "No causal ledger edges found in workspace.",
@@ -3407,6 +3414,37 @@ mod tests {
                 .iter()
                 .any(|degradation| degradation.code == "causal_chain_pair_required"),
             "expected causal_chain_pair_required, got {:?}",
+            report.degradations
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compare_filtered_from_empty_store_reports_missing_sources_and_ledger() -> Result<(), String>
+    {
+        let fixture = CausalStoreFixture::new()?;
+        let report = compare_causal_filtered_from_store(
+            &fixture.connection,
+            &fixture.workspace_id,
+            &CompareOptions::new().with_artifact_id(&fixture.root),
+        )
+        .map_err(|error| error.message())?;
+
+        assert!(report.comparisons.is_empty());
+        assert!(
+            report
+                .degradations
+                .iter()
+                .any(|degradation| degradation.code == "no_sources"),
+            "expected no_sources, got {:?}",
+            report.degradations
+        );
+        assert!(
+            report
+                .degradations
+                .iter()
+                .any(|degradation| degradation.code == "causal_ledger_empty"),
+            "expected causal_ledger_empty, got {:?}",
             report.degradations
         );
         Ok(())

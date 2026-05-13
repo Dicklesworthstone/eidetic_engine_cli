@@ -74,6 +74,14 @@ pub fn redact_content(content: &str, level: RedactionLevel) -> String {
                 redact_paths_in_content(content)
             }
         }
+        RedactionLevel::Strict => {
+            if contains_secret_pattern(content) || content.len() > 200 {
+                REDACTED_PLACEHOLDER.to_owned()
+            } else {
+                redact_paths_in_content(content)
+            }
+        }
+        RedactionLevel::Paranoid => REDACTED_PLACEHOLDER.to_owned(),
         RedactionLevel::Full => REDACTED_PLACEHOLDER.to_owned(),
     }
 }
@@ -120,7 +128,10 @@ fn redact_paths_in_content(content: &str) -> String {
 pub fn redact_path(path: &str, level: RedactionLevel) -> String {
     match level {
         RedactionLevel::None | RedactionLevel::Minimal => path.to_owned(),
-        RedactionLevel::Standard | RedactionLevel::Full => {
+        RedactionLevel::Standard
+        | RedactionLevel::Strict
+        | RedactionLevel::Paranoid
+        | RedactionLevel::Full => {
             if path.starts_with("/home/")
                 || path.starts_with("/Users/")
                 || path.starts_with("/data/")
@@ -139,7 +150,10 @@ pub fn redact_path(path: &str, level: RedactionLevel) -> String {
 #[must_use]
 pub fn redact_identifier(id: &str, level: RedactionLevel) -> String {
     match level {
-        RedactionLevel::None | RedactionLevel::Minimal => id.to_owned(),
+        RedactionLevel::None
+        | RedactionLevel::Minimal
+        | RedactionLevel::Strict
+        | RedactionLevel::Paranoid => id.to_owned(),
         RedactionLevel::Standard => {
             if id.len() > 8 {
                 format!("{}...{}", &id[..4], &id[id.len() - 4..])

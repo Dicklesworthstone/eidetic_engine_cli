@@ -326,6 +326,8 @@ fn release_workflow_inventory_present() -> TestResult {
         "cosign_installer_present",
         "tag_trigger_present",
         "cosign_bundle_present",
+        "cosign_identity_bound",
+        "release_verifies_sigstore_before_publish",
         "macos_smoke_present",
         "smoke_uses_release_tag",
         "smoke_uses_release_installer_asset",
@@ -376,6 +378,20 @@ fn release_workflow_inventory_present() -> TestResult {
         )?;
     }
 
+    ensure(
+        workflow
+            .get("cosign_identity_bound")
+            .and_then(Value::as_bool)
+            == Some(true),
+        "audit: release workflow Sigstore verification does not bind certificate identity and issuer",
+    )?;
+    ensure(
+        workflow
+            .get("release_verifies_sigstore_before_publish")
+            .and_then(Value::as_bool)
+            == Some(true),
+        "audit: release workflow does not verify Sigstore bundles before publishing",
+    )?;
     ensure(
         workflow.get("macos_smoke_present").and_then(Value::as_bool) == Some(true),
         "audit: release workflow is missing macOS smoke coverage",
@@ -581,12 +597,14 @@ fn installer_targets_match_release_matrix() -> TestResult {
         "unix_installer_fails_on_bad_sigstore",
         "unix_installer_requires_sigstore_bundle_with_cosign",
         "unix_installer_requires_sha256_tool",
+        "unix_installer_binds_sigstore_identity",
         "windows_installer_supports_x64_asset",
         "windows_installer_rejects_unbuilt_i686",
         "windows_installer_rejects_unbuilt_arm64",
         "windows_installer_normalizes_version_tag",
         "windows_installer_fails_on_bad_sigstore",
         "windows_installer_requires_sigstore_bundle_with_cosign",
+        "windows_installer_binds_sigstore_identity",
         "homebrew_formula_tests_doctor_json",
         "homebrew_formula_fetches_sha_strictly",
         "homebrew_formula_normalizes_version_tag",

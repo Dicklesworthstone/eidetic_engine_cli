@@ -398,19 +398,21 @@ installer_asset_contract() {
     local homebrew_template="$REPO_ROOT/scripts/homebrew/ee.rb.template"
     local homebrew_update="$REPO_ROOT/scripts/homebrew/update-formula.sh"
 
-    local installer_examples_use_release_assets unix_musl unix_version_normalized unix_sigstore_hard_fail unix_sigstore_bundle_required unix_sha256_tool_required windows_x64 windows_i686_rejected windows_arm64_rejected windows_version_normalized windows_sigstore_hard_fail windows_sigstore_bundle_required homebrew_formula_tests_doctor homebrew_formula_fetches_sha_strictly homebrew_formula_normalizes_version_tag
+    local installer_examples_use_release_assets unix_musl unix_version_normalized unix_sigstore_hard_fail unix_sigstore_bundle_required unix_sha256_tool_required unix_sigstore_identity_bound windows_x64 windows_i686_rejected windows_arm64_rejected windows_version_normalized windows_sigstore_hard_fail windows_sigstore_bundle_required windows_sigstore_identity_bound homebrew_formula_tests_doctor homebrew_formula_fetches_sha_strictly homebrew_formula_normalizes_version_tag
     installer_examples_use_release_assets=false
     unix_musl=false
     unix_version_normalized=false
     unix_sigstore_hard_fail=false
     unix_sigstore_bundle_required=false
     unix_sha256_tool_required=false
+    unix_sigstore_identity_bound=false
     windows_x64=false
     windows_i686_rejected=false
     windows_arm64_rejected=false
     windows_version_normalized=false
     windows_sigstore_hard_fail=false
     windows_sigstore_bundle_required=false
+    windows_sigstore_identity_bound=false
     homebrew_formula_tests_doctor=false
     homebrew_formula_fetches_sha_strictly=false
     homebrew_formula_normalizes_version_tag=false
@@ -443,6 +445,12 @@ installer_asset_contract() {
         && ! grep -qF 'No SHA256 tool found. Skipping verification.' "$unix_installer" 2>/dev/null; then
         unix_sha256_tool_required=true
     fi
+    if [ -f "$unix_installer" ] \
+        && grep -qF -- '--certificate-identity-regexp "$CERT_IDENTITY_REGEXP"' "$unix_installer" 2>/dev/null \
+        && grep -qF -- '--certificate-oidc-issuer "$CERT_OIDC_ISSUER"' "$unix_installer" 2>/dev/null \
+        && grep -qF 'https://token.actions.githubusercontent.com' "$unix_installer" 2>/dev/null; then
+        unix_sigstore_identity_bound=true
+    fi
     if [ -f "$windows_installer" ] && grep -qF '"AMD64" { return "x86_64" }' "$windows_installer" 2>/dev/null; then
         windows_x64=true
     fi
@@ -473,6 +481,12 @@ installer_asset_contract() {
         && ! grep -qF 'Sigstore bundle not available for this release.' "$windows_installer" 2>/dev/null; then
         windows_sigstore_bundle_required=true
     fi
+    if [ -f "$windows_installer" ] \
+        && grep -qF -- '--certificate-identity-regexp $certIdentityRegexp' "$windows_installer" 2>/dev/null \
+        && grep -qF -- '--certificate-oidc-issuer $certOidcIssuer' "$windows_installer" 2>/dev/null \
+        && grep -qF 'https://token.actions.githubusercontent.com' "$windows_installer" 2>/dev/null; then
+        windows_sigstore_identity_bound=true
+    fi
     if [ -f "$homebrew_template" ] \
         && grep -qF 'system "#{bin}/ee", "doctor", "--json"' "$homebrew_template" 2>/dev/null; then
         homebrew_formula_tests_doctor=true
@@ -496,12 +510,14 @@ installer_asset_contract() {
         --argjson unix_sigstore_hard_fail "$unix_sigstore_hard_fail" \
         --argjson unix_sigstore_bundle_required "$unix_sigstore_bundle_required" \
         --argjson unix_sha256_tool_required "$unix_sha256_tool_required" \
+        --argjson unix_sigstore_identity_bound "$unix_sigstore_identity_bound" \
         --argjson windows_x64 "$windows_x64" \
         --argjson windows_i686_rejected "$windows_i686_rejected" \
         --argjson windows_arm64_rejected "$windows_arm64_rejected" \
         --argjson windows_version_normalized "$windows_version_normalized" \
         --argjson windows_sigstore_hard_fail "$windows_sigstore_hard_fail" \
         --argjson windows_sigstore_bundle_required "$windows_sigstore_bundle_required" \
+        --argjson windows_sigstore_identity_bound "$windows_sigstore_identity_bound" \
         --argjson homebrew_formula_tests_doctor "$homebrew_formula_tests_doctor" \
         --argjson homebrew_formula_fetches_sha_strictly "$homebrew_formula_fetches_sha_strictly" \
         --argjson homebrew_formula_normalizes_version_tag "$homebrew_formula_normalizes_version_tag" \
@@ -513,12 +529,14 @@ installer_asset_contract() {
             unix_installer_fails_on_bad_sigstore: $unix_sigstore_hard_fail,
             unix_installer_requires_sigstore_bundle_with_cosign: $unix_sigstore_bundle_required,
             unix_installer_requires_sha256_tool: $unix_sha256_tool_required,
+            unix_installer_binds_sigstore_identity: $unix_sigstore_identity_bound,
             windows_installer_supports_x64_asset: $windows_x64,
             windows_installer_rejects_unbuilt_i686: $windows_i686_rejected,
             windows_installer_rejects_unbuilt_arm64: $windows_arm64_rejected,
             windows_installer_normalizes_version_tag: $windows_version_normalized,
             windows_installer_fails_on_bad_sigstore: $windows_sigstore_hard_fail,
             windows_installer_requires_sigstore_bundle_with_cosign: $windows_sigstore_bundle_required,
+            windows_installer_binds_sigstore_identity: $windows_sigstore_identity_bound,
             homebrew_formula_tests_doctor_json: $homebrew_formula_tests_doctor,
             homebrew_formula_fetches_sha_strictly: $homebrew_formula_fetches_sha_strictly,
             homebrew_formula_normalizes_version_tag: $homebrew_formula_normalizes_version_tag,
@@ -529,12 +547,14 @@ installer_asset_contract() {
                 and $unix_sigstore_hard_fail
                 and $unix_sigstore_bundle_required
                 and $unix_sha256_tool_required
+                and $unix_sigstore_identity_bound
                 and $windows_x64
                 and $windows_i686_rejected
                 and $windows_arm64_rejected
                 and $windows_version_normalized
                 and $windows_sigstore_hard_fail
                 and $windows_sigstore_bundle_required
+                and $windows_sigstore_identity_bound
                 and $homebrew_formula_tests_doctor
                 and $homebrew_formula_fetches_sha_strictly
                 and $homebrew_formula_normalizes_version_tag

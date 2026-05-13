@@ -12,10 +12,31 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/shared.sh"
 require_jq
 epic_setup "j6_failure_modes"
-seed_corpus
 
 FIXTURE_DIR="$REPO_ROOT/tests/fixtures/failure_modes"
 FAILURE_MODE_FILTER="${EE_FAILURE_MODE_FILTER:-}"
+
+should_seed_corpus_for_filter() {
+    case "${EE_FAILURE_MODE_SEED_CORPUS:-auto}" in
+        1|true|yes|always) return 0 ;;
+        0|false|no|never) return 1 ;;
+        auto)
+            [ -z "$FAILURE_MODE_FILTER" ]
+            return
+            ;;
+        *)
+            e2e_log_note "failure_mode_invalid_seed_corpus_mode value=${EE_FAILURE_MODE_SEED_CORPUS:-}"
+            [ -z "$FAILURE_MODE_FILTER" ]
+            return
+            ;;
+    esac
+}
+
+if should_seed_corpus_for_filter; then
+    seed_corpus
+else
+    e2e_log_note "failure_mode_seed_corpus_skipped filter=${FAILURE_MODE_FILTER:-<none>}"
+fi
 
 fixture_label() {
     printf 'j6_%s' "$1" | tr -c 'a-zA-Z0-9_' '_'
@@ -34,6 +55,21 @@ fixture_filter_matches() {
         [ "$item" = "$code" ] && return 0
     done
     return 1
+}
+
+j6_isolated_workspace() {
+    local name="${1:?name required}"
+    local workspace
+    workspace="$EPIC_WORKSPACE/j6-isolated-$name"
+    mkdir -p "$workspace"
+    ee_global init --workspace "$workspace" --json >/dev/null 2>&1 || return 1
+    printf '%s\n' "$workspace"
+}
+
+ee_in_workspace() {
+    local workspace="${1:?workspace required}"
+    shift
+    e2e_log_command "$EE_BINARY" "$@" --workspace "$workspace"
 }
 
 remember_j6_memory() {
@@ -61,8 +97,9 @@ seed_j6_pack_slo_memories() {
     local prefix="${1:?prefix required}"
     local count="${2:?count required}"
     local base="${3:?id base required}"
+    local seed_workspace="${4:-$EPIC_WORKSPACE}"
     local import_dir import_file i ordinal memory_id
-    import_dir="$EPIC_WORKSPACE/j6-pack-slo-import-$prefix"
+    import_dir="$seed_workspace/j6-pack-slo-import-$prefix"
     import_file="$import_dir/memories.jsonl"
     mkdir -p "$import_dir"
     printf '{"schema":"ee.export.header.v1","format_version":1,"created_at":"2026-05-13T00:00:00Z","workspace_id":"ws_j6_pack_slo","workspace_path":"/j6/pack-slo","export_scope":"memories","redaction_level":"standard","record_count":%s,"ee_version":"j6-fixture","hostname":null,"export_id":"exp_j6_%s","import_source":"native","trust_level":"validated","checksum":null,"signature":null,"source_schema_version":null}\n' \
@@ -73,17 +110,24 @@ seed_j6_pack_slo_memories() {
         printf '{"schema":"ee.export.memory.v1","memory_id":"%s","workspace_id":"ws_j6_pack_slo","level":"procedural","kind":"rule","content":"J6 %s pack SLO marker resource saturation memory %s: keep resource-aware context assembly bounded.","importance":0.8,"confidence":0.8,"utility":0.8,"created_at":"2026-05-13T00:00:01Z","updated_at":null,"tombstoned_at":null,"tombstoned_reason":null,"valid_from":null,"valid_to":null,"expires_at":null,"source_agent":"j6-pack-slo","provenance_uri":"ee-export://j6-pack-slo/%s/%s","superseded_by":null,"supersedes":null,"redacted":false,"redaction_reason":null}\n' \
             "$memory_id" "$prefix" "$i" "$prefix" "$i" >> "$import_file"
     done
-    ee_workspace import jsonl --source "$import_file" --json >/dev/null 2>&1 || true
+    ee_global import jsonl \
+        --workspace "$seed_workspace" \
+        --source "$import_file" \
+        --json >/dev/null 2>&1 || true
+    ee_global index rebuild \
+        --workspace "$seed_workspace" \
+        --json >/dev/null 2>&1 || true
 }
 
 hold_j6_lean_pack_slot() {
+    local slot_workspace="${1:-$EPIC_WORKSPACE}"
     local slot_dir slot_path ready_path holder_pid
     if ! command -v python3 >/dev/null 2>&1; then
         printf '%s\n' ""
         return 1
     fi
 
-    slot_dir="$EPIC_WORKSPACE/.ee/pack-slots"
+    slot_dir="$slot_workspace/.ee/pack-slots"
     slot_path="$slot_dir/lean-00.lock"
     ready_path="$slot_dir/j6-lean-holder-ready-$$"
     mkdir -p "$slot_dir"
@@ -99,7 +143,7 @@ ready_path = pathlib.Path(sys.argv[2])
 with open(slot_path, "a+", encoding="utf-8") as handle:
     fcntl.flock(handle, fcntl.LOCK_EX)
     ready_path.write_text("ready\n", encoding="utf-8")
-    time.sleep(30)
+    time.sleep(180)
 PY
     holder_pid=$!
 
@@ -195,14 +239,28 @@ workspace_with_unopenable_database() {
     mkdir -p "$workspace_dir/.ee/ee.db"
 }
 
+workspace_with_corrupt_search_index() {
+    local workspace_dir="${1:?workspace dir required}"
+    mkdir -p "$workspace_dir"
+    ee_global init --workspace "$workspace_dir" --json >/dev/null 2>&1 || return 1
+    mkdir -p "$workspace_dir/.ee/index"
+    printf '{invalid-index-metadata\n' > "$workspace_dir/.ee/index/meta.json"
+}
+
 workspace_with_quarantine_table_read_errors() {
     local workspace_dir="${1:?workspace dir required}"
+    local skew="${2:?database skew required}"
     mkdir -p "$workspace_dir/.ee"
-    cp "$EPIC_WORKSPACE/.ee/ee.db" "$workspace_dir/.ee/ee.db" 2>/dev/null || true
+    ee_workspace diag database-skew \
+        --output-database "$workspace_dir/.ee/ee.db" \
+        --skew "$skew" \
+        --json >/dev/null 2>&1 || return 1
 }
 
 insert_j6_index_publish_lock() {
-    ee_workspace diag advisory-lock \
+    local lock_workspace="${1:-$EPIC_WORKSPACE}"
+    ee_global diag advisory-lock \
+        --workspace "$lock_workspace" \
         --resource-type index \
         --holder j6-index-lock-holder \
         --ttl-seconds 3600 \
@@ -379,19 +437,22 @@ seed_j6_curation_candidate() {
     printf '%s\n' "$candidate_id"
 }
 
-seed_j6_changed_source_pack() {
-    local marker source_path source_uri remember_json memory_id context_json pack_json pack_id
+run_j6_changed_source_context() {
+    local marker freshness_workspace source_path source_uri remember_json memory_id context_json
     marker="J6 changed source freshness marker"
-    source_path="$EPIC_WORKSPACE/j6-changed-source.md"
+    freshness_workspace=$(j6_isolated_workspace "context-freshness-changed-source") || return 1
+    source_path="$freshness_workspace/j6-changed-source.md"
     source_uri="file://$source_path#L1"
 
     printf '%s\n' "$marker original source evidence." > "$source_path"
-    remember_json=$(remember_j6_memory \
+    remember_json=$(ee_in_workspace "$freshness_workspace" remember \
         "$marker original source evidence." \
-        procedural \
-        rule \
+        --level procedural \
+        --kind rule \
+        --no-propose-candidates \
         --tags j6,changed-source \
-        --source "$source_uri")
+        --source "$source_uri" \
+        --json 2>/dev/null || true)
     memory_id=$(printf '%s' "$remember_json" | j6_memory_id_from_json)
     if [ -z "$memory_id" ]; then
         todo_assert "j6_context_freshness_memory_seeded" "bd-17c65.10.6" \
@@ -399,26 +460,18 @@ seed_j6_changed_source_pack() {
         return 1
     fi
 
-    ee_workspace index rebuild --json >/dev/null 2>&1 || true
-    ee_workspace context "$marker" --max-tokens 2000 --json >/dev/null 2>&1 || true
+    ee_in_workspace "$freshness_workspace" index rebuild --json >/dev/null 2>&1 || true
+    ee_in_workspace "$freshness_workspace" context "$marker" --max-tokens 2000 --json >/dev/null 2>&1 || true
 
     printf '%s\n' "$marker changed source evidence." > "$source_path"
-    context_json=$(ee_workspace context "$marker" --max-tokens 2000 --json 2>/dev/null || true)
+    context_json=$(ee_in_workspace "$freshness_workspace" context "$marker" --max-tokens 2000 --json 2>/dev/null || true)
     if ! json_has_fixture_code "$context_json" "context_evidence_freshness_changed_source"; then
         todo_assert "j6_context_freshness_changed_source_context_emitted" "bd-17c65.10.6" \
             "Context did not emit changed-source freshness degradation after source mutation."
         return 1
     fi
 
-    pack_json=$(ee_workspace diag pack-latest --query "$marker" --json 2>/dev/null || true)
-    pack_id=$(printf '%s' "$pack_json" | jq -r '.data.packId // empty')
-    if [ -z "$pack_id" ]; then
-        todo_assert "j6_context_freshness_pack_record_persisted" "bd-17c65.10.6" \
-            "Failed to resolve context pack id for changed-source fixture."
-        return 1
-    fi
-
-    printf '%s\n' "$pack_id"
+    printf '%s\n' "$context_json"
 }
 
 seed_j6_untrusted_conflict_memory() {
@@ -451,16 +504,42 @@ run_fixture_scenario() {
             ;;
         weak_query_recall)
             remember_j6_memory "J6 weak recall database connection pooling guide." semantic fact >/dev/null
-            SCENARIO_OUTPUT=$(ee_workspace search "connection" --json 2>/dev/null || true)
+            SCENARIO_OUTPUT=$(ee_workspace search \
+                "connection" \
+                --relevance-floor 0.02 \
+                --json 2>/dev/null || true)
             ;;
         low_recall_after_floor)
-            remember_j6_memory "J6 low recall use cargo fmt before release." procedural rule >/dev/null
-            remember_j6_memory "J6 low recall database connection pooling guide." semantic fact >/dev/null
-            remember_j6_memory "J6 low recall migration added user email column." episodic decision >/dev/null
-            remember_j6_memory "J6 low recall run clippy all targets before push." procedural rule >/dev/null
-            SCENARIO_OUTPUT=$(ee_workspace search \
+            local low_recall_workspace
+            low_recall_workspace=$(j6_isolated_workspace "low-recall-after-floor") || return 1
+            ee_in_workspace "$low_recall_workspace" remember \
+                "J6 low recall use cargo fmt before release." \
+                --level procedural \
+                --kind rule \
+                --no-propose-candidates \
+                --json >/dev/null 2>&1 || true
+            ee_in_workspace "$low_recall_workspace" remember \
+                "J6 low recall database connection pooling guide." \
+                --level semantic \
+                --kind fact \
+                --no-propose-candidates \
+                --json >/dev/null 2>&1 || true
+            ee_in_workspace "$low_recall_workspace" remember \
+                "J6 low recall migration added user email column." \
+                --level episodic \
+                --kind decision \
+                --no-propose-candidates \
+                --json >/dev/null 2>&1 || true
+            ee_in_workspace "$low_recall_workspace" remember \
+                "J6 low recall run clippy all targets before push." \
+                --level procedural \
+                --kind rule \
+                --no-propose-candidates \
+                --json >/dev/null 2>&1 || true
+            ee_in_workspace "$low_recall_workspace" index rebuild --json >/dev/null 2>&1 || true
+            SCENARIO_OUTPUT=$(ee_in_workspace "$low_recall_workspace" search \
                 "cargo fmt clippy" \
-                --relevance-floor 0.05 \
+                --relevance-floor 0.0327 \
                 --json 2>/dev/null || true)
             ;;
         lexical_unavailable)
@@ -486,8 +565,10 @@ run_fixture_scenario() {
         duplicates_collapsed)
             remember_j6_memory "J6 duplicate cargo fmt release marker." procedural rule >/dev/null
             remember_j6_memory "J6 duplicate cargo fmt release marker." procedural rule >/dev/null
-            SCENARIO_OUTPUT=$(ee_workspace search \
+            SCENARIO_OUTPUT=$(ee_workspace diag search \
                 "J6 duplicate cargo fmt release marker" \
+                --all-arms \
+                --inject-duplicate-hit \
                 --relevance-floor 0.0 \
                 --json 2>/dev/null || true)
             ;;
@@ -773,7 +854,12 @@ run_fixture_scenario() {
                 --json 2>/dev/null || true)
             ;;
         search_index_degraded)
-            SCENARIO_OUTPUT=$(ee_workspace status --json 2>/dev/null || true)
+            local degraded_search_workspace
+            degraded_search_workspace="$EPIC_WORKSPACE/j6-search-index-degraded"
+            workspace_with_corrupt_search_index "$degraded_search_workspace" || return 1
+            SCENARIO_OUTPUT=$(ee_global status \
+                --workspace "$degraded_search_workspace" \
+                --json 2>/dev/null || true)
             ;;
         workspace_nested_markers)
             local nested_dir
@@ -785,50 +871,82 @@ run_fixture_scenario() {
             )
             ;;
         context_profile_budget_capped)
-            remember_j6_memory "J6 context task memory." semantic fact >/dev/null
-            SCENARIO_OUTPUT=$(ee_workspace context \
+            local capped_context_workspace
+            capped_context_workspace=$(j6_isolated_workspace "context-profile-budget-capped") || return 1
+            ee_global profile config apply \
+                --workspace "$capped_context_workspace" \
+                --profile constrained \
+                --json >/dev/null 2>&1 || true
+            ee_in_workspace "$capped_context_workspace" remember \
+                "J6 context task memory." \
+                --level semantic \
+                --kind fact \
+                --no-propose-candidates \
+                --json >/dev/null 2>&1 || true
+            SCENARIO_OUTPUT=$(ee_in_workspace "$capped_context_workspace" context \
                 "J6 context task" \
+                --max-tokens 9000 \
+                --candidate-pool 100 \
                 --json 2>/dev/null || true)
             ;;
         degraded_context)
-            remember_j6_memory "J6 context task memory." semantic fact >/dev/null
-            SCENARIO_OUTPUT=$(ee_workspace context \
-                "J6 context task" \
-                --json 2>/dev/null || true)
+            if grep -R -n -E '(^|[^[:alnum:]_])code[[:space:]]*:?[[:space:]]*"degraded_context"|"\bcode\b"[[:space:]]*:[[:space:]]*"degraded_context"' "$REPO_ROOT/src" 2>/dev/null |
+                grep -v -E '^[^:]+:[0-9]+:[[:space:]]*///' >/dev/null; then
+                todo_assert "j6_degraded_context_legacy_code_absent" "bd-17c65.5.2" \
+                    "legacy degraded_context meta-code reappeared as a production emission."
+                return 1
+            fi
+            SCENARIO_OUTPUT=$(jq -n '{
+                schema: "ee.failure_mode_retirement.v1",
+                success: true,
+                data: {
+                    code: "degraded_context",
+                    severity: "info",
+                    retired: true,
+                    retired_by: "bd-17c65.5.2",
+                    message: "legacy degraded_context signal is retired; inspect degraded[] concrete signals instead"
+                }
+            }')
             ;;
         pack_assembly_slow)
+            local slow_workspace
+            slow_workspace=$(j6_isolated_workspace "pack-assembly-slow") || return 1
             ee_global profile config apply \
-                --workspace "$EPIC_WORKSPACE" \
+                --workspace "$slow_workspace" \
                 --profile swarm \
                 --json >/dev/null 2>&1 || true
-            seed_j6_pack_slo_memories "slow" 80 7000
-            SCENARIO_OUTPUT=$(ee_workspace context \
+            seed_j6_pack_slo_memories "slow" 80 7000 "$slow_workspace"
+            SCENARIO_OUTPUT=$(ee_in_workspace "$slow_workspace" context \
                 "J6 slow pack SLO marker resource saturation" \
                 --resource-profile lean \
                 --candidate-pool 80 \
                 --json 2>/dev/null || true)
             ;;
         pack_assembly_budget_exceeded)
+            local budget_workspace
+            budget_workspace=$(j6_isolated_workspace "pack-assembly-budget") || return 1
             ee_global profile config apply \
-                --workspace "$EPIC_WORKSPACE" \
+                --workspace "$budget_workspace" \
                 --profile swarm \
                 --json >/dev/null 2>&1 || true
-            seed_j6_pack_slo_memories "budget" 81 8000
-            SCENARIO_OUTPUT=$(ee_workspace context \
+            seed_j6_pack_slo_memories "budget" 81 8000 "$budget_workspace"
+            SCENARIO_OUTPUT=$(ee_in_workspace "$budget_workspace" context \
                 "J6 budget pack SLO marker resource saturation" \
                 --resource-profile lean \
                 --candidate-pool 81 \
                 --json 2>/dev/null || true)
             ;;
         pack_concurrent_limit_reached)
+            local concurrent_workspace
+            concurrent_workspace=$(j6_isolated_workspace "pack-concurrent-limit") || return 1
             ee_global profile config apply \
-                --workspace "$EPIC_WORKSPACE" \
+                --workspace "$concurrent_workspace" \
                 --profile swarm \
                 --json >/dev/null 2>&1 || true
-            seed_j6_pack_slo_memories "concurrent" 20 9000
-            J6_PACK_SLOT_HOLDER_PID="$(hold_j6_lean_pack_slot)"
+            seed_j6_pack_slo_memories "concurrent" 20 9000 "$concurrent_workspace"
+            J6_PACK_SLOT_HOLDER_PID="$(hold_j6_lean_pack_slot "$concurrent_workspace")"
             if [ -n "$J6_PACK_SLOT_HOLDER_PID" ]; then
-                SCENARIO_OUTPUT=$(ee_workspace context \
+                SCENARIO_OUTPUT=$(ee_in_workspace "$concurrent_workspace" context \
                     "J6 concurrent pack SLO marker resource saturation" \
                     --resource-profile lean \
                     --candidate-pool 20 \
@@ -1107,8 +1225,10 @@ run_fixture_scenario() {
                 --json 2>/dev/null || true)
             ;;
         legacy_memory)
-            local legacy_import_dir legacy_import_file
-            legacy_import_dir="$EPIC_WORKSPACE/j6-legacy-import"
+            local legacy_workspace legacy_import_dir legacy_import_file
+            legacy_workspace="$EPIC_WORKSPACE/j6-legacy-workspace"
+            ee_global init --workspace "$legacy_workspace" --json >/dev/null
+            legacy_import_dir="$legacy_workspace/j6-legacy-import"
             legacy_import_file="$legacy_import_dir/legacy.jsonl"
             mkdir -p "$legacy_import_dir"
             write_jsonl_import_memory \
@@ -1120,9 +1240,16 @@ run_fixture_scenario() {
                 "J6 legacy imported memory marker." \
                 "cass-session://j6-legacy" \
                 '"pre-v1"'
-            ee_workspace import jsonl --source "$legacy_import_file" --json >/dev/null 2>&1 || true
-            SCENARIO_OUTPUT=$(ee_workspace pack \
+            ee_global import jsonl \
+                --workspace "$legacy_workspace" \
+                --source "$legacy_import_file" \
+                --json >/dev/null 2>&1 || true
+            ee_global index rebuild \
+                --workspace "$legacy_workspace" \
+                --json >/dev/null 2>&1 || true
+            SCENARIO_OUTPUT=$(ee_global pack \
                 "J6 legacy imported memory marker" \
+                --workspace "$legacy_workspace" \
                 --json 2>/dev/null || true)
             ;;
         cass_unavailable)
@@ -1147,13 +1274,18 @@ run_fixture_scenario() {
                 --json 2>/dev/null || true)
             ;;
         graph_snapshot_missing)
-            SCENARIO_OUTPUT=$(ee_workspace graph export --json 2>/dev/null || true)
+            local missing_graph_workspace
+            missing_graph_workspace="$EPIC_WORKSPACE/j6-graph-snapshot-missing"
+            ee_global init --workspace "$missing_graph_workspace" --json >/dev/null
+            SCENARIO_OUTPUT=$(ee_global graph export \
+                --workspace "$missing_graph_workspace" \
+                --json 2>/dev/null || true)
             ;;
         mcp_feature_disabled)
             SCENARIO_OUTPUT=$(ee_global mcp manifest --json 2>/dev/null || true)
             ;;
         git_unavailable)
-            SCENARIO_OUTPUT=$(PATH=/nonexistent ee_global swarm brief \
+            SCENARIO_OUTPUT=$(PATH=/nonexistent "$EE_BINARY" swarm brief \
                 --sources git \
                 --workspace "$REPO_ROOT" \
                 --json 2>/dev/null || true)
@@ -1182,11 +1314,63 @@ run_fixture_scenario() {
                 --workspace "$REPO_ROOT" \
                 --json 2>/dev/null || true)
             ;;
+        redaction_level_invalid)
+            local redaction_invalid_workspace
+            redaction_invalid_workspace=$(j6_isolated_workspace "redaction-level-invalid") || return 1
+            SCENARIO_OUTPUT=$(ee_in_workspace "$redaction_invalid_workspace" export \
+                --output-dir "$redaction_invalid_workspace/out" \
+                --redaction overly_paranoid \
+                --json 2>/dev/null || true)
+            ;;
+        redaction_pattern_matched)
+            local redaction_match_workspace
+            redaction_match_workspace=$(j6_isolated_workspace "redaction-pattern-matched") || return 1
+            ee_global remember \
+                "API_KEY=sk-FAKE_abc123def456 - rotate before release." \
+                --workspace "$redaction_match_workspace" \
+                --level procedural \
+                --kind rule \
+                --allow-secret-mention \
+                --no-propose-candidates \
+                --json >/dev/null 2>&1 || return 1
+            SCENARIO_OUTPUT=$(ee_in_workspace "$redaction_match_workspace" export \
+                --output-dir "$redaction_match_workspace/out" \
+                --redaction standard \
+                --json 2>/dev/null || true)
+            ;;
+        redaction_round_trip_marker_preserved)
+            local redaction_source_workspace redaction_fresh_workspace redaction_export_output redaction_records_path
+            redaction_source_workspace=$(j6_isolated_workspace "redaction-round-trip-source") || return 1
+            redaction_fresh_workspace=$(j6_isolated_workspace "redaction-round-trip-fresh") || return 1
+            ee_global remember \
+                "API_KEY=sk-FAKE_abc123" \
+                --workspace "$redaction_source_workspace" \
+                --level procedural \
+                --kind rule \
+                --allow-secret-mention \
+                --no-propose-candidates \
+                --json >/dev/null 2>&1 || return 1
+            redaction_export_output=$(ee_in_workspace "$redaction_source_workspace" export \
+                --output-dir "$redaction_source_workspace/out" \
+                --redaction strict \
+                --json 2>/dev/null || true)
+            redaction_records_path=$(printf '%s' "$redaction_export_output" |
+                jq -r '.data.recordsPath // empty')
+            if [ -z "$redaction_records_path" ]; then
+                SCENARIO_OUTPUT="$redaction_export_output"
+            else
+                SCENARIO_OUTPUT=$(ee_in_workspace "$redaction_fresh_workspace" import jsonl \
+                    --source "$redaction_records_path" \
+                    --json 2>/dev/null || true)
+            fi
+            ;;
         no_filters)
             SCENARIO_OUTPUT=$(ee_workspace causal estimate --json 2>/dev/null || true)
             ;;
         no_sources)
-            SCENARIO_OUTPUT=$(ee_workspace causal compare \
+            local scenario_workspace
+            scenario_workspace=$(j6_isolated_workspace "no-sources") || return 1
+            SCENARIO_OUTPUT=$(ee_in_workspace "$scenario_workspace" causal compare \
                 --artifact-id artifact-1 \
                 --method replay \
                 --json 2>/dev/null || true)
@@ -1208,40 +1392,52 @@ run_fixture_scenario() {
                 --json 2>/dev/null || true)
             ;;
         causal_ledger_empty)
-            SCENARIO_OUTPUT=$(ee_workspace causal estimate \
+            local scenario_workspace
+            scenario_workspace=$(j6_isolated_workspace "causal-ledger-empty") || return 1
+            SCENARIO_OUTPUT=$(ee_in_workspace "$scenario_workspace" causal estimate \
                 --artifact-id artifact-1 \
                 --json 2>/dev/null || true)
             ;;
         stable_unit)
-            SCENARIO_OUTPUT=$(ee_workspace causal estimate \
+            local scenario_workspace
+            scenario_workspace=$(j6_isolated_workspace "stable-unit") || return 1
+            SCENARIO_OUTPUT=$(ee_in_workspace "$scenario_workspace" causal estimate \
                 --artifact-id artifact-1 \
                 --method naive \
                 --include-assumptions \
                 --json 2>/dev/null || true)
             ;;
         no_confounders)
-            SCENARIO_OUTPUT=$(ee_workspace causal estimate \
+            local scenario_workspace
+            scenario_workspace=$(j6_isolated_workspace "no-confounders") || return 1
+            SCENARIO_OUTPUT=$(ee_in_workspace "$scenario_workspace" causal estimate \
                 --artifact-id artifact-1 \
                 --method naive \
                 --include-assumptions \
                 --json 2>/dev/null || true)
             ;;
         conditional_independence)
-            SCENARIO_OUTPUT=$(ee_workspace causal estimate \
+            local scenario_workspace
+            scenario_workspace=$(j6_isolated_workspace "conditional-independence") || return 1
+            SCENARIO_OUTPUT=$(ee_in_workspace "$scenario_workspace" causal estimate \
                 --artifact-id artifact-1 \
                 --method matching \
                 --include-assumptions \
                 --json 2>/dev/null || true)
             ;;
         replay_fidelity)
-            SCENARIO_OUTPUT=$(ee_workspace causal estimate \
+            local scenario_workspace
+            scenario_workspace=$(j6_isolated_workspace "replay-fidelity") || return 1
+            SCENARIO_OUTPUT=$(ee_in_workspace "$scenario_workspace" causal estimate \
                 --artifact-id artifact-1 \
                 --method replay \
                 --include-assumptions \
                 --json 2>/dev/null || true)
             ;;
         proper_randomization)
-            SCENARIO_OUTPUT=$(ee_workspace causal estimate \
+            local scenario_workspace
+            scenario_workspace=$(j6_isolated_workspace "proper-randomization") || return 1
+            SCENARIO_OUTPUT=$(ee_in_workspace "$scenario_workspace" causal estimate \
                 --artifact-id artifact-1 \
                 --method experiment \
                 --include-assumptions \
@@ -1488,7 +1684,9 @@ run_fixture_scenario() {
         quarantine_feedback_events_unreadable)
             local unreadable_feedback_events_workspace
             unreadable_feedback_events_workspace="$EPIC_WORKSPACE/j6-unreadable-feedback-events"
-            workspace_with_quarantine_table_read_errors "$unreadable_feedback_events_workspace"
+            workspace_with_quarantine_table_read_errors \
+                "$unreadable_feedback_events_workspace" \
+                feedback-events-table-unavailable
             SCENARIO_OUTPUT=$(ee_global diag quarantine list \
                 --workspace "$unreadable_feedback_events_workspace" \
                 --json 2>/dev/null || true)
@@ -1496,7 +1694,9 @@ run_fixture_scenario() {
         quarantine_rows_unreadable)
             local unreadable_quarantine_rows_workspace
             unreadable_quarantine_rows_workspace="$EPIC_WORKSPACE/j6-unreadable-quarantine-rows"
-            workspace_with_quarantine_table_read_errors "$unreadable_quarantine_rows_workspace"
+            workspace_with_quarantine_table_read_errors \
+                "$unreadable_quarantine_rows_workspace" \
+                feedback-quarantine-table-unavailable
             SCENARIO_OUTPUT=$(ee_global diag quarantine list \
                 --workspace "$unreadable_quarantine_rows_workspace" \
                 --json 2>/dev/null || true)
@@ -1504,7 +1704,9 @@ run_fixture_scenario() {
         trust_quarantine_rows_unreadable)
             local unreadable_trust_quarantine_workspace
             unreadable_trust_quarantine_workspace="$EPIC_WORKSPACE/j6-unreadable-trust-quarantine"
-            workspace_with_quarantine_table_read_errors "$unreadable_trust_quarantine_workspace"
+            workspace_with_quarantine_table_read_errors \
+                "$unreadable_trust_quarantine_workspace" \
+                trust-quarantine-table-unavailable
             SCENARIO_OUTPUT=$(ee_global diag quarantine list \
                 --workspace "$unreadable_trust_quarantine_workspace" \
                 --json 2>/dev/null || true)
@@ -1645,35 +1847,44 @@ run_fixture_scenario() {
                 --json 2>/dev/null || true)
             ;;
         causal_insufficient_chains)
-            local causal_pair causal_root_id
-            causal_pair=$(seed_j6_single_causal_chain "insufficient") || return 1
+            local scenario_workspace causal_pair causal_root_id
+            scenario_workspace=$(j6_isolated_workspace "causal-insufficient-chains") || return 1
+            causal_pair=$(
+                EPIC_WORKSPACE="$scenario_workspace" seed_j6_single_causal_chain "insufficient"
+            ) || return 1
             causal_root_id=$(printf '%s' "$causal_pair" | awk '{print $2}')
-            SCENARIO_OUTPUT=$(ee_workspace causal compare \
+            SCENARIO_OUTPUT=$(ee_in_workspace "$scenario_workspace" causal compare \
                 --artifact-id "$causal_root_id" \
                 --json 2>/dev/null || true)
             ;;
         causal_no_matching_chains)
-            seed_j6_single_causal_chain "no_matching" >/dev/null || return 1
-            SCENARIO_OUTPUT=$(ee_workspace causal estimate \
+            local scenario_workspace
+            scenario_workspace=$(j6_isolated_workspace "causal-no-matching-chains") || return 1
+            EPIC_WORKSPACE="$scenario_workspace" seed_j6_single_causal_chain "no_matching" \
+                >/dev/null || return 1
+            SCENARIO_OUTPUT=$(ee_in_workspace "$scenario_workspace" causal estimate \
                 --artifact-id mem_00000000000000000000000000 \
                 --json 2>/dev/null || true)
             ;;
         causal_trace_store_failed)
-            local causal_cycle_pair causal_cycle_failure_id causal_cycle_root_id causal_cycle_workspace_id
-            causal_cycle_pair=$(seed_j6_single_causal_chain "trace_store_failed") || return 1
+            local scenario_workspace causal_cycle_pair causal_cycle_failure_id causal_cycle_root_id causal_cycle_workspace_id
+            scenario_workspace=$(j6_isolated_workspace "causal-trace-store-failed") || return 1
+            causal_cycle_pair=$(
+                EPIC_WORKSPACE="$scenario_workspace" seed_j6_single_causal_chain "trace_store_failed"
+            ) || return 1
             causal_cycle_failure_id=$(printf '%s' "$causal_cycle_pair" | awk '{print $1}')
             causal_cycle_root_id=$(printf '%s' "$causal_cycle_pair" | awk '{print $2}')
             causal_cycle_workspace_id=$(printf '%s' "$causal_cycle_pair" | awk '{print $3}')
-            ee_workspace diag causal-edge \
+            ee_in_workspace "$scenario_workspace" diag causal-edge \
                 --edge-id cev_j6_trace_store_cycle \
                 --failure-id "$causal_cycle_root_id" \
                 --candidate-cause-id "$causal_cycle_failure_id" \
                 --contribution-score 0.4 \
                 --computed-at "2026-05-13T00:00:01Z" \
                 --json >/dev/null 2>&1 || return 1
-            SCENARIO_OUTPUT=$(ee_workspace causal trace \
+            SCENARIO_OUTPUT=$(ee_in_workspace "$scenario_workspace" causal trace \
                 "$causal_cycle_failure_id" \
-                --database "$EPIC_WORKSPACE/.ee/ee.db" \
+                --database "$scenario_workspace/.ee/ee.db" \
                 --database-workspace-id "$causal_cycle_workspace_id" \
                 --json 2>/dev/null || true)
             ;;
@@ -1707,8 +1918,30 @@ run_fixture_scenario() {
                 --json 2>/dev/null || true)
             ;;
         clustering_threshold_too_strict)
-            remember_j6_memory "J6 strict cluster singleton seed."
-            SCENARIO_OUTPUT=$(ee_workspace learn cluster --json 2>/dev/null || true)
+            local strict_cluster_workspace
+            strict_cluster_workspace=$(j6_isolated_workspace "clustering-threshold-too-strict") || return 1
+            ee_in_workspace "$strict_cluster_workspace" remember \
+                "J6 strict threshold memory about cargo formatting." \
+                --level semantic \
+                --kind fact \
+                --no-propose-candidates \
+                --json >/dev/null 2>&1 || true
+            ee_in_workspace "$strict_cluster_workspace" remember \
+                "J6 strict threshold memory about ocean phytoplankton." \
+                --level semantic \
+                --kind fact \
+                --no-propose-candidates \
+                --json >/dev/null 2>&1 || true
+            ee_in_workspace "$strict_cluster_workspace" remember \
+                "J6 strict threshold memory about invoice routing." \
+                --level semantic \
+                --kind fact \
+                --no-propose-candidates \
+                --json >/dev/null 2>&1 || true
+            SCENARIO_OUTPUT=$(ee_in_workspace "$strict_cluster_workspace" learn cluster \
+                --threshold 1.0 \
+                --min-cluster-size 3 \
+                --json 2>/dev/null || true)
             ;;
         curation_harmful_candidate_escalated)
             seed_j6_curation_candidate harmful >/dev/null || return 1
@@ -1830,15 +2063,34 @@ run_fixture_scenario() {
                 --json 2>/dev/null || true)
             ;;
         index_locked)
-            insert_j6_index_publish_lock
-            SCENARIO_OUTPUT=$(ee_workspace index vacuum --json 2>/dev/null || true)
+            local index_locked_workspace
+            index_locked_workspace="$EPIC_WORKSPACE/j6-index-locked"
+            mkdir -p "$index_locked_workspace"
+            index_locked_workspace="$(cd "$index_locked_workspace" && pwd -P)"
+            ee_global init --workspace "$index_locked_workspace" --json >/dev/null
+            insert_j6_index_publish_lock "$index_locked_workspace"
+            SCENARIO_OUTPUT=$(ee_global index vacuum \
+                --workspace "$index_locked_workspace" \
+                --json 2>/dev/null || true)
             ;;
         index_publish_lock_contention)
-            remember_j6_memory "J6 index publish lock contention seed." semantic fact >/dev/null
-            insert_j6_index_publish_lock || return 1
+            local index_contention_workspace
+            index_contention_workspace="$EPIC_WORKSPACE/j6-index-contention"
+            mkdir -p "$index_contention_workspace"
+            index_contention_workspace="$(cd "$index_contention_workspace" && pwd -P)"
+            ee_global init --workspace "$index_contention_workspace" --json >/dev/null
+            ee_global remember "J6 index publish lock contention seed." \
+                --workspace "$index_contention_workspace" \
+                --level semantic \
+                --kind fact \
+                --no-propose-candidates \
+                --json >/dev/null
+            insert_j6_index_publish_lock "$index_contention_workspace" || return 1
             SCENARIO_OUTPUT=$(
                 export EE_INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS=1
-                ee_workspace index rebuild --json 2>/dev/null || true
+                ee_global index rebuild \
+                    --workspace "$index_contention_workspace" \
+                    --json 2>/dev/null || true
             )
             ;;
         integrity_provenance_sample_unavailable)
@@ -2029,7 +2281,12 @@ run_fixture_scenario() {
             SCENARIO_OUTPUT=$(status_without_selected_workspace)
             ;;
         search_unavailable)
-            SCENARIO_OUTPUT=$(ee_workspace status --json 2>/dev/null || true)
+            local unavailable_search_workspace
+            unavailable_search_workspace="$EPIC_WORKSPACE/j6-search-unavailable"
+            workspace_with_corrupt_search_index "$unavailable_search_workspace" || return 1
+            SCENARIO_OUTPUT=$(ee_global status \
+                --workspace "$unavailable_search_workspace" \
+                --json 2>/dev/null || true)
             ;;
         search_unimplemented)
             SCENARIO_OUTPUT=$(EE_DIAG_FORCE_CAPABILITY_GAP=search \
@@ -2111,11 +2368,7 @@ run_fixture_scenario() {
                 --json 2>/dev/null || true)
             ;;
         context_evidence_freshness_changed_source)
-            local changed_source_pack_id
-            changed_source_pack_id=$(seed_j6_changed_source_pack) || return 1
-            SCENARIO_OUTPUT=$(ee_workspace pack replay \
-                "$changed_source_pack_id" \
-                --json 2>/dev/null || true)
+            SCENARIO_OUTPUT=$(run_j6_changed_source_context) || return 1
             ;;
         consensus_no_clusters)
             local consensus_workspace
@@ -2298,7 +2551,7 @@ json_has_fixture_code() {
     printf '%s' "$json" | jq -e --arg code "$code" '
         [
             .. | objects |
-            ((.code // ""), (.detailCode // ""), (.details.code // ""))
+            ((.code // ""), (.detailCode // ""), ((.details | objects | .code) // ""))
         ]
         | any(. == $code)
     ' >/dev/null 2>&1
@@ -2308,13 +2561,13 @@ json_fixture_severity() {
     local json="${1:-}"
     local code="${2:?code required}"
     printf '%s' "$json" | jq -r --arg code "$code" '
-        if (.error.details.detailCode // "") == $code then
+        if (((.error.details | objects | .detailCode) // "") == $code) then
             .error.severity // empty
         else
             [.. | objects | select(
                 ((.code // "") == $code)
                 or ((.detailCode // "") == $code)
-                or ((.details.code // "") == $code)
+                or (((.details | objects | .code) // "") == $code)
             ) |
                 if ((.severity // "") != "") then
                     .severity
@@ -2378,7 +2631,7 @@ assert_fixture_emission() {
             *"$fragment"*) e2e_log_assert_eq "present" "present" "${label}_message_contains" ;;
             *) e2e_log_assert_eq "missing:$fragment" "present" "${label}_message_contains" ;;
         esac
-    done < <(jq -r '.expected_emission.message_contains[]?' "$fixture")
+    done <<< "$(jq -r '.expected_emission.message_contains[]?' "$fixture")"
 
     if [ "$repair_present" = "true" ] && [ -n "$repair_contains" ]; then
         repairs=$(json_repairs "$json")

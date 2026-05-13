@@ -479,7 +479,7 @@ impl SearchDegradation {
     /// understand why the raw retrieval count > the returned count.
     /// Bead bd-17c65.2.3 (B3).
     #[must_use]
-    fn duplicates_collapsed(collapsed: usize) -> Self {
+    pub(crate) fn duplicates_collapsed(collapsed: usize) -> Self {
         Self {
             code: "duplicates_collapsed".to_string(),
             severity: "low".to_string(),
@@ -504,7 +504,7 @@ impl SearchDegradation {
             code: "weak_query_recall".to_string(),
             severity: "low".to_string(),
             message: format!(
-                "Top result scored {top_score:.4} against floor {floor:.4}; embedder may not recognize query synonyms, or the corpus lacks strong matches.",
+                "Top score {top_score:.4} is below the weak-recall threshold for relevance floor {floor:.4}; embedder may not recognize query synonyms, or the corpus lacks strong matches.",
             ),
             repair: Some(
                 "Rephrase with concrete words present in stored memories, or use --source-mode lexical_only.".to_string(),
@@ -2095,7 +2095,7 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
             // Low-recall informational signal when significant drop.
             // Threshold: kept < 30% of considered AND ≥ 3 candidates total
             // (avoid spurious signal for tiny corpora).
-            if kept > 0 && pre_floor_count >= 3 && (kept * 10) < (pre_floor_count * 3) {
+            if pre_floor_count >= 3 && (kept * 10) < (pre_floor_count * 3) {
                 degraded.push(SearchDegradation::low_recall_after_floor(
                     floor,
                     kept,
@@ -2297,7 +2297,7 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
             pre_floor_top_score,
         ));
     }
-    if kept > 0 && pre_floor_count >= 3 && (kept * 10) < (pre_floor_count * 3) {
+    if pre_floor_count >= 3 && (kept * 10) < (pre_floor_count * 3) {
         degraded.push(SearchDegradation::low_recall_after_floor(
             floor,
             kept,

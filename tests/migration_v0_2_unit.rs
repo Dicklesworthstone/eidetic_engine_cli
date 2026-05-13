@@ -207,9 +207,7 @@ fn migration_guide_has_section_per_breaking_bead() -> TestResult {
             && !guide.contains(&bead_anchor)
             && !guide.contains(&plain_anchor)
         {
-            missing.push(format!(
-                "  - {bead_id} (section token `{section_token}`)",
-            ));
+            missing.push(format!("  - {bead_id} (section token `{section_token}`)",));
         }
     }
     if !missing.is_empty() {

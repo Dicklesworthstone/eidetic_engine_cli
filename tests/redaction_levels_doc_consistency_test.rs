@@ -121,7 +121,9 @@ fn doc_cross_references_j6_failure_modes() -> TestResult {
     ] {
         ensure(
             doc.contains(required_fixture),
-            format!("docs/redaction_levels.md missing J6 fixture cross-reference: `{required_fixture}`"),
+            format!(
+                "docs/redaction_levels.md missing J6 fixture cross-reference: `{required_fixture}`"
+            ),
         )?;
     }
     Ok(())

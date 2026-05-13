@@ -468,17 +468,26 @@ pub struct BackupDegradation {
 }
 
 impl BackupDegradation {
-    fn warning(
+    fn with_severity(
         code: impl Into<String>,
+        severity: impl Into<String>,
         message: impl Into<String>,
         next_action: impl Into<String>,
     ) -> Self {
         Self {
             code: code.into(),
-            severity: "warning".to_owned(),
+            severity: severity.into(),
             message: message.into(),
             next_action: next_action.into(),
         }
+    }
+
+    fn warning(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        next_action: impl Into<String>,
+    ) -> Self {
+        Self::with_severity(code, "warning", message, next_action)
     }
 
     #[must_use]
@@ -531,7 +540,11 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     let records_path = backup_path.join(RECORDS_FILE);
     let manifest_path = backup_path.join(MANIFEST_FILE);
     let created_at = Utc::now().to_rfc3339();
-    let degraded = backup_degradations(&workspace_path);
+    let mut degraded = backup_degradations(&workspace_path);
+    degraded.extend(redaction_pattern_degradations(
+        &export_data,
+        options.redaction_level,
+    ));
 
     let (records_bytes, stats) = render_records(
         &backup_id,
@@ -1626,6 +1639,38 @@ fn backup_degradations(workspace_path: &Path) -> Vec<BackupDegradation> {
         "run ee graph refresh after restore, or complete EE-298 for richer backup inspection",
     ));
     degraded
+}
+
+fn redaction_pattern_degradations(
+    data: &BackupExportData,
+    redaction_level: RedactionLevel,
+) -> Vec<BackupDegradation> {
+    if redaction_level == RedactionLevel::None {
+        return Vec::new();
+    }
+
+    let mut classes = BTreeSet::new();
+    for memory in &data.memories {
+        let report = crate::policy::redact_secret_like_content(&memory.content);
+        if report.redacted {
+            classes.extend(report.redacted_reasons.into_iter().map(str::to_owned));
+        }
+    }
+
+    classes
+        .into_iter()
+        .map(|class| {
+            BackupDegradation::with_severity(
+                "redaction_pattern_matched",
+                "medium",
+                format!(
+                    "redaction matched secret detector class `{class}` at level `{}`",
+                    redaction_level.as_str()
+                ),
+                "review the exported records and keep the redacted source of truth; do not attempt to un-redact without an external vault",
+            )
+        })
+        .collect()
 }
 
 fn ensure_backup_directory(backup_root: &Path, backup_path: &Path) -> Result<(), DomainError> {
