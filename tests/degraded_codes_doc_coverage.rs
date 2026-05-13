@@ -41,7 +41,10 @@ fn repo_root() -> PathBuf {
 }
 
 fn fixtures_dir() -> PathBuf {
-    repo_root().join("tests").join("fixtures").join("failure_modes")
+    repo_root()
+        .join("tests")
+        .join("fixtures")
+        .join("failure_modes")
 }
 
 fn doc_path() -> PathBuf {
@@ -54,8 +57,7 @@ fn doc_path() -> PathBuf {
 /// expected section order too).
 fn collect_fixture_codes() -> Result<BTreeSet<String>, String> {
     let dir = fixtures_dir();
-    let entries = fs::read_dir(&dir)
-        .map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
+    let entries = fs::read_dir(&dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
     let mut codes: BTreeSet<String> = BTreeSet::new();
     for entry in entries {
         let entry = entry.map_err(|e| format!("read entry under {}: {e}", dir.display()))?;
@@ -98,7 +100,11 @@ fn collect_doc_section_codes(doc_text: &str) -> BTreeSet<String> {
             // consume this catalog", "Reporting drift"). These don't
             // start with a backtick, so the strip_prefix above
             // already filters them.
-            if !code.is_empty() && code.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+            if !code.is_empty()
+                && code
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
                 out.insert(code.to_string());
             }
         }
@@ -118,7 +124,12 @@ fn every_fixture_has_a_doc_section() -> TestResult {
         return Err(format!(
             "K3 catalog has {} fixture(s) with no matching `## \\`{{code}}\\`` section in docs/degraded_codes.md:\n{}\n\nRun `./scripts/build_degraded_codes_doc.sh` to regenerate.",
             missing.len(),
-            missing.iter().take(10).map(|c| format!("  - `{c}`")).collect::<Vec<_>>().join("\n"),
+            missing
+                .iter()
+                .take(10)
+                .map(|c| format!("  - `{c}`"))
+                .collect::<Vec<_>>()
+                .join("\n"),
         ));
     }
     Ok(())
@@ -136,7 +147,12 @@ fn every_doc_section_has_a_fixture() -> TestResult {
         return Err(format!(
             "K3 catalog has {} orphan `## \\`{{code}}\\`` section(s) in docs/degraded_codes.md with no corresponding fixture:\n{}\n\nEither (a) restore the fixture under tests/fixtures/failure_modes/<code>.json, or (b) re-run `./scripts/build_degraded_codes_doc.sh` to drop the orphan section.",
             orphans.len(),
-            orphans.iter().take(10).map(|c| format!("  - `{c}`")).collect::<Vec<_>>().join("\n"),
+            orphans
+                .iter()
+                .take(10)
+                .map(|c| format!("  - `{c}`"))
+                .collect::<Vec<_>>()
+                .join("\n"),
         ));
     }
     Ok(())
@@ -150,9 +166,9 @@ fn doc_carries_auto_generated_disclaimer() -> TestResult {
     // first screen of the file immediately sees the regen contract.
     let head = doc_text.chars().take(2000).collect::<String>();
     if !head.contains("AUTO-GENERATED") {
-        return Err(format!(
-            "docs/degraded_codes.md is missing the AUTO-GENERATED disclaimer in its first 2000 chars. The disclaimer is required so a human editor reading the file understands edits get overwritten on the next regen. Restore the header block via `./scripts/build_degraded_codes_doc.sh`.",
-        ));
+        return Err(
+            "docs/degraded_codes.md is missing the AUTO-GENERATED disclaimer in its first 2000 chars. The disclaimer is required so a human editor reading the file understands edits get overwritten on the next regen. Restore the header block via `./scripts/build_degraded_codes_doc.sh`.".to_string(),
+        );
     }
     if !head.contains("build_degraded_codes_doc.sh") {
         return Err(

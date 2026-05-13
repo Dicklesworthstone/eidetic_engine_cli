@@ -79,6 +79,8 @@ pub enum EventKind {
     FieldSelector,
     /// Performance benchmark iteration summary emitted by scripts/bench.sh.
     BenchIteration,
+    /// Verification artifact manifest emitted by the J1 bash harness.
+    ArtifactManifest,
 }
 
 impl EventKind {
@@ -98,11 +100,12 @@ impl EventKind {
             Self::SchemaGate => "schema_gate",
             Self::FieldSelector => "field_selector",
             Self::BenchIteration => "bench_iteration",
+            Self::ArtifactManifest => "artifact_manifest",
         }
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 13] {
+    pub const fn all() -> [Self; 14] {
         [
             Self::CommandStart,
             Self::CommandEnd,
@@ -117,6 +120,7 @@ impl EventKind {
             Self::SchemaGate,
             Self::FieldSelector,
             Self::BenchIteration,
+            Self::ArtifactManifest,
         ]
     }
 }

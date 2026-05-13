@@ -466,9 +466,9 @@ mod tests {
             p = p.update_harmful(1.0);
         }
         let mean = p.mean();
-        let (lo, hi) = p
-            .credible_interval(0.90)
-            .expect("ci90 should compute for moderate-evidence posterior");
+        let Some((lo, hi)) = p.credible_interval(0.90) else {
+            panic!("ci90 should compute for moderate-evidence posterior");
+        };
         assert!(
             lo > 0.0 && lo < mean,
             "ci90.lo {lo} should be in (0, {mean})"
@@ -489,8 +489,12 @@ mod tests {
         for _ in 0..10 {
             p = p.update_harmful(1.0);
         }
-        let (lo50, hi50) = p.credible_interval(0.50).unwrap();
-        let (lo90, hi90) = p.credible_interval(0.90).unwrap();
+        let Some((lo50, hi50)) = p.credible_interval(0.50) else {
+            panic!("ci50 should compute for moderate-evidence posterior");
+        };
+        let Some((lo90, hi90)) = p.credible_interval(0.90) else {
+            panic!("ci90 should compute for moderate-evidence posterior");
+        };
         assert!(
             hi50 - lo50 < hi90 - lo90,
             "50%% CI must be narrower than 90%%"
@@ -514,9 +518,15 @@ mod tests {
         // 5% quantile ≈ 0.00615
         // 50% quantile = 0.5 (symmetric)
         // 95% quantile ≈ 0.99385
-        let lo = beta_inv_cdf(0.05, 0.5, 0.5).unwrap();
-        let mid = beta_inv_cdf(0.50, 0.5, 0.5).unwrap();
-        let hi = beta_inv_cdf(0.95, 0.5, 0.5).unwrap();
+        let Some(lo) = beta_inv_cdf(0.05, 0.5, 0.5) else {
+            panic!("Jeffreys 5% quantile should compute");
+        };
+        let Some(mid) = beta_inv_cdf(0.50, 0.5, 0.5) else {
+            panic!("Jeffreys 50% quantile should compute");
+        };
+        let Some(hi) = beta_inv_cdf(0.95, 0.5, 0.5) else {
+            panic!("Jeffreys 95% quantile should compute");
+        };
         assert!(
             approx_eq(lo, 0.00615, 0.005),
             "lo ≈ 0.00615 expected, got {lo}"
@@ -532,8 +542,12 @@ mod tests {
     fn beta_inv_cdf_well_evidenced_posterior() {
         // Beta(50, 50) — well-evidenced 50% posterior, narrow CI.
         // 5% ≈ 0.4178, 50% = 0.5, 95% ≈ 0.5822 (per scipy.stats.beta.ppf).
-        let lo = beta_inv_cdf(0.05, 50.0, 50.0).unwrap();
-        let hi = beta_inv_cdf(0.95, 50.0, 50.0).unwrap();
+        let Some(lo) = beta_inv_cdf(0.05, 50.0, 50.0) else {
+            panic!("well-evidenced 5% quantile should compute");
+        };
+        let Some(hi) = beta_inv_cdf(0.95, 50.0, 50.0) else {
+            panic!("well-evidenced 95% quantile should compute");
+        };
         assert!(approx_eq(lo, 0.4178, 0.01));
         assert!(approx_eq(hi, 0.5822, 0.01));
     }
@@ -541,7 +555,9 @@ mod tests {
     #[test]
     fn variance_matches_closed_form() {
         // var = ab / ((a+b)^2 (a+b+1))
-        let p = BetaPosterior::new(2.0, 3.0).unwrap();
+        let Some(p) = BetaPosterior::new(2.0, 3.0) else {
+            panic!("positive alpha/beta should construct a posterior");
+        };
         let expected = (2.0 * 3.0) / (5.0_f64.powi(2) * 6.0);
         assert!(approx_eq(p.variance(), expected, 1e-12));
     }

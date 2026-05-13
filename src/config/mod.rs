@@ -1,3 +1,5 @@
+use std::path::Path;
+
 pub mod env_registry;
 pub mod file;
 pub mod merge;
@@ -7,9 +9,10 @@ pub mod workspace;
 pub use env_registry::{EnvVar, is_set as env_var_is_set, read as read_env_var};
 pub use env_registry::{read_or_default as read_env_var_or_default, read_os as read_env_var_os};
 pub use file::{
-    CassConfig, ConfigFile, ConfigParseError, CurationConfig, FeedbackConfig, LearnConfig,
-    LearnDecayConfig, PackConfig, PolicyConfig, PrivacyConfig, RuntimeConfig, SearchConfig,
-    SearchSpeed, SecretDetectorConfig, StorageConfig, TrustConfig,
+    CassConfig, ConfigFile, ConfigParseError, CurationConfig, FeedbackConfig, HandoffConfig,
+    HandoffStaleThresholdConfig, LearnConfig, LearnDecayConfig, OutputRedactionConfig, PackConfig,
+    PolicyConfig, PrivacyConfig, RuntimeConfig, SearchConfig, SearchSpeed, SecretDetectorConfig,
+    StorageConfig, TrustConfig,
 };
 pub use merge::{
     CASS_BINARY_KEY, CASS_ENABLED_KEY, CASS_SINCE_KEY, CURATION_DECAY_HALF_LIFE_DAYS_KEY,
@@ -22,14 +25,14 @@ pub use merge::{
     LEARN_DECAY_PROCEDURAL_RULE_HALF_LIFE_DAYS_KEY, LEARN_DECAY_SEMANTIC_FACT_HALF_LIFE_DAYS_KEY,
     LEARN_DECAY_WORKING_HALF_LIFE_DAYS_KEY, MergedConfig, PACK_CANDIDATE_POOL_KEY,
     PACK_DEFAULT_FORMAT_KEY, PACK_DEFAULT_MAX_TOKENS_KEY, PACK_DEFAULT_PROFILE_KEY,
-    PACK_MMR_LAMBDA_KEY, POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY,
-    POLICY_SECRET_DETECTOR_ALLOW_REGEX_KEY, PRIVACY_REDACT_SECRETS_KEY,
-    PRIVACY_REDACTION_CLASSES_KEY, RUNTIME_DAEMON_KEY, RUNTIME_IMPORT_BATCH_SIZE_KEY,
-    RUNTIME_JOB_BUDGET_MS_KEY, SEARCH_DEFAULT_SPEED_KEY, SEARCH_GRAPH_WEIGHT_KEY,
-    SEARCH_LEXICAL_WEIGHT_KEY, SEARCH_SEMANTIC_WEIGHT_KEY, STORAGE_DATABASE_PATH_KEY,
-    STORAGE_INDEX_DIR_KEY, STORAGE_JSONL_EXPORT_KEY, TRUST_DEFAULT_CLASS_KEY,
-    TRUST_PROMPT_INJECTION_GUARD_KEY, TRUST_TEAM_MEMBERS_KEY, built_in_config, config_from_env,
-    merge_config,
+    PACK_MMR_LAMBDA_KEY, POLICY_OUTPUT_REDACTION_ENABLED_KEY,
+    POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY, POLICY_SECRET_DETECTOR_ALLOW_REGEX_KEY,
+    PRIVACY_REDACT_SECRETS_KEY, PRIVACY_REDACTION_CLASSES_KEY, RUNTIME_DAEMON_KEY,
+    RUNTIME_IMPORT_BATCH_SIZE_KEY, RUNTIME_JOB_BUDGET_MS_KEY, SEARCH_DEFAULT_SPEED_KEY,
+    SEARCH_GRAPH_WEIGHT_KEY, SEARCH_LEXICAL_WEIGHT_KEY, SEARCH_SEMANTIC_WEIGHT_KEY,
+    STORAGE_DATABASE_PATH_KEY, STORAGE_INDEX_DIR_KEY, STORAGE_JSONL_EXPORT_KEY,
+    TRUST_DEFAULT_CLASS_KEY, TRUST_PROMPT_INJECTION_GUARD_KEY, TRUST_TEAM_MEMBERS_KEY,
+    built_in_config, config_from_env, merge_config,
 };
 pub use path::{PathExpander, PathExpansionError};
 pub use workspace::{
@@ -46,6 +49,18 @@ pub const SUBSYSTEM: &str = "config";
 #[must_use]
 pub const fn subsystem_name() -> &'static str {
     SUBSYSTEM
+}
+
+#[must_use]
+pub fn workspace_output_redaction_enabled(workspace_path: &Path) -> bool {
+    let config_path = workspace_path.join(".ee").join("config.toml");
+    let Ok(contents) = std::fs::read_to_string(config_path) else {
+        return true;
+    };
+    ConfigFile::parse(&contents)
+        .ok()
+        .and_then(|config| config.policy.output_redaction.enabled)
+        .unwrap_or(true)
 }
 
 #[cfg(test)]

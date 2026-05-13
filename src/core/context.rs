@@ -714,6 +714,17 @@ pub fn run_context_pack_with_performance(
     trace.record_elapsed("dbOpen", db_open_start);
 
     let mut degraded = Vec::new();
+    let output_redaction_enabled =
+        crate::config::workspace_output_redaction_enabled(&options.workspace_path);
+    if !output_redaction_enabled {
+        push_degradation(
+            &mut degraded,
+            "output_redaction_disabled",
+            ContextResponseSeverity::Info,
+            "Output-time redaction is disabled by workspace policy; context content may include secret-like values.",
+            Some("Set policy.output_redaction.enabled = true in .ee/config.toml.".to_string()),
+        );
+    }
     if tokens_capped || candidate_pool_capped {
         push_degradation(
             &mut degraded,
@@ -1065,6 +1076,7 @@ pub fn run_context_pack_with_performance(
         pack_candidates,
         crate::pack::PackAssemblyOptions {
             include_coverage_fill: options.output_options.include_coverage_fill,
+            output_redaction_enabled,
         },
     )
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
@@ -1252,6 +1264,31 @@ fn audit_context_pack_assembly(
             details: Some(item_details),
         };
         let _ = conn.insert_audit(&crate::db::generate_audit_id(), &item_input);
+
+        for redaction in &item.redactions {
+            let redaction_details = serde_json::json!({
+                "queryHash": &query_hash,
+                "packId": &pack_id_for_audit,
+                "rank": item.rank,
+                "displayIndex": (display_index + 1) as u32,
+                "section": item.section.as_str(),
+                "surface": "context",
+                "memoryId": item.memory_id.to_string(),
+                "detectedPattern": redaction.reason,
+                "placeholder": &redaction.placeholder,
+                "action": crate::db::audit_actions::REDACT_AT_OUTPUT,
+            })
+            .to_string();
+            let redaction_input = crate::db::CreateAuditInput {
+                workspace_id: Some(workspace_id.clone()),
+                actor: None,
+                action: crate::db::audit_actions::REDACT_AT_OUTPUT.to_owned(),
+                target_type: Some("memory".to_owned()),
+                target_id: Some(item.memory_id.to_string()),
+                details: Some(redaction_details),
+            };
+            let _ = conn.insert_audit(&crate::db::generate_audit_id(), &redaction_input);
+        }
     }
 }
 
@@ -1526,6 +1563,7 @@ fn push_search_degradations(
 ) {
     for entry in search_degraded {
         let severity = match entry.severity.as_str() {
+            "info" => ContextResponseSeverity::Info,
             "high" => ContextResponseSeverity::High,
             "medium" => ContextResponseSeverity::Medium,
             _ => ContextResponseSeverity::Low,

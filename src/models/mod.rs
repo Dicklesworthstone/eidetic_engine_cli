@@ -388,6 +388,11 @@ pub enum DomainError {
         message: String,
         repair: Option<String>,
     },
+    UnsatisfiedDegradedModeCode {
+        code: &'static str,
+        message: String,
+        repair: Option<String>,
+    },
     PolicyDenied {
         message: String,
         repair: Option<String>,
@@ -419,7 +424,8 @@ impl std::fmt::Display for DomainError {
             Self::Graph { message, .. } => write!(f, "graph error: {message}"),
             Self::Import { message, .. } => write!(f, "import error: {message}"),
             Self::NotFound { resource, id, .. } => write!(f, "{resource} not found: {id}"),
-            Self::UnsatisfiedDegradedMode { message, .. } => {
+            Self::UnsatisfiedDegradedMode { message, .. }
+            | Self::UnsatisfiedDegradedModeCode { message, .. } => {
                 write!(f, "unsatisfied degraded mode: {message}")
             }
             Self::PolicyDenied { message, .. } | Self::PolicyDeniedWithDetails { message, .. } => {
@@ -730,6 +736,7 @@ impl DomainError {
             Self::Import { .. } => "import",
             Self::NotFound { .. } => "not_found",
             Self::UnsatisfiedDegradedMode { .. } => "unsatisfied_degraded_mode",
+            Self::UnsatisfiedDegradedModeCode { code, .. } => code,
             Self::PolicyDenied { .. } | Self::PolicyDeniedWithDetails { .. } => "policy_denied",
             Self::MigrationRequired { .. } => "migration_required",
             Self::MigrationDrift { .. } => "migration_drift",
@@ -748,6 +755,7 @@ impl DomainError {
             | Self::Graph { message, .. }
             | Self::Import { message, .. }
             | Self::UnsatisfiedDegradedMode { message, .. }
+            | Self::UnsatisfiedDegradedModeCode { message, .. }
             | Self::PolicyDenied { message, .. }
             | Self::PolicyDeniedWithDetails { message, .. }
             | Self::MigrationRequired { message, .. }
@@ -771,6 +779,7 @@ impl DomainError {
             | Self::Import { repair, .. }
             | Self::NotFound { repair, .. }
             | Self::UnsatisfiedDegradedMode { repair, .. }
+            | Self::UnsatisfiedDegradedModeCode { repair, .. }
             | Self::PolicyDenied { repair, .. }
             | Self::PolicyDeniedWithDetails { repair, .. }
             | Self::MigrationRequired { repair, .. }
@@ -938,7 +947,9 @@ impl DomainError {
             Self::Graph { .. } => ProcessExitCode::SearchIndex,
             Self::Import { .. } => ProcessExitCode::Import,
             Self::NotFound { .. } => ProcessExitCode::Usage,
-            Self::UnsatisfiedDegradedMode { .. } => ProcessExitCode::UnsatisfiedDegradedMode,
+            Self::UnsatisfiedDegradedMode { .. } | Self::UnsatisfiedDegradedModeCode { .. } => {
+                ProcessExitCode::UnsatisfiedDegradedMode
+            }
             Self::PolicyDenied { .. } | Self::PolicyDeniedWithDetails { .. } => {
                 ProcessExitCode::PolicyDenied
             }

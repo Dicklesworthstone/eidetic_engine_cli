@@ -15,6 +15,7 @@ use super::test_log::{EventKind, TestEvent, log_event, test_id_or};
 pub const VOLATILE_FIELD_NAMES: &[&str] = &[
     "generatedAt",
     "generated_at",
+    "computed_at",
     "last_accessed",
     "last_accessed_at",
     "last_seen_at",
@@ -161,6 +162,7 @@ mod tests {
             "schema": "ee.response.v1",
             "generatedAt": "2026-05-13T00:00:00Z",
             "data": {
+                "computed_at": "2026-05-13T00:00:01Z",
                 "items": [
                     {"id": "mem_a", "elapsedMs": 12, "content": "keep"},
                     {"id": "mem_b", "last_seen_at": "2026-05-13T00:00:01Z"}
@@ -170,6 +172,7 @@ mod tests {
         });
         let report = strip_volatile_fields(&mut value);
         if value.pointer("/generatedAt").is_some()
+            || value.pointer("/data/computed_at").is_some()
             || value.pointer("/data/items/0/elapsedMs").is_some()
             || value.pointer("/data/items/1/last_seen_at").is_some()
             || value.pointer("/data/workspacePath").is_some()
@@ -183,7 +186,13 @@ mod tests {
         {
             return Err("non-volatile content was stripped".to_owned());
         }
-        for expected in ["generatedAt", "elapsedMs", "last_seen_at", "workspacePath"] {
+        for expected in [
+            "generatedAt",
+            "computed_at",
+            "elapsedMs",
+            "last_seen_at",
+            "workspacePath",
+        ] {
             if !report.fields_stripped.contains(&expected) {
                 return Err(format!("report missing stripped field {expected}"));
             }

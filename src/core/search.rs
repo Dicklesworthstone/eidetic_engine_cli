@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -686,6 +686,16 @@ impl SearchDegradation {
     }
 
     #[must_use]
+    fn output_redaction_disabled() -> Self {
+        Self {
+            code: "output_redaction_disabled".to_string(),
+            severity: "info".to_string(),
+            message: "Output-time redaction is disabled by workspace policy; search snippets may include secret-like values.".to_string(),
+            repair: Some("Set policy.output_redaction.enabled = true in .ee/config.toml.".to_string()),
+        }
+    }
+
+    #[must_use]
     fn scope_excluded_evidence(scope: MemoryScope, excluded: usize) -> Self {
         Self {
             code: "scope_excluded_evidence".to_string(),
@@ -826,6 +836,13 @@ impl SearchStatus {
 }
 
 impl SearchReport {
+    fn output_redaction_enabled(&self) -> bool {
+        !self
+            .degraded
+            .iter()
+            .any(|degradation| degradation.code == "output_redaction_disabled")
+    }
+
     #[must_use]
     pub fn retrieval_metrics(&self) -> RetrievalMetrics {
         RetrievalMetrics::from_hits_with_floor(
@@ -901,6 +918,7 @@ impl SearchReport {
 
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
+        let output_redaction_enabled = self.output_redaction_enabled();
         let mut metrics = self.retrieval_metrics().data_json();
         if let Some(metrics_obj) = metrics.as_object_mut() {
             metrics_obj.insert(
@@ -953,7 +971,25 @@ impl SearchReport {
                         obj_map.insert("rerankScore".to_string(), serde_json::json!(rerank));
                     }
                     if let Some(ref meta) = hit.metadata {
-                        obj_map.insert("metadata".to_string(), public_search_metadata(meta));
+                        let (metadata, redacted_patterns) =
+                            public_search_metadata(meta, output_redaction_enabled);
+                        obj_map.insert("metadata".to_string(), metadata);
+                        if !redacted_patterns.is_empty() {
+                            obj_map
+                                .insert("contentRedacted".to_string(), serde_json::json!(true));
+                            obj_map.insert(
+                                "redactions".to_string(),
+                                serde_json::json!(
+                                    redacted_patterns
+                                        .iter()
+                                        .map(|pattern| serde_json::json!({
+                                            "reason": pattern,
+                                            "placeholder": crate::policy::redaction_placeholder(pattern),
+                                        }))
+                                        .collect::<Vec<_>>()
+                                ),
+                            );
+                        }
                         if metadata_bool(meta, "tombstoned").unwrap_or(false) {
                             obj_map.insert("tombstoned".to_string(), serde_json::json!(true));
                             if let Some(tombstoned_at) = metadata_string(meta, "tombstoned_at") {
@@ -1238,17 +1274,95 @@ fn metadata_f32(metadata: &serde_json::Value, key: &str) -> Option<f32> {
         .filter(|value| value.is_finite())
 }
 
-fn public_search_metadata(metadata: &serde_json::Value) -> serde_json::Value {
+fn public_search_metadata(
+    metadata: &serde_json::Value,
+    output_redaction_enabled: bool,
+) -> (serde_json::Value, Vec<String>) {
     let Some(object) = metadata.as_object() else {
-        return metadata.clone();
+        return (metadata.clone(), Vec::new());
     };
-    serde_json::Value::Object(
-        object
-            .iter()
-            .filter(|(key, _)| !key.starts_with("_ee_"))
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect(),
+    let mut redacted_patterns = BTreeSet::new();
+    let mut public_fields: serde_json::Map<String, serde_json::Value> = object
+        .iter()
+        .filter(|(key, _)| !key.starts_with("_ee_"))
+        .map(|(key, value)| {
+            let value = if search_metadata_content_key_needs_redaction(key) {
+                redact_search_metadata_content_value(
+                    value,
+                    &mut redacted_patterns,
+                    output_redaction_enabled,
+                )
+            } else {
+                value.clone()
+            };
+            (key.clone(), value)
+        })
+        .collect();
+
+    if !public_fields.contains_key("content")
+        && let Some(value) = object.get(SEARCH_ANALYSIS_CONTENT_KEY)
+    {
+        public_fields.insert(
+            "content".to_string(),
+            redact_search_metadata_content_value(
+                value,
+                &mut redacted_patterns,
+                output_redaction_enabled,
+            ),
+        );
+    }
+
+    (
+        serde_json::Value::Object(public_fields),
+        redacted_patterns.into_iter().collect(),
     )
+}
+
+fn search_metadata_content_key_needs_redaction(key: &str) -> bool {
+    matches!(key, "content" | "contentPreview" | "content_preview")
+}
+
+fn redact_search_metadata_content_value(
+    value: &serde_json::Value,
+    redacted_patterns: &mut BTreeSet<String>,
+    output_redaction_enabled: bool,
+) -> serde_json::Value {
+    let Some(content) = value.as_str() else {
+        return value.clone();
+    };
+    if !output_redaction_enabled {
+        return value.clone();
+    }
+    let report = crate::policy::redact_secret_like_content(content);
+    if !report.redacted {
+        return value.clone();
+    }
+    for reason in report.redacted_reasons {
+        redacted_patterns.insert(reason.to_owned());
+    }
+    serde_json::json!(report.content)
+}
+
+fn search_hit_output_redaction_patterns(hit: &SearchHit) -> Vec<String> {
+    let mut patterns = BTreeSet::new();
+    let Some(metadata) = hit.metadata.as_ref().and_then(serde_json::Value::as_object) else {
+        return Vec::new();
+    };
+    for key in [
+        "content",
+        "contentPreview",
+        "content_preview",
+        SEARCH_ANALYSIS_CONTENT_KEY,
+    ] {
+        let Some(content) = metadata.get(key).and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let report = crate::policy::redact_secret_like_content(content);
+        if report.redacted {
+            patterns.extend(report.redacted_reasons.into_iter().map(str::to_owned));
+        }
+    }
+    patterns.into_iter().collect()
 }
 
 fn search_consensus_conflict_report(query: &str, hits: &[SearchHit]) -> ConsensusConflictReport {
@@ -1958,7 +2072,12 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
         return Err(SearchError::NoIndex);
     }
 
+    let output_redaction_enabled =
+        crate::config::workspace_output_redaction_enabled(&options.workspace_path);
     let mut degraded = search_degradations(options, &index_dir);
+    if !output_redaction_enabled {
+        degraded.push(SearchDegradation::output_redaction_disabled());
+    }
     if limit_capped {
         degraded.push(SearchDegradation::profile_search_limit_capped(
             options.limit,
@@ -2164,6 +2283,27 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
                     Some(&hit.doc_id),
                     Some(returned_details),
                 );
+                if output_redaction_enabled {
+                    for detected_pattern in search_hit_output_redaction_patterns(hit) {
+                        let redaction_details = serde_json::json!({
+                            "queryHash": &q_hash,
+                            "rank": (rank + 1) as u32,
+                            "surface": "search",
+                            "memoryId": &hit.doc_id,
+                            "detectedPattern": detected_pattern,
+                            "action": audit_actions::REDACT_AT_OUTPUT,
+                        })
+                        .to_string();
+                        audit_append_best_effort(
+                            &database_path,
+                            Some(&workspace_id),
+                            audit_actions::REDACT_AT_OUTPUT,
+                            Some("memory"),
+                            Some(&hit.doc_id),
+                            Some(redaction_details),
+                        );
+                    }
+                }
             }
 
             Ok(SearchReport {
@@ -4087,6 +4227,223 @@ mod tests {
         assert!(!rendered.contains("sk_live_do_not_emit"));
         assert!(!rendered.contains("mem-secret-doc"));
         assert!(!rendered.contains("token should not leave"));
+    }
+
+    #[test]
+    fn search_data_json_redacts_public_content_metadata() {
+        let raw_value = concat!("sk", "_", "search", "_", "secret", "_", "123");
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "rotate output secrets".to_string(),
+            requested_limit: 10,
+            results: vec![SearchHit {
+                doc_id: "mem-secret-doc".to_string(),
+                score: 0.95,
+                source: ScoreSource::Lexical,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: Some(0.95),
+                rerank_score: None,
+                metadata: Some(serde_json::json!({
+                    "content": format!("Rotate api_key={raw_value} before release."),
+                    "contentPreview": format!("Preview api_key={raw_value}."),
+                })),
+                explanation: None,
+            }],
+            elapsed_ms: 12.3,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
+        };
+
+        let json = report.data_json();
+        let rendered = json.to_string();
+
+        assert!(!rendered.contains(raw_value));
+        assert_eq!(json["results"][0]["contentRedacted"], true);
+        assert_eq!(
+            json["results"][0]["metadata"]["content"].as_str(),
+            Some("Rotate api_key=[REDACTED:api_key] before release.")
+        );
+        assert_eq!(
+            json["results"][0]["metadata"]["contentPreview"].as_str(),
+            Some("Preview api_key=[REDACTED:api_key]")
+        );
+        assert_eq!(
+            json["results"][0]["redactions"][0]["reason"].as_str(),
+            Some("api_key")
+        );
+    }
+
+    #[test]
+    fn search_data_json_respects_output_redaction_disabled_degradation() {
+        let raw_value = concat!("sk", "_", "search", "_", "disabled", "_", "123");
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "rotate output secrets".to_string(),
+            requested_limit: 10,
+            results: vec![SearchHit {
+                doc_id: "mem-secret-doc".to_string(),
+                score: 0.95,
+                source: ScoreSource::Lexical,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: Some(0.95),
+                rerank_score: None,
+                metadata: Some(serde_json::json!({
+                    "contentPreview": format!("Preview api_key={raw_value}."),
+                })),
+                explanation: None,
+            }],
+            elapsed_ms: 12.3,
+            errors: Vec::new(),
+            degraded: vec![SearchDegradation::output_redaction_disabled()],
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
+        };
+
+        let json = report.data_json();
+        let rendered = json.to_string();
+        let expected_preview = format!("Preview api_key={raw_value}.");
+
+        assert!(rendered.contains(raw_value));
+        assert_eq!(json["results"][0].get("contentRedacted"), None);
+        assert_eq!(
+            json["results"][0]["metadata"]["contentPreview"].as_str(),
+            Some(expected_preview.as_str())
+        );
+        assert_eq!(
+            json["degraded"][0]["code"].as_str(),
+            Some("output_redaction_disabled")
+        );
+    }
+
+    #[test]
+    fn search_data_json_disabled_output_redaction_returns_raw_content() {
+        let raw_value = concat!("sk", "_", "search", "_", "raw", "_", "123");
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "inspect raw output policy".to_string(),
+            requested_limit: 10,
+            results: vec![SearchHit {
+                doc_id: "mem-raw-secret-doc".to_string(),
+                score: 0.95,
+                source: ScoreSource::Lexical,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: Some(0.95),
+                rerank_score: None,
+                metadata: Some(serde_json::json!({
+                    "content": format!("Raw api_key={raw_value} is visible by policy."),
+                })),
+                explanation: None,
+            }],
+            elapsed_ms: 12.3,
+            errors: Vec::new(),
+            degraded: vec![SearchDegradation::output_redaction_disabled()],
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
+        };
+
+        let json = report.data_json();
+        let rendered = json.to_string();
+
+        assert!(rendered.contains(raw_value));
+        assert_eq!(
+            json["results"][0]["contentRedacted"],
+            serde_json::Value::Null
+        );
+        assert_eq!(json["results"][0]["redactions"], serde_json::Value::Null);
+        assert_eq!(
+            json["results"][0]["metadata"]["content"].as_str(),
+            Some(format!("Raw api_key={raw_value} is visible by policy.").as_str())
+        );
+        assert_eq!(
+            json["degraded"][0]["code"].as_str(),
+            Some("output_redaction_disabled")
+        );
+        assert_eq!(json["degraded"][0]["severity"].as_str(), Some("info"));
+    }
+
+    #[test]
+    fn search_data_json_redacts_hidden_analysis_content_as_public_content() {
+        let raw_value = concat!("sk", "_", "search", "_", "hidden", "_", "123");
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "rotate hidden output secrets".to_string(),
+            requested_limit: 10,
+            results: vec![SearchHit {
+                doc_id: "mem-hidden-secret-doc".to_string(),
+                score: 0.95,
+                source: ScoreSource::Hybrid,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: Some(0.95),
+                rerank_score: None,
+                metadata: Some(serde_json::json!({
+                    SEARCH_ANALYSIS_CONTENT_KEY: format!("Rotate api_key={raw_value} before release."),
+                    "kind": "rule",
+                    "level": "procedural",
+                })),
+                explanation: None,
+            }],
+            elapsed_ms: 12.3,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
+        };
+
+        let json = report.data_json();
+        let rendered = json.to_string();
+
+        assert!(!rendered.contains(raw_value));
+        assert_eq!(json["results"][0]["contentRedacted"], true);
+        assert_eq!(
+            json["results"][0]["metadata"]["content"].as_str(),
+            Some("Rotate api_key=[REDACTED:api_key] before release.")
+        );
+        assert_eq!(
+            json["results"][0]["metadata"].get(SEARCH_ANALYSIS_CONTENT_KEY),
+            None
+        );
+        assert_eq!(
+            json["results"][0]["redactions"][0]["reason"].as_str(),
+            Some("api_key")
+        );
     }
 
     #[test]

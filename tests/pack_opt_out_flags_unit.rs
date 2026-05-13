@@ -81,6 +81,7 @@ fn response_for(options: ContextPackOutputOptions) -> ContextResponse {
         candidates,
         PackAssemblyOptions {
             include_coverage_fill: options.include_coverage_fill,
+            ..PackAssemblyOptions::default()
         },
     )
     .expect("fixture draft assembles");

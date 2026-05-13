@@ -2,10 +2,9 @@
 # J3 — Epic B: search honesty & quality e2e driver.
 #
 # Drives `ee search` and asserts the search response exposes the honesty
-# signals shipped by B1-B8/B11 and records TODOs for B10.
+# signals shipped by B1-B8/B10/B11.
 #
-# Shipped (real assertions):  B1, B2, B3, B4, B5, B6, B7, B8, B11
-# Not yet shipped (todo):     B10
+# Shipped (real assertions):  B1, B2, B3, B4, B5, B6, B7, B8, B10, B11
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -324,9 +323,131 @@ else
     e2e_log_assert_eq "$B6_LEXICAL_UNAVAILABLE_CODE_COUNT" ">=1" "b6_lexical_unavailable_degraded_code"
 fi
 
-# B10 — output redaction.
-todo_assert "b10_output_redaction" "bd-17c65.2.7" \
-    "Search output redaction policy not yet implemented."
+# B10 — output-time redaction. Seed a secret-bearing memory through the
+# auditable bypass, then prove public retrieval surfaces redact it while `why`
+# keeps the explicit audit view unredacted.
+B10_QUERY="b10 output redaction marker omega"
+B10_RAW_VALUE="sk_bten_output_secret_abc123"
+B10_REMEMBER_JSON=$(ee_workspace remember \
+    --level procedural \
+    --kind rule \
+    --tags b10,redaction \
+    --allow-secret-mention \
+    "$B10_QUERY api_key=$B10_RAW_VALUE should redact at output time" \
+    --json || true)
+B10_MEMORY_ID=$(printf '%s' "$B10_REMEMBER_JSON" \
+    | jq -r '.data.memory_id // empty' 2>/dev/null || true)
+if [ -n "$B10_MEMORY_ID" ]; then
+    ee_workspace index rebuild --json >/dev/null || true
+    B10_SEARCH_JSON=$(ee_workspace search "$B10_QUERY" --relevance-floor 0.0 --json || true)
+    B10_SEARCH_HAS_RAW=$(printf '%s' "$B10_SEARCH_JSON" \
+        | jq -r --arg raw "$B10_RAW_VALUE" 'tostring | contains($raw)' 2>/dev/null || echo true)
+    e2e_log_assert_eq "$B10_SEARCH_HAS_RAW" "false" "b10_search_omits_raw_secret_value"
+    B10_SEARCH_REDACTED_COUNT=$(printf '%s' "$B10_SEARCH_JSON" \
+        | jq --arg id "$B10_MEMORY_ID" '
+            [.data.results[]?
+                | select(.docId == $id)
+                | select(.contentRedacted == true)
+                | select((.metadata.contentPreview // .metadata.content_preview // .metadata.content // "") | contains("[REDACTED:api_key]"))
+                | select([.redactions[]?.reason] | index("api_key"))] | length
+        ' 2>/dev/null || echo 0)
+    if [ "$B10_SEARCH_REDACTED_COUNT" -gt 0 ]; then
+        e2e_log_assert_eq "true" "true" "b10_search_redacts_content_metadata"
+    else
+        e2e_log_assert_eq "$B10_SEARCH_REDACTED_COUNT" ">=1" "b10_search_redacts_content_metadata"
+    fi
+
+    B10_CONTEXT_JSON=$(ee_workspace context "$B10_QUERY" --max-tokens 1000 --json || true)
+    B10_CONTEXT_HAS_RAW=$(printf '%s' "$B10_CONTEXT_JSON" \
+        | jq -r --arg raw "$B10_RAW_VALUE" 'tostring | contains($raw)' 2>/dev/null || echo true)
+    e2e_log_assert_eq "$B10_CONTEXT_HAS_RAW" "false" "b10_context_omits_raw_secret_value"
+    B10_CONTEXT_REDACTED_COUNT=$(printf '%s' "$B10_CONTEXT_JSON" \
+        | jq --arg id "$B10_MEMORY_ID" '
+            [.data.pack.items[]?
+                | select(.memoryId == $id)
+                | select(.contentRedacted == true)
+                | select((.content // "") | contains("[REDACTED:api_key]"))
+                | select([.redactions[]?.reason] | index("api_key"))] | length
+        ' 2>/dev/null || echo 0)
+    if [ "$B10_CONTEXT_REDACTED_COUNT" -gt 0 ]; then
+        e2e_log_assert_eq "true" "true" "b10_context_redacts_pack_content"
+    else
+        e2e_log_assert_eq "$B10_CONTEXT_REDACTED_COUNT" ">=1" "b10_context_redacts_pack_content"
+    fi
+
+    B10_WHY_JSON=$(ee_workspace why "$B10_MEMORY_ID" --json || true)
+    B10_WHY_HAS_RAW=$(printf '%s' "$B10_WHY_JSON" \
+        | jq -r --arg raw "$B10_RAW_VALUE" '(.data.content // "") | contains($raw)' 2>/dev/null || echo false)
+    e2e_log_assert_eq "$B10_WHY_HAS_RAW" "true" "b10_why_preserves_audit_content"
+
+    B10_HISTORY_JSON=$(ee_workspace memory history "$B10_MEMORY_ID" --json || true)
+    B10_AUDIT_REDACTION_COUNT=$(printf '%s' "$B10_HISTORY_JSON" \
+        | jq '[.data.entries[]? | select(.action == "redact_at_output")] | length' 2>/dev/null || echo 0)
+    if [ "$B10_AUDIT_REDACTION_COUNT" -ge 2 ]; then
+        e2e_log_assert_eq "true" "true" "b10_redaction_writes_search_and_context_audit_rows"
+    else
+        e2e_log_assert_eq "$B10_AUDIT_REDACTION_COUNT" ">=2" "b10_redaction_writes_search_and_context_audit_rows"
+    fi
+
+    B10_DISABLED_WORKSPACE="$EPIC_WORKSPACE/b10-output-redaction-disabled"
+    ee_global init --workspace "$B10_DISABLED_WORKSPACE" --json >/dev/null
+    mkdir -p "$B10_DISABLED_WORKSPACE/.ee"
+    printf '[policy.output_redaction]\nenabled = false\n' > "$B10_DISABLED_WORKSPACE/.ee/config.toml"
+    B10_DISABLED_QUERY="b10 output redaction disabled marker omega"
+    B10_DISABLED_RAW_VALUE="sk_bten_output_disabled_secret_abc123"
+    B10_DISABLED_REMEMBER_JSON=$(ee_global remember \
+        --workspace "$B10_DISABLED_WORKSPACE" \
+        --level procedural \
+        --kind rule \
+        --tags b10,redaction \
+        --allow-secret-mention \
+        "$B10_DISABLED_QUERY api_key=$B10_DISABLED_RAW_VALUE should remain raw when output redaction is disabled" \
+        --json || true)
+    B10_DISABLED_MEMORY_ID=$(printf '%s' "$B10_DISABLED_REMEMBER_JSON" \
+        | jq -r '.data.memory_id // empty' 2>/dev/null || true)
+    if [ -n "$B10_DISABLED_MEMORY_ID" ]; then
+        ee_global index rebuild --workspace "$B10_DISABLED_WORKSPACE" --json >/dev/null || true
+        B10_DISABLED_SEARCH_JSON=$(ee_global search "$B10_DISABLED_QUERY" \
+            --workspace "$B10_DISABLED_WORKSPACE" \
+            --relevance-floor 0.0 \
+            --json || true)
+        B10_DISABLED_SEARCH_HAS_RAW=$(printf '%s' "$B10_DISABLED_SEARCH_JSON" \
+            | jq -r --arg raw "$B10_DISABLED_RAW_VALUE" 'tostring | contains($raw)' 2>/dev/null || echo false)
+        e2e_log_assert_eq "$B10_DISABLED_SEARCH_HAS_RAW" "true" "b10_search_disabled_returns_raw_secret_value"
+        B10_DISABLED_SEARCH_CODE_COUNT=$(printf '%s' "$B10_DISABLED_SEARCH_JSON" \
+            | jq '[.data.degraded[]?.code // empty] | map(select(. == "output_redaction_disabled")) | length' 2>/dev/null || echo 0)
+        if [ "$B10_DISABLED_SEARCH_CODE_COUNT" -gt 0 ]; then
+            e2e_log_assert_eq "true" "true" "b10_search_disabled_reports_degradation"
+        else
+            e2e_log_assert_eq "$B10_DISABLED_SEARCH_CODE_COUNT" ">=1" "b10_search_disabled_reports_degradation"
+        fi
+
+        B10_DISABLED_CONTEXT_JSON=$(ee_global context "$B10_DISABLED_QUERY" \
+            --workspace "$B10_DISABLED_WORKSPACE" \
+            --max-tokens 1000 \
+            --json || true)
+        B10_DISABLED_CONTEXT_HAS_RAW=$(printf '%s' "$B10_DISABLED_CONTEXT_JSON" \
+            | jq -r --arg raw "$B10_DISABLED_RAW_VALUE" 'tostring | contains($raw)' 2>/dev/null || echo false)
+        e2e_log_assert_eq "$B10_DISABLED_CONTEXT_HAS_RAW" "true" "b10_context_disabled_returns_raw_secret_value"
+        B10_DISABLED_CONTEXT_CODE_COUNT=$(printf '%s' "$B10_DISABLED_CONTEXT_JSON" \
+            | jq '[.data.degraded[]?.code // empty] | map(select(. == "output_redaction_disabled")) | length' 2>/dev/null || echo 0)
+        if [ "$B10_DISABLED_CONTEXT_CODE_COUNT" -gt 0 ]; then
+            e2e_log_assert_eq "true" "true" "b10_context_disabled_reports_degradation"
+        else
+            e2e_log_assert_eq "$B10_DISABLED_CONTEXT_CODE_COUNT" ">=1" "b10_context_disabled_reports_degradation"
+        fi
+
+        B10_DISABLED_AUDIT_COUNT=$(ee_global memory history "$B10_DISABLED_MEMORY_ID" \
+            --workspace "$B10_DISABLED_WORKSPACE" \
+            --json 2>/dev/null \
+            | jq '[.data.entries[]? | select(.action == "redact_at_output")] | length' 2>/dev/null || echo 0)
+        e2e_log_assert_eq "$B10_DISABLED_AUDIT_COUNT" "0" "b10_disabled_skips_redaction_audit_rows"
+    else
+        e2e_log_assert_eq "missing_fixture_memory" "present" "b10_disabled_secret_fixture_created"
+    fi
+else
+    e2e_log_assert_eq "missing_fixture_memory" "present" "b10_secret_fixture_created"
+fi
 
 # B11 — valid_from/valid_to filtering + --as-of historic replay.
 B11_QUERY="b11 validity window marker zeta"

@@ -247,6 +247,7 @@ impl MemoryDocumentBuilder {
                 .with_level(&memory.level)
                 .with_kind(&memory.kind)
                 .with_created_at(&memory.created_at)
+                .with_metadata_entry("contentPreview", content_preview(&memory.content))
                 .with_metadata_entry(
                     "validity_window_kind",
                     memory_validity_window_kind(
@@ -288,6 +289,19 @@ fn memory_validity_window_kind(valid_from: Option<&str>, valid_to: Option<&str>)
         (Some(_), None) => "starts_at",
         (None, Some(_)) => "ends_at",
     }
+}
+
+fn content_preview(content: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    let mut preview = String::new();
+    for (index, ch) in content.chars().enumerate() {
+        if index == MAX_CHARS {
+            preview.push_str("...");
+            break;
+        }
+        preview.push(ch);
+    }
+    preview
 }
 
 /// Convert a stored memory directly to a canonical search document.
@@ -2409,7 +2423,33 @@ mod tests {
             indexable.metadata.get("created_at"),
             Some(&"2026-04-29T12:00:00Z".to_owned())
         );
+        assert_eq!(
+            indexable.metadata.get("contentPreview"),
+            Some(&"Always run cargo fmt before commit.".to_owned())
+        );
         assert!(!indexable.metadata.contains_key("workspace"));
+    }
+
+    #[test]
+    fn memory_document_builder_bounds_content_preview() {
+        let mut memory = make_test_memory();
+        memory.content = "a".repeat(300);
+
+        let indexable = super::memory_to_document(&memory).into_indexable();
+
+        assert_eq!(
+            indexable
+                .metadata
+                .get("contentPreview")
+                .map(std::string::String::len),
+            Some(243)
+        );
+        assert!(
+            indexable
+                .metadata
+                .get("contentPreview")
+                .is_some_and(|preview| preview.ends_with("..."))
+        );
     }
 
     #[test]

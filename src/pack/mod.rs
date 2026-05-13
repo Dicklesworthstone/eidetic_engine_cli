@@ -29,12 +29,14 @@ pub const DEFAULT_COORDINATION_STALE_AFTER_MS: u64 = 86_400_000;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PackAssemblyOptions {
     pub include_coverage_fill: bool,
+    pub output_redaction_enabled: bool,
 }
 
 impl Default for PackAssemblyOptions {
     fn default() -> Self {
         Self {
             include_coverage_fill: true,
+            output_redaction_enabled: true,
         }
     }
 }
@@ -2971,6 +2973,7 @@ pub const fn category_for_code(code: &str) -> DegradedCategory {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContextResponseSeverity {
+    Info,
     Low,
     Medium,
     High,
@@ -2980,6 +2983,7 @@ impl ContextResponseSeverity {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Info => "info",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
@@ -3564,7 +3568,7 @@ pub fn assemble_draft_with_profile_and_options(
                 profile = profile.as_str(),
                 "starting pack assembly"
             );
-            assemble_facility_location_draft(profile, query, budget, candidates)
+            assemble_facility_location_draft(profile, query, budget, candidates, options)
         }
         ContextPackProfile::Compact
         | ContextPackProfile::Balanced
@@ -3589,8 +3593,10 @@ fn assemble_mmr_draft(
     options: PackAssemblyOptions,
 ) -> Result<PackDraft, PackValidationError> {
     let query = trim_required(query.into(), PackValidationError::EmptyQuery)?;
-    let mut candidates: Vec<MmrCandidate> =
-        candidates.into_iter().map(MmrCandidate::from).collect();
+    let mut candidates: Vec<MmrCandidate> = candidates
+        .into_iter()
+        .map(|candidate| MmrCandidate::from_candidate(candidate, options.output_redaction_enabled))
+        .collect();
     let candidate_count = candidates.len();
     candidates.sort_by(|left, right| compare_candidates(&left.candidate, &right.candidate));
 
@@ -3812,13 +3818,16 @@ fn assemble_facility_location_draft(
     query: impl Into<String>,
     budget: TokenBudget,
     candidates: impl IntoIterator<Item = PackCandidate>,
+    options: PackAssemblyOptions,
 ) -> Result<PackDraft, PackValidationError> {
     let query = trim_required(query.into(), PackValidationError::EmptyQuery)?;
     let mut candidates: Vec<PackCandidate> = candidates.into_iter().collect();
     candidates.sort_by(compare_candidates);
     let mut candidates: Vec<FacilityCandidateProfile> = candidates
         .into_iter()
-        .map(FacilityCandidateProfile::from)
+        .map(|candidate| {
+            FacilityCandidateProfile::from_candidate(candidate, options.output_redaction_enabled)
+        })
         .collect();
     let mut remaining_indices: Vec<usize> = (0..candidates.len()).collect();
     let mut current_coverages = vec![0.0_f32; candidates.len()];
@@ -3980,9 +3989,13 @@ struct MmrCandidate {
     redactions: Vec<PackItemRedaction>,
 }
 
-impl From<PackCandidate> for MmrCandidate {
-    fn from(candidate: PackCandidate) -> Self {
-        let (candidate, redactions) = redact_pack_candidate(candidate);
+impl MmrCandidate {
+    fn from_candidate(candidate: PackCandidate, output_redaction_enabled: bool) -> Self {
+        let (candidate, redactions) = if output_redaction_enabled {
+            redact_pack_candidate(candidate)
+        } else {
+            (candidate, Vec::new())
+        };
         let signature = CandidateSignature::from(&candidate);
         Self {
             candidate,
@@ -4000,9 +4013,19 @@ struct FacilityCandidateProfile {
     redactions: Vec<PackItemRedaction>,
 }
 
-impl From<PackCandidate> for FacilityCandidateProfile {
+impl From<PackCandidate> for MmrCandidate {
     fn from(candidate: PackCandidate) -> Self {
-        let (candidate, redactions) = redact_pack_candidate(candidate);
+        Self::from_candidate(candidate, true)
+    }
+}
+
+impl FacilityCandidateProfile {
+    fn from_candidate(candidate: PackCandidate, output_redaction_enabled: bool) -> Self {
+        let (candidate, redactions) = if output_redaction_enabled {
+            redact_pack_candidate(candidate)
+        } else {
+            (candidate, Vec::new())
+        };
         let signature = CandidateSignature::from(&candidate);
         let weight = facility_candidate_weight(&candidate);
         Self {
@@ -4011,6 +4034,12 @@ impl From<PackCandidate> for FacilityCandidateProfile {
             weight,
             redactions,
         }
+    }
+}
+
+impl From<PackCandidate> for FacilityCandidateProfile {
+    fn from(candidate: PackCandidate) -> Self {
+        Self::from_candidate(candidate, true)
     }
 }
 
@@ -5308,17 +5337,17 @@ mod tests {
         ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
         ContextResponseDegradation, ContextResponseSeverity, DEFAULT_CHARS_PER_TOKEN,
         FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR, PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE,
-        PACK_ASSEMBLY_SLOW_CODE, PackAssemblySlo, PackAssemblySloActuals, PackAssemblySloStatus,
-        PackCacheGovernor, PackCacheStatus, PackCandidate, PackCandidateInput, PackHotset,
-        PackHotsetEntry, PackItemRedaction, PackOmissionReason, PackProvenance, PackRejectionStage,
-        PackResourceProfile, PackSection, PackSelectionObjective, PackSelectionPhase,
-        PackTrustSignal, PackValidationError, SectionQuota, SectionQuotas, TokenBudget,
-        TokenEstimationStrategy, WORD_HEURISTIC_TOKEN_MULTIPLIER_DENOMINATOR,
-        WORD_HEURISTIC_TOKEN_MULTIPLIER_NUMERATOR, assemble_draft,
-        assemble_draft_with_cache_governor, assemble_draft_with_profile, candidate_similarity,
-        estimate_character_heuristic_tokens, estimate_tokens, estimate_tokens_default,
-        estimate_word_heuristic_tokens, facility_similarity, pack_item_provenance_json,
-        prewarm_pack_hotset, subsystem_name,
+        PACK_ASSEMBLY_SLOW_CODE, PackAssemblyOptions, PackAssemblySlo, PackAssemblySloActuals,
+        PackAssemblySloStatus, PackCacheGovernor, PackCacheStatus, PackCandidate,
+        PackCandidateInput, PackHotset, PackHotsetEntry, PackItemRedaction, PackOmissionReason,
+        PackProvenance, PackRejectionStage, PackResourceProfile, PackSection,
+        PackSelectionObjective, PackSelectionPhase, PackTrustSignal, PackValidationError,
+        SectionQuota, SectionQuotas, TokenBudget, TokenEstimationStrategy,
+        WORD_HEURISTIC_TOKEN_MULTIPLIER_DENOMINATOR, WORD_HEURISTIC_TOKEN_MULTIPLIER_NUMERATOR,
+        assemble_draft, assemble_draft_with_cache_governor, assemble_draft_with_profile,
+        candidate_similarity, estimate_character_heuristic_tokens, estimate_tokens,
+        estimate_tokens_default, estimate_word_heuristic_tokens, facility_similarity,
+        pack_item_provenance_json, prewarm_pack_hotset, subsystem_name,
     };
     use crate::cache::{CacheBudget, MemoryPressure};
     use crate::models::{ContextProfile, MemoryId, ProvenanceUri, TrustClass, UnitScore};
@@ -7041,6 +7070,40 @@ mod tests {
             &item.redactions,
             &vec![PackItemRedaction::new("anthropic_api_key")],
             "selected pack item records redaction reason",
+        )
+    }
+
+    #[test]
+    fn assemble_draft_can_disable_output_redaction() -> TestResult {
+        let budget =
+            TokenBudget::new(400).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let raw_value = format!("{}{}", concat!("sk", "-ant", "-api03", "-"), "D".repeat(52));
+        let content = format!("Workspace policy allows raw output for {raw_value}.");
+
+        let draft = super::assemble_draft_with_profile_and_options(
+            ContextPackProfile::Balanced,
+            "inspect output redaction policy",
+            budget,
+            vec![candidate_with_content(45, 1.0, 0.8, 80, content)?],
+            PackAssemblyOptions {
+                output_redaction_enabled: false,
+                ..PackAssemblyOptions::default()
+            },
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+        let item = draft
+            .items
+            .first()
+            .ok_or_else(|| "expected selected item".to_string())?;
+
+        ensure(
+            item.content.contains(&raw_value),
+            "disabled output redaction should retain raw secret-like value",
+        )?;
+        ensure_equal(
+            &item.redactions,
+            &Vec::<PackItemRedaction>::new(),
+            "disabled output redaction should not record per-item redactions",
         )
     }
 

@@ -50,6 +50,7 @@ hash_stdin() {
 VOLATILE_FIELD_NAMES=(
     generatedAt
     generated_at
+    computed_at
     last_accessed
     last_accessed_at
     last_seen_at

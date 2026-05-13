@@ -44,6 +44,7 @@ pub mod audit_actions {
     pub const ARTIFACT_REGISTER: &str = "artifact.register";
     pub const CERTIFICATE_UPSERT: &str = "certificate.upsert";
     pub const FEEDBACK_RECORD: &str = "feedback.record";
+    pub const HANDOFF_INSECURE_LOAD: &str = "handoff.insecure_load";
     pub const FEEDBACK_QUARANTINE: &str = "feedback.quarantine";
     pub const FEEDBACK_QUARANTINE_RELEASE: &str = "feedback.quarantine.release";
     pub const FEEDBACK_QUARANTINE_REJECT: &str = "feedback.quarantine.reject";
@@ -122,6 +123,8 @@ pub mod audit_actions {
     pub const MEMORY_SHOW: &str = "memory.show";
     /// `ee why <id>` returned an explanation for a memory.
     pub const WHY_INSPECTED: &str = "why.inspected";
+    /// A read surface redacted secret-like content before returning output.
+    pub const REDACT_AT_OUTPUT: &str = "redact_at_output";
 }
 
 const MIGRATION_TABLE_DDL: &str = "CREATE TABLE IF NOT EXISTS ee_schema_migrations (

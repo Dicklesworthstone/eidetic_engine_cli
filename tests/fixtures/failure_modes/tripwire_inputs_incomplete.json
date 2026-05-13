@@ -23,7 +23,7 @@
     "code": "tripwire_inputs_incomplete",
     "severity": "warning",
     "message_contains": [
-      "No persisted tripwire matched"
+      "Missing persisted tripwire inputs"
     ],
     "repair_contains": "ee tripwire list",
     "repair_string": "ee tripwire list --json",

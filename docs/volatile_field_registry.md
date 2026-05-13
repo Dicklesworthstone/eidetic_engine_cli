@@ -11,6 +11,7 @@ the Rust constant, and the shell list together.
 | Field path | Reason for volatility | Introduced in version | Notes |
 |---|---|---|---|
 | `generatedAt` / `generated_at` | Wall-clock timestamp | v0.1 | RFC 3339 report timestamp. |
+| `computed_at` | Wall-clock timestamp | v0.1 | Resume and diagnostic comparisons that recompute live state. |
 | `last_accessed` / `last_accessed_at` | Per-read update | v0.1 | Access signals for memory freshness and decay. |
 | `last_seen_at` | Per-read or per-observation update | v0.1 | Agent, workspace, and discovery observations may refresh this field. |
 | `last_used_at` | Per-read update | v0.1 | Usage freshness signal. |

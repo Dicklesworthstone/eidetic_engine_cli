@@ -6,7 +6,7 @@
 # C1 + C3 fixes accept meta-policy phrases and dot/colon tags while still
 # rejecting real value-shape secrets.
 #
-# Shipped (real assertions):  C1, C2, C3, C4
+# Shipped (real assertions):  C1, C2, C3, C4, B10
 # Not yet shipped (todo):     C5
 
 set -euo pipefail
@@ -107,6 +107,88 @@ CONFIG_BYPASS_JSON=$(ee_workspace remember \
     --level semantic --kind fact --json 2>/dev/null || true)
 assert_jq "$CONFIG_BYPASS_JSON" '.success // false' "true" "c2_allow_phrase_persists"
 assert_jq "$CONFIG_BYPASS_JSON" '.data.policy_bypass.kind // empty' "config_phrase" "c2_allow_phrase_kind"
+
+# ------------------------------------------------------------
+# B10 (shipped) — output-time redaction is defense-in-depth for
+# secret-bearing content that was explicitly persisted through C2.
+# Search/context redact by default, why remains an explicit audit surface,
+# and disabling workspace output redaction emits an info degradation.
+# ------------------------------------------------------------
+
+B10_MEMORY_ID=$(printf '%s' "$BYPASS_JSON" | jq -r '.data.memory_id // empty' 2>/dev/null || true)
+assert_jq_nonempty "$BYPASS_JSON" '.data.memory_id // empty' "b10_fixture_memory_id_present"
+
+ee_workspace index rebuild --json >/dev/null 2>/dev/null
+
+B10_SEARCH_JSON=$(ee_workspace search "Document redacted sample" --json 2>/dev/null || true)
+assert_jq "$B10_SEARCH_JSON" '.success // false' "true" "b10_search_succeeds"
+assert_jq "$B10_SEARCH_JSON" '.data.results[0].contentRedacted // false' "true" \
+    "b10_search_flags_output_redaction"
+assert_jq "$B10_SEARCH_JSON" '.data.results[0].redactions[0].reason // empty' "api_key" \
+    "b10_search_reports_redaction_reason"
+assert_jq "$B10_SEARCH_JSON" '.data.results[0].metadata.content | contains("[REDACTED:api_key]")' \
+    "true" "b10_search_content_redacted"
+SEARCH_RAW_LEAKED=false
+if printf '%s' "$B10_SEARCH_JSON" | grep -Fq 'sk-FAKEabc123def456ghi789jkl012'; then
+    SEARCH_RAW_LEAKED=true
+fi
+e2e_log_assert_eq "$SEARCH_RAW_LEAKED" "false" "b10_search_does_not_leak_raw_secret"
+
+B10_CONTEXT_JSON=$(ee_workspace context "Document redacted sample" --json 2>/dev/null || true)
+assert_jq "$B10_CONTEXT_JSON" '.success // false' "true" "b10_context_succeeds"
+assert_jq "$B10_CONTEXT_JSON" '.data.pack.items[0].contentRedacted // false' "true" \
+    "b10_context_flags_output_redaction"
+assert_jq "$B10_CONTEXT_JSON" '.data.pack.items[0].redactions[0].reason // empty' "api_key" \
+    "b10_context_reports_redaction_reason"
+assert_jq "$B10_CONTEXT_JSON" '.data.pack.items[0].content | contains("[REDACTED:api_key]")' \
+    "true" "b10_context_content_redacted"
+CONTEXT_RAW_LEAKED=false
+if printf '%s' "$B10_CONTEXT_JSON" | grep -Fq 'sk-FAKEabc123def456ghi789jkl012'; then
+    CONTEXT_RAW_LEAKED=true
+fi
+e2e_log_assert_eq "$CONTEXT_RAW_LEAKED" "false" "b10_context_does_not_leak_raw_secret"
+
+B10_WHY_JSON=$(ee_workspace why "$B10_MEMORY_ID" --json 2>/dev/null || true)
+assert_jq "$B10_WHY_JSON" '.success // false' "true" "b10_why_succeeds"
+assert_jq "$B10_WHY_JSON" '.data.content | contains("sk-FAKEabc123def456ghi789jkl012")' \
+    "true" "b10_why_returns_full_content"
+
+B10_AUDIT_JSON=$(ee_workspace audit timeline --json 2>/dev/null || true)
+assert_jq "$B10_AUDIT_JSON" \
+    '(.data.entries // .entries // []) | map(select((.action // .mutation_kind) == "redact_at_output")) | length > 0' \
+    "true" "b10_audit_records_output_redaction"
+
+printf '%s\n' \
+    '[policy.secret_detector]' \
+    'allow_phrases = ["OAuth refresh token"]' \
+    '' \
+    '[policy.output_redaction]' \
+    'enabled = false' \
+    > "$EPIC_WORKSPACE/.ee/config.toml"
+
+B10_DISABLED_SEARCH_JSON=$(ee_workspace search "Document redacted sample" --json 2>/dev/null || true)
+assert_jq "$B10_DISABLED_SEARCH_JSON" '.success // false' "true" \
+    "b10_disabled_search_succeeds"
+assert_jq "$B10_DISABLED_SEARCH_JSON" \
+    '.data.degraded | map(select(.code == "output_redaction_disabled" and .severity == "info")) | length > 0' \
+    "true" "b10_disabled_search_degraded_info"
+assert_jq "$B10_DISABLED_SEARCH_JSON" \
+    '.data.results[0].metadata.content | contains("sk-FAKEabc123def456ghi789jkl012")' \
+    "true" "b10_disabled_search_returns_raw_content"
+assert_jq "$B10_DISABLED_SEARCH_JSON" '.data.results[0].contentRedacted // false' "false" \
+    "b10_disabled_search_has_no_redaction_flag"
+
+B10_DISABLED_CONTEXT_JSON=$(ee_workspace context "Document redacted sample" --json 2>/dev/null || true)
+assert_jq "$B10_DISABLED_CONTEXT_JSON" '.success // false' "true" \
+    "b10_disabled_context_succeeds"
+assert_jq "$B10_DISABLED_CONTEXT_JSON" \
+    '.data.degraded | map(select(.code == "output_redaction_disabled" and .severity == "info")) | length > 0' \
+    "true" "b10_disabled_context_degraded_info"
+assert_jq "$B10_DISABLED_CONTEXT_JSON" \
+    '.data.pack.items[0].content | contains("sk-FAKEabc123def456ghi789jkl012")' \
+    "true" "b10_disabled_context_returns_raw_content"
+assert_jq "$B10_DISABLED_CONTEXT_JSON" '.data.pack.items[0].contentRedacted // false' "false" \
+    "b10_disabled_context_has_no_redaction_flag"
 
 # ------------------------------------------------------------
 # C4 (shipped) — programmatic error.details for tag and content rejection.

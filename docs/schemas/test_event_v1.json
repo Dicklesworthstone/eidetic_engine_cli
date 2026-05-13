@@ -35,7 +35,8 @@
         "volatile_strip",
         "schema_gate",
         "field_selector",
-        "bench_iteration"
+        "bench_iteration",
+        "artifact_manifest"
       ]
     },
     "command": {
@@ -185,6 +186,34 @@
               "status",
               "profile",
               "workload_tier"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "artifact_manifest"}}},
+      "then": {
+        "properties": {
+          "fields": {
+            "type": "object",
+            "required": [
+              "manifest_schema",
+              "phase",
+              "binary_path",
+              "binary_hash",
+              "binary_hash_status",
+              "source_hash",
+              "command_hash",
+              "command_arg_count",
+              "execution_substrate",
+              "local_host",
+              "worker_host",
+              "target_directory",
+              "fixture_filter",
+              "log_path",
+              "retention_manifest_path",
+              "artifact_manifest_hash"
             ]
           }
         }

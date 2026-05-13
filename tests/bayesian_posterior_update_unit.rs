@@ -109,8 +109,12 @@ fn credible_interval_narrows_with_evidence() {
     for _ in 0..100 {
         many = many.update_helpful();
     }
-    let (few_lo, few_hi) = few.credible_interval(0.90).unwrap();
-    let (many_lo, many_hi) = many.credible_interval(0.90).unwrap();
+    let Some((few_lo, few_hi)) = few.credible_interval(0.90) else {
+        panic!("few-evidence posterior should have a ci90 interval");
+    };
+    let Some((many_lo, many_hi)) = many.credible_interval(0.90) else {
+        panic!("many-evidence posterior should have a ci90 interval");
+    };
     let few_width = few_hi - few_lo;
     let many_width = many_hi - many_lo;
     assert!(

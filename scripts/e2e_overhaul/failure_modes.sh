@@ -595,12 +595,16 @@ run_fixture_scenario() {
                 --json 2>/dev/null || true)
             ;;
         validity_filtered_significant_recall_drop)
-            remember_j6_memory \
+            local significant_validity_workspace
+            significant_validity_workspace=$(j6_isolated_workspace "validity-filtered-significant-recall-drop") || return 1
+            ee_in_workspace "$significant_validity_workspace" remember \
                 "J6 future validity marker." \
-                semantic \
-                fact \
-                --valid-from "2999-01-01T00:00:00Z" >/dev/null
-            SCENARIO_OUTPUT=$(ee_workspace search \
+                --level semantic \
+                --kind fact \
+                --no-propose-candidates \
+                --valid-from "2999-01-01T00:00:00Z" \
+                --json >/dev/null 2>&1 || true
+            SCENARIO_OUTPUT=$(ee_in_workspace "$significant_validity_workspace" search \
                 "future validity marker" \
                 --relevance-floor 0.0 \
                 --json 2>/dev/null || true)

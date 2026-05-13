@@ -87,7 +87,7 @@ A degraded entry's `code` is classified into one of three buckets:
 
 ### `response_time` (104 codes — stay in `degraded[]`)
 
-#### Search and pack quality (32)
+#### Search and pack quality (33)
 | Code | Severity (canonical) | Bead |
 |------|----------------------|------|
 | `conflict_direct` | medium | bd-1zb7k.9 (S8) |
@@ -106,6 +106,7 @@ A degraded entry's `code` is classified into one of three buckets:
 | `low_recall_after_floor` | info | bd-17c65.2.1 (B1) |
 | `malformed_validity_filtered` | medium | bd-17c65.2.10 (B11) |
 | `no_relevant_results` | medium | bd-17c65.2.1 (B1) |
+| `output_redaction_disabled` | info | bd-17c65.2.9 (B10) |
 | `pack_assembly_budget_exceeded` | medium | bd-1zb7k.5 (S4) |
 | `pack_assembly_slow` | low | bd-1zb7k.5 (S4) |
 | `pack_concurrent_limit_reached` | low | bd-1zb7k.5 (S4) |
@@ -238,6 +239,7 @@ A degraded entry's `code` is classified into one of three buckets:
 | `index_publish_lock_contention` | warning | bd-17c65.12.2 (L1) |
 | `write_owner_busy` | warning | bd-17c65.12.2 (L1) |
 | `write_spool_backpressure` | warning | bd-17c65.12.2 (L1) |
+| `write_queue_full` | low | bd-17c65.12.2 (L1) |
 
 #### Other (3)
 | Code | Severity | Bead |
@@ -292,9 +294,13 @@ A degraded entry's `code` is classified into one of three buckets:
 | `graph_snapshot_topology_unavailable` | low | bd-17c65.5.3 (E3) |
 | `graph_snapshot_unusable` | high | bd-17c65.5.3 (E3) |
 
-#### Integrity / schema (7)
+#### Integrity / schema (12)
 | Code | Severity | Bead |
 |------|----------|------|
+| `handoff_capsule_machine_mismatch` | high | bd-17c65.13.6 (M5) |
+| `handoff_capsule_tampered` | high | bd-17c65.13.6 (M5) |
+| `handoff_hmac_missing` | high | bd-17c65.13.6 (M5) |
+| `handoff_hmac_skipped` | high | bd-17c65.13.6 (M5) |
 | `integrity_database_missing` | high | bd-17c65.12.2 (L1) |
 | `integrity_database_open_failed` | high | bd-17c65.12.2 (L1) |
 | `integrity_provenance_sample_unavailable` | low | bd-17c65.12.2 (L1) |
@@ -303,6 +309,7 @@ A degraded entry's `code` is classified into one of three buckets:
 | `integrity_schema_check_unavailable` | medium | bd-17c65.12.2 (L1) |
 | `integrity_schema_migration_required` | high | bd-17c65.12.5 (L4) |
 | `stale_schema_version` | high | bd-17c65.12.5 (L4) |
+| `strict_mode_no_salt_file` | high | bd-17c65.13.6 (M5) |
 | `tampered_hash` | critical | bd-17c65.13.6 (M5) |
 
 #### Maintenance jobs (5)

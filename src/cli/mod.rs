@@ -28,6 +28,9 @@ use crate::core::artifact::{
     ArtifactInspectOptions, ArtifactListOptions, ArtifactRegisterOptions, inspect_artifact,
     list_artifacts as list_artifact_registry, register_artifact,
 };
+use crate::core::artifact_relocation::{
+    ArtifactRelocationMode, ArtifactRelocationOptions, relocate_artifacts,
+};
 use crate::core::audit::{
     AuditDiffOptions, AuditShowOptions, AuditTimelineOptions, AuditVerifyOptions, list_timeline,
     show_diff as show_audit_diff, show_operation as show_audit_operation,
@@ -63,6 +66,7 @@ use crate::core::curate::{
     run_curate_untombstone, run_curation_disposition, run_review_workspace,
     validate_curation_candidate,
 };
+use crate::core::disk_pressure::{DiskPressureOptions, gather_disk_pressure_report};
 use crate::core::doctor::{
     DependencyDiagnosticsReport, DoctorReport, FrankenHealthReport, IntegrityDiagnosticsOptions,
     IntegrityDiagnosticsReport,
@@ -753,6 +757,8 @@ pub enum ArtifactCommand {
     Inspect(ArtifactInspectArgs),
     /// List registered artifacts for a workspace.
     List(ArtifactListArgs),
+    /// Copy artifacts to an external root and write a preservation manifest.
+    Relocate(ArtifactRelocateArgs),
 }
 
 /// Arguments for `ee artifact register`.
@@ -833,6 +839,42 @@ pub struct ArtifactListArgs {
     /// Maximum number of artifacts to return.
     #[arg(long, value_name = "COUNT", default_value_t = 50)]
     pub limit: u32,
+}
+
+/// Arguments for `ee artifact relocate`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ArtifactRelocateArgs {
+    /// Artifact file or directory to preserve.
+    #[arg(
+        long = "from",
+        value_name = "PATH",
+        required_unless_present = "restore"
+    )]
+    pub from: Option<PathBuf>,
+
+    /// Destination root for preservation copies.
+    #[arg(long = "to", value_name = "PATH", required_unless_present = "restore")]
+    pub to: Option<PathBuf>,
+
+    /// Relocation manifest path to write or read.
+    #[arg(long, value_name = "PATH")]
+    pub manifest: PathBuf,
+
+    /// Apply the plan by copying artifacts and writing the manifest.
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "restore")]
+    pub apply: bool,
+
+    /// Restore missing originals from an existing relocation manifest.
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "apply")]
+    pub restore: bool,
+
+    /// Allow a source outside known artifact roots after explicit path review.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub force_with_explicit_path: bool,
+
+    /// Actor recorded in the relocation manifest.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
 }
 
 /// Subcommands for `ee backup`.
@@ -1928,6 +1970,8 @@ pub enum DiagCommand {
     DatabaseSkew(DiagDatabaseSkewArgs),
     /// Report accepted dependency contracts and forbidden dependency gates.
     Dependencies,
+    /// Report disk capacity, artifact consumers, and preservation-only repair plans.
+    DiskPressure(DiagDiskPressureArgs),
     /// Report graph module readiness, capabilities, and metrics.
     Graph,
     /// Seed deterministic graph snapshot diagnostic state.
@@ -2066,6 +2110,22 @@ pub struct DiagDatabaseSkewArgs {
     /// Skew to apply for diagnostic fixture replay.
     #[arg(long, value_name = "SKEW")]
     pub skew: String,
+}
+
+/// Arguments for `ee diag disk-pressure`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagDiskPressureArgs {
+    /// Maximum top consumers to report per root and globally.
+    #[arg(long, default_value_t = 5, value_name = "N")]
+    pub top_limit: usize,
+
+    /// Recursive depth for bounded top-consumer measurement.
+    #[arg(long, default_value_t = 2, value_name = "N")]
+    pub consumer_depth: usize,
+
+    /// Maximum entries to inspect per directory during bounded measurement.
+    #[arg(long, default_value_t = 4000, value_name = "N")]
+    pub consumer_entry_limit: usize,
 }
 
 /// Arguments for `ee diag memory-validity`.
@@ -3037,6 +3097,10 @@ pub struct HandoffCreateArgs {
     /// Preview the capsule without writing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+
+    /// Bind capsule integrity to this machine's local handoff salt.
+    #[arg(long = "bind-to-machine", action = ArgAction::SetTrue)]
+    pub bind_to_machine: bool,
 }
 
 /// Arguments for `ee handoff inspect`.
@@ -3070,6 +3134,11 @@ pub struct HandoffResumeArgs {
     /// the current workspace state. Bead bd-17c65.13.5 (M4).
     #[arg(long = "require-fresh", action = ArgAction::SetTrue)]
     pub require_fresh: bool,
+
+    /// Load an unsigned or tampered capsule anyway and emit an audited
+    /// high-severity degraded entry.
+    #[arg(long = "insecure-skip-hmac", action = ArgAction::SetTrue)]
+    pub insecure_skip_hmac: bool,
 }
 
 /// Handoff capsule profile.
@@ -7393,6 +7462,9 @@ where
         Some(Command::Artifact(ArtifactCommand::List(ref args))) => {
             handle_artifact_list(&cli, args, stdout, stderr)
         }
+        Some(Command::Artifact(ArtifactCommand::Relocate(ref args))) => {
+            handle_artifact_relocate(&cli, args, stdout, stderr)
+        }
         Some(Command::Backup(BackupCommand::Create(ref args))) => {
             handle_backup_create(&cli, args, stdout, stderr)
         }
@@ -7532,6 +7604,7 @@ where
                     ),
                 }
             }
+            DiagCommand::DiskPressure(args) => handle_diag_disk_pressure(&cli, args, stdout),
             DiagCommand::Graph => handle_diag_graph(&cli, stdout),
             DiagCommand::GraphSnapshot(args) => {
                 handle_diag_graph_snapshot(&cli, args, stdout, stderr)
@@ -7694,6 +7767,8 @@ where
                     since: args.since.clone(),
                     dry_run: args.dry_run,
                     task_frame_id: None,
+                    bind_to_machine: args.bind_to_machine,
+                    machine_salt_path: None,
                 };
                 match create_handoff(&options) {
                     Ok(report) => match cli.renderer() {
@@ -7758,6 +7833,8 @@ where
                     bound_workspace_identity: None,
                     include_prompt_fragment: true,
                     require_fresh: args.require_fresh,
+                    insecure_skip_hmac: args.insecure_skip_hmac,
+                    machine_salt_path: None,
                 };
                 match resume_handoff(&options) {
                     Ok(report) => match cli.renderer() {
@@ -15349,6 +15426,52 @@ where
 // EE-243: Graph Diagnostic Output
 // ============================================================================
 
+fn handle_diag_disk_pressure<W>(
+    cli: &Cli,
+    args: &DiagDiskPressureArgs,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let (workspace_path, workspace_source) = resolve_workspace_for_cli(cli.workspace.as_deref());
+    let report = gather_disk_pressure_report(&DiskPressureOptions {
+        workspace: workspace_path,
+        workspace_source: workspace_source.as_str(),
+        top_limit: args.top_limit,
+        consumer_depth: args.consumer_depth,
+        consumer_entry_limit: args.consumer_entry_limit,
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let mut out = format!(
+                "disk pressure diagnostics\n\nposture: {}\nroots: {}\nrecovery actions: {}\n",
+                report.posture.as_str(),
+                report.roots.len(),
+                report.recovery_actions.len()
+            );
+            for guidance in &report.guidance {
+                out.push_str(&format!(
+                    "\n{}: {}\nNext: {}\n",
+                    guidance.severity, guidance.message, guidance.repair
+                ));
+            }
+            write_stdout(stdout, &out)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&workspace_response_json(&report)) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(workspace_response_json(&report) + "\n"))
+        }
+    }
+}
+
 fn handle_diag_write_owner<W>(
     cli: &Cli,
     args: &DiagWriteOwnerArgs,
@@ -15471,7 +15594,7 @@ where
     let now_ms = u64::from(args.enqueue);
     let status = spool.status(now_ms);
     let degraded = backpressure.as_ref().map_or_else(Vec::new, |error| {
-        vec![serde_json::json!({
+        let mut entries = vec![serde_json::json!({
             "code": error.code,
             "severity": "medium",
             "reason": error.reason.as_str(),
@@ -15483,7 +15606,36 @@ where
             "pendingBytes": error.pending_bytes,
             "maxPendingBytes": error.max_pending_bytes,
             "oldestQueuedAgeMs": error.oldest_queued_age_ms,
-        })]
+        })];
+        if error.reason == crate::core::write_owner::WriteSpoolBackpressureReason::QueueDepth {
+            entries.push(serde_json::json!({
+                "code": crate::core::write_owner::WRITE_QUEUE_FULL_CODE,
+                "severity": "low",
+                "reason": "queue_depth",
+                "message": format!(
+                    "Workspace write queue at capacity ({}/{}); retry recommended.",
+                    error.queue_depth,
+                    error.max_pending
+                ),
+                "repair": "retry with exponential backoff",
+                "queueCap": error.max_pending,
+                "queueDepth": error.queue_depth,
+                "recovery": [
+                    {
+                        "priority": 1,
+                        "kind": "flag",
+                        "hint": "Retry with --backoff-ms 100"
+                    },
+                    {
+                        "priority": 2,
+                        "kind": "config",
+                        "key": "writeSpool.queueCap",
+                        "valueHint": "increase if memory permits"
+                    }
+                ]
+            }));
+        }
+        entries
     });
     let data = serde_json::json!({
         "schema": "ee.write_spool.diagnostics.v1",
@@ -17205,10 +17357,9 @@ where
     }
     if review_state.is_some() || args.state_entered_at.is_some() || args.ttl_policy_id.is_some() {
         let review_state_text = review_state
-            .map_or_else(
-                || crate::curate::ReviewQueueState::from_candidate_status(candidate_status),
-                |state| state,
-            )
+            .unwrap_or_else(|| {
+                crate::curate::ReviewQueueState::from_candidate_status(candidate_status)
+            })
             .as_str()
             .to_string();
         let state_entered_at = args.state_entered_at.as_deref().unwrap_or(&args.created_at);
@@ -30775,6 +30926,52 @@ where
     }
 }
 
+fn handle_artifact_relocate<W, E>(
+    cli: &Cli,
+    args: &ArtifactRelocateArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let mode = if args.restore {
+        ArtifactRelocationMode::Restore
+    } else if args.apply {
+        ArtifactRelocationMode::Apply
+    } else {
+        ArtifactRelocationMode::Plan
+    };
+    let options = ArtifactRelocationOptions {
+        workspace_path: &workspace_path,
+        source_path: args.from.as_deref(),
+        destination_root: args.to.as_deref(),
+        manifest_path: &args.manifest,
+        actor: args.actor.as_deref(),
+        mode,
+        force_with_explicit_path: args.force_with_explicit_path,
+    };
+
+    match relocate_artifacts(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&report.data_json().to_string()) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_artifact_success(stdout, report.data_json()),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
 fn write_artifact_success<W>(stdout: &mut W, data: serde_json::Value) -> ProcessExitCode
 where
     W: Write,
@@ -31720,6 +31917,7 @@ impl NormalizedInvocation {
                     ArtifactCommand::Register(_) => "artifact register".to_string(),
                     ArtifactCommand::Inspect(_) => "artifact inspect".to_string(),
                     ArtifactCommand::List(_) => "artifact list".to_string(),
+                    ArtifactCommand::Relocate(_) => "artifact relocate".to_string(),
                 },
                 Command::Backup(backup) => match backup {
                     BackupCommand::Create(_) => "backup create".to_string(),
@@ -31797,6 +31995,7 @@ impl NormalizedInvocation {
                     DiagCommand::CurationCandidate(_) => "diag curation-candidate".to_string(),
                     DiagCommand::DatabaseSkew(_) => "diag database-skew".to_string(),
                     DiagCommand::Dependencies => "diag dependencies".to_string(),
+                    DiagCommand::DiskPressure(_) => "diag disk-pressure".to_string(),
                     DiagCommand::Graph => "diag graph".to_string(),
                     DiagCommand::GraphSnapshot(_) => "diag graph-snapshot".to_string(),
                     DiagCommand::Integrity(_) => "diag integrity".to_string(),
@@ -36646,6 +36845,31 @@ mod tests {
     }
 
     #[test]
+    fn diag_disk_pressure_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "diag",
+            "disk-pressure",
+            "--top-limit",
+            "3",
+            "--consumer-depth",
+            "1",
+            "--consumer-entry-limit",
+            "20",
+        ])
+        .map_err(|e| format!("failed to parse diag disk-pressure: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::DiskPressure(args))) => {
+                ensure_equal(&args.top_limit, &3, "top limit")?;
+                ensure_equal(&args.consumer_depth, &1, "consumer depth")?;
+                ensure_equal(&args.consumer_entry_limit, &20, "consumer entry limit")
+            }
+            _ => Err("expected diag disk-pressure command".to_string()),
+        }
+    }
+
+    #[test]
     fn diag_write_owner_command_parses() -> TestResult {
         let parsed = Cli::try_parse_from([
             "ee",
@@ -37527,6 +37751,16 @@ default_half_life_days = 45
         )?;
         ensure_contains(
             &stdout,
+            "\"code\":\"write_queue_full\"",
+            "write queue full alias code",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"repair\":\"retry with exponential backoff\"",
+            "write queue full recovery repair",
+        )?;
+        ensure_contains(
+            &stdout,
             "\"reason\":\"queue_depth\"",
             "write-spool backpressure reason",
         )?;
@@ -37536,6 +37770,51 @@ default_half_life_days = 45
             "write-spool repair",
         )?;
         ensure(stderr.is_empty(), "diag write-spool json stderr empty")
+    }
+
+    #[test]
+    fn diag_disk_pressure_json_reports_read_only_recovery_plan() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "diag",
+            "disk-pressure",
+            "--workspace",
+            ".",
+            "--top-limit",
+            "1",
+            "--consumer-depth",
+            "0",
+            "--consumer-entry-limit",
+            "5",
+            "--json",
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "diag disk-pressure json exit",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"schema\":\"ee.disk_pressure.diagnostics.v1\"",
+            "disk-pressure diagnostics schema",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"mutationPolicy\":\"read_only_report_no_files_modified\"",
+            "read-only mutation policy",
+        )?;
+        ensure_contains(&stdout, "\"roots\":[", "disk-pressure roots")?;
+        ensure_contains(
+            &stdout,
+            "\"recoveryActions\":[",
+            "disk-pressure recovery actions",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"cargo_target\"",
+            "cargo target root is inspected",
+        )?;
+        ensure(stderr.is_empty(), "diag disk-pressure json stderr empty")
     }
 
     #[test]

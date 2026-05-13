@@ -34,6 +34,8 @@ in the same commit, keeping the catalog complete by construction.
 | `stale_validity_filtered` | search | low | bd-17c65.10.6 (J6) |
 | `malformed_validity_filtered` | search | medium | bd-17c65.10.6 (J6) |
 | `validity_filtered_significant_recall_drop` | search, context | info | bd-17c65.10.6 (J6) |
+| `output_redaction_disabled` | search, context | info | bd-17c65.2.9 (B10) |
+| `handoff_snapshot_stale` | handoff resume | medium | bd-17c65.13.5 (M4) |
 | `profile_search_limit_capped` | search, diag search | low | bd-17c65.2.4 (B7) |
 | `context_profile_budget_capped` | context | low | bd-17c65.10.6 (J6) |
 | `context_evidence_freshness_changed_source` | context | low | bd-17c65.1.2 (A2) |
@@ -191,6 +193,7 @@ in the same commit, keeping the catalog complete by construction.
 | `swarm_scale_nondeterminism` | swarm-scale benchmark | high | bd-1zb7k.8 (S7) |
 | `write_owner_busy` | write owner | medium | bd-17c65.10.6 (J6) |
 | `write_spool_backpressure` | write spool | medium | bd-17c65.10.6 (J6) |
+| `write_queue_full` | write spool | low | bd-17c65.12.2 (L1) |
 | `situation_decisioning_unavailable` | situation classify | warning | bd-17c65.10.6 (J6) |
 | `clustering_insufficient_data` | learn cluster, curate candidates | warning | bd-17c65.10.6 (J6) |
 | `clustering_threshold_too_strict` | learn cluster, curate candidates | warning | bd-17c65.10.6 (J6) |

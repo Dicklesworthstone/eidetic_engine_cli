@@ -1,8 +1,11 @@
 //! N4.2 tests for the deterministic runtime capability token.
 
+use std::collections::BTreeSet;
+
+use ee::core::determinism::{SEED_LABEL_REGISTRY, THREADING_SURFACES};
 use ee::runtime::determinism::{
     DeterminismError, Deterministic, RANDOMNESS_INVENTORY_ROWS_CONTENT_HASH, RandomnessConsumer,
-    SeedSource,
+    Seed, SeedSource,
 };
 
 type TestResult<T = ()> = Result<T, String>;
@@ -77,6 +80,29 @@ fn child_split_is_reproducible_and_distinct() {
 }
 
 #[test]
+fn child_split_is_label_keyed_and_parent_replayable() {
+    let mut parent_a = Deterministic::from_seed(9);
+    let retrieval_a = parent_a.child("retrieval");
+    let pack_a = parent_a.child("pack");
+
+    let mut parent_b = Deterministic::from_seed(9);
+    let retrieval_b = parent_b.child("retrieval");
+    let pack_b = parent_b.child("pack");
+
+    assert_eq!(retrieval_a.seed(), retrieval_b.seed());
+    assert_eq!(pack_a.seed(), pack_b.seed());
+    assert_ne!(
+        retrieval_a.seed(),
+        pack_a.seed(),
+        "child labels must be part of the derived seed contract"
+    );
+    assert_eq!(retrieval_a.source(), SeedSource::Child);
+    assert_eq!(pack_a.source(), SeedSource::Child);
+    assert!(retrieval_a.scope().contains("retrieval#0"));
+    assert!(pack_a.scope().contains("pack#1"));
+}
+
+#[test]
 fn deterministic_rng_replays_same_bytes() {
     let mut token_a = Deterministic::from_seed(77);
     let mut token_b = Deterministic::from_seed(77);
@@ -137,6 +163,12 @@ fn token_is_send_but_not_sync_by_doctest_contract() {
 }
 
 #[test]
+fn deterministic_seed_token_compile_time_guards_hold() {
+    static_assertions::assert_impl_all!(Deterministic<Seed>: Send);
+    static_assertions::assert_not_impl_any!(Deterministic<Seed>: Clone, Copy, Sync);
+}
+
+#[test]
 fn inventory_hash_is_cited_by_the_module() {
     assert_eq!(
         RANDOMNESS_INVENTORY_ROWS_CONTENT_HASH,
@@ -162,4 +194,197 @@ fn deterministic_sequence_snapshot_is_stable() {
     );
 
     assert_eq!(summary, SNAPSHOT);
+}
+
+fn child_thread_summary(label: &'static str, mut token: Deterministic<Seed>) -> String {
+    let first_uuid = token.clock().next_uuid_v7();
+    let first_word = token.rng().next_u64();
+    format!(
+        "{label}:{scope}:{seed}:{uuid}:{word}",
+        scope = token.scope(),
+        seed = token.seed().as_u64(),
+        uuid = first_uuid,
+        word = first_word
+    )
+}
+
+fn concurrent_child_summaries() -> TestResult<Vec<String>> {
+    let mut parent = Deterministic::from_seed(404);
+    let left = parent.child("thread.left");
+    let right = parent.child("thread.right");
+
+    let left_handle = std::thread::spawn(move || child_thread_summary("left", left));
+    let right_handle = std::thread::spawn(move || child_thread_summary("right", right));
+
+    let mut summaries = vec![
+        left_handle
+            .join()
+            .map_err(|_| "left deterministic child thread panicked".to_owned())?,
+        right_handle
+            .join()
+            .map_err(|_| "right deterministic child thread panicked".to_owned())?,
+    ];
+    summaries.sort();
+    Ok(summaries)
+}
+
+#[test]
+fn child_tokens_can_be_consumed_concurrently_without_shared_parent() -> TestResult {
+    let first = concurrent_child_summaries()?;
+    let second = concurrent_child_summaries()?;
+
+    assert_eq!(first, second);
+    assert_eq!(first.len(), 2);
+    assert_ne!(first[0], first[1]);
+
+    Ok(())
+}
+
+#[test]
+fn n4_3_threading_surface_checklist_is_executable() -> TestResult {
+    let expected = [
+        "crate::core::search::run_search",
+        "crate::core::search::canonicalize_equivalent_component_scores",
+        "crate::core::search::search_sync",
+        "crate::pack::assemble_draft_with_profile_and_options",
+        "crate::pack::assemble_mmr_draft",
+        "crate::models::Id::now",
+        "crate::db::generate_audit_id",
+        "crate::core::workspace::stable_workspace_id",
+        "crate::core::context::persist_pack_record",
+        "crate::runtime::determinism::DeterministicClock::next_uuid_v7",
+    ];
+
+    if THREADING_SURFACES != expected.as_slice() {
+        return Err(format!(
+            "N4.3 threading checklist drifted.\nexpected: {expected:?}\nactual:   {THREADING_SURFACES:?}",
+        ));
+    }
+
+    let unique = THREADING_SURFACES.iter().copied().collect::<BTreeSet<_>>();
+    if unique.len() != THREADING_SURFACES.len() {
+        return Err(format!(
+            "N4.3 threading checklist contains duplicates: {THREADING_SURFACES:?}",
+        ));
+    }
+    if THREADING_SURFACES
+        .iter()
+        .any(|surface| !surface.starts_with("crate::") || !surface.contains("::"))
+    {
+        return Err(format!(
+            "N4.3 threading checklist entries must be fully-qualified Rust paths: {THREADING_SURFACES:?}",
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn n4_3_threading_surfaces_have_seed_label_registry_rows() -> TestResult {
+    for (call_site, label_fragment) in [
+        ("src/core/search.rs:run_search", "search."),
+        (
+            "src/core/search.rs:canonicalize_equivalent_component_scores",
+            "search.canonical_ties",
+        ),
+        ("src/core/search.rs:search_sync", "search.rerank"),
+        ("src/pack/mod.rs:assemble_mmr_draft", "pack.mmr_tiebreak"),
+        ("src/models/id.rs:Id::now", "ulid.memory"),
+        ("src/db/mod.rs:generate_audit_id", "ulid.audit"),
+        (
+            "src/core/workspace.rs:stable_workspace_id",
+            "ulid.workspace",
+        ),
+        ("src/core/context.rs:persist_pack_record", "ulid.pack"),
+    ] {
+        let found = SEED_LABEL_REGISTRY.iter().any(|definition| {
+            definition.producer_call_site == call_site && definition.label.contains(label_fragment)
+        });
+        if !found {
+            return Err(format!(
+                "N4.3 threading surface `{call_site}` lacks a matching seed label registry row containing `{label_fragment}`",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn n4_3_threading_surfaces_point_at_real_source_symbols() -> TestResult {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    for surface in THREADING_SURFACES {
+        let (file, symbol) = threading_surface_source_site(surface)?;
+        let path = manifest_dir.join(&file);
+        let source = std::fs::read_to_string(&path).map_err(|error| {
+            format!("N4.3 threading surface `{surface}` points at unreadable `{file}`: {error}")
+        })?;
+        if !source.contains(&symbol) {
+            return Err(format!(
+                "N4.3 threading surface `{surface}` points at `{file}` but symbol `{symbol}` was not found",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn threading_surface_source_site(surface: &str) -> Result<(String, String), String> {
+    let surface = surface
+        .strip_prefix("crate::")
+        .ok_or_else(|| format!("N4.3 threading surface `{surface}` must start with `crate::`"))?;
+    let parts = surface.split("::").collect::<Vec<_>>();
+    let symbol = parts
+        .last()
+        .filter(|part| !part.is_empty())
+        .ok_or_else(|| format!("N4.3 threading surface `{surface}` has no symbol"))?
+        .to_string();
+    let file = match parts.as_slice() {
+        ["core", module, ..] => format!("src/core/{module}.rs"),
+        ["db", ..] => "src/db/mod.rs".to_owned(),
+        ["models", "Id", ..] => "src/models/id.rs".to_owned(),
+        ["pack", ..] => "src/pack/mod.rs".to_owned(),
+        ["runtime", "determinism", ..] => "src/runtime/determinism.rs".to_owned(),
+        _ => {
+            return Err(format!(
+                "N4.3 threading surface `crate::{surface}` has no source-file mapping",
+            ));
+        }
+    };
+    Ok((file, symbol))
+}
+
+#[test]
+fn seed_label_registry_points_at_real_source_files() -> TestResult {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    for definition in SEED_LABEL_REGISTRY {
+        let (file, symbol) = definition
+            .producer_call_site
+            .split_once(':')
+            .ok_or_else(|| {
+                format!(
+                    "seed label `{}` has invalid producer call site `{}`",
+                    definition.label, definition.producer_call_site
+                )
+            })?;
+        let path = manifest_dir.join(file);
+        let source = std::fs::read_to_string(&path).map_err(|error| {
+            format!(
+                "seed label `{}` points at unreadable source file `{}`: {error}",
+                definition.label,
+                path.display()
+            )
+        })?;
+        let symbol_name = symbol.rsplit("::").next().unwrap_or(symbol);
+        if !source.contains(symbol_name) {
+            return Err(format!(
+                "seed label `{}` producer call site `{}` does not mention symbol `{symbol_name}`",
+                definition.label, definition.producer_call_site
+            ));
+        }
+    }
+
+    Ok(())
 }

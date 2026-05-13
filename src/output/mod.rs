@@ -2232,6 +2232,9 @@ pub fn render_context_response_json_with_options(
                 obj.field_str("memoryId", &item.memory_id.to_string());
                 obj.field_str("section", item.section.as_str());
                 obj.field_str("content", &item.content);
+                if !item.redactions.is_empty() {
+                    obj.field_bool("contentRedacted", true);
+                }
                 obj.field_u32("estimatedTokens", item.estimated_tokens);
                 obj.field_object("scores", |scores| {
                     scores.field_raw("relevance", &score_json(item.relevance.into_inner()));
@@ -2520,6 +2523,9 @@ pub fn render_context_response_jsonl(response: &ContextResponse) -> String {
         line.field_str("memoryId", &item.memory_id.to_string());
         line.field_str("section", item.section.as_str());
         line.field_str("content", &item.content);
+        if !item.redactions.is_empty() {
+            line.field_bool("contentRedacted", true);
+        }
         line.field_u32("estimatedTokens", item.estimated_tokens);
         line.field_str("why", &item.why);
         line.field_str("selectedIn", item.selected_in.as_str());
@@ -8175,6 +8181,9 @@ fn domain_error_severity(error: &DomainError) -> &'static str {
     if error.code().starts_with("level_transition_") {
         return "medium";
     }
+    if error.code().starts_with("handoff_") || error.code().starts_with("strict_mode_") {
+        return "high";
+    }
     match error {
         DomainError::Usage { .. }
         | DomainError::UsageWithDetails { .. }
@@ -8186,6 +8195,7 @@ fn domain_error_severity(error: &DomainError) -> &'static str {
         | DomainError::Graph { .. }
         | DomainError::Import { .. }
         | DomainError::UnsatisfiedDegradedMode { .. }
+        | DomainError::UnsatisfiedDegradedModeCode { .. }
         | DomainError::PolicyDenied { .. }
         | DomainError::PolicyDeniedWithDetails { .. }
         | DomainError::MigrationRequired { .. } => "medium",
@@ -11539,7 +11549,7 @@ pub fn render_handoff_inspect_toon(report: &HandoffInspectReport) -> String {
 /// Render a handoff resume report as JSON.
 #[must_use]
 pub fn render_handoff_resume_json(report: &HandoffResumeReport) -> String {
-    serde_json::json!({
+    let value = serde_json::json!({
         "schema": report.schema,
         "capsule_id": report.capsule_id,
         "capsule_path": report.capsule_path,
@@ -11553,12 +11563,45 @@ pub fn render_handoff_resume_json(report: &HandoffResumeReport) -> String {
         "recent_outcomes": report.recent_outcomes,
         "selected_memories": report.selected_memories,
         "active_focus": report.active_focus,
+        "task_frame": report.task_frame,
         "swarm_brief_summary": report.swarm_brief_summary,
         "artifact_pointers": report.artifact_pointers,
         "degradations": report.degradations,
-        "resumed_at": report.resumed_at
-    })
-    .to_string()
+        "resumed_at": report.resumed_at,
+        "prompt_fragment": report.prompt_fragment,
+        "workspace_mismatch": report.workspace_mismatch,
+        "workspace_match": report.workspace_match,
+        "stale_snapshot": report.stale_snapshot
+    });
+    log_handoff_resume_size_check(report, &value);
+    value.to_string()
+}
+
+fn log_handoff_resume_size_check(report: &HandoffResumeReport, value: &serde_json::Value) {
+    let current_bytes = serde_json::to_vec(value).map_or(0, |bytes| bytes.len());
+    let mut baseline = value.clone();
+    if let Some(object) = baseline.as_object_mut() {
+        object.remove("stale_snapshot");
+    }
+    let baseline_bytes = serde_json::to_vec(&baseline).map_or(0, |bytes| bytes.len());
+    let overhead_bytes = current_bytes.saturating_sub(baseline_bytes);
+    let budget_bytes = baseline_bytes.div_ceil(12);
+    let overhead_pct = if baseline_bytes == 0 {
+        0.0
+    } else {
+        overhead_bytes as f64 * 100.0 / baseline_bytes as f64
+    };
+    tracing::info!(
+        event = "handoff_resume_size_check",
+        capsule_id = %report.capsule_id,
+        baseline_bytes,
+        current_bytes,
+        overhead_bytes,
+        budget_bytes,
+        within_budget = overhead_bytes <= budget_bytes,
+        overhead_pct,
+        "handoff resume stale snapshot size budget computed"
+    );
 }
 
 /// Render a handoff resume report as human-readable text.
@@ -12947,6 +12990,11 @@ mod tests {
             &json,
             "\"content\":\"Keep the operational note; mask api_key=[REDACTED:api_key] for review.\"",
             "context JSON emits redacted pack content",
+        )?;
+        ensure_contains(
+            &json,
+            "\"contentRedacted\":true",
+            "context JSON flags redacted pack content",
         )?;
         ensure_contains(
             &json,

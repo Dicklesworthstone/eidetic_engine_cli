@@ -1125,6 +1125,7 @@ dependencies = [
  "sha2 0.10.9",
  "sqlmodel-core",
  "sqlmodel-frankensqlite",
+ "static_assertions",
  "tempfile",
  "tiktoken-rs",
  "toml_edit",

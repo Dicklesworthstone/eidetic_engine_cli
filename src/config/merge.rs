@@ -15,9 +15,9 @@ use serde::Serialize;
 
 use super::env_registry::EnvVar;
 use super::file::{
-    CassConfig, ConfigFile, CurationConfig, FeedbackConfig, LearnConfig, LearnDecayConfig,
-    PackConfig, PolicyConfig, PrivacyConfig, RuntimeConfig, SearchConfig, SearchSpeed,
-    SecretDetectorConfig, StorageConfig, TrustConfig,
+    CassConfig, ConfigFile, CurationConfig, FeedbackConfig, HandoffConfig, LearnConfig,
+    LearnDecayConfig, OutputRedactionConfig, PackConfig, PolicyConfig, PrivacyConfig,
+    RuntimeConfig, SearchConfig, SearchSpeed, SecretDetectorConfig, StorageConfig, TrustConfig,
 };
 use super::path::{PathExpander, PathExpansionError};
 
@@ -60,6 +60,7 @@ pub const FEEDBACK_HARMFUL_PER_SOURCE_PER_HOUR_KEY: &str = "feedback.harmful_per
 pub const FEEDBACK_HARMFUL_BURST_WINDOW_SECONDS_KEY: &str = "feedback.harmful_burst_window_seconds";
 pub const POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY: &str = "policy.secret_detector.allow_phrases";
 pub const POLICY_SECRET_DETECTOR_ALLOW_REGEX_KEY: &str = "policy.secret_detector.allow_regex";
+pub const POLICY_OUTPUT_REDACTION_ENABLED_KEY: &str = "policy.output_redaction.enabled";
 pub const PRIVACY_REDACT_SECRETS_KEY: &str = "privacy.redact_secrets";
 pub const PRIVACY_REDACTION_CLASSES_KEY: &str = "privacy.redaction_classes";
 pub const TRUST_DEFAULT_CLASS_KEY: &str = "trust.default_class";
@@ -389,6 +390,13 @@ impl MergedConfig {
                 self.source(POLICY_SECRET_DETECTOR_ALLOW_REGEX_KEY),
             ));
         }
+        if let Some(enabled) = self.values.policy.output_redaction.enabled {
+            entries.push(ConfigShowEntry::new(
+                POLICY_OUTPUT_REDACTION_ENABLED_KEY,
+                enabled.to_string(),
+                self.source(POLICY_OUTPUT_REDACTION_ENABLED_KEY),
+            ));
+        }
 
         // Privacy section
         if let Some(redact) = self.values.privacy.redact_secrets {
@@ -502,6 +510,7 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             mmr_lambda: Some(0.7),
             candidate_pool: Some(100),
         },
+        handoff: HandoffConfig::default(),
         curation: CurationConfig {
             duplicate_similarity: Some(0.92),
             harmful_weight: Some(2.5),
@@ -525,7 +534,12 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             harmful_per_source_per_hour: Some(5),
             harmful_burst_window_seconds: Some(3600),
         },
-        policy: PolicyConfig::default(),
+        policy: PolicyConfig {
+            output_redaction: OutputRedactionConfig {
+                enabled: Some(true),
+            },
+            ..PolicyConfig::default()
+        },
         privacy: PrivacyConfig {
             redact_secrets: Some(true),
             redaction_classes: Some(vec![
@@ -563,6 +577,7 @@ pub fn config_from_env(
         runtime: RuntimeConfig::default(),
         cass: CassConfig::default(),
         search: SearchConfig::default(),
+        handoff: HandoffConfig::default(),
         pack: PackConfig {
             default_profile: optional_env_string(env, EnvVar::Profile.name())?,
             default_format: None,
@@ -808,6 +823,7 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.defaults.pack.candidate_pool,
             ),
         },
+        handoff: HandoffConfig::default(),
         curation: CurationConfig {
             duplicate_similarity: pick_field(
                 &mut sources,
@@ -978,6 +994,17 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                     &layers.project.policy.secret_detector.allow_regex,
                     &layers.user.policy.secret_detector.allow_regex,
                     &layers.defaults.policy.secret_detector.allow_regex,
+                ),
+            },
+            output_redaction: OutputRedactionConfig {
+                enabled: pick_field(
+                    &mut sources,
+                    POLICY_OUTPUT_REDACTION_ENABLED_KEY,
+                    &layers.cli.policy.output_redaction.enabled,
+                    &layers.environment.policy.output_redaction.enabled,
+                    &layers.project.policy.output_redaction.enabled,
+                    &layers.user.policy.output_redaction.enabled,
+                    &layers.defaults.policy.output_redaction.enabled,
                 ),
             },
         },
@@ -1295,6 +1322,7 @@ mod tests {
                     allow_phrases: Some(vec!["OAuth refresh token".to_string()]),
                     ..SecretDetectorConfig::default()
                 },
+                ..PolicyConfig::default()
             },
             ..ConfigFile::default()
         };

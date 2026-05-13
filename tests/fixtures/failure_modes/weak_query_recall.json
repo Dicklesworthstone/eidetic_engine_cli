@@ -17,8 +17,8 @@
     "code": "weak_query_recall",
     "severity": "low",
     "message_contains": [
-      "Top result scored",
-      "against floor"
+      "Top score",
+      "below"
     ]
   }
 }

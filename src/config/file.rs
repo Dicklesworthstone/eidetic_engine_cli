@@ -21,6 +21,7 @@ pub struct ConfigFile {
     pub cass: CassConfig,
     pub search: SearchConfig,
     pub pack: PackConfig,
+    pub handoff: HandoffConfig,
     pub curation: CurationConfig,
     pub learn: LearnConfig,
     pub feedback: FeedbackConfig,
@@ -70,6 +71,7 @@ impl ConfigFile {
             cass: CassConfig::parse(&document)?,
             search: SearchConfig::parse(&document)?,
             pack: PackConfig::parse(&document)?,
+            handoff: HandoffConfig::parse(&document)?,
             curation: CurationConfig::parse(&document)?,
             learn: LearnConfig::parse(&document)?,
             feedback: FeedbackConfig::parse(&document)?,
@@ -210,6 +212,43 @@ impl PackConfig {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
+pub struct HandoffConfig {
+    pub stale_threshold: HandoffStaleThresholdConfig,
+}
+
+impl HandoffConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            stale_threshold: HandoffStaleThresholdConfig::parse(document)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HandoffStaleThresholdConfig {
+    pub memories_added: Option<u64>,
+    pub any_expired_in_pack: Option<bool>,
+    pub content_drift_score: Option<f64>,
+    pub memories_revised: Option<u64>,
+}
+
+impl HandoffStaleThresholdConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        const SECTIONS: &[&str] = &["handoff", "stale_threshold"];
+        Ok(Self {
+            memories_added: optional_u64_path(document, SECTIONS, "memories_added")?,
+            any_expired_in_pack: optional_bool_path(document, SECTIONS, "any_expired_in_pack")?,
+            content_drift_score: optional_unit_float_path(
+                document,
+                SECTIONS,
+                "content_drift_score",
+            )?,
+            memories_revised: optional_u64_path(document, SECTIONS, "memories_revised")?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct CurationConfig {
     pub duplicate_similarity: Option<f64>,
     pub harmful_weight: Option<f64>,
@@ -329,12 +368,27 @@ impl FeedbackConfig {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PolicyConfig {
     pub secret_detector: SecretDetectorConfig,
+    pub output_redaction: OutputRedactionConfig,
 }
 
 impl PolicyConfig {
     fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
         Ok(Self {
             secret_detector: SecretDetectorConfig::parse(document)?,
+            output_redaction: OutputRedactionConfig::parse(document)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OutputRedactionConfig {
+    pub enabled: Option<bool>,
+}
+
+impl OutputRedactionConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            enabled: optional_bool_path(document, &["policy", "output_redaction"], "enabled")?,
         })
     }
 }
@@ -500,6 +554,23 @@ fn optional_bool(
     }
 }
 
+fn optional_bool_path(
+    document: &DocumentMut,
+    sections: &[&str],
+    key: &str,
+) -> Result<Option<bool>, ConfigParseError> {
+    match item_path(document, sections, key) {
+        Some(value) => value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| ConfigParseError::InvalidType {
+                key: key_path_name(sections, key),
+                expected: "a boolean",
+            }),
+        None => Ok(None),
+    }
+}
+
 fn optional_u64(
     document: &DocumentMut,
     section: &str,
@@ -515,6 +586,28 @@ fn optional_u64(
             }),
             None => Err(ConfigParseError::InvalidType {
                 key: key_name(section, key),
+                expected: "an integer",
+            }),
+        },
+        None => Ok(None),
+    }
+}
+
+fn optional_u64_path(
+    document: &DocumentMut,
+    sections: &[&str],
+    key: &str,
+) -> Result<Option<u64>, ConfigParseError> {
+    match item_path(document, sections, key) {
+        Some(value) => match value.as_integer() {
+            Some(integer) if integer >= 0 => Ok(Some(integer as u64)),
+            Some(integer) => Err(ConfigParseError::InvalidValue {
+                key: key_path_name(sections, key),
+                value: integer.to_string(),
+                message: "expected a non-negative integer".to_string(),
+            }),
+            None => Err(ConfigParseError::InvalidType {
+                key: key_path_name(sections, key),
                 expected: "an integer",
             }),
         },
@@ -815,6 +908,12 @@ default_max_tokens = 4000
 mmr_lambda = 0.7
 candidate_pool = 100
 
+[handoff.stale_threshold]
+memories_added = 20
+any_expired_in_pack = true
+content_drift_score = 0.15
+memories_revised = 0
+
 [curation]
 duplicate_similarity = 0.92
 harmful_weight = 2.5
@@ -837,6 +936,9 @@ default_half_life_days = 30
 [policy.secret_detector]
 allow_phrases = ["OAuth refresh token", "secret ballot"]
 allow_regex = ["fake-key-[A-Z]{4}"]
+
+[policy.output_redaction]
+enabled = false
 
 [privacy]
 redact_secrets = true
@@ -887,6 +989,26 @@ prompt_injection_guard = true
         )?;
         ensure_equal(&config.pack.default_max_tokens, &Some(4000), "max tokens")?;
         ensure_equal(
+            &config.handoff.stale_threshold.memories_added,
+            &Some(20),
+            "handoff stale memories added threshold",
+        )?;
+        ensure_equal(
+            &config.handoff.stale_threshold.any_expired_in_pack,
+            &Some(true),
+            "handoff stale expired threshold",
+        )?;
+        ensure_equal(
+            &config.handoff.stale_threshold.content_drift_score,
+            &Some(0.15),
+            "handoff stale content drift threshold",
+        )?;
+        ensure_equal(
+            &config.handoff.stale_threshold.memories_revised,
+            &Some(0),
+            "handoff stale memories revised threshold",
+        )?;
+        ensure_equal(
             &config.curation.harmful_weight,
             &Some(2.5),
             "harmful weight",
@@ -930,6 +1052,11 @@ prompt_injection_guard = true
             "secret detector allow regex",
         )?;
         ensure_equal(
+            &config.policy.output_redaction.enabled,
+            &Some(false),
+            "output redaction enabled",
+        )?;
+        ensure_equal(
             &config.privacy.redaction_classes,
             &Some(vec![
                 "api_key".to_string(),
@@ -967,6 +1094,21 @@ prompt_injection_guard = true
             &config.policy.secret_detector.allow_phrases,
             &None,
             "allow phrases",
+        )?;
+        ensure_equal(
+            &config.policy.output_redaction.enabled,
+            &None,
+            "output redaction enabled",
+        )?;
+        ensure_equal(
+            &config.handoff.stale_threshold.memories_added,
+            &None,
+            "handoff stale memories added threshold",
+        )?;
+        ensure_equal(
+            &config.handoff.stale_threshold.any_expired_in_pack,
+            &None,
+            "handoff stale expired threshold",
         )?;
         ensure_equal(
             &config.privacy.redaction_classes,
@@ -1047,6 +1189,30 @@ prompt_injection_guard = true
                     if key == "learn.decay.procedural_rule_half_life_days"
             ),
             format!("unexpected half-life error: {half_life_error:?}"),
+        )
+    }
+
+    #[test]
+    fn rejects_invalid_handoff_stale_threshold_values() -> TestResult {
+        let drift_error =
+            expect_config_error("[handoff.stale_threshold]\ncontent_drift_score = 1.5\n")?;
+        ensure(
+            matches!(
+                drift_error,
+                ConfigParseError::InvalidValue { ref key, .. }
+                    if key == "handoff.stale_threshold.content_drift_score"
+            ),
+            format!("unexpected drift threshold error: {drift_error:?}"),
+        )?;
+
+        let added_error = expect_config_error("[handoff.stale_threshold]\nmemories_added = -1\n")?;
+        ensure(
+            matches!(
+                added_error,
+                ConfigParseError::InvalidValue { ref key, .. }
+                    if key == "handoff.stale_threshold.memories_added"
+            ),
+            format!("unexpected memories added threshold error: {added_error:?}"),
         )
     }
 

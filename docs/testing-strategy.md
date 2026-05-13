@@ -157,6 +157,67 @@ progress bars, tracing, warnings, or debug text appear there. stderr assertions
 should allow diagnostics but require stable structure for JSONL progress events
 once those events exist.
 
+### E2E Retention Mode
+
+Agent-run e2e scripts must support an explicit retention mode for auditability
+and for compliance with the repository's no-deletion operating rule.
+
+Set these variables when an agent needs to inspect artifacts after a run:
+
+```bash
+EE_E2E_KEEP_WORKSPACE=1
+EE_E2E_KEEP_ARTIFACTS=1
+```
+
+The shared `scripts/e2e_overhaul/lib/shared.sh` helper writes
+`e2e_retention_manifest.json` in the e2e workspace. The manifest schema is
+`ee.e2e.retention_manifest.v1` and records the epic name, workspace path, J1 log
+path, `EE_BINARY`, keep flags, cleanup policy, and retained artifact paths.
+When `EE_E2E_KEEP_WORKSPACE=1` is set, teardown prints the retained workspace
+and manifest path to stderr and leaves the workspace in place.
+
+E2E scripts should use the shared `epic_setup` / `_epic_teardown` path rather
+than deleting workspaces directly. Any cleanup path must prove it owns the temp
+workspace it is about to remove; direct recursive deletion in per-epic scripts is
+not allowed. Retained workspaces and manifests are verification evidence. Do not
+remove them during an agent session unless the user explicitly authorizes the
+exact deletion.
+
+### RCH Stranded-Result Recovery
+
+Remote verification can produce useful RCH artifacts even when the local wrapper
+exits indeterminately. Use `scripts/rch_recover_verification.sh --job-id <id>
+--status-json <rch-status.json> --json` to produce an `ee.rch.recovery_report.v1`
+summary from `rch status --jobs --json` plus optional artifact/log hints.
+
+The report is intentionally fail-closed:
+
+- explicit recent RCH exit `0` is `status: pass`;
+- explicit recent non-zero exit is `status: fail`;
+- candidate binaries without terminal RCH status are
+  `status: indeterminate_recovered_artifact`, not pass evidence;
+- mismatched command hashes set `unsafe_ambiguity: true`;
+- `safe_for_closure_evidence` is true only for explicit pass/fail records without
+  unsafe ambiguity.
+
+The helper never kills jobs, deletes remote files, or ingests verification
+evidence. If recovery is inconclusive, use the emitted
+`manual_inspection_commands` to inspect the worker and then record evidence
+explicitly through the S2 verification ledger.
+
+### J1 Artifact Manifests
+
+Structured E2E logs include `kind: "artifact_manifest"` events using manifest
+schema `ee.test_artifact_manifest.v1`. The bash J1 harness emits one after each
+`e2e_log_command` and records the exercised binary path/hash, command hash,
+source hash, execution substrate, target directory, fixture filter, J1 log path,
+and retention manifest path.
+
+The manifest is verification evidence only: it never stores raw stdout, stderr,
+or domain data, and it does not upload, delete, or ingest artifacts. If a binary
+hash is unavailable, `binary_hash_status` records the warning state so closeout
+audits can block or caveat the evidence instead of guessing.
+
 ### Boundary-Migration Log Schema
 
 Mechanical-boundary migration tests must use `ee.e2e.boundary_log.v1` as the

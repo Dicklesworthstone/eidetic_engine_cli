@@ -53,17 +53,17 @@ impl SeedLabelDefinition {
 pub const SEED_LABEL_REGISTRY: &[SeedLabelDefinition] = &[
     SeedLabelDefinition::new(
         "pack.mmr_tiebreak",
-        "src/core/pack.rs:assemble_pack",
+        "src/pack/mod.rs:assemble_mmr_draft",
         "MMR diversity tie-breaks during pack assembly",
     ),
     SeedLabelDefinition::new(
         "pack.selection_id",
-        "src/core/pack.rs:persist_pack_record",
+        "src/core/context.rs:persist_pack_record",
         "Context pack selection and persisted pack IDs",
     ),
     SeedLabelDefinition::new(
         "pack.skipped_order",
-        "src/core/pack.rs:skipped_candidates",
+        "src/pack/mod.rs:PackDraft::skipped_for_output",
         "Stable ordering for omitted or skipped candidates",
     ),
     SeedLabelDefinition::new(
@@ -73,64 +73,79 @@ pub const SEED_LABEL_REGISTRY: &[SeedLabelDefinition] = &[
     ),
     SeedLabelDefinition::new(
         "search.canonical_ties",
-        "src/core/search.rs:canonicalize_result_ties",
+        "src/core/search.rs:canonicalize_equivalent_component_scores",
         "Stable ordering for equal-score search results",
     ),
     SeedLabelDefinition::new(
         "search.rerank",
-        "src/core/search.rs:rerank_top_k",
+        "src/core/search.rs:search_sync",
         "Rerank-stage deterministic tie-breaks",
     ),
     SeedLabelDefinition::new(
         "ulid.memory",
-        "src/db/id_gen.rs:next_memory_id",
+        "src/models/id.rs:Id::now",
         "Memory UUIDv7 generation",
     ),
     SeedLabelDefinition::new(
         "ulid.audit",
-        "src/db/id_gen.rs:next_audit_id",
+        "src/db/mod.rs:generate_audit_id",
         "Audit UUIDv7 generation",
     ),
     SeedLabelDefinition::new(
         "ulid.workspace",
-        "src/db/id_gen.rs:next_workspace_id",
+        "src/core/workspace.rs:stable_workspace_id",
         "Workspace UUIDv7 generation",
     ),
     SeedLabelDefinition::new(
         "ulid.pack",
-        "src/core/pack.rs:pack_id",
+        "src/core/context.rs:persist_pack_record",
         "Context pack UUIDv7 generation",
     ),
     SeedLabelDefinition::new(
         "clustering.kmeans_init",
-        "src/curate/clustering.rs",
-        "Cluster centroid initialization",
+        "src/curate/cluster_coherence.rs:centroid_hash",
+        "Cluster centroid hash derivation",
     ),
     SeedLabelDefinition::new(
         "counterfactual.replay",
-        "src/core/lab.rs:counterfactual_replay",
+        "src/core/lab.rs:run_counterfactual",
         "Counterfactual replay child seed",
     ),
     SeedLabelDefinition::new(
         "lab.replay",
-        "src/core/lab.rs:replay",
+        "src/core/lab.rs:replay_episode",
         "Lab replay child seed",
     ),
 ];
 
-/// N4.3 threading checklist. Each row becomes an implementation row in
+/// N4.3 threading checklist.
+///
+/// Each row becomes an implementation row in
 /// `tests/determinism_token_threading_unit.rs` when the token is threaded.
+///
+/// | Row | Surface | Token shape |
+/// | --- | --- | --- |
+/// | 1 | `crate::core::search::run_search` | `&Deterministic<Seed>` |
+/// | 2 | `crate::core::search::canonicalize_equivalent_component_scores` | `&Deterministic<Seed>` |
+/// | 3 | `crate::core::search::search_sync` | `&Deterministic<Seed>` |
+/// | 4 | `crate::pack::assemble_draft_with_profile_and_options` | `&Deterministic<Seed>` |
+/// | 5 | `crate::pack::assemble_mmr_draft` | `&Deterministic<Seed>` |
+/// | 6 | `crate::models::Id::now` | `&mut Deterministic<Seed>` |
+/// | 7 | `crate::db::generate_audit_id` | `&mut Deterministic<Seed>` |
+/// | 8 | `crate::core::workspace::stable_workspace_id` | `&mut Deterministic<Seed>` |
+/// | 9 | `crate::core::context::persist_pack_record` | `&Deterministic<Seed>` |
+/// | 10 | `crate::runtime::determinism::DeterministicClock::next_uuid_v7` | `&mut Deterministic<Seed>` |
 pub const THREADING_SURFACES: &[&str] = &[
     "crate::core::search::run_search",
-    "crate::core::search::canonicalize_result_ties",
-    "crate::core::search::rerank_top_k",
-    "crate::core::pack::assemble_pack",
-    "crate::core::pack::two_pass_mmr_fill",
-    "crate::db::id_gen::next_memory_id",
-    "crate::db::id_gen::next_audit_id",
-    "crate::db::id_gen::next_workspace_id",
-    "crate::core::pack::pack_id",
-    "crate::core::audit::ulid::Generator::new",
+    "crate::core::search::canonicalize_equivalent_component_scores",
+    "crate::core::search::search_sync",
+    "crate::pack::assemble_draft_with_profile_and_options",
+    "crate::pack::assemble_mmr_draft",
+    "crate::models::Id::now",
+    "crate::db::generate_audit_id",
+    "crate::core::workspace::stable_workspace_id",
+    "crate::core::context::persist_pack_record",
+    "crate::runtime::determinism::DeterministicClock::next_uuid_v7",
 ];
 
 /// Return true when `label` is registered for deterministic child-seed use.

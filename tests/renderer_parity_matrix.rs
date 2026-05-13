@@ -272,7 +272,7 @@ fn every_omission_field_path_is_well_formed() -> TestResult {
         if !field
             .chars()
             .next()
-            .map_or(false, |c| c.is_ascii_alphabetic())
+            .is_some_and(|c| c.is_ascii_alphabetic())
         {
             return Err(format!(
                 "[[omission]] #{i}: field path `{field}` must start with an ASCII alpha character",
