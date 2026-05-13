@@ -1,0 +1,100 @@
+{"id":"false-positive-001","source":"plain_english","upstream_pattern":"plain-secret-mention","input":"The word secret describes a policy category, not a stored value.","expected_detected":false}
+{"id":"false-positive-002","source":"plain_english","upstream_pattern":"plain-token-mention","input":"The cancellation token was dropped before the task observed the stop signal.","expected_detected":false}
+{"id":"false-positive-003","source":"plain_english","upstream_pattern":"plain-credential-mention","input":"Credentials should be redacted before context packs are shared.","expected_detected":false}
+{"id":"false-positive-004","source":"plain_english","upstream_pattern":"plain-key-mention","input":"The primary key column is stable across the migration fixture.","expected_detected":false}
+{"id":"false-positive-005","source":"plain_english","upstream_pattern":"plain-oauth-mention","input":"OAuth refresh token rotation is documented without including an actual value.","expected_detected":false}
+{"id":"false-positive-006","source":"plain_english","upstream_pattern":"plain-jwt-mention","input":"JWT validation failed in the test because the header was malformed.","expected_detected":false}
+{"id":"false-positive-007","source":"plain_english","upstream_pattern":"plain-api-key-mention","input":"The API key pattern is described in prose for policy reviewers.","expected_detected":false}
+{"id":"false-positive-008","source":"plain_english","upstream_pattern":"plain-secret-ballot","input":"The secret ballot fixture checks election wording, not credentials.","expected_detected":false}
+{"id":"false-positive-009","source":"plain_english","upstream_pattern":"plain-token-budget","input":"The token budget is too small for the release context pack.","expected_detected":false}
+{"id":"false-positive-010","source":"plain_english","upstream_pattern":"plain-keyboard","input":"The key binding for save should stay consistent across terminals.","expected_detected":false}
+{"id":"false-positive-011","source":"plain_english","upstream_pattern":"plain-secret-policy","input":"Context packs must never include secrets or credentials.","expected_detected":false}
+{"id":"false-positive-012","source":"plain_english","upstream_pattern":"plain-access-token","input":"Access token wording appears in the docs as a concept only.","expected_detected":false}
+{"id":"false-positive-013","source":"plain_english","upstream_pattern":"plain-service-account","input":"Service account guidance belongs in the security runbook.","expected_detected":false}
+{"id":"false-positive-014","source":"plain_english","upstream_pattern":"plain-private-key","input":"Private key material should never be pasted into issue comments.","expected_detected":false}
+{"id":"false-positive-015","source":"plain_english","upstream_pattern":"plain-password","input":"Password handling was mentioned during the threat-model review.","expected_detected":false}
+{"id":"false-positive-016","source":"plain_english","upstream_pattern":"plain-tokenizer","input":"The tokenizer split the markdown heading into seven pieces.","expected_detected":false}
+{"id":"false-positive-017","source":"plain_english","upstream_pattern":"plain-keynote","input":"The keynote demo used a fake memory database with no secrets.","expected_detected":false}
+{"id":"false-positive-018","source":"plain_english","upstream_pattern":"plain-credentials-doc","input":"The credentials section tells agents to refuse raw values.","expected_detected":false}
+{"id":"false-positive-019","source":"plain_english","upstream_pattern":"plain-signing-key","input":"Signing key rotation is listed as a quarterly maintenance task.","expected_detected":false}
+{"id":"false-positive-020","source":"plain_english","upstream_pattern":"plain-webhook-secret","input":"Webhook secret storage is out of scope for this CLI.","expected_detected":false}
+{"id":"false-positive-021","source":"plain_english","upstream_pattern":"plain-master-key","input":"Master key custody requires a separate operations document.","expected_detected":false}
+{"id":"false-positive-022","source":"plain_english","upstream_pattern":"plain-session-token","input":"Session token expiry is described without sample credentials.","expected_detected":false}
+{"id":"false-positive-023","source":"plain_english","upstream_pattern":"plain-encryption-key","input":"Encryption key provenance must be audited by the operator.","expected_detected":false}
+{"id":"false-positive-024","source":"plain_english","upstream_pattern":"plain-bearer","input":"HTTP authorization schemes are protocol details, not credential values here.","expected_detected":false}
+{"id":"false-positive-025","source":"plain_english","upstream_pattern":"plain-client-secret","input":"Client secret naming appears in the config schema documentation.","expected_detected":false}
+{"id":"false-positive-026","source":"plain_english","upstream_pattern":"plain-database-url","input":"Database URL redaction is tested with synthetic values elsewhere.","expected_detected":false}
+{"id":"false-positive-027","source":"plain_english","upstream_pattern":"plain-pat","input":"A personal access token should be referenced only as an abstract class.","expected_detected":false}
+{"id":"false-positive-028","source":"plain_english","upstream_pattern":"plain-aws","input":"AWS access key naming conventions are listed in the detector catalog.","expected_detected":false}
+{"id":"false-positive-029","source":"plain_english","upstream_pattern":"plain-azure","input":"Azure account key handling is summarized in one sentence.","expected_detected":false}
+{"id":"false-positive-030","source":"plain_english","upstream_pattern":"plain-sas","input":"SAS token review requires a separate cloud-storage checklist.","expected_detected":false}
+{"id":"false-positive-031","source":"plain_english","upstream_pattern":"plain-secret-lesson","input":"The lesson says to avoid secret-bearing memories.","expected_detected":false}
+{"id":"false-positive-032","source":"plain_english","upstream_pattern":"plain-token-lesson","input":"The lesson says cancellation token leaks caused the hang.","expected_detected":false}
+{"id":"false-positive-033","source":"plain_english","upstream_pattern":"plain-key-lesson","input":"The lesson says key ordering must be deterministic.","expected_detected":false}
+{"id":"false-positive-034","source":"plain_english","upstream_pattern":"plain-credential-lesson","input":"The lesson says credential examples need redacted placeholders.","expected_detected":false}
+{"id":"false-positive-035","source":"plain_english","upstream_pattern":"plain-secret-field","input":"The secret field name is documented but no value is present.","expected_detected":false}
+{"id":"false-positive-036","source":"plain_english","upstream_pattern":"plain-token-field","input":"The token field name is present in a schema explanation.","expected_detected":false}
+{"id":"false-positive-037","source":"plain_english","upstream_pattern":"plain-key-field","input":"The key field sorts the table by deterministic rank.","expected_detected":false}
+{"id":"false-positive-038","source":"plain_english","upstream_pattern":"plain-credential-field","input":"The credential field is intentionally absent from the response.","expected_detected":false}
+{"id":"false-positive-039","source":"plain_english","upstream_pattern":"plain-secret-tag","input":"The tag policy-detectors covers secret handling work.","expected_detected":false}
+{"id":"false-positive-040","source":"plain_english","upstream_pattern":"plain-token-tag","input":"The token-budget tag covers context packing economics.","expected_detected":false}
+{"id":"false-positive-041","source":"plain_english","upstream_pattern":"plain-key-tag","input":"The key-ordering tag covers deterministic serialization.","expected_detected":false}
+{"id":"false-positive-042","source":"plain_english","upstream_pattern":"plain-credential-tag","input":"The credential-redaction tag covers output filters.","expected_detected":false}
+{"id":"false-positive-043","source":"plain_english","upstream_pattern":"plain-secret-corpus","input":"The corpus includes plain-English secret mentions as negatives.","expected_detected":false}
+{"id":"false-positive-044","source":"plain_english","upstream_pattern":"plain-token-corpus","input":"The corpus includes token mentions that are not values.","expected_detected":false}
+{"id":"false-positive-045","source":"plain_english","upstream_pattern":"plain-key-corpus","input":"The corpus includes key mentions about maps and sort order.","expected_detected":false}
+{"id":"false-positive-046","source":"plain_english","upstream_pattern":"plain-credential-corpus","input":"The corpus includes credential mentions without assignments.","expected_detected":false}
+{"id":"false-positive-047","source":"plain_english","upstream_pattern":"plain-secret-test","input":"The test proves secret nouns alone do not trigger detection.","expected_detected":false}
+{"id":"false-positive-048","source":"plain_english","upstream_pattern":"plain-token-test","input":"The test proves token nouns alone do not trigger detection.","expected_detected":false}
+{"id":"false-positive-049","source":"plain_english","upstream_pattern":"plain-key-test","input":"The test proves key nouns alone do not trigger detection.","expected_detected":false}
+{"id":"false-positive-050","source":"plain_english","upstream_pattern":"plain-credential-test","input":"The test proves credential nouns alone do not trigger detection.","expected_detected":false}
+{"id":"false-positive-051","source":"plain_english","upstream_pattern":"plain-secret-review","input":"Reviewers asked for a secret detector with fewer false positives.","expected_detected":false}
+{"id":"false-positive-052","source":"plain_english","upstream_pattern":"plain-token-review","input":"Reviewers asked whether token budgets should be shown in markdown.","expected_detected":false}
+{"id":"false-positive-053","source":"plain_english","upstream_pattern":"plain-key-review","input":"Reviewers asked whether key order is stable in compact output.","expected_detected":false}
+{"id":"false-positive-054","source":"plain_english","upstream_pattern":"plain-credential-review","input":"Reviewers asked whether credential policy errors include repair hints.","expected_detected":false}
+{"id":"false-positive-055","source":"plain_english","upstream_pattern":"plain-secret-audit","input":"Audit rows should mention secret bypass usage without storing values.","expected_detected":false}
+{"id":"false-positive-056","source":"plain_english","upstream_pattern":"plain-token-audit","input":"Audit rows should mention token-related policy decisions abstractly.","expected_detected":false}
+{"id":"false-positive-057","source":"plain_english","upstream_pattern":"plain-key-audit","input":"Audit rows should mention key rotation policy abstractly.","expected_detected":false}
+{"id":"false-positive-058","source":"plain_english","upstream_pattern":"plain-credential-audit","input":"Audit rows should mention credential review decisions abstractly.","expected_detected":false}
+{"id":"false-positive-059","source":"plain_english","upstream_pattern":"plain-secret-config","input":"Config documentation may include the phrase secret detector.","expected_detected":false}
+{"id":"false-positive-060","source":"plain_english","upstream_pattern":"plain-token-config","input":"Config documentation may include token budget defaults.","expected_detected":false}
+{"id":"false-positive-061","source":"plain_english","upstream_pattern":"plain-key-config","input":"Config documentation may include key names and descriptions.","expected_detected":false}
+{"id":"false-positive-062","source":"plain_english","upstream_pattern":"plain-credential-config","input":"Config documentation may include credential policy names.","expected_detected":false}
+{"id":"false-positive-063","source":"plain_english","upstream_pattern":"plain-secret-error","input":"The error explains that secret-like values were rejected.","expected_detected":false}
+{"id":"false-positive-064","source":"plain_english","upstream_pattern":"plain-token-error","input":"The error explains that token-looking values need redaction.","expected_detected":false}
+{"id":"false-positive-065","source":"plain_english","upstream_pattern":"plain-key-error","input":"The error explains that key-looking values need redaction.","expected_detected":false}
+{"id":"false-positive-066","source":"plain_english","upstream_pattern":"plain-credential-error","input":"The error explains that credential-looking values need redaction.","expected_detected":false}
+{"id":"false-positive-067","source":"plain_english","upstream_pattern":"plain-secret-bypass","input":"The bypass flag is used only for secret mentions, not values.","expected_detected":false}
+{"id":"false-positive-068","source":"plain_english","upstream_pattern":"plain-token-bypass","input":"The bypass flag is used only for token mentions, not values.","expected_detected":false}
+{"id":"false-positive-069","source":"plain_english","upstream_pattern":"plain-key-bypass","input":"The bypass flag is used only for key mentions, not values.","expected_detected":false}
+{"id":"false-positive-070","source":"plain_english","upstream_pattern":"plain-credential-bypass","input":"The bypass flag is used only for credential mentions, not values.","expected_detected":false}
+{"id":"false-positive-071","source":"plain_english","upstream_pattern":"plain-secret-output","input":"Output rendering should hide secret-bearing snippets.","expected_detected":false}
+{"id":"false-positive-072","source":"plain_english","upstream_pattern":"plain-token-output","input":"Output rendering should show token counts clearly.","expected_detected":false}
+{"id":"false-positive-073","source":"plain_english","upstream_pattern":"plain-key-output","input":"Output rendering should preserve key names in schema docs.","expected_detected":false}
+{"id":"false-positive-074","source":"plain_english","upstream_pattern":"plain-credential-output","input":"Output rendering should not include credential values.","expected_detected":false}
+{"id":"false-positive-075","source":"plain_english","upstream_pattern":"plain-secret-handoff","input":"The handoff capsule summarizes secret policy without values.","expected_detected":false}
+{"id":"false-positive-076","source":"plain_english","upstream_pattern":"plain-token-handoff","input":"The handoff capsule reports token estimate totals.","expected_detected":false}
+{"id":"false-positive-077","source":"plain_english","upstream_pattern":"plain-key-handoff","input":"The handoff capsule records key decisions, not key material.","expected_detected":false}
+{"id":"false-positive-078","source":"plain_english","upstream_pattern":"plain-credential-handoff","input":"The handoff capsule says credentials were not included.","expected_detected":false}
+{"id":"false-positive-079","source":"plain_english","upstream_pattern":"plain-secret-pack","input":"The context pack includes a secret policy reminder.","expected_detected":false}
+{"id":"false-positive-080","source":"plain_english","upstream_pattern":"plain-token-pack","input":"The context pack includes token budget accounting.","expected_detected":false}
+{"id":"false-positive-081","source":"plain_english","upstream_pattern":"plain-key-pack","input":"The context pack includes key architectural decisions.","expected_detected":false}
+{"id":"false-positive-082","source":"plain_english","upstream_pattern":"plain-credential-pack","input":"The context pack includes credential handling guidance.","expected_detected":false}
+{"id":"false-positive-083","source":"plain_english","upstream_pattern":"plain-secret-search","input":"Search for secret policies should return policy memories.","expected_detected":false}
+{"id":"false-positive-084","source":"plain_english","upstream_pattern":"plain-token-search","input":"Search for token budgets should return packing memories.","expected_detected":false}
+{"id":"false-positive-085","source":"plain_english","upstream_pattern":"plain-key-search","input":"Search for key ordering should return determinism memories.","expected_detected":false}
+{"id":"false-positive-086","source":"plain_english","upstream_pattern":"plain-credential-search","input":"Search for credential handling should return redaction memories.","expected_detected":false}
+{"id":"false-positive-087","source":"plain_english","upstream_pattern":"plain-secret-rule","input":"A procedural rule can say never store secrets.","expected_detected":false}
+{"id":"false-positive-088","source":"plain_english","upstream_pattern":"plain-token-rule","input":"A procedural rule can say propagate cancellation tokens.","expected_detected":false}
+{"id":"false-positive-089","source":"plain_english","upstream_pattern":"plain-key-rule","input":"A procedural rule can say sort map keys before hashing.","expected_detected":false}
+{"id":"false-positive-090","source":"plain_english","upstream_pattern":"plain-credential-rule","input":"A procedural rule can say redact credentials before import.","expected_detected":false}
+{"id":"false-positive-091","source":"plain_english","upstream_pattern":"plain-secret-failure","input":"The failure happened because a secret mention was rejected as a value.","expected_detected":false}
+{"id":"false-positive-092","source":"plain_english","upstream_pattern":"plain-token-failure","input":"The failure happened because a cancellation token was not propagated.","expected_detected":false}
+{"id":"false-positive-093","source":"plain_english","upstream_pattern":"plain-key-failure","input":"The failure happened because the key sort was unstable.","expected_detected":false}
+{"id":"false-positive-094","source":"plain_english","upstream_pattern":"plain-credential-failure","input":"The failure happened because credential policy was too broad.","expected_detected":false}
+{"id":"false-positive-095","source":"plain_english","upstream_pattern":"plain-secret-success","input":"The successful path stores secret policy guidance safely.","expected_detected":false}
+{"id":"false-positive-096","source":"plain_english","upstream_pattern":"plain-token-success","input":"The successful path stores token budget guidance safely.","expected_detected":false}
+{"id":"false-positive-097","source":"plain_english","upstream_pattern":"plain-key-success","input":"The successful path stores key ordering guidance safely.","expected_detected":false}
+{"id":"false-positive-098","source":"plain_english","upstream_pattern":"plain-credential-success","input":"The successful path stores credential guidance safely.","expected_detected":false}
+{"id":"false-positive-099","source":"plain_english","upstream_pattern":"plain-secret-maintenance","input":"Maintenance should refresh secret pattern fixtures quarterly.","expected_detected":false}
+{"id":"false-positive-100","source":"plain_english","upstream_pattern":"plain-token-maintenance","input":"Maintenance should refresh token pattern fixtures quarterly.","expected_detected":false}
