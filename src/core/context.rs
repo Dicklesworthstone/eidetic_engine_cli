@@ -25,6 +25,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
@@ -47,9 +48,11 @@ use crate::models::{
 use crate::pack::{
     ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
     ContextResponseDegradation, ContextResponseSeverity, PackCandidate, PackCandidateInput,
-    PackProvenance, PackSection, PackTrustSignal, TokenBudget, assemble_draft_with_profile,
-    estimate_tokens_default, pack_item_provenance_json,
+    PackProvenance, PackSection, PackTrustSignal, TokenBudget,
+    assemble_draft_with_profile_and_options, estimate_tokens_default, pack_item_provenance_json,
 };
+
+static PACK_HASH_LOG_RUN_INDEX: AtomicU64 = AtomicU64::new(0);
 
 /// Per-subsystem permission level. `None < Read < Write` under the
 /// derived `Ord`, which is what the narrowing law relies on.
@@ -283,6 +286,100 @@ pub struct ContextPackOptions {
     pub max_results: Option<u32>,
     pub include_tombstoned: bool,
     pub pagination: Option<ContextPagination>,
+    pub output_options: ContextPackOutputOptions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ContextPackOutputProfile {
+    Lean,
+    #[default]
+    Standard,
+    Verbose,
+}
+
+impl ContextPackOutputProfile {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Lean => "lean",
+            Self::Standard => "standard",
+            Self::Verbose => "verbose",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContextPackOutputOptions {
+    pub profile: ContextPackOutputProfile,
+    pub include_coverage_fill: bool,
+    pub include_rendered_text: bool,
+    pub include_skipped: bool,
+    pub include_meta: bool,
+    pub include_verbose_meta: bool,
+}
+
+impl Default for ContextPackOutputOptions {
+    fn default() -> Self {
+        Self::for_profile(ContextPackOutputProfile::Standard)
+    }
+}
+
+impl ContextPackOutputOptions {
+    #[must_use]
+    pub const fn for_profile(profile: ContextPackOutputProfile) -> Self {
+        match profile {
+            ContextPackOutputProfile::Lean => Self {
+                profile,
+                include_coverage_fill: false,
+                include_rendered_text: false,
+                include_skipped: false,
+                include_meta: true,
+                include_verbose_meta: false,
+            },
+            ContextPackOutputProfile::Standard => Self {
+                profile,
+                include_coverage_fill: true,
+                include_rendered_text: true,
+                include_skipped: true,
+                include_meta: true,
+                include_verbose_meta: false,
+            },
+            ContextPackOutputProfile::Verbose => Self {
+                profile,
+                include_coverage_fill: true,
+                include_rendered_text: true,
+                include_skipped: true,
+                include_meta: true,
+                include_verbose_meta: true,
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn with_overrides(self, overrides: ContextPackOutputOptionOverrides) -> Self {
+        Self {
+            profile: self.profile,
+            include_coverage_fill: overrides
+                .no_coverage_fill
+                .map_or(self.include_coverage_fill, |value| !value),
+            include_rendered_text: overrides
+                .no_rendered_text
+                .map_or(self.include_rendered_text, |value| !value),
+            include_skipped: overrides
+                .no_skipped
+                .map_or(self.include_skipped, |value| !value),
+            include_meta: overrides.no_meta.map_or(self.include_meta, |value| !value),
+            include_verbose_meta: self.include_verbose_meta,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ContextPackOutputOptionOverrides {
+    pub no_coverage_fill: Option<bool>,
+    pub no_rendered_text: Option<bool>,
+    pub no_skipped: Option<bool>,
+    pub no_meta: Option<bool>,
 }
 
 /// Pagination state for context pack execution.
@@ -483,6 +580,8 @@ pub fn run_context_pack_with_performance(
         // Keep the candidate pool broad so an exact single-memory match is not
         // dropped by the interactive search command's presentation floor.
         relevance_floor: Some(0.0),
+        source_mode: crate::core::search::SearchSourceMode::Hybrid,
+        strict_source_mode: false,
     }) {
         Ok(report) => report,
         Err(SearchError::NoIndex) => missing_index_search_report(
@@ -743,9 +842,16 @@ pub fn run_context_pack_with_performance(
             .map_err(|error| ContextPackError::Pack(error.to_string()))?,
         None => TokenBudget::default_context(),
     };
-    let mut draft =
-        assemble_draft_with_profile(request.profile, request.query.clone(), budget, candidates)
-            .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    let mut draft = assemble_draft_with_profile_and_options(
+        request.profile,
+        request.query.clone(),
+        budget,
+        candidates,
+        crate::pack::PackAssemblyOptions {
+            include_coverage_fill: options.output_options.include_coverage_fill,
+        },
+    )
+    .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     let tombstoned_item_count = draft
         .items
         .iter()
@@ -773,7 +879,12 @@ pub fn run_context_pack_with_performance(
         );
     }
 
-    draft.hash = Some(compute_pack_hash(&request, &draft, &degraded));
+    draft.hash = Some(compute_pack_hash_with_output_options(
+        &request,
+        &draft,
+        &degraded,
+        options.output_options,
+    ));
     trace.record_elapsed("packAssembly", pack_start);
 
     let mut response_degraded = degraded.clone();
@@ -982,10 +1093,12 @@ fn candidate_resolution_json(trace: &ContextPerformanceTrace) -> serde_json::Val
 
 fn context_pack_json(draft: &crate::pack::PackDraft) -> serde_json::Value {
     let quality = draft.quality_metrics();
+    let producer = crate::models::ProducerMetadata::context_pack(None, None);
     serde_json::json!({
         "profile": draft.selection_certificate.profile.as_str(),
         "objective": draft.selection_certificate.objective.as_str(),
         "algorithm": draft.selection_certificate.algorithm,
+        "producer": producer,
         "candidateCount": draft.selection_certificate.candidate_count,
         "selectedCount": draft.selection_certificate.selected_count,
         "omittedCount": draft.selection_certificate.omitted_count,
@@ -1070,6 +1183,10 @@ fn missing_index_search_report(
         runtime_profile,
         relevance_floor_applied: None,
         candidates_below_floor: 0,
+        source_mode_requested: crate::core::search::SearchSourceMode::Hybrid,
+        source_mode_applied: crate::core::search::SearchSourceMode::Hybrid,
+        source_mode_fallback: false,
+        strict_source_mode: false,
     }
 }
 
@@ -1478,57 +1595,185 @@ fn compute_pack_hash(
     draft: &crate::pack::PackDraft,
     degraded: &[ContextResponseDegradation],
 ) -> String {
+    compute_pack_hash_with_output_options(
+        request,
+        draft,
+        degraded,
+        ContextPackOutputOptions::default(),
+    )
+}
+
+fn compute_pack_hash_with_output_options(
+    request: &ContextRequest,
+    draft: &crate::pack::PackDraft,
+    degraded: &[ContextResponseDegradation],
+    output_options: ContextPackOutputOptions,
+) -> String {
+    let components = compute_pack_hash_components(request, draft, degraded, output_options);
+    log_pack_hash_components(&components);
+    components.composite_hash
+}
+
+#[derive(Debug)]
+struct PackHashComponents {
+    pack_request_hash: String,
+    draft_items_hash: String,
+    degraded_summary_hash: String,
+    rendered_text_hash: String,
+    composite_hash: String,
+}
+
+fn compute_pack_hash_components(
+    request: &ContextRequest,
+    draft: &crate::pack::PackDraft,
+    degraded: &[ContextResponseDegradation],
+    output_options: ContextPackOutputOptions,
+) -> PackHashComponents {
     use blake3::Hasher;
-    let mut hasher = Hasher::new();
-    hasher.update(request.query.as_bytes());
-    hasher.update(request.profile.as_str().as_bytes());
-    hasher.update(&request.budget.max_tokens().to_le_bytes());
-    hasher.update(&draft.used_tokens.to_le_bytes());
+
+    let mut request_hasher = Hasher::new();
+    request_hasher.update(request.query.as_bytes());
+    request_hasher.update(request.profile.as_str().as_bytes());
+    request_hasher.update(&request.budget.max_tokens().to_le_bytes());
+    request_hasher.update(output_options.profile.as_str().as_bytes());
+    request_hasher.update(&[u8::from(output_options.include_coverage_fill)]);
+    request_hasher.update(&[u8::from(output_options.include_rendered_text)]);
+    request_hasher.update(&[u8::from(output_options.include_skipped)]);
+    request_hasher.update(&[u8::from(output_options.include_meta)]);
+    request_hasher.update(&[u8::from(output_options.include_verbose_meta)]);
+
+    let mut draft_hasher = Hasher::new();
+    draft_hasher.update(&draft.used_tokens.to_le_bytes());
+
     let rendered_text = crate::pack::render_context_markdown(request, draft, degraded);
-    hasher.update(rendered_text.as_bytes());
+    let mut rendered_text_hasher = Hasher::new();
+    rendered_text_hasher.update(rendered_text.as_bytes());
+
+    let mut composite_hasher = Hasher::new();
+    composite_hasher.update(request.query.as_bytes());
+    composite_hasher.update(request.profile.as_str().as_bytes());
+    composite_hasher.update(&request.budget.max_tokens().to_le_bytes());
+    composite_hasher.update(output_options.profile.as_str().as_bytes());
+    composite_hasher.update(&[u8::from(output_options.include_coverage_fill)]);
+    composite_hasher.update(&[u8::from(output_options.include_rendered_text)]);
+    composite_hasher.update(&[u8::from(output_options.include_skipped)]);
+    composite_hasher.update(&[u8::from(output_options.include_meta)]);
+    composite_hasher.update(&[u8::from(output_options.include_verbose_meta)]);
+    composite_hasher.update(&draft.used_tokens.to_le_bytes());
+    if output_options.include_rendered_text {
+        composite_hasher.update(rendered_text.as_bytes());
+    }
+
     for item in &draft.items {
-        hasher.update(item.memory_id.to_string().as_bytes());
-        hasher.update(&item.rank.to_le_bytes());
-        hasher.update(item.section.as_str().as_bytes());
-        hasher.update(item.content.as_bytes());
-        hasher.update(&item.estimated_tokens.to_le_bytes());
-        hasher.update(&item.relevance.into_inner().to_le_bytes());
-        hasher.update(&item.utility.into_inner().to_le_bytes());
-        hasher.update(item.why.as_bytes());
-        hasher.update(item.selected_in.as_str().as_bytes());
+        for hasher in [&mut draft_hasher, &mut composite_hasher] {
+            hasher.update(item.memory_id.to_string().as_bytes());
+            hasher.update(&item.rank.to_le_bytes());
+            hasher.update(item.section.as_str().as_bytes());
+            hasher.update(item.content.as_bytes());
+            hasher.update(&item.estimated_tokens.to_le_bytes());
+            hasher.update(&item.relevance.into_inner().to_le_bytes());
+            hasher.update(&item.utility.into_inner().to_le_bytes());
+            hasher.update(item.why.as_bytes());
+            hasher.update(item.selected_in.as_str().as_bytes());
+        }
         for provenance in &item.provenance {
-            hasher.update(provenance.uri.to_string().as_bytes());
-            hasher.update(provenance.note.as_bytes());
+            for hasher in [&mut draft_hasher, &mut composite_hasher] {
+                hasher.update(provenance.uri.to_string().as_bytes());
+                hasher.update(provenance.note.as_bytes());
+            }
         }
         if let Some(diversity_key) = &item.diversity_key {
-            hasher.update(diversity_key.as_bytes());
+            for hasher in [&mut draft_hasher, &mut composite_hasher] {
+                hasher.update(diversity_key.as_bytes());
+            }
         }
-        hasher.update(item.trust.class.as_str().as_bytes());
+        for hasher in [&mut draft_hasher, &mut composite_hasher] {
+            hasher.update(item.trust.class.as_str().as_bytes());
+        }
         if let Some(subclass) = &item.trust.subclass {
-            hasher.update(subclass.as_bytes());
+            for hasher in [&mut draft_hasher, &mut composite_hasher] {
+                hasher.update(subclass.as_bytes());
+            }
         }
         if let Some(tombstoned_at) = &item.tombstoned_at {
-            hasher.update(tombstoned_at.as_bytes());
+            for hasher in [&mut draft_hasher, &mut composite_hasher] {
+                hasher.update(tombstoned_at.as_bytes());
+            }
         }
         for redaction in &item.redactions {
-            hasher.update(redaction.reason.as_bytes());
-            hasher.update(redaction.placeholder.as_bytes());
+            for hasher in [&mut draft_hasher, &mut composite_hasher] {
+                hasher.update(redaction.reason.as_bytes());
+                hasher.update(redaction.placeholder.as_bytes());
+            }
         }
     }
     for omission in &draft.omitted {
-        hasher.update(omission.memory_id.to_string().as_bytes());
-        hasher.update(&omission.estimated_tokens.to_le_bytes());
-        hasher.update(omission.reason.as_str().as_bytes());
-    }
-    for degradation in degraded {
-        hasher.update(degradation.code.as_bytes());
-        hasher.update(degradation.severity.as_str().as_bytes());
-        hasher.update(degradation.message.as_bytes());
-        if let Some(repair) = &degradation.repair {
-            hasher.update(repair.as_bytes());
+        draft_hasher.update(omission.memory_id.to_string().as_bytes());
+        draft_hasher.update(&omission.estimated_tokens.to_le_bytes());
+        draft_hasher.update(omission.reason.as_str().as_bytes());
+        if output_options.include_skipped {
+            composite_hasher.update(omission.memory_id.to_string().as_bytes());
+            composite_hasher.update(&omission.estimated_tokens.to_le_bytes());
+            composite_hasher.update(omission.reason.as_str().as_bytes());
         }
     }
+
+    let mut degraded_hasher = Hasher::new();
+    for degradation in degraded {
+        for hasher in [&mut degraded_hasher, &mut composite_hasher] {
+            hasher.update(degradation.code.as_bytes());
+            hasher.update(degradation.severity.as_str().as_bytes());
+            hasher.update(degradation.message.as_bytes());
+        }
+        if let Some(repair) = &degradation.repair {
+            for hasher in [&mut degraded_hasher, &mut composite_hasher] {
+                hasher.update(repair.as_bytes());
+            }
+        }
+    }
+
+    PackHashComponents {
+        pack_request_hash: finalize_blake3(request_hasher),
+        draft_items_hash: finalize_blake3(draft_hasher),
+        degraded_summary_hash: finalize_blake3(degraded_hasher),
+        rendered_text_hash: finalize_blake3(rendered_text_hasher),
+        composite_hash: finalize_blake3(composite_hasher),
+    }
+}
+
+fn finalize_blake3(hasher: blake3::Hasher) -> String {
     format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn log_pack_hash_components(components: &PackHashComponents) {
+    let run_index = PACK_HASH_LOG_RUN_INDEX.fetch_add(1, Ordering::Relaxed) + 1;
+    crate::obs::log_event(
+        crate::obs::TestEvent::new(
+            crate::obs::test_id_or("pack_hash_components"),
+            crate::obs::EventKind::PackHashComponents,
+        )
+        .with_field(
+            "pack_request_hash",
+            serde_json::Value::String(components.pack_request_hash.clone()),
+        )
+        .with_field(
+            "draft_items_hash",
+            serde_json::Value::String(components.draft_items_hash.clone()),
+        )
+        .with_field(
+            "degraded_summary_hash",
+            serde_json::Value::String(components.degraded_summary_hash.clone()),
+        )
+        .with_field(
+            "rendered_text_hash",
+            serde_json::Value::String(components.rendered_text_hash.clone()),
+        )
+        .with_field(
+            "composite_hash",
+            serde_json::Value::String(components.composite_hash.clone()),
+        )
+        .with_field("run_index", serde_json::Value::from(run_index)),
+    );
 }
 
 #[allow(clippy::type_complexity)]
@@ -3184,6 +3429,10 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            source_mode_requested: crate::core::search::SearchSourceMode::Hybrid,
+            source_mode_applied: crate::core::search::SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
         };
         let mut degraded = Vec::new();
 
@@ -3317,6 +3566,10 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            source_mode_requested: crate::core::search::SearchSourceMode::Hybrid,
+            source_mode_applied: crate::core::search::SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
         };
 
         let mut first_degraded = Vec::new();
@@ -3478,6 +3731,10 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            source_mode_requested: crate::core::search::SearchSourceMode::Hybrid,
+            source_mode_applied: crate::core::search::SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
         };
         let options = super::ContextPackOptions {
             workspace_path: PathBuf::from("/tmp/ee-explain"),
@@ -3492,6 +3749,7 @@ mod tests {
             max_results: None,
             include_tombstoned: false,
             pagination: None,
+            output_options: Default::default(),
         };
         let trace = ContextPerformanceTrace {
             db_open_count: 1,
@@ -3601,6 +3859,7 @@ mod tests {
             max_results: None,
             include_tombstoned: false,
             pagination: None,
+            output_options: Default::default(),
         })
         .map_err(|error| error.to_string())?;
 
@@ -3692,6 +3951,7 @@ mod tests {
             max_results: None,
             include_tombstoned: false,
             pagination: None,
+            output_options: Default::default(),
         };
 
         let default_response = super::run_context_pack(&base_options)
@@ -4099,7 +4359,10 @@ mod tests {
 
     #[test]
     fn pack_hash_includes_content_provenance_and_degradation() -> Result<(), String> {
-        use super::{ContextResponseDegradation, ContextResponseSeverity, compute_pack_hash};
+        use super::{
+            ContextPackOutputOptions, ContextPackOutputProfile, ContextResponseDegradation,
+            ContextResponseSeverity, compute_pack_hash, compute_pack_hash_with_output_options,
+        };
         use crate::models::{ProvenanceUri, TrustClass, UnitScore};
         use crate::pack::{
             ContextRequest, PackDraft, PackDraftItem, PackGuaranteeStatus, PackOmission,
@@ -4167,6 +4430,16 @@ mod tests {
         let base_degraded: Vec<ContextResponseDegradation> = vec![];
 
         let hash_base = compute_pack_hash(&request, &base_draft, &base_degraded);
+        let hash_lean = compute_pack_hash_with_output_options(
+            &request,
+            &base_draft,
+            &base_degraded,
+            ContextPackOutputOptions::for_profile(ContextPackOutputProfile::Lean),
+        );
+        assert_ne!(
+            hash_base, hash_lean,
+            "pack hash must include output-profile field omissions"
+        );
         let rendered_base =
             crate::pack::render_context_markdown(&request, &base_draft, &base_degraded);
         assert!(
@@ -4238,6 +4511,43 @@ mod tests {
             hash_base, hash_degraded,
             "degradation change must alter hash"
         );
+        let degraded_with_two_issues = vec![
+            ContextResponseDegradation {
+                code: "search_index_stale".to_string(),
+                severity: ContextResponseSeverity::Medium,
+                message: "Search index is stale.".to_string(),
+                repair: Some("ee index rebuild --workspace .".to_string()),
+            },
+            ContextResponseDegradation {
+                code: "low_recall_after_floor".to_string(),
+                severity: ContextResponseSeverity::Low,
+                message: "Only one candidate passed the relevance floor.".to_string(),
+                repair: Some("broaden query".to_string()),
+            },
+        ];
+        let hash_degraded_two = compute_pack_hash(&request, &base_draft, &degraded_with_two_issues);
+        assert_ne!(
+            hash_degraded, hash_degraded_two,
+            "distinct degradation lists must produce distinct hashes"
+        );
+
+        for (label, degraded) in [
+            ("empty", base_degraded.as_slice()),
+            ("one", degraded_with_issue.as_slice()),
+            ("two", degraded_with_two_issues.as_slice()),
+        ] {
+            let first = compute_pack_hash(&request, &base_draft, degraded);
+            let second = compute_pack_hash(&request, &base_draft, degraded);
+            let third = compute_pack_hash(&request, &base_draft, degraded);
+            assert_eq!(
+                first, second,
+                "fixed pack hash input should reproduce for {label} degraded entries"
+            );
+            assert_eq!(
+                second, third,
+                "fixed pack hash input should reproduce across a third call for {label} degraded entries"
+            );
+        }
 
         // Same inputs produce same hash (determinism check).
         let hash_repeat = compute_pack_hash(&request, &base_draft, &base_degraded);

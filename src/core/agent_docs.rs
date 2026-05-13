@@ -1,3 +1,4 @@
+use crate::config::EnvVar;
 use crate::models::{ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -153,25 +154,25 @@ pub const DEFAULT_PATHS: &[PathEntry] = &[
         name: "database",
         default: "<workspace>/.ee/ee.db",
         description: "SQLite database storing memories, sessions, and metadata",
-        env_override: Some("EE_DATABASE"),
+        env_override: Some(EnvVar::DatabasePath.name()),
     },
     PathEntry {
         name: "index_dir",
         default: "<workspace>/.ee/index/",
         description: "Directory containing search indexes",
-        env_override: Some("EE_INDEX_DIR"),
+        env_override: Some(EnvVar::IndexDir.name()),
     },
     PathEntry {
         name: "config",
         default: "<workspace>/.ee/config.toml",
         description: "Workspace-specific configuration file",
-        env_override: Some("EE_CONFIG"),
+        env_override: None,
     },
     PathEntry {
         name: "global_config",
         default: "~/.config/ee/config.toml",
         description: "Global user configuration file",
-        env_override: Some("EE_GLOBAL_CONFIG"),
+        env_override: None,
     },
     PathEntry {
         name: "lock",
@@ -191,58 +192,154 @@ pub struct EnvVarEntry {
 
 pub const ENV_VARS: &[EnvVarEntry] = &[
     EnvVarEntry {
-        name: "EE_WORKSPACE",
-        description: "Default workspace path when --workspace is not specified",
-        default: Some("."),
-        category: "paths",
+        name: EnvVar::AgentMode.name(),
+        description: EnvVar::AgentMode.description(),
+        default: EnvVar::AgentMode.default_value(),
+        category: EnvVar::AgentMode.category(),
     },
     EnvVarEntry {
-        name: "EE_DATABASE",
-        description: "Override default database path",
-        default: None,
-        category: "paths",
+        name: EnvVar::CassBinary.name(),
+        description: EnvVar::CassBinary.description(),
+        default: EnvVar::CassBinary.default_value(),
+        category: EnvVar::CassBinary.category(),
     },
     EnvVarEntry {
-        name: "EE_INDEX_DIR",
-        description: "Override default index directory",
-        default: None,
-        category: "paths",
+        name: EnvVar::DatabasePath.name(),
+        description: EnvVar::DatabasePath.description(),
+        default: EnvVar::DatabasePath.default_value(),
+        category: EnvVar::DatabasePath.category(),
     },
     EnvVarEntry {
-        name: "EE_CONFIG",
-        description: "Override workspace config file path",
-        default: None,
-        category: "paths",
+        name: EnvVar::DemoEvidenceRoot.name(),
+        description: EnvVar::DemoEvidenceRoot.description(),
+        default: EnvVar::DemoEvidenceRoot.default_value(),
+        category: EnvVar::DemoEvidenceRoot.category(),
     },
     EnvVarEntry {
-        name: "EE_GLOBAL_CONFIG",
-        description: "Override global config file path",
-        default: None,
-        category: "paths",
+        name: EnvVar::ExperimentalTriad.name(),
+        description: EnvVar::ExperimentalTriad.description(),
+        default: EnvVar::ExperimentalTriad.default_value(),
+        category: EnvVar::ExperimentalTriad.category(),
     },
     EnvVarEntry {
-        name: "EE_LOG_LEVEL",
-        description: "Logging verbosity (error, warn, info, debug, trace)",
-        default: Some("warn"),
-        category: "diagnostics",
+        name: EnvVar::Format.name(),
+        description: EnvVar::Format.description(),
+        default: EnvVar::Format.default_value(),
+        category: EnvVar::Format.category(),
     },
     EnvVarEntry {
-        name: "EE_NO_COLOR",
-        description: "Disable colored output (also respects NO_COLOR)",
-        default: Some("false"),
-        category: "output",
+        name: EnvVar::HarmfulBurstWindowSeconds.name(),
+        description: EnvVar::HarmfulBurstWindowSeconds.description(),
+        default: EnvVar::HarmfulBurstWindowSeconds.default_value(),
+        category: EnvVar::HarmfulBurstWindowSeconds.category(),
     },
     EnvVarEntry {
-        name: "NO_COLOR",
-        description: "Standard environment variable to disable colors",
-        default: None,
-        category: "output",
+        name: EnvVar::HarmfulPerSourcePerHour.name(),
+        description: EnvVar::HarmfulPerSourcePerHour.description(),
+        default: EnvVar::HarmfulPerSourcePerHour.default_value(),
+        category: EnvVar::HarmfulPerSourcePerHour.category(),
     },
     EnvVarEntry {
-        name: "EE_JSON_PRETTY",
-        description: "Emit pretty-printed JSON (for debugging only)",
-        default: Some("false"),
-        category: "output",
+        name: EnvVar::HookMode.name(),
+        description: EnvVar::HookMode.description(),
+        default: EnvVar::HookMode.default_value(),
+        category: EnvVar::HookMode.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::IndexDir.name(),
+        description: EnvVar::IndexDir.description(),
+        default: EnvVar::IndexDir.default_value(),
+        category: EnvVar::IndexDir.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::Json.name(),
+        description: EnvVar::Json.description(),
+        default: EnvVar::Json.default_value(),
+        category: EnvVar::Json.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::LogFormat.name(),
+        description: EnvVar::LogFormat.description(),
+        default: EnvVar::LogFormat.default_value(),
+        category: EnvVar::LogFormat.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::LogJson.name(),
+        description: EnvVar::LogJson.description(),
+        default: EnvVar::LogJson.default_value(),
+        category: EnvVar::LogJson.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::MaxTokens.name(),
+        description: EnvVar::MaxTokens.description(),
+        default: EnvVar::MaxTokens.default_value(),
+        category: EnvVar::MaxTokens.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::NoColor.name(),
+        description: EnvVar::NoColor.description(),
+        default: EnvVar::NoColor.default_value(),
+        category: EnvVar::NoColor.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::OutputFormat.name(),
+        description: EnvVar::OutputFormat.description(),
+        default: EnvVar::OutputFormat.default_value(),
+        category: EnvVar::OutputFormat.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::PreflightBypassSecret.name(),
+        description: EnvVar::PreflightBypassSecret.description(),
+        default: EnvVar::PreflightBypassSecret.default_value(),
+        category: EnvVar::PreflightBypassSecret.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::Profile.name(),
+        description: EnvVar::Profile.description(),
+        default: EnvVar::Profile.default_value(),
+        category: EnvVar::Profile.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::RememberCurationSyncBudgetMs.name(),
+        description: EnvVar::RememberCurationSyncBudgetMs.description(),
+        default: EnvVar::RememberCurationSyncBudgetMs.default_value(),
+        category: EnvVar::RememberCurationSyncBudgetMs.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::SecurityProfile.name(),
+        description: EnvVar::SecurityProfile.description(),
+        default: EnvVar::SecurityProfile.default_value(),
+        category: EnvVar::SecurityProfile.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::TestLogLevel.name(),
+        description: EnvVar::TestLogLevel.description(),
+        default: EnvVar::TestLogLevel.default_value(),
+        category: EnvVar::TestLogLevel.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::TestLogPath.name(),
+        description: EnvVar::TestLogPath.description(),
+        default: EnvVar::TestLogPath.default_value(),
+        category: EnvVar::TestLogPath.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::TestLogTestId.name(),
+        description: EnvVar::TestLogTestId.description(),
+        default: EnvVar::TestLogTestId.default_value(),
+        category: EnvVar::TestLogTestId.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::Workspace.name(),
+        description: EnvVar::Workspace.description(),
+        default: EnvVar::Workspace.default_value(),
+        category: EnvVar::Workspace.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::WorkspaceRegistry.name(),
+        description: EnvVar::WorkspaceRegistry.description(),
+        default: EnvVar::WorkspaceRegistry.default_value(),
+        category: EnvVar::WorkspaceRegistry.category(),
     },
 ];
 
@@ -369,6 +466,12 @@ pub const OUTPUT_FORMATS: &[FormatEntry] = &[
         machine_readable: false,
     },
     FormatEntry {
+        name: "markdown",
+        flag: "--format markdown",
+        description: "Markdown context output for direct agent prompt inclusion",
+        machine_readable: false,
+    },
+    FormatEntry {
         name: "jsonl",
         flag: "--format jsonl",
         description: "Line-delimited JSON for streaming",
@@ -385,6 +488,12 @@ pub const OUTPUT_FORMATS: &[FormatEntry] = &[
         flag: "--format hook",
         description: "Format optimized for hook consumption",
         machine_readable: true,
+    },
+    FormatEntry {
+        name: "mermaid",
+        flag: "--format mermaid",
+        description: "Mermaid graph projection for commands with diagram output",
+        machine_readable: false,
     },
 ];
 
@@ -780,6 +889,7 @@ mod tests {
         AGENT_DOC_RECIPES, AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, ENV_VARS, EXAMPLES,
         EXIT_CODES, FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS,
     };
+    use crate::config::EnvVar;
     use crate::models::ProcessExitCode;
 
     type TestResult = Result<(), String>;
@@ -867,6 +977,33 @@ mod tests {
     }
 
     #[test]
+    fn env_docs_match_registry_order() -> TestResult {
+        for (entry, var) in ENV_VARS.iter().zip(EnvVar::all()) {
+            ensure_equal(&entry.name, &var.name(), "env docs name")?;
+            ensure_equal(
+                &entry.description,
+                &var.description(),
+                &format!("env docs description {}", var.name()),
+            )?;
+            ensure_equal(
+                &entry.default,
+                &var.default_value(),
+                &format!("env docs default {}", var.name()),
+            )?;
+            ensure_equal(
+                &entry.category,
+                &var.category(),
+                &format!("env docs category {}", var.name()),
+            )?;
+        }
+        ensure_equal(
+            &ENV_VARS.len(),
+            &EnvVar::all().len(),
+            "env docs registry count",
+        )
+    }
+
+    #[test]
     fn exit_codes_are_sequential() -> TestResult {
         for (i, code) in EXIT_CODES.iter().enumerate() {
             ensure_equal(
@@ -916,6 +1053,21 @@ mod tests {
             ensure(!fmt.name.is_empty(), "format name non-empty")?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn output_formats_cover_global_format_enum() -> TestResult {
+        let names = OUTPUT_FORMATS
+            .iter()
+            .map(|format| format.name)
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &names,
+            &vec![
+                "human", "json", "toon", "markdown", "jsonl", "compact", "hook", "mermaid",
+            ],
+            "documented output formats",
+        )
     }
 
     #[test]

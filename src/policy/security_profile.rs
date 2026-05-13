@@ -16,6 +16,8 @@ use std::fmt;
 use std::path::Path;
 use std::str::FromStr;
 
+use crate::config::env_registry::{EnvVar, read};
+
 /// Security profile controlling trust and access policies.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum SecurityProfile {
@@ -387,8 +389,7 @@ fn check_directory_permissions(path: &Path, max_mode: u32, dir_type: &str) -> Fi
 /// Load security profile from environment or use default.
 #[must_use]
 pub fn load_profile_from_env() -> SecurityProfile {
-    std::env::var("EE_SECURITY_PROFILE")
-        .ok()
+    read(EnvVar::SecurityProfile)
         .and_then(|s| s.parse().ok())
         .unwrap_or_default()
 }

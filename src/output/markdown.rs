@@ -21,7 +21,10 @@
 //! - **`` ` ``**: always escape — could open a code span anywhere.
 //! - **`#`**: escape only at start of a line (ATX heading marker).
 //! - **`+` `-`**: escape only at start of a line followed by space
-//!   (unordered list marker).
+//!   (unordered list marker). A run of three or more `-` markers that
+//!   occupies the whole line is escaped as a thematic break marker.
+//! - **`=`**: escape only when a run occupies the whole line, where it
+//!   could turn the preceding paragraph into a setext heading.
 //! - **`.` `)`** (after a digit): escape only at line start preceded by
 //!   one-or-more digits (ordered list marker).
 //! - **`!`**: escape only when followed by `[` (image link).
@@ -90,11 +93,17 @@ pub(crate) fn escape_text(input: &str) -> String {
                 output.push('\\');
                 output.push('#');
             }
+            '=' if line_start && line_is_marker_run(&chars, i, '=', 1) => {
+                output.push('\\');
+                output.push('=');
+            }
             '+' if line_start && next_is_space_or_eol(next_ch) => {
                 output.push('\\');
                 output.push('+');
             }
-            '-' if line_start && next_is_space_or_eol(next_ch) => {
+            '-' if line_start
+                && (next_is_space_or_eol(next_ch) || line_is_marker_run(&chars, i, '-', 3)) =>
+            {
                 output.push('\\');
                 output.push('-');
             }
@@ -171,6 +180,21 @@ fn next_is_space_or_eol(next: Option<char>) -> bool {
     }
 }
 
+fn line_is_marker_run(chars: &[char], start: usize, marker: char, min_count: usize) -> bool {
+    let mut count = 0;
+    let mut index = start;
+    while index < chars.len() {
+        match chars[index] {
+            ch if ch == marker => count += 1,
+            ' ' | '\t' => {}
+            '\n' | '\r' => break,
+            _ => return false,
+        }
+        index += 1;
+    }
+    count >= min_count
+}
+
 /// Escape text for a Markdown heading, collapsing newlines so injected
 /// block syntax cannot start a new section.
 #[must_use]
@@ -228,6 +252,21 @@ fn longest_backtick_run(input: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{escape_heading, escape_text, fenced_code_block, inline_code};
+
+    #[derive(Debug, serde::Deserialize)]
+    struct MarkdownCornerFixture {
+        name: String,
+        renderer: String,
+        input: String,
+        expected: String,
+        rationale: String,
+    }
+
+    fn commonmark_event_signature(markdown: &str) -> Vec<String> {
+        pulldown_cmark::Parser::new(markdown)
+            .map(|event| format!("{event:?}"))
+            .collect()
+    }
 
     // -- Adversarial cases the old policy escaped — these still get
     // escaped because they ARE markdown syntax at the position they
@@ -405,5 +444,73 @@ mod tests {
         // First line: "Run me first." — `.` mid-text, no escape.
         // Second line: starts "1." → ordered marker → escape.
         assert_eq!(escaped, "Run me first.\n1\\. Then bullet.");
+    }
+
+    #[test]
+    fn thematic_break_and_setext_lines_are_escaped() {
+        assert_eq!(escape_text("Before\n---\nAfter"), "Before\n\\---\nAfter");
+        assert_eq!(escape_text("Before\n===\nAfter"), "Before\n\\===\nAfter");
+        assert_eq!(escape_text("--- not a rule"), "--- not a rule");
+    }
+
+    #[test]
+    fn commonmark_corner_fixture_catalog_matches_renderer() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("markdown_corner_cases");
+        let mut entries = std::fs::read_dir(&root)
+            .unwrap_or_else(|error| panic!("read {}: {error}", root.display()))
+            .map(|entry| {
+                entry
+                    .unwrap_or_else(|error| panic!("read fixture entry: {error}"))
+                    .path()
+            })
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+            .collect::<Vec<_>>();
+        entries.sort();
+
+        assert!(
+            entries.len() >= 20,
+            "expected at least 20 markdown corner fixtures, got {}",
+            entries.len()
+        );
+
+        let mut names = std::collections::BTreeSet::new();
+        for path in entries {
+            let content = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            let fixture: MarkdownCornerFixture = serde_json::from_str(&content)
+                .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
+            assert!(
+                names.insert(fixture.name.clone()),
+                "duplicate markdown corner fixture name: {}",
+                fixture.name
+            );
+            assert!(
+                !fixture.rationale.trim().is_empty(),
+                "{} rationale must be non-empty",
+                fixture.name
+            );
+
+            let rendered = match fixture.renderer.as_str() {
+                "text" => escape_text(&fixture.input),
+                "heading" => escape_heading(&fixture.input),
+                "inline_code" => inline_code(&fixture.input),
+                "fenced_code_block" => fenced_code_block(&fixture.input),
+                other => panic!("{} unknown renderer {other}", fixture.name),
+            };
+            assert_eq!(
+                rendered, fixture.expected,
+                "{} rendered output drifted",
+                fixture.name
+            );
+            assert_eq!(
+                commonmark_event_signature(&rendered),
+                commonmark_event_signature(&fixture.expected),
+                "{} pulldown-cmark event stream drifted",
+                fixture.name
+            );
+        }
     }
 }

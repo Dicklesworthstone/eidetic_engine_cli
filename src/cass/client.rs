@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use super::error::CassError;
 use super::process::CassInvocation;
+use crate::config::env_registry::{EnvVar, read, read_os};
 
 /// Default binary name `ee` resolves through `$PATH` when the config
 /// does not pin an explicit location.
@@ -105,7 +106,7 @@ pub fn discover_with_override(
     config_override: Option<&Path>,
 ) -> Result<DiscoveredBinary, CassError> {
     // Check EE_CASS_BINARY env var first
-    if let Ok(env_path) = std::env::var("EE_CASS_BINARY") {
+    if let Some(env_path) = read(EnvVar::CassBinary) {
         let path = PathBuf::from(&env_path);
         if path.is_file() {
             return Ok(DiscoveredBinary::new(
@@ -159,7 +160,7 @@ pub fn discover_with_override(
 pub fn discover_import_binary(
     config_override: Option<&Path>,
 ) -> Result<DiscoveredBinary, CassError> {
-    let env_override = std::env::var_os("EE_CASS_BINARY");
+    let env_override = read_os(EnvVar::CassBinary);
     discover_import_binary_from_sources(
         env_override.as_deref(),
         config_override,

@@ -13,9 +13,11 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+use super::env_registry::EnvVar;
 use super::file::{
-    CassConfig, ConfigFile, CurationConfig, FeedbackConfig, PackConfig, PrivacyConfig,
-    RuntimeConfig, SearchConfig, SearchSpeed, StorageConfig, TrustConfig,
+    CassConfig, ConfigFile, CurationConfig, FeedbackConfig, PackConfig, PolicyConfig,
+    PrivacyConfig, RuntimeConfig, SearchConfig, SearchSpeed, SecretDetectorConfig, StorageConfig,
+    TrustConfig,
 };
 use super::path::{PathExpander, PathExpansionError};
 
@@ -43,6 +45,8 @@ pub const CURATION_DECAY_HALF_LIFE_DAYS_KEY: &str = "curation.decay_half_life_da
 pub const CURATION_SPECIFICITY_MIN_KEY: &str = "curation.specificity_min";
 pub const FEEDBACK_HARMFUL_PER_SOURCE_PER_HOUR_KEY: &str = "feedback.harmful_per_source_per_hour";
 pub const FEEDBACK_HARMFUL_BURST_WINDOW_SECONDS_KEY: &str = "feedback.harmful_burst_window_seconds";
+pub const POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY: &str = "policy.secret_detector.allow_phrases";
+pub const POLICY_SECRET_DETECTOR_ALLOW_REGEX_KEY: &str = "policy.secret_detector.allow_regex";
 pub const PRIVACY_REDACT_SECRETS_KEY: &str = "privacy.redact_secrets";
 pub const PRIVACY_REDACTION_CLASSES_KEY: &str = "privacy.redaction_classes";
 pub const TRUST_DEFAULT_CLASS_KEY: &str = "trust.default_class";
@@ -291,6 +295,22 @@ impl MergedConfig {
             ));
         }
 
+        // Policy section
+        if let Some(ref phrases) = self.values.policy.secret_detector.allow_phrases {
+            entries.push(ConfigShowEntry::new(
+                POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY,
+                phrases.join(","),
+                self.source(POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY),
+            ));
+        }
+        if let Some(ref regexes) = self.values.policy.secret_detector.allow_regex {
+            entries.push(ConfigShowEntry::new(
+                POLICY_SECRET_DETECTOR_ALLOW_REGEX_KEY,
+                regexes.join(","),
+                self.source(POLICY_SECRET_DETECTOR_ALLOW_REGEX_KEY),
+            ));
+        }
+
         // Privacy section
         if let Some(redact) = self.values.privacy.redact_secrets {
             entries.push(ConfigShowEntry::new(
@@ -406,6 +426,7 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             harmful_per_source_per_hour: Some(5),
             harmful_burst_window_seconds: Some(3600),
         },
+        policy: PolicyConfig::default(),
         privacy: PrivacyConfig {
             redact_secrets: Some(true),
             redaction_classes: Some(vec![
@@ -435,25 +456,32 @@ pub fn config_from_env(
 ) -> Result<ConfigFile, EnvironmentConfigError> {
     Ok(ConfigFile {
         storage: StorageConfig {
-            database_path: optional_env_path(env, "EE_DATABASE_PATH", expander)?,
-            index_dir: optional_env_path(env, "EE_INDEX_DIR", expander)?,
+            database_path: optional_env_path(env, EnvVar::DatabasePath.name(), expander)?,
+            index_dir: optional_env_path(env, EnvVar::IndexDir.name(), expander)?,
             jsonl_export: None,
         },
         runtime: RuntimeConfig::default(),
         cass: CassConfig::default(),
         search: SearchConfig::default(),
         pack: PackConfig {
-            default_profile: optional_env_string(env, "EE_PROFILE")?,
+            default_profile: optional_env_string(env, EnvVar::Profile.name())?,
             default_format: None,
-            default_max_tokens: optional_env_u64(env, "EE_MAX_TOKENS")?,
+            default_max_tokens: optional_env_u64(env, EnvVar::MaxTokens.name())?,
             mmr_lambda: None,
             candidate_pool: None,
         },
         curation: CurationConfig::default(),
         feedback: FeedbackConfig {
-            harmful_per_source_per_hour: optional_env_u64(env, "EE_HARMFUL_PER_SOURCE_PER_HOUR")?,
-            harmful_burst_window_seconds: optional_env_u64(env, "EE_HARMFUL_BURST_WINDOW_SECONDS")?,
+            harmful_per_source_per_hour: optional_env_u64(
+                env,
+                EnvVar::HarmfulPerSourcePerHour.name(),
+            )?,
+            harmful_burst_window_seconds: optional_env_u64(
+                env,
+                EnvVar::HarmfulBurstWindowSeconds.name(),
+            )?,
         },
+        policy: PolicyConfig::default(),
         privacy: PrivacyConfig::default(),
         trust: TrustConfig::default(),
     })
@@ -737,6 +765,28 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.defaults.feedback.harmful_burst_window_seconds,
             ),
         },
+        policy: PolicyConfig {
+            secret_detector: SecretDetectorConfig {
+                allow_phrases: pick_field(
+                    &mut sources,
+                    POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY,
+                    &layers.cli.policy.secret_detector.allow_phrases,
+                    &layers.environment.policy.secret_detector.allow_phrases,
+                    &layers.project.policy.secret_detector.allow_phrases,
+                    &layers.user.policy.secret_detector.allow_phrases,
+                    &layers.defaults.policy.secret_detector.allow_phrases,
+                ),
+                allow_regex: pick_field(
+                    &mut sources,
+                    POLICY_SECRET_DETECTOR_ALLOW_REGEX_KEY,
+                    &layers.cli.policy.secret_detector.allow_regex,
+                    &layers.environment.policy.secret_detector.allow_regex,
+                    &layers.project.policy.secret_detector.allow_regex,
+                    &layers.user.policy.secret_detector.allow_regex,
+                    &layers.defaults.policy.secret_detector.allow_regex,
+                ),
+            },
+        },
         privacy: PrivacyConfig {
             redact_secrets: pick_field(
                 &mut sources,
@@ -868,13 +918,14 @@ mod tests {
 
     use super::{
         CURATION_SPECIFICITY_MIN_KEY, ConfigLayers, ConfigValueSource, EnvironmentConfigError,
-        PACK_DEFAULT_MAX_TOKENS_KEY, PACK_DEFAULT_PROFILE_KEY, SEARCH_DEFAULT_SPEED_KEY,
+        PACK_DEFAULT_MAX_TOKENS_KEY, PACK_DEFAULT_PROFILE_KEY,
+        POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY, SEARCH_DEFAULT_SPEED_KEY,
         STORAGE_DATABASE_PATH_KEY, STORAGE_INDEX_DIR_KEY, built_in_config, config_from_env,
         merge_config,
     };
     use crate::config::{
-        ConfigFile, CurationConfig, PackConfig, PathExpander, SearchConfig, SearchSpeed,
-        StorageConfig,
+        ConfigFile, CurationConfig, PackConfig, PathExpander, PolicyConfig, SearchConfig,
+        SearchSpeed, SecretDetectorConfig, StorageConfig,
     };
 
     type TestResult = Result<(), String>;
@@ -1017,6 +1068,12 @@ mod tests {
                 specificity_min: Some(0.60),
                 ..CurationConfig::default()
             },
+            policy: PolicyConfig {
+                secret_detector: SecretDetectorConfig {
+                    allow_phrases: Some(vec!["OAuth refresh token".to_string()]),
+                    ..SecretDetectorConfig::default()
+                },
+            },
             ..ConfigFile::default()
         };
         let environment = ConfigFile {
@@ -1100,6 +1157,16 @@ mod tests {
             &merged.source(CURATION_SPECIFICITY_MIN_KEY),
             &Some(ConfigValueSource::Project),
             "specificity threshold source",
+        )?;
+        ensure_equal(
+            &merged.values.policy.secret_detector.allow_phrases,
+            &Some(vec!["OAuth refresh token".to_string()]),
+            "project policy allow phrase",
+        )?;
+        ensure_equal(
+            &merged.source(POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY),
+            &Some(ConfigValueSource::Project),
+            "policy allow phrase source",
         )
     }
 

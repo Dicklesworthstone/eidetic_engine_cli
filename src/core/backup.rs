@@ -14,7 +14,9 @@ use serde_json::{Value as JsonValue, json};
 
 use crate::config::WORKSPACE_MARKER;
 use crate::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
-use crate::db::{DatabaseConfig, DbConnection, StoredAuditEntry, StoredMemory, StoredMemoryLink};
+use crate::db::{
+    DatabaseConfig, DbConnection, StoredAuditEntry, StoredMemory, StoredMemoryLink, audit_actions,
+};
 use crate::models::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
     BACKUP_MANIFEST_SCHEMA_V1, BACKUP_RESTORE_SCHEMA_V1, BACKUP_VERIFY_SCHEMA_V1, BackupId,
@@ -1383,11 +1385,15 @@ fn render_records(
             .write_workspace(data.workspace.clone())
             .map_err(io_error("write backup workspace record"))?;
 
+        let tombstone_reasons = tombstone_reasons_by_memory(&data.audits);
         for memory in &data.memories {
             exporter
                 .write_memory(
-                    memory_record(memory)
-                        .map_err(export_build_error("build backup memory record"))?,
+                    memory_record(
+                        memory,
+                        tombstone_reasons.get(&memory.id).map(String::as_str),
+                    )
+                    .map_err(export_build_error("build backup memory record"))?,
                 )
                 .map_err(io_error("write backup memory record"))?;
             for tag in
@@ -1428,7 +1434,10 @@ fn render_records(
     Ok((output, stats))
 }
 
-fn memory_record(memory: &StoredMemory) -> Result<ExportMemoryRecord, ExportRecordBuildError> {
+fn memory_record(
+    memory: &StoredMemory,
+    tombstoned_reason: Option<&str>,
+) -> Result<ExportMemoryRecord, ExportRecordBuildError> {
     let mut builder = ExportMemoryRecord::builder()
         .memory_id(memory.id.clone())
         .workspace_id(memory.workspace_id.clone())
@@ -1444,7 +1453,53 @@ fn memory_record(memory: &StoredMemory) -> Result<ExportMemoryRecord, ExportReco
     if let Some(provenance_uri) = &memory.provenance_uri {
         builder = builder.provenance_uri(provenance_uri.clone());
     }
+    if let Some(tombstoned_at) = &memory.tombstoned_at {
+        builder = builder.tombstoned_at(tombstoned_at.clone());
+    }
+    if let Some(reason) = tombstoned_reason {
+        builder = builder.tombstoned_reason(reason.to_owned());
+    }
+    if let Some(valid_from) = &memory.valid_from {
+        builder = builder.valid_from(valid_from.clone());
+    }
+    if let Some(valid_to) = &memory.valid_to {
+        builder = builder
+            .valid_to(valid_to.clone())
+            .expires_at(valid_to.clone());
+    }
     builder.build()
+}
+
+fn tombstone_reasons_by_memory(audits: &[StoredAuditEntry]) -> BTreeMap<String, String> {
+    let mut reasons = BTreeMap::new();
+    for audit in audits {
+        if audit.action != audit_actions::MEMORY_TOMBSTONE
+            || audit.target_type.as_deref() != Some("memory")
+        {
+            continue;
+        }
+        let Some(memory_id) = audit.target_id.as_ref() else {
+            continue;
+        };
+        if reasons.contains_key(memory_id) {
+            continue;
+        }
+        let Some(reason) = tombstone_reason_from_audit_details(audit.details.as_deref()) else {
+            continue;
+        };
+        reasons.insert(memory_id.clone(), reason);
+    }
+    reasons
+}
+
+fn tombstone_reason_from_audit_details(details: Option<&str>) -> Option<String> {
+    let value = serde_json::from_str::<JsonValue>(details?).ok()?;
+    value
+        .get("reason")
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_owned)
 }
 
 fn memory_tags(
@@ -1915,6 +1970,64 @@ mod tests {
             "dry run verification",
         )?;
         ensure(!out.exists(), "dry run must not create output directory")
+    }
+
+    #[test]
+    fn memory_record_preserves_lifecycle_metadata() -> TestResult {
+        let record = memory_record(
+            &StoredMemory {
+                id: "mem_00000000000000000000000001".to_owned(),
+                workspace_id: "ws_00000000000000000000000001".to_owned(),
+                level: "procedural".to_owned(),
+                kind: "rule".to_owned(),
+                content: "Run release checks before shipping.".to_owned(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.7,
+                importance: 0.8,
+                provenance_uri: Some("ee-test://lifecycle".to_owned()),
+                trust_class: "agent_validated".to_owned(),
+                trust_subclass: Some("fixture".to_owned()),
+                provenance_chain_hash: None,
+                provenance_chain_hash_version: "v1".to_owned(),
+                provenance_verification_status: "unverified".to_owned(),
+                provenance_verified_at: None,
+                provenance_verification_note: None,
+                created_at: "2026-05-01T00:00:00Z".to_owned(),
+                updated_at: "2026-05-02T00:00:00Z".to_owned(),
+                tombstoned_at: Some("2026-05-03T00:00:00Z".to_owned()),
+                valid_from: Some("2026-04-01T00:00:00Z".to_owned()),
+                valid_to: Some("2026-06-01T00:00:00Z".to_owned()),
+            },
+            Some("outdated rule"),
+        )
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            record.tombstoned_at.as_deref(),
+            Some("2026-05-03T00:00:00Z"),
+            "tombstoned_at",
+        )?;
+        ensure_equal(
+            record.tombstoned_reason.as_deref(),
+            Some("outdated rule"),
+            "tombstoned_reason",
+        )?;
+        ensure_equal(
+            record.valid_from.as_deref(),
+            Some("2026-04-01T00:00:00Z"),
+            "valid_from",
+        )?;
+        ensure_equal(
+            record.valid_to.as_deref(),
+            Some("2026-06-01T00:00:00Z"),
+            "valid_to",
+        )?;
+        ensure_equal(
+            record.expires_at.as_deref(),
+            Some("2026-06-01T00:00:00Z"),
+            "expires_at",
+        )
     }
 
     #[test]

@@ -17,6 +17,7 @@ use super::index::{
     DEFAULT_INDEX_SUBDIR, IndexProcessingJobReport, process_index_job_for_connection,
 };
 use super::search::{SearchOptions, SearchStatus, run_search};
+use crate::config::ConfigFile;
 use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
     CreateAuditInput, CreateCurationCandidateInput, CreateMemoryInput, CreateMemoryLinkInput,
@@ -25,8 +26,9 @@ use crate::db::{
     generate_audit_id,
 };
 use crate::models::{
-    DomainError, MemoryContent, MemoryId, MemoryKind, MemoryLevel, ProvenanceUri, Tag, TrustClass,
-    UnitScore, WorkspaceId,
+    DomainError, MAX_TAG_BYTES, MemoryContent, MemoryId, MemoryKind, MemoryLevel,
+    MemoryValidationError, ProducerMetadata, ProvenanceUri, Tag, TrustClass, UnitScore,
+    WorkspaceId,
 };
 use crate::obs::{AuditEvent, AuditOutcome, now_rfc3339_nanos};
 
@@ -60,6 +62,8 @@ pub struct RememberMemoryOptions<'a> {
     pub confidence: f32,
     /// Optional source provenance URI.
     pub source: Option<&'a str>,
+    /// Explicitly allow a secret-detector match while surfacing an audit/degraded signal.
+    pub allow_secret_mention: bool,
     /// RFC3339 timestamp when this memory becomes applicable.
     pub valid_from: Option<&'a str>,
     /// RFC3339 timestamp when this memory stops being applicable.
@@ -99,6 +103,8 @@ pub struct RememberMemoryReport {
     pub tags: Vec<String>,
     /// Canonical source/provenance URI.
     pub source: Option<String>,
+    /// Producer identity metadata for this memory write.
+    pub producer: ProducerMetadata,
     /// RFC3339 timestamp when this memory becomes applicable.
     pub valid_from: Option<String>,
     /// RFC3339 timestamp when this memory stops being applicable.
@@ -131,6 +137,8 @@ pub struct RememberMemoryReport {
     pub suggested_link_degradations: Vec<RememberSuggestedLinkDegradation>,
     /// Stable redaction/policy status for the accepted content.
     pub redaction_status: String,
+    /// Explicit policy-bypass signal when a configured or per-call bypass was used.
+    pub policy_bypass: Option<RememberPolicyBypassReport>,
     /// Durable auto-link rows created by remember-time workflow reinforcement.
     pub auto_links: Vec<RememberAutoLink>,
     /// Status of remember-time workflow auto-linking.
@@ -341,6 +349,60 @@ pub struct RememberSuggestedLinkDegradation {
     pub repair: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RememberPolicyBypassMatch {
+    pub kind: String,
+    pub pattern: String,
+    pub matched_text: String,
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RememberPolicyBypassReport {
+    pub code: String,
+    pub severity: String,
+    pub kind: String,
+    pub message: String,
+    pub repair: String,
+    pub redacted_reasons: Vec<String>,
+    pub matches: Vec<RememberPolicyBypassMatch>,
+    pub audit_id: Option<String>,
+}
+
+impl RememberPolicyBypassReport {
+    fn degradation(
+        kind: impl Into<String>,
+        redacted_reasons: Vec<String>,
+        matches: Vec<RememberPolicyBypassMatch>,
+    ) -> Self {
+        let kind = kind.into();
+        let message = match kind.as_str() {
+            "flag" => "Secret-like content persisted because --allow-secret-mention was used.",
+            "config_phrase" | "config_regex" | "config" => {
+                "Secret-like content persisted because workspace secret-detector allow config matched."
+            }
+            _ => "Secret-like content persisted through an explicit policy bypass.",
+        };
+        Self {
+            code: "policy_bypass_used".to_owned(),
+            severity: "info".to_owned(),
+            kind,
+            message: message.to_owned(),
+            repair: "Review the memory and its audit row before relying on this content."
+                .to_owned(),
+            redacted_reasons,
+            matches,
+            audit_id: None,
+        }
+    }
+
+    fn with_audit_id(mut self, audit_id: String) -> Self {
+        self.audit_id = Some(audit_id);
+        self
+    }
+}
+
 /// Create a manual memory and publish its single-document index job.
 ///
 /// Dry-run mode validates and returns the canonical record shape without
@@ -363,6 +425,7 @@ pub fn remember_memory(
             confidence: prepared.confidence,
             tags: prepared.tags,
             source: prepared.provenance_uri,
+            producer: ProducerMetadata::manual_remember(None, None),
             valid_from: prepared.valid_from,
             valid_to: prepared.valid_to,
             validity_status: prepared.validity_status,
@@ -379,6 +442,7 @@ pub fn remember_memory(
             suggested_link_status: "dry_run_not_evaluated".to_owned(),
             suggested_link_degradations: Vec::new(),
             redaction_status: "checked".to_owned(),
+            policy_bypass: prepared.policy_bypass,
             auto_links: Vec::new(),
             auto_link_status: "dry_run_not_evaluated".to_owned(),
             auto_link_degradations: Vec::new(),
@@ -406,6 +470,7 @@ pub fn remember_memory(
 
     let memory_id = prepared.memory_id.to_string();
     let audit_id = generate_audit_id();
+    let policy_bypass_audit_id = prepared.policy_bypass.as_ref().map(|_| generate_audit_id());
     let index_job_id = generate_search_index_job_id();
     let memory_input = CreateMemoryInput {
         workspace_id: prepared.workspace_id.clone(),
@@ -423,7 +488,12 @@ pub fn remember_memory(
         valid_from: prepared.valid_from.clone(),
         valid_to: prepared.valid_to.clone(),
     };
-    let audit_details = remember_audit_details(&memory_id, &memory_input);
+    let policy_bypass = prepared
+        .policy_bypass
+        .clone()
+        .zip(policy_bypass_audit_id)
+        .map(|(bypass, audit_id)| bypass.with_audit_id(audit_id));
+    let audit_details = remember_audit_details(&memory_id, &memory_input, policy_bypass.as_ref());
     let index_input = CreateSearchIndexJobInput {
         workspace_id: prepared.workspace_id.clone(),
         job_type: SearchIndexJobType::SingleDocument,
@@ -440,6 +510,7 @@ pub fn remember_memory(
         &memory_input,
         &audit_details,
         &index_input,
+        policy_bypass.as_ref(),
     )?;
 
     append_remember_audit_jsonl(&prepared, &audit_id, &memory_id, &memory_input)?;
@@ -559,6 +630,7 @@ pub fn remember_memory(
         confidence: prepared.confidence,
         tags: prepared.tags,
         source: prepared.provenance_uri,
+        producer: ProducerMetadata::manual_remember(None, None),
         valid_from: prepared.valid_from,
         valid_to: prepared.valid_to,
         validity_status: prepared.validity_status,
@@ -575,6 +647,7 @@ pub fn remember_memory(
         suggested_link_status,
         suggested_link_degradations,
         redaction_status: "checked".to_owned(),
+        policy_bypass,
         auto_links,
         auto_link_status,
         auto_link_degradations,
@@ -756,6 +829,7 @@ struct PreparedRememberMemory {
     confidence: f32,
     tags: Vec<String>,
     provenance_uri: Option<String>,
+    policy_bypass: Option<RememberPolicyBypassReport>,
     valid_from: Option<String>,
     valid_to: Option<String>,
     validity_status: String,
@@ -774,7 +848,8 @@ fn prepare_remember_memory(
         .map_err(|error| remember_usage_error(error.to_string()))?
         .as_str()
         .to_owned();
-    validate_remember_policy(&content)?;
+    let policy_bypass =
+        validate_remember_policy(&content, &workspace_path, options.allow_secret_mention)?;
     let workflow_id = parse_workflow_id(options.workflow_id)?;
     let level = MemoryLevel::from_str(options.level)
         .map_err(|error| remember_usage_error(error.to_string()))?;
@@ -806,6 +881,7 @@ fn prepare_remember_memory(
         confidence,
         tags,
         provenance_uri,
+        policy_bypass,
         valid_from: validity.valid_from,
         valid_to: validity.valid_to,
         validity_status: validity.status,
@@ -1135,11 +1211,147 @@ fn parse_tags(tags: Option<&str>) -> Result<Vec<String>, DomainError> {
     let mut unique = BTreeSet::new();
     if let Some(tags) = tags {
         for raw in tags.split(',').map(str::trim).filter(|tag| !tag.is_empty()) {
-            let tag = Tag::parse(raw).map_err(|error| remember_usage_error(error.to_string()))?;
+            let tag = Tag::parse(raw).map_err(|error| remember_tag_usage_error(raw, &error))?;
             unique.insert(tag.to_string());
         }
     }
     Ok(unique.into_iter().collect())
+}
+
+fn remember_tag_usage_error(raw: &str, error: &MemoryValidationError) -> DomainError {
+    let normalized_candidate = normalize_tag_candidate(raw);
+    let rejected = tag_rejection_matches(raw, error);
+    let details = serde_json::json!({
+        "detailCode": "policy_tag_rejected_with_details",
+        "rejectedKind": "tag",
+        "tag": raw,
+        "rejectedInput": raw,
+        "acceptedPattern": r"^[\p{Alphabetic}\p{Mark}\p{Number}._:-]{1,64}$",
+        "acceptedExamples": ["release", "v0.1.0", "policy.detector", "security:auth-bypass"],
+        "matchedAt": rejected,
+        "normalizedFormCandidate": normalized_candidate,
+        "maxBytes": MAX_TAG_BYTES,
+    });
+    DomainError::UsageWithDetails {
+        message: match error {
+            MemoryValidationError::InvalidTag { .. } => {
+                format!("tag `{raw}` contains characters outside the accepted set.")
+            }
+            MemoryValidationError::EmptyTag => "tag cannot be empty.".to_owned(),
+            MemoryValidationError::TagTooLong { limit, .. } => {
+                format!("tag `{raw}` exceeds the {limit}-byte limit.")
+            }
+            other => other.to_string(),
+        },
+        repair: Some(
+            "Use only accepted tag characters, for example `v0.1.0` or `policy.detector`."
+                .to_owned(),
+        ),
+        details_json: details.to_string(),
+    }
+}
+
+fn normalize_tag_candidate(input: &str) -> String {
+    unicode_normalization::UnicodeNormalization::nfc(input.trim())
+        .map(|ch| {
+            if ch.is_ascii_uppercase() {
+                ch.to_ascii_lowercase()
+            } else {
+                ch
+            }
+        })
+        .collect()
+}
+
+fn previous_char_boundary(input: &str, mut index: usize) -> usize {
+    while index > 0 && !input.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn tag_rejection_matches(input: &str, error: &MemoryValidationError) -> Vec<serde_json::Value> {
+    match error {
+        MemoryValidationError::EmptyTag => vec![serde_json::json!({
+            "start": 0,
+            "end": 0,
+            "reason": "empty",
+        })],
+        MemoryValidationError::TagTooLong { .. } => {
+            let start = previous_char_boundary(input, MAX_TAG_BYTES.min(input.len()));
+            vec![serde_json::json!({
+                "start": start,
+                "end": input.len(),
+                "reason": "too_long",
+            })]
+        }
+        MemoryValidationError::InvalidTag { .. } => input
+            .char_indices()
+            .filter_map(|(start, ch)| {
+                tag_rejection_reason(ch).map(|reason| {
+                    serde_json::json!({
+                        "start": start,
+                        "end": start + ch.len_utf8(),
+                        "reason": reason,
+                    })
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn tag_rejection_reason(ch: char) -> Option<&'static str> {
+    if ch.is_whitespace() {
+        Some("space_disallowed")
+    } else if ch.is_control() {
+        Some("control_disallowed")
+    } else if ch.is_ascii() {
+        if matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | ':' | '-') {
+            None
+        } else if matches!(
+            ch,
+            ',' | '='
+                | '/'
+                | '\\'
+                | ';'
+                | '*'
+                | '?'
+                | '|'
+                | '<'
+                | '>'
+                | '"'
+                | '\''
+                | '`'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '@'
+                | '#'
+                | '$'
+                | '%'
+                | '^'
+                | '&'
+                | '+'
+                | '~'
+        ) {
+            Some("reserved_delimiter")
+        } else {
+            Some("symbol_disallowed")
+        }
+    } else if ch.is_alphanumeric()
+        || matches!(
+            unicode_normalization::char::canonical_combining_class(ch),
+            1..=255
+        )
+    {
+        None
+    } else {
+        Some("unicode_disallowed")
+    }
 }
 
 fn parse_workflow_id(workflow_id: Option<&str>) -> Result<Option<String>, DomainError> {
@@ -1170,21 +1382,284 @@ fn parse_workflow_id(workflow_id: Option<&str>) -> Result<Option<String>, Domain
 /// detector (`policy::redact_secret_like_content`) already catches real
 /// secret VALUES (API keys, JWTs, PEM blocks, high-entropy tokens) without
 /// flagging plain-English mentions. The keyword fallthrough is removed.
-fn validate_remember_policy(content: &str) -> Result<(), DomainError> {
+fn validate_remember_policy(
+    content: &str,
+    workspace_path: &Path,
+    allow_secret_mention: bool,
+) -> Result<Option<RememberPolicyBypassReport>, DomainError> {
     let redaction_report = crate::policy::redact_secret_like_content(content);
-    if redaction_report.redacted {
-        return Err(DomainError::PolicyDenied {
-            message: format!(
-                "Refusing to persist memory content that contains secrets: {}.",
-                redaction_report.redacted_reasons.join(", ")
-            ),
-            repair: Some(
-                "Redact the secret and run `ee remember` again with only durable evidence."
-                    .to_owned(),
-            ),
-        });
+    if !redaction_report.redacted {
+        return Ok(None);
     }
-    Ok(())
+
+    let secret_matches = redaction_report.matches;
+    let mut redacted_reasons = redaction_report
+        .redacted_reasons
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    redacted_reasons.sort_unstable();
+    redacted_reasons.dedup();
+
+    let allow_config = load_secret_detector_allow_config(workspace_path)?;
+    let configured_matches = secret_detector_allow_matches(content, &allow_config)?;
+    if !configured_matches.is_empty() {
+        let masked = mask_allow_match_spans(content, &configured_matches);
+        let masked_report = crate::policy::redact_secret_like_content(&masked);
+        if !masked_report.redacted {
+            let kind = configured_bypass_kind(&configured_matches);
+            return Ok(Some(RememberPolicyBypassReport::degradation(
+                kind,
+                redacted_reasons,
+                configured_matches,
+            )));
+        }
+    }
+
+    if allow_secret_mention {
+        return Ok(Some(RememberPolicyBypassReport::degradation(
+            "flag",
+            redacted_reasons,
+            Vec::new(),
+        )));
+    }
+
+    Err(remember_secret_policy_denied_error(
+        redacted_reasons,
+        &secret_matches,
+    ))
+}
+
+fn remember_secret_policy_denied_error(
+    redacted_reasons: Vec<String>,
+    matches: &[crate::policy::SecretRedactionMatch],
+) -> DomainError {
+    let matched_at = matches
+        .iter()
+        .map(|matched| {
+            serde_json::json!({
+                "start": matched.start,
+                "end": matched.end,
+                "pattern_id": matched.pattern_id,
+            })
+        })
+        .collect::<Vec<_>>();
+    let detected_patterns = {
+        let mut patterns = redacted_reasons.clone();
+        patterns.sort_unstable();
+        patterns.dedup();
+        patterns
+    };
+    let detected_pattern = detected_patterns
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "secret_like_value".to_owned());
+    let details = serde_json::json!({
+        "detailCode": "policy_secret_detected_with_offsets",
+        "rejectedKind": "content",
+        "detectedPattern": detected_pattern,
+        "detectedPatterns": detected_patterns,
+        "matchedAt": matched_at,
+        "bypassFlag": "--allow-secret-mention",
+        "configKey": "policy.secret_detector.allow_phrases",
+        "configRegexKey": "policy.secret_detector.allow_regex",
+    });
+    DomainError::PolicyDeniedWithDetails {
+        message: format!(
+            "Refusing to persist memory content that contains secrets: {}.",
+            redacted_reasons.join(", ")
+        ),
+        repair: Some(
+            "Redact the secret or run `ee remember --allow-secret-mention` only for auditable non-secret mentions."
+                .to_owned(),
+        ),
+        details_json: details.to_string(),
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct SecretDetectorAllowConfig {
+    allow_phrases: Vec<String>,
+    allow_regex: Vec<String>,
+}
+
+fn load_secret_detector_allow_config(
+    workspace_path: &Path,
+) -> Result<SecretDetectorAllowConfig, DomainError> {
+    let path = workspace_path.join(".ee").join("config.toml");
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SecretDetectorAllowConfig::default());
+        }
+        Err(error) => {
+            return Err(DomainError::Configuration {
+                message: format!(
+                    "Failed to read workspace config {}: {error}",
+                    path.display()
+                ),
+                repair: Some("Fix or remove .ee/config.toml.".to_owned()),
+            });
+        }
+    };
+    let config = ConfigFile::parse(&contents).map_err(|error| DomainError::Configuration {
+        message: format!(
+            "Failed to parse workspace config {}: {error}",
+            path.display()
+        ),
+        repair: Some("Fix [policy.secret_detector] in .ee/config.toml.".to_owned()),
+    })?;
+    Ok(SecretDetectorAllowConfig {
+        allow_phrases: config
+            .policy
+            .secret_detector
+            .allow_phrases
+            .unwrap_or_default(),
+        allow_regex: config
+            .policy
+            .secret_detector
+            .allow_regex
+            .unwrap_or_default(),
+    })
+}
+
+fn configured_bypass_kind(matches: &[RememberPolicyBypassMatch]) -> &'static str {
+    let has_phrase = matches.iter().any(|item| item.kind == "config_phrase");
+    let has_regex = matches.iter().any(|item| item.kind == "config_regex");
+    match (has_phrase, has_regex) {
+        (true, true) => "config",
+        (true, false) => "config_phrase",
+        (false, true) => "config_regex",
+        (false, false) => "config",
+    }
+}
+
+fn secret_detector_allow_matches(
+    content: &str,
+    config: &SecretDetectorAllowConfig,
+) -> Result<Vec<RememberPolicyBypassMatch>, DomainError> {
+    let mut matches = Vec::new();
+    for phrase in &config.allow_phrases {
+        let trimmed = phrase.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        for (start, end) in find_case_insensitive_spans(content, trimmed) {
+            let (span_start, span_end) = containing_sentence_span(content, start, end);
+            matches.push(RememberPolicyBypassMatch {
+                kind: "config_phrase".to_owned(),
+                pattern: trimmed.to_owned(),
+                matched_text: content[start..end].to_owned(),
+                start: span_start,
+                end: span_end,
+            });
+        }
+    }
+
+    for pattern in &config.allow_regex {
+        let regex =
+            regex_lite::Regex::new(pattern).map_err(|error| DomainError::Configuration {
+                message: format!("Invalid policy.secret_detector.allow_regex `{pattern}`: {error}"),
+                repair: Some(
+                    "Fix [policy.secret_detector].allow_regex in .ee/config.toml.".to_owned(),
+                ),
+            })?;
+        for matched in regex.find_iter(content) {
+            matches.push(RememberPolicyBypassMatch {
+                kind: "config_regex".to_owned(),
+                pattern: pattern.clone(),
+                matched_text: matched.as_str().to_owned(),
+                start: matched.start(),
+                end: matched.end(),
+            });
+        }
+    }
+
+    matches.sort_by(|left, right| {
+        left.start
+            .cmp(&right.start)
+            .then_with(|| left.end.cmp(&right.end))
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.pattern.cmp(&right.pattern))
+    });
+    matches.dedup();
+    Ok(matches)
+}
+
+fn find_case_insensitive_spans(content: &str, needle: &str) -> Vec<(usize, usize)> {
+    let lowercase_content = content.to_ascii_lowercase();
+    let lowercase_needle = needle.to_ascii_lowercase();
+    let mut spans = Vec::new();
+    let mut offset = 0;
+    while let Some(relative_start) = lowercase_content[offset..].find(&lowercase_needle) {
+        let start = offset + relative_start;
+        let end = start + lowercase_needle.len();
+        if content.is_char_boundary(start) && content.is_char_boundary(end) {
+            spans.push((start, end));
+        }
+        offset = end;
+    }
+    spans
+}
+
+fn containing_sentence_span(content: &str, start: usize, end: usize) -> (usize, usize) {
+    let prefix = &content[..start];
+    let span_start = prefix
+        .rfind(['.', '!', '?', '\n'])
+        .map_or(0, |index| index + 1);
+    let suffix = &content[end..];
+    let span_end = suffix
+        .find(['.', '!', '?', '\n'])
+        .map_or(content.len(), |index| end + index + 1);
+    (trim_span_start(content, span_start, span_end), span_end)
+}
+
+fn trim_span_start(content: &str, mut start: usize, end: usize) -> usize {
+    while start < end {
+        let Some(next) = content[start..end].chars().next() else {
+            break;
+        };
+        if !next.is_whitespace() {
+            break;
+        }
+        start += next.len_utf8();
+    }
+    start
+}
+
+fn mask_allow_match_spans(content: &str, matches: &[RememberPolicyBypassMatch]) -> String {
+    if matches.is_empty() {
+        return content.to_owned();
+    }
+
+    let mut spans = matches
+        .iter()
+        .map(|item| (item.start, item.end))
+        .collect::<Vec<_>>();
+    spans.sort_unstable();
+
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in spans {
+        if let Some(last) = merged.last_mut()
+            && start <= last.1
+        {
+            last.1 = last.1.max(end);
+            continue;
+        }
+        merged.push((start, end));
+    }
+
+    let mut out = String::with_capacity(content.len());
+    let mut cursor = 0;
+    for (start, end) in merged {
+        out.push_str(&content[cursor..start]);
+        for ch in content[start..end].chars() {
+            out.push(if ch == '\n' { '\n' } else { ' ' });
+        }
+        cursor = end;
+    }
+    out.push_str(&content[cursor..]);
+    out
 }
 
 fn resolve_workspace_path(path: &Path, dry_run: bool) -> Result<PathBuf, DomainError> {
@@ -1278,6 +1753,10 @@ fn workspace_insert_lost_race(error: &impl ToString) -> bool {
         || message.contains("unique constraint failed: workspaces.id")
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "transaction retry helper mirrors the existing storage/audit/index inputs"
+)]
 fn store_remembered_memory_with_retry(
     connection: &DbConnection,
     memory_id: &str,
@@ -1286,6 +1765,7 @@ fn store_remembered_memory_with_retry(
     memory_input: &CreateMemoryInput,
     audit_details: &str,
     index_input: &CreateSearchIndexJobInput,
+    policy_bypass: Option<&RememberPolicyBypassReport>,
 ) -> Result<(), DomainError> {
     const MAX_ATTEMPTS: usize = 8;
 
@@ -1303,6 +1783,21 @@ fn store_remembered_memory_with_retry(
                     details: Some(audit_details.to_owned()),
                 },
             )?;
+            if let Some(policy_bypass) = policy_bypass {
+                if let Some(policy_audit_id) = policy_bypass.audit_id.as_deref() {
+                    connection.insert_audit(
+                        policy_audit_id,
+                        &CreateAuditInput {
+                            workspace_id: Some(memory_input.workspace_id.clone()),
+                            actor: Some("ee remember".to_owned()),
+                            action: audit_actions::POLICY_BYPASS.to_owned(),
+                            target_type: Some("memory".to_owned()),
+                            target_id: Some(memory_id.to_owned()),
+                            details: Some(policy_bypass_audit_details(policy_bypass)),
+                        },
+                    )?;
+                }
+            }
             connection.insert_search_index_job(index_job_id, index_input)
         }) {
             Ok(()) => return Ok(()),
@@ -1382,7 +1877,11 @@ fn generate_memory_link_id() -> String {
     format!("link_{payload}")
 }
 
-fn remember_audit_details(memory_id: &str, input: &CreateMemoryInput) -> String {
+fn remember_audit_details(
+    memory_id: &str,
+    input: &CreateMemoryInput,
+    policy_bypass: Option<&RememberPolicyBypassReport>,
+) -> String {
     serde_json::json!({
         "schema": "ee.audit.memory_create.v1",
         "command": "ee remember",
@@ -1395,8 +1894,39 @@ fn remember_audit_details(memory_id: &str, input: &CreateMemoryInput) -> String 
         "provenanceUri": input.provenance_uri,
         "workflowId": input.workflow_id,
         "tagCount": input.tags.len(),
+        "policyBypass": policy_bypass.map(policy_bypass_audit_json),
     })
     .to_string()
+}
+
+fn policy_bypass_audit_details(policy_bypass: &RememberPolicyBypassReport) -> String {
+    serde_json::json!({
+        "schema": "ee.audit.policy_bypass.v1",
+        "command": "ee remember",
+        "policyBypass": policy_bypass_audit_json(policy_bypass),
+    })
+    .to_string()
+}
+
+fn policy_bypass_audit_json(policy_bypass: &RememberPolicyBypassReport) -> serde_json::Value {
+    serde_json::json!({
+        "code": &policy_bypass.code,
+        "severity": &policy_bypass.severity,
+        "kind": &policy_bypass.kind,
+        "message": &policy_bypass.message,
+        "repair": &policy_bypass.repair,
+        "redactedReasons": &policy_bypass.redacted_reasons,
+        "matches": policy_bypass.matches.iter().map(|item| {
+            serde_json::json!({
+                "kind": &item.kind,
+                "pattern": &item.pattern,
+                "matchedText": &item.matched_text,
+                "start": item.start,
+                "end": item.end,
+            })
+        }).collect::<Vec<_>>(),
+        "auditId": &policy_bypass.audit_id,
+    })
 }
 
 fn append_remember_audit_jsonl(
@@ -1802,6 +2332,8 @@ fn remember_search_neighbor_ids(
         explain: false,
         include_tombstoned: false,
         relevance_floor: Some(0.0),
+        source_mode: crate::core::search::SearchSourceMode::Hybrid,
+        strict_source_mode: false,
     })
     .map_err(|error| error.to_string())?;
 
@@ -2053,11 +2585,12 @@ fn remember_curation_candidate_audit_details(
 
 #[cfg(not(test))]
 fn remember_curation_sync_budget_ms() -> u128 {
-    std::env::var("EE_REMEMBER_CURATION_SYNC_BUDGET_MS")
-        .ok()
-        .and_then(|raw| raw.parse::<u128>().ok())
-        .filter(|budget_ms| *budget_ms > 0)
-        .unwrap_or(REMEMBER_CURATION_SYNC_BUDGET_MS)
+    crate::config::env_registry::read(
+        crate::config::env_registry::EnvVar::RememberCurationSyncBudgetMs,
+    )
+    .and_then(|raw| raw.parse::<u128>().ok())
+    .filter(|budget_ms| *budget_ms > 0)
+    .unwrap_or(REMEMBER_CURATION_SYNC_BUDGET_MS)
 }
 
 #[cfg(test)]
@@ -4432,6 +4965,7 @@ mod tests {
             tags: Some("release,checks"),
             confidence: 0.9,
             source: Some("file://README.md#L74-77"),
+            allow_secret_mention: false,
             valid_from: None,
             valid_to: None,
             dry_run: false,
@@ -4661,6 +5195,7 @@ mod tests {
             tags: Some("links"),
             confidence: 0.8,
             source: Some("file://README.md#L78-80"),
+            allow_secret_mention: false,
             valid_from: None,
             valid_to: None,
             dry_run: false,
@@ -4861,6 +5396,7 @@ mod tests {
             tags: Some("Release,cli,release"),
             confidence: 0.8,
             source: Some("file://AGENTS.md#L42"),
+            allow_secret_mention: false,
             valid_from: None,
             valid_to: None,
             dry_run: true,
@@ -4949,6 +5485,7 @@ mod tests {
             tags: Some("release,checks"),
             confidence: 0.9,
             source: Some("file://README.md#L74-77"),
+            allow_secret_mention: false,
             valid_from: None,
             valid_to: None,
             dry_run: false,
@@ -5081,6 +5618,7 @@ mod tests {
             tags: Some("temporal,validity"),
             confidence: 0.8,
             source: None,
+            allow_secret_mention: false,
             valid_from: Some("2020-01-01T00:00:00+00:00"),
             valid_to: Some("2099-01-01T00:00:00Z"),
             dry_run: false,
@@ -5142,6 +5680,7 @@ mod tests {
             tags: None,
             confidence: 0.8,
             source: None,
+            allow_secret_mention: false,
             valid_from: Some("not a timestamp"),
             valid_to: None,
             dry_run: true,
@@ -5166,6 +5705,7 @@ mod tests {
             tags: None,
             confidence: 0.8,
             source: None,
+            allow_secret_mention: false,
             valid_from: Some("2099-01-01T00:00:00Z"),
             valid_to: Some("2020-01-01T00:00:00Z"),
             dry_run: true,
@@ -5191,6 +5731,7 @@ mod tests {
             tags: None,
             confidence: 0.8,
             source: None,
+            allow_secret_mention: false,
             valid_from: Some("2050-01-01T00:00:00Z"),
             valid_to: Some("2050-01-01T00:00:00Z"),
             dry_run: true,
@@ -5220,6 +5761,7 @@ mod tests {
             tags: Some("release,checks"),
             confidence: 0.9,
             source: None,
+            allow_secret_mention: false,
             valid_from: None,
             valid_to: None,
             dry_run: false,
@@ -5237,6 +5779,7 @@ mod tests {
             tags: Some("release,docs"),
             confidence: 0.8,
             source: None,
+            allow_secret_mention: false,
             valid_from: None,
             valid_to: None,
             dry_run: false,
@@ -5254,6 +5797,7 @@ mod tests {
             tags: Some("checks,release"),
             confidence: 0.85,
             source: None,
+            allow_secret_mention: false,
             valid_from: None,
             valid_to: None,
             dry_run: false,
@@ -5327,6 +5871,7 @@ mod tests {
             tags: None,
             confidence: 0.8,
             source: None,
+            allow_secret_mention: false,
             valid_from: None,
             valid_to: None,
             dry_run: false,
@@ -5350,6 +5895,7 @@ mod tests {
             tags: None,
             confidence: 0.8,
             source: None,
+            allow_secret_mention: false,
             valid_from: None,
             valid_to: None,
             dry_run: false,
@@ -5452,6 +5998,7 @@ mod tests {
             tags: None,
             confidence: 0.8,
             source: None,
+            allow_secret_mention: false,
             valid_from: None,
             valid_to: None,
             dry_run: false,
@@ -5470,6 +6017,7 @@ mod tests {
             tags: None,
             confidence: 0.8,
             source: None,
+            allow_secret_mention: false,
             valid_from: None,
             valid_to: None,
             dry_run: false,
@@ -5516,6 +6064,7 @@ mod tests {
                     tags: Some("cargo,release"),
                     confidence: 0.8,
                     source: None,
+                    allow_secret_mention: false,
                     valid_from: None,
                     valid_to: None,
                     dry_run: false,
@@ -5614,6 +6163,7 @@ mod tests {
             tags: Some("cargo,release"),
             confidence: 0.8,
             source: None,
+            allow_secret_mention: false,
             valid_from: None,
             valid_to: None,
             dry_run: false,
@@ -5654,6 +6204,7 @@ mod tests {
                     tags: Some("cargo,release"),
                     confidence: 0.8,
                     source: None,
+                    allow_secret_mention: false,
                     valid_from: None,
                     valid_to: None,
                     dry_run: false,
@@ -5709,6 +6260,7 @@ mod tests {
             tags: Some("cargo,release"),
             confidence: 0.8,
             source: None,
+            allow_secret_mention: false,
             valid_from: None,
             valid_to: None,
             dry_run: false,
@@ -5804,6 +6356,7 @@ mod tests {
             tags: None,
             confidence: 0.8,
             source: None,
+            allow_secret_mention: false,
             valid_from: None,
             valid_to: None,
             dry_run: false,
@@ -5812,7 +6365,12 @@ mod tests {
         });
 
         match result {
-            Err(DomainError::PolicyDenied { message, repair }) => {
+            Err(
+                DomainError::PolicyDenied { message, repair }
+                | DomainError::PolicyDeniedWithDetails {
+                    message, repair, ..
+                },
+            ) => {
                 ensure(
                     message.contains("secret"),
                     true,
@@ -5831,6 +6389,213 @@ mod tests {
             temp.path().join(".ee").join("ee.db").exists(),
             false,
             "policy denial must not create database",
+        )
+    }
+
+    #[test]
+    fn remember_invalid_tag_error_includes_programmatic_details() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let result = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Tag rejection should be recoverable by an agent.",
+            workflow_id: None,
+            level: "semantic",
+            kind: "fact",
+            tags: Some("bad tag"),
+            confidence: 0.8,
+            source: None,
+            allow_secret_mention: false,
+            valid_from: None,
+            valid_to: None,
+            dry_run: true,
+            auto_link: true,
+            propose_candidates: true,
+        });
+
+        let details_json = match result {
+            Err(DomainError::UsageWithDetails { details_json, .. }) => details_json,
+            Err(error) => return Err(format!("expected detailed usage error, got {error:?}")),
+            Ok(report) => return Err(format!("invalid tag should fail, got {report:?}")),
+        };
+        let details: serde_json::Value =
+            serde_json::from_str(&details_json).map_err(|error| error.to_string())?;
+        ensure(
+            details["acceptedPattern"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("._:-"),
+            true,
+            "accepted pattern names C3 punctuation",
+        )?;
+        ensure(
+            details["acceptedExamples"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item == "v0.1.0")),
+            true,
+            "accepted examples include dotted version",
+        )?;
+        ensure(
+            details["matchedAt"][0]["reason"].as_str(),
+            Some("space_disallowed"),
+            "space rejection reason",
+        )
+    }
+
+    #[test]
+    fn remember_secret_policy_error_includes_offsets_without_secret_value() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        let secret_like_content =
+            "Document redacted sample API_KEY=sk-FAKEabc123def456ghi789jkl012.";
+        let result = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: secret_like_content,
+            workflow_id: None,
+            level: "procedural",
+            kind: "rule",
+            tags: None,
+            confidence: 0.8,
+            source: None,
+            allow_secret_mention: false,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: true,
+            propose_candidates: true,
+        });
+
+        let details_json = match result {
+            Err(DomainError::PolicyDeniedWithDetails { details_json, .. }) => details_json,
+            Err(error) => return Err(format!("expected detailed policy error, got {error:?}")),
+            Ok(report) => return Err(format!("secret-like content should fail, got {report:?}")),
+        };
+        if details_json.contains("sk-FAKEabc123def456ghi789jkl012") {
+            return Err("policy details leaked the rejected secret value".to_owned());
+        }
+        let details: serde_json::Value =
+            serde_json::from_str(&details_json).map_err(|error| error.to_string())?;
+        ensure(
+            details["bypassFlag"].as_str(),
+            Some("--allow-secret-mention"),
+            "bypass flag",
+        )?;
+        ensure(
+            details["matchedAt"][0]["pattern_id"].as_str(),
+            Some("api_key"),
+            "pattern id",
+        )?;
+        ensure(
+            details["matchedAt"][0]["start"].as_u64().is_some(),
+            true,
+            "match start present",
+        )
+    }
+
+    #[test]
+    fn remember_memory_allow_secret_mention_persists_with_policy_bypass_audit() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        let secret_like_content =
+            "Document redacted sample API_KEY=sk-FAKEabc123def456ghi789jkl012.";
+
+        let report = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: secret_like_content,
+            workflow_id: None,
+            level: "procedural",
+            kind: "rule",
+            tags: None,
+            confidence: 0.8,
+            source: None,
+            allow_secret_mention: true,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: true,
+            propose_candidates: true,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(report.persisted, true, "bypass persisted")?;
+        let bypass = report
+            .policy_bypass
+            .as_ref()
+            .ok_or_else(|| "policy bypass missing".to_owned())?;
+        ensure(bypass.code.clone(), "policy_bypass_used".to_owned(), "code")?;
+        ensure(bypass.kind.clone(), "flag".to_owned(), "kind")?;
+        let policy_audit_id = bypass
+            .audit_id
+            .as_deref()
+            .ok_or_else(|| "policy bypass audit id missing".to_owned())?;
+
+        let connection = crate::db::DbConnection::open_file(&report.database_path)
+            .map_err(|error| error.to_string())?;
+        let audit = connection
+            .get_audit(policy_audit_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "policy bypass audit row missing".to_owned())?;
+        ensure(
+            audit.action,
+            audit_actions::POLICY_BYPASS.to_owned(),
+            "policy audit action",
+        )?;
+        ensure(
+            audit.target_id,
+            Some(report.memory_id.to_string()),
+            "policy audit target",
+        )
+    }
+
+    #[test]
+    fn remember_memory_secret_detector_allow_phrase_masks_configured_sentence() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_dir = temp.path().join(".ee");
+        std::fs::create_dir(&config_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[policy.secret_detector]\nallow_phrases = [\"OAuth refresh token\"]\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let report = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "OAuth refresh token fixture uses API_KEY=sk-FAKEabc123def456ghi789jkl012 for documentation.",
+            workflow_id: None,
+            level: "semantic",
+            kind: "fact",
+            tags: None,
+            confidence: 0.8,
+            source: None,
+            allow_secret_mention: false,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: true,
+            propose_candidates: true,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(report.persisted, true, "config bypass persisted")?;
+        let bypass = report
+            .policy_bypass
+            .as_ref()
+            .ok_or_else(|| "policy bypass missing".to_owned())?;
+        ensure(
+            bypass.kind.clone(),
+            "config_phrase".to_owned(),
+            "config phrase kind",
+        )?;
+        ensure(
+            bypass
+                .matches
+                .iter()
+                .any(|item| item.pattern == "OAuth refresh token"),
+            true,
+            "allow phrase recorded",
         )
     }
 
@@ -6518,6 +7283,10 @@ mod tests {
     /// `token`, `credentials` as nouns must pass.
     #[test]
     fn validate_remember_policy_accepts_meta_policy_phrases() {
+        let temp = match tempfile::tempdir() {
+            Ok(temp) => temp,
+            Err(error) => panic!("tempdir failed: {error}"),
+        };
         let acceptable = [
             // The four 2026-05-10 walkthrough cases that the keyword
             // detector blocked:
@@ -6529,8 +7298,9 @@ mod tests {
             "PEM-encoded keys live in the keystore module.",
         ];
         for content in acceptable {
-            match validate_remember_policy(content) {
-                Ok(()) => {}
+            match validate_remember_policy(content, temp.path(), false) {
+                Ok(None) => {}
+                Ok(Some(bypass)) => panic!("C1 false bypass: `{content}` accepted via {bypass:?}"),
                 Err(error) => panic!("C1 false positive: `{content}` rejected: {error:?}"),
             }
         }
@@ -6541,6 +7311,10 @@ mod tests {
     /// existing value-shape detector definitively catches.
     #[test]
     fn validate_remember_policy_rejects_real_secret_values() {
+        let temp = match tempfile::tempdir() {
+            Ok(temp) => temp,
+            Err(error) => panic!("tempdir failed: {error}"),
+        };
         let must_reject = [
             // OpenAI-style — covered by raw_api_tokens regex
             "API_KEY=sk-FAKEabc123def456ghi789jkl012",
@@ -6552,9 +7326,11 @@ mod tests {
             "DATABASE_URL=postgres://admin:SuperSecretPass123!@db.example.com/prod",
         ];
         for content in must_reject {
-            match validate_remember_policy(content) {
-                Ok(()) => panic!("C1 false negative: `{content}` should reject"),
-                Err(DomainError::PolicyDenied { .. }) => {}
+            match validate_remember_policy(content, temp.path(), false) {
+                Ok(_) => panic!("C1 false negative: `{content}` should reject"),
+                Err(
+                    DomainError::PolicyDenied { .. } | DomainError::PolicyDeniedWithDetails { .. },
+                ) => {}
                 Err(other) => panic!("wrong error variant for `{content}`: {other:?}"),
             }
         }
@@ -6564,6 +7340,10 @@ mod tests {
     /// must not trip the detector (regression guard).
     #[test]
     fn validate_remember_policy_accepts_benign_corpus_content() {
+        let temp = match tempfile::tempdir() {
+            Ok(temp) => temp,
+            Err(error) => panic!("tempdir failed: {error}"),
+        };
         for content in [
             "Run cargo fmt --check before cutting any release tag; CI rejects unformatted code.",
             "Forbidden deps: tokio, rusqlite, petgraph, hyper, axum, tower, reqwest, sqlx, diesel, sea-orm — CI greps for them.",
@@ -6571,8 +7351,11 @@ mod tests {
             "JSON output goes to stdout; human diagnostics go to stderr.",
             "All work lands on main. No worktrees. No feature branches.",
         ] {
-            match validate_remember_policy(content) {
-                Ok(()) => {}
+            match validate_remember_policy(content, temp.path(), false) {
+                Ok(None) => {}
+                Ok(Some(bypass)) => {
+                    panic!("benign content `{content}` accepted via policy bypass: {bypass:?}")
+                }
                 Err(error) => panic!("benign content `{content}` rejected: {error:?}"),
             }
         }

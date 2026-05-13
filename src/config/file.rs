@@ -8,6 +8,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use regex_lite::Regex;
 use toml_edit::{DocumentMut, Item, Value};
 
 use super::path::{PathExpander, PathExpansionError};
@@ -22,6 +23,7 @@ pub struct ConfigFile {
     pub pack: PackConfig,
     pub curation: CurationConfig,
     pub feedback: FeedbackConfig,
+    pub policy: PolicyConfig,
     pub privacy: PrivacyConfig,
     pub trust: TrustConfig,
 }
@@ -69,6 +71,7 @@ impl ConfigFile {
             pack: PackConfig::parse(&document)?,
             curation: CurationConfig::parse(&document)?,
             feedback: FeedbackConfig::parse(&document)?,
+            policy: PolicyConfig::parse(&document)?,
             privacy: PrivacyConfig::parse(&document)?,
             trust: TrustConfig::parse(&document)?,
         })
@@ -251,6 +254,42 @@ impl FeedbackConfig {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PolicyConfig {
+    pub secret_detector: SecretDetectorConfig,
+}
+
+impl PolicyConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            secret_detector: SecretDetectorConfig::parse(document)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SecretDetectorConfig {
+    pub allow_phrases: Option<Vec<String>>,
+    pub allow_regex: Option<Vec<String>>,
+}
+
+impl SecretDetectorConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            allow_phrases: optional_string_array_path(
+                document,
+                &["policy", "secret_detector"],
+                "allow_phrases",
+            )?,
+            allow_regex: optional_regex_array_path(
+                document,
+                &["policy", "secret_detector"],
+                "allow_regex",
+            )?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PrivacyConfig {
     pub redact_secrets: Option<bool>,
     pub redaction_classes: Option<Vec<String>>,
@@ -335,8 +374,21 @@ fn item<'a>(document: &'a DocumentMut, section: &str, key: &str) -> Option<&'a I
     document.get(section).and_then(|table| table.get(key))
 }
 
+fn item_path<'a>(document: &'a DocumentMut, sections: &[&str], key: &str) -> Option<&'a Item> {
+    let (first, rest) = sections.split_first()?;
+    let mut current = document.get(first)?;
+    for section in rest {
+        current = current.get(section)?;
+    }
+    current.get(key)
+}
+
 fn key_name(section: &str, key: &str) -> String {
     format!("{section}.{key}")
+}
+
+fn key_path_name(sections: &[&str], key: &str) -> String {
+    format!("{}.{}", sections.join("."), key)
 }
 
 fn optional_string(
@@ -516,6 +568,54 @@ fn optional_string_array(
     Ok(Some(out))
 }
 
+fn optional_string_array_path(
+    document: &DocumentMut,
+    sections: &[&str],
+    key: &str,
+) -> Result<Option<Vec<String>>, ConfigParseError> {
+    let Some(value) = item_path(document, sections, key) else {
+        return Ok(None);
+    };
+    let Some(array) = value.as_array() else {
+        return Err(ConfigParseError::InvalidType {
+            key: key_path_name(sections, key),
+            expected: "an array of strings",
+        });
+    };
+
+    let mut out = Vec::new();
+    for entry in array.iter() {
+        match entry {
+            Value::String(text) => out.push(text.value().to_string()),
+            _ => {
+                return Err(ConfigParseError::InvalidType {
+                    key: key_path_name(sections, key),
+                    expected: "an array of strings",
+                });
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
+fn optional_regex_array_path(
+    document: &DocumentMut,
+    sections: &[&str],
+    key: &str,
+) -> Result<Option<Vec<String>>, ConfigParseError> {
+    let Some(patterns) = optional_string_array_path(document, sections, key)? else {
+        return Ok(None);
+    };
+    for pattern in &patterns {
+        Regex::new(pattern).map_err(|source| ConfigParseError::InvalidValue {
+            key: key_path_name(sections, key),
+            value: pattern.clone(),
+            message: format!("expected a valid regex: {source}"),
+        })?;
+    }
+    Ok(Some(patterns))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -589,6 +689,10 @@ harmful_weight = 2.5
 decay_half_life_days = 60
 specificity_min = 0.45
 
+[policy.secret_detector]
+allow_phrases = ["OAuth refresh token", "secret ballot"]
+allow_regex = ["fake-key-[A-Z]{4}"]
+
 [privacy]
 redact_secrets = true
 redaction_classes = ["api_key", "jwt", "password"]
@@ -648,6 +752,19 @@ prompt_injection_guard = true
             "specificity min",
         )?;
         ensure_equal(
+            &config.policy.secret_detector.allow_phrases,
+            &Some(vec![
+                "OAuth refresh token".to_string(),
+                "secret ballot".to_string(),
+            ]),
+            "secret detector allow phrases",
+        )?;
+        ensure_equal(
+            &config.policy.secret_detector.allow_regex,
+            &Some(vec!["fake-key-[A-Z]{4}".to_string()]),
+            "secret detector allow regex",
+        )?;
+        ensure_equal(
             &config.privacy.redaction_classes,
             &Some(vec![
                 "api_key".to_string(),
@@ -671,6 +788,11 @@ prompt_injection_guard = true
         ensure_equal(&config.storage.database_path, &None, "database path")?;
         ensure_equal(&config.runtime.daemon, &None, "runtime daemon")?;
         ensure_equal(&config.search.default_speed, &None, "search default speed")?;
+        ensure_equal(
+            &config.policy.secret_detector.allow_phrases,
+            &None,
+            "allow phrases",
+        )?;
         ensure_equal(
             &config.privacy.redaction_classes,
             &None,
@@ -735,6 +857,20 @@ prompt_injection_guard = true
                 error,
                 ConfigParseError::InvalidType { ref key, expected }
                     if key == "privacy.redaction_classes" && expected == "an array of strings"
+            ),
+            format!("unexpected error: {error:?}"),
+        )
+    }
+
+    #[test]
+    fn rejects_invalid_secret_detector_allow_regex() -> TestResult {
+        let error = expect_config_error("[policy.secret_detector]\nallow_regex = [\"[\"]\n")?;
+
+        ensure(
+            matches!(
+                error,
+                ConfigParseError::InvalidValue { ref key, .. }
+                    if key == "policy.secret_detector.allow_regex"
             ),
             format!("unexpected error: {error:?}"),
         )

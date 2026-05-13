@@ -264,6 +264,7 @@ impl CapabilitiesReport {
             OutputFormatEntry::new("toon", true, false, "TOON renderer over canonical JSON"),
             OutputFormatEntry::new("human", true, false, "Human-readable terminal output"),
             OutputFormatEntry::new("markdown", true, false, "Markdown context output"),
+            OutputFormatEntry::new("mermaid", true, false, "Mermaid diagram output"),
             OutputFormatEntry::new("jsonl", true, true, "Line-delimited JSON stream output"),
             OutputFormatEntry::new("compact", true, true, "Compact machine-readable output"),
             OutputFormatEntry::new("hook", true, true, "Hook protocol output"),
@@ -341,7 +342,24 @@ mod tests {
         ensure_at_least(report.subsystems.len(), 3, "at least 3 subsystems")?;
         ensure_at_least(report.features.len(), 3, "at least 3 features")?;
         ensure_at_least(report.commands.len(), 5, "at least 5 commands")?;
-        ensure_at_least(report.output_formats.len(), 5, "at least 5 output formats")
+        ensure_at_least(report.output_formats.len(), 8, "all output formats")
+    }
+
+    #[test]
+    fn capabilities_report_lists_all_global_output_formats() -> TestResult {
+        let report = CapabilitiesReport::gather();
+        let names = report
+            .output_formats
+            .iter()
+            .map(|format| format.name)
+            .collect::<Vec<_>>();
+        ensure(
+            names,
+            vec![
+                "json", "toon", "human", "markdown", "mermaid", "jsonl", "compact", "hook",
+            ],
+            "capabilities output formats",
+        )
     }
 
     #[test]

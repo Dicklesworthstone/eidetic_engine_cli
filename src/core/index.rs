@@ -18,6 +18,14 @@ pub const DEFAULT_INDEX_SUBDIR: &str = "index";
 const INDEX_METADATA_FILE: &str = "meta.json";
 const INDEX_STAGING_PREFIX: &str = ".publish-";
 const INDEX_RETAINED_SUFFIX: &str = ".previous";
+const READ_SURFACE_AUDIT_ACTIONS: [&str; 6] = [
+    crate::db::audit_actions::SEARCH_EXECUTED,
+    crate::db::audit_actions::SEARCH_RETURNED_MEM,
+    crate::db::audit_actions::PACK_ASSEMBLED,
+    crate::db::audit_actions::PACK_INCLUDED_MEM,
+    crate::db::audit_actions::MEMORY_SHOW,
+    crate::db::audit_actions::WHY_INSPECTED,
+];
 
 /// Lock TTL for index publish operations (5 minutes).
 const INDEX_PUBLISH_LOCK_TTL_SECS: u64 = 300;
@@ -2139,7 +2147,7 @@ pub fn get_index_status(
 
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-    Ok(IndexStatusReport {
+    let report = IndexStatusReport {
         health,
         index_dir,
         database_path,
@@ -2154,7 +2162,42 @@ pub fn get_index_status(
         last_check_error,
         repair_hint,
         elapsed_ms,
-    })
+    };
+    log_db_generation_observed(&report);
+    Ok(report)
+}
+
+fn log_db_generation_observed(report: &IndexStatusReport) {
+    crate::obs::log_event(
+        crate::obs::TestEvent::new(
+            crate::obs::test_id_or("db_generation_observed"),
+            crate::obs::EventKind::DbGenerationObserved,
+        )
+        .with_field(
+            "command",
+            serde_json::Value::String("index_status".to_owned()),
+        )
+        .with_field(
+            "health",
+            serde_json::Value::String(report.health.as_str().to_owned()),
+        )
+        .with_field(
+            "db_generation",
+            serde_json::Value::from(report.db_generation),
+        )
+        .with_field(
+            "index_generation",
+            serde_json::Value::from(report.index_generation),
+        )
+        .with_field(
+            "index_dir",
+            serde_json::Value::String(report.index_dir.to_string_lossy().into_owned()),
+        )
+        .with_field(
+            "database_path",
+            serde_json::Value::String(report.database_path.to_string_lossy().into_owned()),
+        ),
+    );
 }
 
 /// Preview search-index vacuum work without mutating the source DB or derived assets.
@@ -2479,9 +2522,18 @@ fn get_db_stats(db: &DbConnection) -> Result<(u32, u32, Option<u64>), DbError> {
     let source_document_count = u64::from(memory_count) + u64::from(session_count) + artifact_count;
 
     // Audit rows track audited updates; source document count covers fixtures and
-    // older repository writes that predate full audit coverage.
+    // older repository writes that predate full audit coverage. Read-surface
+    // audit rows are deliberately excluded: they are access metadata, not
+    // search-indexable source mutations, and must not make read-only commands
+    // mark the index stale on the next invocation.
     let audit_count = db
-        .query("SELECT COUNT(*) FROM audit_log", &[])
+        .query(
+            "SELECT COUNT(*) FROM audit_log WHERE action NOT IN (?1, ?2, ?3, ?4, ?5, ?6)",
+            &READ_SURFACE_AUDIT_ACTIONS
+                .iter()
+                .map(|action| SqlValue::Text((*action).to_owned()))
+                .collect::<Vec<_>>(),
+        )
         .ok()
         .and_then(|rows| {
             rows.first()
@@ -2818,6 +2870,76 @@ mod tests {
         ensure(
             generation == Some(1),
             "source generation should include unaudited source documents",
+        )?;
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn db_stats_generation_ignores_read_surface_audit_rows() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                "wsp_22222222222222222222222222",
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-index-read-surface-generation-test".to_owned(),
+                    name: Some("index read surface generation test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_22222222222222222222222222",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_22222222222222222222222222".to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Run cargo fmt --check before release.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: vec![],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let (_, _, generation_before) =
+            get_db_stats(&connection).map_err(|error| error.to_string())?;
+        ensure(
+            generation_before == Some(1),
+            "baseline generation should track the single source document",
+        )?;
+
+        for action in &READ_SURFACE_AUDIT_ACTIONS {
+            connection
+                .insert_audit(
+                    &crate::db::generate_audit_id(),
+                    &crate::db::CreateAuditInput {
+                        workspace_id: Some("wsp_22222222222222222222222222".to_owned()),
+                        actor: None,
+                        action: (*action).to_owned(),
+                        target_type: Some("memory".to_owned()),
+                        target_id: Some("mem_22222222222222222222222222".to_owned()),
+                        details: Some(serde_json::json!({"readSurface": true}).to_string()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        let (_, _, generation_after) =
+            get_db_stats(&connection).map_err(|error| error.to_string())?;
+        ensure(
+            generation_after == generation_before,
+            format!(
+                "read-surface audit rows must not bump index generation: before={generation_before:?} after={generation_after:?}",
+            ),
         )?;
 
         connection.close().map_err(|error| error.to_string())

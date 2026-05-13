@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::core::curate::{
+    ClusterCoherenceCluster, ClusterCoherenceInput, silhouette_agglomerative_clusters,
+};
 use crate::core::outcome::{OutcomeRecordOptions, OutcomeRecordReport, record_outcome};
 use crate::db::{
     CreateCurationCandidateInput, CreateLearningObservationInput, CreateWorkspaceInput,
@@ -19,6 +22,7 @@ use crate::models::{
     DomainError, ExperimentOutcome, ExperimentOutcomeStatus, ExperimentSafetyBoundary,
     LearningObservation, LearningObservationSignal, LearningTargetKind, WorkspaceId,
 };
+use crate::search::HashEmbedder;
 
 /// Schema for learning agenda report.
 pub const LEARN_AGENDA_SCHEMA_V1: &str = "ee.learn.agenda.v1";
@@ -28,6 +32,9 @@ pub const LEARN_UNCERTAINTY_SCHEMA_V1: &str = "ee.learn.uncertainty.v1";
 
 /// Schema for learning summary report.
 pub const LEARN_SUMMARY_SCHEMA_V1: &str = "ee.learn.summary.v1";
+
+/// Schema for deterministic learning cluster coherence reports.
+pub const LEARN_CLUSTER_SCHEMA_V1: &str = "ee.learn.cluster.v1";
 
 /// Schema for experiment proposal reports.
 pub const LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1: &str = "ee.learn.experiment_proposal.v1";
@@ -393,6 +400,125 @@ pub fn show_summary(options: &LearnSummaryOptions) -> Result<LearnSummaryReport,
         events: learning_events,
         generated_at: stable_learning_generated_at(),
     })
+}
+
+// ============================================================================
+// Cluster Operation
+// ============================================================================
+
+/// Options for deterministic learning cluster analysis.
+#[derive(Clone, Debug)]
+pub struct LearnClusterOptions {
+    pub workspace: PathBuf,
+    pub threshold: f32,
+    pub min_cluster_size: usize,
+    pub include_singletons: bool,
+    pub level: Option<String>,
+    pub kind: Option<String>,
+}
+
+impl Default for LearnClusterOptions {
+    fn default() -> Self {
+        Self {
+            workspace: PathBuf::from("."),
+            threshold: 0.55,
+            min_cluster_size: 3,
+            include_singletons: false,
+            level: None,
+            kind: None,
+        }
+    }
+}
+
+/// Deterministic cluster report from workspace memory content embeddings.
+#[derive(Clone, Debug, Serialize)]
+pub struct LearnClusterReport {
+    pub schema: String,
+    pub workspace_id: String,
+    pub threshold: f32,
+    pub min_cluster_size: usize,
+    pub memory_count: usize,
+    pub clustered_memory_count: usize,
+    pub cluster_count: usize,
+    pub clusters: Vec<ClusterCoherenceCluster>,
+    pub degradations: Vec<String>,
+    pub generated_at: String,
+}
+
+/// Analyze deterministic memory clusters for learning/curation decisions.
+pub fn analyze_clusters(options: &LearnClusterOptions) -> Result<LearnClusterReport, DomainError> {
+    let snapshot = load_learning_snapshot(&options.workspace)?;
+    let mut memories = snapshot
+        .memories
+        .values()
+        .filter(|memory| memory.tombstoned_at.is_none())
+        .filter(|memory| {
+            options
+                .level
+                .as_ref()
+                .is_none_or(|level| &memory.level == level)
+        })
+        .filter(|memory| {
+            options
+                .kind
+                .as_ref()
+                .is_none_or(|kind| &memory.kind == kind)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    memories.sort_by(|left, right| left.id.cmp(&right.id));
+
+    let embedder = HashEmbedder::default_256();
+    let inputs = memories
+        .iter()
+        .map(|memory| ClusterCoherenceInput {
+            memory_id: memory.id.clone(),
+            embedding: embedder.embed_sync(&cluster_embedding_text(&snapshot, memory)),
+        })
+        .collect::<Vec<_>>();
+
+    let raw_report = silhouette_agglomerative_clusters(&inputs, options.threshold);
+    let mut degradations = raw_report.degradations;
+    let clusters = raw_report
+        .clusters
+        .into_iter()
+        .filter(|cluster| {
+            options.include_singletons
+                || cluster.member_memory_ids.len() >= options.min_cluster_size
+        })
+        .collect::<Vec<_>>();
+    if !inputs.is_empty() && clusters.is_empty() {
+        degradations.push("degraded.clustering_threshold_too_strict".to_owned());
+    }
+    let clustered_memory_count = clusters
+        .iter()
+        .map(|cluster| cluster.member_memory_ids.len())
+        .sum();
+
+    Ok(LearnClusterReport {
+        schema: LEARN_CLUSTER_SCHEMA_V1.to_owned(),
+        workspace_id: snapshot.workspace_id,
+        threshold: raw_report.threshold,
+        min_cluster_size: options.min_cluster_size,
+        memory_count: inputs.len(),
+        clustered_memory_count,
+        cluster_count: clusters.len(),
+        clusters,
+        degradations,
+        generated_at: stable_learning_generated_at(),
+    })
+}
+
+fn cluster_embedding_text(snapshot: &LearningSnapshot, memory: &StoredMemory) -> String {
+    let tags = snapshot
+        .memory_tags
+        .get(&memory.id)
+        .map(|tags| tags.join(" "))
+        .unwrap_or_default();
+    format!(
+        "level:{}\nkind:{}\ntags:{}\ncontent:{}",
+        memory.level, memory.kind, tags, memory.content
+    )
 }
 
 // ============================================================================

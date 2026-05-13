@@ -69,6 +69,36 @@ pub struct SearchOptions {
     /// back to [`DEFAULT_RELEVANCE_FLOOR`]. Set to `Some(0.0)` to disable.
     /// Bead bd-17c65.2.1 (B1).
     pub relevance_floor: Option<f32>,
+    /// Requested search arm selection. Defaults to hybrid.
+    pub source_mode: SearchSourceMode,
+    /// Fail closed when the requested source mode cannot be applied.
+    pub strict_source_mode: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SearchSourceMode {
+    LexicalOnly,
+    SemanticOnly,
+    #[default]
+    Hybrid,
+}
+
+impl SearchSourceMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LexicalOnly => "lexical_only",
+            Self::SemanticOnly => "semantic_only",
+            Self::Hybrid => "hybrid",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SourceModeResolution {
+    applied: SearchSourceMode,
+    fallback_applied: bool,
+    unavailable_no_results: bool,
 }
 
 /// Default relevance floor for 0..=1-normalized score sources (bead
@@ -156,6 +186,10 @@ pub struct SearchReport {
     /// (B1). Informational; agents can use this to decide whether to
     /// retry with a lower floor or different query.
     pub candidates_below_floor: usize,
+    pub source_mode_requested: SearchSourceMode,
+    pub source_mode_applied: SearchSourceMode,
+    pub source_mode_fallback: bool,
+    pub strict_source_mode: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -401,7 +435,7 @@ impl SearchDegradation {
                 plural = if considered == 1 { "" } else { "s" },
             ),
             repair: Some(
-                "Broaden the query, lower --relevance-floor, or use --source-mode lexical_only when implemented (B6)."
+                "Broaden the query, lower --relevance-floor, or use --source-mode lexical_only."
                     .to_string(),
             ),
         }
@@ -440,7 +474,7 @@ impl SearchDegradation {
                 "Top result scored {top_score:.4} against floor {floor:.4}; embedder may not recognize query synonyms, or the corpus lacks strong matches.",
             ),
             repair: Some(
-                "Rephrase with concrete words present in stored memories, or use --source-mode lexical_only when implemented (B6).".to_string(),
+                "Rephrase with concrete words present in stored memories, or use --source-mode lexical_only.".to_string(),
             ),
         }
     }
@@ -460,6 +494,38 @@ impl SearchDegradation {
                 "Rephrase with concrete words present in stored memories, or use --source-mode lexical_only when implemented (B6)."
                     .to_string(),
             ),
+        }
+    }
+
+    #[must_use]
+    fn source_mode_fallback(
+        requested: SearchSourceMode,
+        applied: SearchSourceMode,
+        reason: &str,
+    ) -> Self {
+        Self {
+            code: "source_mode_fallback".to_string(),
+            severity: "warning".to_string(),
+            message: format!(
+                "Requested source_mode={} but it could not be applied ({reason}); fell back to {}.",
+                requested.as_str(),
+                applied.as_str()
+            ),
+            repair: Some(
+                "Rebuild with the requested search features, or pass --strict-source-mode to fail closed."
+                    .to_string(),
+            ),
+        }
+    }
+
+    #[must_use]
+    fn lexical_unavailable() -> Self {
+        Self {
+            code: "lexical_unavailable".to_string(),
+            severity: "warning".to_string(),
+            message: "Requested lexical_only search, but the lexical/BM25 arm is unavailable."
+                .to_string(),
+            repair: Some("rebuild ee with --features fts5,lexical-bm25".to_string()),
         }
     }
 
@@ -693,6 +759,25 @@ impl SearchReport {
 
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
+        let mut metrics = self.retrieval_metrics().data_json();
+        if let Some(metrics_obj) = metrics.as_object_mut() {
+            metrics_obj.insert(
+                "sourceModeRequested".to_string(),
+                serde_json::json!(self.source_mode_requested.as_str()),
+            );
+            metrics_obj.insert(
+                "sourceModeApplied".to_string(),
+                serde_json::json!(self.source_mode_applied.as_str()),
+            );
+            metrics_obj.insert(
+                "fallbackApplied".to_string(),
+                serde_json::json!(self.source_mode_fallback),
+            );
+            metrics_obj.insert(
+                "strictSourceMode".to_string(),
+                serde_json::json!(self.strict_source_mode),
+            );
+        }
         let results: Vec<serde_json::Value> = self
             .results
             .iter()
@@ -760,10 +845,14 @@ impl SearchReport {
             "command": "search",
             "status": self.status.as_str(),
             "query": &self.query,
+            "request": {
+                "sourceMode": self.source_mode_requested.as_str(),
+                "strictSourceMode": self.strict_source_mode,
+            },
             "results": results,
             "resultCount": self.results.len(),
             "elapsedMs": self.elapsed_ms,
-            "metrics": self.retrieval_metrics().data_json(),
+            "metrics": metrics,
             "profileRuntime": self.runtime_profile.data_json(),
             "errors": self.errors,
             "degraded": self.degraded.iter().map(SearchDegradation::data_json).collect::<Vec<_>>(),
@@ -799,6 +888,10 @@ impl SearchReport {
                 "candidateBudget": speed.candidate_limit(),
                 "usesEmbeddings": speed.uses_embeddings(),
                 "scoreExplanationsRequested": score_explanations_requested,
+                "sourceModeRequested": self.source_mode_requested.as_str(),
+                "sourceModeApplied": self.source_mode_applied.as_str(),
+                "strictSourceMode": self.strict_source_mode,
+                "fallbackApplied": self.source_mode_fallback,
             },
             "profileRuntime": self.runtime_profile.data_json(),
             "dbReads": {
@@ -1244,6 +1337,10 @@ fn round_metric_f64(score: f64) -> f64 {
 pub enum SearchError {
     Index(String),
     NoIndex,
+    SourceModeUnavailable {
+        requested: SearchSourceMode,
+        reason: String,
+    },
 }
 
 impl SearchError {
@@ -1252,6 +1349,9 @@ impl SearchError {
         match self {
             Self::Index(_) => Some("Check index directory and permissions"),
             Self::NoIndex => Some("ee index rebuild --workspace ."),
+            Self::SourceModeUnavailable { .. } => {
+                Some("Rebuild with the requested search features, or omit --strict-source-mode")
+            }
         }
     }
 }
@@ -1261,6 +1361,11 @@ impl std::fmt::Display for SearchError {
         match self {
             Self::Index(e) => write!(f, "Index error: {e}"),
             Self::NoIndex => write!(f, "Search index not found"),
+            Self::SourceModeUnavailable { requested, reason } => write!(
+                f,
+                "Requested source mode {} is unavailable: {reason}",
+                requested.as_str()
+            ),
         }
     }
 }
@@ -1467,12 +1572,33 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
         ));
     }
 
+    let source_mode = resolve_source_mode(options, &index_dir, &mut degraded)?;
+    if source_mode.unavailable_no_results {
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        return Ok(SearchReport {
+            status: SearchStatus::NoResults,
+            query: options.query.clone(),
+            requested_limit: options.limit,
+            results: Vec::new(),
+            elapsed_ms,
+            errors: Vec::new(),
+            degraded,
+            runtime_profile,
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: options.source_mode,
+            source_mode_applied: source_mode.applied,
+            source_mode_fallback: source_mode.fallback_applied,
+            strict_source_mode: options.strict_source_mode,
+        });
+    }
     let search_result = search_sync(
         &index_dir,
         &options.query,
         effective_limit as usize,
         options.two_tier_config_for_limit(effective_limit),
         options.explain,
+        source_mode.applied,
     );
 
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -1646,6 +1772,10 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
                 runtime_profile,
                 relevance_floor_applied: Some(floor),
                 candidates_below_floor: dropped,
+                source_mode_requested: options.source_mode,
+                source_mode_applied: source_mode.applied,
+                source_mode_fallback: source_mode.fallback_applied,
+                strict_source_mode: options.strict_source_mode,
             })
         }
         Err(e) => {
@@ -1668,6 +1798,10 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
                 runtime_profile,
                 relevance_floor_applied: None,
                 candidates_below_floor: 0,
+                source_mode_requested: options.source_mode,
+                source_mode_applied: source_mode.applied,
+                source_mode_fallback: source_mode.fallback_applied,
+                strict_source_mode: options.strict_source_mode,
             })
         }
     }
@@ -1770,6 +1904,10 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
         runtime_profile,
         relevance_floor_applied: Some(floor),
         candidates_below_floor: dropped,
+        source_mode_requested: options.source_mode,
+        source_mode_applied: options.source_mode,
+        source_mode_fallback: false,
+        strict_source_mode: options.strict_source_mode,
     };
 
     Ok(SearchDiagnosticReport {
@@ -1799,6 +1937,76 @@ fn search_degradations(options: &SearchOptions, index_dir: &Path) -> Vec<SearchD
             index_status.last_check_error.as_deref(),
         )],
     }
+}
+
+fn resolve_source_mode(
+    options: &SearchOptions,
+    index_dir: &Path,
+    degraded: &mut Vec<SearchDegradation>,
+) -> Result<SourceModeResolution, SearchError> {
+    let requested = options.source_mode;
+    let lexical_available = lexical_search_available(index_dir);
+
+    match requested {
+        SearchSourceMode::LexicalOnly if lexical_available => Ok(SourceModeResolution {
+            applied: SearchSourceMode::LexicalOnly,
+            fallback_applied: false,
+            unavailable_no_results: false,
+        }),
+        SearchSourceMode::LexicalOnly if options.strict_source_mode => {
+            Err(SearchError::SourceModeUnavailable {
+                requested,
+                reason: "lexical-bm25 index is unavailable".to_string(),
+            })
+        }
+        SearchSourceMode::LexicalOnly => {
+            degraded.push(SearchDegradation::lexical_unavailable());
+            Ok(SourceModeResolution {
+                applied: SearchSourceMode::LexicalOnly,
+                fallback_applied: false,
+                unavailable_no_results: true,
+            })
+        }
+        SearchSourceMode::SemanticOnly => Ok(SourceModeResolution {
+            applied: SearchSourceMode::SemanticOnly,
+            fallback_applied: false,
+            unavailable_no_results: false,
+        }),
+        SearchSourceMode::Hybrid if lexical_available => Ok(SourceModeResolution {
+            applied: SearchSourceMode::Hybrid,
+            fallback_applied: false,
+            unavailable_no_results: false,
+        }),
+        SearchSourceMode::Hybrid if options.strict_source_mode => {
+            Err(SearchError::SourceModeUnavailable {
+                requested,
+                reason: "lexical-bm25 index is unavailable".to_string(),
+            })
+        }
+        SearchSourceMode::Hybrid => {
+            let applied = SearchSourceMode::SemanticOnly;
+            degraded.push(SearchDegradation::source_mode_fallback(
+                requested,
+                applied,
+                "lexical-bm25 index is unavailable",
+            ));
+            Ok(SourceModeResolution {
+                applied,
+                fallback_applied: true,
+                unavailable_no_results: false,
+            })
+        }
+    }
+}
+
+#[cfg(feature = "lexical-bm25")]
+fn lexical_search_available(index_dir: &Path) -> bool {
+    open_lexical_searcher(index_dir).ok().flatten().is_some()
+}
+
+#[cfg(not(feature = "lexical-bm25"))]
+fn lexical_search_available(_index_dir: &Path) -> bool {
+    false
 }
 
 fn cached_index_status_for_search(
@@ -2200,6 +2408,7 @@ fn search_sync(
     limit: usize,
     config: TwoTierConfig,
     explain: bool,
+    source_mode: SearchSourceMode,
 ) -> Result<(Vec<SearchHit>, Vec<String>), String> {
     let index_dir_owned = index_dir.to_path_buf();
     let query_owned = query.to_string();
@@ -2212,6 +2421,43 @@ fn search_sync(
     let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let runtime_result = crate::core::run_cli_future(async move {
             let cx = asupersync::Cx::for_testing();
+            if source_mode == SearchSourceMode::LexicalOnly {
+                let lexical = match open_lexical_searcher(&index_dir_owned) {
+                    Ok(Some(lexical)) => lexical,
+                    Ok(None) => {
+                        if let Ok(mut guard) = task_result.lock() {
+                            *guard = Some(Err("Lexical index not found".to_string()));
+                        }
+                        return;
+                    }
+                    Err(error) => {
+                        if let Ok(mut guard) = task_result.lock() {
+                            *guard = Some(Err(error));
+                        }
+                        return;
+                    }
+                };
+
+                let search_result = lexical.search(&cx, &query_owned, limit).await;
+                let converted = match search_result {
+                    Ok(results) => {
+                        let mut hits: Vec<SearchHit> = results
+                            .into_iter()
+                            .map(|result| search_hit_from_scored_result(result, explain))
+                            .collect();
+                        canonicalize_equivalent_component_scores(&mut hits);
+                        hits.sort_by(search_hit_score_order);
+                        Ok((hits, Vec::new()))
+                    }
+                    Err(error) => Err(format!("Lexical search failed: {error}")),
+                };
+
+                if let Ok(mut guard) = task_result.lock() {
+                    *guard = Some(converted);
+                }
+                return;
+            }
+
             let index = match TwoTierIndex::open(&index_dir_owned, config.clone()) {
                 Ok(idx) => Arc::new(idx),
                 Err(e) => {
@@ -2224,14 +2470,18 @@ fn search_sync(
 
             let fast_embedder = Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>;
             let searcher = TwoTierSearcher::new(index, fast_embedder, config);
-            let searcher = match attach_lexical_searcher(searcher, &index_dir_owned) {
-                Ok(searcher) => searcher,
-                Err(error) => {
-                    if let Ok(mut guard) = task_result.lock() {
-                        *guard = Some(Err(error));
+            let searcher = if source_mode == SearchSourceMode::Hybrid {
+                match attach_lexical_searcher(searcher, &index_dir_owned) {
+                    Ok(searcher) => searcher,
+                    Err(error) => {
+                        if let Ok(mut guard) = task_result.lock() {
+                            *guard = Some(Err(error));
+                        }
+                        return;
                     }
-                    return;
                 }
+            } else {
+                searcher
             };
 
             let search_result = searcher.search_collect(&cx, &query_owned, limit).await;
@@ -2417,6 +2667,15 @@ fn open_lexical_searcher(index_dir: &Path) -> Result<Option<Arc<dyn LexicalSearc
         })
 }
 
+#[cfg(not(feature = "lexical-bm25"))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "signature mirrors the lexical-bm25 implementation"
+)]
+fn open_lexical_searcher(_index_dir: &Path) -> Result<Option<Arc<dyn LexicalSearch>>, String> {
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2445,12 +2704,39 @@ mod tests {
         )
     }
 
+    fn source_mode_test_options(
+        source_mode: SearchSourceMode,
+        strict_source_mode: bool,
+    ) -> SearchOptions {
+        let workspace = unique_test_dir("source-mode-resolution");
+        SearchOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(workspace.join("ee.db")),
+            index_dir: Some(workspace.join("index")),
+            query: "format before release".to_string(),
+            limit: 10,
+            speed: SpeedMode::Default,
+            explain: false,
+            include_tombstoned: false,
+            relevance_floor: None,
+            source_mode,
+            strict_source_mode,
+        }
+    }
+
     #[test]
     fn search_status_as_str_is_stable() {
         assert_eq!(SearchStatus::Success.as_str(), "success");
         assert_eq!(SearchStatus::NoResults.as_str(), "no_results");
         assert_eq!(SearchStatus::IndexNotFound.as_str(), "index_not_found");
         assert_eq!(SearchStatus::IndexError.as_str(), "index_error");
+    }
+
+    #[test]
+    fn search_source_mode_as_str_is_stable() {
+        assert_eq!(SearchSourceMode::LexicalOnly.as_str(), "lexical_only");
+        assert_eq!(SearchSourceMode::SemanticOnly.as_str(), "semantic_only");
+        assert_eq!(SearchSourceMode::Hybrid.as_str(), "hybrid");
     }
 
     #[test]
@@ -2476,6 +2762,10 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
         };
 
         let json = report.data_json();
@@ -2487,8 +2777,92 @@ mod tests {
         assert_eq!(json["metrics"]["requestedLimit"], 10);
         assert_eq!(json["metrics"]["returnedCount"], 1);
         assert_eq!(json["metrics"]["errorCount"], 0);
+        assert_eq!(json["request"]["sourceMode"], "hybrid");
+        assert_eq!(json["request"]["strictSourceMode"], false);
+        assert_eq!(json["metrics"]["sourceModeRequested"], "hybrid");
+        assert_eq!(json["metrics"]["sourceModeApplied"], "hybrid");
+        assert_eq!(json["metrics"]["fallbackApplied"], false);
+        assert_eq!(json["metrics"]["strictSourceMode"], false);
         assert!(json["results"][0]["why"].is_string());
         assert!(json["results"][0]["provenance"].is_array());
+    }
+
+    #[test]
+    fn source_mode_resolution_reports_lexical_unavailable_without_fallback() -> TestResult {
+        let options = source_mode_test_options(SearchSourceMode::LexicalOnly, false);
+        let index_dir = options.resolve_index_dir();
+        let mut degraded = Vec::new();
+
+        let resolution = resolve_source_mode(&options, &index_dir, &mut degraded)
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(resolution.applied, SearchSourceMode::LexicalOnly);
+        assert!(!resolution.fallback_applied);
+        assert!(resolution.unavailable_no_results);
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "lexical_unavailable");
+        assert_eq!(degraded[0].severity, "warning");
+        Ok(())
+    }
+
+    #[test]
+    fn source_mode_resolution_strict_errors_when_lexical_is_unavailable() -> TestResult {
+        let options = source_mode_test_options(SearchSourceMode::LexicalOnly, true);
+        let index_dir = options.resolve_index_dir();
+        let mut degraded = Vec::new();
+
+        let error = match resolve_source_mode(&options, &index_dir, &mut degraded) {
+            Ok(_) => {
+                return Err(
+                    "strict lexical-only mode should fail when lexical index is unavailable"
+                        .to_owned(),
+                );
+            }
+            Err(error) => error,
+        };
+
+        match error {
+            SearchError::SourceModeUnavailable { requested, reason } => {
+                assert_eq!(requested, SearchSourceMode::LexicalOnly);
+                assert!(reason.contains("lexical-bm25 index is unavailable"));
+            }
+            other => return Err(format!("unexpected source mode error: {other}")),
+        }
+        assert!(degraded.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn source_mode_resolution_honors_semantic_only_without_lexical() -> TestResult {
+        let options = source_mode_test_options(SearchSourceMode::SemanticOnly, true);
+        let index_dir = options.resolve_index_dir();
+        let mut degraded = Vec::new();
+
+        let resolution = resolve_source_mode(&options, &index_dir, &mut degraded)
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(resolution.applied, SearchSourceMode::SemanticOnly);
+        assert!(!resolution.fallback_applied);
+        assert!(!resolution.unavailable_no_results);
+        assert!(degraded.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn source_mode_resolution_falls_back_for_default_hybrid_without_lexical() -> TestResult {
+        let options = source_mode_test_options(SearchSourceMode::Hybrid, false);
+        let index_dir = options.resolve_index_dir();
+        let mut degraded = Vec::new();
+
+        let resolution = resolve_source_mode(&options, &index_dir, &mut degraded)
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(resolution.applied, SearchSourceMode::SemanticOnly);
+        assert!(resolution.fallback_applied);
+        assert!(!resolution.unavailable_no_results);
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "source_mode_fallback");
+        Ok(())
     }
 
     #[test]
@@ -2555,6 +2929,8 @@ mod tests {
             explain: false,
             include_tombstoned: false,
             relevance_floor: None,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
         };
 
         let mut degraded = Vec::new();
@@ -2580,6 +2956,10 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
         };
         let json = report.data_json();
         assert_eq!(json["results"][0]["tombstoned"], true);
@@ -2613,6 +2993,10 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
         };
 
         let json = report.performance_explain_json(SpeedMode::Instant, false);
@@ -2644,6 +3028,8 @@ mod tests {
             explain: false,
             include_tombstoned: false,
             relevance_floor: None,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
         };
 
         let degraded = search_degradations(&options, &index_dir);
@@ -2675,6 +3061,8 @@ mod tests {
             explain: false,
             include_tombstoned: false,
             relevance_floor: None,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
         };
 
         let degraded = search_degradations(&options, &index_dir);
@@ -2702,6 +3090,8 @@ mod tests {
             explain: false,
             include_tombstoned: false,
             relevance_floor: None,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
         };
 
         let degraded = search_degradations(&options, &index_dir);
@@ -2759,7 +3149,14 @@ mod tests {
             explain: true,
             ..TwoTierConfig::default()
         };
-        let (hits, errors) = search_sync(&index_dir, "forbidden dependencies", 5, config, true)?;
+        let (hits, errors) = search_sync(
+            &index_dir,
+            "forbidden dependencies",
+            5,
+            config,
+            true,
+            SearchSourceMode::Hybrid,
+        )?;
 
         assert!(errors.is_empty(), "search returned errors: {errors:?}");
         let literal_hit = hits
@@ -2828,6 +3225,8 @@ mod tests {
             explain: true,
             include_tombstoned: false,
             relevance_floor: Some(0.0),
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
         })
         .map_err(|error| error.to_string())?;
         let json = report.data_json();
@@ -2922,6 +3321,8 @@ mod tests {
             explain: false,
             include_tombstoned: false,
             relevance_floor: None,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
         };
 
         assert_eq!(
@@ -2942,6 +3343,8 @@ mod tests {
             explain: true,
             include_tombstoned: false,
             relevance_floor: None,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
         };
         let config = options.two_tier_config();
         assert!(!config.fast_only);
@@ -2976,6 +3379,8 @@ mod tests {
             explain: false,
             include_tombstoned: false,
             relevance_floor: None,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
         };
 
         assert_eq!(options.resolve_index_dir(), PathBuf::from("/custom/index"));
@@ -3025,6 +3430,10 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
         };
 
         let json = report.data_json();
@@ -3070,6 +3479,10 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
         };
 
         let json = report.data_json();
@@ -3117,6 +3530,10 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
         };
 
         let json = report.data_json();
@@ -3169,6 +3586,10 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
         };
 
         let metrics = report.retrieval_metrics();
@@ -3214,6 +3635,10 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
         };
 
         let json = report.data_json();
@@ -3336,6 +3761,10 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
         };
 
         let json = report.data_json();
@@ -3392,6 +3821,10 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
         };
 
         let summary = report.human_summary();
@@ -3567,6 +4000,10 @@ mod tests {
         hit
     }
 
+    fn test_effective_floor(user_floor_override: Option<f32>, source: ScoreSource) -> f32 {
+        user_floor_override.unwrap_or_else(|| default_floor_for_source(source))
+    }
+
     #[test]
     fn adaptive_partition_keeps_typical_hybrid_hit_with_no_override() {
         // Reproduces the bd-n22a4 acceptance path: a hybrid hit at the
@@ -3575,12 +4012,10 @@ mod tests {
         // one-memory workspace returns the matching memory instead of a
         // `no_relevant_results` degraded entry.
         let hits = vec![synthetic_hybrid_hit("mem_canonical", 2.0 / 61.0)];
-        let user_floor_override: Option<f32> = None;
         let kept: Vec<_> = hits
             .into_iter()
             .filter(|hit| {
-                let per_hit_floor =
-                    user_floor_override.unwrap_or_else(|| default_floor_for_source(hit.source));
+                let per_hit_floor = test_effective_floor(None, hit.source);
                 hit.score.is_finite() && hit.score >= per_hit_floor
             })
             .collect();
@@ -3598,12 +4033,10 @@ mod tests {
         // noise) still gets filtered out under the standard 0.05 floor.
         // The adaptive policy must not weaken the semantic-only path.
         let hits = vec![synthetic_hit("mem_semantic_noise", 0.02)];
-        let user_floor_override: Option<f32> = None;
         let kept: Vec<_> = hits
             .into_iter()
             .filter(|hit| {
-                let per_hit_floor =
-                    user_floor_override.unwrap_or_else(|| default_floor_for_source(hit.source));
+                let per_hit_floor = test_effective_floor(None, hit.source);
                 hit.score.is_finite() && hit.score >= per_hit_floor
             })
             .collect();
@@ -3626,12 +4059,10 @@ mod tests {
             synthetic_hit("mem_semantic_strong", 0.20),
             synthetic_hit("mem_semantic_weak", 0.02),
         ];
-        let user_floor_override: Option<f32> = Some(0.10);
         let kept: Vec<_> = hits
             .into_iter()
             .filter(|hit| {
-                let per_hit_floor =
-                    user_floor_override.unwrap_or_else(|| default_floor_for_source(hit.source));
+                let per_hit_floor = test_effective_floor(Some(0.10), hit.source);
                 hit.score.is_finite() && hit.score >= per_hit_floor
             })
             .collect();

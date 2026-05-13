@@ -401,10 +401,10 @@ fn validate_skill_evidence_bundle(value: &Value) -> Result<ValidatedSkillBundle,
     if bundle.workspace.trim().is_empty() {
         return Err("missing_required_field:workspace".to_string());
     }
-    if !bundle
+    if bundle
         .source_command
         .first()
-        .is_some_and(|command| command == "ee")
+        .is_none_or(|command| command != "ee")
     {
         return Err("invalid_source_command".to_string());
     }

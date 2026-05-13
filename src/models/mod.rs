@@ -23,6 +23,7 @@ pub mod perf_artifact;
 pub mod posture;
 pub mod preflight;
 pub mod procedure;
+pub mod producer;
 pub mod progress;
 pub mod provenance;
 pub mod query;
@@ -35,6 +36,7 @@ pub mod schema;
 pub mod situation;
 pub mod timing;
 pub mod trust;
+pub mod verification;
 pub mod why_tag;
 
 pub use backup::{
@@ -191,6 +193,11 @@ pub use procedure::{
     ProcedureVerificationStatus, SKILL_CAPSULE_SCHEMA_V1, SkillCapsule, SkillCapsuleInstallMode,
     procedure_schema_catalog_json, procedure_schemas,
 };
+pub use producer::{
+    AgentIdentity, AgentRun, PRODUCER_METADATA_SCHEMA_V1, PRODUCER_SCHEMA_CATALOG_V1,
+    ProducerFieldSchema, ProducerIdentityStatus, ProducerMetadata, ProducerObjectSchema,
+    ProducerSourceSystem, producer_schema_catalog_json, producer_schemas,
+};
 pub use progress::{
     PROGRESS_EVENT_SCHEMA_V1, ParseProgressEventTypeError, ProgressEvent, ProgressEventBuilder,
     ProgressEventType, progress_completed, progress_failed, progress_running, progress_started,
@@ -260,6 +267,14 @@ pub use situation::{
 };
 pub use timing::{DiagnosticTiming, TimingCapture, TimingPhase};
 pub use trust::{ParseTrustClassError, TrustClass};
+pub use verification::{
+    VERIFICATION_CLOSURE_GUIDANCE_SCHEMA_V1, VERIFICATION_EVIDENCE_SCHEMA_V1,
+    VerificationArtifactRef, VerificationClosureGuidance, VerificationEnvironment,
+    VerificationEvidenceInput, VerificationEvidenceRecord, VerificationGateAssessment,
+    VerificationGateRequirement, VerificationOffload, VerificationOutputSummary,
+    VerificationStatus, command_hash, rch_cargo_closure_requirements,
+    sample_verification_evidence_records, verification_closure_guidance,
+};
 pub use why_tag::{ParseWhyTagError, WhyTag};
 
 // ============================================================================
@@ -333,6 +348,11 @@ pub enum DomainError {
         message: String,
         repair: Option<String>,
     },
+    UsageWithDetails {
+        message: String,
+        repair: Option<String>,
+        details_json: String,
+    },
     Configuration {
         message: String,
         repair: Option<String>,
@@ -366,6 +386,11 @@ pub enum DomainError {
         message: String,
         repair: Option<String>,
     },
+    PolicyDeniedWithDetails {
+        message: String,
+        repair: Option<String>,
+        details_json: String,
+    },
     MigrationRequired {
         message: String,
         repair: Option<String>,
@@ -379,7 +404,9 @@ pub enum DomainError {
 impl std::fmt::Display for DomainError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Usage { message, .. } => write!(f, "usage error: {message}"),
+            Self::Usage { message, .. } | Self::UsageWithDetails { message, .. } => {
+                write!(f, "usage error: {message}")
+            }
             Self::Configuration { message, .. } => write!(f, "configuration error: {message}"),
             Self::Storage { message, .. } => write!(f, "storage error: {message}"),
             Self::SearchIndex { message, .. } => write!(f, "search index error: {message}"),
@@ -389,7 +416,9 @@ impl std::fmt::Display for DomainError {
             Self::UnsatisfiedDegradedMode { message, .. } => {
                 write!(f, "unsatisfied degraded mode: {message}")
             }
-            Self::PolicyDenied { message, .. } => write!(f, "policy denied: {message}"),
+            Self::PolicyDenied { message, .. } | Self::PolicyDeniedWithDetails { message, .. } => {
+                write!(f, "policy denied: {message}")
+            }
             Self::MigrationRequired { message, .. } => {
                 write!(f, "migration required: {message}")
             }
@@ -686,7 +715,7 @@ impl DomainError {
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
-            Self::Usage { .. } => "usage",
+            Self::Usage { .. } | Self::UsageWithDetails { .. } => "usage",
             Self::Configuration { .. } => "configuration",
             Self::Storage { .. } => "storage",
             Self::SearchIndex { .. } => "search_index",
@@ -694,7 +723,7 @@ impl DomainError {
             Self::Import { .. } => "import",
             Self::NotFound { .. } => "not_found",
             Self::UnsatisfiedDegradedMode { .. } => "unsatisfied_degraded_mode",
-            Self::PolicyDenied { .. } => "policy_denied",
+            Self::PolicyDenied { .. } | Self::PolicyDeniedWithDetails { .. } => "policy_denied",
             Self::MigrationRequired { .. } => "migration_required",
             Self::MigrationDrift { .. } => "migration_drift",
         }
@@ -704,6 +733,7 @@ impl DomainError {
     pub fn message(&self) -> String {
         match self {
             Self::Usage { message, .. }
+            | Self::UsageWithDetails { message, .. }
             | Self::Configuration { message, .. }
             | Self::Storage { message, .. }
             | Self::SearchIndex { message, .. }
@@ -711,6 +741,7 @@ impl DomainError {
             | Self::Import { message, .. }
             | Self::UnsatisfiedDegradedMode { message, .. }
             | Self::PolicyDenied { message, .. }
+            | Self::PolicyDeniedWithDetails { message, .. }
             | Self::MigrationRequired { message, .. }
             | Self::MigrationDrift { message, .. } => message.clone(),
             Self::NotFound { resource, id, .. } => {
@@ -723,6 +754,7 @@ impl DomainError {
     pub fn repair(&self) -> Option<&str> {
         match self {
             Self::Usage { repair, .. }
+            | Self::UsageWithDetails { repair, .. }
             | Self::Configuration { repair, .. }
             | Self::Storage { repair, .. }
             | Self::SearchIndex { repair, .. }
@@ -731,6 +763,7 @@ impl DomainError {
             | Self::NotFound { repair, .. }
             | Self::UnsatisfiedDegradedMode { repair, .. }
             | Self::PolicyDenied { repair, .. }
+            | Self::PolicyDeniedWithDetails { repair, .. }
             | Self::MigrationRequired { repair, .. }
             | Self::MigrationDrift { repair, .. } => repair.as_deref(),
         }
@@ -779,7 +812,8 @@ impl DomainError {
                 RecoveryAction {
                     priority: 1,
                     kind: RecoveryKind::Migration,
-                    rationale: "Rebuild the index from current memory state; idempotent.".to_owned(),
+                    rationale: "Rebuild the index from current memory state; idempotent."
+                        .to_owned(),
                     env_name: None,
                     value_hint: None,
                     config_path: None,
@@ -792,7 +826,8 @@ impl DomainError {
                 RecoveryAction {
                     priority: 2,
                     kind: RecoveryKind::Migration,
-                    rationale: "Inspect index state before rebuilding (faster diagnosis).".to_owned(),
+                    rationale: "Inspect index state before rebuilding (faster diagnosis)."
+                        .to_owned(),
                     env_name: None,
                     value_hint: None,
                     config_path: None,
@@ -810,25 +845,25 @@ impl DomainError {
                 "Apply outstanding migrations; idempotent and audit-logged.",
             )],
             // Migration drift.
-            Self::MigrationDrift { .. } => vec![
-                RecoveryAction {
-                    priority: 1,
-                    kind: RecoveryKind::Migration,
-                    rationale: "Inspect drift details before deciding repair path.".to_owned(),
-                    env_name: None,
-                    value_hint: None,
-                    config_path: None,
-                    config_key: None,
-                    flag_name: None,
-                    command: Some("ee migrate status --workspace . --json".to_owned()),
-                    results_in: None,
-                    example: None,
-                },
-            ],
-            // Policy denied: secret-bearing content. Recovery is to
-            // redact-then-retry. No flag bypass yet (C2 is a separate
-            // bead).
-            Self::PolicyDenied { .. } if message.contains("secret") => vec![
+            Self::MigrationDrift { .. } => vec![RecoveryAction {
+                priority: 1,
+                kind: RecoveryKind::Migration,
+                rationale: "Inspect drift details before deciding repair path.".to_owned(),
+                env_name: None,
+                value_hint: None,
+                config_path: None,
+                config_key: None,
+                flag_name: None,
+                command: Some("ee migrate status --workspace . --json".to_owned()),
+                results_in: None,
+                example: None,
+            }],
+            // Policy denied: secret-bearing content. Prefer redaction;
+            // C2's explicit bypass is surfaced in detailed error metadata.
+            Self::PolicyDenied { .. } | Self::PolicyDeniedWithDetails { .. }
+                if message.contains("secret") =>
+            {
+                vec![
                 RecoveryAction {
                     priority: 1,
                     kind: RecoveryKind::Broaden,
@@ -842,37 +877,42 @@ impl DomainError {
                     results_in: None,
                     example: None,
                 },
-            ],
+            ]
+            }
             // No workspace found (planned in D7; here we cover the
             // existing usage-error variant for symmetry).
-            Self::Usage { .. } if message.contains("workspace") && message.contains("not found")
-            => vec![
-                RecoveryAction::flag(
-                    1,
-                    "--workspace",
-                    "<path>",
-                    "Point at an explicit workspace; the simplest fix when running from outside an .ee/ directory.",
-                ),
-                RecoveryAction::env(
-                    2,
-                    "EE_WORKSPACE",
-                    "<absolute path>",
-                    "Persists for the current shell; useful for scripts that always operate on one workspace.",
-                ),
-                RecoveryAction {
-                    priority: 3,
-                    kind: RecoveryKind::Seed,
-                    rationale: "Create a new workspace at cwd if one doesn't exist yet.".to_owned(),
-                    env_name: None,
-                    value_hint: None,
-                    config_path: None,
-                    config_key: None,
-                    flag_name: None,
-                    command: Some("ee init --workspace .".to_owned()),
-                    results_in: None,
-                    example: None,
-                },
-            ],
+            Self::Usage { .. }
+                if message.contains("workspace") && message.contains("not found") =>
+            {
+                vec![
+                    RecoveryAction::flag(
+                        1,
+                        "--workspace",
+                        "<path>",
+                        "Point at an explicit workspace; the simplest fix when running from outside an .ee/ directory.",
+                    ),
+                    RecoveryAction::env(
+                        2,
+                        "EE_WORKSPACE",
+                        "<absolute path>",
+                        "Persists for the current shell; useful for scripts that always operate on one workspace.",
+                    ),
+                    RecoveryAction {
+                        priority: 3,
+                        kind: RecoveryKind::Seed,
+                        rationale: "Create a new workspace at cwd if one doesn't exist yet."
+                            .to_owned(),
+                        env_name: None,
+                        value_hint: None,
+                        config_path: None,
+                        config_key: None,
+                        flag_name: None,
+                        command: Some("ee init --workspace .".to_owned()),
+                        results_in: None,
+                        example: None,
+                    },
+                ]
+            }
             _ => Vec::new(),
         }
     }
@@ -880,7 +920,7 @@ impl DomainError {
     #[must_use]
     pub const fn exit_code(&self) -> ProcessExitCode {
         match self {
-            Self::Usage { .. } => ProcessExitCode::Usage,
+            Self::Usage { .. } | Self::UsageWithDetails { .. } => ProcessExitCode::Usage,
             Self::Configuration { .. } => ProcessExitCode::Configuration,
             Self::Storage { .. } => ProcessExitCode::Storage,
             Self::SearchIndex { .. } => ProcessExitCode::SearchIndex,
@@ -888,7 +928,9 @@ impl DomainError {
             Self::Import { .. } => ProcessExitCode::Import,
             Self::NotFound { .. } => ProcessExitCode::Usage,
             Self::UnsatisfiedDegradedMode { .. } => ProcessExitCode::UnsatisfiedDegradedMode,
-            Self::PolicyDenied { .. } => ProcessExitCode::PolicyDenied,
+            Self::PolicyDenied { .. } | Self::PolicyDeniedWithDetails { .. } => {
+                ProcessExitCode::PolicyDenied
+            }
             Self::MigrationRequired { .. } => ProcessExitCode::MigrationRequired,
             Self::MigrationDrift { .. } => ProcessExitCode::MigrationRequired,
         }

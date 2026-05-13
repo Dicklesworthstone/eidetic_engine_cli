@@ -166,23 +166,28 @@ fn maintenance_job_decay_sweep_persists_history_and_mutates_db() -> TestResult {
     {
         let connection =
             DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
-        connection
-            .insert_feedback_event(
-                "fb_e1234567890123456789012345",
-                &CreateFeedbackEventInput {
-                    workspace_id: workspace_id.clone(),
-                    target_type: "memory".to_owned(),
-                    target_id: memory_id.clone(),
-                    signal: "harmful".to_owned(),
-                    weight: 1.0,
-                    source_type: "outcome_observed".to_owned(),
-                    source_id: Some("maintenance-decay-sweep-e2e".to_owned()),
-                    reason: Some("force real decay_sweep mutation path".to_owned()),
-                    evidence_json: Some(r#"{"fixture":"maintenance_decay_sweep"}"#.to_owned()),
-                    session_id: None,
-                },
-            )
-            .map_err(|error| error.to_string())?;
+        for feedback_id in [
+            "fb_e1234567890123456789012345",
+            "fb_f1234567890123456789012345",
+        ] {
+            connection
+                .insert_feedback_event(
+                    feedback_id,
+                    &CreateFeedbackEventInput {
+                        workspace_id: workspace_id.clone(),
+                        target_type: "memory".to_owned(),
+                        target_id: memory_id.clone(),
+                        signal: "harmful".to_owned(),
+                        weight: 1.0,
+                        source_type: "outcome_observed".to_owned(),
+                        source_id: Some(format!("maintenance-decay-sweep-e2e-{feedback_id}")),
+                        reason: Some("force real decay_sweep mutation path".to_owned()),
+                        evidence_json: Some(r#"{"fixture":"maintenance_decay_sweep"}"#.to_owned()),
+                        session_id: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
         connection.close().map_err(|error| error.to_string())?;
     }
 
@@ -296,17 +301,44 @@ fn maintenance_job_decay_sweep_persists_history_and_mutates_db() -> TestResult {
 }
 
 fn unique_artifact_dir(name: &str) -> Result<PathBuf, String> {
-    let target_dir = env::var_os("CARGO_TARGET_TMPDIR")
-        .or_else(|| env::var_os("CARGO_TARGET_DIR"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
-    let dir = target_dir
-        .join("ee-test-artifacts")
+    let mut target_roots = Vec::new();
+    for candidate in [
+        env::var_os("CARGO_TARGET_TMPDIR"),
+        env::var_os("CARGO_TARGET_DIR"),
+        Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .into_os_string(),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .map(PathBuf::from)
+    {
+        if !target_roots.iter().any(|root| root == &candidate) {
+            target_roots.push(candidate);
+        }
+    }
+
+    let artifact_suffix = PathBuf::from("ee-test-artifacts")
         .join("e2e-daemon-recovery")
         .join(format!("{}-{}", name, unique_run_id()?));
-    fs::create_dir_all(&dir)
-        .map_err(|error| format!("failed to create artifact dir {}: {error}", dir.display()))?;
-    Ok(dir)
+
+    let mut failures = Vec::new();
+    for target_dir in target_roots {
+        let dir = target_dir.join(&artifact_suffix);
+        match fs::create_dir_all(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(error) => {
+                failures.push(format!("{}: {error}", dir.display()));
+            }
+        }
+    }
+
+    Err(format!(
+        "failed to create artifact dir in any target root: {}",
+        failures.join("; ")
+    ))
 }
 
 fn unique_run_id() -> Result<String, String> {

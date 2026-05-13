@@ -47,6 +47,7 @@ pub mod audit_actions {
     pub const FEEDBACK_QUARANTINE: &str = "feedback.quarantine";
     pub const FEEDBACK_QUARANTINE_RELEASE: &str = "feedback.quarantine.release";
     pub const FEEDBACK_QUARANTINE_REJECT: &str = "feedback.quarantine.reject";
+    pub const POLICY_BYPASS: &str = "policy.bypass";
     pub const MEMORY_CREATE: &str = "memory.create";
     pub const MEMORY_EXPIRE: &str = "memory.expire";
     pub const MEMORY_SCORE_DECAY: &str = "memory.score_decay";
@@ -77,6 +78,8 @@ pub mod audit_actions {
     pub const RATIONALE_TRACE_CREATE: &str = "rationale_trace.create";
     pub const TRIPWIRE_CHECK: &str = "tripwire.check";
     pub const TRIPWIRE_CREATE: &str = "tripwire.create";
+    pub const VERIFICATION_INGEST: &str = "verification.ingest";
+    pub const VERIFICATION_RECORD: &str = VERIFICATION_INGEST;
 
     // ----------------------------------------------------------------------
     // Read-surface actions (G8 / bd-17c65.7.7).
@@ -7726,6 +7729,22 @@ impl DbConnection {
             DbOperation::Execute,
             "UPDATE memories SET tombstoned_at = ?1, updated_at = ?1 WHERE id = ?2 AND tombstoned_at IS NULL",
             &[Value::Text(now), Value::Text(id.to_string())],
+        )?;
+        if affected > 0 {
+            self.garbage_collect_auto_memory_links_for_memory_inner(id)?;
+        }
+        Ok(affected > 0)
+    }
+
+    /// Restore an imported tombstone timestamp without synthesizing a fresh one.
+    pub fn restore_imported_memory_tombstone(&self, id: &str, tombstoned_at: &str) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET tombstoned_at = ?1, updated_at = ?1 WHERE id = ?2",
+            &[
+                Value::Text(tombstoned_at.to_owned()),
+                Value::Text(id.to_owned()),
+            ],
         )?;
         if affected > 0 {
             self.garbage_collect_auto_memory_links_for_memory_inner(id)?;

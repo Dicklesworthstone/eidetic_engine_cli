@@ -383,6 +383,15 @@ pub struct SecretRedactionReport {
     pub content: String,
     pub redacted: bool,
     pub redacted_reasons: Vec<&'static str>,
+    pub matches: Vec<SecretRedactionMatch>,
+}
+
+/// Byte span of a secret-like value in the original input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SecretRedactionMatch {
+    pub pattern_id: &'static str,
+    pub start: usize,
+    pub end: usize,
 }
 
 /// Stable rejection returned when privileged trust promotion evidence is not
@@ -665,6 +674,7 @@ pub fn detect_instruction_like_content(content: &str) -> InstructionLikeReport {
 /// diagnostics, curation review, and non-secret memory content.
 #[must_use]
 pub fn redact_secret_like_content(content: &str) -> SecretRedactionReport {
+    let matches = detect_secret_like_matches(content);
     let mut reasons = Vec::new();
     let (without_key_values, key_value_redacted) = redact_secret_key_values(content, &mut reasons);
     let (without_url_passwords, url_password_redacted) =
@@ -691,6 +701,267 @@ pub fn redact_secret_like_content(content: &str) -> SecretRedactionReport {
             || high_entropy_redacted
             || pii_redacted,
         redacted_reasons: reasons,
+        matches,
+    }
+}
+
+#[must_use]
+fn detect_secret_like_matches(input: &str) -> Vec<SecretRedactionMatch> {
+    let mut matches = Vec::new();
+    detect_secret_key_value_matches(input, &mut matches);
+    detect_url_password_matches(input, &mut matches);
+    detect_pem_block_matches(input, &mut matches);
+    detect_raw_api_token_matches(input, &mut matches);
+    detect_jwt_token_matches(input, &mut matches);
+    detect_high_entropy_secret_matches(input, &mut matches);
+    detect_pii_matches(input, &mut matches);
+    matches.sort_by(|left, right| {
+        left.start
+            .cmp(&right.start)
+            .then_with(|| left.end.cmp(&right.end))
+            .then_with(|| left.pattern_id.cmp(right.pattern_id))
+    });
+    matches.dedup();
+    matches
+}
+
+fn push_secret_match(
+    matches: &mut Vec<SecretRedactionMatch>,
+    pattern_id: &'static str,
+    start: usize,
+    end: usize,
+) {
+    if start < end {
+        matches.push(SecretRedactionMatch {
+            pattern_id,
+            start,
+            end,
+        });
+    }
+}
+
+fn detect_secret_key_value_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>) {
+    for pattern in SECRET_KEY_PATTERNS {
+        let mut search_start = 0;
+        let lower = input.to_ascii_lowercase();
+        loop {
+            if search_start >= lower.len() {
+                break;
+            }
+            let Some(relative) = lower[search_start..].find(pattern.key) else {
+                break;
+            };
+            let key_start = search_start + relative;
+            let key_end = key_start + pattern.key.len();
+            if !is_key_boundary(lower.as_bytes(), key_start, key_end) {
+                search_start = key_end;
+                continue;
+            }
+            if let Some((value_start, value_end)) =
+                secret_value_range(input, key_end, pattern.whitespace_value)
+            {
+                push_secret_match(matches, pattern.code, value_start, value_end);
+                search_start = value_end;
+            } else {
+                search_start = key_end;
+            }
+        }
+    }
+}
+
+fn detect_url_password_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>) {
+    let mut search_start = 0;
+    let lower = input.to_ascii_lowercase();
+    loop {
+        if search_start >= lower.len() {
+            break;
+        }
+        let Some(relative_scheme) = lower[search_start..].find("://") else {
+            break;
+        };
+        let scheme_marker = search_start + relative_scheme + 3;
+        let segment_end = input[scheme_marker..]
+            .char_indices()
+            .find_map(|(offset, ch)| ch.is_whitespace().then_some(scheme_marker + offset))
+            .unwrap_or(input.len());
+        let Some(at_relative) = input[scheme_marker..segment_end].find('@') else {
+            search_start = segment_end;
+            continue;
+        };
+        let at_index = scheme_marker + at_relative;
+        let Some(colon_relative) = input[scheme_marker..at_index].rfind(':') else {
+            search_start = at_index + 1;
+            continue;
+        };
+        let value_start = scheme_marker + colon_relative + 1;
+        push_secret_match(matches, "url_password", value_start, at_index);
+        search_start = at_index + 1;
+    }
+}
+
+fn detect_pem_block_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>) {
+    let mut search_start = 0;
+    let lower = input.to_ascii_lowercase();
+    loop {
+        if search_start >= lower.len() {
+            break;
+        }
+        let Some(relative_begin) = lower[search_start..].find("-----begin") else {
+            break;
+        };
+        let begin = search_start + relative_begin;
+        let end = lower[begin..]
+            .find("-----end")
+            .map_or(input.len(), |relative_end| {
+                let marker_start = begin + relative_end;
+                input[marker_start..]
+                    .find('\n')
+                    .map_or(input.len(), |relative_line_end| {
+                        marker_start + relative_line_end
+                    })
+            });
+        push_secret_match(matches, "pem_block", begin, end);
+        search_start = end;
+    }
+}
+
+fn detect_raw_api_token_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>) {
+    const RAW_TOKEN_PATTERNS: &[(&str, &str, usize)] = &[
+        ("sk-ant-api03-", "anthropic_api_key", 40),
+        ("sk-proj-", "openai_api_key", 40),
+        ("sk-", "openai_api_key", 48),
+        ("ghp_", "github_token", 36),
+        ("gho_", "github_token", 36),
+        ("ghs_", "github_token", 36),
+        ("ghu_", "github_token", 36),
+        ("ghr_", "github_token", 36),
+        ("AKIA", "aws_access_key", 16),
+        ("ASIA", "aws_access_key", 16),
+        ("sk_live_", "stripe_secret_key", 24),
+        ("sk_test_", "stripe_secret_key", 24),
+        ("rk_live_", "stripe_restricted_key", 24),
+        ("rk_test_", "stripe_restricted_key", 24),
+        ("AIza", "gcp_api_key", 35),
+        ("xoxb-", "slack_token", 24),
+        ("xoxp-", "slack_token", 24),
+        ("xoxa-", "slack_token", 24),
+        ("xoxr-", "slack_token", 24),
+        ("npm_", "npm_token", 16),
+        ("hf_", "huggingface_token", 16),
+        ("pypi-", "pypi_token", 24),
+        ("AC", "twilio_account_sid", 32),
+        ("SG.", "sendgrid_api_key", 24),
+        ("sq0idp-", "square_token", 20),
+        ("sq0csp-", "square_token", 20),
+        ("key-", "mailgun_key", 24),
+        ("pubkey-", "mailgun_key", 24),
+    ];
+
+    for &(prefix, code, min_suffix_len) in RAW_TOKEN_PATTERNS {
+        let mut search_start = 0;
+        loop {
+            if search_start >= input.len() {
+                break;
+            }
+            let Some(relative) = input[search_start..].find(prefix) else {
+                break;
+            };
+            let token_start = search_start + relative;
+            let after_prefix = token_start + prefix.len();
+            if token_start > 0
+                && input.as_bytes().get(token_start - 1).is_some_and(|byte| {
+                    byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-'
+                })
+            {
+                search_start = after_prefix;
+                continue;
+            }
+            let token_end = input[after_prefix..]
+                .char_indices()
+                .find_map(|(offset, ch)| (!is_raw_token_char(ch)).then_some(after_prefix + offset))
+                .unwrap_or(input.len());
+            let actual_token_end = trim_raw_token_end(input, after_prefix, token_end);
+            let suffix_len = actual_token_end - after_prefix;
+            if suffix_len >= min_suffix_len {
+                push_secret_match(matches, code, token_start, actual_token_end);
+                search_start = actual_token_end;
+            } else {
+                search_start = token_end;
+            }
+        }
+    }
+}
+
+fn detect_jwt_token_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>) {
+    let mut search_start = 0;
+    loop {
+        if search_start >= input.len() {
+            break;
+        }
+        let Some(relative) = input[search_start..].find("eyJ") else {
+            break;
+        };
+        let jwt_start = search_start + relative;
+        if jwt_start > 0
+            && input
+                .as_bytes()
+                .get(jwt_start - 1)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-')
+        {
+            search_start = jwt_start + 3;
+            continue;
+        }
+        let jwt_end = input[jwt_start..]
+            .char_indices()
+            .find_map(|(offset, ch)| (!is_jwt_segment_char(ch)).then_some(jwt_start + offset))
+            .unwrap_or(input.len());
+        let jwt_candidate = input[jwt_start..jwt_end].trim_end_matches('.');
+        let actual_jwt_end = jwt_start + jwt_candidate.len();
+        let dot_count = jwt_candidate.bytes().filter(|&byte| byte == b'.').count();
+        if dot_count == 2 && jwt_candidate.len() >= 32 && is_valid_jwt_candidate(jwt_candidate) {
+            push_secret_match(matches, "jwt_token", jwt_start, actual_jwt_end);
+            search_start = actual_jwt_end;
+        } else {
+            search_start = jwt_end;
+        }
+    }
+}
+
+fn detect_high_entropy_secret_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>) {
+    let mut cursor = 0;
+    while cursor < input.len() {
+        let Some((token_start, token_end)) = next_entropy_candidate(input, cursor) else {
+            break;
+        };
+        let candidate = &input[token_start..token_end];
+        let should_redact = if looks_like_high_entropy_secret(candidate) {
+            looks_like_standalone_high_entropy_secret(candidate)
+                || has_nearby_secret_keyword(input, token_start, token_end)
+        } else {
+            false
+        };
+        if should_redact {
+            push_secret_match(matches, "high_entropy_secret", token_start, token_end);
+        }
+        cursor = token_end;
+    }
+}
+
+fn detect_pii_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>) {
+    for (pattern, reason) in [
+        (
+            r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+            "email_address",
+        ),
+        (r"\b\d{3}-\d{2}-\d{4}\b", "ssn"),
+        (r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b", "phone_number"),
+    ] {
+        let Ok(regex) = regex_lite::Regex::new(pattern) else {
+            continue;
+        };
+        for matched in regex.find_iter(input) {
+            push_secret_match(matches, reason, matched.start(), matched.end());
+        }
     }
 }
 

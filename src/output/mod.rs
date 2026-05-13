@@ -4,9 +4,11 @@ use std::io::IsTerminal;
 
 use serde::Serialize;
 
+use crate::config::env_registry::{EnvVar, read};
 use crate::core::agent_detect::{AgentInventoryReport, InstalledAgentDetectionReport};
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
+use crate::core::context::ContextPackOutputOptions;
 use crate::core::curate::{
     CurateApplyReport, CurateCandidatesReport, CurateDispositionReport, CurateReviewReport,
     CurateValidateReport,
@@ -35,8 +37,8 @@ use crate::core::{VERSION_PROVENANCE_SCHEMA_V1, VersionReport};
 use crate::eval::{EvaluationReport, EvaluationStatus, FixtureListEntry, ScenarioValidationResult};
 use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
 use crate::models::{
-    DomainError, ERROR_SCHEMA_V1, InstallCheckReport, InstallPlanReport, RESPONSE_SCHEMA_V0,
-    RESPONSE_SCHEMA_V1,
+    DomainError, ERROR_SCHEMA_V1, InstallCheckReport, InstallPlanReport, ProducerMetadata,
+    RESPONSE_SCHEMA_V0, RESPONSE_SCHEMA_V1,
 };
 use crate::pack::{
     ContextResponse, PackAdvisoryBanner, PackAdvisoryNote, PackItemProvenance, PackOmission,
@@ -834,14 +836,14 @@ struct OutputEnvironment {
 impl OutputEnvironment {
     fn from_process_env() -> Self {
         Self {
-            ee_json: env::var("EE_JSON").ok(),
-            ee_output_format: env::var("EE_OUTPUT_FORMAT").ok(),
-            ee_format: env::var("EE_FORMAT").ok(),
+            ee_json: read(EnvVar::Json),
+            ee_output_format: read(EnvVar::OutputFormat),
+            ee_format: read(EnvVar::Format),
             toon_default_format: env::var("TOON_DEFAULT_FORMAT").ok(),
-            ee_agent_mode: env::var("EE_AGENT_MODE").ok(),
-            ee_hook_mode: env::var("EE_HOOK_MODE").ok(),
+            ee_agent_mode: read(EnvVar::AgentMode),
+            ee_hook_mode: read(EnvVar::HookMode),
             no_color: env::var("NO_COLOR").ok(),
-            ee_no_color: env::var("EE_NO_COLOR").ok(),
+            ee_no_color: read(EnvVar::NoColor),
             force_color: env::var("FORCE_COLOR").ok(),
         }
     }
@@ -1399,12 +1401,29 @@ pub fn compute_representative_size_diagnostics() -> Vec<(&'static str, OutputSiz
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ContextJsonRenderOptions {
     pub include_rendered_text: bool,
+    pub include_skipped: bool,
+    pub include_meta: bool,
+    pub include_verbose_meta: bool,
 }
 
 impl Default for ContextJsonRenderOptions {
     fn default() -> Self {
         Self {
             include_rendered_text: true,
+            include_skipped: true,
+            include_meta: true,
+            include_verbose_meta: false,
+        }
+    }
+}
+
+impl From<ContextPackOutputOptions> for ContextJsonRenderOptions {
+    fn from(options: ContextPackOutputOptions) -> Self {
+        Self {
+            include_rendered_text: options.include_rendered_text,
+            include_skipped: options.include_skipped,
+            include_meta: options.include_meta,
+            include_verbose_meta: options.include_verbose_meta,
         }
     }
 }
@@ -1456,18 +1475,36 @@ pub fn render_context_response_json_with_options(
             if let Some(text) = &rendered_text {
                 pack.field_str("text", text);
             }
-            pack.field_object("meta", |meta| {
-                meta.field_object("algorithm", |algorithm| {
-                    build_pack_algorithm_metadata(
-                        algorithm,
-                        &response.data.pack.selection_certificate,
+            if options.include_meta {
+                pack.field_object("meta", |meta| {
+                    meta.field_object("algorithm", |algorithm| {
+                        build_pack_algorithm_metadata(
+                            algorithm,
+                            &response.data.pack.selection_certificate,
+                        );
+                    });
+                    if options.include_verbose_meta {
+                        meta.field_object("selectionFormula", |formula| {
+                            formula.field_str(
+                                "summary",
+                                "Strict MMR greedily selects positive marginal-gain items first; optional coverage fill admits redundant but still relevant memories while budget remains.",
+                            );
+                            formula.field_str(
+                                "coverageFillPolicy",
+                                "selected_in=coverage_fill only when include_coverage_fill is active and relevance >= floor",
+                            );
+                        });
+                    }
+                    meta.field_raw(
+                        "coverageFillCount",
+                        &response.data.pack.coverage_fill_count().to_string(),
+                    );
+                    meta.field_raw(
+                        "producer",
+                        &ProducerMetadata::context_pack(None, None).to_json_string_lossy(),
                     );
                 });
-                meta.field_raw(
-                    "coverageFillCount",
-                    &response.data.pack.coverage_fill_count().to_string(),
-                );
-            });
+            }
             pack.field_object("budget", |budget| {
                 budget.field_u32("maxTokens", response.data.pack.budget.max_tokens());
                 budget.field_u32("usedTokens", response.data.pack.used_tokens);
@@ -1599,10 +1636,12 @@ pub fn render_context_response_json_with_options(
                 "skippedTotal",
                 &response.data.pack.skipped_total().to_string(),
             );
-            let skipped = response.data.pack.skipped_for_output();
-            pack.field_array_of_objects("skipped", &skipped, |obj, omission| {
-                build_pack_skipped_item(obj, omission);
-            });
+            if options.include_skipped {
+                let skipped = response.data.pack.skipped_for_output();
+                pack.field_array_of_objects("skipped", &skipped, |obj, omission| {
+                    build_pack_skipped_item(obj, omission);
+                });
+            }
             let footer = response.data.pack.provenance_footer();
             // Bead bd-2pe1z (A1 phase 2): drop provenanceFooter.entries[]. Each
             // entry's sourceIndex is now emitted inline on the matching
@@ -1639,10 +1678,11 @@ pub fn render_context_response_human(response: &ContextResponse) -> String {
         response.data.request.query
     ));
     output.push_str(&format!(
-        "Profile: {} | Budget: {}/{} tokens\n\n",
+        "Profile: {} | Budget: {}/{} tokens | Pack hash: {}\n\n",
         response.data.request.profile.as_str(),
         response.data.pack.used_tokens,
-        response.data.pack.budget.max_tokens()
+        response.data.pack.budget.max_tokens(),
+        context_pack_hash(response)
     ));
 
     let advisory_banner = response.data.advisory_banner();
@@ -1699,6 +1739,130 @@ pub fn render_context_response_toon(response: &ContextResponse) -> String {
     render_toon_from_json(&render_context_response_json(response))
 }
 
+/// Render a context response as JSON Lines.
+///
+/// The first line is pack-level metadata, each item gets one independent
+/// line, and the final line carries omitted/degraded summary counts. Every
+/// line repeats the pack hash so streaming consumers can correlate partial
+/// reads back to the canonical pack record.
+#[must_use]
+pub fn render_context_response_jsonl(response: &ContextResponse) -> String {
+    let mut lines = Vec::with_capacity(response.data.pack.items.len() + 2);
+
+    let mut header = JsonBuilder::with_capacity(256);
+    header.field_str("schema", "ee.context.jsonl.header.v1");
+    header.field_str("packHash", context_pack_hash(response));
+    header.field_str("query", &response.data.request.query);
+    header.field_u32("usedTokens", response.data.pack.used_tokens);
+    header.field_u32("maxTokens", response.data.pack.budget.max_tokens());
+    header.field_raw("itemCount", &response.data.pack.items.len().to_string());
+    lines.push(header.finish());
+
+    for item in &response.data.pack.items {
+        let provenance = item.rendered_provenance();
+        let mut line = JsonBuilder::with_capacity(384 + item.content.len());
+        line.field_str("schema", "ee.context.jsonl.item.v1");
+        line.field_str("packHash", context_pack_hash(response));
+        line.field_u32("rank", item.rank);
+        line.field_str("memoryId", &item.memory_id.to_string());
+        line.field_str("section", item.section.as_str());
+        line.field_str("content", &item.content);
+        line.field_u32("estimatedTokens", item.estimated_tokens);
+        line.field_str("why", &item.why);
+        line.field_str("selectedIn", item.selected_in.as_str());
+        line.field_array_of_objects("provenance", &provenance, build_rendered_provenance);
+        lines.push(line.finish());
+    }
+
+    let mut footer = JsonBuilder::with_capacity(192);
+    footer.field_str("schema", "ee.context.jsonl.footer.v1");
+    footer.field_str("packHash", context_pack_hash(response));
+    footer.field_raw(
+        "skippedTotal",
+        &response.data.pack.skipped_total().to_string(),
+    );
+    footer.field_raw("degradedCount", &response.data.degraded.len().to_string());
+    lines.push(footer.finish());
+
+    lines.join("\n")
+}
+
+/// Render a terse, single-line context response for shell hooks.
+#[must_use]
+pub fn render_context_response_compact(response: &ContextResponse) -> String {
+    format!(
+        "{}\t{}/{}\t{}\t{}",
+        compact_field(&response.data.request.query),
+        response.data.pack.items.len(),
+        response.data.pack.budget.max_tokens(),
+        compact_field(&top_context_item_ids(response)),
+        context_pack_hash(response)
+    )
+}
+
+/// Render the stable hook contract consumed by agent harness integrations.
+#[must_use]
+pub fn render_context_response_hook(response: &ContextResponse) -> String {
+    let mut b = JsonBuilder::with_capacity(512);
+    b.field_str("schema", "ee.hook.context_pack.v1");
+    b.field_str("pack_id", context_pack_hash(response));
+    b.field_raw("total_tokens", &response.data.pack.used_tokens.to_string());
+    b.field_array_of_objects("items", &response.data.pack.items, |obj, item| {
+        obj.field_str("id", &item.memory_id.to_string());
+        obj.field_str("content", &item.content);
+        obj.field_u32("tokens", item.estimated_tokens);
+    });
+    b.field_array_of_objects("degraded", &response.data.degraded, |obj, degraded| {
+        obj.field_str("code", &degraded.code);
+        obj.field_str("severity", degraded.severity.as_str());
+        obj.field_str("message", &degraded.message);
+        if let Some(repair) = &degraded.repair {
+            obj.field_str("repair", repair);
+        }
+    });
+    b.finish()
+}
+
+/// Render a Mermaid graph projection of the canonical context pack.
+#[must_use]
+pub fn render_context_response_mermaid(response: &ContextResponse) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("%% pack.hash: {}\n", context_pack_hash(response)));
+    output.push_str(&format!("%% pack.schema: {}\n", response.schema));
+    output.push_str("graph TD\n");
+    output.push_str(&format!(
+        "  pack[\"{}\"]\n",
+        escape_mermaid_label(&format!("context pack: {}", response.data.request.query))
+    ));
+
+    let mut source_nodes = std::collections::BTreeSet::new();
+    for item in &response.data.pack.items {
+        let item_node = mermaid_node_id("mem", &item.memory_id.to_string());
+        output.push_str(&format!(
+            "  {item_node}[\"{}\"]\n",
+            escape_mermaid_label(&format!("{}: {}", item.rank, item.memory_id))
+        ));
+        output.push_str(&format!("  pack --> {item_node}\n"));
+        for provenance in item.rendered_provenance() {
+            let source_node = mermaid_node_id("src", &provenance.uri);
+            if source_nodes.insert(source_node.clone()) {
+                output.push_str(&format!(
+                    "  {source_node}[\"{}\"]\n",
+                    escape_mermaid_label(&provenance.label)
+                ));
+            }
+            output.push_str(&format!("  {item_node} --> {source_node}\n"));
+        }
+    }
+
+    if response.data.pack.items.is_empty() {
+        output.push_str("  empty[\"no items selected\"]\n");
+        output.push_str("  pack --> empty\n");
+    }
+
+    output
+}
+
 /// Render a context response as Markdown.
 ///
 /// Produces a structured Markdown document suitable for direct inclusion
@@ -1707,6 +1871,50 @@ pub fn render_context_response_toon(response: &ContextResponse) -> String {
 #[must_use]
 pub fn render_context_response_markdown(response: &ContextResponse) -> String {
     crate::pack::render_context_response_markdown(response)
+}
+
+fn context_pack_hash(response: &ContextResponse) -> &str {
+    response.data.pack.hash.as_deref().unwrap_or("absent")
+}
+
+fn top_context_item_ids(response: &ContextResponse) -> String {
+    let ids = response
+        .data
+        .pack
+        .items
+        .iter()
+        .take(3)
+        .map(|item| item.memory_id.to_string())
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        "-".to_owned()
+    } else {
+        ids.join(",")
+    }
+}
+
+fn compact_field(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '\t' | '\n' | '\r' => ' ',
+            other => other,
+        })
+        .collect()
+}
+
+fn mermaid_node_id(prefix: &str, value: &str) -> String {
+    let mut id = String::with_capacity(prefix.len() + value.len() + 1);
+    id.push_str(prefix);
+    id.push('_');
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            id.push(character);
+        } else {
+            id.push('_');
+        }
+    }
+    id
 }
 
 fn build_pack_advisory_banner(obj: &mut JsonBuilder, banner: &PackAdvisoryBanner) {
@@ -4307,12 +4515,10 @@ pub fn render_capabilities_json(report: &CapabilitiesReport) -> String {
             obj.field_bool("available", cmd.available);
             obj.field_str("description", cmd.description);
         });
-        // Bead bd-17c65.6.4 (F4) — discovered binaries (cass + others as
-        // they're added) and EE_* env-var registry. Lite version: just
-        // cass + EE_CASS_BINARY for now; F5 will expand to the full
-        // registry. Agents reading capabilities can determine which
-        // discovery source produced each binary, so error.recovery
-        // hints from F1 are reproducible / verifiable.
+        // Bead bd-17c65.6.4/F5 — discovered binaries and registry-backed
+        // EE_* environment overrides. Agents reading capabilities can
+        // determine which discovery source produced each binary, so
+        // error.recovery hints from F1 are reproducible / verifiable.
         write_capabilities_binaries_block(d);
         write_capabilities_env_overrides_block(d);
         write_capabilities_output_metadata(d, report, true);
@@ -4347,7 +4553,7 @@ pub fn render_capabilities_json(report: &CapabilitiesReport) -> String {
 /// - `trusted`: whether the discovered path passed the safety
 ///   ownership / permission checks
 ///
-/// Future bead F5 expands this with `recovery[]` (matching F1) when
+/// Future recovery work can add `recovery[]` (matching F1) when
 /// `discoveredAt` is null.
 fn write_capabilities_binaries_block(builder: &mut JsonBuilder) {
     builder.field_object("binaries", |bins| {
@@ -4385,22 +4591,37 @@ fn source_label(source: crate::cass::DiscoverySource) -> &'static str {
 /// Emit `envOverrides` capability block (F4).
 ///
 /// Each entry lists an `EE_*` environment variable ee honors, what it
-/// controls, and whether it's currently set. Lite version covers
-/// EE_CASS_BINARY; F5 will expand to a registry-backed full list.
+/// controls, and whether it's currently set.
 fn write_capabilities_env_overrides_block(builder: &mut JsonBuilder) {
-    let cass_env = std::env::var("EE_CASS_BINARY").ok();
-    builder.field_array_of_objects(
-        "envOverrides",
-        &[("EE_CASS_BINARY", "Override for the cass import binary path"); 1],
-        |obj, (name, controls)| {
-            obj.field_str("name", name);
-            obj.field_str("controls", controls);
-            obj.field_bool("isSet", cass_env.is_some());
-            if let Some(ref value) = cass_env {
+    builder.field_array_of_objects("envOverrides", EnvVar::all(), |obj, var| {
+        let value = read(*var);
+        let default = var.default_value();
+        let source = if value.is_some() {
+            "process_env"
+        } else if default.is_some() {
+            "registry_default"
+        } else {
+            "unset"
+        };
+        obj.field_str("name", var.name());
+        obj.field_str("category", var.category());
+        obj.field_str("controls", var.description());
+        match default {
+            Some(default) => {
+                obj.field_str("defaultValue", default);
+            }
+            None => {
+                obj.field_raw("defaultValue", "null");
+            }
+        }
+        obj.field_bool("isSet", value.is_some());
+        obj.field_str("source", source);
+        if var.exposes_value() {
+            if let Some(ref value) = value {
                 obj.field_str("currentValue", value);
             }
-        },
-    );
+        }
+    });
 }
 
 fn write_capabilities_output_metadata(
@@ -5703,7 +5924,7 @@ const GLOBAL_OPTIONS: &[GlobalOption] = &[
     GlobalOption {
         name: "--format",
         short: "",
-        description: "Select output renderer (human|json|toon|jsonl|compact|hook)",
+        description: "Select output renderer (human|json|toon|jsonl|compact|hook|markdown|mermaid)",
         opt_type: "enum",
     },
     GlobalOption {
@@ -6701,7 +6922,9 @@ pub fn error_response_toon(error: &DomainError) -> String {
 
 fn domain_error_severity(error: &DomainError) -> &'static str {
     match error {
-        DomainError::Usage { .. } | DomainError::NotFound { .. } => "low",
+        DomainError::Usage { .. }
+        | DomainError::UsageWithDetails { .. }
+        | DomainError::NotFound { .. } => "low",
         DomainError::Storage { .. } | DomainError::MigrationDrift { .. } => "high",
         DomainError::Configuration { .. }
         | DomainError::SearchIndex { .. }
@@ -6709,11 +6932,19 @@ fn domain_error_severity(error: &DomainError) -> &'static str {
         | DomainError::Import { .. }
         | DomainError::UnsatisfiedDegradedMode { .. }
         | DomainError::PolicyDenied { .. }
+        | DomainError::PolicyDeniedWithDetails { .. }
         | DomainError::MigrationRequired { .. } => "medium",
     }
 }
 
 fn domain_error_details(details: &mut JsonBuilder, error: &DomainError) {
+    match error {
+        DomainError::UsageWithDetails { details_json, .. }
+        | DomainError::PolicyDeniedWithDetails { details_json, .. } => {
+            append_domain_error_details(details, details_json);
+        }
+        _ => {}
+    }
     if let DomainError::NotFound { resource, id, .. } = error {
         details.field_str("resource", resource);
         details.field_str("id", id);
@@ -6752,6 +6983,17 @@ fn domain_error_details(details: &mut JsonBuilder, error: &DomainError) {
                 obj.field_str("example", example);
             }
         });
+    }
+}
+
+fn append_domain_error_details(details: &mut JsonBuilder, details_json: &str) {
+    let Ok(serde_json::Value::Object(map)) =
+        serde_json::from_str::<serde_json::Value>(details_json)
+    else {
+        return;
+    };
+    for (key, value) in map {
+        details.field_raw(&key, &value.to_string());
     }
 }
 
@@ -9127,8 +9369,8 @@ pub fn render_procedure_drift_toon(report: &ProcedureDriftReport) -> String {
 // ============================================================================
 
 use crate::core::learn::{
-    LearnAgendaReport, LearnCloseReport, LearnExperimentProposalReport, LearnExperimentRunReport,
-    LearnObserveReport, LearnSummaryReport, LearnUncertaintyReport,
+    LearnAgendaReport, LearnCloseReport, LearnClusterReport, LearnExperimentProposalReport,
+    LearnExperimentRunReport, LearnObserveReport, LearnSummaryReport, LearnUncertaintyReport,
 };
 
 /// Render a learn agenda report as JSON.
@@ -9228,6 +9470,63 @@ pub fn render_learn_uncertainty_toon(report: &LearnUncertaintyReport) -> String 
     format!(
         "LEARN_UNCERTAINTY|mean={:.2}|high={}|candidates={}",
         report.mean_uncertainty, report.high_uncertainty_count, report.sampling_candidates
+    )
+}
+
+/// Render a learn cluster report as JSON.
+#[must_use]
+pub fn render_learn_cluster_json(report: &LearnClusterReport) -> String {
+    serde_json::json!({
+        "schema": report.schema,
+        "success": true,
+        "workspaceId": report.workspace_id,
+        "threshold": report.threshold,
+        "minClusterSize": report.min_cluster_size,
+        "memoryCount": report.memory_count,
+        "clusteredMemoryCount": report.clustered_memory_count,
+        "clusterCount": report.cluster_count,
+        "clusters": report.clusters,
+        "degradations": report.degradations,
+        "generatedAt": report.generated_at,
+    })
+    .to_string()
+}
+
+/// Render a learn cluster report as human-readable text.
+#[must_use]
+pub fn render_learn_cluster_human(report: &LearnClusterReport) -> String {
+    let mut out = String::with_capacity(1024);
+    out.push_str("Learning Clusters\n\n");
+    out.push_str(&format!(
+        "Clusters: {} from {} memories (threshold {:.3}, min size {})\n\n",
+        report.cluster_count, report.memory_count, report.threshold, report.min_cluster_size
+    ));
+    for cluster in &report.clusters {
+        out.push_str(&format!(
+            "{}: {} member(s), silhouette {}\n",
+            cluster.cluster_id,
+            cluster.member_memory_ids.len(),
+            cluster
+                .silhouette_score
+                .map_or_else(|| "n/a".to_owned(), |score| format!("{score:.3}"))
+        ));
+        out.push_str(&format!("    {}\n", cluster.member_memory_ids.join(", ")));
+    }
+    if !report.degradations.is_empty() {
+        out.push_str("\nDegraded:\n");
+        for degradation in &report.degradations {
+            out.push_str(&format!("  {degradation}\n"));
+        }
+    }
+    out
+}
+
+/// Render a learn cluster report as TOON.
+#[must_use]
+pub fn render_learn_cluster_toon(report: &LearnClusterReport) -> String {
+    format!(
+        "LEARN_CLUSTER|clusters={}|memories={}|clustered={}|threshold={:.3}",
+        report.cluster_count, report.memory_count, report.clustered_memory_count, report.threshold
     )
 }
 
@@ -11628,6 +11927,32 @@ mod tests {
             "\"repair\":\"ee doctor --fix-plan --json\"",
             "repair",
         )
+    }
+
+    #[test]
+    fn error_schema_detailed_variants_merge_details_object() -> TestResult {
+        let error = DomainError::PolicyDeniedWithDetails {
+            message: "Refusing to persist memory content that contains secrets: api_key."
+                .to_string(),
+            repair: Some("Redact the secret.".to_string()),
+            details_json: serde_json::json!({
+                "detectedPattern": "api_key",
+                "matchedAt": [{"start": 12, "end": 40, "pattern_id": "api_key"}],
+                "bypassFlag": "--allow-secret-mention",
+            })
+            .to_string(),
+        };
+        let json = error_response_json(&error);
+        ensure_contains(&json, "\"code\":\"policy_denied\"", "code")?;
+        ensure_contains(&json, "\"details\":{", "details object")?;
+        ensure_contains(&json, "\"detectedPattern\":\"api_key\"", "detected pattern")?;
+        ensure_contains(&json, "\"matchedAt\":[", "matchedAt array")?;
+        ensure_contains(
+            &json,
+            "\"bypassFlag\":\"--allow-secret-mention\"",
+            "bypass flag",
+        )?;
+        ensure_contains(&json, "\"recovery\":[", "recovery still present")
     }
 
     #[test]

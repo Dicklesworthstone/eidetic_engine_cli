@@ -1,9 +1,9 @@
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -17,6 +17,7 @@ use crate::cass::{
     CassClient, CassImportOptions, discover_import_binary, import_cass_sessions,
     parse_import_since_duration,
 };
+use crate::config::env_registry::{EnvVar, read, read_os};
 use crate::core::VersionReport;
 use crate::core::agent_detect::{
     AgentDetectOptions, AgentSourcesOptions, AgentStatusOptions, build_agent_sources_report,
@@ -47,7 +48,9 @@ use crate::core::causal::{
 };
 use crate::core::check::CheckReport;
 use crate::core::context::{
-    ContextPackError, ContextPackOptions, run_context_pack, run_context_pack_with_performance,
+    ContextPackError, ContextPackOptions, ContextPackOutputOptionOverrides,
+    ContextPackOutputOptions, ContextPackOutputProfile, run_context_pack,
+    run_context_pack_with_performance,
 };
 use crate::core::curate::{
     CurateApplyOptions, CurateApplyReport, CurateCandidatesOptions, CurateCandidatesReport,
@@ -145,7 +148,9 @@ use crate::core::rule::{
     extract_playbook_candidates, import_playbook, list_playbook_rules, list_rules, mark_rule,
     protect_rule, show_rule, update_rule,
 };
-use crate::core::search::{SearchOptions, SearchReport, run_diag_search, run_search};
+use crate::core::search::{
+    SearchOptions, SearchReport, SearchSourceMode, run_diag_search, run_search,
+};
 use crate::core::status::StatusReport;
 use crate::core::swarm_brief::{
     SwarmBriefCollectOptions, SwarmBriefReport, SwarmBriefSourceKind, SwarmBriefSourceStatus,
@@ -161,6 +166,11 @@ use crate::core::tripwire::{
     CheckOptions as TripwireCheckOptions, CheckReport as TripwireCheckReport,
     ListOptions as TripwireListOptions, ListReport as TripwireListReport, TripwireEventPayload,
     check_tripwire, list_tripwires,
+};
+use crate::core::verify::{
+    VerificationClosureGuidanceOptions, VerificationRecordOptions,
+    default_rch_cargo_closure_requirements, record_verification_evidence,
+    verification_closure_guidance_from_ledger, verification_response_json,
 };
 use crate::core::why::{WhyOptions, explain_memory};
 use crate::core::workspace as workspace_core;
@@ -249,6 +259,9 @@ pub struct Cli {
     /// Select the output renderer for commands that support multiple formats.
     #[arg(long, global = true, value_enum, default_value_t = OutputFormat::Human)]
     pub format: OutputFormat,
+
+    #[arg(skip)]
+    format_explicit: bool,
 
     /// Control the verbosity level of output fields.
     #[arg(long, global = true, value_enum, default_value_t = FieldsLevel::Standard)]
@@ -354,7 +367,7 @@ pub fn resolve_workspace_for_cli(cli_workspace: Option<&Path>) -> (PathBuf, Work
     if let Some(explicit) = cli_workspace {
         return (explicit.to_path_buf(), WorkspaceSource::Flag);
     }
-    if let Ok(env_path) = std::env::var("EE_WORKSPACE") {
+    if let Some(env_path) = read(EnvVar::Workspace) {
         if !env_path.is_empty() {
             return (PathBuf::from(env_path), WorkspaceSource::Env);
         }
@@ -406,6 +419,7 @@ impl Cli {
     pub const fn context_renderer(&self) -> output::Renderer {
         match self.format {
             OutputFormat::Human if self.json || self.robot => output::Renderer::Json,
+            OutputFormat::Human if self.format_explicit => output::Renderer::Human,
             OutputFormat::Human => output::Renderer::Markdown,
             OutputFormat::Json => output::Renderer::Json,
             OutputFormat::Toon => output::Renderer::Toon,
@@ -665,6 +679,12 @@ pub enum Command {
     /// List and check tripwires from preflight assessments.
     #[command(subcommand)]
     Tripwire(TripwireCommand),
+    /// Record and evaluate verification evidence for closure decisions.
+    #[command(subcommand)]
+    Verify(VerifyCommand),
+    /// Durable verification evidence ingestion and closure guidance.
+    #[command(name = "verification", subcommand)]
+    Verification(VerifyCommand),
     /// Print the ee version.
     Version,
     /// Plan an update without mutating the installation.
@@ -1428,6 +1448,10 @@ pub struct ContextArgs {
     #[arg(long, short = 'p', default_value = "balanced")]
     pub profile: String,
 
+    /// Pack output profile: lean omits bulky optional fields, standard is default, verbose adds extra metadata.
+    #[arg(long = "pack-profile", value_enum, default_value_t = PackOutputProfileArg::Standard)]
+    pub pack_profile: PackOutputProfileArg,
+
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
@@ -1440,13 +1464,44 @@ pub struct ContextArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain_performance: bool,
 
+    /// Disable the coverage-fill pass; accepts --no-coverage-fill=false to override a lean profile.
+    #[arg(long = "no-coverage-fill", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
+    pub no_coverage_fill: Option<bool>,
+
     /// Suppress data.pack.text in JSON output for structured-only consumers.
-    #[arg(long = "no-rendered-text", action = ArgAction::SetTrue)]
-    pub no_rendered_text: bool,
+    #[arg(long = "no-rendered-text", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
+    pub no_rendered_text: Option<bool>,
+
+    /// Suppress data.pack.skipped in JSON output for consumers that do not need omission explanations.
+    #[arg(long = "no-skipped", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
+    pub no_skipped: Option<bool>,
+
+    /// Suppress data.pack.meta in JSON output.
+    #[arg(long = "no-meta", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
+    pub no_meta: Option<bool>,
 
     /// Include tombstoned memories in context results with lifecycle metadata.
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_tombstoned: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum PackOutputProfileArg {
+    Lean,
+    #[default]
+    Standard,
+    Verbose,
+}
+
+impl PackOutputProfileArg {
+    #[must_use]
+    pub const fn to_core(self) -> ContextPackOutputProfile {
+        match self {
+            Self::Lean => ContextPackOutputProfile::Lean,
+            Self::Standard => ContextPackOutputProfile::Standard,
+            Self::Verbose => ContextPackOutputProfile::Verbose,
+        }
+    }
 }
 
 /// Arguments for `ee completion`.
@@ -1517,6 +1572,26 @@ pub struct PackArgs {
     #[arg(long, short = 'p')]
     pub profile: Option<String>,
 
+    /// Pack output profile: lean, standard, or verbose.
+    #[arg(long = "pack-profile", value_enum)]
+    pub pack_profile: Option<PackOutputProfileArg>,
+
+    /// Disable the coverage-fill pass; accepts --no-coverage-fill=false to override a lean profile.
+    #[arg(long = "no-coverage-fill", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
+    pub no_coverage_fill: Option<bool>,
+
+    /// Suppress data.pack.text in JSON output.
+    #[arg(long = "no-rendered-text", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
+    pub no_rendered_text: Option<bool>,
+
+    /// Suppress data.pack.skipped in JSON output.
+    #[arg(long = "no-skipped", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
+    pub no_skipped: Option<bool>,
+
+    /// Suppress data.pack.meta in JSON output.
+    #[arg(long = "no-meta", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
+    pub no_meta: Option<bool>,
+
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
@@ -1564,6 +1639,26 @@ pub struct PackBuildArgs {
     #[arg(long, short = 'p')]
     pub profile: Option<String>,
 
+    /// Pack output profile: lean, standard, or verbose.
+    #[arg(long = "pack-profile", value_enum)]
+    pub pack_profile: Option<PackOutputProfileArg>,
+
+    /// Disable the coverage-fill pass; accepts --no-coverage-fill=false to override a lean profile.
+    #[arg(long = "no-coverage-fill", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
+    pub no_coverage_fill: Option<bool>,
+
+    /// Suppress data.pack.text in JSON output.
+    #[arg(long = "no-rendered-text", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
+    pub no_rendered_text: Option<bool>,
+
+    /// Suppress data.pack.skipped in JSON output.
+    #[arg(long = "no-skipped", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
+    pub no_skipped: Option<bool>,
+
+    /// Suppress data.pack.meta in JSON output.
+    #[arg(long = "no-meta", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
+    pub no_meta: Option<bool>,
+
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
@@ -1598,6 +1693,11 @@ impl PackArgs {
             candidate_pool: self.candidate_pool,
             speed: self.speed,
             profile: self.profile.clone(),
+            pack_profile: self.pack_profile,
+            no_coverage_fill: self.no_coverage_fill,
+            no_rendered_text: self.no_rendered_text,
+            no_skipped: self.no_skipped,
+            no_meta: self.no_meta,
             database: self.database.clone(),
             index_dir: self.index_dir.clone(),
             explain_performance: self.explain_performance,
@@ -2392,6 +2492,8 @@ pub enum LearnCommand {
     Agenda(LearnAgendaArgs),
     /// Show uncertainty estimates and sampling priorities.
     Uncertainty(LearnUncertaintyArgs),
+    /// Analyze deterministic memory clusters for curation coherence.
+    Cluster(LearnClusterArgs),
     /// Propose and inspect safe active learning experiments.
     #[command(subcommand)]
     Experiment(LearnExperimentCommand),
@@ -2441,6 +2543,30 @@ pub struct LearnUncertaintyArgs {
     /// Include low-confidence items only.
     #[arg(long, action = ArgAction::SetTrue)]
     pub low_confidence: bool,
+}
+
+/// Arguments for `ee learn cluster`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct LearnClusterArgs {
+    /// Agglomerative average-linkage similarity threshold.
+    #[arg(long, default_value = "0.55")]
+    pub threshold: String,
+
+    /// Minimum cluster size to emit.
+    #[arg(long, default_value_t = 3)]
+    pub min_cluster_size: usize,
+
+    /// Include singleton clusters with explicit silhouette degradation.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_singletons: bool,
+
+    /// Filter by memory level.
+    #[arg(long)]
+    pub level: Option<String>,
+
+    /// Filter by memory kind.
+    #[arg(long)]
+    pub kind: Option<String>,
 }
 
 /// Subcommands for `ee learn experiment`.
@@ -2729,6 +2855,56 @@ pub struct AuditVerifyArgs {
     pub until: Option<String>,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Subcommands for `ee verify`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum VerifyCommand {
+    /// Persist one verification evidence record in the append-only audit ledger.
+    Ingest(VerifyIngestArgs),
+    /// Legacy alias for `ingest`.
+    #[command(hide = true)]
+    Record(VerifyIngestArgs),
+    /// Evaluate whether recorded evidence satisfies bead closure gates.
+    #[command(name = "closure-guidance")]
+    ClosureGuidance(VerifyClosureGuidanceArgs),
+}
+
+/// Arguments for `ee verification ingest`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct VerifyIngestArgs {
+    /// Path to a JSON `ee.verification.evidence.v1` record.
+    #[arg(long, alias = "input", value_name = "PATH", conflicts_with = "stdin")]
+    pub file: Option<PathBuf>,
+    /// Read one JSON `ee.verification.evidence.v1` record from stdin.
+    #[arg(long = "stdin", action = ArgAction::SetTrue, conflicts_with = "file")]
+    pub stdin: bool,
+    /// Target type linked by this evidence, usually memory or pack.
+    #[arg(long = "target-type", default_value = "memory")]
+    pub target_type: String,
+    /// Target identifier linked by this evidence.
+    #[arg(long = "target-id")]
+    pub target_id: String,
+    /// Actor recorded on the verification audit row.
+    #[arg(long)]
+    pub actor: Option<String>,
+    /// Explicit database path.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee verify closure-guidance`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct VerifyClosureGuidanceArgs {
+    /// Bead ID whose verification evidence should be evaluated.
+    #[arg(long = "bead-id")]
+    pub bead_id: Option<String>,
+    /// Use the standard remote-required Cargo closure gate set.
+    #[arg(long = "require-rch-cargo", action = ArgAction::SetTrue)]
+    pub require_rch_cargo: bool,
+    /// Explicit database path.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 }
@@ -4085,6 +4261,14 @@ pub struct SearchArgs {
     /// disable filtering. Bead bd-17c65.2.1 (B1).
     #[arg(long, value_name = "FLOAT")]
     pub relevance_floor: Option<f32>,
+
+    /// Search arm selection for diagnostics: lexical_only, semantic_only, or hybrid.
+    #[arg(long, value_parser = parse_search_source_mode_arg, default_value = "hybrid")]
+    pub source_mode: SearchSourceMode,
+
+    /// Fail instead of falling back when the requested source mode is unavailable.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_source_mode: bool,
 }
 
 /// Arguments for `ee doctor`.
@@ -4250,6 +4434,10 @@ pub struct RememberArgs {
     #[arg(long)]
     pub source: Option<String>,
 
+    /// Persist secret-like content with an explicit policy-bypass audit signal.
+    #[arg(long = "allow-secret-mention", action = ArgAction::SetTrue)]
+    pub allow_secret_mention: bool,
+
     /// RFC3339 timestamp when this memory becomes applicable.
     #[arg(long, value_name = "RFC3339")]
     pub valid_from: Option<String>,
@@ -4305,6 +4493,10 @@ pub struct NoteArgs {
     /// Source provenance URI (e.g., file://path:line).
     #[arg(long)]
     pub source: Option<String>,
+
+    /// Persist secret-like content with an explicit policy-bypass audit signal.
+    #[arg(long = "allow-secret-mention", action = ArgAction::SetTrue)]
+    pub allow_secret_mention: bool,
 
     /// RFC3339 timestamp when this memory becomes applicable.
     #[arg(long, value_name = "RFC3339")]
@@ -6345,6 +6537,7 @@ where
         Ok(cli) => cli,
         Err(error) => return write_parse_error(error, &args, stdout, stderr),
     };
+    cli.format_explicit = args_contain_format_flag(&args);
     resolve_workspace_alias_global(&mut cli);
     ACTIVE_RESPONSE_SCHEMA_VERSION.with(|version| {
         version.set(cli.response_schema_version());
@@ -6742,6 +6935,7 @@ where
                     max_sections: args.max_sections,
                     task_frame_id: None,
                     bound_workspace_id: None,
+                    bound_workspace_identity: None,
                     include_prompt_fragment: true,
                 };
                 match resume_handoff(&options) {
@@ -6969,6 +7163,9 @@ where
         }
         Some(Command::Learn(LearnCommand::Uncertainty(ref args))) => {
             handle_learn_uncertainty(&cli, args, stdout, stderr)
+        }
+        Some(Command::Learn(LearnCommand::Cluster(ref args))) => {
+            handle_learn_cluster(&cli, args, stdout, stderr)
         }
         Some(Command::Learn(LearnCommand::Experiment(LearnExperimentCommand::Propose(
             ref args,
@@ -7349,6 +7546,24 @@ where
         Some(Command::Tripwire(TripwireCommand::Check(ref args))) => {
             handle_tripwire_check(&cli, args, stdout, stderr)
         }
+        Some(Command::Verify(VerifyCommand::Record(ref args))) => {
+            handle_verification_ingest(&cli, args, stdout, stderr)
+        }
+        Some(Command::Verify(VerifyCommand::Ingest(ref args))) => {
+            handle_verification_ingest(&cli, args, stdout, stderr)
+        }
+        Some(Command::Verify(VerifyCommand::ClosureGuidance(ref args))) => {
+            handle_verify_closure_guidance(&cli, args, stdout, stderr)
+        }
+        Some(Command::Verification(VerifyCommand::Record(ref args))) => {
+            handle_verification_ingest(&cli, args, stdout, stderr)
+        }
+        Some(Command::Verification(VerifyCommand::Ingest(ref args))) => {
+            handle_verification_ingest(&cli, args, stdout, stderr)
+        }
+        Some(Command::Verification(VerifyCommand::ClosureGuidance(ref args))) => {
+            handle_verify_closure_guidance(&cli, args, stdout, stderr)
+        }
         Some(Command::Version) => {
             let report = VersionReport::gather();
             match cli.renderer() {
@@ -7369,6 +7584,21 @@ where
         Some(Command::Update(ref args)) => handle_update(&cli, args, stdout, stderr),
         Some(Command::Why(ref args)) => handle_why(&cli, args, stdout, stderr),
     }
+}
+
+fn args_contain_format_flag(args: &[OsString]) -> bool {
+    for arg in args.iter().skip(1) {
+        if arg == OsStr::new("--") {
+            return false;
+        }
+        let Some(arg) = arg.to_str() else {
+            continue;
+        };
+        if arg == "--format" || arg.starts_with("--format=") {
+            return true;
+        }
+    }
+    false
 }
 
 fn handle_eval_list<W, E>(
@@ -7974,6 +8204,8 @@ fn pack_quality_actuals_for_cases(
             explain: false,
             include_tombstoned: false,
             relevance_floor: None,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
         })
         .map_err(|error| DomainError::SearchIndex {
             message: format!("pack-quality eval search failed for `{query}`: {error}"),
@@ -8261,6 +8493,8 @@ fn run_eval_retrieval_queries(
             explain: false,
             include_tombstoned: false,
             relevance_floor: None,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
         })
         .map_err(|error| DomainError::SearchIndex {
             message: format!("eval fixture search failed for `{query}`: {error}"),
@@ -10706,6 +10940,56 @@ where
     }
 }
 
+fn handle_learn_cluster<W, E>(
+    cli: &Cli,
+    args: &LearnClusterArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let threshold = match args.threshold.parse::<f32>() {
+        Ok(value) if value.is_finite() && (-1.0..=1.0).contains(&value) => value,
+        _ => {
+            let error = DomainError::Usage {
+                message: format!(
+                    "Invalid cluster threshold `{}`: expected a finite number from -1.0 to 1.0",
+                    args.threshold
+                ),
+                repair: Some("Use --threshold 0.55".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let options = crate::core::learn::LearnClusterOptions {
+        workspace: cli.resolve_workspace(),
+        threshold,
+        min_cluster_size: args.min_cluster_size,
+        include_singletons: args.include_singletons,
+        level: args.level.clone(),
+        kind: args.kind.clone(),
+    };
+    match crate::core::learn::analyze_clusters(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_learn_cluster_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_learn_cluster_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_learn_cluster_json(&report) + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
 fn handle_learn_experiment_propose<W, E>(
     cli: &Cli,
     args: &LearnExperimentProposeArgs,
@@ -11407,9 +11691,7 @@ where
         command: args.command.clone(),
         workspace,
         bypass_tokens,
-        bypass_secret: std::env::var("EE_PREFLIGHT_BYPASS_SECRET")
-            .ok()
-            .map(|s| s.into_bytes()),
+        bypass_secret: read(EnvVar::PreflightBypassSecret).map(|s| s.into_bytes()),
     };
 
     let report = run_preflight_guard(&registry, &options);
@@ -14133,6 +14415,8 @@ where
         explain: true,
         include_tombstoned: false,
         relevance_floor: args.relevance_floor,
+        source_mode: SearchSourceMode::Hybrid,
+        strict_source_mode: false,
     };
 
     match run_diag_search(&options) {
@@ -16793,6 +17077,23 @@ fn parse_context_profile(value: &str) -> Result<ContextPackProfile, String> {
     }
 }
 
+fn resolve_context_output_options(
+    pack_profile: PackOutputProfileArg,
+    no_coverage_fill: Option<bool>,
+    no_rendered_text: Option<bool>,
+    no_skipped: Option<bool>,
+    no_meta: Option<bool>,
+) -> ContextPackOutputOptions {
+    ContextPackOutputOptions::for_profile(pack_profile.to_core()).with_overrides(
+        ContextPackOutputOptionOverrides {
+            no_coverage_fill,
+            no_rendered_text,
+            no_skipped,
+            no_meta,
+        },
+    )
+}
+
 fn parse_operating_profile(value: &str) -> Result<OperatingProfile, String> {
     value
         .parse::<OperatingProfile>()
@@ -16805,38 +17106,78 @@ fn parse_speed_mode_arg(value: &str) -> Result<crate::search::SpeedMode, String>
         .map_err(|error| error.to_string())
 }
 
+fn parse_search_source_mode_arg(value: &str) -> Result<SearchSourceMode, String> {
+    match value {
+        "lexical_only" => Ok(SearchSourceMode::LexicalOnly),
+        "semantic_only" => Ok(SearchSourceMode::SemanticOnly),
+        "hybrid" => Ok(SearchSourceMode::Hybrid),
+        _ => Err(format!(
+            "Invalid source mode '{value}'. Expected lexical_only, semantic_only, or hybrid."
+        )),
+    }
+}
+
 fn write_context_response<W>(
     renderer: output::Renderer,
+    requested_format: OutputFormat,
     response: &ContextResponse,
-    include_rendered_text: bool,
+    render_options: output::ContextJsonRenderOptions,
     stdout: &mut W,
 ) -> ProcessExitCode
 where
     W: Write,
 {
-    match renderer {
-        output::Renderer::Human => {
-            write_stdout(stdout, &output::render_context_response_human(response))
+    let rendered = match renderer {
+        output::Renderer::Human => output::render_context_response_human(response),
+        output::Renderer::Toon => output::render_context_response_toon(response) + "\n",
+        output::Renderer::Json => {
+            output::render_context_response_json_with_options(response, render_options) + "\n"
         }
-        output::Renderer::Toon => write_stdout(
-            stdout,
-            &(output::render_context_response_toon(response) + "\n"),
-        ),
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(
-            stdout,
-            &(output::render_context_response_json_with_options(
-                response,
-                output::ContextJsonRenderOptions {
-                    include_rendered_text,
-                },
-            ) + "\n"),
-        ),
+        output::Renderer::Jsonl => output::render_context_response_jsonl(response) + "\n",
+        output::Renderer::Compact => output::render_context_response_compact(response) + "\n",
+        output::Renderer::Hook => output::render_context_response_hook(response) + "\n",
         output::Renderer::Markdown => {
-            write_stdout(stdout, &output::render_context_response_markdown(response))
+            if requested_format == OutputFormat::Mermaid {
+                output::render_context_response_mermaid(response)
+            } else {
+                output::render_context_response_markdown(response)
+            }
         }
+    };
+    tracing::debug!(
+        target: "ee::format_render",
+        event = "format_render",
+        format = context_format_name(renderer, requested_format),
+        byte_size = rendered.len(),
+        hash = response.data.pack.hash.as_deref().unwrap_or("absent"),
+        fields_omitted_count = context_format_fields_omitted_count(renderer, requested_format, render_options),
+    );
+    write_stdout(stdout, &rendered)
+}
+
+fn context_format_name(renderer: output::Renderer, requested_format: OutputFormat) -> &'static str {
+    match (renderer, requested_format) {
+        (output::Renderer::Markdown, OutputFormat::Mermaid) => "mermaid",
+        _ => renderer.as_str(),
+    }
+}
+
+fn context_format_fields_omitted_count(
+    renderer: output::Renderer,
+    requested_format: OutputFormat,
+    render_options: output::ContextJsonRenderOptions,
+) -> u32 {
+    let json_omissions = u32::from(!render_options.include_rendered_text)
+        + u32::from(!render_options.include_skipped)
+        + u32::from(!render_options.include_meta)
+        + u32::from(!render_options.include_verbose_meta);
+    match (renderer, requested_format) {
+        (output::Renderer::Json, _) | (output::Renderer::Toon, _) => json_omissions,
+        (output::Renderer::Jsonl, _) => json_omissions + 8,
+        (output::Renderer::Compact, _) => json_omissions + 11,
+        (output::Renderer::Hook, _) => json_omissions + 8,
+        (output::Renderer::Markdown, OutputFormat::Mermaid) => json_omissions + 10,
+        (output::Renderer::Markdown, _) | (output::Renderer::Human, _) => json_omissions + 6,
     }
 }
 
@@ -16883,6 +17224,13 @@ where
     };
 
     let workspace_path = cli.resolve_workspace();
+    let output_options = resolve_context_output_options(
+        args.pack_profile,
+        args.no_coverage_fill,
+        args.no_rendered_text,
+        args.no_skipped,
+        args.no_meta,
+    );
     let options = ContextPackOptions {
         workspace_path,
         database_path: args.database.clone(),
@@ -16896,6 +17244,7 @@ where
         include_tombstoned: args.include_tombstoned,
         pagination: None,
         filters: crate::models::QueryFilters::default(),
+        output_options,
     };
 
     if args.explain_performance {
@@ -16911,8 +17260,9 @@ where
     match run_context_pack(&options) {
         Ok(response) => write_context_response(
             cli.context_renderer(),
+            cli.format,
             &response,
-            !args.no_rendered_text,
+            output::ContextJsonRenderOptions::from(output_options),
             stdout,
         ),
         Err(error) => {
@@ -18122,10 +18472,14 @@ where
                 .profile
                 .clone()
                 .unwrap_or_else(|| "balanced".to_string()),
+            pack_profile: args.pack_profile.unwrap_or_default(),
             database: args.database.clone(),
             index_dir: args.index_dir.clone(),
             explain_performance: args.explain_performance,
-            no_rendered_text: false,
+            no_coverage_fill: args.no_coverage_fill,
+            no_rendered_text: args.no_rendered_text,
+            no_skipped: args.no_skipped,
+            no_meta: args.no_meta,
             include_tombstoned: false,
         };
         return handle_context(cli, &context_args, stdout, stderr);
@@ -18179,6 +18533,13 @@ where
         .clone()
         .or_else(|| request.workspace_path.take())
         .unwrap_or_else(|| PathBuf::from("."));
+    let output_options = resolve_context_output_options(
+        args.pack_profile.unwrap_or_default(),
+        args.no_coverage_fill,
+        args.no_rendered_text,
+        args.no_skipped,
+        args.no_meta,
+    );
 
     let pagination = if request.pagination.is_empty() {
         None
@@ -18236,6 +18597,7 @@ where
         max_results: request.max_results,
         include_tombstoned: false,
         pagination,
+        output_options,
     };
     let renderer = effective_pack_renderer(cli, request.renderer);
 
@@ -18252,7 +18614,13 @@ where
     match run_context_pack(&options) {
         Ok(mut response) => {
             response.data.degraded.extend(request.degraded);
-            write_context_response(renderer, &response, true, stdout)
+            write_context_response(
+                renderer,
+                cli.format,
+                &response,
+                output::ContextJsonRenderOptions::from(output_options),
+                stdout,
+            )
         }
         Err(error) => {
             let domain_error = context_error_to_domain(&error);
@@ -20123,6 +20491,8 @@ where
         explain: args.explain,
         include_tombstoned: args.include_tombstoned,
         relevance_floor: args.relevance_floor,
+        source_mode: args.source_mode,
+        strict_source_mode: args.strict_source_mode,
     };
 
     match run_search(&options) {
@@ -20336,6 +20706,145 @@ where
             stdout,
             &(output::render_outcome_quarantine_review_json(report) + "\n"),
         ),
+    }
+}
+
+fn handle_verification_ingest<W, E>(
+    cli: &Cli,
+    args: &VerifyIngestArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    let input = match read_verification_evidence_input(args) {
+        Ok(input) => input,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: error,
+                repair: Some("pass --file <verification-evidence.json> or --stdin".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let evidence = match serde_json::from_str::<crate::models::VerificationEvidenceRecord>(&input) {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: format!("Invalid verification evidence JSON: {error}"),
+                repair: Some("provide an ee.verification.evidence.v1 JSON record".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let options = VerificationRecordOptions {
+        database_path: &database_path,
+        workspace_path: &workspace_path,
+        target_type: &args.target_type,
+        target_id: &args.target_id,
+        actor: args.actor.as_deref(),
+        evidence,
+    };
+
+    match record_verification_evidence(options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => {
+                let json = verification_response_json(report.data_json()).to_string();
+                write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let json = verification_response_json(report.data_json());
+                write_stdout(stdout, &(json.to_string() + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn read_verification_evidence_input(args: &VerifyIngestArgs) -> Result<String, String> {
+    match (&args.file, args.stdin) {
+        (Some(path), false) => fs::read_to_string(path).map_err(|error| {
+            format!(
+                "Failed to read verification evidence input '{}': {error}",
+                path.display()
+            )
+        }),
+        (None, true) => {
+            let mut input = String::new();
+            io::stdin().read_to_string(&mut input).map_err(|error| {
+                format!("Failed to read verification evidence from stdin: {error}")
+            })?;
+            Ok(input)
+        }
+        (None, false) => Err(
+            "verification ingest requires --file <verification-evidence.json> or --stdin"
+                .to_owned(),
+        ),
+        (Some(_), true) => Err("pass only one of --file or --stdin".to_owned()),
+    }
+}
+
+fn handle_verify_closure_guidance<W, E>(
+    cli: &Cli,
+    args: &VerifyClosureGuidanceArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !args.require_rch_cargo {
+        let domain_error = DomainError::Usage {
+            message: "verification closure guidance currently requires --require-rch-cargo"
+                .to_owned(),
+            repair: Some("rerun with --require-rch-cargo".to_owned()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let workspace_path = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    let options = VerificationClosureGuidanceOptions {
+        database_path: &database_path,
+        bead_id: args.bead_id.as_deref(),
+        requirements: default_rch_cargo_closure_requirements(),
+    };
+
+    match verification_closure_guidance_from_ledger(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => {
+                let json = verification_response_json(report.data_json()).to_string();
+                write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let json = verification_response_json(report.data_json());
+                write_stdout(stdout, &(json.to_string() + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
 
@@ -21309,9 +21818,11 @@ impl RememberMemoryReport {
         let auto_link_degradations_json = self.auto_link_degradations_json();
         let curation_candidate_json = self.curation_candidate_json();
         let curation_candidate_degradations_json = self.curation_candidate_degradations_json();
+        let policy_bypass_json = self.policy_bypass_json();
+        let degraded_json = self.remember_degraded_json();
 
         let mut json = format!(
-            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"producer":{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"auto_links":{},"auto_link_status":"{}","auto_link_degradations":{},"curation_candidate":{},"curation_candidate_status":"{}","curation_candidate_degradations":{},"redaction_status":"{}"}}"#,
+            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"producer":{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"auto_links":{},"auto_link_status":"{}","auto_link_degradations":{},"curation_candidate":{},"curation_candidate_status":"{}","curation_candidate_degradations":{},"redaction_status":"{}","policy_bypass_used":{},"policy_bypass":{},"degraded":{}}}"#,
             self.version,
             self.memory_id,
             escape_json_string(&self.workspace_id),
@@ -21345,7 +21856,10 @@ impl RememberMemoryReport {
             curation_candidate_json,
             escape_json_string(&self.curation_candidate_status),
             curation_candidate_degradations_json,
-            escape_json_string(&self.redaction_status)
+            escape_json_string(&self.redaction_status),
+            self.policy_bypass.is_some(),
+            policy_bypass_json,
+            degraded_json
         );
         json.push('}');
         json
@@ -21492,6 +22006,74 @@ impl RememberMemoryReport {
             .join(",");
         format!("[{items}]")
     }
+
+    fn policy_bypass_json(&self) -> String {
+        use crate::output::escape_json_string;
+
+        self.policy_bypass.as_ref().map_or_else(
+            || "null".to_owned(),
+            |bypass| {
+                let reasons = bypass
+                    .redacted_reasons
+                    .iter()
+                    .map(|reason| format!("\"{}\"", escape_json_string(reason)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let matches = bypass
+                    .matches
+                    .iter()
+                    .map(|item| {
+                        format!(
+                            r#"{{"kind":"{}","pattern":"{}","matched_text":"{}","start":{},"end":{}}}"#,
+                            escape_json_string(&item.kind),
+                            escape_json_string(&item.pattern),
+                            escape_json_string(&item.matched_text),
+                            item.start,
+                            item.end
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let audit_id = bypass.audit_id.as_ref().map_or("null".to_owned(), |id| {
+                    format!("\"{}\"", escape_json_string(id))
+                });
+                format!(
+                    r#"{{"code":"{}","severity":"{}","kind":"{}","message":"{}","repair":"{}","redacted_reasons":[{}],"matches":[{}],"audit_id":{}}}"#,
+                    escape_json_string(&bypass.code),
+                    escape_json_string(&bypass.severity),
+                    escape_json_string(&bypass.kind),
+                    escape_json_string(&bypass.message),
+                    escape_json_string(&bypass.repair),
+                    reasons,
+                    matches,
+                    audit_id
+                )
+            },
+        )
+    }
+
+    fn remember_degraded_json(&self) -> String {
+        self.policy_bypass.as_ref().map_or_else(
+            || "[]".to_owned(),
+            |bypass| format!("[{}]", self.policy_bypass_json_for_degraded(bypass)),
+        )
+    }
+
+    fn policy_bypass_json_for_degraded(
+        &self,
+        bypass: &crate::core::memory::RememberPolicyBypassReport,
+    ) -> String {
+        use crate::output::escape_json_string;
+
+        format!(
+            r#"{{"code":"{}","severity":"{}","message":"{}","repair":"{}","kind":"{}"}}"#,
+            escape_json_string(&bypass.code),
+            escape_json_string(&bypass.severity),
+            escape_json_string(&bypass.message),
+            escape_json_string(&bypass.repair),
+            escape_json_string(&bypass.kind)
+        )
+    }
 }
 
 impl WorkflowCloseReport {
@@ -21563,7 +22145,7 @@ where
 
 fn triad_enabled(cli: &Cli) -> bool {
     cli.experimental_triad
-        || std::env::var("EE_EXPERIMENTAL_TRIAD").is_ok_and(|value| {
+        || read(EnvVar::ExperimentalTriad).is_some_and(|value| {
             let normalized = value.trim().to_ascii_lowercase();
             matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
         })
@@ -21656,6 +22238,7 @@ fn note_to_remember_args(args: &NoteArgs) -> RememberArgs {
         no_propose_candidates: args.no_propose_candidates,
         confidence: args.confidence,
         source: args.source.clone(),
+        allow_secret_mention: args.allow_secret_mention,
         valid_from: args.valid_from.clone(),
         valid_to: args.valid_to.clone(),
         dry_run: args.dry_run,
@@ -21691,6 +22274,7 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberMemoryRepor
         tags: args.tags.as_deref(),
         confidence: args.confidence,
         source: args.source.as_deref(),
+        allow_secret_mention: args.allow_secret_mention,
         valid_from: args.valid_from.as_deref(),
         valid_to: args.valid_to.as_deref(),
         dry_run: args.dry_run,
@@ -24335,7 +24919,7 @@ fn ensure_demo_workspace_row(
 }
 
 fn demo_evidence_root() -> Result<PathBuf, DomainError> {
-    if let Some(root) = std::env::var_os("EE_DEMO_EVIDENCE_ROOT") {
+    if let Some(root) = read_os(EnvVar::DemoEvidenceRoot) {
         return Ok(PathBuf::from(root));
     }
     if let Some(root) = std::env::var_os("XDG_DATA_HOME") {
@@ -27059,6 +27643,8 @@ const COMMAND_NAMES: &[&str] = &[
     "swarm",
     "tripwire",
     "update",
+    "verification",
+    "verify",
     "version",
     "workspace",
     "why",
@@ -27118,6 +27704,7 @@ const LAB_SUBCOMMANDS: &[&str] = &["capture", "replay", "counterfactual"];
 const LEARN_SUBCOMMANDS: &[&str] = &[
     "agenda",
     "uncertainty",
+    "cluster",
     "experiment",
     "observe",
     "close",
@@ -27152,6 +27739,7 @@ const SWARM_SUBCOMMANDS: &[&str] = &["brief"];
 const TASK_FRAME_SUBCOMMANDS: &[&str] = &["create", "show", "update", "close", "subgoal"];
 const TASK_FRAME_SUBGOAL_SUBCOMMANDS: &[&str] = &["add"];
 const TRIPWIRE_SUBCOMMANDS: &[&str] = &["list", "check"];
+const VERIFICATION_SUBCOMMANDS: &[&str] = &["ingest", "record", "closure-guidance"];
 const WORKSPACE_SUBCOMMANDS: &[&str] = &["resolve", "list", "alias"];
 
 /// Read-only normalized representation of a CLI invocation.
@@ -27364,6 +27952,7 @@ impl NormalizedInvocation {
                 Command::Learn(learn) => match learn {
                     LearnCommand::Agenda(_) => "learn agenda".to_string(),
                     LearnCommand::Uncertainty(_) => "learn uncertainty".to_string(),
+                    LearnCommand::Cluster(_) => "learn cluster".to_string(),
                     LearnCommand::Experiment(experiment) => match experiment {
                         LearnExperimentCommand::Propose(_) => {
                             "learn experiment propose".to_string()
@@ -27531,6 +28120,18 @@ impl NormalizedInvocation {
                     TripwireCommand::List(_) => "tripwire list".to_string(),
                     TripwireCommand::Check(_) => "tripwire check".to_string(),
                 },
+                Command::Verify(verify) => match verify {
+                    VerifyCommand::Ingest(_) => "verify ingest".to_string(),
+                    VerifyCommand::Record(_) => "verify record".to_string(),
+                    VerifyCommand::ClosureGuidance(_) => "verify closure-guidance".to_string(),
+                },
+                Command::Verification(verify) => match verify {
+                    VerifyCommand::Ingest(_) => "verification ingest".to_string(),
+                    VerifyCommand::Record(_) => "verification record".to_string(),
+                    VerifyCommand::ClosureGuidance(_) => {
+                        "verification closure-guidance".to_string()
+                    }
+                },
                 Command::Update(_) => "update".to_string(),
                 Command::Version => "version".to_string(),
                 Command::Why(_) => "why".to_string(),
@@ -27657,6 +28258,7 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "task-frame" => Some(TASK_FRAME_SUBCOMMANDS),
         "task-frame subgoal" => Some(TASK_FRAME_SUBGOAL_SUBCOMMANDS),
         "tripwire" => Some(TRIPWIRE_SUBCOMMANDS),
+        "verification" | "verify" => Some(VERIFICATION_SUBCOMMANDS),
         "workspace" => Some(WORKSPACE_SUBCOMMANDS),
         _ => None,
     }
@@ -28118,13 +28720,14 @@ mod tests {
         Command, CurateCommand, DaemonCommand, DiagCommand, DiagQuarantineCommand, EconomyCommand,
         FieldsLevel, FocusCommand, GraphCommand, ImportCommand, JobCommand, LearnCommand,
         LearnExperimentCommand, MaintenanceCommand, MemoryCommand, OutcomeQuarantineCommand,
-        OutputFormat, PackCommand, PlaybookCommand, RuleCommand, ShadowMode, SituationCommand,
-        SwarmBriefArgs, SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand, WorkflowCommand,
-        run, write_index_rebuild_error,
+        OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand, RuleCommand, ShadowMode,
+        SituationCommand, SwarmBriefArgs, SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand,
+        VerifyCommand, WorkflowCommand, run, write_index_rebuild_error,
     };
     use crate::core::index::IndexRebuildError;
     use crate::core::search::{
-        ScoreExplanation, ScoreFactor, ScoreSource, SearchHit, SearchReport, SearchStatus,
+        ScoreExplanation, ScoreFactor, ScoreSource, SearchHit, SearchReport, SearchSourceMode,
+        SearchStatus,
     };
     use crate::core::why::{
         PackSelectionExplanation, RationaleTraceSummary, RetrievalExplanation,
@@ -28793,6 +29396,10 @@ mod tests {
             ),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
         }
     }
 
@@ -29727,6 +30334,50 @@ mod tests {
             &(true, OutputFormat::Json, true),
             "robot and format globals",
         )
+    }
+
+    #[test]
+    fn parser_accepts_verification_ingest_file_and_stdin() -> TestResult {
+        let file = Cli::try_parse_from([
+            "ee",
+            "verification",
+            "ingest",
+            "--file",
+            "verify.json",
+            "--target-id",
+            "mem_verify",
+            "--actor",
+            "codex:test",
+        ])
+        .map(|cli| cli.command)
+        .map_err(|error| format!("failed to parse verification ingest: {:?}", error.kind()))?;
+        match file {
+            Some(Command::Verification(VerifyCommand::Ingest(args))) => {
+                ensure_equal(&args.file, &Some(PathBuf::from("verify.json")), "file")?;
+                ensure(!args.stdin, "file mode is not stdin")?;
+                ensure_equal(&args.target_id, &"mem_verify".to_owned(), "target id")?;
+                ensure_equal(&args.actor, &Some("codex:test".to_owned()), "actor")?;
+            }
+            other => return Err(format!("expected verification ingest, got {other:?}")),
+        }
+
+        let stdin = Cli::try_parse_from([
+            "ee",
+            "verification",
+            "ingest",
+            "--stdin",
+            "--target-id",
+            "mem_verify",
+        ])
+        .map(|cli| cli.command)
+        .map_err(|error| format!("failed to parse verification stdin: {:?}", error.kind()))?;
+        match stdin {
+            Some(Command::Verification(VerifyCommand::Ingest(args))) => {
+                ensure(args.file.is_none(), "stdin mode has no file")?;
+                ensure(args.stdin, "stdin flag parsed")
+            }
+            other => Err(format!("expected verification ingest stdin, got {other:?}")),
+        }
     }
 
     #[test]
@@ -32912,8 +33563,37 @@ mod tests {
             })?;
 
         match parsed.command {
+            Some(Command::Context(ref args)) => ensure_equal(
+                &args.no_rendered_text,
+                &Some(true),
+                "context no_rendered_text",
+            ),
+            _ => Err("expected Context command".to_string()),
+        }
+    }
+
+    #[test]
+    fn context_command_accepts_pack_profile_and_boolean_opt_out_override() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "context",
+            "test",
+            "--pack-profile",
+            "lean",
+            "--no-skipped=false",
+            "--no-meta",
+        ])
+        .map_err(|e| format!("failed to parse context pack profile flags: {:?}", e.kind()))?;
+
+        match parsed.command {
             Some(Command::Context(ref args)) => {
-                ensure_equal(&args.no_rendered_text, &true, "context no_rendered_text")
+                ensure_equal(
+                    &args.pack_profile,
+                    &PackOutputProfileArg::Lean,
+                    "context pack profile",
+                )?;
+                ensure_equal(&args.no_skipped, &Some(false), "context no_skipped")?;
+                ensure_equal(&args.no_meta, &Some(true), "context no_meta")
             }
             _ => Err("expected Context command".to_string()),
         }
@@ -32927,6 +33607,18 @@ mod tests {
             &cli.context_renderer(),
             &output::Renderer::Markdown,
             "context default renderer should be Markdown",
+        )
+    }
+
+    #[test]
+    fn context_renderer_respects_explicit_format_human() -> TestResult {
+        let mut cli = Cli::try_parse_from(["ee", "--format", "human", "context", "test"])
+            .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
+        cli.format_explicit = true;
+        ensure_equal(
+            &cli.context_renderer(),
+            &output::Renderer::Human,
+            "context renderer with explicit --format human should be human",
         )
     }
 
@@ -32982,6 +33674,87 @@ mod tests {
             &cli.context_renderer(),
             &output::Renderer::Markdown,
             "context renderer with --format markdown should be Markdown",
+        )
+    }
+
+    #[test]
+    fn context_renderer_respects_explicit_format_jsonl() -> TestResult {
+        let cli = Cli::try_parse_from(["ee", "--format", "jsonl", "context", "test"])
+            .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
+        ensure_equal(
+            &cli.context_renderer(),
+            &output::Renderer::Jsonl,
+            "context renderer with --format jsonl should be JSONL",
+        )
+    }
+
+    #[test]
+    fn context_renderer_respects_explicit_format_compact() -> TestResult {
+        let cli = Cli::try_parse_from(["ee", "--format", "compact", "context", "test"])
+            .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
+        ensure_equal(
+            &cli.context_renderer(),
+            &output::Renderer::Compact,
+            "context renderer with --format compact should be compact",
+        )
+    }
+
+    #[test]
+    fn context_renderer_respects_explicit_format_hook() -> TestResult {
+        let cli = Cli::try_parse_from(["ee", "--format", "hook", "context", "test"])
+            .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
+        ensure_equal(
+            &cli.context_renderer(),
+            &output::Renderer::Hook,
+            "context renderer with --format hook should be hook",
+        )
+    }
+
+    #[test]
+    fn context_renderer_explicit_format_mermaid_uses_markdown_channel() -> TestResult {
+        let cli = Cli::try_parse_from(["ee", "--format", "mermaid", "context", "test"])
+            .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
+        ensure_equal(
+            &cli.context_renderer(),
+            &output::Renderer::Markdown,
+            "context renderer with --format mermaid should use text channel",
+        )
+    }
+
+    #[test]
+    fn context_renderer_format_flag_detection_handles_global_forms() -> TestResult {
+        let split = [
+            OsString::from("ee"),
+            OsString::from("--format"),
+            OsString::from("human"),
+            OsString::from("context"),
+            OsString::from("test"),
+        ];
+        ensure(
+            super::args_contain_format_flag(&split),
+            "split --format value should be detected",
+        )?;
+
+        let equals = [
+            OsString::from("ee"),
+            OsString::from("context"),
+            OsString::from("test"),
+            OsString::from("--format=human"),
+        ];
+        ensure(
+            super::args_contain_format_flag(&equals),
+            "--format=value should be detected",
+        )?;
+
+        let separator = [
+            OsString::from("ee"),
+            OsString::from("context"),
+            OsString::from("--"),
+            OsString::from("--format"),
+        ];
+        ensure(
+            !super::args_contain_format_flag(&separator),
+            "format-looking positional query after -- should not be detected",
         )
     }
 
@@ -33596,6 +34369,36 @@ mod tests {
     }
 
     #[test]
+    fn search_command_accepts_source_mode_and_strict_source_mode() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "search",
+            "test",
+            "--source-mode",
+            "lexical_only",
+            "--strict-source-mode",
+        ])
+        .map_err(|e| {
+            format!(
+                "failed to parse search with source-mode flags: {:?}",
+                e.kind()
+            )
+        })?;
+
+        match parsed.command {
+            Some(Command::Search(ref args)) => {
+                ensure_equal(
+                    &args.source_mode,
+                    &SearchSourceMode::LexicalOnly,
+                    "search source mode",
+                )?;
+                ensure_equal(&args.strict_source_mode, &true, "search strict source mode")
+            }
+            _ => Err("expected Search command".to_string()),
+        }
+    }
+
+    #[test]
     fn search_command_accepts_include_tombstoned() -> TestResult {
         let parsed = Cli::try_parse_from(["ee", "search", "test", "--include-tombstoned"])
             .map_err(|e| format!("failed to parse search with tombstones: {:?}", e.kind()))?;
@@ -34175,6 +34978,68 @@ mod tests {
             ),
             _ => Err("expected Remember command".to_string()),
         }
+    }
+
+    #[test]
+    fn remember_command_accepts_allow_secret_mention_flag() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "remember",
+            "Document a redacted secret-like fixture.",
+            "--allow-secret-mention",
+        ])
+        .map_err(|error| {
+            format!(
+                "failed to parse remember allow-secret-mention: {:?}",
+                error.kind()
+            )
+        })?;
+
+        match parsed.command {
+            Some(Command::Remember(ref args)) => {
+                ensure_equal(&args.allow_secret_mention, &true, "allow secret flag")
+            }
+            _ => Err("expected Remember command".to_string()),
+        }
+    }
+
+    #[test]
+    fn remember_json_surfaces_policy_bypass_when_flag_used() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().to_string_lossy().into_owned();
+        let (init_exit, _init_stdout, init_stderr) =
+            invoke(&["ee", "--workspace", &workspace, "init", "--json"]);
+        ensure_equal(&init_exit, &ProcessExitCode::Success, "init exit")?;
+        ensure(init_stderr.is_empty(), "init json stderr clean")?;
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "remember",
+            "Document redacted sample sk-FAKEabc123def456ghi789jkl012.",
+            "--allow-secret-mention",
+            "--json",
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "remember exit")?;
+        ensure(stderr.is_empty(), "remember json stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["data"]["policy_bypass_used"],
+            &serde_json::json!(true),
+            "policy bypass used",
+        )?;
+        ensure_equal(
+            &value["data"]["policy_bypass"]["kind"],
+            &serde_json::json!("flag"),
+            "policy bypass kind",
+        )?;
+        ensure_equal(
+            &value["data"]["degraded"][0]["code"],
+            &serde_json::json!("policy_bypass_used"),
+            "degraded policy code",
+        )
     }
 
     #[test]

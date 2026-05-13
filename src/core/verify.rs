@@ -24,7 +24,18 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use super::build_info;
+use crate::db::{
+    CreateAuditInput, CreateWorkspaceInput, DbConnection, WorkspaceScopeFields, audit_actions,
+    generate_audit_id,
+};
+use crate::models::{
+    DomainError, ProducerMetadata, RESPONSE_SCHEMA_V1, VERIFICATION_EVIDENCE_SCHEMA_V1,
+    VerificationClosureGuidance, VerificationEvidenceRecord, VerificationGateRequirement,
+    VerificationStatus, rch_cargo_closure_requirements, verification_closure_guidance,
+};
 
 // ============================================================================
 // Schema Constants
@@ -32,6 +43,10 @@ use super::build_info;
 
 /// Schema for verification reports.
 pub const VERIFY_REPORT_SCHEMA_V1: &str = "ee.verify.report.v1";
+pub const VERIFY_RECORD_REPORT_SCHEMA_V1: &str = "ee.verify.record_report.v1";
+pub const VERIFY_CLOSURE_GUIDANCE_REPORT_SCHEMA_V1: &str = "ee.verify.closure_guidance_report.v1";
+pub const VERIFICATION_LEDGER_ENTRY_SCHEMA_V1: &str = "ee.verification.ledger_entry.v1";
+const LEGACY_VERIFICATION_RECORD_ACTION: &str = "verification.record";
 
 /// Schema for artifact policy.
 pub const ARTIFACT_POLICY_SCHEMA_V1: &str = "ee.artifact_policy.v1";
@@ -246,8 +261,9 @@ impl VerifyReport {
             .collect();
 
         serde_json::json!({
-            "command": "verify",
+            "command": "verify run",
             "version": self.version,
+            "schema": VERIFY_REPORT_SCHEMA_V1,
             "workspacePath": self.workspace_path,
             "allPassed": self.all_passed,
             "totalDurationMs": self.total_duration_ms,
@@ -420,9 +436,544 @@ pub struct VerifyOptions {
     pub dry_run: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct VerificationRecordOptions<'a> {
+    pub database_path: &'a Path,
+    pub workspace_path: &'a Path,
+    pub target_type: &'a str,
+    pub target_id: &'a str,
+    pub actor: Option<&'a str>,
+    pub evidence: VerificationEvidenceRecord,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerificationRecordReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub audit_id: String,
+    pub content_hash: String,
+    pub workspace_id: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub persisted: bool,
+    pub replayed: bool,
+    pub degradations: Vec<String>,
+    pub evidence: VerificationEvidenceRecord,
+}
+
+impl VerificationRecordReport {
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let verb = if self.replayed {
+            "verification evidence already recorded"
+        } else {
+            "verification evidence recorded"
+        };
+        format!(
+            "{verb}\n  ID: {}\n  Audit: {}\n  Content hash: {}\n  Target: {}:{}\n  Status: {}\n",
+            self.evidence.verification_id,
+            self.audit_id,
+            self.content_hash,
+            self.target_type,
+            self.target_id,
+            self.evidence.status.as_str()
+        )
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "command": self.command,
+            "version": self.version,
+            "schema": self.schema,
+            "auditId": self.audit_id,
+            "contentHash": self.content_hash,
+            "workspaceId": self.workspace_id,
+            "targetType": self.target_type,
+            "targetId": self.target_id,
+            "persisted": self.persisted,
+            "replayed": self.replayed,
+            "degradations": self.degradations,
+            "verificationEvidence": self.evidence,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerificationClosureGuidanceReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub bead_id: Option<String>,
+    pub evidence_count: usize,
+    pub guidance: VerificationClosureGuidance,
+}
+
+impl VerificationClosureGuidanceReport {
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut output = format!(
+            "verification closure guidance\n  Bead: {}\n  Evidence records: {}\n  Can close: {}\n",
+            self.bead_id.as_deref().unwrap_or("none"),
+            self.evidence_count,
+            if self.guidance.can_close { "yes" } else { "no" }
+        );
+        for reason in &self.guidance.rejected_reasons {
+            output.push_str(&format!("  Reject: {reason}\n"));
+        }
+        output
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "command": self.command,
+            "version": self.version,
+            "schema": self.schema,
+            "beadId": self.bead_id,
+            "evidenceCount": self.evidence_count,
+            "guidance": self.guidance,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct VerificationClosureGuidanceOptions<'a> {
+    pub database_path: &'a Path,
+    pub bead_id: Option<&'a str>,
+    pub requirements: Vec<VerificationGateRequirement>,
+}
+
 // ============================================================================
 // Verification Runner
 // ============================================================================
+
+pub fn record_verification_evidence(
+    options: VerificationRecordOptions<'_>,
+) -> Result<VerificationRecordReport, DomainError> {
+    if options.target_type.trim().is_empty() {
+        return Err(DomainError::Usage {
+            message: "verification record target type must not be empty".to_owned(),
+            repair: Some("pass --target-type memory or --target-type pack".to_owned()),
+        });
+    }
+    if options.target_id.trim().is_empty() {
+        return Err(DomainError::Usage {
+            message: "verification record target id must not be empty".to_owned(),
+            repair: Some("pass --target-id <memory-or-pack-id>".to_owned()),
+        });
+    }
+    validate_verification_record(&options.evidence)?;
+    let content_hash =
+        verification_evidence_content_hash(&options.evidence).map_err(|message| {
+            DomainError::Storage {
+                message,
+                repair: Some("inspect the verification evidence JSON and retry".to_owned()),
+            }
+        })?;
+
+    let connection = open_verification_database(options.database_path)?;
+    let workspace_id = ensure_verification_workspace(&connection, options.workspace_path)?;
+    if let Some(existing) = find_existing_verification_ingest(
+        &connection,
+        &content_hash,
+        options.target_type,
+        options.target_id,
+    )? {
+        return Ok(VerificationRecordReport {
+            schema: VERIFY_RECORD_REPORT_SCHEMA_V1,
+            command: "verification ingest",
+            version: build_info().version,
+            audit_id: existing.audit_id,
+            content_hash,
+            workspace_id,
+            target_type: options.target_type.trim().to_owned(),
+            target_id: options.target_id.trim().to_owned(),
+            persisted: false,
+            replayed: true,
+            degradations: vec!["degraded.verification_idempotent_replay".to_owned()],
+            evidence: existing.record,
+        });
+    }
+
+    let audit_id = generate_audit_id();
+    let details = VerificationAuditDetails::new(content_hash.clone(), &options.evidence);
+    let details = serde_json::to_string(&details).map_err(|error| DomainError::Storage {
+        message: format!("Failed to serialize verification evidence: {error}"),
+        repair: Some("inspect the verification evidence JSON and retry".to_owned()),
+    })?;
+
+    connection
+        .insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(workspace_id.clone()),
+                actor: options
+                    .actor
+                    .map(str::trim)
+                    .filter(|actor| !actor.is_empty())
+                    .map(str::to_owned),
+                action: audit_actions::VERIFICATION_INGEST.to_owned(),
+                target_type: Some(options.target_type.trim().to_owned()),
+                target_id: Some(options.target_id.trim().to_owned()),
+                details: Some(details),
+            },
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to record verification audit row: {error}"),
+            repair: Some("ee audit timeline --surface verification --json".to_owned()),
+        })?;
+
+    Ok(VerificationRecordReport {
+        schema: VERIFY_RECORD_REPORT_SCHEMA_V1,
+        command: "verification ingest",
+        version: build_info().version,
+        audit_id,
+        content_hash,
+        workspace_id,
+        target_type: options.target_type.trim().to_owned(),
+        target_id: options.target_id.trim().to_owned(),
+        persisted: true,
+        replayed: false,
+        degradations: Vec::new(),
+        evidence: options.evidence,
+    })
+}
+
+pub fn verification_closure_guidance_from_ledger(
+    options: &VerificationClosureGuidanceOptions<'_>,
+) -> Result<VerificationClosureGuidanceReport, DomainError> {
+    let connection = open_verification_database(options.database_path)?;
+    let records = if let Some(bead_id) = options.bead_id {
+        list_verification_records_for_bead(&connection, bead_id)?
+    } else {
+        list_verification_records(&connection, None)?
+    };
+    let guidance =
+        verification_closure_guidance(options.bead_id, &options.requirements, records.as_slice());
+
+    Ok(VerificationClosureGuidanceReport {
+        schema: VERIFY_CLOSURE_GUIDANCE_REPORT_SCHEMA_V1,
+        command: "verification closure-guidance",
+        version: build_info().version,
+        bead_id: options.bead_id.map(str::to_owned),
+        evidence_count: records.len(),
+        guidance,
+    })
+}
+
+pub fn verification_records_for_target(
+    connection: &DbConnection,
+    target_type: &str,
+    target_id: &str,
+) -> Result<Vec<VerificationEvidenceRecord>, String> {
+    let entries = connection
+        .list_audit_by_target(target_type, target_id, None)
+        .map_err(|error| format!("failed to query verification audit rows: {error}"))?;
+    parse_verification_audit_entries(entries)
+}
+
+fn open_verification_database(database_path: &Path) -> Result<DbConnection, DomainError> {
+    let connection =
+        DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open database: {error}"),
+            repair: Some("ee init --workspace .".to_owned()),
+        })?;
+    connection.migrate().map_err(|error| DomainError::Storage {
+        message: format!("Failed to migrate database before verification ledger access: {error}"),
+        repair: Some("ee migrate run --workspace .".to_owned()),
+    })?;
+    Ok(connection)
+}
+
+fn ensure_verification_workspace(
+    connection: &DbConnection,
+    workspace_path: &Path,
+) -> Result<String, DomainError> {
+    let workspace_path = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    let workspace_key = workspace_path.to_string_lossy().into_owned();
+    if let Some(existing) = connection
+        .get_workspace_by_path(&workspace_key)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query verification workspace: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?
+    {
+        return Ok(existing.id);
+    }
+
+    let workspace_id = super::workspace::stable_workspace_id(&workspace_path);
+    let input = CreateWorkspaceInput {
+        path: workspace_key,
+        name: workspace_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned),
+    };
+    connection
+        .upsert_workspace_with_scope(&workspace_id, &input, &WorkspaceScopeFields::standalone())
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to ensure workspace for verification ledger: {error}"),
+            repair: Some("ee init --workspace .".to_owned()),
+        })?;
+    if let Some(existing) =
+        connection
+            .get_workspace(&workspace_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to query ensured verification workspace: {error}"),
+                repair: Some("ee doctor".to_owned()),
+            })?
+    {
+        return Ok(existing.id);
+    }
+    if let Some(existing) = connection
+        .get_workspace_by_path(&workspace_path.to_string_lossy())
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query ensured verification workspace path: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?
+    {
+        return Ok(existing.id);
+    }
+
+    Err(DomainError::Storage {
+        message:
+            "Failed to ensure workspace for verification ledger: workspace row was not inserted"
+                .to_owned(),
+        repair: Some("ee init --workspace .".to_owned()),
+    })
+}
+
+fn validate_verification_record(record: &VerificationEvidenceRecord) -> Result<(), DomainError> {
+    if record.schema != VERIFICATION_EVIDENCE_SCHEMA_V1 {
+        return Err(DomainError::Usage {
+            message: format!(
+                "verification evidence schema must be {}, got {}",
+                VERIFICATION_EVIDENCE_SCHEMA_V1, record.schema
+            ),
+            repair: Some("regenerate the evidence with the current ee schema".to_owned()),
+        });
+    }
+    if record.verification_id.trim().is_empty() {
+        return Err(DomainError::Usage {
+            message: "verification evidence verificationId must not be empty".to_owned(),
+            repair: Some("set verificationId to a stable ver_* identifier".to_owned()),
+        });
+    }
+    if record.gate_name.trim().is_empty() {
+        return Err(DomainError::Usage {
+            message: "verification evidence gateName must not be empty".to_owned(),
+            repair: Some("set gateName to the gate being recorded".to_owned()),
+        });
+    }
+    if record.command.trim().is_empty() {
+        return Err(DomainError::Usage {
+            message: "verification evidence command must not be empty".to_owned(),
+            repair: Some("record the command that produced this evidence".to_owned()),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct ParsedVerificationAuditEntry {
+    audit_id: String,
+    content_hash: String,
+    target_type: Option<String>,
+    target_id: Option<String>,
+    record: VerificationEvidenceRecord,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VerificationAuditDetails {
+    schema: String,
+    content_hash: String,
+    producer: ProducerMetadata,
+    status: VerificationStatus,
+    evidence: VerificationEvidenceRecord,
+}
+
+impl VerificationAuditDetails {
+    fn new(content_hash: String, evidence: &VerificationEvidenceRecord) -> Self {
+        Self {
+            schema: VERIFICATION_LEDGER_ENTRY_SCHEMA_V1.to_owned(),
+            content_hash,
+            producer: evidence.producer.clone(),
+            status: evidence.status,
+            evidence: evidence.clone(),
+        }
+    }
+}
+
+fn verification_evidence_content_hash(
+    record: &VerificationEvidenceRecord,
+) -> Result<String, String> {
+    let bytes = serde_json::to_vec(record)
+        .map_err(|error| format!("Failed to canonicalize verification evidence: {error}"))?;
+    Ok(format!("blake3:{}", blake3::hash(&bytes).to_hex()))
+}
+
+fn is_verification_audit_action(action: &str) -> bool {
+    action == audit_actions::VERIFICATION_INGEST || action == LEGACY_VERIFICATION_RECORD_ACTION
+}
+
+fn list_verification_audit_entries(
+    connection: &DbConnection,
+) -> Result<Vec<crate::db::StoredAuditEntry>, DomainError> {
+    let mut entries = connection
+        .list_audit_by_action(audit_actions::VERIFICATION_INGEST, None)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query verification ledger: {error}"),
+            repair: Some("ee audit timeline --surface verification --json".to_owned()),
+        })?;
+
+    if audit_actions::VERIFICATION_INGEST != LEGACY_VERIFICATION_RECORD_ACTION {
+        let legacy_entries = connection
+            .list_audit_by_action(LEGACY_VERIFICATION_RECORD_ACTION, None)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to query legacy verification ledger: {error}"),
+                repair: Some("ee audit timeline --surface verification --json".to_owned()),
+            })?;
+        entries.extend(legacy_entries);
+    }
+
+    Ok(entries)
+}
+
+fn find_existing_verification_ingest(
+    connection: &DbConnection,
+    content_hash: &str,
+    target_type: &str,
+    target_id: &str,
+) -> Result<Option<ParsedVerificationAuditEntry>, DomainError> {
+    let entries = list_verification_audit_entries(connection)?;
+    let parsed = parse_verification_audit_entries_with_metadata(entries).map_err(|message| {
+        DomainError::Storage {
+            message,
+            repair: Some("ee audit verify --json".to_owned()),
+        }
+    })?;
+    let target_type = target_type.trim();
+    let target_id = target_id.trim();
+    Ok(parsed.into_iter().find(|entry| {
+        entry.content_hash == content_hash
+            && entry.target_type.as_deref() == Some(target_type)
+            && entry.target_id.as_deref() == Some(target_id)
+    }))
+}
+
+fn list_verification_records_for_bead(
+    connection: &DbConnection,
+    bead_id: &str,
+) -> Result<Vec<VerificationEvidenceRecord>, DomainError> {
+    list_verification_records(connection, Some(bead_id))
+}
+
+fn list_verification_records(
+    connection: &DbConnection,
+    bead_id: Option<&str>,
+) -> Result<Vec<VerificationEvidenceRecord>, DomainError> {
+    let entries = list_verification_audit_entries(connection)?;
+    let records =
+        parse_verification_audit_entries(entries).map_err(|message| DomainError::Storage {
+            message,
+            repair: Some("ee audit verify --json".to_owned()),
+        })?;
+    if let Some(bead_id) = bead_id {
+        Ok(records
+            .into_iter()
+            .filter(|record| record.bead_id.as_deref() == Some(bead_id))
+            .collect())
+    } else {
+        Ok(records)
+    }
+}
+
+fn parse_verification_audit_entries(
+    entries: Vec<crate::db::StoredAuditEntry>,
+) -> Result<Vec<VerificationEvidenceRecord>, String> {
+    Ok(parse_verification_audit_entries_with_metadata(entries)?
+        .into_iter()
+        .map(|entry| entry.record)
+        .collect())
+}
+
+fn parse_verification_audit_entries_with_metadata(
+    entries: Vec<crate::db::StoredAuditEntry>,
+) -> Result<Vec<ParsedVerificationAuditEntry>, String> {
+    let mut records = Vec::new();
+    for entry in entries
+        .into_iter()
+        .filter(|entry| is_verification_audit_action(&entry.action))
+    {
+        let Some(details) = entry.details else {
+            return Err(format!(
+                "verification audit row {} is missing details",
+                entry.id
+            ));
+        };
+        let (record, content_hash) =
+            match serde_json::from_str::<VerificationAuditDetails>(&details) {
+                Ok(details) if details.schema == VERIFICATION_LEDGER_ENTRY_SCHEMA_V1 => {
+                    (details.evidence, details.content_hash)
+                }
+                Ok(details) => {
+                    return Err(format!(
+                        "verification audit row {} has unsupported details schema {}",
+                        entry.id, details.schema
+                    ));
+                }
+                Err(_) => {
+                    let record = serde_json::from_str::<VerificationEvidenceRecord>(&details)
+                        .map_err(|error| {
+                            format!(
+                                "verification audit row {} has invalid evidence JSON: {error}",
+                                entry.id
+                            )
+                        })?;
+                    let content_hash = verification_evidence_content_hash(&record)?;
+                    (record, content_hash)
+                }
+            };
+        records.push(ParsedVerificationAuditEntry {
+            audit_id: entry.id,
+            content_hash,
+            target_type: entry.target_type,
+            target_id: entry.target_id,
+            record,
+        });
+    }
+    records.sort_by(|left, right| {
+        left.record
+            .finished_at
+            .cmp(&right.record.finished_at)
+            .then_with(|| left.record.started_at.cmp(&right.record.started_at))
+            .then_with(|| {
+                left.record
+                    .verification_id
+                    .cmp(&right.record.verification_id)
+            })
+    });
+    Ok(records)
+}
+
+#[must_use]
+pub fn default_rch_cargo_closure_requirements() -> Vec<VerificationGateRequirement> {
+    rch_cargo_closure_requirements()
+}
+
+#[must_use]
+pub fn verification_response_json(data: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "schema": RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": data,
+    })
+}
 
 /// Run the verification pipeline.
 #[must_use]
@@ -685,5 +1236,146 @@ mod tests {
             return Err("rules is array".to_string());
         };
         ensure(rules.len() >= 4, "at least 4 rules")
+    }
+
+    #[test]
+    fn record_verification_evidence_writes_audit_ledger() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or("database path should have parent")?,
+        )
+        .map_err(|error| error.to_string())?;
+        let evidence = crate::models::sample_verification_evidence_records()
+            .into_iter()
+            .next()
+            .ok_or("sample evidence exists")?;
+        let report = record_verification_evidence(VerificationRecordOptions {
+            database_path: &database_path,
+            workspace_path: temp.path(),
+            target_type: "memory",
+            target_id: "mem_verifyledger0000000000001",
+            actor: Some("codex:test"),
+            evidence: evidence.clone(),
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure(report.persisted, "record report is persisted")?;
+        ensure(!report.replayed, "first record is not replayed")?;
+        ensure(
+            report.content_hash.starts_with("blake3:"),
+            "content hash is blake3",
+        )?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let audit_entries = connection
+            .list_audit_by_action(audit_actions::VERIFICATION_INGEST, None)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&audit_entries.len(), &1, "one ingest audit row")?;
+        let details: serde_json::Value = serde_json::from_str(
+            audit_entries[0]
+                .details
+                .as_deref()
+                .ok_or("ingest audit row has details")?,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &details
+                .get("schema")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("ledger detail schema")?,
+            &VERIFICATION_LEDGER_ENTRY_SCHEMA_V1,
+            "ledger detail schema",
+        )?;
+        ensure_equal(
+            &details
+                .get("contentHash")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("ledger detail content hash")?,
+            &report.content_hash.as_str(),
+            "ledger detail content hash",
+        )?;
+        let records = verification_records_for_target(
+            &connection,
+            "memory",
+            "mem_verifyledger0000000000001",
+        )?;
+        ensure_equal(&records.len(), &1, "one linked verification record")?;
+        ensure_equal(
+            &records[0].verification_id,
+            &evidence.verification_id,
+            "verification id",
+        )?;
+
+        let replay = record_verification_evidence(VerificationRecordOptions {
+            database_path: &database_path,
+            workspace_path: temp.path(),
+            target_type: "memory",
+            target_id: "mem_verifyledger0000000000001",
+            actor: Some("codex:test"),
+            evidence,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(!replay.persisted, "replay does not persist a duplicate")?;
+        ensure(replay.replayed, "replay is flagged")?;
+        ensure_equal(&replay.audit_id, &report.audit_id, "replay audit id")?;
+        ensure_equal(
+            &replay.degradations,
+            &vec!["degraded.verification_idempotent_replay".to_owned()],
+            "replay degradation",
+        )?;
+        let audit_entries = connection
+            .list_audit_by_action(audit_actions::VERIFICATION_INGEST, None)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&audit_entries.len(), &1, "idempotent replay keeps one row")
+    }
+
+    #[test]
+    fn closure_guidance_consumes_audit_ledger_and_rejects_fallback() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or("database path should have parent")?,
+        )
+        .map_err(|error| error.to_string())?;
+        let evidence = crate::models::sample_verification_evidence_records()
+            .into_iter()
+            .find(|record| record.status == crate::models::VerificationStatus::FallbackDetected)
+            .ok_or("sample fallback evidence exists")?;
+        record_verification_evidence(VerificationRecordOptions {
+            database_path: &database_path,
+            workspace_path: temp.path(),
+            target_type: "memory",
+            target_id: "mem_verifyledger0000000000002",
+            actor: Some("codex:test"),
+            evidence,
+        })
+        .map_err(|error| error.to_string())?;
+
+        let report =
+            verification_closure_guidance_from_ledger(&VerificationClosureGuidanceOptions {
+                database_path: &database_path,
+                bead_id: Some("bd-example"),
+                requirements: vec![VerificationGateRequirement::new(
+                    "cargo test producer",
+                    Some("cargo test --lib producer"),
+                    true,
+                )],
+            })
+            .map_err(|error| error.to_string())?;
+
+        ensure(
+            !report.guidance.can_close,
+            "fallback evidence rejects closure",
+        )?;
+        ensure_equal(&report.evidence_count, &1, "one evidence record")?;
+        ensure(
+            report.guidance.rejected_reasons[0].contains("local fallback"),
+            "rejection explains fallback",
+        )
     }
 }

@@ -148,7 +148,7 @@ mod tests {
         CreateCurationCandidateInput, CreateMemoryInput, CreateMemoryLinkInput,
         CreateWorkspaceInput, DbConnection, MemoryLinkRelation, MemoryLinkSource,
     };
-    use ee::models::WorkspaceId;
+    use ee::models::{ProducerMetadata, WorkspaceId};
     use std::path::Path;
     use std::process::{Command, Output};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -673,6 +673,7 @@ mod tests {
             workspace_id: Some("wsp_auditgolden0000000000001".to_owned()),
             target_type: Some(surface.to_owned()),
             target_id: Some(format!("{surface}_auditgolden0000000001")),
+            producer: ProducerMetadata::audit_actor(Some("cod_2"), Some(timestamp)),
             details: Some(serde_json::json!({ "source": "golden" })),
         }
     }

@@ -11,9 +11,9 @@ use std::path::{Component, Path, PathBuf};
 use serde::Serialize;
 
 use crate::config::{
-    WORKSPACE_MARKER, WorkspaceDiagnostic, WorkspaceResolutionMode, WorkspaceResolutionRequest,
-    WorkspaceResolutionSource, WorkspaceScope, derive_workspace_scope,
-    diagnose_workspace_resolution, resolve_workspace,
+    EnvVar, WORKSPACE_MARKER, WorkspaceDiagnostic, WorkspaceResolutionMode,
+    WorkspaceResolutionRequest, WorkspaceResolutionSource, WorkspaceScope, derive_workspace_scope,
+    diagnose_workspace_resolution, read_env_var, resolve_workspace,
 };
 use crate::db::{
     CreateAuditInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, StoredWorkspace,
@@ -24,7 +24,7 @@ use crate::models::{DomainError, WorkspaceId};
 pub const WORKSPACE_REGISTRY_SCHEMA_V1: &str = "ee.workspace.registry.v1";
 pub const WORKSPACE_ALIAS_SCHEMA_V1: &str = "ee.workspace.alias.v1";
 pub const WORKSPACE_RESOLVE_SCHEMA_V1: &str = "ee.workspace.resolve.v1";
-pub const WORKSPACE_REGISTRY_ENV_VAR: &str = "EE_WORKSPACE_REGISTRY";
+pub const WORKSPACE_REGISTRY_ENV_VAR: &str = EnvVar::WorkspaceRegistry.name();
 
 const WORKSPACE_ALIAS_SET_ACTION: &str = "workspace.alias.set";
 const WORKSPACE_ALIAS_CLEAR_ACTION: &str = "workspace.alias.clear";
@@ -178,7 +178,7 @@ pub fn registry_database_path_override(override_path: Option<&Path>) -> PathBuf 
     if let Some(path) = override_path {
         return path.to_path_buf();
     }
-    if let Ok(path) = env::var(WORKSPACE_REGISTRY_ENV_VAR) {
+    if let Some(path) = read_env_var(EnvVar::WorkspaceRegistry) {
         let trimmed = path.trim();
         if !trimmed.is_empty() {
             return PathBuf::from(trimmed);

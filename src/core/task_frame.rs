@@ -689,10 +689,6 @@ fn normalize_optional(value: Option<String>) -> Option<String> {
     })
 }
 
-#[expect(
-    dead_code,
-    reason = "utility prepared for future subgoal bulk operations"
-)]
 fn normalized_strings(values: &[String]) -> Vec<String> {
     let mut normalized = values
         .iter()

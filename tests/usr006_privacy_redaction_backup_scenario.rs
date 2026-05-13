@@ -738,7 +738,7 @@ fn backup_workflow_creates_verifiable_artifact() -> TestResult {
     )?;
 
     ensure(
-        !workspace.join(".ee").join("ee.db").metadata().is_err(),
+        workspace.join(".ee").join("ee.db").metadata().is_ok(),
         "original database must not be destroyed by restore",
     )?;
 

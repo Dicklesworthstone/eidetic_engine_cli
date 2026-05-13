@@ -355,6 +355,8 @@ impl ParsedJsonlImport {
 struct PreparedMemory {
     id: String,
     input: CreateMemoryInput,
+    tombstoned_at: Option<String>,
+    tombstoned_reason: Option<String>,
     details: String,
     tag_count: u32,
 }
@@ -415,6 +417,27 @@ pub fn import_jsonl_records(
     connection.with_transaction(|| {
         for memory in &to_insert {
             connection.insert_memory(&memory.id, &memory.input)?;
+            if let Some(tombstoned_at) = memory.tombstoned_at.as_deref() {
+                connection.restore_imported_memory_tombstone(&memory.id, tombstoned_at)?;
+                connection.insert_audit(
+                    &crate::db::generate_audit_id(),
+                    &CreateAuditInput {
+                        workspace_id: Some(memory.input.workspace_id.clone()),
+                        actor: Some("ee import jsonl".to_owned()),
+                        action: crate::db::audit_actions::MEMORY_TOMBSTONE.to_owned(),
+                        target_type: Some("memory".to_owned()),
+                        target_id: Some(memory.id.clone()),
+                        details: Some(
+                            json!({
+                                "tombstoned_at": tombstoned_at,
+                                "reason": memory.tombstoned_reason.as_deref(),
+                                "source": "jsonl_import",
+                            })
+                            .to_string(),
+                        ),
+                    },
+                )?;
+            }
             connection.insert_audit(
                 &crate::db::generate_audit_id(),
                 &CreateAuditInput {
@@ -843,15 +866,24 @@ fn prepare_memory(
             trust_class: trust_class.as_str().to_owned(),
             trust_subclass: Some(trust_subclass.to_owned()),
             tags,
-            valid_from: None,
-            valid_to: None,
+            valid_from: memory.valid_from.clone(),
+            valid_to: memory
+                .valid_to
+                .clone()
+                .or_else(|| memory.expires_at.clone()),
         },
+        tombstoned_at: memory.tombstoned_at.clone(),
+        tombstoned_reason: memory.tombstoned_reason.clone(),
         details: json!({
             "schema": IMPORT_JSONL_SCHEMA_V1,
             "sourceMemoryId": memory.memory_id,
             "sourceWorkspaceId": memory.workspace_id,
             "sourceCreatedAt": memory.created_at,
             "sourceUpdatedAt": memory.updated_at,
+            "sourceTombstonedAt": memory.tombstoned_at.as_deref(),
+            "sourceTombstonedReason": memory.tombstoned_reason.as_deref(),
+            "sourceValidFrom": memory.valid_from.as_deref(),
+            "sourceValidTo": memory.valid_to.clone().or_else(|| memory.expires_at.clone()),
             "redacted": memory.redacted,
             "redactionReason": memory.redaction_reason,
         })
@@ -1128,6 +1160,42 @@ mod tests {
                 .any(|issue| issue.code == "invalid_memory_confidence"),
             true,
             "invalid confidence issue",
+        )
+    }
+
+    #[test]
+    fn prepare_memories_preserves_lifecycle_metadata() -> TestResult {
+        let input = sample_jsonl().replace(
+            r#""updated_at":null,"expires_at":null"#,
+            r#""updated_at":null,"tombstoned_at":"2026-05-02T00:00:00Z","tombstoned_reason":"superseded by newer release rule","valid_from":"2026-05-01T00:00:00Z","expires_at":"2026-06-01T00:00:00Z""#,
+        );
+        let parsed = parse_jsonl_source(&input);
+        let prepared = prepare_memories(&parsed, "wsp_01234567890123456789012345");
+        ensure(prepared.has_errors(), false, "prepared has no errors")?;
+        let memory = prepared
+            .memories
+            .first()
+            .ok_or_else(|| "prepared memory missing".to_string())?;
+
+        ensure(
+            memory.tombstoned_at.as_deref(),
+            Some("2026-05-02T00:00:00Z"),
+            "tombstoned_at",
+        )?;
+        ensure(
+            memory.tombstoned_reason.as_deref(),
+            Some("superseded by newer release rule"),
+            "tombstoned_reason",
+        )?;
+        ensure(
+            memory.input.valid_from.as_deref(),
+            Some("2026-05-01T00:00:00Z"),
+            "valid_from",
+        )?;
+        ensure(
+            memory.input.valid_to.as_deref(),
+            Some("2026-06-01T00:00:00Z"),
+            "valid_to fallback from expires_at",
         )
     }
 }

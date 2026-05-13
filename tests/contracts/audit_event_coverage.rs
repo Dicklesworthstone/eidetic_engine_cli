@@ -49,6 +49,7 @@ fn build_workspace() -> Result<(TempDir, PathBuf, PathBuf, String), String> {
         tags: Some("release"),
         confidence: 0.9,
         source: None,
+        allow_secret_mention: false,
         valid_from: None,
         valid_to: None,
         dry_run: false,
@@ -99,6 +100,8 @@ fn ee_search_writes_search_executed_and_returned_mem_rows() -> TestResult {
         explain: false,
         include_tombstoned: false,
         relevance_floor: Some(0.0),
+        source_mode: ee::core::search::SearchSourceMode::Hybrid,
+        strict_source_mode: false,
     })
     .map_err(|error| format!("run_search: {error:?}"))?;
     if report.results.is_empty() {
@@ -141,6 +144,8 @@ fn ee_search_audit_row_carries_query_hash_not_raw_query() -> TestResult {
         explain: false,
         include_tombstoned: false,
         relevance_floor: Some(0.0),
+        source_mode: ee::core::search::SearchSourceMode::Hybrid,
+        strict_source_mode: false,
     })
     .map_err(|error| format!("run_search: {error:?}"))?;
 
@@ -180,6 +185,7 @@ fn ee_context_writes_pack_assembled_and_included_mem_rows() -> TestResult {
         filters: Default::default(),
         include_tombstoned: false,
         pagination: None,
+        output_options: Default::default(),
     })
     .map_err(|error| format!("run_context_pack: {error:?}"))?;
     let included = response.data.pack.items.len();

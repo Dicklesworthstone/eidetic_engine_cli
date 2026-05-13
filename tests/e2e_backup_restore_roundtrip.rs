@@ -176,6 +176,9 @@ struct MemoryContent {
     utility_milli: i64,
     importance_milli: i64,
     tombstoned: bool,
+    tombstoned_at: Option<String>,
+    valid_from: Option<String>,
+    valid_to: Option<String>,
 }
 
 fn milli(value: f32) -> i64 {
@@ -192,6 +195,9 @@ impl From<&StoredMemory> for MemoryContent {
             utility_milli: milli(memory.utility),
             importance_milli: milli(memory.importance),
             tombstoned: memory.tombstoned_at.is_some(),
+            tombstoned_at: memory.tombstoned_at.clone(),
+            valid_from: memory.valid_from.clone(),
+            valid_to: memory.valid_to.clone(),
         }
     }
 }
@@ -263,6 +269,7 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         ),
     ];
 
+    let mut seeded_memory_ids = Vec::new();
     for (level, kind, content, tags, confidence) in seeds {
         let json = run_ee(&[
             "--workspace",
@@ -284,21 +291,52 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
             &Some(true),
             &format!("remember `{content}` succeeded"),
         )?;
+        seeded_memory_ids.push(json_str(&json, "/data/memory_id", "remember")?.to_owned());
     }
 
-    // 3. Capture source-side ground truth from the SQLite database directly.
+    let tombstoned_memory_id = seeded_memory_ids
+        .get(1)
+        .ok_or_else(|| "missing memory id to tombstone".to_owned())?;
+    let tombstone = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "--json",
+        "curate",
+        "tombstone",
+        tombstoned_memory_id,
+        "--reason",
+        "backup-roundtrip-tombstone-fixture",
+        "--actor",
+        "e2e_backup_restore_roundtrip",
+    ])?;
+    ensure_equal(
+        &tombstone.pointer("/persisted").and_then(JsonValue::as_bool),
+        &Some(true),
+        "tombstone persisted",
+    )?;
+
+    // 3. Capture source-side ground truth from the SQLite database directly,
+    // including the tombstoned row so backup/restore must preserve it.
     let src_db = workspace.join(".ee").join("ee.db");
     ensure(src_db.exists(), "source database exists")?;
     let src_conn =
         DbConnection::open_file(&src_db).map_err(|error| format!("open src db: {error}"))?;
     let src_workspace_id = workspace_id_from_db(&src_conn, &workspace)?;
     let src_memories = src_conn
-        .list_memories(&src_workspace_id, None, false)
+        .list_memories(&src_workspace_id, None, true)
         .map_err(|error| format!("src list_memories: {error}"))?;
     ensure_equal(
         &src_memories.len(),
         &seeds.len(),
-        "seeded memory count matches list_memories",
+        "seeded memory count matches list_memories with tombstones",
+    )?;
+    ensure_equal(
+        &src_memories
+            .iter()
+            .filter(|memory| memory.tombstoned_at.is_some())
+            .count(),
+        &1,
+        "source has one tombstoned memory",
     )?;
 
     let mut src_pairs: Vec<(MemoryContent, Vec<String>)> = src_memories
@@ -341,6 +379,29 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         &usize::try_from(memory_records).unwrap_or(0),
         &seeds.len(),
         "backup memoryRecords matches seeded count",
+    )?;
+    let backup_records_path = records_path_from_report(&backup, "backup create")?;
+    let backup_records = read_jsonl_records(&backup_records_path)?;
+    let tombstoned_record = records_with_schema(&backup_records, "ee.export.memory.v1")
+        .into_iter()
+        .find(|record| {
+            record.get("memory_id").and_then(JsonValue::as_str)
+                == Some(tombstoned_memory_id.as_str())
+        })
+        .ok_or_else(|| "backup export did not include tombstoned memory record".to_owned())?;
+    ensure(
+        tombstoned_record
+            .get("tombstoned_at")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|value| !value.is_empty()),
+        "backup export records tombstoned_at on tombstoned memory",
+    )?;
+    ensure_equal(
+        &tombstoned_record
+            .get("tombstoned_reason")
+            .and_then(JsonValue::as_str),
+        &Some("backup-roundtrip-tombstone-fixture"),
+        "backup export records tombstoned reason",
     )?;
 
     // 5. Restore to the side path.
@@ -400,17 +461,49 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         restored_db_path.exists(),
         format!("restored database exists at {}", restored_db_path.display()),
     )?;
+    let restored_db_path_arg = restored_db_path.to_string_lossy().into_owned();
+    let restored_why = run_ee(&[
+        "--workspace",
+        &side_path_arg,
+        "--json",
+        "why",
+        tombstoned_memory_id,
+        "--database",
+        &restored_db_path_arg,
+    ])?;
+    ensure_equal(
+        &restored_why
+            .pointer("/data/lifecycle/status")
+            .and_then(JsonValue::as_str),
+        &Some("tombstoned"),
+        "restored why lifecycle status",
+    )?;
+    ensure_equal(
+        &restored_why
+            .pointer("/data/lifecycle/tombstoned_reason")
+            .and_then(JsonValue::as_str),
+        &Some("backup-roundtrip-tombstone-fixture"),
+        "restored why lifecycle tombstone reason",
+    )?;
 
     let restored_conn = DbConnection::open_file(&restored_db_path)
         .map_err(|error| format!("open restored db: {error}"))?;
     let restored_workspace_id = workspace_id_from_db(&restored_conn, &side_path)?;
     let restored_memories = restored_conn
-        .list_memories(&restored_workspace_id, None, false)
+        .list_memories(&restored_workspace_id, None, true)
         .map_err(|error| format!("restored list_memories: {error}"))?;
     ensure_equal(
         &restored_memories.len(),
         &src_pairs.len(),
         "restored memory count matches source",
+    )?;
+    ensure_equal(
+        &restored_memories
+            .iter()
+            .filter(|memory| memory.tombstoned_at.is_some())
+            .count(),
+        &1,
+        "restored has one tombstoned memory",
     )?;
 
     let mut restored_pairs: Vec<(MemoryContent, Vec<String>)> = restored_memories
@@ -441,7 +534,7 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
     let restored_conn2 = DbConnection::open_file(&restored_db_path)
         .map_err(|error| format!("re-open restored db: {error}"))?;
     let restored_again = restored_conn2
-        .list_memories(&restored_workspace_id, None, false)
+        .list_memories(&restored_workspace_id, None, true)
         .map_err(|error| format!("restored re-list: {error}"))?;
     ensure_equal(
         &restored_again.len(),

@@ -9,7 +9,9 @@
 //! - Field naming is stable across commands
 
 use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
-use ee::core::search::{RetrievalMetrics, ScoreSource, SearchHit, SearchReport, SearchStatus};
+use ee::core::search::{
+    RetrievalMetrics, ScoreSource, SearchHit, SearchReport, SearchSourceMode, SearchStatus,
+};
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
@@ -74,6 +76,10 @@ fn search_report_data_json_uses_camel_case_fields() -> TestResult {
         runtime_profile: test_runtime_profile(),
         relevance_floor_applied: None,
         candidates_below_floor: 0,
+        source_mode_requested: SearchSourceMode::Hybrid,
+        source_mode_applied: SearchSourceMode::Hybrid,
+        source_mode_fallback: false,
+        strict_source_mode: false,
     };
 
     let json = report.data_json();
@@ -217,6 +223,10 @@ fn search_hit_fields_are_camel_case_when_populated() -> TestResult {
         runtime_profile: test_runtime_profile(),
         relevance_floor_applied: None,
         candidates_below_floor: 0,
+        source_mode_requested: SearchSourceMode::Hybrid,
+        source_mode_applied: SearchSourceMode::Hybrid,
+        source_mode_fallback: false,
+        strict_source_mode: false,
     };
 
     let json = report.data_json();
@@ -250,6 +260,7 @@ fn field_naming_contract_is_stable() -> TestResult {
         "results",
         "resultCount",
         "elapsedMs",
+        "request",
         "metrics",
         "errors",
     ];
@@ -274,6 +285,10 @@ fn field_naming_contract_is_stable() -> TestResult {
         "sourceCounts",
         "scoreDistribution",
         "fieldCoverage",
+        "sourceModeRequested",
+        "sourceModeApplied",
+        "fallbackApplied",
+        "strictSourceMode",
     ];
 
     // Build a report that exercises all fields
@@ -301,6 +316,10 @@ fn field_naming_contract_is_stable() -> TestResult {
         runtime_profile: test_runtime_profile(),
         relevance_floor_applied: None,
         candidates_below_floor: 0,
+        source_mode_requested: SearchSourceMode::Hybrid,
+        source_mode_applied: SearchSourceMode::Hybrid,
+        source_mode_fallback: false,
+        strict_source_mode: false,
     };
 
     let json = report.data_json();
@@ -385,6 +404,10 @@ fn optional_hit_fields_absent_when_none() -> TestResult {
         runtime_profile: test_runtime_profile(),
         relevance_floor_applied: None,
         candidates_below_floor: 0,
+        source_mode_requested: SearchSourceMode::Hybrid,
+        source_mode_applied: SearchSourceMode::Hybrid,
+        source_mode_fallback: false,
+        strict_source_mode: false,
     };
 
     let json = report.data_json();

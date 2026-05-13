@@ -24,8 +24,11 @@ use std::str::FromStr;
 
 use ee::models::{MemoryId, ProvenanceUri, TrustClass, UnitScore};
 use ee::output::{
-    ContextJsonRenderOptions, render_context_response_json,
-    render_context_response_json_with_options, render_context_response_markdown,
+    ContextJsonRenderOptions, render_context_response_compact, render_context_response_hook,
+    render_context_response_human, render_context_response_json,
+    render_context_response_json_with_options, render_context_response_jsonl,
+    render_context_response_markdown, render_context_response_mermaid,
+    render_context_response_toon,
 };
 use ee::pack::{
     ContextRequest, ContextResponse, PackCandidate, PackCandidateInput, PackProvenance,
@@ -108,9 +111,44 @@ fn multi_section_fixture() -> ContextResponse {
         Some("incident".to_owned()),
     ));
 
-    let draft = assemble_draft(&request.query, budget, vec![rule, decision, failure])
+    let mut draft = assemble_draft(&request.query, budget, vec![rule, decision, failure])
         .expect("draft assembles with three candidates");
+    draft.hash = Some("blake3:fixture-context-pack".to_owned());
     ContextResponse::new(request, draft, Vec::new()).expect("response constructs")
+}
+
+fn pack_hash(response: &ContextResponse) -> &str {
+    response
+        .data
+        .pack
+        .hash
+        .as_deref()
+        .expect("fixture carries pack hash")
+}
+
+fn canonical_memory_ids(response: &ContextResponse) -> Vec<String> {
+    response
+        .data
+        .pack
+        .items
+        .iter()
+        .map(|item| item.memory_id.to_string())
+        .collect()
+}
+
+fn ensure_toon_matches_json(json: &str, toon: &str, context: &str) -> TestResult {
+    let expected_json = serde_json::from_str::<Value>(json)
+        .map_err(|error| format!("{context}: JSON should parse: {error}"))?;
+    let expected = Value::from(toon::JsonValue::from(expected_json));
+    let decoded = toon::try_decode(toon, None)
+        .map_err(|error| format!("{context}: TOON should decode: {error}"))?;
+    let actual = Value::from(decoded);
+    if actual != expected {
+        return Err(format!(
+            "{context}: decoded TOON drifted from canonical JSON.\nexpected: {expected}\nactual: {actual}"
+        ));
+    }
+    Ok(())
 }
 
 /// Helper: collect the line set after "### " markers in a markdown body so
@@ -127,6 +165,276 @@ fn markdown_section_headers(markdown: &str) -> Vec<&str> {
         .lines()
         .filter(|line| line.starts_with("## ") && !line.starts_with("### "))
         .collect()
+}
+
+fn render_all_context_formats(response: &ContextResponse) -> [(&'static str, String); 8] {
+    [
+        ("human", render_context_response_human(response)),
+        ("json", render_context_response_json(response)),
+        ("toon", render_context_response_toon(response)),
+        ("jsonl", render_context_response_jsonl(response)),
+        ("compact", render_context_response_compact(response)),
+        ("hook", render_context_response_hook(response)),
+        ("markdown", render_context_response_markdown(response)),
+        ("mermaid", render_context_response_mermaid(response)),
+    ]
+}
+
+#[test]
+fn all_context_format_renderers_carry_pack_hash_metadata() -> TestResult {
+    let response = multi_section_fixture();
+    let hash = pack_hash(&response);
+
+    for (format, rendered) in render_all_context_formats(&response) {
+        if !rendered.contains(hash) {
+            return Err(format!(
+                "{format} context renderer must carry pack hash {hash:?}; output head: {:?}",
+                &rendered[..rendered.len().min(160)]
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn all_context_format_renderers_are_deterministic_for_fixed_pack() -> TestResult {
+    let response = multi_section_fixture();
+    let first = render_all_context_formats(&response);
+    let second = render_all_context_formats(&response);
+
+    for ((first_format, first_rendered), (second_format, second_rendered)) in
+        first.iter().zip(second.iter())
+    {
+        if first_format != second_format {
+            return Err(format!(
+                "renderer order drifted between deterministic passes: {first_format} vs {second_format}"
+            ));
+        }
+        if first_rendered != second_rendered {
+            return Err(format!(
+                "{first_format} renderer is not byte-stable for the fixed canonical pack"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn jsonl_context_renderer_emits_parseable_header_items_footer() -> TestResult {
+    let response = multi_section_fixture();
+    let rendered = render_context_response_jsonl(&response);
+    let lines = rendered.lines().collect::<Vec<_>>();
+    let expected_len = response.data.pack.items.len() + 2;
+    if lines.len() != expected_len {
+        return Err(format!(
+            "jsonl renderer must emit header + one line per item + footer; got {} expected {expected_len}",
+            lines.len()
+        ));
+    }
+
+    let parsed = lines
+        .iter()
+        .map(|line| {
+            serde_json::from_str::<Value>(line)
+                .map_err(|error| format!("jsonl line did not parse: {line}\n{error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let header_schema = parsed[0]
+        .get("schema")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "jsonl header missing schema".to_string())?;
+    if header_schema != "ee.context.jsonl.header.v1" {
+        return Err(format!("unexpected jsonl header schema: {header_schema}"));
+    }
+    if parsed[0].get("packHash").and_then(Value::as_str) != Some(pack_hash(&response)) {
+        return Err("jsonl header packHash does not match canonical pack hash".to_string());
+    }
+    if parsed[0].get("query").and_then(Value::as_str) != Some(response.data.request.query.as_str())
+    {
+        return Err("jsonl header query does not match canonical request query".to_string());
+    }
+    if parsed[0].get("itemCount").and_then(Value::as_u64)
+        != Some(response.data.pack.items.len() as u64)
+    {
+        return Err("jsonl header itemCount does not match canonical item count".to_string());
+    }
+
+    let mut item_ids = Vec::new();
+    for (actual, expected) in parsed[1..parsed.len() - 1]
+        .iter()
+        .zip(&response.data.pack.items)
+    {
+        let schema = actual
+            .get("schema")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "jsonl item missing schema".to_string())?;
+        if schema != "ee.context.jsonl.item.v1" {
+            return Err(format!("unexpected jsonl item schema: {schema}"));
+        }
+        let memory_id = actual
+            .get("memoryId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| "jsonl item missing memoryId".to_string())?;
+        if actual.get("content").and_then(Value::as_str) != Some(expected.content.as_str()) {
+            return Err(format!(
+                "jsonl content drifted for canonical memory id {}",
+                expected.memory_id
+            ));
+        }
+        if actual.get("estimatedTokens").and_then(Value::as_u64)
+            != Some(u64::from(expected.estimated_tokens))
+        {
+            return Err(format!(
+                "jsonl token count drifted for canonical memory id {}",
+                expected.memory_id
+            ));
+        }
+        if actual.get("why").and_then(Value::as_str) != Some(expected.why.as_str()) {
+            return Err(format!(
+                "jsonl why drifted for canonical memory id {}",
+                expected.memory_id
+            ));
+        }
+        item_ids.push(memory_id);
+    }
+    if item_ids != canonical_memory_ids(&response) {
+        return Err(format!(
+            "jsonl item ids drifted from canonical pack order: got {item_ids:?}"
+        ));
+    }
+
+    let footer = parsed
+        .last()
+        .ok_or_else(|| "jsonl parser produced no footer".to_string())?;
+    if footer.get("schema").and_then(Value::as_str) != Some("ee.context.jsonl.footer.v1") {
+        return Err(format!("unexpected jsonl footer: {footer:?}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn toon_context_renderer_decodes_to_canonical_json() -> TestResult {
+    let response = multi_section_fixture();
+    let json = render_context_response_json(&response);
+    let toon = render_context_response_toon(&response);
+    ensure_toon_matches_json(&json, &toon, "context TOON renderer")
+}
+
+#[test]
+fn hook_context_renderer_emits_agent_hook_schema() -> TestResult {
+    let response = multi_section_fixture();
+    let rendered = render_context_response_hook(&response);
+    let json: Value =
+        serde_json::from_str(&rendered).map_err(|error| format!("hook JSON invalid: {error}"))?;
+
+    if json.get("schema").and_then(Value::as_str) != Some("ee.hook.context_pack.v1") {
+        return Err(format!("unexpected hook schema: {json:?}"));
+    }
+    if json.get("pack_id").and_then(Value::as_str) != Some(pack_hash(&response)) {
+        return Err("hook pack_id must equal canonical pack hash".to_string());
+    }
+    let items = json
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "hook JSON missing items array".to_string())?;
+    if items.len() != response.data.pack.items.len() {
+        return Err(format!(
+            "hook item count mismatch: got {}, expected {}",
+            items.len(),
+            response.data.pack.items.len()
+        ));
+    }
+    for (actual, expected) in items.iter().zip(&response.data.pack.items) {
+        let expected_id = expected.memory_id.to_string();
+        if actual.get("id").and_then(Value::as_str) != Some(expected_id.as_str()) {
+            return Err(format!(
+                "hook item id drifted from canonical memory id {}",
+                expected.memory_id
+            ));
+        }
+        if actual.get("content").and_then(Value::as_str) != Some(expected.content.as_str()) {
+            return Err(format!(
+                "hook item content drifted for memory id {}",
+                expected.memory_id
+            ));
+        }
+        if actual.get("tokens").and_then(Value::as_u64)
+            != Some(u64::from(expected.estimated_tokens))
+        {
+            return Err(format!(
+                "hook item token count drifted for memory id {}",
+                expected.memory_id
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn compact_context_renderer_is_single_line_canonical_summary() -> TestResult {
+    let response = multi_section_fixture();
+    let rendered = render_context_response_compact(&response);
+    if rendered.contains('\n') || rendered.contains('\r') {
+        return Err(format!(
+            "compact renderer must be single-line, got {rendered:?}"
+        ));
+    }
+    let fields = rendered.split('\t').collect::<Vec<_>>();
+    if fields.len() != 4 {
+        return Err(format!(
+            "compact renderer must emit 4 tab-separated fields, got {fields:?}"
+        ));
+    }
+    if fields[0] != response.data.request.query {
+        return Err(format!("compact query drifted: {fields:?}"));
+    }
+    let expected_budget = format!(
+        "{}/{}",
+        response.data.pack.items.len(),
+        response.data.pack.budget.max_tokens()
+    );
+    if fields[1] != expected_budget {
+        return Err(format!(
+            "compact item/budget field drifted: got {:?}, expected {expected_budget:?}",
+            fields[1]
+        ));
+    }
+    for id in canonical_memory_ids(&response).into_iter().take(3) {
+        if !fields[2].contains(&id) {
+            return Err(format!("compact top-id field missing {id}: {fields:?}"));
+        }
+    }
+    if fields[3] != pack_hash(&response) {
+        return Err(format!("compact pack hash drifted: {fields:?}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn mermaid_context_renderer_projects_pack_items_and_provenance() -> TestResult {
+    let response = multi_section_fixture();
+    let rendered = render_context_response_mermaid(&response);
+    if !rendered.starts_with("%% pack.hash: ") || !rendered.contains("\ngraph TD\n") {
+        return Err(format!(
+            "mermaid output missing metadata or graph header: {rendered}"
+        ));
+    }
+    for item in &response.data.pack.items {
+        let id = item.memory_id.to_string();
+        if !rendered.contains(&id) {
+            return Err(format!("mermaid graph missing memory id label {id}"));
+        }
+        for provenance in item.rendered_provenance() {
+            if !rendered.contains(&provenance.label) {
+                return Err(format!(
+                    "mermaid graph missing provenance label {:?}",
+                    provenance.label
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[test]
@@ -331,6 +639,7 @@ fn json_pack_text_can_be_suppressed_for_structured_only_consumers() -> TestResul
         &response,
         ContextJsonRenderOptions {
             include_rendered_text: false,
+            ..ContextJsonRenderOptions::default()
         },
     );
 

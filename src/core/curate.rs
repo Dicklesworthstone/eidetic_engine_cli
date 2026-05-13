@@ -25,7 +25,8 @@ use crate::db::{
     generate_audit_id,
 };
 use crate::models::{
-    CandidateId, DomainError, MemoryId, REVIEW_SESSION_SCHEMA_V1, RuleId, WorkspaceId,
+    CandidateId, DomainError, MemoryId, ProducerMetadata, REVIEW_SESSION_SCHEMA_V1, RuleId,
+    WorkspaceId,
 };
 
 /// Stable schema for `ee curate candidates` response data.
@@ -1097,20 +1098,35 @@ pub struct CurateCandidatesFilter {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CurateCandidateSummary {
+    #[serde(rename = "candidateId")]
+    pub candidate_id: String,
     pub id: String,
+    pub kind: String,
     #[serde(rename = "type")]
     pub candidate_type: String,
     pub target_memory_id: String,
     pub proposed_content: Option<String>,
+    pub proposed_level: Option<String>,
+    pub proposed_kind: Option<String>,
+    pub proposed_tags: Vec<String>,
     pub proposed_confidence: Option<f32>,
     pub proposed_trust_class: Option<String>,
+    pub trust_class: Option<String>,
     pub confidence: f32,
     pub status: String,
     pub review_state: String,
     pub reason: String,
     pub source: CurateCandidateSource,
+    pub proposal_source: String,
+    pub producer: ProducerMetadata,
     pub evidence: Vec<CurateCandidateEvidence>,
+    pub evidence_summary: CurateCandidateEvidenceSummary,
     pub member_memory_ids: Vec<String>,
+    pub tombstoned_member_count: usize,
+    pub priority: String,
+    pub close_reason: Option<String>,
+    pub auto_rejected_reason: Option<String>,
+    pub audit: CurateCandidateAudit,
     pub validation: CurateCandidateValidation,
     pub scope: String,
     pub scope_key: String,
@@ -1142,6 +1158,22 @@ pub struct CurateCandidateEvidence {
     #[serde(rename = "type")]
     pub evidence_type: String,
     pub id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurateCandidateEvidenceSummary {
+    pub member_memory_ids: Vec<String>,
+    pub support_count: usize,
+    pub contradiction_count: usize,
+    pub cluster_coherence: Option<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurateCandidateAudit {
+    pub proposed_by: String,
+    pub proposed_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1219,8 +1251,10 @@ pub fn list_curation_candidates(
         .into_iter()
         .skip(offset)
         .take(limit)
-        .map(|candidate| candidate_summary_from_stored(candidate, &prepared.workspace_path))
-        .collect::<Vec<_>>();
+        .map(|candidate| {
+            candidate_summary_from_database(&connection, candidate, &prepared.workspace_path)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let returned_count = candidates.len();
     let truncated = offset.saturating_add(returned_count) < total_count;
     let next_action = candidates.first().map_or_else(
@@ -2396,7 +2430,7 @@ pub fn run_curate_tombstone(
         .map(str::to_owned);
     let tombstoned_at = Utc::now().to_rfc3339();
 
-    let next_action = "ee memory list --include-tombstoned --json".to_owned();
+    let next_action = "ee memory list --json".to_owned();
 
     if options.dry_run {
         return Ok(CurateTombstoneReport {
@@ -2434,7 +2468,7 @@ pub fn run_curate_tombstone(
     if memory.tombstoned_at.is_some() {
         return Err(DomainError::Usage {
             message: format!("Memory {} is already tombstoned.", options.memory_id),
-            repair: Some("ee memory list --include-tombstoned --json".to_owned()),
+            repair: Some("ee memory list --json".to_owned()),
         });
     }
 
@@ -4785,38 +4819,116 @@ fn candidate_summary_from_stored(
     workspace_path: &Path,
 ) -> CurateCandidateSummary {
     let evidence = candidate_evidence_from_source(&stored.source_type, stored.source_id.as_deref());
-    let member_memory_ids = evidence
-        .iter()
-        .filter(|item| item.id.starts_with("mem_"))
-        .map(|item| item.id.clone())
-        .collect::<Vec<_>>();
+    let facts = CandidateEvidenceFacts::from_evidence(&evidence);
+    candidate_summary_from_parts(stored, workspace_path, evidence, facts)
+}
+
+fn candidate_summary_from_database(
+    connection: &DbConnection,
+    stored: StoredCurationCandidate,
+    workspace_path: &Path,
+) -> Result<CurateCandidateSummary, DomainError> {
+    let evidence = candidate_evidence_from_source(&stored.source_type, stored.source_id.as_deref());
+    let facts = CandidateEvidenceFacts::from_database(connection, &evidence)?;
+    Ok(candidate_summary_from_parts(
+        stored,
+        workspace_path,
+        evidence,
+        facts,
+    ))
+}
+
+fn candidate_summary_from_parts(
+    stored: StoredCurationCandidate,
+    workspace_path: &Path,
+    evidence: Vec<CurateCandidateEvidence>,
+    facts: CandidateEvidenceFacts,
+) -> CurateCandidateSummary {
     let review_state = normalized_review_state(&stored);
-    let requires_validate = candidate_requires_validate(&stored.status, &review_state);
-    let requires_apply = candidate_requires_apply(&stored.status, &review_state);
-    let next_action = next_action_for_candidate_fields(
-        &stored.id,
-        &stored.status,
-        &review_state,
-        stored.snoozed_until.as_deref(),
+    let auto_rejected_reason = facts
+        .all_member_memories_tombstoned()
+        .then(|| "evidence_tombstoned".to_owned());
+    let close_reason = auto_rejected_reason.clone();
+    let summary_status = auto_rejected_reason
+        .as_ref()
+        .map_or_else(|| stored.status.clone(), |_| "auto_rejected".to_owned());
+    let summary_review_state = auto_rejected_reason.as_ref().map_or(review_state, |_| {
+        ReviewQueueState::Rejected.as_str().to_owned()
+    });
+    let requires_validate = auto_rejected_reason.is_none()
+        && candidate_requires_validate(&summary_status, &summary_review_state);
+    let requires_apply = auto_rejected_reason.is_none()
+        && candidate_requires_apply(&summary_status, &summary_review_state);
+    let next_action = if auto_rejected_reason.is_some() {
+        "no action required".to_owned()
+    } else {
+        next_action_for_candidate_fields(
+            &stored.id,
+            &summary_status,
+            &summary_review_state,
+            stored.snoozed_until.as_deref(),
+        )
+    };
+
+    let producer = ProducerMetadata::curation_candidate(
+        &stored.source_type,
+        stored.source_id.as_deref(),
+        None,
+        Some(&stored.created_at),
     );
+    let proposal_source = proposal_source_for_candidate(&stored);
+    let proposed_tags = proposed_tags_for_candidate(&stored, &facts.member_memory_ids);
+    let priority = priority_for_candidate(
+        stored.confidence,
+        facts.support_count,
+        facts.contradiction_count,
+    );
+    let candidate_id = stored.id.clone();
+    let candidate_type = stored.candidate_type.clone();
+    let source_type = stored.source_type.clone();
+    let source_id = stored.source_id.clone();
+    let created_at = stored.created_at.clone();
+    let trust_class = effective_candidate_trust_class(&stored, &proposal_source);
 
     CurateCandidateSummary {
+        candidate_id,
         id: stored.id,
-        candidate_type: stored.candidate_type,
+        kind: kind_for_candidate_type(&candidate_type),
+        candidate_type,
         target_memory_id: stored.target_memory_id,
         proposed_content: stored.proposed_content,
+        proposed_level: proposed_level_for_candidate_type(&stored.candidate_type),
+        proposed_kind: proposed_kind_for_candidate_type(&stored.candidate_type),
+        proposed_tags,
         proposed_confidence: stored.proposed_confidence,
         proposed_trust_class: stored.proposed_trust_class,
+        trust_class,
         confidence: stored.confidence,
-        status: stored.status,
-        review_state,
+        status: summary_status,
+        review_state: summary_review_state,
         reason: stored.reason,
         source: CurateCandidateSource {
-            source_type: stored.source_type,
-            source_id: stored.source_id,
+            source_type,
+            source_id,
         },
+        proposal_source: proposal_source.clone(),
+        producer,
         evidence,
-        member_memory_ids,
+        evidence_summary: CurateCandidateEvidenceSummary {
+            member_memory_ids: facts.member_memory_ids.clone(),
+            support_count: facts.support_count,
+            contradiction_count: facts.contradiction_count,
+            cluster_coherence: facts.cluster_coherence,
+        },
+        member_memory_ids: facts.member_memory_ids,
+        tombstoned_member_count: facts.tombstoned_member_count,
+        priority,
+        close_reason,
+        auto_rejected_reason,
+        audit: CurateCandidateAudit {
+            proposed_by: proposed_by_for_candidate(&proposal_source),
+            proposed_at: created_at.clone(),
+        },
         validation: CurateCandidateValidation {
             status: "not_run".to_owned(),
             warnings: Vec::new(),
@@ -4824,7 +4936,7 @@ fn candidate_summary_from_stored(
         },
         scope: "workspace".to_owned(),
         scope_key: workspace_path.display().to_string(),
-        created_at: stored.created_at,
+        created_at,
         reviewed_at: stored.reviewed_at,
         reviewed_by: stored.reviewed_by,
         applied_at: stored.applied_at,
@@ -4854,6 +4966,457 @@ fn candidate_evidence_from_source(
             })
             .collect()
     })
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct CandidateEvidenceFacts {
+    member_memory_ids: Vec<String>,
+    support_count: usize,
+    contradiction_count: usize,
+    cluster_coherence: Option<f32>,
+    tombstoned_member_count: usize,
+}
+
+impl CandidateEvidenceFacts {
+    fn from_evidence(evidence: &[CurateCandidateEvidence]) -> Self {
+        let member_memory_ids = evidence
+            .iter()
+            .filter(|item| item.id.starts_with("mem_"))
+            .map(|item| item.id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        Self {
+            member_memory_ids,
+            support_count: evidence.len(),
+            contradiction_count: 0,
+            cluster_coherence: candidate_cluster_coherence(evidence.len(), 0, None),
+            tombstoned_member_count: 0,
+        }
+    }
+
+    fn from_database(
+        connection: &DbConnection,
+        evidence: &[CurateCandidateEvidence],
+    ) -> Result<Self, DomainError> {
+        let mut member_memory_ids = BTreeSet::new();
+        let mut contradiction_count = 0_usize;
+        for item in evidence {
+            if item.id.starts_with("mem_") {
+                member_memory_ids.insert(item.id.clone());
+            }
+            if item.evidence_type == CandidateSource::FeedbackEvent.as_str()
+                && let Some(event) = connection.get_feedback_event(&item.id).map_err(|error| {
+                    DomainError::Storage {
+                        message: format!(
+                            "Failed to load curation candidate feedback evidence: {error}"
+                        ),
+                        repair: Some("ee learn summary --json".to_owned()),
+                    }
+                })?
+            {
+                if event.target_type == "memory" {
+                    member_memory_ids.insert(event.target_id);
+                }
+                if feedback_signal_contradicts_candidate(&event.signal) {
+                    contradiction_count = contradiction_count.saturating_add(1);
+                }
+            }
+        }
+
+        let member_memory_ids = member_memory_ids.into_iter().collect::<Vec<_>>();
+        let mut tombstoned_member_count = 0_usize;
+        for memory_id in &member_memory_ids {
+            if connection
+                .get_memory(memory_id)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to load curation candidate member memory: {error}"),
+                    repair: Some("ee memory show <memory-id> --json".to_owned()),
+                })?
+                .is_some_and(|memory| memory.tombstoned_at.is_some())
+            {
+                tombstoned_member_count = tombstoned_member_count.saturating_add(1);
+            }
+        }
+
+        let support_count = evidence.len().saturating_sub(contradiction_count);
+        Ok(Self {
+            member_memory_ids,
+            support_count,
+            contradiction_count,
+            cluster_coherence: candidate_cluster_coherence(
+                evidence.len(),
+                contradiction_count,
+                None,
+            ),
+            tombstoned_member_count,
+        })
+    }
+
+    fn all_member_memories_tombstoned(&self) -> bool {
+        !self.member_memory_ids.is_empty()
+            && self.tombstoned_member_count == self.member_memory_ids.len()
+    }
+}
+
+fn kind_for_candidate_type(candidate_type: &str) -> String {
+    match candidate_type {
+        "rule" => "procedural_rule_proposal".to_owned(),
+        "procedure" => "procedure_proposal".to_owned(),
+        other => format!("{other}_proposal"),
+    }
+}
+
+fn proposed_level_for_candidate_type(candidate_type: &str) -> Option<String> {
+    matches!(candidate_type, "rule" | "procedure").then(|| "procedural".to_owned())
+}
+
+fn proposed_kind_for_candidate_type(candidate_type: &str) -> Option<String> {
+    matches!(candidate_type, "rule" | "procedure").then(|| candidate_type.to_owned())
+}
+
+fn proposal_source_for_candidate(stored: &StoredCurationCandidate) -> String {
+    if stored.candidate_type == CandidateType::Rule.as_str()
+        && stored.source_type == CandidateSource::FeedbackEvent.as_str()
+    {
+        "auto_propose_from_cluster".to_owned()
+    } else if stored.source_type == CandidateSource::RuleEngine.as_str() {
+        "playbook_rule_extraction".to_owned()
+    } else if stored.source_type == CandidateSource::AgentInference.as_str()
+        && stored
+            .source_id
+            .as_deref()
+            .is_some_and(|id| id.contains(','))
+    {
+        "session_review_proposal".to_owned()
+    } else {
+        stored.source_type.clone()
+    }
+}
+
+fn proposed_by_for_candidate(proposal_source: &str) -> String {
+    match proposal_source {
+        "auto_propose_from_cluster" => "auto_proposer:v1".to_owned(),
+        "playbook_rule_extraction" => "rule_engine:v1".to_owned(),
+        "session_review_proposal" => "review_session:v1".to_owned(),
+        "human_request" => "human".to_owned(),
+        other => format!("curation:{other}"),
+    }
+}
+
+fn effective_candidate_trust_class(
+    stored: &StoredCurationCandidate,
+    proposal_source: &str,
+) -> Option<String> {
+    if proposal_source == "auto_propose_from_cluster" {
+        Some("derived".to_owned())
+    } else {
+        stored.proposed_trust_class.clone()
+    }
+}
+
+fn priority_for_candidate(
+    confidence: f32,
+    support_count: usize,
+    contradiction_count: usize,
+) -> String {
+    if contradiction_count > 0 || confidence >= 0.85 || support_count >= 6 {
+        "high".to_owned()
+    } else if confidence >= 0.55 || support_count >= 2 {
+        "medium".to_owned()
+    } else {
+        "low".to_owned()
+    }
+}
+
+fn candidate_cluster_coherence(
+    evidence_count: usize,
+    contradiction_count: usize,
+    fallback: Option<f32>,
+) -> Option<f32> {
+    if evidence_count == 0 {
+        return fallback;
+    }
+    let support_count = evidence_count.saturating_sub(contradiction_count);
+    let coherence = support_count as f32 / evidence_count as f32;
+    Some((coherence * 1000.0).round() / 1000.0)
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ClusterCoherenceInput {
+    pub memory_id: String,
+    pub embedding: Vec<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ClusterCoherenceCluster {
+    pub cluster_id: String,
+    pub member_memory_ids: Vec<String>,
+    pub average_internal_similarity: Option<f32>,
+    pub silhouette_score: Option<f32>,
+    pub degradations: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ClusterCoherenceReport {
+    pub threshold: f32,
+    pub clusters: Vec<ClusterCoherenceCluster>,
+    pub degradations: Vec<String>,
+}
+
+#[must_use]
+pub fn silhouette_agglomerative_clusters(
+    inputs: &[ClusterCoherenceInput],
+    threshold: f32,
+) -> ClusterCoherenceReport {
+    let threshold = if threshold.is_finite() {
+        threshold.clamp(-1.0, 1.0)
+    } else {
+        0.55
+    };
+    if inputs.is_empty() {
+        return ClusterCoherenceReport {
+            threshold,
+            clusters: Vec::new(),
+            degradations: vec!["degraded.clustering_insufficient_data".to_owned()],
+        };
+    }
+
+    let mut ordered = inputs.to_vec();
+    ordered.sort_by(|left, right| left.memory_id.cmp(&right.memory_id));
+    let similarities = pairwise_cosine_similarities(&ordered);
+    let mut clusters = (0..ordered.len())
+        .map(|index| vec![index])
+        .collect::<Vec<_>>();
+
+    while let Some((left_index, right_index, merged)) =
+        best_average_linkage_merge(&clusters, &similarities, threshold)
+    {
+        clusters[left_index] = merged;
+        clusters.remove(right_index);
+    }
+
+    let mut rendered = clusters
+        .into_iter()
+        .map(|members| render_cluster(&ordered, &similarities, &members, &threshold))
+        .collect::<Vec<_>>();
+    rendered.sort_by(|left, right| left.member_memory_ids.cmp(&right.member_memory_ids));
+
+    ClusterCoherenceReport {
+        threshold,
+        clusters: rendered,
+        degradations: Vec::new(),
+    }
+}
+
+fn pairwise_cosine_similarities(inputs: &[ClusterCoherenceInput]) -> Vec<Vec<f32>> {
+    let mut similarities = vec![vec![1.0; inputs.len()]; inputs.len()];
+    for left in 0..inputs.len() {
+        for right in (left + 1)..inputs.len() {
+            let similarity = cosine_similarity(&inputs[left].embedding, &inputs[right].embedding);
+            similarities[left][right] = similarity;
+            similarities[right][left] = similarity;
+        }
+    }
+    similarities
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    let len = left.len().min(right.len());
+    if len == 0 {
+        return 0.0;
+    }
+    let mut dot = 0.0_f32;
+    let mut left_norm = 0.0_f32;
+    let mut right_norm = 0.0_f32;
+    for index in 0..len {
+        dot += left[index] * right[index];
+        left_norm += left[index] * left[index];
+        right_norm += right[index] * right[index];
+    }
+    if left_norm <= f32::EPSILON || right_norm <= f32::EPSILON {
+        return 0.0;
+    }
+    dot / (left_norm.sqrt() * right_norm.sqrt())
+}
+
+fn best_average_linkage_merge(
+    clusters: &[Vec<usize>],
+    similarities: &[Vec<f32>],
+    threshold: f32,
+) -> Option<(usize, usize, Vec<usize>)> {
+    let mut best: Option<(usize, usize, Vec<usize>, f32)> = None;
+    for left_index in 0..clusters.len() {
+        for right_index in (left_index + 1)..clusters.len() {
+            let mut merged = clusters[left_index].clone();
+            merged.extend(clusters[right_index].iter().copied());
+            merged.sort_unstable();
+            let Some(average) = average_internal_similarity(&merged, similarities) else {
+                continue;
+            };
+            if average < threshold {
+                continue;
+            }
+            let replace = best
+                .as_ref()
+                .is_none_or(|(_, _, best_members, best_average)| {
+                    average > *best_average
+                        || ((average - *best_average).abs() <= f32::EPSILON
+                            && merged < *best_members)
+                });
+            if replace {
+                best = Some((left_index, right_index, merged, average));
+            }
+        }
+    }
+    best.map(|(left, right, members, _)| (left, right, members))
+}
+
+fn average_internal_similarity(members: &[usize], similarities: &[Vec<f32>]) -> Option<f32> {
+    if members.len() < 2 {
+        return None;
+    }
+    let mut total = 0.0_f32;
+    let mut count = 0_usize;
+    for (offset, left) in members.iter().enumerate() {
+        for right in members.iter().skip(offset + 1) {
+            total += similarities[*left][*right];
+            count += 1;
+        }
+    }
+    Some(round_similarity(total / count as f32))
+}
+
+fn render_cluster(
+    inputs: &[ClusterCoherenceInput],
+    similarities: &[Vec<f32>],
+    members: &[usize],
+    threshold: &f32,
+) -> ClusterCoherenceCluster {
+    let member_memory_ids = members
+        .iter()
+        .map(|index| inputs[*index].memory_id.clone())
+        .collect::<Vec<_>>();
+    let average_internal_similarity = average_internal_similarity(members, similarities);
+    let mut degradations = Vec::new();
+    let silhouette_score = cluster_silhouette(members, similarities, inputs.len()).map_or_else(
+        || {
+            let code = if members.len() < 2 {
+                "degraded.clustering_silhouette_undefined_for_singleton"
+            } else {
+                "degraded.clustering_silhouette_requires_two_clusters"
+            };
+            degradations.push(code.to_owned());
+            None
+        },
+        Some,
+    );
+    let cluster_id = cluster_coherence_id(&member_memory_ids, *threshold);
+    ClusterCoherenceCluster {
+        cluster_id,
+        member_memory_ids,
+        average_internal_similarity,
+        silhouette_score,
+        degradations,
+    }
+}
+
+fn cluster_silhouette(
+    members: &[usize],
+    similarities: &[Vec<f32>],
+    total_members: usize,
+) -> Option<f32> {
+    if members.len() < 2 || members.len() == total_members {
+        return None;
+    }
+    let member_set = members.iter().copied().collect::<BTreeSet<_>>();
+    let mut total = 0.0_f32;
+    for member in members {
+        let intra_distance = mean_distance_to(*member, members.iter().copied(), similarities)?;
+        let non_members = (0..total_members).filter(|candidate| !member_set.contains(candidate));
+        let nearest_other_distance = mean_distance_to(*member, non_members, similarities)?;
+        let denominator = intra_distance.max(nearest_other_distance);
+        if denominator <= f32::EPSILON {
+            continue;
+        }
+        total += (nearest_other_distance - intra_distance) / denominator;
+    }
+    Some(round_similarity(total / members.len() as f32))
+}
+
+fn mean_distance_to(
+    member: usize,
+    others: impl Iterator<Item = usize>,
+    similarities: &[Vec<f32>],
+) -> Option<f32> {
+    let mut total = 0.0_f32;
+    let mut count = 0_usize;
+    for other in others {
+        if other == member {
+            continue;
+        }
+        total += 1.0 - similarities[member][other];
+        count += 1;
+    }
+    (count > 0).then(|| total / count as f32)
+}
+
+fn cluster_coherence_id(member_memory_ids: &[String], threshold: f32) -> String {
+    let payload = format!("{threshold:.3}:{}", member_memory_ids.join("\u{1f}"));
+    format!(
+        "cluster_{}",
+        &blake3::hash(payload.as_bytes()).to_hex()[..16]
+    )
+}
+
+fn round_similarity(value: f32) -> f32 {
+    (value * 1000.0).round() / 1000.0
+}
+
+fn feedback_signal_contradicts_candidate(signal: &str) -> bool {
+    matches!(
+        signal,
+        "negative" | "contradiction" | "harmful" | "stale" | "inaccurate" | "outdated"
+    )
+}
+
+fn proposed_tags_for_candidate(
+    stored: &StoredCurationCandidate,
+    member_memory_ids: &[String],
+) -> Vec<String> {
+    let mut tags = BTreeSet::new();
+    if stored.candidate_type == CandidateType::Rule.as_str() {
+        tags.insert("procedural".to_owned());
+        tags.insert("rule".to_owned());
+    } else if stored.candidate_type == CandidateType::Procedure.as_str() {
+        tags.insert("procedural".to_owned());
+        tags.insert("procedure".to_owned());
+    }
+    if !member_memory_ids.is_empty() {
+        tags.insert("cluster".to_owned());
+    }
+    let text = format!(
+        "{} {}",
+        stored.proposed_content.as_deref().unwrap_or_default(),
+        stored.reason
+    )
+    .to_ascii_lowercase();
+    for (needle, tag) in [
+        ("cargo", "cargo"),
+        ("release", "release"),
+        ("fmt", "format"),
+        ("format", "format"),
+        ("clippy", "clippy"),
+        ("test", "test"),
+        ("build", "build"),
+        ("search", "search"),
+        ("curate", "curate"),
+    ] {
+        if text.contains(needle) {
+            tags.insert(tag.to_owned());
+        }
+    }
+    tags.into_iter().collect()
 }
 
 fn prepare_curate_read(
@@ -5090,9 +5653,9 @@ mod tests {
         review_session_proposals, stable_workspace_id, validate_curation_candidate,
     };
     use crate::db::{
-        CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateMemoryInput,
-        CreateSessionInput, CreateWorkspaceInput, DbConnection, StoredCurationCandidate,
-        audit_actions,
+        CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateFeedbackEventInput,
+        CreateMemoryInput, CreateSessionInput, CreateWorkspaceInput, DbConnection,
+        StoredCurationCandidate, audit_actions,
     };
     use crate::models::{CandidateId, EvidenceId, MemoryId, SessionId};
 
@@ -5191,6 +5754,54 @@ mod tests {
             ]
         );
         assert_eq!(summary.member_memory_ids.len(), summary.evidence.len());
+    }
+
+    #[test]
+    fn candidate_summary_surfaces_g4_auto_proposal_metadata() {
+        let stored = StoredCurationCandidate {
+            id: "curate_cluster0000000000000001".to_owned(),
+            workspace_id: "wsp_00000000000000000000000000".to_owned(),
+            candidate_type: "rule".to_owned(),
+            target_memory_id: "mem_alpha".to_owned(),
+            proposed_content: Some(
+                "Always run cargo fmt --check before cutting a release tag.".to_owned(),
+            ),
+            proposed_confidence: Some(0.67),
+            proposed_trust_class: None,
+            source_type: "feedback_event".to_owned(),
+            source_id: Some("mem_alpha, mem_beta, mem_gamma".to_owned()),
+            reason: "Auto-proposed from a repeated cargo release cluster.".to_owned(),
+            confidence: 0.67,
+            status: "pending".to_owned(),
+            created_at: "2026-05-01T00:00:00Z".to_owned(),
+            reviewed_at: None,
+            reviewed_by: None,
+            applied_at: None,
+            ttl_expires_at: None,
+            review_state: "new".to_owned(),
+            snoozed_until: None,
+            merged_into_candidate_id: None,
+            state_entered_at: Some("2026-05-01T00:00:00Z".to_owned()),
+            last_action_at: None,
+            ttl_policy_id: None,
+        };
+
+        let summary = candidate_summary_from_stored(stored, std::path::Path::new("/repo"));
+
+        assert_eq!(summary.candidate_id, "curate_cluster0000000000000001");
+        assert_eq!(summary.kind, "procedural_rule_proposal");
+        assert_eq!(summary.proposal_source, "auto_propose_from_cluster");
+        assert_eq!(summary.proposed_level.as_deref(), Some("procedural"));
+        assert_eq!(summary.proposed_kind.as_deref(), Some("rule"));
+        assert_eq!(summary.trust_class.as_deref(), Some("derived"));
+        assert_eq!(summary.priority, "medium");
+        assert_eq!(summary.audit.proposed_by, "auto_proposer:v1");
+        assert_eq!(summary.evidence_summary.support_count, 3);
+        assert_eq!(summary.evidence_summary.contradiction_count, 0);
+        assert_eq!(summary.evidence_summary.cluster_coherence, Some(1.0));
+        assert!(summary.proposed_tags.contains(&"cargo".to_owned()));
+        assert!(summary.proposed_tags.contains(&"release".to_owned()));
+        assert!(summary.proposed_tags.contains(&"rule".to_owned()));
     }
 
     #[test]
@@ -5533,6 +6144,153 @@ mod tests {
         assert!(report.candidates[0].member_memory_ids.is_empty());
         assert!(!report.durable_mutation);
         assert_eq!(report.filter.status.as_deref(), Some("pending"));
+        Ok(())
+    }
+
+    #[test]
+    fn list_curation_candidates_resolves_feedback_cluster_members_and_tombstones() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = stable_workspace_id(workspace_path);
+        let memory_one = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7001)).to_string();
+        let memory_two = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7002)).to_string();
+        let candidate_id = curate_id(0x7003);
+        let feedback_one = feedback_id(1);
+        let feedback_two = feedback_id(2);
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("curate-g4-cluster".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for (memory_id, content) in [
+            (&memory_one, "Run cargo fmt --check before release."),
+            (
+                &memory_two,
+                "Keep cargo release tags behind fmt verification.",
+            ),
+        ] {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence: 0.7,
+                        utility: 0.6,
+                        importance: 0.5,
+                        provenance_uri: None,
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        for (feedback_id, target_id) in [(&feedback_one, &memory_one), (&feedback_two, &memory_two)]
+        {
+            connection
+                .insert_feedback_event(
+                    feedback_id,
+                    &CreateFeedbackEventInput {
+                        workspace_id: workspace_id.clone(),
+                        target_type: "memory".to_owned(),
+                        target_id: target_id.clone(),
+                        signal: "helpful".to_owned(),
+                        weight: 1.0,
+                        source_type: "agent_inference".to_owned(),
+                        source_id: Some("cluster-fixture".to_owned()),
+                        reason: Some("Cluster member supports the proposal.".to_owned()),
+                        evidence_json: None,
+                        session_id: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection
+            .insert_curation_candidate(
+                &candidate_id,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.clone(),
+                    candidate_type: "rule".to_owned(),
+                    target_memory_id: memory_one.clone(),
+                    proposed_content: Some(
+                        "Always run cargo fmt --check before cutting a release tag.".to_owned(),
+                    ),
+                    proposed_confidence: Some(0.67),
+                    proposed_trust_class: Some("agent_validated".to_owned()),
+                    source_type: "feedback_event".to_owned(),
+                    source_id: Some(format!("{feedback_one},{feedback_two}")),
+                    reason: "Learning cluster proposed a cargo release rule.".to_owned(),
+                    confidence: 0.67,
+                    status: Some("pending".to_owned()),
+                    created_at: Some("2026-05-01T00:00:02Z".to_owned()),
+                    ttl_expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .tombstone_memory(&memory_one)
+            .map_err(|error| error.to_string())?;
+        connection
+            .tombstone_memory(&memory_two)
+            .map_err(|error| error.to_string())?;
+
+        let report = list_curation_candidates(&CurateCandidatesOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_type: Some("rule"),
+            status: Some("pending"),
+            target_memory_id: None,
+            limit: 10,
+            offset: 0,
+            sort: "review_state",
+            group_duplicates: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let candidate = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == candidate_id)
+            .ok_or_else(|| "G4 candidate missing from queue".to_owned())?;
+        assert_eq!(candidate.proposal_source, "auto_propose_from_cluster");
+        assert_eq!(
+            candidate.member_memory_ids,
+            vec![memory_one.clone(), memory_two.clone()]
+        );
+        assert_eq!(
+            candidate.evidence_summary.member_memory_ids,
+            candidate.member_memory_ids
+        );
+        assert_eq!(candidate.evidence_summary.support_count, 2);
+        assert_eq!(candidate.tombstoned_member_count, 2);
+        assert_eq!(candidate.status, "auto_rejected");
+        assert_eq!(candidate.review_state, "rejected");
+        assert_eq!(
+            candidate.close_reason.as_deref(),
+            Some("evidence_tombstoned")
+        );
+        assert_eq!(
+            candidate.auto_rejected_reason.as_deref(),
+            Some("evidence_tombstoned")
+        );
+        assert!(!candidate.requires_validate);
+        assert!(!candidate.requires_apply);
+        assert_eq!(candidate.next_action, "no action required");
         Ok(())
     }
 
@@ -6601,5 +7359,9 @@ mod tests {
     fn curate_id(seed: u128) -> String {
         let candidate = CandidateId::from_uuid(uuid::Uuid::from_u128(seed)).to_string();
         format!("curate_{}", candidate.trim_start_matches("cand_"))
+    }
+
+    fn feedback_id(seed: u128) -> String {
+        format!("fb_{seed:026}")
     }
 }

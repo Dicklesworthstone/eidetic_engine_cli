@@ -31,6 +31,7 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+use super::env_registry::{EnvVar, read_os as read_env_var_os};
 use serde::{Deserialize, Serialize};
 
 use super::PathExpander;
@@ -42,7 +43,7 @@ use super::PathExpander;
 pub const WORKSPACE_MARKER: &str = ".ee";
 
 /// Environment variable used as a process-wide workspace override.
-pub const WORKSPACE_ENV_VAR: &str = "EE_WORKSPACE";
+pub const WORKSPACE_ENV_VAR: &str = EnvVar::Workspace.name();
 
 /// Schema identifier for workspace identity records.
 pub const WORKSPACE_IDENTITY_SCHEMA_V1: &str = "ee.workspace.identity.v1";
@@ -613,7 +614,7 @@ impl WorkspaceResolutionRequest {
         let current_dir = env::current_dir().map_err(WorkspaceError::CurrentDir)?;
         Ok(Self {
             explicit_workspace,
-            environment_workspace: env::var_os(WORKSPACE_ENV_VAR).map(PathBuf::from),
+            environment_workspace: read_env_var_os(EnvVar::Workspace).map(PathBuf::from),
             current_dir,
             mode,
         })

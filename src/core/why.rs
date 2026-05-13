@@ -14,7 +14,7 @@ use crate::core::memory::{
     EvidenceFreshness, EvidenceFreshnessStatus, assess_memory_evidence_freshness, memory_validity,
 };
 use crate::db::DbConnection;
-use crate::models::{RationaleTrace, RationaleTraceVisibility};
+use crate::models::{RationaleTrace, RationaleTraceVisibility, VerificationEvidenceRecord};
 use sqlmodel_core::{Row, Value};
 
 /// Why a memory was stored with certain characteristics.
@@ -397,6 +397,8 @@ pub struct WhyReport {
     pub history: Option<MemoryHistorySummary>,
     /// Safe visible rationale traces linked to this memory or latest pack.
     pub rationale_traces: Vec<RationaleTraceSummary>,
+    /// Verification evidence linked by the caller or future ledger lookup.
+    pub verification_evidence: Vec<VerificationEvidenceRecord>,
     /// Non-fatal degradation notices.
     pub degraded: Vec<WhyDegradation>,
     /// Error message if query failed.
@@ -426,6 +428,7 @@ impl WhyReport {
             links: Vec::new(),
             history: None,
             rationale_traces: Vec::new(),
+            verification_evidence: Vec::new(),
             degraded: Vec::new(),
             error: None,
         }
@@ -456,6 +459,7 @@ impl WhyReport {
             links: Vec::new(),
             history: None,
             rationale_traces: Vec::new(),
+            verification_evidence: Vec::new(),
             degraded: Vec::new(),
             error: None,
         }
@@ -478,6 +482,7 @@ impl WhyReport {
             links: Vec::new(),
             history: None,
             rationale_traces: Vec::new(),
+            verification_evidence: Vec::new(),
             degraded: Vec::new(),
             error: Some(message),
         }
@@ -587,6 +592,19 @@ impl WhyReport {
         self.rationale_traces = rationale_traces;
         self
     }
+
+    /// Add verification evidence already linked by the caller.
+    #[must_use]
+    pub fn with_verification_evidence(
+        mut self,
+        mut verification_evidence: Vec<VerificationEvidenceRecord>,
+    ) -> Self {
+        verification_evidence
+            .sort_by(|left, right| left.verification_id.cmp(&right.verification_id));
+        verification_evidence.dedup_by(|left, right| left.verification_id == right.verification_id);
+        self.verification_evidence = verification_evidence;
+        self
+    }
 }
 
 /// Options for the why query.
@@ -662,6 +680,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
 
     // Fetch rationale traces (EE-RATIONALE-TRACE-001)
     let rationale_trace_fetch = fetch_rationale_traces(&conn, &memory.workspace_id, memory_id);
+    let verification_fetch = fetch_verification_evidence(&conn, "memory", memory_id);
     let mut evidence_degradations = Vec::new();
     if let Some(degradation) = contradiction_fetch.degradation {
         evidence_degradations.push(degradation);
@@ -675,6 +694,25 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
     if let Some(degradation) = rationale_trace_fetch.degradation {
         evidence_degradations.push(degradation);
     }
+    if let Some(degradation) = verification_fetch.degradation {
+        evidence_degradations.push(degradation);
+    }
+    if verification_fetch.items.is_empty()
+        && tags.iter().any(|tag| {
+            tag == "verification" || tag == "verification-required" || tag == "bead-closure"
+        })
+    {
+        evidence_degradations.push(WhyDegradation {
+            code: "verification_evidence_not_found",
+            severity: "low",
+            message: "No verification evidence ledger row is linked to this memory; verification-sensitive claims are reported as unverified rather than silently absent."
+                .to_owned(),
+            repair: Some(
+                "ee verification ingest --file <verification-evidence.json> --target-type memory --target-id <memory-id>"
+                    .to_owned(),
+            ),
+        });
+    }
     let workspace_path = workspace_path_for_memory(&conn, &memory.workspace_id);
     let freshness = assess_memory_evidence_freshness(&memory, workspace_path.as_deref());
     if let Some(degradation) = why_evidence_freshness_degradation(memory_id, &freshness) {
@@ -685,6 +723,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
     let history = history_fetch.items.into_iter().next();
     let lifecycle = lifecycle_for_memory(&memory, history.as_ref());
     let rationale_traces = rationale_trace_fetch.items;
+    let verification_evidence = verification_fetch.items;
 
     let validity = memory_validity(&memory.valid_from, &memory.valid_to);
     let graph_retrieval = build_graph_retrieval_explanation(
@@ -739,6 +778,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
                     links,
                     history,
                     rationale_traces,
+                    verification_evidence: Vec::new(),
                     graph_retrieval,
                     degraded: evidence_degradations,
                 },
@@ -767,6 +807,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
             links,
             history,
             rationale_traces,
+            verification_evidence,
             graph_retrieval,
             degraded: evidence_degradations,
         },
@@ -1010,6 +1051,7 @@ struct ReportSelectionInputs {
     links: Vec<MemoryLinkSummary>,
     history: Option<MemoryHistorySummary>,
     rationale_traces: Vec<RationaleTraceSummary>,
+    verification_evidence: Vec<VerificationEvidenceRecord>,
     graph_retrieval: GraphRetrievalExplanation,
     degraded: Vec<WhyDegradation>,
 }
@@ -1041,6 +1083,7 @@ fn build_report(
         .with_optional_history(selection_inputs.history)
         .with_graph_retrieval(selection_inputs.graph_retrieval)
         .with_rationale_traces(selection_inputs.rationale_traces)
+        .with_verification_evidence(selection_inputs.verification_evidence)
         .with_degradations(selection_inputs.degraded)
 }
 
@@ -1541,6 +1584,21 @@ fn fetch_history(conn: &DbConnection, memory_id: &str) -> WhyEvidenceFetch<Memor
     }])
 }
 
+fn fetch_verification_evidence(
+    conn: &DbConnection,
+    target_type: &str,
+    target_id: &str,
+) -> WhyEvidenceFetch<VerificationEvidenceRecord> {
+    match crate::core::verify::verification_records_for_target(conn, target_type, target_id) {
+        Ok(records) => WhyEvidenceFetch::available(records),
+        Err(error) => WhyEvidenceFetch::unavailable(
+            "why_verification_evidence_unavailable",
+            "verification evidence",
+            error,
+        ),
+    }
+}
+
 /// Fetch rationale traces linked to a memory (EE-RATIONALE-TRACE-001).
 fn fetch_rationale_traces(
     conn: &DbConnection,
@@ -1728,6 +1786,7 @@ mod tests {
                 links: Vec::new(),
                 history: None,
                 rationale_traces: Vec::new(),
+                verification_evidence: Vec::new(),
                 graph_retrieval: graph_retrieval_unavailable(
                     "wsp_01234567890123456789012345",
                     "graph_snapshot_missing",
@@ -1749,6 +1808,76 @@ mod tests {
                 .map(|selection| selection.rank),
             Some(1),
             "pack rank",
+        )
+    }
+
+    #[test]
+    fn explain_memory_includes_linked_verification_evidence() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or("database path should have parent")?,
+        )
+        .map_err(|error| error.to_string())?;
+        let memory_id = "mem_verifywhy00000000000000001";
+        let evidence = crate::models::sample_verification_evidence_records()
+            .into_iter()
+            .next()
+            .ok_or("sample evidence exists")?;
+        let record_report = crate::core::verify::record_verification_evidence(
+            crate::core::verify::VerificationRecordOptions {
+                database_path: &database_path,
+                workspace_path: temp.path(),
+                target_type: "memory",
+                target_id: memory_id,
+                actor: Some("codex:test"),
+                evidence: evidence.clone(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        let connection = crate::db::DbConnection::open_file(&database_path)
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                memory_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: record_report.workspace_id,
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Run verification gates before closing beads.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.7,
+                    importance: 0.6,
+                    provenance_uri: None,
+                    trust_class: "agent_assertion".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["verification".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let report = explain_memory(&WhyOptions {
+            database_path: &database_path,
+            memory_id,
+            confidence_threshold: WhyOptions::DEFAULT_CONFIDENCE_THRESHOLD,
+        });
+
+        ensure(report.found, true, "why found memory")?;
+        ensure(
+            report.verification_evidence.len(),
+            1_usize,
+            "verification evidence count",
+        )?;
+        ensure(
+            report.verification_evidence[0].verification_id.as_str(),
+            evidence.verification_id.as_str(),
+            "verification id",
         )
     }
 

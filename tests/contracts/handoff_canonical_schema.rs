@@ -72,6 +72,7 @@ fn build_workspace() -> Result<(TempDir, PathBuf), String> {
             tags,
             confidence: 0.9,
             source: None,
+            allow_secret_mention: false,
             valid_from: None,
             valid_to: None,
             dry_run: false,

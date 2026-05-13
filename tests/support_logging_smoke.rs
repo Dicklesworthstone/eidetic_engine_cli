@@ -26,16 +26,6 @@ use tempfile::TempDir;
 
 type TestResult = Result<(), String>;
 
-const ALLOWED_KINDS: &[&str] = &[
-    "command_start",
-    "command_end",
-    "assert_ok",
-    "assert_fail",
-    "golden_compare",
-    "timer_lap",
-    "note",
-];
-
 fn read_events(path: &Path) -> Result<Vec<Value>, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| format!("read {}: {error}", path.display()))?;
@@ -77,7 +67,11 @@ fn validate_event(event: &Value) -> Result<(), String> {
         .get("kind")
         .and_then(Value::as_str)
         .ok_or("missing kind field")?;
-    if !ALLOWED_KINDS.contains(&kind) {
+    let allowed_kinds = EventKind::all()
+        .into_iter()
+        .map(EventKind::as_str)
+        .collect::<BTreeSet<_>>();
+    if !allowed_kinds.contains(kind) {
         return Err(format!("kind {kind} not in enum"));
     }
     for key in ["stdout_hash", "stdin_hash"] {

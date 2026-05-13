@@ -23,6 +23,19 @@ pub const FACILITY_LOCATION_EPSILON: f32 = 0.000_001;
 pub const DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR: f32 = 0.05;
 pub const MAX_PACK_SKIPPED_ITEMS: usize = 50;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PackAssemblyOptions {
+    pub include_coverage_fill: bool,
+}
+
+impl Default for PackAssemblyOptions {
+    fn default() -> Self {
+        Self {
+            include_coverage_fill: true,
+        }
+    }
+}
+
 /// Similarity floor applied when two candidates share the same `diversity_key`
 /// during facility-location selection.
 ///
@@ -2254,13 +2267,31 @@ pub fn assemble_draft_with_profile(
     budget: TokenBudget,
     candidates: impl IntoIterator<Item = PackCandidate>,
 ) -> Result<PackDraft, PackValidationError> {
+    assemble_draft_with_profile_and_options(
+        profile,
+        query,
+        budget,
+        candidates,
+        PackAssemblyOptions::default(),
+    )
+}
+
+pub fn assemble_draft_with_profile_and_options(
+    profile: ContextPackProfile,
+    query: impl Into<String>,
+    budget: TokenBudget,
+    candidates: impl IntoIterator<Item = PackCandidate>,
+    options: PackAssemblyOptions,
+) -> Result<PackDraft, PackValidationError> {
     match profile {
         ContextPackProfile::Submodular => {
             assemble_facility_location_draft(profile, query, budget, candidates)
         }
         ContextPackProfile::Compact
         | ContextPackProfile::Balanced
-        | ContextPackProfile::Thorough => assemble_mmr_draft(profile, query, budget, candidates),
+        | ContextPackProfile::Thorough => {
+            assemble_mmr_draft(profile, query, budget, candidates, options)
+        }
     }
 }
 
@@ -2269,6 +2300,7 @@ fn assemble_mmr_draft(
     query: impl Into<String>,
     budget: TokenBudget,
     candidates: impl IntoIterator<Item = PackCandidate>,
+    options: PackAssemblyOptions,
 ) -> Result<PackDraft, PackValidationError> {
     let query = trim_required(query.into(), PackValidationError::EmptyQuery)?;
     let mut candidates: Vec<MmrCandidate> =
@@ -2363,91 +2395,102 @@ fn assemble_mmr_draft(
         }
     }
 
-    coverage_fill_candidates
-        .sort_by(|left, right| compare_candidates(&left.candidate, &right.candidate));
-    let coverage_fill_limit = items.len();
-    let mut coverage_fill_count = 0_usize;
-    for selection in coverage_fill_candidates {
-        if selection.candidate.relevance.into_inner() < DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR {
-            omitted.push(PackOmission::from_candidate_at(
+    if options.include_coverage_fill {
+        coverage_fill_candidates
+            .sort_by(|left, right| compare_candidates(&left.candidate, &right.candidate));
+        let coverage_fill_limit = items.len();
+        let mut coverage_fill_count = 0_usize;
+        for selection in coverage_fill_candidates {
+            if selection.candidate.relevance.into_inner() < DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR {
+                omitted.push(PackOmission::from_candidate_at(
+                    &selection.candidate,
+                    PackOmissionReason::BelowRelevanceFloor,
+                    PackRejectionStage::CandidateFilter,
+                    None,
+                ));
+                continue;
+            }
+            if coverage_fill_count >= coverage_fill_limit {
+                omitted.push(PackOmission::from_candidate(
+                    &selection.candidate,
+                    PackOmissionReason::RedundantCandidate,
+                    None,
+                ));
+                continue;
+            }
+
+            let section_used = section_usage.tokens_for(selection.candidate.section);
+            if facility_candidate_is_feasible(
                 &selection.candidate,
-                PackOmissionReason::BelowRelevanceFloor,
-                PackRejectionStage::CandidateFilter,
-                None,
-            ));
-            continue;
+                used_tokens,
+                budget,
+                &quotas,
+                &section_usage,
+            ) {
+                match used_tokens.checked_add(selection.candidate.estimated_tokens) {
+                    Some(total) => {
+                        let rank = next_rank;
+                        next_rank = next_rank
+                            .checked_add(1)
+                            .ok_or(PackValidationError::CandidateRankOverflow)?;
+                        let marginal_gain =
+                            strict_mmr_marginal_gain(&selection, &selected_signatures);
+                        steps.push(PackSelectionStep {
+                            rank,
+                            memory_id: selection.candidate.memory_id,
+                            marginal_gain,
+                            objective_value,
+                            token_cost: selection.candidate.estimated_tokens,
+                            feasible: true,
+                            covered_features: certificate_features(&selection.candidate),
+                        });
+                        used_tokens = total;
+                        let candidate = selection.candidate;
+                        let redactions = selection.redactions;
+                        section_usage.add_candidate(&candidate);
+                        selected_signatures.push(selection.signature);
+                        coverage_fill_count = coverage_fill_count.saturating_add(1);
+                        items.push(PackDraftItem::from_selected_candidate(
+                            rank,
+                            candidate,
+                            redactions,
+                            PackSelectionPhase::CoverageFill,
+                        ));
+                    }
+                    None => {
+                        omitted.push(PackOmission::from_candidate(
+                            &selection.candidate,
+                            PackOmissionReason::TokenBudgetExceeded,
+                            Some(minimal_budget_for_candidate(
+                                profile,
+                                used_tokens,
+                                section_used,
+                                selection.candidate.section,
+                                selection.candidate.estimated_tokens,
+                            )),
+                        ));
+                    }
+                }
+            } else {
+                omitted.push(PackOmission::from_candidate(
+                    &selection.candidate,
+                    PackOmissionReason::TokenBudgetExceeded,
+                    Some(minimal_budget_for_candidate(
+                        profile,
+                        used_tokens,
+                        section_used,
+                        selection.candidate.section,
+                        selection.candidate.estimated_tokens,
+                    )),
+                ));
+            }
         }
-        if coverage_fill_count >= coverage_fill_limit {
+    } else {
+        for selection in coverage_fill_candidates {
             omitted.push(PackOmission::from_candidate(
                 &selection.candidate,
                 PackOmissionReason::RedundantCandidate,
                 None,
-            ));
-            continue;
-        }
-
-        let section_used = section_usage.tokens_for(selection.candidate.section);
-        if facility_candidate_is_feasible(
-            &selection.candidate,
-            used_tokens,
-            budget,
-            &quotas,
-            &section_usage,
-        ) {
-            match used_tokens.checked_add(selection.candidate.estimated_tokens) {
-                Some(total) => {
-                    let rank = next_rank;
-                    next_rank = next_rank
-                        .checked_add(1)
-                        .ok_or(PackValidationError::CandidateRankOverflow)?;
-                    let marginal_gain = strict_mmr_marginal_gain(&selection, &selected_signatures);
-                    steps.push(PackSelectionStep {
-                        rank,
-                        memory_id: selection.candidate.memory_id,
-                        marginal_gain,
-                        objective_value,
-                        token_cost: selection.candidate.estimated_tokens,
-                        feasible: true,
-                        covered_features: certificate_features(&selection.candidate),
-                    });
-                    used_tokens = total;
-                    let candidate = selection.candidate;
-                    let redactions = selection.redactions;
-                    section_usage.add_candidate(&candidate);
-                    selected_signatures.push(selection.signature);
-                    coverage_fill_count = coverage_fill_count.saturating_add(1);
-                    items.push(PackDraftItem::from_selected_candidate(
-                        rank,
-                        candidate,
-                        redactions,
-                        PackSelectionPhase::CoverageFill,
-                    ));
-                }
-                None => {
-                    omitted.push(PackOmission::from_candidate(
-                        &selection.candidate,
-                        PackOmissionReason::TokenBudgetExceeded,
-                        Some(minimal_budget_for_candidate(
-                            profile,
-                            used_tokens,
-                            section_used,
-                            selection.candidate.section,
-                            selection.candidate.estimated_tokens,
-                        )),
-                    ));
-                }
-            }
-        } else {
-            omitted.push(PackOmission::from_candidate(
-                &selection.candidate,
-                PackOmissionReason::TokenBudgetExceeded,
-                Some(minimal_budget_for_candidate(
-                    profile,
-                    used_tokens,
-                    section_used,
-                    selection.candidate.section,
-                    selection.candidate.estimated_tokens,
-                )),
             ));
         }
     }

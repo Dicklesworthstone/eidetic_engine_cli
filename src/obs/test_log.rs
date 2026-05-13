@@ -21,7 +21,6 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{Map, Value};
-use std::env;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -30,15 +29,19 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::time::Instant;
 
+use crate::config::{EnvVar, read_env_var, read_env_var_os};
+
 /// Schema version. Bump on shape changes; `docs/schemas/test_event_v1.json`
 /// must move in lock-step.
 pub const TEST_EVENT_SCHEMA_V1: &str = "ee.test_event.v1";
 
 /// Env var naming the JSON-line log file. Unset → harness no-ops.
-pub const ENV_TEST_LOG_PATH: &str = "EE_TEST_LOG_PATH";
+pub const ENV_TEST_LOG_PATH: &str = EnvVar::TestLogPath.name();
 
 /// Env var controlling verbosity (`quiet|normal|verbose`).
-pub const ENV_TEST_LOG_LEVEL: &str = "EE_TEST_LOG_LEVEL";
+pub const ENV_TEST_LOG_LEVEL: &str = EnvVar::TestLogLevel.name();
+/// Env var naming the current test scenario.
+pub const ENV_TEST_LOG_TEST_ID: &str = EnvVar::TestLogTestId.name();
 
 /// Event kinds emitted by the harness. `timer_lap` is suppressed at the
 /// `normal` level; everything else is always emitted when a log path is
@@ -60,6 +63,50 @@ pub enum EventKind {
     TimerLap,
     /// A free-form note (e.g. test setup phase markers).
     Note,
+    /// Pack-hash subcomponent hashes for determinism debugging.
+    PackHashComponents,
+    /// Observed DB/index generations for staleness debugging.
+    DbGenerationObserved,
+    /// Volatile fields stripped before determinism hashing.
+    VolatileStrip,
+    /// Test-event schema gate summary.
+    SchemaGate,
+}
+
+impl EventKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CommandStart => "command_start",
+            Self::CommandEnd => "command_end",
+            Self::AssertOk => "assert_ok",
+            Self::AssertFail => "assert_fail",
+            Self::GoldenCompare => "golden_compare",
+            Self::TimerLap => "timer_lap",
+            Self::Note => "note",
+            Self::PackHashComponents => "pack_hash_components",
+            Self::DbGenerationObserved => "db_generation_observed",
+            Self::VolatileStrip => "volatile_strip",
+            Self::SchemaGate => "schema_gate",
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 11] {
+        [
+            Self::CommandStart,
+            Self::CommandEnd,
+            Self::AssertOk,
+            Self::AssertFail,
+            Self::GoldenCompare,
+            Self::TimerLap,
+            Self::Note,
+            Self::PackHashComponents,
+            Self::DbGenerationObserved,
+            Self::VolatileStrip,
+            Self::SchemaGate,
+        ]
+    }
 }
 
 /// Verbosity filter parsed from `EE_TEST_LOG_LEVEL`.
@@ -152,7 +199,7 @@ impl TestEvent {
 /// Resolve the configured log path (env-based). `None` when unset.
 #[must_use]
 pub fn log_path() -> Option<PathBuf> {
-    env::var_os(ENV_TEST_LOG_PATH).map(PathBuf::from)
+    read_env_var_os(EnvVar::TestLogPath).map(PathBuf::from)
 }
 
 /// Current log level (env-based). Cheap; called per-emit so tests can flip
@@ -160,7 +207,13 @@ pub fn log_path() -> Option<PathBuf> {
 /// because this crate forbids `unsafe`).
 #[must_use]
 pub fn log_level() -> LogLevel {
-    LogLevel::parse(env::var_os(ENV_TEST_LOG_LEVEL))
+    LogLevel::parse(read_env_var_os(EnvVar::TestLogLevel))
+}
+
+/// Resolve the current test id, falling back to a stable caller-supplied id.
+#[must_use]
+pub fn test_id_or(default: impl Into<String>) -> String {
+    read_env_var(EnvVar::TestLogTestId).unwrap_or_else(|| default.into())
 }
 
 // Lock keeps appends atomic in-process; cross-process appends rely on the
@@ -509,7 +562,7 @@ mod tests {
     #[test]
     fn empty_log_path_function_returns_none_when_unset() {
         // Read-only env access is safe even without unsafe.
-        if env::var_os(ENV_TEST_LOG_PATH).is_none() {
+        if read_env_var_os(EnvVar::TestLogPath).is_none() {
             assert!(log_path().is_none());
         } else {
             // Test runner has the var set externally — skip rather than fail.

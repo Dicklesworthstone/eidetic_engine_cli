@@ -162,6 +162,9 @@ pub fn redact_memory_record(
     }
 
     record.content = redact_content(&record.content, level);
+    if let Some(reason) = record.tombstoned_reason.as_ref() {
+        record.tombstoned_reason = Some(redact_content(reason, level));
+    }
     record.redacted = level != RedactionLevel::None;
     record.redaction_reason = Some(format!("redaction_level:{}", level.as_str()));
 

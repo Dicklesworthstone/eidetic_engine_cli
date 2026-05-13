@@ -868,6 +868,10 @@ pub struct ExportMemoryRecord {
     pub utility: Option<f64>,
     pub created_at: String,
     pub updated_at: Option<String>,
+    pub tombstoned_at: Option<String>,
+    pub tombstoned_reason: Option<String>,
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
     pub expires_at: Option<String>,
     pub source_agent: Option<String>,
     pub provenance_uri: Option<String>,
@@ -896,6 +900,10 @@ pub struct ExportMemoryRecordBuilder {
     utility: Option<f64>,
     created_at: Option<String>,
     updated_at: Option<String>,
+    tombstoned_at: Option<String>,
+    tombstoned_reason: Option<String>,
+    valid_from: Option<String>,
+    valid_to: Option<String>,
     expires_at: Option<String>,
     source_agent: Option<String>,
     provenance_uri: Option<String>,
@@ -967,6 +975,30 @@ impl ExportMemoryRecordBuilder {
     }
 
     #[must_use]
+    pub fn tombstoned_at(mut self, tombstoned_at: impl Into<String>) -> Self {
+        self.tombstoned_at = Some(tombstoned_at.into());
+        self
+    }
+
+    #[must_use]
+    pub fn tombstoned_reason(mut self, tombstoned_reason: impl Into<String>) -> Self {
+        self.tombstoned_reason = Some(tombstoned_reason.into());
+        self
+    }
+
+    #[must_use]
+    pub fn valid_from(mut self, valid_from: impl Into<String>) -> Self {
+        self.valid_from = Some(valid_from.into());
+        self
+    }
+
+    #[must_use]
+    pub fn valid_to(mut self, valid_to: impl Into<String>) -> Self {
+        self.valid_to = Some(valid_to.into());
+        self
+    }
+
+    #[must_use]
     pub fn expires_at(mut self, expires_at: impl Into<String>) -> Self {
         self.expires_at = Some(expires_at.into());
         self
@@ -1030,6 +1062,10 @@ impl ExportMemoryRecordBuilder {
             utility: self.utility,
             created_at: required_string(ExportRecordType::Memory, "created_at", self.created_at)?,
             updated_at: self.updated_at,
+            tombstoned_at: self.tombstoned_at,
+            tombstoned_reason: self.tombstoned_reason,
+            valid_from: self.valid_from,
+            valid_to: self.valid_to,
             expires_at: self.expires_at,
             source_agent: self.source_agent,
             provenance_uri: self.provenance_uri,
@@ -1949,6 +1985,10 @@ mod tests {
             .importance(0.8)
             .confidence(0.9)
             .created_at("2026-04-30T12:00:00Z")
+            .tombstoned_at("2026-05-01T12:00:00Z")
+            .tombstoned_reason("outdated release procedure")
+            .valid_from("2026-04-01T00:00:00Z")
+            .valid_to("2026-06-01T00:00:00Z")
             .source_agent("claude-code")
             .redacted(false)
             .build()
@@ -1959,6 +1999,16 @@ mod tests {
         assert_eq!(memory.level, "procedural");
         assert_eq!(memory.kind, "rule");
         assert_eq!(memory.importance, Some(0.8));
+        assert_eq!(
+            memory.tombstoned_at.as_deref(),
+            Some("2026-05-01T12:00:00Z")
+        );
+        assert_eq!(
+            memory.tombstoned_reason.as_deref(),
+            Some("outdated release procedure")
+        );
+        assert_eq!(memory.valid_from.as_deref(), Some("2026-04-01T00:00:00Z"));
+        assert_eq!(memory.valid_to.as_deref(), Some("2026-06-01T00:00:00Z"));
         assert!(!memory.redacted);
     }
 
@@ -2552,6 +2602,10 @@ mod tests {
             "confidence": 0.9,
             "utility": 0.7,
             "created_at": "2026-04-30T12:00:00Z",
+            "tombstoned_at": "2026-05-01T12:00:00Z",
+            "tombstoned_reason": "outdated release procedure",
+            "valid_from": "2026-04-01T00:00:00Z",
+            "valid_to": "2026-06-01T00:00:00Z",
             "redacted": false
         }"#;
 
@@ -2559,6 +2613,16 @@ mod tests {
         assert_eq!(memory.schema, EXPORT_MEMORY_SCHEMA_V1);
         assert_eq!(memory.memory_id, "mem-001");
         assert_eq!(memory.importance, Some(0.8));
+        assert_eq!(
+            memory.tombstoned_at.as_deref(),
+            Some("2026-05-01T12:00:00Z")
+        );
+        assert_eq!(
+            memory.tombstoned_reason.as_deref(),
+            Some("outdated release procedure")
+        );
+        assert_eq!(memory.valid_from.as_deref(), Some("2026-04-01T00:00:00Z"));
+        assert_eq!(memory.valid_to.as_deref(), Some("2026-06-01T00:00:00Z"));
         assert!(!memory.redacted);
     }
 

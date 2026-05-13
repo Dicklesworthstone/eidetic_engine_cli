@@ -100,6 +100,7 @@ fn source_roots() -> Vec<PathBuf> {
         src.join("graph"),
         src.join("output"),
         src.join("pack"),
+        src.join("science"),
         src.join("steward"),
         src.join("serve.rs"),
         src.join("curate").join("cluster_coherence.rs"),
@@ -119,6 +120,14 @@ fn line_defines_code_literal(line: &str) -> bool {
     trimmed.contains("code:")
         || trimmed.contains("\"code\":")
         || trimmed.contains("degradation_code:")
+        || (trimmed.contains("_CODE") && trimmed.contains("= \""))
+        || trimmed.contains("=> \"maintenance_job_")
+}
+
+fn line_starts_code_factory_call(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.contains("trace_degradation(")
+        || trimmed.contains("snapshot_graph_feature_unavailable_report(")
 }
 
 fn excluded_code_candidate(value: &str) -> bool {
@@ -149,7 +158,30 @@ fn emitted_degraded_codes() -> TestResult<BTreeSet<String>> {
     for file in files {
         let content = fs::read_to_string(&file)
             .map_err(|error| format!("read {}: {error}", file.display()))?;
+        let mut capture_next_factory_code = false;
         for line in content.lines() {
+            if capture_next_factory_code {
+                for candidate in quoted_strings(line) {
+                    if candidate != "code"
+                        && !candidate.starts_with("test_")
+                        && !excluded_code_candidate(&candidate)
+                        && is_code_candidate(&candidate)
+                    {
+                        codes.insert(candidate);
+                        capture_next_factory_code = false;
+                        break;
+                    }
+                }
+                if line.contains(')') {
+                    capture_next_factory_code = false;
+                }
+                if !capture_next_factory_code {
+                    continue;
+                }
+            }
+            if line_starts_code_factory_call(line) {
+                capture_next_factory_code = true;
+            }
             if !line_defines_code_literal(line) {
                 continue;
             }

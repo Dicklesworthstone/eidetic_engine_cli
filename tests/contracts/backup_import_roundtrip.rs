@@ -189,6 +189,7 @@ fn build_source_workspace(workspace: &Path, database: &Path) -> Result<(), Strin
             tags: *tags,
             confidence: 0.85,
             source: None,
+            allow_secret_mention: false,
             valid_from: None,
             valid_to: None,
             dry_run: false,

@@ -1,8 +1,11 @@
+pub mod env_registry;
 pub mod file;
 pub mod merge;
 pub mod path;
 pub mod workspace;
 
+pub use env_registry::{EnvVar, is_set as env_var_is_set, read as read_env_var};
+pub use env_registry::{read_or_default as read_env_var_or_default, read_os as read_env_var_os};
 pub use file::{
     CassConfig, ConfigFile, ConfigParseError, CurationConfig, FeedbackConfig, PackConfig,
     PolicyConfig, PrivacyConfig, RuntimeConfig, SearchConfig, SearchSpeed, SecretDetectorConfig,

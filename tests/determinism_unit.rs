@@ -25,6 +25,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -95,12 +96,16 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
 }
 
 fn tmp_workspace(label: &str) -> Result<PathBuf, String> {
-    let base =
-        std::env::temp_dir().join(format!("ee-determinism-{}-{}", label, std::process::id()));
-    if base.exists() {
-        std::fs::remove_dir_all(&base)
-            .map_err(|error| format!("clean stale workspace: {error}"))?;
-    }
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let base = std::env::temp_dir().join(format!(
+        "ee-determinism-{}-{}-{}",
+        label,
+        std::process::id(),
+        nonce
+    ));
     std::fs::create_dir_all(&base).map_err(|error| format!("create workspace: {error}"))?;
     Ok(base)
 }
@@ -184,12 +189,7 @@ fn search_tie_break_stable_across_three_invocations() -> TestResult {
     Ok(())
 }
 
-// IGNORED pending bd-xzuma (pack-hash non-determinism). The test passes
-// the binary the same query, budget, profile and workspace three times
-// and observes distinct `data.pack.hash` values on each run — an
-// AGENTS.md non-negotiable violation. Re-enable after the fix lands.
 #[test]
-#[ignore = "bd-xzuma: pack hash currently non-deterministic across runs"]
 fn context_pack_hash_reproduces_across_three_invocations() -> TestResult {
     let workspace = tmp_workspace("pack_hash")?;
     init_workspace(&workspace)?;

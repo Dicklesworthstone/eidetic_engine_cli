@@ -4,6 +4,7 @@
 //! consolidation, promotion, deprecation, supersession, tombstoning, etc.
 //! No silent durable mutation — every change goes through this queue.
 
+pub mod cluster_coherence;
 pub mod regret;
 
 use std::cmp::Ordering;

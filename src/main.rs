@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
+use ee::config::env_registry::{EnvVar, read};
 use ee::obs::{LogEnvelope, LogLevel, now_rfc3339_nanos};
 use serde_json::Value;
 use tracing_subscriber::EnvFilter;
@@ -32,8 +33,8 @@ fn has_explicit_machine_output_flag(args: &[OsString]) -> bool {
 }
 
 fn should_inject_json_flag(args: &[OsString]) -> bool {
-    let hook_mode = env_flag_truthy(std::env::var("EE_HOOK_MODE").ok());
-    let agent_mode = env_flag_truthy(std::env::var("EE_AGENT_MODE").ok());
+    let hook_mode = env_flag_truthy(read(EnvVar::HookMode));
+    let agent_mode = env_flag_truthy(read(EnvVar::AgentMode));
     (hook_mode || agent_mode) && !has_explicit_machine_output_flag(args)
 }
 
@@ -42,8 +43,7 @@ fn env_value_is_json(value: Option<String>) -> bool {
 }
 
 fn json_log_enabled() -> bool {
-    env_flag_truthy(std::env::var("EE_LOG_JSON").ok())
-        || env_value_is_json(std::env::var("EE_LOG_FORMAT").ok())
+    env_flag_truthy(read(EnvVar::LogJson)) || env_value_is_json(read(EnvVar::LogFormat))
 }
 
 fn inferred_command_name(args: &[OsString]) -> String {
