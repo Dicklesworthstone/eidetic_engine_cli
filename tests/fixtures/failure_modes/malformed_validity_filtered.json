@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "malformed_validity_filtered",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "search"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Search encounters an indexed memory whose validity timestamp is malformed and excludes it from results.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# inject a malformed valid_from or valid_to timestamp through a fixture harness"
+    ],
+    "invocation": "ee search 'malformed validity marker' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "malformed_validity_filtered",
+    "severity": "medium",
+    "message_contains": [
+      "malformed validity timestamps"
+    ],
+    "repair_contains": "ee why"
+  }
+}

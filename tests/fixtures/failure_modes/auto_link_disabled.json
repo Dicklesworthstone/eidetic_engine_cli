@@ -1,0 +1,25 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "auto_link_disabled",
+  "introduced_by": { "bead": "bd-17c65.7.6", "epic_letter": "G" },
+  "surfaces": ["remember"],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee remember invoked WITHOUT a workflow_id. Per G7's honest-unimplemented decision, workflow-less auto-linking is not implemented: ee returns status=no_workflow_required AND an info-severity degraded entry pointing at the explicit `ee memory link` surface.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee remember 'My new memory' --workspace . --level procedural --kind rule --json"
+  },
+  "expected_emission": {
+    "code": "auto_link_disabled",
+    "severity": "info",
+    "message_contains": [
+      "Automatic memory linking requires a workflow context",
+      "ee memory link"
+    ],
+    "repair_contains": "ee memory link"
+  },
+  "notes": "Status string is `auto_link_status: \"no_workflow_required\"` (a non-failure honest state). The degraded entry serves as the agent-readable signal that no workflow was supplied and explicit linking is the path forward."
+}

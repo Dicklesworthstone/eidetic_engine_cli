@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "usage_conflicting_presets",
+  "introduced_by": {
+    "bead": "bd-17c65.4.5",
+    "epic_letter": "D"
+  },
+  "surfaces": [
+    "status",
+    "search",
+    "context"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "A --fields selector provides more than one preset instead of one preset plus explicit field additions.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee status --workspace . --fields minimal,summary --json"
+  },
+  "expected_emission": {
+    "code": "usage_conflicting_presets",
+    "severity": "low",
+    "message_contains": [
+      "Conflicting --fields presets"
+    ],
+    "repair_contains": "Use one preset"
+  }
+}

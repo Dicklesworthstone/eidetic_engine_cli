@@ -62,7 +62,7 @@ A degraded entry's `code` is classified into one of three buckets:
 > a new code, add a row here in the same commit. The
 > `tests/degraded_code_taxonomy_consistency_test.rs` enforces this.
 
-### `build_time` (9 codes — migration targets for E5)
+### `build_time` (10 codes — surfaced through `ee capabilities`)
 
 | Code | Surface | Feature flag | Notes |
 |------|---------|--------------|-------|
@@ -70,6 +70,7 @@ A degraded entry's `code` is classified into one of three buckets:
 | `daemon_background_mode_unimplemented` | serve | (daemon background-mode build) | Background daemon mode not built; foreground still works. |
 | `diagram_backend_unavailable` | doctor, dependency contract | (mermaid renderer feature) | Mermaid backend not linked. |
 | `lexical_unavailable` | search | `frankensearch/lexical` | BM25 arm disabled at build. |
+| `mcp_feature_disabled` | mcp manifest | `mcp` | MCP manifest remains available, but the stdio adapter is disabled in this build. |
 | `mcp_unavailable` | doctor, dependency contract | `mcp` | MCP adapter feature off. |
 | `runtime_unavailable` | status, doctor | `asupersync` | Runtime feature off (defensive; should never fire in a real build). |
 | `search_unimplemented` | status | `frankensearch` core feature | Whole search subsystem disabled. |
@@ -84,7 +85,7 @@ A degraded entry's `code` is classified into one of three buckets:
 | `graph_unavailable` | doctor, diag graph | Build-time: `fnx-*` feature. Response-time: snapshot generation failed. Split per E5. |
 | `search_unavailable` | doctor, dependency contract | Build-time: `frankensearch`. Response-time: index manifest missing. Split per E5. |
 
-### `response_time` (88 codes — stay in `degraded[]`)
+### `response_time` (89 codes — stay in `degraded[]`)
 
 #### Search and pack quality (15)
 | Code | Severity (canonical) | Bead |
@@ -129,7 +130,7 @@ A degraded entry's `code` is classified into one of three buckets:
 | `policy_secret_detected_with_offsets` | medium | bd-17c65.3.4 (C4) |
 | `policy_tag_rejected_with_details` | low | bd-17c65.3.4 (C4) |
 
-#### Learn / curate (12)
+#### Learn / curate (13)
 | Code | Severity | Bead |
 |------|----------|------|
 | `auto_propose_deferred_to_maintenance` | info | bd-17c65.7.3 (G3) |
@@ -143,6 +144,7 @@ A degraded entry's `code` is classified into one of three buckets:
 | `curation_ttl_blocked` | medium | bd-17c65.7.4 (G4) |
 | `curation_ttl_policy_missing` | medium | bd-17c65.7.4 (G4) |
 | `curation_ttl_policy_unavailable` | medium | bd-17c65.10.6 (J6) |
+| `auto_link_disabled` | info | bd-17c65.7.6 (G7) — workflow-less honest-unimplemented marker |
 | `remember_auto_link_failed` | low | bd-17c65.7.3 (G3) |
 | `remember_link_suggestion_failed` | low | bd-17c65.7.3 (G3) |
 
@@ -340,7 +342,6 @@ A degraded entry's `code` is classified into one of three buckets:
 | `lab_replay_unavailable` | medium | bd-17c65.14.15.5 (N15.4) — slated for retirement once N15 lands |
 | `legacy_memory` | info | (TBD) — legacy import marker |
 | `manual_heavy_strategy` | info | (TBD) |
-| `mcp_feature_disabled` | medium | bd-17c65.10.6 (J6) — distinct from build-time `mcp_unavailable`; this is a per-call disable |
 | `profile_mismatch` | medium | (TBD) |
 | `profile_missing` | low | (TBD) |
 | `redaction_uncertain` | warning | bd-17c65.11.6 (K6) |
@@ -358,32 +359,24 @@ A degraded entry's `code` is classified into one of three buckets:
 |------|----------|------|
 | `storage_unavailable` | medium | bd-17c65.10.6 (J6) — also classified in mixed table above; appears as response_time when storage feature is built |
 
-## Capabilities surface (post-E5 target)
+## Capabilities surface
 
-When E5 (`bd-17c65.5.5`) lands, the build-time and mixed codes move to:
+Build-time gaps are reported once by `ee capabilities --json`:
 
 ```json
-"capabilities": {
-  "unimplemented": [
-    {
-      "code": "lexical_unavailable",
-      "feature_flag": "frankensearch/lexical",
-      "tracking_bead": "bd-17c65.5.5",
-      "user_message": "Lexical BM25 search is disabled in this build."
-    },
-    { /* ... other 7 build_time codes ... */ }
-  ],
-  "available": [
-    { "name": "semantic_search", "feature_flag": "frankensearch/model2vec" },
-    { "name": "graph_compute",  "feature_flag": "fnx-runtime" },
-    /* ... presence markers including the mixed-code build-time half ... */
-  ]
-}
+"unimplemented": [
+  {
+    "code": "lexical_unavailable",
+    "featureFlag": "lexical-bm25",
+    "trackingBead": "bd-17c65.5.5",
+    "userMessage": "BM25 lexical search is disabled in this build."
+  },
+  { "...": "other build_time codes" }
+]
 ```
 
-Until E5 lands, `build_time` and `mixed` codes still appear in
-`data.degraded[]`. After E5, only `response_time` codes (and the
-response-time half of mixed) appear in `data.degraded[]`.
+Only `response_time` codes, plus the response-time half of `mixed`
+codes, belong in response-local `data.degraded[]` arrays.
 
 ## Severity vocabulary (canonical; 6 tiers)
 

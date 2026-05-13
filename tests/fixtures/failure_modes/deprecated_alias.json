@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "deprecated_alias",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "remember",
+    "context"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "A promoted triad command keeps the older verbose command available as a compatibility alias and reports the replacement.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee remember 'Deprecated alias fixture.' --workspace . --level semantic --kind fact --json"
+  },
+  "expected_emission": {
+    "code": "deprecated_alias",
+    "severity": "low",
+    "message_contains": [
+      "compatibility alias",
+      "promoted triad command"
+    ],
+    "repair_contains": "ee note"
+  }
+}

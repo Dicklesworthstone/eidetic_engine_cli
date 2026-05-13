@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "validity_filtered_significant_recall_drop",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "search",
+    "context"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Validity filtering removes at least half of candidate memories, leaving materially fewer candidates for search or fallback context packing.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'J6 future validity marker.' --workspace . --level semantic --kind fact --valid-from 2999-01-01T00:00:00Z"
+    ],
+    "invocation": "ee search 'future validity marker' --workspace . --relevance-floor 0.0 --json"
+  },
+  "expected_emission": {
+    "code": "validity_filtered_significant_recall_drop",
+    "severity": "info",
+    "message_contains": [
+      "Validity window filtering removed",
+      "remain"
+    ],
+    "repair_contains": "--include-expired"
+  }
+}

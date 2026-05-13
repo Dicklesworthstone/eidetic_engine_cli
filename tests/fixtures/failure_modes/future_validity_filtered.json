@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "future_validity_filtered",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "search"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "A memory has a valid_from timestamp after the search reference time, so default search hides it from current results.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'J6 future validity marker.' --workspace . --level semantic --kind fact --valid-from 2999-01-01T00:00:00Z"
+    ],
+    "invocation": "ee search 'future validity marker' --workspace . --relevance-floor 0.0 --json"
+  },
+  "expected_emission": {
+    "code": "future_validity_filtered",
+    "severity": "low",
+    "message_contains": [
+      "not-yet-valid",
+      "valid_from"
+    ],
+    "repair_contains": "--include-future"
+  }
+}

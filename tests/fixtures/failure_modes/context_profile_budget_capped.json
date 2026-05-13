@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "context_profile_budget_capped",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "context"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "The active constrained operating profile caps the requested context budget before packing.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'J6 context task memory.' --workspace . --level semantic --kind fact"
+    ],
+    "invocation": "ee context 'J6 context task' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "context_profile_budget_capped",
+    "severity": "low",
+    "message_contains": [
+      "Context request budget was capped",
+      "operating profile"
+    ],
+    "repair_contains": "ee profile config plan"
+  }
+}

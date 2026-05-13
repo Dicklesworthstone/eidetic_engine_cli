@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "stale_validity_filtered",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "search"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "Search encounters an indexed memory whose stored validity_status is stale and excludes it unless stale memories are explicitly requested.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# inject or age an indexed validity_status through a fixture harness"
+    ],
+    "invocation": "ee search 'stale validity marker' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "stale_validity_filtered",
+    "severity": "low",
+    "message_contains": [
+      "stale",
+      "validity_status"
+    ],
+    "repair_contains": "--include-stale"
+  }
+}
