@@ -6045,7 +6045,11 @@ mod tests {
             "no_workflow_required".to_string(),
             "workflow-less auto-link status is `no_workflow_required` (honest-unimplemented marker)",
         )?;
-        ensure(report.auto_links.len(), 0, "no auto-links created without workflow")?;
+        ensure(
+            report.auto_links.len(),
+            0,
+            "no auto-links created without workflow",
+        )?;
         ensure(
             report.auto_link_degradations.len(),
             1,
