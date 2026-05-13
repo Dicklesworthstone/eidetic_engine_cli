@@ -1,0 +1,9 @@
+---
+source: src/cli/mod.rs
+assertion: agent-triad interface is complete
+schema:
+  triad: ee.agent_triad.v1
+contracts:
+  - agent triad inference works seamlessly
+evidence:
+  - agent_triad.inference

@@ -1,0 +1,104 @@
+{"id":"rule_001","content":"Always run cargo fmt before release.","level":"procedural","kind":"rule"}
+{"id":"rule_002","content":"Never commit generated credentials into fixtures.","level":"procedural","kind":"rule"}
+{"id":"rule_003","content":"Use the USB target directory for local Cargo builds.","level":"procedural","kind":"rule"}
+{"id":"rule_004","content":"Verify JSON output stays parseable before closing a bead.","level":"procedural","kind":"rule"}
+{"id":"rule_005","content":"Check the bead dependency graph before claiming work.","level":"procedural","kind":"rule"}
+{"id":"rule_006","content":"Ensure pack hashes remain stable for identical inputs.","level":"procedural","kind":"rule"}
+{"id":"rule_007","content":"Prefer structured parsers for response envelopes.","level":"procedural","kind":"rule"}
+{"id":"rule_008","content":"Remember to include provenance for promoted rules.","level":"procedural","kind":"rule"}
+{"id":"rule_009","content":"Run focused tests before the broad readiness gate.","level":"procedural","kind":"rule"}
+{"id":"rule_010","content":"All context pack items must include actionable reasons.","level":"procedural","kind":"rule"}
+{"id":"rule_011","content":"The search response should report degraded recall honestly.","level":"procedural","kind":"rule"}
+{"id":"rule_012","content":"A closure note is required when a bead ships a sentinel.","level":"procedural","kind":"rule"}
+{"id":"rule_013","content":"Always sync beads after changing issue state.","level":"procedural","kind":"rule"}
+{"id":"rule_014","content":"Never hide a failed search arm behind a success envelope.","level":"procedural","kind":"rule"}
+{"id":"rule_015","content":"Use markdown snapshots for renderer regressions.","level":"procedural","kind":"rule"}
+{"id":"rule_016","content":"Verify that stdout contains only machine JSON in json mode.","level":"procedural","kind":"rule"}
+{"id":"rule_017","content":"Check feature flags before exercising experimental aliases.","level":"procedural","kind":"rule"}
+{"id":"rule_018","content":"Ensure memory IDs are quoted in shell examples.","level":"procedural","kind":"rule"}
+{"id":"rule_019","content":"Prefer explicit workspace flags in e2e scripts.","level":"procedural","kind":"rule"}
+{"id":"rule_020","content":"Remember decay jobs are opt in until documented otherwise.","level":"procedural","kind":"rule"}
+{"id":"rule_021","content":"Run bash syntax checks for changed shell drivers.","level":"procedural","kind":"rule"}
+{"id":"rule_022","content":"All degraded codes should have catalog fixtures.","level":"procedural","kind":"rule"}
+{"id":"rule_023","content":"Use existing core APIs for triad wrappers.","level":"procedural","kind":"rule"}
+{"id":"rule_024","content":"Never create custom retrieval fusion inside the CLI layer.","level":"procedural","kind":"rule"}
+{"id":"rule_025","content":"Check pack markdown parity after changing JSON shape.","level":"procedural","kind":"rule"}
+{"id":"rule_026","content":"Ensure tombstoned memories stay excluded by default.","level":"procedural","kind":"rule"}
+{"id":"rule_027","content":"Verify fixture counts before trusting accuracy metrics.","level":"procedural","kind":"rule"}
+{"id":"rule_028","content":"Use deterministic ordering for every emitted item list.","level":"procedural","kind":"rule"}
+{"id":"rule_029","content":"Always record the command that produced a spike artifact.","level":"procedural","kind":"rule"}
+{"id":"rule_030","content":"Prefer dry-run probes when measuring wrapper inference.","level":"procedural","kind":"rule"}
+{"id":"rule_031","content":"Required repair hints belong in every blocking error.","level":"procedural","kind":"rule"}
+{"id":"rule_032","content":"Run cargo fmt after editing Rust tests.","level":"procedural","kind":"rule"}
+{"id":"failure_001","content":"The release failed when the search index was stale.","level":"episodic","kind":"failure"}
+{"id":"failure_002","content":"A regression in pack rendering duplicated every item.","level":"episodic","kind":"failure"}
+{"id":"failure_003","content":"The build broke after enabling the optional adapter.","level":"episodic","kind":"failure"}
+{"id":"failure_004","content":"A JSON schema error blocked the contract test.","level":"episodic","kind":"failure"}
+{"id":"failure_005","content":"The migration problem appeared on the seeded workspace.","level":"episodic","kind":"failure"}
+{"id":"failure_006","content":"The smoke test reported a storage failure in the audit path.","level":"episodic","kind":"failure"}
+{"id":"failure_007","content":"The pack hash bug made identical inputs diverge.","level":"episodic","kind":"failure"}
+{"id":"failure_008","content":"A broken fixture hid the missing degraded code.","level":"episodic","kind":"failure"}
+{"id":"failure_009","content":"The parser failed on an empty markdown table row.","level":"episodic","kind":"failure"}
+{"id":"failure_010","content":"The link suggestion problem came from stale tag data.","level":"episodic","kind":"failure"}
+{"id":"failure_011","content":"The context command errored when the DB path was absent.","level":"episodic","kind":"failure"}
+{"id":"failure_012","content":"The status report showed a regression in freshness scoring.","level":"episodic","kind":"failure"}
+{"id":"failure_013","content":"The formatter failure came from a long generated line.","level":"episodic","kind":"failure"}
+{"id":"failure_014","content":"A search quality bug returned only zero-score hits.","level":"episodic","kind":"failure"}
+{"id":"failure_015","content":"The policy detector broke on a harmless token-budget note.","level":"episodic","kind":"failure"}
+{"id":"failure_016","content":"The e2e driver failed because the binary path was stale.","level":"episodic","kind":"failure"}
+{"id":"failure_017","content":"The graph refresh problem left centrality scores unavailable.","level":"episodic","kind":"failure"}
+{"id":"failure_018","content":"The output contract error came from mixed stdout diagnostics.","level":"episodic","kind":"failure"}
+{"id":"failure_019","content":"The backup roundtrip bug changed tag ordering.","level":"episodic","kind":"failure"}
+{"id":"failure_020","content":"The closure linter failed after a sentinel bead was mislabeled.","level":"episodic","kind":"failure"}
+{"id":"failure_021","content":"A stale workspace problem produced an invalid migration report.","level":"episodic","kind":"failure"}
+{"id":"failure_022","content":"The replay command broke when a pack record was missing.","level":"episodic","kind":"failure"}
+{"id":"failure_023","content":"The redaction problem removed the entire policy sentence.","level":"episodic","kind":"failure"}
+{"id":"failure_024","content":"The shell driver failed on a missing jq binary.","level":"episodic","kind":"failure"}
+{"id":"event_001","content":"The 2026 release was tagged after the local verify pass.","level":"episodic","kind":"event"}
+{"id":"event_002","content":"The 2025 workspace was migrated with the v2 schema.","level":"episodic","kind":"event"}
+{"id":"event_003","content":"The 2026 audit run fixed the stale closure notes.","level":"episodic","kind":"event"}
+{"id":"event_004","content":"The 2024 fixture was changed during the markdown parity pass.","level":"episodic","kind":"event"}
+{"id":"event_005","content":"The 2026 harness ran the triad walkthrough twice.","level":"episodic","kind":"event"}
+{"id":"event_006","content":"The 2025 importer did preserve every memory tag.","level":"episodic","kind":"event"}
+{"id":"event_007","content":"The 2026 benchmark was recorded with the release profile.","level":"episodic","kind":"event"}
+{"id":"event_008","content":"The 2024 corpus was seeded before the search probe.","level":"episodic","kind":"event"}
+{"id":"event_009","content":"The 2026 agent changed the pack profile defaults.","level":"episodic","kind":"event"}
+{"id":"event_010","content":"The 2025 smoke suite ran on the retained workspace.","level":"episodic","kind":"event"}
+{"id":"event_011","content":"The 2026 context check did include rendered markdown.","level":"episodic","kind":"event"}
+{"id":"event_012","content":"The 2024 diagnostic run was captured in the support bundle.","level":"episodic","kind":"event"}
+{"id":"event_013","content":"The 2026 migration fixed the workspace id mapping.","level":"episodic","kind":"event"}
+{"id":"event_014","content":"The 2025 release notes were updated after the gate passed.","level":"episodic","kind":"event"}
+{"id":"event_015","content":"The 2026 replay did select the same pack items.","level":"episodic","kind":"event"}
+{"id":"event_016","content":"The 2024 search probe ran with lexical-only mode.","level":"episodic","kind":"event"}
+{"id":"event_017","content":"The 2026 handoff was written after the verification ledger.","level":"episodic","kind":"event"}
+{"id":"event_018","content":"The 2025 graph snapshot was refreshed during maintenance.","level":"episodic","kind":"event"}
+{"id":"event_019","content":"The 2026 driver changed the outcome artifact schema.","level":"episodic","kind":"event"}
+{"id":"event_020","content":"The 2024 backup was restored into a clean workspace.","level":"episodic","kind":"event"}
+{"id":"event_021","content":"The 2026 command log ran before the final sync.","level":"episodic","kind":"event"}
+{"id":"event_022","content":"The 2025 policy audit fixed the allowlist examples.","level":"episodic","kind":"event"}
+{"id":"event_023","content":"The 2026 test matrix did cover compact output.","level":"episodic","kind":"event"}
+{"id":"event_024","content":"The 2024 contract fixture was normalized after review.","level":"episodic","kind":"event"}
+{"id":"fact_001","content":"Cargo target artifacts live outside the repository checkout.","level":"semantic","kind":"fact"}
+{"id":"fact_002","content":"The default branch name is main.","level":"semantic","kind":"fact"}
+{"id":"fact_003","content":"Context packs contain a rendered markdown text field.","level":"semantic","kind":"fact"}
+{"id":"fact_004","content":"The response envelope schema is ee.response.v1.","level":"semantic","kind":"fact"}
+{"id":"fact_005","content":"FrankenSQLite is the durable storage foundation.","level":"semantic","kind":"fact"}
+{"id":"fact_006","content":"Frankensearch provides hybrid retrieval for memories.","level":"semantic","kind":"fact"}
+{"id":"fact_007","content":"Asupersync is the runtime foundation for this CLI.","level":"semantic","kind":"fact"}
+{"id":"fact_008","content":"The mcp adapter is optional for normal operation.","level":"semantic","kind":"fact"}
+{"id":"fact_009","content":"Pack skipped entries describe candidates excluded from context.","level":"semantic","kind":"fact"}
+{"id":"fact_010","content":"Memory links store relationships between durable memory records.","level":"semantic","kind":"fact"}
+{"id":"fact_011","content":"The query file schema name is ee.query.v1.","level":"semantic","kind":"fact"}
+{"id":"fact_012","content":"The outcome artifact belongs under tests logs active.","level":"semantic","kind":"fact"}
+{"id":"fact_013","content":"The triad surface consists of note pack and why.","level":"semantic","kind":"fact"}
+{"id":"fact_014","content":"The search quality report includes a source mode field.","level":"semantic","kind":"fact"}
+{"id":"fact_015","content":"Workspace configuration influences context pack budgets.","level":"semantic","kind":"fact"}
+{"id":"fact_016","content":"Golden fixtures preserve stable machine output contracts.","level":"semantic","kind":"fact"}
+{"id":"fact_017","content":"Audit log rows capture durable memory mutations.","level":"semantic","kind":"fact"}
+{"id":"fact_018","content":"A pack hash starts with a blake3 prefix.","level":"semantic","kind":"fact"}
+{"id":"fact_019","content":"The support bundle contains redacted diagnostic artifacts.","level":"semantic","kind":"fact"}
+{"id":"fact_020","content":"The closure linter reads bead taxonomy labels.","level":"semantic","kind":"fact"}
+{"id":"fact_021","content":"The corpus seed script populates the reference workspace.","level":"semantic","kind":"fact"}
+{"id":"fact_022","content":"The graph snapshot stores derived centrality features.","level":"semantic","kind":"fact"}
+{"id":"fact_023","content":"The verification ledger links commands to closure evidence.","level":"semantic","kind":"fact"}
+{"id":"fact_024","content":"The status command reports subsystem readiness.","level":"semantic","kind":"fact"}

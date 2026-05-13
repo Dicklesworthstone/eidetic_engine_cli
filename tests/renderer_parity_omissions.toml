@@ -1,0 +1,77 @@
+# D8 cross-renderer parity matrix — intentional-omissions allowlist
+#
+# Owned by bd-17c65.4.9 (D8). The full parity-matrix test
+# (`tests/renderer_parity_matrix.rs` — landed under D8.1 follow-up
+# `bd-17c65.4.9.1`) walks every (renderer, canonical_field) pair and
+# asserts the field lands in the right place. Some omissions are
+# *intentional* and documented here so the matrix test allows them.
+#
+# Schema (each entry):
+#
+#   [[omission]]
+#   renderer = "human" | "json" | "toon" | "jsonl" | "compact" | "hook" | "markdown"
+#   field = "pack.items[].scoreBreakdown" | …
+#   reason = "format_native_omission" | "compact_intentional_drop"
+#   rationale = "<one-line human-readable rationale>"
+#   since_schema = "ee.context.v1" | …
+#
+# `reason` values:
+#   - `format_native_omission` — the format is structurally incapable
+#     of carrying this field (e.g. mermaid is a diagram-only output,
+#     not a record carrier; it omits per-item scoring).
+#   - `compact_intentional_drop` — the format chooses to drop the
+#     field to stay within its size discipline (e.g. compact format
+#     drops provenance footers to fit budgets).
+#
+# CI gate: tests/renderer_parity_matrix.rs (D8.1) asserts that any
+# omitted field has a matching entry here. Adding an omission without
+# a registry entry fails CI; removing a field that was previously
+# omitted by design also requires removing its entry here.
+#
+# Bead: bd-17c65.4.9 (D8). Per-renderer matrix is bd-17c65.4.9.1
+# (D8.1) once the canonical pack tree from bd-17c65.4 (D-series)
+# stabilizes.
+
+# === Mermaid: diagram-only output ===========================================
+# Mermaid is intentionally a diagram-only output format that maps to
+# Renderer::Markdown but renders graph/sequence diagrams of pack
+# structure rather than the literal record content. Per-item record
+# fields are structurally absent.
+
+[[omission]]
+renderer = "markdown"
+field = "pack.items[].scoreBreakdown.componentByComponent"
+reason = "format_native_omission"
+rationale = "Mermaid (which shares output::Renderer::Markdown) renders structural diagrams, not per-component score tables."
+since_schema = "ee.context.v1"
+
+# === Compact: size-discipline drops =========================================
+# The `compact` format prioritizes byte budget over provenance richness.
+# It drops fields that are valuable for forensics but cost bytes per
+# record.
+
+[[omission]]
+renderer = "compact"
+field = "pack.items[].provenance.entries[]"
+reason = "compact_intentional_drop"
+rationale = "Compact format keeps a single provenance summary string per item rather than the full entries array."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "compact"
+field = "pack.selectionAudit.steps[]"
+reason = "compact_intentional_drop"
+rationale = "Compact format keeps only the selection summary; per-step deltas live in the verbose audit."
+since_schema = "ee.context.v1"
+
+# === Hook: hook-consumer minimal contract ===================================
+# The `hook` format is the contract for Claude Code / Codex PreToolUse
+# style hooks: they need a tight subset of fields to insert into the
+# next prompt, not the full pack record.
+
+[[omission]]
+renderer = "hook"
+field = "pack.selectionAudit"
+reason = "format_native_omission"
+rationale = "Hook consumers care about pack.items[].content and pack.text; the audit metadata is not part of the hook contract."
+since_schema = "ee.context.v1"

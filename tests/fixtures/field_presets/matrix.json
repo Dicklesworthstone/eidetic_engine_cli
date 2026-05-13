@@ -1,0 +1,16 @@
+{
+  "schema": "ee.field_preset_matrix.v1",
+  "surfaces": [
+    {"surface": "search", "command": "search", "schema_file": "ee.search.v1.json"},
+    {"surface": "context", "command": "context", "schema_file": "ee.pack.v2.json"},
+    {"surface": "memory_show", "command": "memory show", "schema_file": "ee.memory.show.v1.json"},
+    {"surface": "memory_list", "command": "memory list", "schema_file": "ee.memory.list.v1.json"},
+    {"surface": "status", "command": "status", "schema_file": "ee.status.v1.json"},
+    {"surface": "doctor", "command": "doctor", "schema_file": "ee.doctor.v1.json"},
+    {"surface": "capabilities", "command": "capabilities", "schema_file": "ee.capabilities.v1.json"},
+    {"surface": "import_cass", "command": "import cass", "schema_file": "ee.import.cass.v1.json"},
+    {"surface": "export", "command": "export", "schema_file": "ee.export.v1.json"},
+    {"surface": "curate_candidates", "command": "curate candidates", "schema_file": "ee.curate.candidates.v1.json"},
+    {"surface": "graph_export", "command": "graph export", "schema_file": "ee.graph.export.v1.json"}
+  ]
+}
