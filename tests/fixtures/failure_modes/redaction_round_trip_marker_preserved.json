@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "redaction_round_trip_marker_preserved",
+  "introduced_by": { "bead": "bd-17c65.11.6", "epic_letter": "K" },
+  "surfaces": ["import jsonl"],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "ee import jsonl invoked against a JSONL bundle previously produced by ee export --redaction <level> where one or more memories carried redaction_markers[]. The import preserves the markers (does NOT attempt un-redaction) and emits this informational signal so the caller knows the imported workspace will have hashed/redacted regions.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'API_KEY=sk-FAKE_abc123' --workspace . --level procedural --kind rule --json --allow-secret-mention",
+      "mkdir -p out",
+      "ee export --workspace . --output-dir out --redaction strict --json",
+      "ee init --workspace ./fresh-workspace --json"
+    ],
+    "invocation": "ee import jsonl --workspace ./fresh-workspace --source out/memories.jsonl --json"
+  },
+  "expected_emission": {
+    "code": "redaction_round_trip_marker_preserved",
+    "severity": "info",
+    "message_contains": [
+      "redaction",
+      "preserved"
+    ]
+  },
+  "notes": "Severity is info because the round-trip is a SUCCESS path — the property the K6 spec calls for. The signal just confirms the markers are intact for any future un-redaction step."
+}

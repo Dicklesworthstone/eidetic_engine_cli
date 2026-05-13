@@ -348,7 +348,7 @@ A degraded entry's `code` is classified into one of three buckets:
 | `clustering_no_candidates` | info | bd-17c65.7.5 (G5) |
 | `clustering_no_embeddings` | info | bd-17c65.7.5 (G5) |
 
-#### Miscellaneous (11)
+#### Miscellaneous (14)
 | Code | Severity | Bead |
 |------|----------|------|
 | `action_override_not_actionable` | low | (TBD) |
@@ -363,6 +363,9 @@ A degraded entry's `code` is classified into one of three buckets:
 | `manual_heavy_strategy` | warning | bd-17c65.10.6 (J6) |
 | `profile_mismatch` | medium | (TBD) |
 | `profile_missing` | low | (TBD) |
+| `redaction_pattern_matched` | medium | bd-17c65.11.6 (K6) — emitted per redaction event |
+| `redaction_level_invalid` | low | bd-17c65.11.6 (K6) — error envelope; bad --redaction value |
+| `redaction_round_trip_marker_preserved` | info | bd-17c65.11.6 (K6) — import surfaces preserved markers |
 | `redaction_uncertain` | warning | bd-17c65.11.6 (K6) |
 | `semantic_dimension_exceeds_budget` | warning | (TBD) — composes with semantic-model gating |
 | `tombstone_visibility_unavailable` | medium | bd-17c65.2.8 (B8) |

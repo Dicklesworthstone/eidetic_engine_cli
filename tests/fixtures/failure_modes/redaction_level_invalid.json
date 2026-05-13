@@ -1,0 +1,25 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "redaction_level_invalid",
+  "introduced_by": { "bead": "bd-17c65.11.6", "epic_letter": "K" },
+  "surfaces": ["export", "handoff create", "context", "support bundle"],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "User invoked --redaction with a value that is not one of the canonical 5 levels (none|minimal|standard|strict|paranoid). The surface returns an ee.error.v2 envelope with details.acceptedValues enumerating the canonical levels.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee export --workspace . --output-dir out --redaction overly_paranoid --json"
+  },
+  "expected_emission": {
+    "code": "redaction_level_invalid",
+    "severity": "low",
+    "message_contains": [
+      "redaction",
+      "invalid"
+    ],
+    "repair_contains": "none|minimal|standard|strict|paranoid"
+  },
+  "notes": "Error envelope (not success.degraded[]); CLI exit code 1 (usage error). error.details.acceptedValues MUST list the 5 canonical levels in canonical order so programmatic recovery is trivial."
+}

@@ -1,0 +1,26 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "redaction_pattern_matched",
+  "introduced_by": { "bead": "bd-17c65.11.6", "epic_letter": "K" },
+  "surfaces": ["export", "handoff create", "context", "support bundle"],
+  "severity": "medium",
+  "repair_present": false,
+  "trigger": {
+    "description": "ee invoked with --redaction <level> against a workspace containing memory content that matches a secret detector class (api_key, jwt, stripe_secret, aws_secret_access_key, password, oauth_token, private_key, ssh_key, service_account_json). The surface emits redaction_pattern_matched as an informational signal per redaction event so the caller can see which class fired and at which level.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'API_KEY=sk-FAKE_abc123def456 - rotate before release.' --workspace . --level procedural --kind rule --json --allow-secret-mention",
+      "mkdir -p out"
+    ],
+    "invocation": "ee export --workspace . --output-dir out --redaction standard --json"
+  },
+  "expected_emission": {
+    "code": "redaction_pattern_matched",
+    "severity": "medium",
+    "message_contains": [
+      "redaction",
+      "matched"
+    ]
+  },
+  "notes": "The redaction event itself is non-fatal; severity is medium because the agent should KNOW the response was rewritten. After E5, a presence marker in capabilities.available also reflects which detector classes are enabled in this build."
+}
