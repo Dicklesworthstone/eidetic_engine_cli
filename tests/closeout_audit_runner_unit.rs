@@ -62,10 +62,7 @@ fn fixture_path(scenario: &str) -> PathBuf {
 fn run_audit(scenario: &str, bead_id: &str) -> Result<Value, String> {
     let fixture = fixture_path(scenario);
     if !fixture.exists() {
-        return Err(format!(
-            "fixture not found: {}",
-            fixture.display(),
-        ));
+        return Err(format!("fixture not found: {}", fixture.display(),));
     }
     let output = Command::new("bash")
         .arg(script_path())
@@ -93,7 +90,15 @@ fn run_audit(scenario: &str, bead_id: &str) -> Result<Value, String> {
 /// field fails CI here even if the readiness logic still produces
 /// the right verdict.
 fn assert_envelope_shape(audit: &Value) -> TestResult {
-    let required_top_level = ["schema", "bead_id", "readiness", "evidence", "blockers", "caveats", "next_actions"];
+    let required_top_level = [
+        "schema",
+        "bead_id",
+        "readiness",
+        "evidence",
+        "blockers",
+        "caveats",
+        "next_actions",
+    ];
     for key in &required_top_level {
         if audit.get(key).is_none() {
             return Err(format!(
@@ -120,9 +125,7 @@ fn assert_envelope_shape(audit: &Value) -> TestResult {
     ];
     for key in &required_evidence {
         if audit["evidence"].get(key).is_none() {
-            return Err(format!(
-                "audit.evidence missing required field `{key}`",
-            ));
+            return Err(format!("audit.evidence missing required field `{key}`",));
         }
     }
     for arr in &["blockers", "caveats", "next_actions"] {
@@ -171,7 +174,10 @@ fn ready_fixture_reports_readiness_ready() -> TestResult {
             "ready fixture should report readiness=`ready`; got {readiness:?}. Full audit: {audit}",
         ));
     }
-    if audit["blockers"].as_array().map_or(false, |a| !a.is_empty()) {
+    if audit["blockers"]
+        .as_array()
+        .map_or(false, |a| !a.is_empty())
+    {
         return Err(format!(
             "ready fixture should have zero blockers; got {}",
             audit["blockers"],
@@ -214,7 +220,10 @@ fn ready_with_caveats_fixture_reports_readiness_ready_with_caveats() -> TestResu
             "ready_with_caveats fixture must NOT be classified `blocked`; got {readiness}. Full audit: {audit}",
         ));
     }
-    if audit["blockers"].as_array().map_or(false, |a| !a.is_empty()) {
+    if audit["blockers"]
+        .as_array()
+        .map_or(false, |a| !a.is_empty())
+    {
         return Err(format!(
             "ready_with_caveats fixture should have zero blockers; got {}",
             audit["blockers"],
@@ -339,8 +348,8 @@ fn script_does_not_mutate_fixture_workspace() -> TestResult {
     // contract gate.
     let fixture = fixture_path("ready");
     fn collect_mtimes(root: &Path, out: &mut Vec<(PathBuf, std::time::SystemTime)>) -> TestResult {
-        for entry in std::fs::read_dir(root)
-            .map_err(|e| format!("read_dir {}: {e}", root.display()))?
+        for entry in
+            std::fs::read_dir(root).map_err(|e| format!("read_dir {}: {e}", root.display()))?
         {
             let entry = entry.map_err(|e| format!("read entry: {e}"))?;
             let path = entry.path();
