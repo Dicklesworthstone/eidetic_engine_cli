@@ -492,6 +492,12 @@ pub struct CreateReport {
     pub token_count: usize,
     pub byte_count: usize,
     pub content_hash: String,
+    /// Round-trip-stable BLAKE3 hash over the capsule body with
+    /// volatile fields stripped (capsule_id, created_at, audit_ids,
+    /// last_accessed_at). Two creates of the same workspace state
+    /// produce the same value regardless of when/who/where they ran.
+    /// Bead bd-17c65.13.4 (M3).
+    pub canonical_content_hash: String,
     pub redaction_summary: RedactionSummary,
     pub dry_run: bool,
     pub created_at: String,
@@ -514,6 +520,7 @@ impl CreateReport {
             token_count: 0,
             byte_count: 0,
             content_hash: String::new(),
+            canonical_content_hash: String::new(),
             redaction_summary: RedactionSummary::default(),
             dry_run: false,
             created_at: Utc::now().to_rfc3339(),
@@ -949,6 +956,77 @@ fn compute_content_hash(content: &str) -> String {
     let mut hasher = Hasher::new();
     hasher.update(content.as_bytes());
     hasher.finalize().to_hex()[..16].to_owned()
+}
+
+/// Compute the round-trip-stable canonical content hash for a capsule
+/// (M3 / bd-17c65.13.4). Strips the volatile top-level fields that
+/// change on every create regardless of workspace state:
+///   - `capsule_id` — freshly generated ULID per call
+///   - `created_at` — wall-clock timestamp
+///     and recursively scrubs the volatile per-section fields:
+///   - `audit_id` (assigned at write time)
+///   - `last_accessed_at` (changes on every memory touch)
+///
+/// Two creates of the same workspace state always produce the same
+/// canonical hash regardless of when/where they ran. This is the
+/// equivalence anchor for the handoff round-trip determinism contract.
+fn compute_canonical_capsule_hash(content: &serde_json::Value) -> String {
+    let mut clone = content.clone();
+    strip_volatile_capsule_fields(&mut clone);
+    let canonical = canonical_json_string(&clone);
+    compute_content_hash(&canonical)
+}
+
+fn strip_volatile_capsule_fields(value: &mut serde_json::Value) {
+    if let Some(object) = value.as_object_mut() {
+        object.remove("capsule_id");
+        object.remove("created_at");
+        object.remove("audit_id");
+        object.remove("last_accessed_at");
+        for (_, child) in object.iter_mut() {
+            strip_volatile_capsule_fields(child);
+        }
+    } else if let Some(array) = value.as_array_mut() {
+        for child in array.iter_mut() {
+            strip_volatile_capsule_fields(child);
+        }
+    }
+}
+
+/// Serialize a JSON value with keys sorted alphabetically at every
+/// nesting level so the same logical content always produces the same
+/// byte sequence. serde_json's default Object iteration order depends
+/// on whether the `preserve_order` feature is on; this helper sorts
+/// keys explicitly so we don't depend on global feature flags.
+fn canonical_json_string(value: &serde_json::Value) -> String {
+    let canonical = canonicalize_json_value(value);
+    serde_json::to_string(&canonical).unwrap_or_else(|_| "null".to_owned())
+}
+
+fn canonicalize_json_value(value: &serde_json::Value) -> serde_json::Value {
+    use std::collections::BTreeMap;
+    match value {
+        serde_json::Value::Object(map) => {
+            let sorted: BTreeMap<String, serde_json::Value> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), canonicalize_json_value(v)))
+                .collect();
+            // Convert BTreeMap back into a Map; serde_json::to_string
+            // over a Map without the preserve_order feature already
+            // sorts alphabetically, but going through BTreeMap → Map
+            // makes the sorting explicit and resilient to feature flag
+            // changes.
+            let mut out = serde_json::Map::new();
+            for (k, v) in sorted {
+                out.insert(k, v);
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(canonicalize_json_value).collect())
+        }
+        other => other.clone(),
+    }
 }
 
 fn focus_memory_ids(focus_state: &crate::models::FocusState) -> Vec<String> {
@@ -1464,6 +1542,11 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
 
     let content_str = crate::core::serialize_pretty_or_error(&capsule_content);
     report.content_hash = compute_content_hash(&content_str);
+    // Bead bd-17c65.13.4 (M3): canonical content hash for round-trip
+    // determinism. Strips volatile fields (capsule_id, created_at,
+    // audit_id, last_accessed_at) so two creates of the same workspace
+    // state always produce the same value.
+    report.canonical_content_hash = compute_canonical_capsule_hash(&capsule_content);
 
     if !options.dry_run {
         std::fs::write(&options.output, &content_str).map_err(|e| DomainError::Storage {

@@ -145,5 +145,8 @@ mod handoff_resume_prompt_fragment;
 #[path = "contracts/workspace_fingerprint_reconciliation.rs"]
 mod workspace_fingerprint_reconciliation;
 
+#[path = "contracts/handoff_capsule_roundtrip_determinism.rs"]
+mod handoff_capsule_roundtrip_determinism;
+
 #[path = "contracts/failure_mode_fixtures.rs"]
 mod failure_mode_fixtures;
