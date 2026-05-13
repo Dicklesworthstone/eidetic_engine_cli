@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "causal_workspace_id_required",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "causal trace"
+  ],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "The direct causal trace helper is called with a database path but without a workspace id.",
+    "setup_commands": [
+      "# call trace helper from a unit harness with database_path set and workspace_id omitted"
+    ],
+    "invocation": "ee causal trace failure-1 --database .ee/ee.db --json"
+  },
+  "expected_emission": {
+    "code": "causal_workspace_id_required",
+    "severity": "warning",
+    "message_contains": [
+      "Provide a workspace ID"
+    ]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "index_publish_lock_contention",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "index rebuild",
+    "index publish"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Index rebuild cannot acquire the advisory publish lock because another publisher holds it.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# hold the index publish advisory lock through a test harness"
+    ],
+    "invocation": "ee index rebuild --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "index_publish_lock_contention",
+    "severity": "medium",
+    "message_contains": [
+      "index publish lock"
+    ],
+    "repair_contains": "retry"
+  }
+}

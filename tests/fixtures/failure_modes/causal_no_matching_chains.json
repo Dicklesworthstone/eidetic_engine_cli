@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "causal_no_matching_chains",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "causal estimate"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "Causal evidence rows exist, but none match the artifact or decision filters.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# seed causal evidence rows for a different artifact or decision"
+    ],
+    "invocation": "ee causal estimate --artifact-id absent-artifact --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "causal_no_matching_chains",
+    "severity": "info",
+    "message_contains": [
+      "No causal chains match"
+    ]
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "lab_replay_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "lab capture",
+    "lab replay",
+    "lab counterfactual"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Lab replay surfaces abstain because stored episode replay artifacts are not implemented yet.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee lab replay --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "lab_replay_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "Lab replay",
+      "unavailable"
+    ],
+    "repair_contains": "stored episodes"
+  }
+}

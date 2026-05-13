@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "causal_database_open_failed",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "causal trace"
+  ],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "The causal trace database path exists but cannot be opened.",
+    "setup_commands": [
+      "# use a direct-helper fixture with an unreadable or invalid database"
+    ],
+    "invocation": "ee causal trace failure-1 --database bad.db --json"
+  },
+  "expected_emission": {
+    "code": "causal_database_open_failed",
+    "severity": "warning",
+    "message_contains": [
+      "Failed to open causal trace database"
+    ]
+  }
+}

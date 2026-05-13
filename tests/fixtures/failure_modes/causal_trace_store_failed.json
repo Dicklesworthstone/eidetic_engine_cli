@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "causal_trace_store_failed",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "causal trace"
+  ],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "Causal trace storage opens, but reading trace rows returns a storage error.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# use a fixture that makes causal trace row reads fail"
+    ],
+    "invocation": "ee causal trace failure-1 --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "causal_trace_store_failed",
+    "severity": "warning",
+    "message_contains": [
+      "Failed to read causal trace rows"
+    ]
+  }
+}

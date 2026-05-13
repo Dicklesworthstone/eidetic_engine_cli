@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "causal_database_missing",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "causal trace"
+  ],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "The direct causal trace helper is pointed at a database path that does not exist.",
+    "setup_commands": [
+      "# call trace helper from a unit harness with database_path set to a missing file"
+    ],
+    "invocation": "ee causal trace failure-1 --database missing.db --json"
+  },
+  "expected_emission": {
+    "code": "causal_database_missing",
+    "severity": "warning",
+    "message_contains": [
+      "Causal trace database does not exist"
+    ]
+  }
+}

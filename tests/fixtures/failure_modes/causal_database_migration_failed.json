@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "causal_database_migration_failed",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "causal trace"
+  ],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "The causal trace database opens, but migration fails before trace rows can be read.",
+    "setup_commands": [
+      "# use a direct-helper fixture whose schema migration fails"
+    ],
+    "invocation": "ee causal trace failure-1 --database stale.db --json"
+  },
+  "expected_emission": {
+    "code": "causal_database_migration_failed",
+    "severity": "warning",
+    "message_contains": [
+      "Failed to migrate causal trace database"
+    ]
+  }
+}

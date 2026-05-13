@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "causal_ledger_empty",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "causal estimate",
+    "causal compare"
+  ],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "A causal command reads an initialized workspace whose causal evidence ledger has no rows.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee causal estimate --artifact-id artifact-1 --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "causal_ledger_empty",
+    "severity": "warning",
+    "message_contains": [
+      "No causal ledger edges found"
+    ]
+  }
+}

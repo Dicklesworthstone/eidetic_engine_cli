@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "causal_evidence_table_missing",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "causal trace",
+    "causal estimate",
+    "causal compare"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "The causal evidence table is absent from an older or malformed database schema.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# use a fixture database without causal_evidence"
+    ],
+    "invocation": "ee causal trace failure-1 --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "causal_evidence_table_missing",
+    "severity": "warning",
+    "message_contains": [
+      "causal_evidence table is missing"
+    ],
+    "repair_contains": "ee init"
+  }
+}

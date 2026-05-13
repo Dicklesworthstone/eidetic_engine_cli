@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_snapshot_scores_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "graph feature-enrichment"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A graph snapshot exists but its centrality-score payload cannot be parsed for feature enrichment.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# insert a graph snapshot with malformed centrality metrics"
+    ],
+    "invocation": "ee graph feature-enrichment --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_snapshot_scores_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "centrality",
+      "scores"
+    ],
+    "repair_contains": "ee graph centrality-refresh"
+  }
+}
