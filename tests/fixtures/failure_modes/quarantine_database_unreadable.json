@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "quarantine_database_unreadable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "quarantine",
+    "status"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Quarantine reporting found the workspace database but could not open it.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# make .ee/ee.db unreadable through a test harness"
+    ],
+    "invocation": "ee trust quarantine --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "quarantine_database_unreadable",
+    "severity": "medium",
+    "message_contains": [
+      "Failed to open quarantine database"
+    ],
+    "repair_contains": "ee doctor"
+  }
+}

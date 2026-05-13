@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_snapshot_stale",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "graph export",
+    "graph feature-enrichment"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A persisted graph snapshot is marked stale, so graph-derived output may lag memory links.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# insert or mark a graph snapshot with stale status through a test harness"
+    ],
+    "invocation": "ee graph export --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_snapshot_stale",
+    "severity": "medium",
+    "message_contains": [
+      "Graph snapshot is marked stale"
+    ],
+    "repair_contains": "ee graph centrality-refresh"
+  }
+}

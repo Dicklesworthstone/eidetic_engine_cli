@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "decay_sweep_database_unresolved",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "job run"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A decay sweep job cannot resolve a database path from the workspace or explicit options.",
+    "setup_commands": [
+      "# run job runner with neither database_path nor workspace_path available"
+    ],
+    "invocation": "ee job run decay_sweep --json"
+  },
+  "expected_emission": {
+    "code": "decay_sweep_database_unresolved",
+    "severity": "medium",
+    "message_contains": [
+      "requires a database path"
+    ],
+    "repair_contains": "ee init"
+  }
+}

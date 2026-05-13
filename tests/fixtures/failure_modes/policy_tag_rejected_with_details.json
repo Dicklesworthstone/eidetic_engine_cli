@@ -1,0 +1,24 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "policy_tag_rejected_with_details",
+  "introduced_by": { "bead": "bd-17c65.3.4", "epic_letter": "C" },
+  "surfaces": ["remember", "note"],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee remember receives a tag containing reserved delimiter characters, so the usage error includes acceptedPattern, acceptedExamples, normalizedFormCandidate, and byte-range matchedAt details for programmatic retry.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee remember 'Tag rejection should be recoverable.' --workspace . --level semantic --kind fact --tags 'bad tag' --json"
+  },
+  "expected_emission": {
+    "code": "policy_tag_rejected_with_details",
+    "severity": "low",
+    "message_contains": [
+      "tag",
+      "accepted set"
+    ],
+    "repair_contains": "accepted tag characters"
+  }
+}

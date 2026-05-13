@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "runtime_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "status",
+    "doctor"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "The Asupersync runtime capability probe fails, so runtime-backed command paths are unavailable.",
+    "setup_commands": [
+      "ee status --workspace . --json"
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "runtime_unavailable",
+    "severity": "high",
+    "message_contains": [
+      "runtime",
+      "failed"
+    ],
+    "repair_contains": "doctor"
+  }
+}

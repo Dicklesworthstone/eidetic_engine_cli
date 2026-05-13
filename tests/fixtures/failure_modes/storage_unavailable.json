@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "storage_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "doctor",
+    "dependency contract"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "The FrankenSQLite/SQLModel storage capability probe cannot open or verify workspace storage.",
+    "setup_commands": [
+      "ee doctor --workspace . --json"
+    ],
+    "invocation": "ee doctor --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "storage_unavailable",
+    "severity": "high",
+    "message_contains": [
+      "storage",
+      "unavailable"
+    ],
+    "repair_contains": "ee doctor"
+  }
+}

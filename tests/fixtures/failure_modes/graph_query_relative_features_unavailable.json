@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_query_relative_features_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "why"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "Stable graph feature fields exist, but community/query-seed features are unavailable without community detection and query-seed expansion.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Graph why target.' --workspace . --json"
+    ],
+    "invocation": "ee why <memory-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_query_relative_features_unavailable",
+    "severity": "low",
+    "message_contains": [
+      "Community and query-seed graph features",
+      "unavailable"
+    ],
+    "repair_contains": "ee graph communities"
+  }
+}

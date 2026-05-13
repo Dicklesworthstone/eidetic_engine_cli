@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "unsupported_schema",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "import jsonl",
+    "perf compare"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "An import record or performance artifact declares a schema version the current command refuses to interpret.",
+    "setup_commands": [
+      "printf '{\"schema\":\"ee.unknown.v1\"}\\n' > fixture.jsonl"
+    ],
+    "invocation": "ee import jsonl fixture.jsonl --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "unsupported_schema",
+    "severity": "high",
+    "message_contains": [
+      "unsupported",
+      "schema"
+    ],
+    "repair_contains": "current ee version"
+  }
+}

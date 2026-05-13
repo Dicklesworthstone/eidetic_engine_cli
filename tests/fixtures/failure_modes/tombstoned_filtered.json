@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "tombstoned_filtered",
+  "introduced_by": {
+    "bead": "bd-17c65.2.8",
+    "epic_letter": "B"
+  },
+  "surfaces": [
+    "search"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "A matching memory was tombstoned and default search excludes it unless --include-tombstoned is requested.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Old rule kept for audit.' --workspace . --level procedural --kind rule",
+      "ee curate tombstone <memory_id> --workspace . --reason 'superseded'"
+    ],
+    "invocation": "ee search 'old rule' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "tombstoned_filtered",
+    "severity": "low",
+    "message_contains": [
+      "Excluded",
+      "tombstoned"
+    ],
+    "repair_contains": "--include-tombstoned"
+  }
+}

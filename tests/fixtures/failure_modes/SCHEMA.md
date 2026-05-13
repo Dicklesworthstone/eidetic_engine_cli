@@ -57,7 +57,7 @@ lists alphabetically and so the contract test can cross-check
 
   // Required. Severity classification matching the production
   // SearchDegradation / ContextResponseDegradation factory: one of
-  // "info" | "low" | "medium" | "high" | "critical".
+  // "info" | "low" | "warning" | "medium" | "high" | "critical".
   "severity": "medium",
 
   // Required. Whether the production factory always populates `repair`
@@ -111,10 +111,15 @@ lists alphabetically and so the contract test can cross-check
 ## Why a static catalog (not E2E)
 
 Per-epic e2e drivers under `scripts/e2e_overhaul/` already exercise
-each degraded path end-to-end against the real binary. This catalog is
-a **structural reference** — it documents what the codes look like,
-which surfaces emit them, and what an agent should do when they see
-one. The contract test enforces that the structural reference cannot
-drift away from the production source.
+many degraded paths end-to-end against the real binary. J6 also ships
+`scripts/e2e_overhaul/failure_modes.sh`, which reads this catalog and
+exercises every fixture with a public-CLI scenario where one is
+available. Fixtures whose triggers still require direct mutation or
+unimplemented replay surfaces are logged as explicit TODOs.
+
+This catalog remains the **structural reference** — it documents what
+the codes look like, which surfaces emit them, and what an agent should
+do when they see one. The contract test enforces that the structural
+reference cannot drift away from the production source.
 
 Bead: `bd-17c65.10.6` (J6).

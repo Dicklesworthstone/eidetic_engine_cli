@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "why_pack_selection_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "why"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee why cannot read the latest pack-selection evidence for a memory because pack ledger storage is unavailable or needs migration.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# induce pack ledger read failure through a test harness"
+    ],
+    "invocation": "ee why <memory-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "why_pack_selection_unavailable",
+    "severity": "low",
+    "message_contains": [
+      "pack",
+      "selection"
+    ],
+    "repair_contains": "ee db migrate"
+  }
+}

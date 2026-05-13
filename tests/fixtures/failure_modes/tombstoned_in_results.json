@@ -2,11 +2,11 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "tombstoned_in_results",
   "introduced_by": { "bead": "bd-17c65.2.8", "epic_letter": "B" },
-  "surfaces": ["search"],
-  "severity": "info",
+  "surfaces": ["search", "context"],
+  "severity": "low",
   "repair_present": false,
   "trigger": {
-    "description": "Search invoked with --include-tombstoned returns tombstoned memories alongside live ones. Tombstone visibility was requested explicitly so the agent can ignore or special-case the tombstoned hits.",
+    "description": "Retrieval invoked with --include-tombstoned returns tombstoned memories alongside live ones. Tombstone visibility was requested explicitly so the agent can ignore or special-case the tombstoned hits.",
     "setup_commands": [
       "ee init --workspace .",
       "ee remember 'Old rule kept for audit.' --workspace . --level procedural --kind rule",
@@ -16,10 +16,10 @@
   },
   "expected_emission": {
     "code": "tombstoned_in_results",
-    "severity": "info",
+    "severity": "low",
     "message_contains": [
       "tombstoned",
-      "include"
+      "--include-tombstoned"
     ]
   },
   "extra_required_response_fields": {

@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "legacy_memory",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "context"
+  ],
+  "severity": "high",
+  "repair_present": false,
+  "trigger": {
+    "description": "A context pack includes pre-v1 legacy evidence that must be revalidated.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# import or insert a legacy-evidence memory through a test harness"
+    ],
+    "invocation": "ee context 'task' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "legacy_memory",
+    "severity": "high",
+    "message_contains": [
+      "packed legacy",
+      "revalidated"
+    ]
+  }
+}

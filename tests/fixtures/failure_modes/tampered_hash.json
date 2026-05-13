@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "tampered_hash",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "perf compare",
+    "certificate verify"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "An artifact declares a content hash that does not match the observed payload.",
+    "setup_commands": [
+      "# use a perf artifact or certificate fixture with mismatched declared and observed hash values"
+    ],
+    "invocation": "ee perf compare baseline.json candidate.json --json"
+  },
+  "expected_emission": {
+    "code": "tampered_hash",
+    "severity": "high",
+    "message_contains": [
+      "hash"
+    ],
+    "repair_contains": "Verify artifact integrity"
+  }
+}

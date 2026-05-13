@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "feedback_quarantine_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "status"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Feedback quarantine rows cannot be read from the workspace database.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# corrupt or migrate-drift feedback quarantine storage through a test harness"
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "feedback_quarantine_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "Feedback quarantine rows",
+      "could not be read"
+    ],
+    "repair_contains": "ee db migrate"
+  }
+}

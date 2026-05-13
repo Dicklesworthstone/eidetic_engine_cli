@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "lexical_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.2.6",
+    "epic_letter": "B"
+  },
+  "surfaces": [
+    "search"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A caller explicitly requests lexical_only search against an index directory without an available BM25/FTS lexical arm.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "mkdir -p ./empty-index"
+    ],
+    "invocation": "ee search 'query' --workspace . --index-dir ./empty-index --source-mode lexical_only --json"
+  },
+  "expected_emission": {
+    "code": "lexical_unavailable",
+    "severity": "warning",
+    "message_contains": [
+      "Requested lexical_only search",
+      "lexical/BM25 arm is unavailable"
+    ],
+    "repair_contains": "fts5,lexical-bm25"
+  }
+}

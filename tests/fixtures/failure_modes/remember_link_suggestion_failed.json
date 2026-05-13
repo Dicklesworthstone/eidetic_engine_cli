@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "remember_link_suggestion_failed",
+  "introduced_by": {
+    "bead": "bd-17c65.7.3",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "remember"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "The memory was persisted, but tag/link suggestion lookup failed.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# induce memory tag/link index failure through a test harness"
+    ],
+    "invocation": "ee remember 'Link suggestion fixture.' --workspace . --tags link --json"
+  },
+  "expected_emission": {
+    "code": "remember_link_suggestion_failed",
+    "severity": "low",
+    "message_contains": [
+      "Remembered the memory",
+      "link suggestions failed"
+    ],
+    "repair_contains": "memory tag/link indexes"
+  }
+}

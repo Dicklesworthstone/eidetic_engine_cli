@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "quarantine_database_missing",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "quarantine",
+    "status"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Quarantine reporting was requested for a workspace whose ee database does not exist.",
+    "setup_commands": [
+      "mkdir -p <workspace>"
+    ],
+    "invocation": "ee trust quarantine --workspace <workspace> --json"
+  },
+  "expected_emission": {
+    "code": "quarantine_database_missing",
+    "severity": "medium",
+    "message_contains": [
+      "No ee database",
+      "was found"
+    ],
+    "repair_contains": "ee init"
+  }
+}

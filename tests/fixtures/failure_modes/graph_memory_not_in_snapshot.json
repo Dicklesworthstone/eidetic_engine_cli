@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_memory_not_in_snapshot",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "why"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "A graph snapshot exists, but the target memory has no graph score in that snapshot.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# create graph snapshot before adding target memory"
+    ],
+    "invocation": "ee why <memory-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_memory_not_in_snapshot",
+    "severity": "low",
+    "message_contains": [
+      "Graph snapshot exists",
+      "no graph score"
+    ],
+    "repair_contains": "ee graph centrality-refresh"
+  }
+}

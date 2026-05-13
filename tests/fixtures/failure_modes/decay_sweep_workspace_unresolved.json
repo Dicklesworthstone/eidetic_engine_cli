@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "decay_sweep_workspace_unresolved",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "job run"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The decay sweep job opens storage but cannot resolve a workspace id for scoring.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# use a database fixture without resolvable workspace metadata"
+    ],
+    "invocation": "ee job run decay_sweep --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "decay_sweep_workspace_unresolved",
+    "severity": "medium",
+    "message_contains": [
+      "workspace"
+    ],
+    "repair_contains": "ee remember"
+  }
+}

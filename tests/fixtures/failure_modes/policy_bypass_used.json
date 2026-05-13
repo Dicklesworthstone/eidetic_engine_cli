@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "policy_bypass_used",
+  "introduced_by": {
+    "bead": "bd-17c65.3.2",
+    "epic_letter": "C"
+  },
+  "surfaces": [
+    "remember",
+    "note"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Secret-shaped content is persisted with the explicit --allow-secret-mention bypass, so the response must carry an auditable degraded signal.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee remember 'Document API_KEY=sk-FAKEabc123def456ghi789jkl012.' --workspace . --level procedural --kind rule --allow-secret-mention --json"
+  },
+  "expected_emission": {
+    "code": "policy_bypass_used",
+    "severity": "info",
+    "message_contains": [
+      "Secret-like content persisted",
+      "--allow-secret-mention"
+    ],
+    "repair_contains": "Review the memory"
+  }
+}

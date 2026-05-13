@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "source_mode_fallback",
+  "introduced_by": {
+    "bead": "bd-17c65.2.6",
+    "epic_letter": "B"
+  },
+  "surfaces": [
+    "search"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Hybrid search was requested, but the lexical/BM25 arm is unavailable, so the command falls back to semantic_only unless strict source mode is enabled.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "mkdir -p ./empty-index"
+    ],
+    "invocation": "ee search 'query' --workspace . --index-dir ./empty-index --source-mode hybrid --json"
+  },
+  "expected_emission": {
+    "code": "source_mode_fallback",
+    "severity": "warning",
+    "message_contains": [
+      "Requested source_mode=hybrid",
+      "fell back to semantic_only"
+    ],
+    "repair_contains": "--strict-source-mode"
+  }
+}

@@ -42,7 +42,7 @@ fn src_dir() -> PathBuf {
 }
 
 fn allowed_severities() -> BTreeSet<&'static str> {
-    ["info", "low", "medium", "high", "critical"]
+    ["info", "low", "warning", "medium", "high", "critical"]
         .into_iter()
         .collect()
 }
@@ -149,7 +149,9 @@ fn validate_fixture(path: &Path) -> TestResult {
     let severity = ensure_string_field(&value, "/severity", &ctx)?;
     ensure(
         allowed_severities().contains(severity),
-        format!("{ctx}: severity `{severity}` not in {{info, low, medium, high, critical}}",),
+        format!(
+            "{ctx}: severity `{severity}` not in {{info, low, warning, medium, high, critical}}",
+        ),
     )?;
     let _repair_present = ensure_bool_field(&value, "/repair_present", &ctx)?;
     let _ = ensure_string_field(&value, "/trigger/description", &ctx)?;

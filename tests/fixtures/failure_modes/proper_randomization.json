@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "proper_randomization",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "causal estimate"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "Experiment causal estimate reports the proper-randomization assumption.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee causal estimate --artifact-id artifact-1 --method experiment --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "proper_randomization",
+    "severity": "info",
+    "message_contains": [
+      "Treatment assignment",
+      "properly randomized"
+    ]
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "unknown_method",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "causal compare",
+    "causal promote-plan"
+  ],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "A causal command receives an unknown method name and falls back conservatively.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee causal compare --fixture-replay-id fixture-1 --method made-up --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "unknown_method",
+    "severity": "warning",
+    "message_contains": [
+      "Unknown method",
+      "falling back"
+    ]
+  }
+}

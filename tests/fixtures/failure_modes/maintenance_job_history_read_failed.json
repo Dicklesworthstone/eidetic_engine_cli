@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "maintenance_job_history_read_failed",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "job list",
+    "job show"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Maintenance job history listing or lookup cannot read the persisted job-history file.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# make the maintenance job history file unreadable through a test harness"
+    ],
+    "invocation": "ee job list --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "maintenance_job_history_read_failed",
+    "severity": "medium",
+    "message_contains": [
+      "history"
+    ],
+    "repair_contains": "Check workspace .ee directory permissions"
+  }
+}

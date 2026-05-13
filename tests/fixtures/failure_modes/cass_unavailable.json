@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "cass_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "doctor",
+    "import cass",
+    "dependency contract"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The external cass binary is missing, untrusted, or does not satisfy the robot/JSON contract.",
+    "setup_commands": [
+      "EE_CASS_BINARY=/missing/cass ee import cass --workspace . --dry-run --json"
+    ],
+    "invocation": "EE_CASS_BINARY=/missing/cass ee import cass --workspace . --dry-run --json"
+  },
+  "expected_emission": {
+    "code": "cass_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "cass",
+      "unavailable"
+    ],
+    "repair_contains": "EE_CASS_BINARY"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "storage_unimplemented",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "status"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "The binary was built without the storage subsystem implementation.",
+    "setup_commands": [
+      "# build fixture binary without storage support"
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "storage_unimplemented",
+    "severity": "high",
+    "message_contains": [
+      "Storage has no compiled implementation"
+    ],
+    "repair_contains": "storage subsystem"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "auto_propose_skipped_existing_rule_covers",
+  "introduced_by": {
+    "bead": "bd-17c65.7.3",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "remember"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "An existing procedural rule already covers the remember-time evidence cluster, so a duplicate proposal is not created.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Always run cargo fmt before release.' --workspace . --level procedural --kind rule --tags release"
+    ],
+    "invocation": "ee remember 'Release process includes cargo fmt.' --workspace . --tags release --json"
+  },
+  "expected_emission": {
+    "code": "auto_propose_skipped_existing_rule_covers",
+    "severity": "info",
+    "message_contains": [
+      "existing procedural rule",
+      "covers"
+    ],
+    "repair_contains": "ee rule show"
+  }
+}

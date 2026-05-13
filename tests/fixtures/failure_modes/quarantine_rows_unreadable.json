@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "quarantine_rows_unreadable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "quarantine",
+    "status"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The quarantine report opens the ee database but cannot read feedback quarantine rows.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# use a harness fixture with unreadable or migrated-away feedback_quarantine storage"
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "quarantine_rows_unreadable",
+    "severity": "medium",
+    "message_contains": [
+      "Failed to read feedback quarantine rows"
+    ],
+    "repair_contains": "ee db migrate"
+  }
+}

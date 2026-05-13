@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "tripwire_inputs_incomplete",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "tripwire check",
+    "preflight"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A tripwire check runs without the task/source inputs needed to evaluate its condition.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# create a tripwire whose condition requires missing task/source context"
+    ],
+    "invocation": "ee tripwire check <id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "tripwire_inputs_incomplete",
+    "severity": "warning",
+    "message_contains": [
+      "missing"
+    ],
+    "repair_contains": "ee tripwire list"
+  }
+}

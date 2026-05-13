@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "integrity_reference_issues",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "diag integrity"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Link or pack reference integrity checks find dangling or inconsistent references.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# insert a dangling link or pack reference through a test harness"
+    ],
+    "invocation": "ee diag integrity --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "integrity_reference_issues",
+    "severity": "medium",
+    "message_contains": [
+      "reference integrity issue"
+    ],
+    "repair_contains": "ee diag integrity"
+  }
+}

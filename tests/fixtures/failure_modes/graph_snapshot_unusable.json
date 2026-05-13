@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_snapshot_unusable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "graph export",
+    "graph feature-enrichment"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A graph snapshot exists but has an archived, invalid, or mismatched graph type/status.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# insert an archived or invalid graph snapshot through a test harness"
+    ],
+    "invocation": "ee graph export --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_snapshot_unusable",
+    "severity": "medium",
+    "message_contains": [
+      "Graph snapshot",
+      "status"
+    ],
+    "repair_contains": "ee graph centrality-refresh"
+  }
+}

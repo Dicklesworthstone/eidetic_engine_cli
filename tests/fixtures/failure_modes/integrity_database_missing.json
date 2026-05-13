@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "integrity_database_missing",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "diag integrity"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Integrity diagnostics run before the workspace has an initialized ee database.",
+    "setup_commands": [
+      "# run against a fresh directory without ee init"
+    ],
+    "invocation": "ee diag integrity --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "integrity_database_missing",
+    "severity": "medium",
+    "message_contains": [
+      "Integrity checks require",
+      "initialized ee database"
+    ],
+    "repair_contains": "ee init"
+  }
+}

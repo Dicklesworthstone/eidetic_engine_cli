@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "search_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "doctor",
+    "dependency contract"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The Frankensearch/index capability probe cannot confirm that search is ready for the selected workspace.",
+    "setup_commands": [
+      "ee index status --workspace . --json"
+    ],
+    "invocation": "ee index status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "search_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "search",
+      "unavailable"
+    ],
+    "repair_contains": "ee index status"
+  }
+}

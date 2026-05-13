@@ -3,7 +3,7 @@
   "code": "profile_search_limit_capped",
   "introduced_by": { "bead": "bd-17c65.2.4", "epic_letter": "B" },
   "surfaces": ["search", "diag search"],
-  "severity": "info",
+  "severity": "low",
   "repair_present": true,
   "trigger": {
     "description": "Active runtime profile (laptop / swarm / batch / ci-smoke / hpc) imposes a candidateLimit budget. When the caller requests more, the searcher caps the effective limit and emits this signal so the agent knows the answer is bounded.",
@@ -15,7 +15,7 @@
   },
   "expected_emission": {
     "code": "profile_search_limit_capped",
-    "severity": "info",
+    "severity": "low",
     "message_contains": [
       "limit",
       "capped"

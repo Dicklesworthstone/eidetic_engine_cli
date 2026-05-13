@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "curation_harmful_candidate_escalated",
+  "introduced_by": {
+    "bead": "bd-17c65.7.4",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "curate disposition",
+    "status"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A rejected curation candidate reached its harmful-feedback escalation TTL.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# seed rejected candidate whose escalation TTL has expired"
+    ],
+    "invocation": "ee curate disposition --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "curation_harmful_candidate_escalated",
+    "severity": "high",
+    "message_contains": [
+      "harmful-feedback",
+      "escalation"
+    ],
+    "repair_contains": "ee curate"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "verification_evidence_not_found",
+  "introduced_by": {
+    "bead": "bd-1zb7k.3",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "why"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "A verification-sensitive memory is tagged as requiring verification, but no verification evidence ledger row is linked.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Verified claim placeholder.' --workspace . --tags verification-required --json"
+    ],
+    "invocation": "ee why <memory-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "verification_evidence_not_found",
+    "severity": "low",
+    "message_contains": [
+      "No verification evidence ledger row",
+      "unverified"
+    ],
+    "repair_contains": "ee verification ingest"
+  }
+}

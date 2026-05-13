@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "agent_detection_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "agent sources",
+    "doctor",
+    "dependency contract"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The agent-detection adapter cannot inspect local agent roots or source probes.",
+    "setup_commands": [
+      "ee agent sources --workspace . --json"
+    ],
+    "invocation": "ee agent sources --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "agent_detection_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "agent",
+      "unavailable"
+    ],
+    "repair_contains": "agent"
+  }
+}

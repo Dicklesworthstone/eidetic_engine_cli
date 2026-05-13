@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "stable_unit",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "causal estimate"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "Causal estimate reports its stable-unit assumption for any supported method.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee causal estimate --artifact-id artifact-1 --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "stable_unit",
+    "severity": "info",
+    "message_contains": [
+      "Treatment of one unit",
+      "does not affect outcomes"
+    ]
+  }
+}

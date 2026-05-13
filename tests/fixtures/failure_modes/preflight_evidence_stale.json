@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "preflight_evidence_stale",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "preflight"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Preflight evidence exists but is stale relative to the task or workspace state.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# seed stale preflight evidence through a test harness"
+    ],
+    "invocation": "ee preflight run 'task' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "preflight_evidence_stale",
+    "severity": "warning",
+    "message_contains": [
+      "evidence",
+      "stale"
+    ],
+    "repair_contains": "ee preflight run"
+  }
+}

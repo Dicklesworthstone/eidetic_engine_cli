@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "search_unimplemented",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "status"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "The binary was built without the search implementation.",
+    "setup_commands": [
+      "# build fixture binary without search support"
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "search_unimplemented",
+    "severity": "high",
+    "message_contains": [
+      "Search has no compiled implementation"
+    ],
+    "repair_contains": "search support"
+  }
+}

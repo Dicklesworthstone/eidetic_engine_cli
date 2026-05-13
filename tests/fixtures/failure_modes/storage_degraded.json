@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "storage_degraded",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "status",
+    "health"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Workspace storage exists but cannot be opened or requires migration.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# corrupt or migrate-drift the workspace database through a test harness"
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "storage_degraded",
+    "severity": "medium",
+    "message_contains": [
+      "Workspace storage exists",
+      "could not be opened"
+    ],
+    "repair_contains": "ee doctor"
+  }
+}

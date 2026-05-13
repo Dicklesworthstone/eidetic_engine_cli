@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "feedback_protected_rules_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "status"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Protected procedural rule rows cannot be read from the workspace database.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# corrupt or migrate-drift protected-rule storage through a test harness"
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "feedback_protected_rules_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "Protected procedural rule rows",
+      "could not be read"
+    ],
+    "repair_contains": "ee db migrate"
+  }
+}

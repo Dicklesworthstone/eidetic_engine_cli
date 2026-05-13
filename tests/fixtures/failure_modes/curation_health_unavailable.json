@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "curation_health_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "status"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "Curation health cannot be inspected because the selected workspace database is missing or unreadable.",
+    "setup_commands": [
+      "mkdir -p <workspace>"
+    ],
+    "invocation": "ee status --workspace <workspace> --json"
+  },
+  "expected_emission": {
+    "code": "curation_health_unavailable",
+    "severity": "low",
+    "message_contains": [
+      "Curation health is unavailable",
+      "database is missing"
+    ],
+    "repair_contains": "ee init"
+  }
+}

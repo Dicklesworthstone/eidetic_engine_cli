@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_snapshot_missing",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "graph export",
+    "graph feature-enrichment"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A graph export or feature-enrichment command runs before any persisted graph snapshot exists.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee graph export --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_snapshot_missing",
+    "severity": "medium",
+    "message_contains": [
+      "No graph snapshot exists"
+    ],
+    "repair_contains": "ee graph centrality-refresh"
+  }
+}

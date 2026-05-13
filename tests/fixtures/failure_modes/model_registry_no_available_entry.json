@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "model_registry_no_available_entry",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "model status",
+    "model list"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The model registry contains entries, but every entry is disabled or unavailable.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# insert only disabled/unavailable model registry rows through a test harness"
+    ],
+    "invocation": "ee model status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "model_registry_no_available_entry",
+    "severity": "medium",
+    "message_contains": [
+      "none are marked available",
+      "semantic search is degraded"
+    ],
+    "repair_contains": "ee doctor"
+  }
+}

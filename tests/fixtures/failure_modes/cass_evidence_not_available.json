@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "cass_evidence_not_available",
+  "introduced_by": {
+    "bead": "bd-17c65.7.4",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "curate candidates"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "curate candidates was asked to include CASS evidence, but workspace-scope CASS evidence span listing is not implemented.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee curate candidates --workspace . --include-cass --json"
+  },
+  "expected_emission": {
+    "code": "cass_evidence_not_available",
+    "severity": "low",
+    "message_contains": [
+      "CASS evidence span listing",
+      "not yet implemented"
+    ],
+    "repair_contains": "ee review session"
+  }
+}

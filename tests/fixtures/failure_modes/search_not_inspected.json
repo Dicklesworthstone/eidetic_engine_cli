@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "search_not_inspected",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "status"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "Search readiness is reported as not inspected when status is run without selecting a workspace.",
+    "setup_commands": [],
+    "invocation": "ee status --json"
+  },
+  "expected_emission": {
+    "code": "search_not_inspected",
+    "severity": "low",
+    "message_contains": [
+      "Search readiness was not inspected",
+      "no workspace"
+    ],
+    "repair_contains": "ee status --workspace"
+  }
+}

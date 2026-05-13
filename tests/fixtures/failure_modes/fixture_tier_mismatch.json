@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "fixture_tier_mismatch",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "perf compare"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Baseline and candidate performance artifacts were produced from different fixture tiers.",
+    "setup_commands": [
+      "# use normalized perf artifacts whose fixtureTier values differ"
+    ],
+    "invocation": "ee perf compare baseline.json candidate.json --json"
+  },
+  "expected_emission": {
+    "code": "fixture_tier_mismatch",
+    "severity": "medium",
+    "message_contains": [
+      "Fixture tier mismatch"
+    ],
+    "repair_contains": "same fixture tier"
+  }
+}

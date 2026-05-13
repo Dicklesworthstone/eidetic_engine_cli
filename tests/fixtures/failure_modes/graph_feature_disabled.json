@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_feature_disabled",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "graph",
+    "graph feature-enrichment"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A graph command is invoked from a build that does not enable the optional graph feature.",
+    "setup_commands": [
+      "# build ee without --features graph"
+    ],
+    "invocation": "ee graph centrality --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_feature_disabled",
+    "severity": "medium",
+    "message_contains": [
+      "Graph algorithm execution requires",
+      "graph feature"
+    ],
+    "repair_contains": "--features graph"
+  }
+}

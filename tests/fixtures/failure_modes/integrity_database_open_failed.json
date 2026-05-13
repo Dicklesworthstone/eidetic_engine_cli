@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "integrity_database_open_failed",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "diag integrity"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "The integrity database path exists, but FrankenSQLite cannot open it.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# replace .ee/ee.db with an unreadable or invalid database fixture"
+    ],
+    "invocation": "ee diag integrity --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "integrity_database_open_failed",
+    "severity": "high",
+    "message_contains": [
+      "database exists",
+      "could not be opened"
+    ],
+    "repair_contains": "ee doctor"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "auto_propose_deferred_to_maintenance",
+  "introduced_by": {
+    "bead": "bd-17c65.7.3",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "remember"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Remember-time proposal exceeded its synchronous budget before durable write, so maintenance/review should produce candidates later.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# seed enough tagged evidence to exceed the synchronous proposal budget"
+    ],
+    "invocation": "ee remember 'Budget-heavy cluster fact.' --workspace . --tags cluster --json"
+  },
+  "expected_emission": {
+    "code": "auto_propose_deferred_to_maintenance",
+    "severity": "info",
+    "message_contains": [
+      "exceeded the synchronous budget",
+      "durable write"
+    ],
+    "repair_contains": "ee review workspace --propose"
+  }
+}

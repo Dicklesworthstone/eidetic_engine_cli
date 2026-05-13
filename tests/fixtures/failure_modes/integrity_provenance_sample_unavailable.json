@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "integrity_provenance_sample_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "diag integrity"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Integrity diagnostics cannot inspect the requested provenance-chain sample.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# use a fixture where sampled provenance-chain queries fail"
+    ],
+    "invocation": "ee diag integrity --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "integrity_provenance_sample_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "provenance-chain sample",
+      "could not be inspected"
+    ],
+    "repair_contains": "ee diag integrity"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "storage_not_ready",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "health"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The health probe sees storage as pending because workspace storage has not been initialized.",
+    "setup_commands": [
+      "mkdir -p <workspace>"
+    ],
+    "invocation": "ee status --workspace <workspace> --json"
+  },
+  "expected_emission": {
+    "code": "storage_not_ready",
+    "severity": "medium",
+    "message_contains": [
+      "storage",
+      "not been initialized"
+    ],
+    "repair_contains": "ee init"
+  }
+}

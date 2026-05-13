@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "causal_comparison_evidence_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "causal compare"
+  ],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "Causal compare has source IDs, but no persisted comparison evidence ledger rows.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee causal compare --fixture-replay-id fixture-1 --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "causal_comparison_evidence_unavailable",
+    "severity": "warning",
+    "message_contains": [
+      "No persisted comparison evidence ledger rows"
+    ]
+  }
+}

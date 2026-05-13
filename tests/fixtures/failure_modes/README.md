@@ -19,15 +19,130 @@ in the same commit, keeping the catalog complete by construction.
 |---|---|---|---|
 | `no_relevant_results` | search | medium | bd-17c65.2.1 (B1) |
 | `weak_query_recall` | search | low | bd-17c65.2.5 (B5) |
+| `lexical_unavailable` | search | warning | bd-17c65.2.6 (B6) |
+| `source_mode_fallback` | search | warning | bd-17c65.2.6 (B6) |
 | `low_recall_after_floor` | search | info | bd-17c65.2.1 (B1) |
 | `duplicates_collapsed` | search | low | bd-17c65.2.3 (B3) |
 | `index_stale` | search, context | high | bd-17c65.2.1 (B1) |
+| `search_index_stale` | search, context | medium | bd-17c65.2.1 (B1) |
 | `index_missing` | search, context | medium | bd-17c65.2.1 (B1) |
 | `index_corrupt` | search, context | high | bd-17c65.2.1 (B1) |
-| `tombstoned_in_results` | search | info | bd-17c65.2.8 (B8) |
-| `expired_filtered` | search | info | bd-17c65.2.8 (B8) |
-| `profile_search_limit_capped` | search, diag search | info | bd-17c65.2.4 (B7) |
+| `tombstoned_in_results` | search | low | bd-17c65.2.8 (B8) |
+| `tombstoned_filtered` | search | low | bd-17c65.2.8 (B8) |
+| `expired_filtered` | search | low | bd-17c65.2.8 (B8) |
+| `profile_search_limit_capped` | search, diag search | low | bd-17c65.2.4 (B7) |
 | `context_evidence_freshness_changed_source` | context, pack replay | info | bd-17c65.1.2 (A2) |
+| `policy_bypass_used` | remember, note | info | bd-17c65.3.2 (C2) |
+| `policy_tag_rejected_with_details` | remember, note | low | bd-17c65.3.4 (C4) |
+| `policy_secret_detected_with_offsets` | remember, note | medium | bd-17c65.3.4 (C4) |
+| `runtime_unavailable` | status, doctor | high | bd-17c65.10.6 (J6) |
+| `storage_unavailable` | doctor, dependency contract | high | bd-17c65.10.6 (J6) |
+| `search_unavailable` | doctor, dependency contract | medium | bd-17c65.10.6 (J6) |
+| `graph_unavailable` | doctor, diag graph | medium | bd-17c65.10.6 (J6) |
+| `cass_unavailable` | doctor, import cass | medium | bd-17c65.10.6 (J6) |
+| `toon_unavailable` | status, doctor | medium | bd-17c65.10.6 (J6) |
+| `diagram_backend_unavailable` | doctor, dependency contract | medium | bd-17c65.10.6 (J6) |
+| `agent_detection_unavailable` | agent sources, doctor | medium | bd-17c65.10.6 (J6) |
+| `mcp_unavailable` | doctor, dependency contract | medium | bd-17c65.10.6 (J6) |
+| `storage_not_inspected` | status | low | bd-17c65.10.6 (J6) |
+| `storage_not_initialized` | status | medium | bd-17c65.10.6 (J6) |
+| `storage_degraded` | status, health | medium | bd-17c65.10.6 (J6) |
+| `storage_not_ready` | health | medium | bd-17c65.10.6 (J6) |
+| `storage_unimplemented` | status | high | bd-17c65.10.6 (J6) |
+| `search_not_inspected` | status | low | bd-17c65.10.6 (J6) |
+| `search_waiting_for_storage` | status | medium | bd-17c65.10.6 (J6) |
+| `search_index_degraded` | status, health | medium | bd-17c65.10.6 (J6) |
+| `search_not_ready` | health | medium | bd-17c65.10.6 (J6) |
+| `search_unimplemented` | status | high | bd-17c65.10.6 (J6) |
+| `memory_health_unavailable` | status | low | bd-17c65.10.6 (J6) |
+| `curation_health_unavailable` | status | low | bd-17c65.10.6 (J6) |
+| `curation_ttl_policy_unavailable` | status | medium | bd-17c65.10.6 (J6) |
+| `feedback_health_unavailable` | status | low | bd-17c65.10.6 (J6) |
+| `feedback_quarantine_unavailable` | status | medium | bd-17c65.10.6 (J6) |
+| `feedback_protected_rules_unavailable` | status | medium | bd-17c65.10.6 (J6) |
+| `auto_propose_skipped_too_few_neighbors` | remember | info | bd-17c65.7.3 (G3) |
+| `auto_propose_search_neighbor_lookup_failed` | remember | info | bd-17c65.7.3 (G3) |
+| `auto_propose_skipped_existing_rule_covers` | remember | info | bd-17c65.7.3 (G3) |
+| `auto_propose_deferred_to_maintenance` | remember | info | bd-17c65.7.3 (G3) |
+| `auto_propose_failed` | remember | low | bd-17c65.7.3 (G3) |
+| `remember_auto_link_failed` | remember | low | bd-17c65.7.3 (G3) |
+| `remember_link_suggestion_failed` | remember | low | bd-17c65.7.3 (G3) |
+| `cass_evidence_not_available` | curate candidates | low | bd-17c65.7.4 (G4) |
+| `curation_ttl_policy_missing` | curate disposition | medium | bd-17c65.7.4 (G4) |
+| `curation_harmful_candidate_escalated` | curate disposition, status | high | bd-17c65.7.4 (G4) |
+| `curation_ttl_blocked` | status, curate disposition | medium | bd-17c65.7.4 (G4) |
+| `verification_evidence_not_found` | why | low | bd-1zb7k.3 (S2) |
+| `why_pack_selection_unavailable` | why | low | bd-17c65.10.6 (J6) |
+| `why_result_target_unsupported_source` | why | medium | bd-17c65.10.6 (J6) |
+| `graph_memory_not_in_snapshot` | why | low | bd-17c65.10.6 (J6) |
+| `graph_query_relative_features_unavailable` | why | low | bd-17c65.10.6 (J6) |
+| `preflight_evidence_unavailable` | preflight | medium | bd-17c65.10.6 (J6) |
+| `preflight_evidence_stale` | preflight | warning | bd-17c65.10.6 (J6) |
+| `quarantine_workspace_unavailable` | quarantine, status | medium | bd-17c65.10.6 (J6) |
+| `quarantine_database_missing` | quarantine, status | medium | bd-17c65.10.6 (J6) |
+| `quarantine_database_unreadable` | quarantine, status | medium | bd-17c65.10.6 (J6) |
+| `quarantine_feedback_events_unreadable` | quarantine, status | medium | bd-17c65.10.6 (J6) |
+| `quarantine_rows_unreadable` | quarantine, status | medium | bd-17c65.10.6 (J6) |
+| `trust_quarantine_rows_unreadable` | quarantine, status | medium | bd-17c65.10.6 (J6) |
+| `model_registry_empty` | model status, model list | low | bd-17c65.10.6 (J6) |
+| `model_registry_no_available_entry` | model status, model list | medium | bd-17c65.10.6 (J6) |
+| `heavy_gates_skipped` | profile verify | info | bd-17c65.10.6 (J6) |
+| `manual_heavy_strategy` | profile verify | warning | bd-17c65.10.6 (J6) |
+| `index_locked` | index vacuum | medium | bd-17c65.10.6 (J6) |
+| `integrity_database_missing` | diag integrity | medium | bd-17c65.10.6 (J6) |
+| `integrity_database_open_failed` | diag integrity | high | bd-17c65.10.6 (J6) |
+| `integrity_reference_issues` | diag integrity | medium | bd-17c65.10.6 (J6) |
+| `integrity_reference_check_unavailable` | diag integrity | medium | bd-17c65.10.6 (J6) |
+| `integrity_schema_migration_required` | diag integrity | medium | bd-17c65.10.6 (J6) |
+| `integrity_schema_check_unavailable` | diag integrity | medium | bd-17c65.10.6 (J6) |
+| `integrity_provenance_sample_unavailable` | diag integrity | medium | bd-17c65.10.6 (J6) |
+| `tripwire_inputs_incomplete` | tripwire check, preflight | warning | bd-17c65.10.6 (J6) |
+| `unsupported_condition` | tripwire check, preflight | warning | bd-17c65.10.6 (J6) |
+| `tombstone_visibility_unavailable` | search | medium | bd-17c65.10.6 (J6) |
+| `semantic_dimension_exceeds_budget` | semantic model admissibility, search | medium | bd-17c65.10.6 (J6) |
+| `unsupported_schema` | import jsonl, perf compare | high | bd-17c65.10.6 (J6) |
+| `stale_schema_version` | certificate verify, perf compare | medium | bd-17c65.10.6 (J6) |
+| `tampered_hash` | perf compare, certificate verify | high | bd-17c65.10.6 (J6) |
+| `unsupported_artifact_kind` | perf compare | high | bd-17c65.10.6 (J6) |
+| `redaction_uncertain` | perf compare, support bundle | medium | bd-17c65.10.6 (J6) |
+| `profile_mismatch` | perf compare, perf budget check | medium | bd-17c65.10.6 (J6) |
+| `profile_missing` | perf budget check | medium | bd-17c65.10.6 (J6) |
+| `missing_metric` | perf artifact summary, perf budget check | medium | bd-17c65.10.6 (J6) |
+| `metric_missing` | perf compare | medium | bd-17c65.10.6 (J6) |
+| `fixture_tier_mismatch` | perf compare | medium | bd-17c65.10.6 (J6) |
+| `no_filters` | causal commands | warning | bd-17c65.10.6 (J6) |
+| `no_sources` | causal compare | warning | bd-17c65.10.6 (J6) |
+| `causal_sample_underpowered` | causal estimate, causal promote-plan | warning | bd-17c65.10.6 (J6) |
+| `causal_confounders_unavailable` | causal estimate | warning | bd-17c65.10.6 (J6) |
+| `causal_comparison_evidence_unavailable` | causal compare | warning | bd-17c65.10.6 (J6) |
+| `unknown_method` | causal compare, causal promote-plan | warning | bd-17c65.10.6 (J6) |
+| `stable_unit` | causal estimate | info | bd-17c65.10.6 (J6) |
+| `no_confounders` | causal estimate | info | bd-17c65.10.6 (J6) |
+| `conditional_independence` | causal estimate | info | bd-17c65.10.6 (J6) |
+| `replay_fidelity` | causal estimate | info | bd-17c65.10.6 (J6) |
+| `proper_randomization` | causal estimate | info | bd-17c65.10.6 (J6) |
+| `advisory_memory` | context | medium | bd-17c65.10.6 (J6) |
+| `legacy_memory` | context | high | bd-17c65.10.6 (J6) |
+| `degraded_context` | context | high | bd-17c65.10.6 (J6) |
+| `daemon_background_mode_unimplemented` | daemon | low | bd-17c65.10.6 (J6) |
+| `decay_sweep_database_unresolved` | job run | medium | bd-17c65.10.6 (J6) |
+| `decay_sweep_database_missing` | job run | medium | bd-17c65.10.6 (J6) |
+| `decay_sweep_database_open_failed` | job run | high | bd-17c65.10.6 (J6) |
+| `decay_sweep_migration_failed` | job run | high | bd-17c65.10.6 (J6) |
+| `decay_sweep_workspace_unresolved` | job run | medium | bd-17c65.10.6 (J6) |
+| `decay_sweep_item_limit_too_large` | job run | medium | bd-17c65.10.6 (J6) |
+| `decay_sweep_handler_failed` | job run | high | bd-17c65.10.6 (J6) |
+| `graph_feature_disabled` | graph, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
+| `graph_snapshot_missing` | graph export, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
+| `graph_snapshot_stale` | graph export, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
+| `graph_snapshot_unusable` | graph export, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
+| `graph_snapshot_topology_unavailable` | graph export | medium | bd-17c65.10.6 (J6) |
+| `maintenance_job_history_write_failed` | job run | high | bd-17c65.10.6 (J6) |
+| `maintenance_job_since_invalid` | job list | medium | bd-17c65.10.6 (J6) |
+| `maintenance_job_history_read_failed` | job list, job show | medium | bd-17c65.10.6 (J6) |
+| `maintenance_job_not_found` | job show | medium | bd-17c65.10.6 (J6) |
+| `mcp_feature_disabled` | mcp manifest | low | bd-17c65.10.6 (J6) |
+| `workspace_nested_markers` | workspace discovery, status | warning | bd-17c65.10.6 (J6) |
 
 ## Adding a fixture
 
@@ -41,9 +156,10 @@ in the same commit, keeping the catalog complete by construction.
 
 * It is not a replacement for end-to-end exercise of each degraded
   emission. Per-epic e2e drivers under
-  `scripts/e2e_overhaul/` (search_honesty.sh, etc.) run the real
-  binary and assert each code fires when expected. The catalog is the
-  static reference; the e2e drivers are the executable proof.
+  `scripts/e2e_overhaul/` (search_honesty.sh, etc.) and the J6 catalog
+  driver at `scripts/e2e_overhaul/failure_modes.sh` run the real binary
+  and assert each code fires when expected. The catalog is the static
+  reference; the e2e drivers are the executable proof.
 * It is not authoritative for message text. Production messages embed
   runtime values (floor, query, counts). Fixtures use
   `message_contains` substrings to stay robust under templating.

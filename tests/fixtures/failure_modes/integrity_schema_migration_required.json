@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "integrity_schema_migration_required",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "diag integrity"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The database opens, but pending migrations block provenance sampling and canary writes.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# use a fixture database whose schema version is behind current migrations"
+    ],
+    "invocation": "ee diag integrity --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "integrity_schema_migration_required",
+    "severity": "medium",
+    "message_contains": [
+      "current ee schema",
+      "sampling provenance"
+    ],
+    "repair_contains": "ee init"
+  }
+}

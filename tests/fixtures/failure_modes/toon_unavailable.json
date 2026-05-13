@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "toon_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "status",
+    "doctor",
+    "dependency contract"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The TOON renderer capability probe fails; JSON remains the canonical output surface.",
+    "setup_commands": [
+      "ee status --workspace . --json"
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "toon_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "TOON",
+      "unavailable"
+    ],
+    "repair_contains": "json"
+  }
+}

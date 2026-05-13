@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "no_sources",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "causal compare"
+  ],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "A causal comparison has scope filters but no fixture replay, shadow run, counterfactual episode, or experiment source IDs.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee causal compare --workspace . --method replay --json"
+  },
+  "expected_emission": {
+    "code": "no_sources",
+    "severity": "warning",
+    "message_contains": [
+      "No source IDs provided"
+    ]
+  }
+}

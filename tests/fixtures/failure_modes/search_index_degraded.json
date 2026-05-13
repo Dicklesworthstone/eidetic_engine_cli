@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "search_index_degraded",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "status",
+    "health"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Search is compiled, but the selected workspace index is missing, stale, corrupt, or unreadable.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# make the search index missing, stale, corrupt, or unreadable"
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "search_index_degraded",
+    "severity": "medium",
+    "message_contains": [
+      "Search is compiled",
+      "index is missing"
+    ],
+    "repair_contains": "ee index status"
+  }
+}

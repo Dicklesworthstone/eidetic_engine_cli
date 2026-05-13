@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "auto_propose_search_neighbor_lookup_failed",
+  "introduced_by": {
+    "bead": "bd-17c65.7.3",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "remember"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Frankensearch neighbor lookup is unavailable during remember-time curation proposal, so proposal falls back to tag-overlap clustering.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Tagged cluster seed.' --workspace . --tags cluster"
+    ],
+    "invocation": "ee remember 'Tagged cluster follow-up.' --workspace . --tags cluster --json"
+  },
+  "expected_emission": {
+    "code": "auto_propose_search_neighbor_lookup_failed",
+    "severity": "info",
+    "message_contains": [
+      "Frankensearch neighbor lookup",
+      "unavailable"
+    ],
+    "repair_contains": "tag-overlap"
+  }
+}

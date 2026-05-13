@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "heavy_gates_skipped",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "profile verify"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "A constrained verification profile skips heavy cargo gates.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# select a profile whose verification budget omits heavy gates"
+    ],
+    "invocation": "ee profile verify --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "heavy_gates_skipped",
+    "severity": "info",
+    "message_contains": [
+      "heavy verification gate",
+      "skipped by profile"
+    ],
+    "repair_contains": "Run skipped gates manually"
+  }
+}

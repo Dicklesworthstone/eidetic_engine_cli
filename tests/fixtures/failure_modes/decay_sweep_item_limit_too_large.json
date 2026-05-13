@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "decay_sweep_item_limit_too_large",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "job run"
+  ],
+  "severity": "medium",
+  "repair_present": false,
+  "trigger": {
+    "description": "The decay sweep item limit is larger than the internal u32 limit.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee job run decay_sweep --item-limit 18446744073709551615 --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "decay_sweep_item_limit_too_large",
+    "severity": "medium",
+    "message_contains": [
+      "item limit exceeds u32"
+    ]
+  }
+}

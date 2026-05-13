@@ -3,7 +3,7 @@
   "code": "expired_filtered",
   "introduced_by": { "bead": "bd-17c65.2.8", "epic_letter": "B" },
   "surfaces": ["search"],
-  "severity": "info",
+  "severity": "low",
   "repair_present": false,
   "trigger": {
     "description": "ee memory expire sets valid_to in the past; subsequent search excludes time-expired memories from the result set. This informational signal records how many were filtered so the agent can correlate result counts with corpus size.",
@@ -16,7 +16,7 @@
   },
   "expected_emission": {
     "code": "expired_filtered",
-    "severity": "info",
+    "severity": "low",
     "message_contains": [
       "expired"
     ]

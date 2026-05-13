@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "why_result_target_unsupported_source",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "why"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee why was asked to explain a result:<doc-id> target that refers to a non-memory document source.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee why result:<non-memory-doc-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "why_result_target_unsupported_source",
+    "severity": "medium",
+    "message_contains": [
+      "non-memory",
+      "source-level explanation"
+    ],
+    "repair_contains": "memory"
+  }
+}

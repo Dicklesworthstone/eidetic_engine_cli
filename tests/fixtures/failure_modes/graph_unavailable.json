@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "doctor",
+    "diag graph",
+    "dependency contract"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Graph analytics are feature-gated or the FrankenNetworkX projection cannot be built for the workspace.",
+    "setup_commands": [
+      "ee diag graph --workspace . --json"
+    ],
+    "invocation": "ee diag graph --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "graph",
+      "unavailable"
+    ],
+    "repair_contains": "graph"
+  }
+}

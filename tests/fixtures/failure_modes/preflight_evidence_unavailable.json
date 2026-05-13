@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "preflight_evidence_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "preflight"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Preflight could not obtain required explicit evidence sources for a task.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee preflight run 'risky task' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "preflight_evidence_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "evidence",
+      "unavailable"
+    ],
+    "repair_contains": "preflight evidence"
+  }
+}

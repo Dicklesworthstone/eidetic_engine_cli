@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "profile_missing",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "perf budget check"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A performance budget check asks for a profile, but the artifact does not declare one.",
+    "setup_commands": [
+      "# use a normalized perf artifact with profile omitted"
+    ],
+    "invocation": "ee perf budget check --profile workstation artifact.json --json"
+  },
+  "expected_emission": {
+    "code": "profile_missing",
+    "severity": "medium",
+    "message_contains": [
+      "does not declare requested profile"
+    ],
+    "repair_contains": "Regenerate the artifact"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "workspace_nested_markers",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "workspace discovery",
+    "status"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Workspace discovery finds more than one initialized ee workspace marker in the current directory ancestry.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "mkdir -p nested",
+      "ee init --workspace nested"
+    ],
+    "invocation": "cd nested && ee status --json"
+  },
+  "expected_emission": {
+    "code": "workspace_nested_markers",
+    "severity": "warning",
+    "message_contains": [
+      "initialized ee workspaces",
+      "nearest marker wins"
+    ],
+    "repair_contains": "--workspace"
+  }
+}

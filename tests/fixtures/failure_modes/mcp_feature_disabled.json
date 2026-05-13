@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mcp_feature_disabled",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "mcp manifest"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "The MCP manifest is rendered by a build that does not enable the MCP stdio adapter feature.",
+    "setup_commands": [
+      "# build ee without --features mcp"
+    ],
+    "invocation": "ee mcp manifest --json"
+  },
+  "expected_emission": {
+    "code": "mcp_feature_disabled",
+    "severity": "low",
+    "message_contains": [
+      "MCP stdio adapter feature is not enabled"
+    ],
+    "repair_contains": "mcp feature"
+  }
+}

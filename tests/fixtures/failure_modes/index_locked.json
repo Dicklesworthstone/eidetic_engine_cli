@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "index_locked",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "index vacuum"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "An index publish lock is held while index vacuum previews reclaimable files.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# write an active index publish lock row through a test harness"
+    ],
+    "invocation": "ee index vacuum --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "index_locked",
+    "severity": "medium",
+    "message_contains": [
+      "index publish lock",
+      "currently held"
+    ],
+    "repair_contains": "Wait for the active index operation"
+  }
+}

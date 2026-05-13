@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "semantic_dimension_exceeds_budget",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "semantic model admissibility",
+    "search"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A configured local embedding model exceeds the semantic dimension budget, so retrieval falls back to lexical mode.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# register an embedding model with dimension greater than the configured semantic budget"
+    ],
+    "invocation": "ee search 'query' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "semantic_dimension_exceeds_budget",
+    "severity": "medium",
+    "message_contains": [
+      "embedding dimension exceeds",
+      "configured budget"
+    ],
+    "repair_contains": "select a smaller local embedding model"
+  }
+}

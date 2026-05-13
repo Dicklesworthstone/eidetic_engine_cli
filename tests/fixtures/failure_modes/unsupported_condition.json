@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "unsupported_condition",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "tripwire check",
+    "preflight"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A persisted tripwire condition uses a condition kind the evaluator refuses to guess about.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# create a tripwire with an unsupported condition kind through a test harness"
+    ],
+    "invocation": "ee tripwire check <id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "unsupported_condition",
+    "severity": "warning",
+    "message_contains": [
+      "unsupported"
+    ],
+    "repair_contains": "provide a generated"
+  }
+}
