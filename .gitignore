@@ -10,6 +10,8 @@
 # broad global ignores for "core", so keep this module visible to Git.
 !src/core/
 !src/core/**
+!src/cache/
+!src/cache/**
 
 # ee project-local state
 .ee/
@@ -88,6 +90,7 @@ Cargo.lock.bak
 .rch/
 .claude/
 .codex/
+.codex_write_probe
 .cursor/
 .stash_janitor_workspace/
 !tests/fixtures/agent_detect/remote_mirror/

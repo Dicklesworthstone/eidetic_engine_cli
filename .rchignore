@@ -24,6 +24,11 @@
 # /Volumes/USBNVME16TB. RCH sets worker-local target dirs explicitly.
 .cargo/config.toml
 
+# `src/cache` is a real Rust module. Keep it visible even when host-level
+# ignore files contain broad cache-directory exclusions.
+!src/cache/
+!src/cache/**
+
 # Diagnostic output files created by verification scripts
 .clippy_out.txt
 .closure-lint-report.json
