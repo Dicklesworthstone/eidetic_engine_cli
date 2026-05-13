@@ -29,19 +29,33 @@ path = "src/lib.rs"
 name = "ee"
 path = "src/main.rs"
 
+# Feature flags. See docs/feature_flag_registry.md for status, gate surface,
+# and owner-bead per flag. tests/feature_flag_registry_in_sync.rs enforces
+# 1:1 correspondence with that registry. `[]` as a value means "no optional
+# Cargo dependencies" — a flag can still cfg-gate code in src/ with `[]` value.
 [features]
 default = ["fts5", "json", "embed-fast", "lexical-bm25", "graph"]
 fts5 = ["frankensearch/fts5"]
+# Reserved (status: reserved). No cfg-gates in src/ today. Reserved for a
+# future "JSON-only minimal output" build profile. See docs/feature_flag_registry.md.
 json = []
 embed-fast = ["frankensearch/model2vec"]
 # Blocked: frankensearch/fastembed currently pulls reqwest/tokio/hyper/tower.
 # Do not expose an embed-quality feature until that tree is forbidden-dep clean.
 lexical-bm25 = ["frankensearch/lexical"]
+# Active. Gates ~42 cfg-gated functions under src/graph/mod.rs. Default-on.
 graph = []
+# Active. Gates `pub mod mcp;` at src/lib.rs:23 (the full 2.6k-LOC MCP adapter).
+# Opt-in via `cargo install ee --features mcp` per README.
 mcp = []
+# Reserved (status: reserved). No cfg-gates in src/ today. Reserved for the
+# future localhost HTTP/SSE adapter described in AGENTS.md §Module Layout.
 serve = []
-# Optional science analytics for evaluation and diagnostics (EE-171).
-# Enables offline statistical metrics, clustering, and diagram exports.
+# Reserved (status: reserved). One cfg-gate at src/science/mod.rs:1999.
+# The corresponding CLI surface `ee analyze science-status` is
+# CommandEffect::degraded_unavailable. Reserved for the future analytics
+# subsystem (EE-171). See docs/feature_flag_registry.md and
+# docs/silent-fallback-inventory.md.
 science-analytics = []
 
 [dependencies]
