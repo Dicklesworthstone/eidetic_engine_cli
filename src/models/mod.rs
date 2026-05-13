@@ -291,8 +291,6 @@ pub const RESPONSE_SCHEMA_V0: &str = "ee.response.v0";
 /// Response envelope schema for successful command output.
 pub const RESPONSE_SCHEMA_V1: &str = "ee.response.v1";
 
-/// Error envelope schema for failed command output.
-pub const ERROR_SCHEMA_V1: &str = "ee.error.v1";
 /// Current error envelope schema for failed command output.
 pub const ERROR_SCHEMA_V2: &str = "ee.error.v2";
 
