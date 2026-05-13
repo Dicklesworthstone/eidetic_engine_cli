@@ -1743,8 +1743,9 @@ run_fixture_scenario() {
             unresolved_job_workspace="${EPIC_WORKSPACE}.j6-decay-database-unresolved"
             mkdir -p "$unresolved_job_workspace"
             SCENARIO_OUTPUT=$(
-                cd "$unresolved_job_workspace" &&
-                    env -u EE_WORKSPACE "$EE_BINARY" job run decay_sweep --json 2>/dev/null || true
+                cd "$unresolved_job_workspace" || exit 1
+                unset EE_WORKSPACE
+                e2e_log_command "$EE_BINARY" job run decay_sweep --json || true
             )
             ;;
         decay_sweep_handler_failed)

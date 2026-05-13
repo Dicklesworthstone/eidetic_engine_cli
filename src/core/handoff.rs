@@ -2433,6 +2433,7 @@ mod tests {
             bound_workspace_id: None,
             bound_workspace_identity: None,
             include_prompt_fragment: true,
+            require_fresh: false,
         })
         .map_err(|error| error.message())?;
         ensure(resume.active_focus.is_some(), "resume includes focus")?;
@@ -2517,6 +2518,7 @@ mod tests {
             bound_workspace_id: None,
             bound_workspace_identity: None,
             include_prompt_fragment: true,
+            require_fresh: false,
         })
         .map_err(|error| error.message())?;
         ensure(resume.task_frame.is_some(), "resume includes task frame")?;
