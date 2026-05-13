@@ -23,7 +23,7 @@
     "code": "pack_concurrent_limit_reached",
     "severity": "low",
     "message_contains": [
-      "concurrent",
+      "Concurrent",
       "pack"
     ],
     "repair_contains": "retry"

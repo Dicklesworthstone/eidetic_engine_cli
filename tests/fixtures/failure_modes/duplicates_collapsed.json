@@ -2,7 +2,7 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "duplicates_collapsed",
   "introduced_by": { "bead": "bd-17c65.2.3", "epic_letter": "B" },
-  "surfaces": ["search"],
+  "surfaces": ["search", "diag search"],
   "severity": "low",
   "repair_present": false,
   "trigger": {
@@ -11,7 +11,7 @@
       "ee init --workspace .",
       "ee remember 'Use cargo fmt before release.' --workspace . --level procedural --kind rule"
     ],
-    "invocation": "ee search 'cargo fmt' --workspace . --json"
+    "invocation": "ee diag search 'cargo fmt' --workspace . --all-arms --inject-duplicate-hit --json"
   },
   "expected_emission": {
     "code": "duplicates_collapsed",

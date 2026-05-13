@@ -22,7 +22,7 @@
     "code": "quarantine_workspace_unavailable",
     "severity": "medium",
     "message_contains": [
-      "workspace",
+      "Workspace",
       "unavailable"
     ],
     "repair_contains": "ee init",

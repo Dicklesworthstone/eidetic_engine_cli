@@ -65,6 +65,17 @@ lists alphabetically and so the contract test can cross-check
   // is purely informational).
   "repair_present": true,
 
+  // Optional. True only for a legacy code intentionally kept in the
+  // catalog as a tombstone after production stopped emitting it. Retired
+  // fixtures keep the historical `code` and `expected_emission` shape so
+  // tooling can recognize the code, while the e2e driver asserts the
+  // production emission pattern is absent.
+  "retired": false,
+  "retired_by": {
+    "bead": "bd-17c65.5.2",
+    "reason": "The meta signal was replaced by concrete degraded[] entries."
+  },
+
   // Required. Human-readable trigger description and the minimal
   // setup that should produce the emission. The setup commands are
   // documentation, not necessarily executed by the contract test —

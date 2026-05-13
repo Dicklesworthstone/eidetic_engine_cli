@@ -14,7 +14,7 @@
       "ee export --workspace . --output-dir out --redaction strict --json",
       "ee init --workspace ./fresh-workspace --json"
     ],
-    "invocation": "ee import jsonl --workspace ./fresh-workspace --source out/memories.jsonl --json"
+    "invocation": "ee import jsonl --workspace ./fresh-workspace --source out/<backup-id>/records.jsonl --json"
   },
   "expected_emission": {
     "code": "redaction_round_trip_marker_preserved",

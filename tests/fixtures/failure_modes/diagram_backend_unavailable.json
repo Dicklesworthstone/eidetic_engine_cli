@@ -22,7 +22,7 @@
     "code": "diagram_backend_unavailable",
     "severity": "medium",
     "message_contains": [
-      "diagram",
+      "Diagram",
       "unavailable"
     ],
     "repair_contains": "Mermaid"

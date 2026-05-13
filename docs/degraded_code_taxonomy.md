@@ -95,7 +95,7 @@ A degraded entry's `code` is classified into one of three buckets:
 | `consensus_no_clusters` | low | bd-1zb7k.9 (S8) |
 | `coordination_source_stale` | low | bd-1zb7k.4 (S3) |
 | `coordination_source_unavailable` | medium | bd-1zb7k.4 (S3) |
-| `context_evidence_freshness_changed_source` | info | bd-17c65.1.2 (A2) |
+| `context_evidence_freshness_changed_source` | low | bd-17c65.1.2 (A2) |
 | `context_profile_budget_capped` | info | bd-17c65.2.4 (B7) |
 | `duplicates_collapsed` | low | bd-17c65.2.3 (B3) |
 | `expired_filtered` | low | bd-17c65.2.8 (B8) |
@@ -353,7 +353,7 @@ A degraded entry's `code` is classified into one of three buckets:
 |------|----------|------|
 | `action_override_not_actionable` | low | (TBD) |
 | `advisory_memory` | info | (TBD) — advisory-memory presence marker |
-| `degraded_context` | info | (TBD) — meta-signal for any non-empty degraded[] |
+| `degraded_context` | info | bd-17c65.5.2 (E2) — retired tombstone for legacy meta-signal; context emits concrete degraded[] entries instead |
 | `dry_run_recommended` | info | (TBD) |
 | `fixture_tier_mismatch` | low | (TBD) |
 | `heavy_gates_skipped` | info | (TBD) |

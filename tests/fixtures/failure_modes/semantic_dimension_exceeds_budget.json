@@ -23,7 +23,7 @@
     "code": "semantic_dimension_exceeds_budget",
     "severity": "medium",
     "message_contains": [
-      "embedding dimension exceeds",
+      "model dimension exceeds",
       "configured budget"
     ],
     "repair_contains": "select a smaller local embedding model",

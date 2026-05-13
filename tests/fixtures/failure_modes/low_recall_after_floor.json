@@ -3,8 +3,8 @@
   "code": "low_recall_after_floor",
   "introduced_by": { "bead": "bd-17c65.2.1", "epic_letter": "B" },
   "surfaces": ["search"],
-  "severity": "info",
-  "repair_present": false,
+  "severity": "low",
+  "repair_present": true,
   "trigger": {
     "description": "Search considered at least 3 candidates but kept under 30% after applying the relevance floor. Informational so an agent can decide whether to widen the query.",
     "setup_commands": [
@@ -14,14 +14,15 @@
       "ee remember 'Migration 0042 added user_email column.' --workspace . --level episodic --kind decision",
       "ee remember 'Run clippy --all-targets before push.' --workspace . --level procedural --kind rule"
     ],
-    "invocation": "ee search 'cargo fmt clippy' --workspace . --json"
+    "invocation": "ee search 'cargo fmt clippy' --workspace . --relevance-floor 0.0327 --json"
   },
   "expected_emission": {
     "code": "low_recall_after_floor",
-    "severity": "info",
+    "severity": "low",
     "message_contains": [
-      "kept",
-      "considered"
-    ]
+      "Only",
+      "candidates passed"
+    ],
+    "repair_contains": "Rephrase"
   }
 }

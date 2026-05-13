@@ -22,8 +22,8 @@
       "Memory health is unavailable",
       "workspace"
     ],
-    "repair_contains": "ee status --workspace",
-    "repair_string": "Run `ee status --workspace . --json`.",
+    "repair_contains": "ee init --workspace",
+    "repair_string": "Run `ee init --workspace .` before inspecting memory health.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"
   }
 }

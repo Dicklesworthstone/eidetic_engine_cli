@@ -2,8 +2,8 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "context_evidence_freshness_changed_source",
   "introduced_by": { "bead": "bd-17c65.1.2", "epic_letter": "A" },
-  "surfaces": ["context", "pack replay"],
-  "severity": "info",
+  "surfaces": ["context"],
+  "severity": "low",
   "repair_present": false,
   "trigger": {
     "description": "ee context (or ee pack replay) detected that an evidence source referenced by the persisted pack ledger has changed contents since the pack was built. The pack is still rendered honestly, but the agent should treat its evidence as potentially stale.",
@@ -14,14 +14,13 @@
       "ee index rebuild --workspace . --json",
       "ee context 'J6 changed source freshness marker' --workspace . --json",
       "printf 'J6 changed source freshness marker changed source evidence.\\n' > j6-changed-source.md",
-      "ee context 'J6 changed source freshness marker' --workspace . --json",
-      "ee diag pack-latest --workspace . --query 'J6 changed source freshness marker' --json"
+      "ee context 'J6 changed source freshness marker' --workspace . --json"
     ],
-    "invocation": "ee pack replay <pack-id> --workspace . --json"
+    "invocation": "ee context 'J6 changed source freshness marker' --workspace . --json"
   },
   "expected_emission": {
     "code": "context_evidence_freshness_changed_source",
-    "severity": "info",
+    "severity": "low",
     "message_contains": [
       "evidence",
       "changed"

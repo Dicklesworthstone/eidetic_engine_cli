@@ -8,22 +8,27 @@
   "surfaces": [
     "context"
   ],
-  "severity": "medium",
+  "severity": "info",
   "repair_present": false,
+  "retired": true,
+  "retired_by": {
+    "bead": "bd-17c65.5.2",
+    "reason": "The meta degraded_context banner duplicated concrete degraded[] entries and trained agents to ignore degraded output."
+  },
   "trigger": {
-    "description": "A context pack has one or more degraded retrieval or packing signals, so the advisory banner summarizes them.",
+    "description": "Retired legacy meta-code. Context now emits concrete degraded[] entries instead of a degraded_context summary banner.",
     "setup_commands": [
       "ee init --workspace .",
-      "# trigger a context degradation such as stale index or unavailable graph features"
+      "# confirm src/ has no production degraded_context emission pattern"
     ],
-    "invocation": "ee context 'task' --workspace . --json"
+    "invocation": "scripts/e2e_overhaul/failure_modes.sh with EE_FAILURE_MODE_FILTER=degraded_context"
   },
   "expected_emission": {
     "code": "degraded_context",
-    "severity": "medium",
+    "severity": "info",
     "message_contains": [
-      "degraded context signal",
-      "inspect degraded"
+      "degraded_context signal is retired",
+      "inspect degraded[] concrete signals"
     ]
   }
 }

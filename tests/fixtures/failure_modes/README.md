@@ -36,7 +36,7 @@ in the same commit, keeping the catalog complete by construction.
 | `validity_filtered_significant_recall_drop` | search, context | info | bd-17c65.10.6 (J6) |
 | `profile_search_limit_capped` | search, diag search | low | bd-17c65.2.4 (B7) |
 | `context_profile_budget_capped` | context | low | bd-17c65.10.6 (J6) |
-| `context_evidence_freshness_changed_source` | context, pack replay | info | bd-17c65.1.2 (A2) |
+| `context_evidence_freshness_changed_source` | context | low | bd-17c65.1.2 (A2) |
 | `policy_bypass_used` | remember, note | info | bd-17c65.3.2 (C2) |
 | `policy_tag_rejected_with_details` | remember, note | low | bd-17c65.3.4 (C4) |
 | `policy_secret_detected_with_offsets` | remember, note | medium | bd-17c65.3.4 (C4) |
@@ -140,7 +140,7 @@ in the same commit, keeping the catalog complete by construction.
 | `proper_randomization` | causal estimate | info | bd-17c65.10.6 (J6) |
 | `advisory_memory` | context | medium | bd-17c65.10.6 (J6) |
 | `legacy_memory` | context | high | bd-17c65.10.6 (J6) |
-| `degraded_context` | context | medium | bd-17c65.10.6 (J6) |
+| `degraded_context` | context | info | bd-17c65.5.2 (E2, retired tombstone) |
 | `daemon_background_mode_unimplemented` | daemon | low | bd-17c65.10.6 (J6) |
 | `decay_sweep_database_unresolved` | job run | medium | bd-17c65.10.6 (J6) |
 | `decay_sweep_database_missing` | job run | medium | bd-17c65.10.6 (J6) |

@@ -11,14 +11,14 @@
       "ee init --workspace .",
       "ee remember 'Database connection pooling guide' --workspace . --level semantic --kind fact"
     ],
-    "invocation": "ee search 'connection' --workspace . --json"
+    "invocation": "ee search 'connection' --workspace . --relevance-floor 0.02 --json"
   },
   "expected_emission": {
     "code": "weak_query_recall",
     "severity": "low",
     "message_contains": [
-      "top score",
-      "below"
+      "Top result scored",
+      "against floor"
     ]
   }
 }
