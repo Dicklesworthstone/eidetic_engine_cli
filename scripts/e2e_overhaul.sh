@@ -53,7 +53,7 @@ fi
 # Epic registry. Letter → script-basename. Iterate in this order regardless
 # of --only/--skip; that way the summary is deterministic across invocations.
 # ---------------------------------------------------------------------------
-EPIC_LETTERS=(A B C D E F G H I)
+EPIC_LETTERS=(A B C D E F G H I J)
 declare -A EPIC_SCRIPTS=(
     [A]="pack_format.sh"
     [B]="search_honesty.sh"
@@ -64,6 +64,7 @@ declare -A EPIC_SCRIPTS=(
     [G]="learn_curate.sh"
     [H]="output_rendering.sh"
     [I]="agent_triad.sh"
+    [J]="determinism.sh"
 )
 declare -A EPIC_NAMES=(
     [A]="pack_format"
@@ -75,6 +76,7 @@ declare -A EPIC_NAMES=(
     [G]="learn_curate"
     [H]="output_rendering"
     [I]="agent_triad"
+    [J]="determinism"
 )
 
 # ---------------------------------------------------------------------------
