@@ -211,9 +211,28 @@ CRASH_MARKER="L1 killed writer $RUN_ID"
     --no-propose-candidates \
     --json >"$ARTIFACT_DIR/crash.out" 2>"$ARTIFACT_DIR/crash.err" &
 CRASH_PID=$!
-sleep 0.001
+REPLAY_STATE_FILE="$EPIC_WORKSPACE/.ee/write-spool/recovery-state.json"
+for _attempt in $(seq 1 200); do
+    if [ -f "$REPLAY_STATE_FILE" ] \
+        && jq -e '.state == "uncommitted_write_replay_required"' \
+            "$REPLAY_STATE_FILE" >/dev/null 2>&1; then
+        break
+    fi
+    if ! kill -0 "$CRASH_PID" 2>/dev/null; then
+        break
+    fi
+    sleep 0.005
+done
 kill "$CRASH_PID" 2>/dev/null || true
 wait "$CRASH_PID" >/dev/null 2>&1 || true
+
+PRE_RECOVERY_STATUS_JSON=$(ee_workspace status --json 2>/dev/null || true)
+e2e_log_assert_eq "$(printf '%s' "$PRE_RECOVERY_STATUS_JSON" | jq -r '.success // false' 2>/dev/null)" \
+    "true" "l1_status_after_killed_writer_reports"
+assert_jq "$PRE_RECOVERY_STATUS_JSON" '.data.posture.workspace.storage.status // empty' \
+    "degraded_recoverable" "l1_post_kill_storage_degraded_recoverable"
+assert_jq "$PRE_RECOVERY_STATUS_JSON" '.data.posture.workspace.storage.reason // empty' \
+    "uncommitted_write_replay_required" "l1_post_kill_storage_replay_reason"
 
 RECOVERY_JSON=$(ee_workspace remember \
     "L1 post-kill recovery $RUN_ID durable write succeeds" \
@@ -229,4 +248,6 @@ e2e_log_assert_num "$CRASH_COUNT" -le 1 "l1_killed_writer_no_duplicate_partial_r
 STATUS_JSON=$(ee_workspace status --json 2>/dev/null || true)
 e2e_log_assert_eq "$(printf '%s' "$STATUS_JSON" | jq -r '.success // false' 2>/dev/null)" \
     "true" "l1_status_after_killed_writer_succeeds"
+assert_jq "$STATUS_JSON" '.data.posture.workspace.storage.reason // empty' \
+    "" "l1_post_recovery_storage_replay_reason_cleared"
 concurrency_step "killed_writer_recovery" "0_or_1" "$CRASH_COUNT" "ok"

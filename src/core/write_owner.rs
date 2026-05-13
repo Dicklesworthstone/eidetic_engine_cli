@@ -40,6 +40,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::cx::Cx;
@@ -58,6 +60,15 @@ pub const WRITE_SPOOL_STATUS_SCHEMA_V1: &str = "ee.write_spool.status.v1";
 
 /// Schema for write spool backpressure errors.
 pub const WRITE_SPOOL_BACKPRESSURE_SCHEMA_V1: &str = "ee.write_spool.backpressure.v1";
+
+/// Schema for the durable write-spool crash-recovery state marker.
+pub const WRITE_SPOOL_RECOVERY_STATE_SCHEMA_V1: &str = "ee.write_spool.recovery_state.v1";
+
+/// Relative path to the durable write-spool crash-recovery state marker.
+pub const WRITE_SPOOL_RECOVERY_STATE_PATH: &str = ".ee/write-spool/recovery-state.json";
+
+const WRITE_SPOOL_RECOVERY_STATE_CLEAN: &str = "clean";
+const WRITE_SPOOL_RECOVERY_STATE_REPLAY_REQUIRED: &str = "uncommitted_write_replay_required";
 
 /// Default channel capacity for write requests.
 pub const DEFAULT_CHANNEL_CAPACITY: usize = 64;
@@ -82,6 +93,52 @@ pub const WRITE_SPOOL_BACKPRESSURE_CODE: &str = "write_spool_backpressure";
 
 /// User-facing alias for queue-depth write spool backpressure (L1).
 pub const WRITE_QUEUE_FULL_CODE: &str = "write_queue_full";
+
+/// Return the workspace-relative recovery state path.
+#[must_use]
+pub fn write_spool_recovery_state_path(workspace_path: &Path) -> PathBuf {
+    workspace_path.join(WRITE_SPOOL_RECOVERY_STATE_PATH)
+}
+
+/// Mark the workspace as having an interrupted write that requires replay.
+pub fn mark_write_replay_required(workspace_path: &Path) -> std::io::Result<()> {
+    write_recovery_state(workspace_path, WRITE_SPOOL_RECOVERY_STATE_REPLAY_REQUIRED)
+}
+
+/// Mark the workspace write-spool recovery state as clean.
+pub fn mark_write_replay_clean(workspace_path: &Path) -> std::io::Result<()> {
+    write_recovery_state(workspace_path, WRITE_SPOOL_RECOVERY_STATE_CLEAN)
+}
+
+/// Returns true when the workspace has an interrupted write requiring replay.
+#[must_use]
+pub fn workspace_write_replay_required(workspace_path: &Path) -> bool {
+    let path = write_spool_recovery_state_path(workspace_path);
+    let Ok(raw) = fs::read_to_string(path) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("state")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some(WRITE_SPOOL_RECOVERY_STATE_REPLAY_REQUIRED)
+}
+
+fn write_recovery_state(workspace_path: &Path, state: &str) -> std::io::Result<()> {
+    let path = write_spool_recovery_state_path(workspace_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let payload = format!(
+        "{{\"schema\":\"{WRITE_SPOOL_RECOVERY_STATE_SCHEMA_V1}\",\"state\":\"{state}\"}}\n"
+    );
+    fs::write(path, payload)
+}
 
 /// A request to perform a write operation.
 #[derive(Debug)]
@@ -1344,6 +1401,25 @@ mod tests {
         assert!(duplicate.duplicate);
         assert_eq!(spool.status(11).queue_depth, 1);
         assert_eq!(spool.recovery_records().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn write_spool_recovery_state_marks_replay_required_and_clean() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+
+        mark_write_replay_required(temp.path()).map_err(|error| error.to_string())?;
+        assert!(
+            workspace_write_replay_required(temp.path()),
+            "replay marker should report required"
+        );
+
+        mark_write_replay_clean(temp.path()).map_err(|error| error.to_string())?;
+        assert!(
+            !workspace_write_replay_required(temp.path()),
+            "clean marker should clear replay requirement"
+        );
+
         Ok(())
     }
 

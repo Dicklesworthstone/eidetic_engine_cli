@@ -476,6 +476,8 @@ pub fn remember_memory(
         });
     }
 
+    let mut write_replay_guard = RememberWriteReplayGuard::arm(&prepared.workspace_path)?;
+
     ensure_database_parent_exists(&prepared.database_path)?;
     let connection =
         DbConnection::open_file(&prepared.database_path).map_err(|error| DomainError::Storage {
@@ -657,6 +659,8 @@ pub fn remember_memory(
                 }],
             ),
         };
+
+    write_replay_guard.mark_clean()?;
 
     Ok(RememberMemoryReport {
         version: env!("CARGO_PKG_VERSION"),
@@ -875,6 +879,45 @@ struct PreparedRememberMemory {
     valid_to: Option<String>,
     validity_status: String,
     validity_window_kind: String,
+}
+
+struct RememberWriteReplayGuard {
+    workspace_path: PathBuf,
+    armed: bool,
+}
+
+impl RememberWriteReplayGuard {
+    fn arm(workspace_path: &Path) -> Result<Self, DomainError> {
+        super::write_owner::mark_write_replay_required(workspace_path).map_err(|error| {
+            DomainError::Storage {
+                message: format!("Failed to record write-spool recovery marker: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            }
+        })?;
+        Ok(Self {
+            workspace_path: workspace_path.to_path_buf(),
+            armed: true,
+        })
+    }
+
+    fn mark_clean(&mut self) -> Result<(), DomainError> {
+        super::write_owner::mark_write_replay_clean(&self.workspace_path).map_err(|error| {
+            DomainError::Storage {
+                message: format!("Failed to clear write-spool recovery marker: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            }
+        })?;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for RememberWriteReplayGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = super::write_owner::mark_write_replay_clean(&self.workspace_path);
+        }
+    }
 }
 
 fn prepare_remember_memory(

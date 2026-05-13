@@ -985,7 +985,10 @@ fn status_posture_report(
     degradations: &[DegradationReport],
 ) -> WorkspacePostureReport {
     let workspace_path = options.workspace_path.as_deref();
-    let storage_status = storage_posture_status(capabilities.storage, workspace_path);
+    let write_replay_required =
+        workspace_path.is_some_and(super::write_owner::workspace_write_replay_required);
+    let storage_status =
+        storage_posture_status(capabilities.storage, workspace_path, write_replay_required);
     let search_status = search_posture_status(capabilities.search, storage_status);
     let graph_status = graph_compute_posture_status(graph_compute.status);
 
@@ -999,7 +1002,7 @@ fn status_posture_report(
         posture_row(
             "storage",
             storage_status,
-            storage_posture_reason(capabilities.storage, workspace_path),
+            storage_posture_reason(capabilities.storage, workspace_path, write_replay_required),
             storage_posture_fallback(capabilities.storage, workspace_path),
         ),
         posture_row(
@@ -1130,7 +1133,11 @@ const fn capability_posture_status(
 const fn storage_posture_status(
     status: CapabilityStatus,
     workspace_path: Option<&Path>,
+    write_replay_required: bool,
 ) -> SubsystemPostureStatus {
+    if write_replay_required {
+        return SubsystemPostureStatus::DegradedRecoverable;
+    }
     match status {
         CapabilityStatus::Ready => SubsystemPostureStatus::Ok,
         CapabilityStatus::Pending if workspace_path.is_none() => {
@@ -1145,7 +1152,11 @@ const fn storage_posture_status(
 const fn storage_posture_reason(
     status: CapabilityStatus,
     workspace_path: Option<&Path>,
+    write_replay_required: bool,
 ) -> Option<&'static str> {
+    if write_replay_required {
+        return Some("uncommitted_write_replay_required");
+    }
     match status {
         CapabilityStatus::Ready => None,
         CapabilityStatus::Pending if workspace_path.is_none() => Some("workspace_not_selected"),
@@ -3067,6 +3078,42 @@ mod tests {
                 .collect(),
             vec!["medium", "high"],
             "storage degraded severities",
+        )
+    }
+
+    #[test]
+    fn status_storage_posture_reports_uncommitted_write_replay_required() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ee_dir = temp.path().join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let connection =
+            DbConnection::open_file(ee_dir.join("ee.db")).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        super::super::write_owner::mark_write_replay_required(temp.path())
+            .map_err(|error| error.to_string())?;
+
+        let report = StatusReport::gather_for_workspace(temp.path());
+        let storage = report
+            .posture
+            .subsystems
+            .iter()
+            .find(|subsystem| subsystem.id == "storage")
+            .ok_or_else(|| "missing storage posture row".to_string())?;
+
+        ensure(
+            report.capabilities.storage,
+            CapabilityStatus::Ready,
+            "storage capability remains ready",
+        )?;
+        ensure(
+            storage.status,
+            SubsystemPostureStatus::DegradedRecoverable,
+            "storage posture is recoverable",
+        )?;
+        ensure(
+            storage.reason,
+            Some("uncommitted_write_replay_required"),
+            "storage replay reason",
         )
     }
 
