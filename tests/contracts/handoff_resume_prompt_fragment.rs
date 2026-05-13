@@ -75,6 +75,7 @@ fn build_capsule() -> Result<CapsuleFixture, String> {
             tags,
             confidence: 0.9,
             source: None,
+            allow_secret_mention: false,
             valid_from: None,
             valid_to: None,
             dry_run: false,
@@ -116,6 +117,7 @@ fn run_resume(
         max_sections: None,
         task_frame_id: None,
         bound_workspace_id: bound_workspace_id.map(str::to_owned),
+        bound_workspace_identity: None,
         include_prompt_fragment,
     })
     .map_err(|error| format!("resume_handoff: {error:?}"))

@@ -983,7 +983,17 @@ fn canonical_or_lexical(path: &Path) -> PathBuf {
         .unwrap_or_else(|_| lexical_absolute(Path::new("."), path))
 }
 
-fn workspace_fingerprint(path: &Path) -> String {
+/// Compute a stable workspace fingerprint from a canonical root path.
+///
+/// Returns the first 24 hex chars of BLAKE3 over the path's string
+/// representation. Same path → same fingerprint across processes,
+/// hosts, and reboots; different paths → vanishingly low collision
+/// probability for sensible workspace counts. Bead bd-17c65.13.3 (M2)
+/// promoted this from private to crate-public so the handoff capsule
+/// can embed the fingerprint at create-time and the resume side can
+/// reconcile against the bound workspace.
+#[must_use]
+pub fn workspace_fingerprint(path: &Path) -> String {
     let rendered = path.to_string_lossy();
     let hash = blake3::hash(rendered.as_bytes()).to_hex();
     hash.chars().take(24).collect()

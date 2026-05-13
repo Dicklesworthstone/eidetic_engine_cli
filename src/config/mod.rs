@@ -5,7 +5,8 @@ pub mod workspace;
 
 pub use file::{
     CassConfig, ConfigFile, ConfigParseError, CurationConfig, FeedbackConfig, PackConfig,
-    PrivacyConfig, RuntimeConfig, SearchConfig, SearchSpeed, StorageConfig, TrustConfig,
+    PolicyConfig, PrivacyConfig, RuntimeConfig, SearchConfig, SearchSpeed, SecretDetectorConfig,
+    StorageConfig, TrustConfig,
 };
 pub use merge::{
     CASS_BINARY_KEY, CASS_ENABLED_KEY, CASS_SINCE_KEY, CURATION_DECAY_HALF_LIFE_DAYS_KEY,
@@ -13,7 +14,8 @@ pub use merge::{
     ConfigShowReport, ConfigValueSource, EnvironmentConfigError,
     FEEDBACK_HARMFUL_BURST_WINDOW_SECONDS_KEY, FEEDBACK_HARMFUL_PER_SOURCE_PER_HOUR_KEY,
     MergedConfig, PACK_CANDIDATE_POOL_KEY, PACK_DEFAULT_FORMAT_KEY, PACK_DEFAULT_MAX_TOKENS_KEY,
-    PACK_DEFAULT_PROFILE_KEY, PACK_MMR_LAMBDA_KEY, PRIVACY_REDACT_SECRETS_KEY,
+    PACK_DEFAULT_PROFILE_KEY, PACK_MMR_LAMBDA_KEY, POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY,
+    POLICY_SECRET_DETECTOR_ALLOW_REGEX_KEY, PRIVACY_REDACT_SECRETS_KEY,
     PRIVACY_REDACTION_CLASSES_KEY, RUNTIME_DAEMON_KEY, RUNTIME_IMPORT_BATCH_SIZE_KEY,
     RUNTIME_JOB_BUDGET_MS_KEY, SEARCH_DEFAULT_SPEED_KEY, SEARCH_GRAPH_WEIGHT_KEY,
     SEARCH_LEXICAL_WEIGHT_KEY, SEARCH_SEMANTIC_WEIGHT_KEY, STORAGE_DATABASE_PATH_KEY,
@@ -26,7 +28,8 @@ pub use workspace::{
     WorkspaceError, WorkspaceLocation, WorkspaceResolution, WorkspaceResolutionMode,
     WorkspaceResolutionRequest, WorkspaceResolutionSource, WorkspaceScope, WorkspaceScopeKind,
     derive_workspace_scope, diagnose_workspace_resolution, discover, discover_all,
-    discover_from_current_dir, resolve_workspace, workspace_scope_from_repository_root,
+    discover_from_current_dir, resolve_workspace, workspace_fingerprint,
+    workspace_scope_from_repository_root,
 };
 
 pub const SUBSYSTEM: &str = "config";

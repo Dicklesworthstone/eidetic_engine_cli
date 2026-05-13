@@ -142,5 +142,8 @@ mod handoff_canonical_schema;
 #[path = "contracts/handoff_resume_prompt_fragment.rs"]
 mod handoff_resume_prompt_fragment;
 
+#[path = "contracts/workspace_fingerprint_reconciliation.rs"]
+mod workspace_fingerprint_reconciliation;
+
 #[path = "contracts/failure_mode_fixtures.rs"]
 mod failure_mode_fixtures;

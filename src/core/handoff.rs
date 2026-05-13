@@ -662,6 +662,13 @@ pub struct ResumeOptions {
     /// `None` skips the comparison (legacy / unbounded resume).
     /// Bead bd-17c65.13.2 (M1).
     pub bound_workspace_id: Option<String>,
+    /// When set, the resume runs the four-level
+    /// `WorkspaceMatch` reconciliation against the capsule's embedded
+    /// `workspace_identity` block (M2 / bd-17c65.13.3). This takes
+    /// precedence over `bound_workspace_id` when both are set — the
+    /// structured identity carries more signal. `None` falls back to
+    /// the M1 string-ID comparison.
+    pub bound_workspace_identity: Option<WorkspaceIdentity>,
     /// When false, callers can suppress rendering the
     /// `prompt_fragment` markdown body to save bytes when they only
     /// want the structured data. Defaults to `true`.
@@ -678,6 +685,7 @@ impl Default for ResumeOptions {
             max_sections: None,
             task_frame_id: None,
             bound_workspace_id: None,
+            bound_workspace_identity: None,
             include_prompt_fragment: true,
         }
     }
@@ -728,6 +736,104 @@ impl WorkspaceMismatchSeverity {
     }
 }
 
+/// Identity fingerprint that the producer side embeds into the
+/// handoff capsule's `workspace_identity` block (bead bd-17c65.13.3 / M2).
+/// Carries the BLAKE3 fingerprint of the canonical root, plus the
+/// canonical root path itself and the optional repository
+/// fingerprint when a git repository scope was detected. The resume
+/// side compares this against its own bound workspace to decide
+/// whether the match is exact, soft (same path or same repository),
+/// or hard (no shared identity).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceIdentity {
+    /// 24-hex-char BLAKE3 prefix over canonical_root.
+    pub fingerprint: String,
+    /// Canonical root path string (already canonicalize'd by the
+    /// producer side via WorkspaceResolution).
+    pub canonical_root: String,
+    /// `WorkspaceScopeKind` as a stable string ("standalone" |
+    /// "repository" | "repository_subdir"). Stored as String so the
+    /// capsule shape doesn't drift with future enum additions.
+    pub scope_kind: String,
+    /// Optional repository fingerprint when the workspace lives
+    /// inside a git repository. Used by the resume side to detect
+    /// "same repo, different workspace" soft matches.
+    pub repository_fingerprint: Option<String>,
+}
+
+/// Granular four-level reconciliation result returned by
+/// [`compare_workspace_identity`] (M2 / bd-17c65.13.3). Maps to
+/// `WorkspaceMismatchSeverity` for the M1 boolean flag:
+///   - `Exact` → `None`
+///   - `SoftSamePath` / `SoftSameRepo` → `Soft`
+///   - `Hard` → `Hard`
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceMatch {
+    /// Fingerprints match — same canonical root.
+    Exact,
+    /// Fingerprints differ but canonical roots are equal (e.g. the
+    /// path is the same but the producer hashed it under a different
+    /// canonicalization). Treated as recoverable.
+    SoftSamePath,
+    /// Different canonical roots but the same containing repository
+    /// fingerprint. Common monorepo case: two workspaces in different
+    /// subdirectories of the same repo.
+    SoftSameRepo,
+    /// No shared identity — different workspace, different repo (or
+    /// no repo on at least one side). Memory IDs from the capsule
+    /// almost certainly don't exist in the bound workspace.
+    Hard,
+}
+
+impl WorkspaceMatch {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::SoftSamePath => "soft_same_path",
+            Self::SoftSameRepo => "soft_same_repo",
+            Self::Hard => "hard",
+        }
+    }
+
+    /// Project the four-level match to the M1 boolean severity used
+    /// throughout the resume report.
+    #[must_use]
+    pub const fn to_mismatch_severity(self) -> WorkspaceMismatchSeverity {
+        match self {
+            Self::Exact => WorkspaceMismatchSeverity::None,
+            Self::SoftSamePath | Self::SoftSameRepo => WorkspaceMismatchSeverity::Soft,
+            Self::Hard => WorkspaceMismatchSeverity::Hard,
+        }
+    }
+}
+
+/// Compare a capsule's recorded `WorkspaceIdentity` against the resume
+/// side's bound identity and return the four-level reconciliation
+/// result. Bead bd-17c65.13.3 (M2).
+#[must_use]
+pub fn compare_workspace_identity(
+    capsule: &WorkspaceIdentity,
+    bound: &WorkspaceIdentity,
+) -> WorkspaceMatch {
+    if capsule.fingerprint.eq_ignore_ascii_case(&bound.fingerprint) {
+        return WorkspaceMatch::Exact;
+    }
+    if capsule.canonical_root == bound.canonical_root {
+        return WorkspaceMatch::SoftSamePath;
+    }
+    if let (Some(cap_repo), Some(bound_repo)) = (
+        capsule.repository_fingerprint.as_deref(),
+        bound.repository_fingerprint.as_deref(),
+    ) {
+        if cap_repo.eq_ignore_ascii_case(bound_repo) {
+            return WorkspaceMatch::SoftSameRepo;
+        }
+    }
+    WorkspaceMatch::Hard
+}
+
 /// Report from resuming a handoff capsule.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResumeReport {
@@ -758,6 +864,13 @@ pub struct ResumeReport {
     /// requested; `Soft`/`Hard` when a binding was requested and the
     /// IDs differ.
     pub workspace_mismatch: WorkspaceMismatchSeverity,
+    /// Four-level workspace match result (M2 / bd-17c65.13.3) computed
+    /// against `ResumeOptions::bound_workspace_identity`. Always
+    /// `None` when no structured identity was bound; otherwise one of
+    /// {Exact, SoftSamePath, SoftSameRepo, Hard}. When this is set,
+    /// `workspace_mismatch` is derived from it via
+    /// `to_mismatch_severity()` so both fields stay in sync.
+    pub workspace_match: Option<WorkspaceMatch>,
 }
 
 /// A memory selected for the resume payload.
@@ -799,6 +912,7 @@ impl ResumeReport {
             degradations: Vec::new(),
             prompt_fragment: None,
             workspace_mismatch: WorkspaceMismatchSeverity::None,
+            workspace_match: None,
             resumed_at: Utc::now().to_rfc3339(),
         }
     }
@@ -1330,10 +1444,16 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
     report.token_count = sections.iter().map(|s| s.token_estimate).sum();
     report.byte_count = report.token_count * 4;
 
+    // Bead bd-17c65.13.3 (M2): embed structured workspace_identity so
+    // the resume side can run a four-level reconciliation (Exact /
+    // SoftSamePath / SoftSameRepo / Hard) against its bound workspace.
+    let workspace_identity = compute_workspace_identity_for_capsule(&options.workspace);
+
     let capsule_content = serde_json::json!({
         "schema": HANDOFF_CAPSULE_SCHEMA_V1,
         "capsule_id": capsule_id,
         "workspace": options.workspace,
+        "workspace_identity": workspace_identity,
         "profile": options.profile.as_str(),
         "sections": sections,
         "active_focus": active_focus,
@@ -1562,41 +1682,79 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
         );
     }
 
-    // Bead bd-17c65.13.2 (M1): workspace mismatch detection. When the
-    // caller supplied a bound workspace ID, compare it to the capsule's
-    // recorded workspace and surface a degradation if they differ.
-    // Severity is `hard` whenever the IDs differ at all — the capsule's
-    // memory IDs and audit references all assume the source workspace,
-    // so any mismatch means memory IDs may not resolve in the bound
-    // workspace. `soft` is reserved for future cases where the resume
-    // surface can distinguish "different root, same project" from
-    // "different workspace altogether" (out of scope here).
-    if let Some(bound) = options.bound_workspace_id.as_deref() {
-        let capsule_workspace = report.workspace.as_deref();
-        if let Some(cap) = capsule_workspace {
-            if !workspace_ids_match(cap, bound) {
-                report.workspace_mismatch = WorkspaceMismatchSeverity::Hard;
-                report.degradations.push(
-                    DegradationInfo::new(
-                        "workspace_mismatch_hard",
-                        format!(
-                            "Capsule was created from workspace `{cap}` but this resume is bound to `{bound}`; memory IDs and audit references may not resolve in the bound workspace."
-                        ),
-                    )
-                    .with_next_action("re-import or rebuild the workspace before resuming"),
-                );
-            }
-        } else {
-            // Capsule has no workspace field — soft warn so the agent
-            // knows the binding can't be verified.
-            report.workspace_mismatch = WorkspaceMismatchSeverity::Soft;
+    // Bead bd-17c65.13.3 (M2): structured workspace identity
+    // reconciliation. When the caller supplies a bound
+    // WorkspaceIdentity AND the capsule carries a workspace_identity
+    // block, run the four-level compare_workspace_identity. The
+    // result populates both `workspace_match` (Exact/SoftSamePath/
+    // SoftSameRepo/Hard) and `workspace_mismatch` (None/Soft/Hard via
+    // to_mismatch_severity for M1 callers). Takes precedence over the
+    // M1 string-ID path below.
+    let capsule_identity = capsule
+        .get("workspace_identity")
+        .and_then(|v| serde_json::from_value::<WorkspaceIdentity>(v.clone()).ok());
+    let mut m2_reconciled = false;
+    if let (Some(bound_identity), Some(capsule_identity)) = (
+        options.bound_workspace_identity.as_ref(),
+        capsule_identity.as_ref(),
+    ) {
+        let match_level = compare_workspace_identity(capsule_identity, bound_identity);
+        report.workspace_match = Some(match_level);
+        report.workspace_mismatch = match_level.to_mismatch_severity();
+        m2_reconciled = true;
+        if !matches!(match_level, WorkspaceMatch::Exact) {
+            let code = if matches!(match_level, WorkspaceMatch::Hard) {
+                "workspace_mismatch_hard"
+            } else {
+                "workspace_mismatch_soft"
+            };
             report.degradations.push(
                 DegradationInfo::new(
-                    "workspace_mismatch_soft",
-                    "Capsule did not record a workspace ID; cannot verify it matches the bound workspace.".to_owned(),
+                    code,
+                    format!(
+                        "Workspace identity match: {} (capsule fingerprint=`{}`, bound fingerprint=`{}`). Memory IDs and audit references may not resolve in the bound workspace.",
+                        match_level.as_str(),
+                        capsule_identity.fingerprint,
+                        bound_identity.fingerprint
+                    ),
                 )
-                .with_next_action("regenerate the capsule with a workspace-aware version of ee handoff create"),
+                .with_next_action(match match_level {
+                    WorkspaceMatch::Hard => "re-import or rebuild the workspace before resuming",
+                    _ => "verify the capsule was produced from the same workspace branch",
+                }),
             );
+        }
+    }
+
+    // Bead bd-17c65.13.2 (M1): legacy string-ID workspace mismatch
+    // detection. Skipped when the M2 structured path already
+    // reconciled.
+    if !m2_reconciled {
+        if let Some(bound) = options.bound_workspace_id.as_deref() {
+            let capsule_workspace = report.workspace.as_deref();
+            if let Some(cap) = capsule_workspace {
+                if !workspace_ids_match(cap, bound) {
+                    report.workspace_mismatch = WorkspaceMismatchSeverity::Hard;
+                    report.degradations.push(
+                        DegradationInfo::new(
+                            "workspace_mismatch_hard",
+                            format!(
+                                "Capsule was created from workspace `{cap}` but this resume is bound to `{bound}`; memory IDs and audit references may not resolve in the bound workspace."
+                            ),
+                        )
+                        .with_next_action("re-import or rebuild the workspace before resuming"),
+                    );
+                }
+            } else {
+                report.workspace_mismatch = WorkspaceMismatchSeverity::Soft;
+                report.degradations.push(
+                    DegradationInfo::new(
+                        "workspace_mismatch_soft",
+                        "Capsule did not record a workspace ID; cannot verify it matches the bound workspace.".to_owned(),
+                    )
+                    .with_next_action("regenerate the capsule with a workspace-aware version of ee handoff create"),
+                );
+            }
         }
     }
 
@@ -1704,6 +1862,35 @@ fn render_resume_prompt_fragment(report: &ResumeReport) -> ResumePromptFragment 
 /// change to workspace ID format can centralize the comparison.
 fn workspace_ids_match(a: &str, b: &str) -> bool {
     a.trim().eq_ignore_ascii_case(b.trim())
+}
+
+/// Compute the [`WorkspaceIdentity`] that the producer side embeds in
+/// a handoff capsule (M2 / bd-17c65.13.3). Best-effort: when the
+/// workspace path can't be canonicalized (e.g. it doesn't exist yet
+/// for dry-run preview), the lexical path is used instead. The
+/// fingerprint is always computable.
+#[must_use]
+pub fn compute_workspace_identity_for_capsule(workspace: &Path) -> WorkspaceIdentity {
+    let canonical_root = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let fingerprint = crate::config::workspace_fingerprint(&canonical_root);
+    let scope = crate::config::derive_workspace_scope(&canonical_root);
+    WorkspaceIdentity {
+        fingerprint,
+        canonical_root: canonical_root.to_string_lossy().into_owned(),
+        scope_kind: scope.kind.as_str().to_owned(),
+        repository_fingerprint: scope.repository_fingerprint.clone(),
+    }
+}
+
+/// Resolve a [`WorkspaceIdentity`] for a path that the resume-side
+/// caller wants to bind to. Mirrors
+/// [`compute_workspace_identity_for_capsule`] but lives here so the
+/// asymmetry between producer/consumer code paths stays explicit.
+#[must_use]
+pub fn resolve_bound_workspace_identity(workspace: &Path) -> WorkspaceIdentity {
+    compute_workspace_identity_for_capsule(workspace)
 }
 
 fn find_latest_capsule(workspace: &Path) -> Result<PathBuf, DomainError> {
@@ -1987,6 +2174,7 @@ mod tests {
             max_sections: None,
             task_frame_id: None,
             bound_workspace_id: None,
+            bound_workspace_identity: None,
             include_prompt_fragment: true,
         })
         .map_err(|error| error.message())?;
@@ -2070,6 +2258,7 @@ mod tests {
             max_sections: None,
             task_frame_id: None,
             bound_workspace_id: None,
+            bound_workspace_identity: None,
             include_prompt_fragment: true,
         })
         .map_err(|error| error.message())?;
