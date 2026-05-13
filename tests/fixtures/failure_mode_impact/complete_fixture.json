@@ -1,0 +1,47 @@
+{
+  "schema": "ee.failure_mode_impact.v1",
+  "success": true,
+  "data": {
+    "impactStatus": "complete",
+    "reason": "All changed paths are concrete failure-mode fixture JSON files with known codes.",
+    "changedPaths": [
+      "tests/fixtures/failure_modes/weak_query_recall.json"
+    ],
+    "fixtureCodes": [
+      "weak_query_recall"
+    ],
+    "unmappedPaths": [],
+    "caveats": [],
+    "signals": {
+      "docsChanged": false,
+      "taxonomyChanged": false,
+      "driverChanged": false
+    },
+    "commands": [
+      {
+        "id": "focused_j6",
+        "kind": "e2e",
+        "command": "EE_E2E_KEEP_WORKSPACE=1 EE_FAILURE_MODE_FILTER=weak_query_recall scripts/e2e_overhaul/failure_modes.sh",
+        "covers": "Executable J6 scenarios for mapped fixture codes",
+        "coverage": "complete"
+      },
+      {
+        "id": "fixture_contract",
+        "kind": "cargo-test",
+        "command": "cargo test --test contracts failure_mode_fixtures_validate_catalog -- --nocapture",
+        "covers": "Failure-mode fixture schema, filename, severity, and source-literal contract",
+        "coverage": "complete"
+      },
+      {
+        "id": "degraded_codes_doc_coverage",
+        "kind": "cargo-test",
+        "command": "cargo test --test degraded_codes_doc_coverage -- --nocapture",
+        "covers": "K3 degraded-code documentation section coverage",
+        "coverage": "supporting"
+      }
+    ],
+    "remainingVerification": [
+      "Focused fixture impact is complete for the supplied path set; full J6 remains the release gate."
+    ]
+  }
+}

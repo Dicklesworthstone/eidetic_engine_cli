@@ -1,0 +1,47 @@
+{
+  "schema": "ee.failure_mode_impact.v1",
+  "success": true,
+  "data": {
+    "impactStatus": "ambiguous",
+    "reason": "At least one changed path cannot be mapped to a complete fixture-code set from path evidence alone.",
+    "changedPaths": [
+      "scripts/e2e_overhaul/failure_modes.sh"
+    ],
+    "fixtureCodes": [],
+    "unmappedPaths": [],
+    "caveats": [
+      "scripts/e2e_overhaul/failure_modes.sh is the catalog driver; changes can affect any fixture scenario."
+    ],
+    "signals": {
+      "docsChanged": false,
+      "taxonomyChanged": false,
+      "driverChanged": true
+    },
+    "commands": [
+      {
+        "id": "fixture_contract",
+        "kind": "cargo-test",
+        "command": "cargo test --test contracts failure_mode_fixtures_validate_catalog -- --nocapture",
+        "covers": "Failure-mode fixture schema, filename, severity, and source-literal contract",
+        "coverage": "partial"
+      },
+      {
+        "id": "degraded_codes_doc_coverage",
+        "kind": "cargo-test",
+        "command": "cargo test --test degraded_codes_doc_coverage -- --nocapture",
+        "covers": "K3 degraded-code documentation section coverage",
+        "coverage": "supporting"
+      },
+      {
+        "id": "full_j6_catalog",
+        "kind": "e2e",
+        "command": "EE_E2E_KEEP_WORKSPACE=1 scripts/e2e_overhaul/failure_modes.sh",
+        "covers": "Full executable J6 catalog; recommended because focused impact is not complete",
+        "coverage": "complete"
+      }
+    ],
+    "remainingVerification": [
+      "Path-only mapping is ambiguous; run full_j6_catalog before closeout."
+    ]
+  }
+}

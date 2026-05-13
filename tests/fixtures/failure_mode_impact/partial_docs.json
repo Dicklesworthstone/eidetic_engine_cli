@@ -1,0 +1,54 @@
+{
+  "schema": "ee.failure_mode_impact.v1",
+  "success": true,
+  "data": {
+    "impactStatus": "partial",
+    "reason": "Changed paths map to fixture codes or catalog docs, but focused verification does not cover the full catalog.",
+    "changedPaths": [
+      "docs/degraded_codes.md"
+    ],
+    "fixtureCodes": [],
+    "unmappedPaths": [],
+    "caveats": [
+      "docs/degraded_codes.md is generated from all fixtures; path-only impact cannot prove which sections changed."
+    ],
+    "signals": {
+      "docsChanged": true,
+      "taxonomyChanged": false,
+      "driverChanged": false
+    },
+    "commands": [
+      {
+        "id": "fixture_contract",
+        "kind": "cargo-test",
+        "command": "cargo test --test contracts failure_mode_fixtures_validate_catalog -- --nocapture",
+        "covers": "Failure-mode fixture schema, filename, severity, and source-literal contract",
+        "coverage": "partial"
+      },
+      {
+        "id": "degraded_codes_doc_coverage",
+        "kind": "cargo-test",
+        "command": "cargo test --test degraded_codes_doc_coverage -- --nocapture",
+        "covers": "K3 degraded-code documentation section coverage",
+        "coverage": "partial"
+      },
+      {
+        "id": "regenerate_degraded_codes_doc",
+        "kind": "manual-regeneration",
+        "command": "./scripts/build_degraded_codes_doc.sh",
+        "covers": "Regenerates docs/degraded_codes.md from fixture JSON when docs drift is intentional",
+        "coverage": "supporting"
+      },
+      {
+        "id": "full_j6_catalog",
+        "kind": "e2e",
+        "command": "EE_E2E_KEEP_WORKSPACE=1 scripts/e2e_overhaul/failure_modes.sh",
+        "covers": "Full executable J6 catalog; recommended because focused impact is not complete",
+        "coverage": "complete"
+      }
+    ],
+    "remainingVerification": [
+      "Focused commands cover mapped codes and static docs checks only; run full_j6_catalog before claiming full catalog coverage."
+    ]
+  }
+}
