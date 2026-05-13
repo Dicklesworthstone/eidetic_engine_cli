@@ -1,11 +1,11 @@
-//! Golden snapshot tests for ee.error.v1 JSON envelope contracts.
+//! Golden snapshot tests for ee.error.v2 JSON envelope contracts.
 //!
 //! These tests ensure all DomainError variants produce stable JSON output
 //! conforming to the documented error schema in AGENTS.md:
 //!
 //! ```json
 //! {
-//!   "schema": "ee.error.v1",
+//!   "schema": "ee.error.v2",
 //!   "error": {
 //!     "code": "<error_code>",
 //!     "message": "<description>",
@@ -31,7 +31,7 @@ fn verify_error_envelope(json: &str) -> TestResult {
     let value = parse_error_json(json)?;
     let obj = value.as_object().ok_or("expected object at root")?;
 
-    if obj.get("schema") != Some(&Value::String("ee.error.v1".into())) {
+    if obj.get("schema") != Some(&Value::String("ee.error.v2".into())) {
         return Err("missing or incorrect schema field".into());
     }
 

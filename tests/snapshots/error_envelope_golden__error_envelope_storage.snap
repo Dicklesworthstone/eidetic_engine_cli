@@ -3,7 +3,7 @@ source: tests/error_envelope_golden.rs
 expression: value
 ---
 {
-  "schema": "ee.error.v1",
+  "schema": "ee.error.v2",
   "error": {
     "code": "storage",
     "message": "Database file corrupted.",

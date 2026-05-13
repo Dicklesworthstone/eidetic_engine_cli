@@ -1,10 +1,10 @@
 ---
 source: tests/error_envelope_golden.rs
-assertion: all DomainError variants produce ee.error.v1 compliant JSON envelopes
+assertion: all DomainError variants produce ee.error.v2 compliant JSON envelopes
 schema:
-  error: ee.error.v1
+  error: ee.error.v2
 contracts:
-  - error envelope includes schema field set to "ee.error.v1"
+  - error envelope includes schema field set to "ee.error.v2"
   - error.code is lowercase_snake_case matching the DomainError variant
   - error.message contains human-readable description
   - error.severity is "low", "medium", or "high" per documented exit codes

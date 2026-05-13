@@ -3,12 +3,27 @@ source: tests/error_envelope_golden.rs
 expression: value
 ---
 {
-  "schema": "ee.error.v1",
+  "schema": "ee.error.v2",
   "error": {
     "code": "search_index",
     "message": "Index is stale (generation 9, database generation 12).",
     "severity": "medium",
     "repair": "ee index rebuild",
-    "details": {}
+    "details": {
+      "recovery": [
+        {
+          "priority": 1,
+          "kind": "migration",
+          "rationale": "Rebuild the index from current memory state; idempotent.",
+          "command": "ee index rebuild --workspace ."
+        },
+        {
+          "priority": 2,
+          "kind": "migration",
+          "rationale": "Inspect index state before rebuilding (faster diagnosis).",
+          "command": "ee index status --workspace . --json"
+        }
+      ]
+    }
   }
 }
