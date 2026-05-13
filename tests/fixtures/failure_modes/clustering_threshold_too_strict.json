@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "clustering_threshold_too_strict",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "learn cluster",
+    "curate candidates"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Cluster coherence analysis has enough points, but none reach the configured minimum member count.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# seed weakly related memories and set a strict cluster threshold"
+    ],
+    "invocation": "ee learn cluster --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "clustering_threshold_too_strict",
+    "severity": "warning",
+    "message_contains": [
+      "No cluster reached"
+    ],
+    "repair_contains": "cluster_coherence_threshold"
+  }
+}

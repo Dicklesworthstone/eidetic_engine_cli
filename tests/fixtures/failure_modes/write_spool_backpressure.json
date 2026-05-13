@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "write_spool_backpressure",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "write spool"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The write spool is full or above its pending-byte budget, so new writes receive backpressure.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# fill the write spool through a concurrency harness"
+    ],
+    "invocation": "ee remember 'queued write' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "write_spool_backpressure",
+    "severity": "medium",
+    "message_contains": [
+      "backpressure"
+    ],
+    "repair_contains": "retry"
+  }
+}

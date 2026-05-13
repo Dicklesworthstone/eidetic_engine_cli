@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "drift_no_evaluation_snapshots",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "analyze drift"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "Drift analysis runs before frozen evaluation snapshots are available.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee analyze drift --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "drift_no_evaluation_snapshots",
+    "severity": "high",
+    "message_contains": [
+      "No frozen evaluation snapshots"
+    ],
+    "repair_contains": "ee eval run"
+  }
+}

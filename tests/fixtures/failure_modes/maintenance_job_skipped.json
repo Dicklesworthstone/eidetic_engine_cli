@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "maintenance_job_skipped",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "job run"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A supervised maintenance job reports that it skipped work instead of completing successfully.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# use a job fixture that returns skipped"
+    ],
+    "invocation": "ee job run decay_sweep --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "maintenance_job_skipped",
+    "severity": "medium",
+    "message_contains": [
+      "skipped"
+    ],
+    "repair_contains": "ee job run"
+  }
+}

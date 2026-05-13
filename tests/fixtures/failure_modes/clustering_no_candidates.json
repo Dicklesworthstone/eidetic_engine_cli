@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "clustering_no_candidates",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "analyze clustering"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Science clustering analysis has no curation candidates to cluster.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee analyze clustering --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "clustering_no_candidates",
+    "severity": "medium",
+    "message_contains": [
+      "No curation candidates"
+    ],
+    "repair_contains": "ee curate candidates"
+  }
+}

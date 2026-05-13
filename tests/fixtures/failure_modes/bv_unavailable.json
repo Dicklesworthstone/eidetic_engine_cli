@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "bv_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "swarm brief"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Swarm brief cannot collect graph-aware Beads triage from bv.",
+    "setup_commands": [
+      "# run swarm brief where bv is unavailable"
+    ],
+    "invocation": "ee swarm brief --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "bv_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "bv"
+    ],
+    "repair_contains": "bv"
+  }
+}

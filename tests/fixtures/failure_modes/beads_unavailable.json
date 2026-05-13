@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "beads_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "swarm brief"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Swarm brief cannot collect Beads issue state.",
+    "setup_commands": [
+      "# run swarm brief where br is unavailable or .beads cannot be read"
+    ],
+    "invocation": "ee swarm brief --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "beads_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "beads"
+    ],
+    "repair_contains": "br"
+  }
+}

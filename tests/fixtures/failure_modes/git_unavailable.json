@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "git_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "swarm brief"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Swarm brief cannot collect git state for the workspace.",
+    "setup_commands": [
+      "# run swarm brief outside a git checkout or with git unavailable"
+    ],
+    "invocation": "ee swarm brief --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "git_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "git"
+    ],
+    "repair_contains": "git"
+  }
+}

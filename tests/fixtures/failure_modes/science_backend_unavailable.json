@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "science_backend_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "science status"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "Science analytics were compiled, but the backend dependency is unavailable.",
+    "setup_commands": [
+      "# run science diagnostics with an unavailable analytics backend"
+    ],
+    "invocation": "ee analyze science-status --json"
+  },
+  "expected_emission": {
+    "code": "science_backend_unavailable",
+    "severity": "high",
+    "message_contains": [
+      "Science analytics backend is unavailable"
+    ],
+    "repair_contains": "ee doctor"
+  }
+}

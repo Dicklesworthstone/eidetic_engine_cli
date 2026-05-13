@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "rch_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "swarm brief"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Swarm brief cannot collect remote compile host state from rch.",
+    "setup_commands": [
+      "# run swarm brief --include-rch while rch is unavailable"
+    ],
+    "invocation": "ee swarm brief --include-rch --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "rch_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "rch"
+    ],
+    "repair_contains": "rch"
+  }
+}

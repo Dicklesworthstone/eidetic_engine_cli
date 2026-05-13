@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "maintenance_job_timed_out",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "job run"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A supervised maintenance job exceeds its configured time budget.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# run a maintenance job with a tiny timeout"
+    ],
+    "invocation": "ee job run decay_sweep --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "maintenance_job_timed_out",
+    "severity": "medium",
+    "message_contains": [
+      "timed"
+    ],
+    "repair_contains": "ee job run"
+  }
+}

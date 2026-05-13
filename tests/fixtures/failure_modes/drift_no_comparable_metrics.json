@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "drift_no_comparable_metrics",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "analyze drift"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Drift analysis has two snapshots, but they do not share numeric metrics.",
+    "setup_commands": [
+      "# provide baseline/current snapshots without shared numeric metrics"
+    ],
+    "invocation": "ee analyze drift --baseline a.json --current b.json --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "drift_no_comparable_metrics",
+    "severity": "medium",
+    "message_contains": [
+      "shared numeric metrics"
+    ],
+    "repair_contains": "Persist evaluation snapshots"
+  }
+}

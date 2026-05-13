@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "science_budget_exceeded",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "science analytics"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Science analytics exhausts its explicit compute or latency budget.",
+    "setup_commands": [
+      "# run science analytics with a very small budget"
+    ],
+    "invocation": "ee analyze drift --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "science_budget_exceeded",
+    "severity": "medium",
+    "message_contains": [
+      "budget was exhausted"
+    ],
+    "repair_contains": "Increase"
+  }
+}

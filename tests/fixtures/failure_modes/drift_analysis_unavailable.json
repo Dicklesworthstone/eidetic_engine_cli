@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "drift_analysis_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "analyze drift"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "Drift analysis cannot run because the science analytics capability is unavailable.",
+    "setup_commands": [
+      "# run drift analysis in a build or environment without science analytics"
+    ],
+    "invocation": "ee analyze drift --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "drift_analysis_unavailable",
+    "severity": "high",
+    "message_contains": [
+      "drift analysis",
+      "unavailable"
+    ],
+    "repair_contains": "science"
+  }
+}

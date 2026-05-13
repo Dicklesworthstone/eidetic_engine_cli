@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "science_input_too_large",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "science analytics"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Science analytics input exceeds the supported size for the configured backend.",
+    "setup_commands": [
+      "# run science analytics with an oversized input fixture"
+    ],
+    "invocation": "ee analyze drift --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "science_input_too_large",
+    "severity": "medium",
+    "message_contains": [
+      "input exceeds"
+    ],
+    "repair_contains": "Reduce"
+  }
+}

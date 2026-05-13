@@ -143,6 +143,51 @@ in the same commit, keeping the catalog complete by construction.
 | `maintenance_job_not_found` | job show | medium | bd-17c65.10.6 (J6) |
 | `mcp_feature_disabled` | mcp manifest | low | bd-17c65.10.6 (J6) |
 | `workspace_nested_markers` | workspace discovery, status | warning | bd-17c65.10.6 (J6) |
+| `causal_ledger_empty` | causal estimate, causal compare | warning | bd-17c65.10.6 (J6) |
+| `causal_evidence_unavailable` | causal commands | warning | bd-17c65.10.6 (J6) |
+| `causal_workspace_id_required` | causal trace | warning | bd-17c65.10.6 (J6) |
+| `causal_database_missing` | causal trace | warning | bd-17c65.10.6 (J6) |
+| `causal_database_open_failed` | causal trace | warning | bd-17c65.10.6 (J6) |
+| `causal_database_migration_failed` | causal trace | warning | bd-17c65.10.6 (J6) |
+| `causal_trace_store_failed` | causal trace | warning | bd-17c65.10.6 (J6) |
+| `causal_failure_id_required` | causal trace | warning | bd-17c65.10.6 (J6) |
+| `causal_evidence_table_missing` | causal commands | warning | bd-17c65.10.6 (J6) |
+| `causal_chain_id_required` | causal estimate, causal promote-plan | warning | bd-17c65.10.6 (J6) |
+| `causal_chain_not_found` | causal estimate, causal compare | warning | bd-17c65.10.6 (J6) |
+| `causal_no_matching_chains` | causal estimate | info | bd-17c65.10.6 (J6) |
+| `causal_chain_pair_required` | causal compare | warning | bd-17c65.10.6 (J6) |
+| `causal_insufficient_chains` | causal compare | info | bd-17c65.10.6 (J6) |
+| `action_override_not_actionable` | causal promote-plan | warning | bd-17c65.10.6 (J6) |
+| `dry_run_recommended` | causal promote-plan | info | bd-17c65.10.6 (J6) |
+| `graph_snapshot_scores_unavailable` | graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
+| `index_publish_lock_contention` | index rebuild, index publish | medium | bd-17c65.10.6 (J6) |
+| `lab_replay_unavailable` | lab capture, lab replay, lab counterfactual | medium | bd-17c65.10.6 (J6) |
+| `git_unavailable` | swarm brief | medium | bd-17c65.10.6 (J6) |
+| `beads_unavailable` | swarm brief | medium | bd-17c65.10.6 (J6) |
+| `bv_unavailable` | swarm brief | medium | bd-17c65.10.6 (J6) |
+| `agent_mail_unavailable` | swarm brief | medium | bd-17c65.10.6 (J6) |
+| `rch_unavailable` | swarm brief | medium | bd-17c65.10.6 (J6) |
+| `agent_status_unavailable` | swarm brief | medium | bd-17c65.10.6 (J6) |
+| `write_owner_busy` | write owner | medium | bd-17c65.10.6 (J6) |
+| `write_spool_backpressure` | write spool | medium | bd-17c65.10.6 (J6) |
+| `situation_decisioning_unavailable` | situation decisioning | medium | bd-17c65.10.6 (J6) |
+| `clustering_insufficient_data` | learn cluster, curate candidates | warning | bd-17c65.10.6 (J6) |
+| `clustering_threshold_too_strict` | learn cluster, curate candidates | warning | bd-17c65.10.6 (J6) |
+| `science_not_compiled` | science status, analyze drift, analyze clustering | high | bd-17c65.10.6 (J6) |
+| `science_backend_unavailable` | science status | high | bd-17c65.10.6 (J6) |
+| `science_input_too_large` | science analytics | medium | bd-17c65.10.6 (J6) |
+| `science_budget_exceeded` | science analytics | medium | bd-17c65.10.6 (J6) |
+| `drift_analysis_unavailable` | analyze drift | high | bd-17c65.10.6 (J6) |
+| `drift_no_evaluation_snapshots` | analyze drift | high | bd-17c65.10.6 (J6) |
+| `drift_no_comparable_metrics` | analyze drift | medium | bd-17c65.10.6 (J6) |
+| `clustering_no_candidates` | analyze clustering | medium | bd-17c65.10.6 (J6) |
+| `clustering_no_embeddings` | analyze clustering | medium | bd-17c65.10.6 (J6) |
+| `maintenance_job_cancelled` | job run | medium | bd-17c65.10.6 (J6) |
+| `maintenance_job_timed_out` | job run | medium | bd-17c65.10.6 (J6) |
+| `maintenance_job_failed` | job run | medium | bd-17c65.10.6 (J6) |
+| `maintenance_job_skipped` | job run | medium | bd-17c65.10.6 (J6) |
+| `maintenance_job_lock_busy` | job run | medium | bd-17c65.10.6 (J6) |
+| `maintenance_job_lock_open_failed` | job run | high | bd-17c65.10.6 (J6) |
 
 ## Adding a fixture
 

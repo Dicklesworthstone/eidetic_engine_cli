@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "science_not_compiled",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "science status",
+    "analyze drift",
+    "analyze clustering"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A science analytics command is invoked from a build without the science analytics feature.",
+    "setup_commands": [
+      "# build ee without --features science-analytics"
+    ],
+    "invocation": "ee analyze science-status --json"
+  },
+  "expected_emission": {
+    "code": "science_not_compiled",
+    "severity": "high",
+    "message_contains": [
+      "Science analytics",
+      "not compiled"
+    ],
+    "repair_contains": "science-analytics"
+  }
+}

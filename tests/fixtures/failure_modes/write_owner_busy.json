@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "write_owner_busy",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "write owner"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A write request cannot acquire the single-writer owner because another owner is active.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# hold the write-owner lock through a concurrency harness"
+    ],
+    "invocation": "ee remember 'queued write' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "write_owner_busy",
+    "severity": "medium",
+    "message_contains": [
+      "write owner"
+    ],
+    "repair_contains": "retry"
+  }
+}

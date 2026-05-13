@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "situation_decisioning_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "situation decisioning"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Situation-aware decisioning is requested before that planner surface is implemented.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee plan recommend --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "situation_decisioning_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "situation",
+      "unavailable"
+    ],
+    "repair_contains": "plan"
+  }
+}
