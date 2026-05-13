@@ -274,6 +274,27 @@ jobs:
           cp install.sh release/
           cp install.ps1 release/
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Verify Sigstore bundles
+        run: |
+          set -euo pipefail
+          CERT_IDENTITY_REGEXP='^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/(tags/v[0-9].*|heads/main)$'
+          CERT_OIDC_ISSUER='https://token.actions.githubusercontent.com'
+          for artifact in release/ee-*.tar.xz; do
+            bundle="${artifact}.sigstore.json"
+            if [ ! -f "$bundle" ]; then
+              echo "::error title=Missing Sigstore bundle::Expected $bundle for $artifact"
+              exit 1
+            fi
+            cosign verify-blob \
+              --bundle "$bundle" \
+              --certificate-identity-regexp "$CERT_IDENTITY_REGEXP" \
+              --certificate-oidc-issuer "$CERT_OIDC_ISSUER" \
+              "$artifact"
+          done
+
       - name: Generate release notes
         id: notes
         run: |
@@ -314,7 +335,11 @@ jobs:
             printf '%s\n\n' '## Verification'
             printf '%s\n' 'All release artifacts are signed with Sigstore. Verify with:'
             printf '%s\n' '```bash'
-            printf '%s\n' 'cosign verify-blob --bundle ee-<target>.tar.xz.sigstore.json ee-<target>.tar.xz'
+            printf '%s\n' 'cosign verify-blob \'
+            printf '%s\n' '  --bundle ee-<target>.tar.xz.sigstore.json \'
+            printf '%s\n' '  --certificate-identity-regexp "^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/(tags/v[0-9].*|heads/main)$" \'
+            printf '%s\n' '  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \'
+            printf '%s\n' '  ee-<target>.tar.xz'
             printf '%s\n\n' '```'
             printf '%s\n\n' '## Changes'
           } > release_notes.md

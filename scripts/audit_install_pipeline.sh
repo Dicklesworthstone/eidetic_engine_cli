@@ -152,6 +152,22 @@ release_workflow_assets() {
             echo '  "cosign_bundle_present": false'
         fi
         echo ','
+        if grep -qF -- '--certificate-identity-regexp "$CERT_IDENTITY_REGEXP"' "$yml" 2>/dev/null \
+            && grep -qF -- '--certificate-oidc-issuer "$CERT_OIDC_ISSUER"' "$yml" 2>/dev/null \
+            && grep -qF 'https://token.actions.githubusercontent.com' "$yml" 2>/dev/null; then
+            echo '  "cosign_identity_bound": true'
+        else
+            echo '  "cosign_identity_bound": false'
+        fi
+        echo ','
+        if grep -qF 'Verify Sigstore bundles' "$yml" 2>/dev/null \
+            && grep -qF 'Missing Sigstore bundle' "$yml" 2>/dev/null \
+            && grep -qF 'for artifact in release/ee-*.tar.xz' "$yml" 2>/dev/null; then
+            echo '  "release_verifies_sigstore_before_publish": true'
+        else
+            echo '  "release_verifies_sigstore_before_publish": false'
+        fi
+        echo ','
         local smoke_containers_json
         smoke_containers_json="$(grep -oE 'image: (ubuntu:24\.04|debian:bookworm-slim)' "$yml" 2>/dev/null \
             | sed 's/^image: //' \

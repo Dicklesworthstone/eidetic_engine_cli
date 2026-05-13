@@ -134,8 +134,10 @@ function Verify-Sigstore {
         return
     }
     Write-Status "Verifying Sigstore signature..."
+    $certIdentityRegexp = "^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/(tags/v[0-9].*|heads/main)$"
+    $certOidcIssuer = "https://token.actions.githubusercontent.com"
     try {
-        $result = & cosign verify-blob --bundle $BundlePath $TarballPath 2>&1
+        $result = & cosign verify-blob --bundle $BundlePath --certificate-identity-regexp $certIdentityRegexp --certificate-oidc-issuer $certOidcIssuer $TarballPath 2>&1
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  Sigstore signature verified." -ForegroundColor Green
         }

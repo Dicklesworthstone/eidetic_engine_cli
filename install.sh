@@ -132,6 +132,8 @@ verify_sha256() {
 verify_sigstore() {
     BUNDLE="$1"
     ARTIFACT="$2"
+    CERT_IDENTITY_REGEXP='^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/(tags/v[0-9].*|heads/main)$'
+    CERT_OIDC_ISSUER='https://token.actions.githubusercontent.com'
 
     if ! command -v cosign >/dev/null 2>&1; then
         warn "cosign not found. Skipping Sigstore verification."
@@ -140,7 +142,11 @@ verify_sigstore() {
     fi
 
     info "Verifying Sigstore signature..."
-    if cosign verify-blob --bundle "$BUNDLE" "$ARTIFACT" >/dev/null 2>&1; then
+    if cosign verify-blob \
+        --bundle "$BUNDLE" \
+        --certificate-identity-regexp "$CERT_IDENTITY_REGEXP" \
+        --certificate-oidc-issuer "$CERT_OIDC_ISSUER" \
+        "$ARTIFACT" >/dev/null 2>&1; then
         info "Sigstore signature verified."
     else
         error "Sigstore verification failed."
