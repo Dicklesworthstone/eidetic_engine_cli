@@ -120,3 +120,10 @@ node_modules/
 # Per-run e2e overhaul suite logs (J3/J4). Each run writes a timestamped
 # directory under tests/logs/; keep them off git.
 tests/logs/
+
+# One-off ad-hoc helper scripts agents occasionally drop in the repo root
+# while investigating an issue. These are not authoritative tooling — they
+# are scratch. Keep them off git so they don't sneak into commits.
+/find_async_sleep.sh
+/fix_unwrap_err.sh
+/patch.py
