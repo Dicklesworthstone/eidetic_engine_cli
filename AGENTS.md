@@ -266,7 +266,7 @@ This runs all gates in the correct order with per-stage exit codes and durations
 
 Criterion benchmarks are excluded from the normal test gate and run only through
 the explicit benchmark gate (`./scripts/verify.sh --include-bench` or
-`./scripts/bench.sh --check-regression`).
+`./scripts/bench_perf_regression.sh --check-regression`).
 
 The script fails fast on the first failing gate.
 
@@ -474,6 +474,104 @@ Acceptance gate:
 - **Graceful degradation** — semantic down → lexical works; graph stale → retrieval works; CASS missing → explicit memories work
 - **No silent memory mutation** — every promotion, consolidation, or tombstone is audited
 - **Evidence over vibes** — rules without source/feedback/validation stay low-confidence
+
+### Agent UX Patterns (post-2026-05 overhaul)
+
+The 2026-05 agent-first UX overhaul rewrote how `ee` talks to coding agents. This subsection captures the contract every agent should rely on; the meta-docs cross-linked below are the authoritative reference.
+
+#### Canonical workflow (the 5-command core path)
+
+```bash
+ee init    --workspace . --json
+ee remember "<text>" --workspace . --level <l> --kind <k> --json
+ee search   "<query>" --workspace . --json
+ee context  "<task>"  --workspace . --max-tokens N --json  # use pack.text as a ready-to-prepend prompt fragment
+ee why      <id>      --workspace . --json                  # explain why a memory was selected
+```
+
+Everything else (`ee curate`, `ee graph`, `ee handoff`, `ee diag`, `ee lab`, …) is in service of these five. `ee --help` opens with this list under "Most-used commands (start here)".
+
+#### Response envelope contract
+
+Every machine-facing command emits one of:
+
+```jsonc
+{ "schema": "ee.response.v2", "success": true,  "data": { ... }, "degraded": [ ... ] }
+{ "schema": "ee.error.v2",    "success": false, "error": { "code": "...", "message": "...", "severity": "...", "repair": "...", "details": { "recovery": [ ... ] } } }
+```
+
+Field invariants:
+
+- **`schema`** pins the surface version. v1 is end-of-life as of 0.2.0; consumers must migrate (see `docs/migration_v0.1_to_v0.2.md`).
+- **`content`** is the single canonical field for memory body text. List views may set `content_truncated: true` and `content_preview` (in addition to, not in place of, `content`).
+- **`degraded[]`** is **only** populated when the response was actually affected by a degradation. Build-time feature flags belong in `capabilities.unimplemented[]`, not in per-response `degraded[]` (see E5 / `bd-17c65.5.5`).
+- **`error.details.recovery[]`** is a structured array of recovery actions (each with `priority`, `kind`, `command`), not prose-only repair strings.
+- **`posture`** (in `ee status` / `ee doctor`) is a five-state enum `ok | initializing | degraded_recoverable | degraded_required | blocked`, not a `healthy: bool`.
+
+#### Severity vocabulary (6 tiers, ordered)
+
+`info < low < warning < medium < high < critical`. See `tests/fixtures/failure_modes/SCHEMA.md` for the canonical definition and `docs/degraded_code_taxonomy.md` for per-code classification.
+
+#### Failure-mode catalog
+
+Every `degraded[]` code is documented at `tests/fixtures/failure_modes/<code>.json` with its surface, severity, trigger setup, and expected message substrings. The agent-readable summary lives at `docs/degraded_codes.md` (auto-generated from the fixture catalog by K3).
+
+When `ee` emits a new degraded code, the implementing PR must land both the source emission AND a fixture under `tests/fixtures/failure_modes/`. The J6 catalog validator (`tests/contracts/failure_mode_fixtures.rs`) fails CI on drift.
+
+#### Code taxonomy
+
+`docs/degraded_code_taxonomy.md` classifies every code as one of:
+
+- **`build_time`** — feature-flag dependent; surfaced through `capabilities.unimplemented[]`. Examples: `lexical_unavailable`, `mcp_unavailable`, `toon_unavailable`.
+- **`mixed`** — both feature-flag AND state dependent. Presence in `capabilities.available[]`; runtime variant in `degraded[]`. Examples: `cass_unavailable`, `graph_unavailable`.
+- **`response_time`** — query/state dependent; stays in `degraded[]`. Examples: `no_relevant_results`, `index_stale`, `weak_query_recall`.
+
+#### Schema versions
+
+| Surface | Schema |
+| --- | --- |
+| Response envelope (success) | `ee.response.v2` |
+| Response envelope (error) | `ee.error.v2` |
+| Context pack | `ee.pack.v2` |
+| Search result | `ee.search.document.v1` |
+| Failure-mode fixture | `ee.failure_mode_fixture.v1` |
+| Test event log line | `ee.test_event.v1` |
+| Performance bench | `ee.perf.v1` |
+
+Per-envelope JSON Schema files live in `docs/schemas/` (K2). The drift gate in `tests/contracts/schema_drift.rs` fails CI when an emitted response doesn't validate against its declared schema.
+
+#### Env var registry
+
+Every `EE_*` variable honored by `ee` is enumerated in `docs/env_vars.md` and registered in `src/config/env_registry.rs` (K4 / F5). Raw `std::env::var("EE_*")` calls outside the registry are forbidden by a Clippy lint.
+
+#### Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| 0 | success |
+| 1 | usage error |
+| 2 | configuration error |
+| 3 | storage error |
+| 4 | search/index error |
+| 5 | import error |
+| 6 | degraded but command could not satisfy required mode |
+| 7 | policy denied operation |
+| 8 | migration required |
+
+Agents should treat exit 8 as the explicit signal to run `ee migrate run --workspace .`.
+
+#### Determinism (non-negotiable)
+
+Same DB + indexes + config + query → byte-identical JSON output. Same workspace → byte-identical context pack hash. Same evaluation fixture → byte-identical pack-quality report. The J7 harness (`scripts/e2e_overhaul/determinism.sh` + `tests/determinism_unit.rs`) gates this contract across cross-process and in-process paths.
+
+#### When the contract drifts
+
+- Schema field rename / addition → bump the schema version AND update `docs/migration_v0.1_to_v0.2.md` (or the next migration file).
+- New degraded code → land a fixture at `tests/fixtures/failure_modes/<code>.json` in the same commit; classify it in `docs/degraded_code_taxonomy.md`.
+- New env var → register in `src/config/env_registry.rs` + document in `docs/env_vars.md`.
+- New CLI subcommand → add a Most-used-commands or category entry to the `ee --help` prelude (F3).
+
+The CI gates that enforce each of these are the load-bearing surface for the overhaul. Adding a feature without updating its gate is a regression.
 
 ### CLI Output Rules
 
