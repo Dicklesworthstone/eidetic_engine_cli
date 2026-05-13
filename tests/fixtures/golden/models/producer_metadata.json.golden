@@ -1,0 +1,1 @@
+{"schema":"ee.producer.metadata.v1","sourceSystem":"agent_mail","identity":{"status":"known","agentName":"MagentaSummit","harness":"codex-cli","model":"gpt-5"},"run":{"runId":"run_20260512","sessionId":"019e1a95-c745-7ea0-9b71-d0c72185aa97","workspaceFingerprint":"repo:25e38e130474e7f0292de2a3"},"observedAt":"2026-05-12T12:00:00Z"}
