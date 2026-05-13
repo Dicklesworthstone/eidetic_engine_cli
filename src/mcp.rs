@@ -2500,7 +2500,7 @@ mod tests {
 
         let text = first_tool_text(&response)?;
         assert!(
-            text.starts_with("{\"schema\":\"ee.error.v1\""),
+            text.starts_with("{\"schema\":\"ee.error.v2\""),
             "context degraded output must stay in the stable error envelope"
         );
         let parsed: Value =

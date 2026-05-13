@@ -14,10 +14,10 @@
   "trigger": {
     "description": "Quarantine reporting found the workspace database but could not open it.",
     "setup_commands": [
-      "ee init --workspace .",
-      "# make .ee/ee.db unreadable through a test harness"
+      "mkdir -p <workspace>/.ee",
+      "printf 'not sqlite' > <workspace>/.ee/ee.db"
     ],
-    "invocation": "ee trust quarantine --workspace . --json"
+    "invocation": "ee diag quarantine list --workspace <workspace> --json"
   },
   "expected_emission": {
     "code": "quarantine_database_unreadable",

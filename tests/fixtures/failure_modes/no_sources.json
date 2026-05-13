@@ -15,7 +15,7 @@
     "setup_commands": [
       "ee init --workspace ."
     ],
-    "invocation": "ee causal compare --workspace . --method replay --json"
+    "invocation": "ee causal compare --workspace . --artifact-id artifact-1 --method replay --json"
   },
   "expected_emission": {
     "code": "no_sources",

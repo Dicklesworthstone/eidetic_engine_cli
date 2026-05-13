@@ -132,7 +132,7 @@ use crate::core::preflight_guard::{
 };
 use crate::core::profile::{
     OperatingProfile, ProfileConfigError, ProfileConfigOptions, ProfileConfigReport,
-    apply_profile_config, plan_profile_config,
+    VerificationRecipe, apply_profile_config, plan_profile_config,
 };
 use crate::core::rehearse::{
     CommandSpec, RehearsalProfile, RehearseInspectOptions, RehearsePlanOptions,
@@ -12611,11 +12611,19 @@ where
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
-            let rendered = serde_json::json!({
+            let degraded = VerificationRecipe::for_profile(report.profile.effective).degraded;
+            let mut data = serde_json::json!(report);
+            if !degraded.is_empty() && let Some(object) = data.as_object_mut() {
+                object.insert("degraded".to_string(), serde_json::json!(degraded.clone()));
+            }
+            let mut rendered = serde_json::json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V1,
                 "success": !report.has_conflicts(),
-                "data": report,
+                "data": data,
             });
+            if !degraded.is_empty() && let Some(object) = rendered.as_object_mut() {
+                object.insert("degraded".to_string(), serde_json::json!(degraded));
+            }
             write_stdout(stdout, &(rendered.to_string() + "\n"))
         }
     };
@@ -24116,21 +24124,7 @@ where
         let json = serde_json::json!({
             "schema": crate::models::SITUATION_CLASSIFY_SCHEMA_V1,
             "success": true,
-            "data": {
-                "command": "situation classify",
-                "category": result.category.as_str(),
-                "confidence": result.confidence.as_str(),
-                "confidenceScore": result.confidence_score,
-                "signals": result.signals.iter().map(|s| serde_json::json!({
-                    "signalType": s.signal_type,
-                    "pattern": &s.pattern,
-                    "weight": s.weight
-                })).collect::<Vec<_>>(),
-                "alternativeCategories": result.alternative_categories.iter().map(|(cat, score)| serde_json::json!({
-                    "category": cat.as_str(),
-                    "score": score
-                })).collect::<Vec<_>>(),
-            }
+            "data": result.data_json(),
         });
         let _ = stdout.write_all(json.to_string().as_bytes());
         let _ = stdout.write_all(b"\n");
@@ -24786,7 +24780,19 @@ where
         options = options.dry_run();
     }
 
-    let result = if options.chain_a_id.is_some() && options.chain_b_id.is_some() {
+    let has_evidence_source = options.fixture_replay_id.is_some()
+        || options.shadow_run_id.is_some()
+        || options.counterfactual_episode_id.is_some()
+        || options.experiment_id.is_some();
+    let has_store_scope = options.artifact_id.is_some() || options.decision_id.is_some();
+
+    let result = if !has_evidence_source
+        && has_store_scope
+        && options.chain_a_id.is_none()
+        && options.chain_b_id.is_none()
+    {
+        Ok(compare_causal_evidence(&options))
+    } else if options.chain_a_id.is_some() && options.chain_b_id.is_some() {
         open_causal_database(cli).and_then(|(conn, workspace_id)| {
             compare_causal_chains_from_store(&conn, &workspace_id, &options)
         })
@@ -27237,11 +27243,21 @@ fn write_maintenance_response<W>(
 where
     W: Write,
 {
-    let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
-        "success": success,
-        "data": data,
-    });
+    let degraded = maintenance_response_degraded(success, &data);
+    let response = if degraded.is_empty() {
+        serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": success,
+            "data": data,
+        })
+    } else {
+        serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": success,
+            "data": data,
+            "degraded": degraded,
+        })
+    };
 
     let exit = match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
@@ -27265,6 +27281,29 @@ where
     } else {
         ProcessExitCode::UnsatisfiedDegradedMode
     }
+}
+
+fn maintenance_response_degraded(
+    success: bool,
+    data: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    if success {
+        return Vec::new();
+    }
+    let Some(code) = data["code"].as_str() else {
+        return Vec::new();
+    };
+    let message = data["message"]
+        .as_str()
+        .unwrap_or("Maintenance command completed in degraded mode.");
+    let repair = data["repair"].as_str();
+
+    vec![serde_json::json!({
+        "code": code,
+        "severity": "medium",
+        "message": message,
+        "repair": repair,
+    })]
 }
 
 fn render_maintenance_human(response: &serde_json::Value) -> String {

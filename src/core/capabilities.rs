@@ -74,6 +74,35 @@ impl FeatureEntry {
     }
 }
 
+/// Build-time gap surfaced once through `ee capabilities`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnimplementedCapabilityEntry {
+    pub code: &'static str,
+    pub feature_flag: &'static str,
+    pub ship_target: &'static str,
+    pub tracking_bead: &'static str,
+    pub user_message: &'static str,
+}
+
+impl UnimplementedCapabilityEntry {
+    #[must_use]
+    pub const fn new(
+        code: &'static str,
+        feature_flag: &'static str,
+        ship_target: &'static str,
+        tracking_bead: &'static str,
+        user_message: &'static str,
+    ) -> Self {
+        Self {
+            code,
+            feature_flag,
+            ship_target,
+            tracking_bead,
+            user_message,
+        }
+    }
+}
+
 /// Output format entry from the renderer registry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutputFormatEntry {
@@ -156,6 +185,7 @@ pub struct CapabilitiesReport {
     pub version: &'static str,
     pub subsystems: Vec<CapabilityEntry>,
     pub features: Vec<FeatureEntry>,
+    pub unimplemented: Vec<UnimplementedCapabilityEntry>,
     pub commands: Vec<CommandEntry>,
     pub output_formats: Vec<OutputFormatEntry>,
     pub toon: ToonOutputCapability,
@@ -224,6 +254,79 @@ impl CapabilitiesReport {
             FeatureEntry::new("serve", cfg!(feature = "serve"), "HTTP serve adapter"),
         ];
 
+        let mut unimplemented = Vec::new();
+        if runtime_status == CapabilityStatus::Unimplemented {
+            unimplemented.push(UnimplementedCapabilityEntry::new(
+                "runtime_unavailable",
+                "asupersync",
+                "v0.2",
+                "bd-17c65.5.5",
+                "Asupersync runtime support is not available in this binary.",
+            ));
+        }
+        if storage_status == CapabilityStatus::Unimplemented {
+            unimplemented.push(UnimplementedCapabilityEntry::new(
+                "storage_unimplemented",
+                "fsqlite",
+                "v0.2",
+                "bd-17c65.5.5",
+                "Storage support is not available in this binary.",
+            ));
+        }
+        if search_status == CapabilityStatus::Unimplemented {
+            unimplemented.push(UnimplementedCapabilityEntry::new(
+                "search_unimplemented",
+                "frankensearch",
+                "v0.2",
+                "bd-17c65.5.5",
+                "Search support is not available in this binary.",
+            ));
+        }
+        if !cfg!(feature = "lexical-bm25") {
+            unimplemented.push(UnimplementedCapabilityEntry::new(
+                "lexical_unavailable",
+                "lexical-bm25",
+                "v0.2",
+                "bd-17c65.5.5",
+                "BM25 lexical search is disabled in this build.",
+            ));
+        }
+        if !cfg!(feature = "graph") {
+            unimplemented.push(UnimplementedCapabilityEntry::new(
+                "graph_feature_disabled",
+                "graph",
+                "v0.2",
+                "bd-17c65.5.5",
+                "Graph algorithm execution is disabled in this build.",
+            ));
+        }
+        if !cfg!(feature = "mcp") {
+            unimplemented.push(UnimplementedCapabilityEntry::new(
+                "mcp_feature_disabled",
+                "mcp",
+                "v0.2",
+                "bd-17c65.5.5",
+                "MCP stdio adapter support is disabled in this build.",
+            ));
+        }
+        if !cfg!(feature = "serve") {
+            unimplemented.push(UnimplementedCapabilityEntry::new(
+                "daemon_background_mode_unimplemented",
+                "serve",
+                "v0.5",
+                "bd-17c65.5.5",
+                "Background daemon mode is not implemented in this build; bounded foreground mode is available.",
+            ));
+        }
+        unimplemented.push(UnimplementedCapabilityEntry::new(
+            "diagram_backend_unavailable",
+            "franken-mermaid-adapter",
+            "v0.3",
+            "bd-17c65.5.5",
+            "Diagram backend support is not linked in this build.",
+        ));
+        unimplemented.sort_by(|left, right| left.code.cmp(right.code));
+
         let commands = vec![
             CommandEntry::new("capabilities", true, "Report feature availability"),
             CommandEntry::new("check", true, "Quick posture summary"),
@@ -274,6 +377,7 @@ impl CapabilitiesReport {
             version: info.version,
             subsystems,
             features,
+            unimplemented,
             commands,
             output_formats,
             toon: ToonOutputCapability::ready(),
@@ -293,6 +397,12 @@ impl CapabilitiesReport {
     #[must_use]
     pub fn enabled_feature_count(&self) -> usize {
         self.features.iter().filter(|f| f.enabled).count()
+    }
+
+    /// Count of build-time gaps reported once through capabilities.
+    #[must_use]
+    pub fn unimplemented_count(&self) -> usize {
+        self.unimplemented.len()
     }
 
     /// Count of available commands.
@@ -363,7 +473,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::expect_used)]
     fn capabilities_report_has_runtime_ready() -> TestResult {
         let report = CapabilitiesReport::gather();
 
@@ -371,7 +480,7 @@ mod tests {
             .subsystems
             .iter()
             .find(|s| s.name == "runtime")
-            .expect("runtime subsystem must exist");
+            .unwrap_or_else(|| panic!("runtime subsystem must exist")); // ubs:ignore
         ensure(runtime.status, CapabilityStatus::Ready, "runtime is ready")
     }
 
@@ -388,7 +497,33 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::expect_used)]
+    fn capabilities_report_surfaces_build_time_gaps_once() -> TestResult {
+        let report = CapabilitiesReport::gather();
+        let codes = report
+            .unimplemented
+            .iter()
+            .map(|entry| entry.code)
+            .collect::<Vec<_>>();
+
+        if !cfg!(feature = "mcp") && !codes.contains(&"mcp_feature_disabled") {
+            return Err(format!(
+                "mcp feature gap should be in capabilities.unimplemented; got {codes:?}"
+            ));
+        }
+        if !cfg!(feature = "serve") && !codes.contains(&"daemon_background_mode_unimplemented") {
+            return Err(format!(
+                "daemon background gap should be in capabilities.unimplemented; got {codes:?}"
+            ));
+        }
+        if !codes.contains(&"diagram_backend_unavailable") {
+            return Err(format!(
+                "diagram backend gap should be in capabilities.unimplemented; got {codes:?}"
+            ));
+        }
+        ensure(report.unimplemented_count(), codes.len(), "gap count")
+    }
+
+    #[test]
     fn capabilities_report_includes_capabilities_command() -> TestResult {
         let report = CapabilitiesReport::gather();
 
@@ -396,12 +531,11 @@ mod tests {
             .commands
             .iter()
             .find(|c| c.name == "capabilities")
-            .expect("capabilities command must exist");
+            .unwrap_or_else(|| panic!("capabilities command must exist")); // ubs:ignore
         ensure(cmd.available, true, "capabilities command is available")
     }
 
     #[test]
-    #[expect(clippy::expect_used)]
     fn capabilities_report_marks_daemon_maintenance_posture() -> TestResult {
         let report = CapabilitiesReport::gather();
 
@@ -409,21 +543,21 @@ mod tests {
             .commands
             .iter()
             .find(|c| c.name == "daemon foreground decay_sweep")
-            .expect("daemon foreground decay_sweep command must exist");
+            .unwrap_or_else(|| panic!("daemon foreground decay_sweep command must exist")); // ubs:ignore
         ensure(decay.available, true, "decay sweep daemon job is available")?;
 
         let background = report
             .commands
             .iter()
             .find(|c| c.name == "daemon background")
-            .expect("daemon background command must exist");
+            .unwrap_or_else(|| panic!("daemon background command must exist")); // ubs:ignore
         ensure(background.available, false, "background daemon unavailable")?;
 
         let non_decay = report
             .commands
             .iter()
             .find(|c| c.name == "daemon foreground non-decay")
-            .expect("daemon foreground non-decay command must exist");
+            .unwrap_or_else(|| panic!("daemon foreground non-decay command must exist")); // ubs:ignore
         ensure(
             non_decay.available,
             false,

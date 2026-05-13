@@ -274,7 +274,7 @@ fn budget_check_missing_report_returns_error() -> TestResult {
         .get("schema")
         .and_then(|s| s.as_str())
         .ok_or("missing schema")?;
-    ensure_equal(&schema, &"ee.error.v1", "error schema")
+    ensure_equal(&schema, &"ee.error.v2", "error schema")
 }
 
 #[test]
@@ -300,7 +300,7 @@ fn budget_check_empty_profile_returns_error() -> TestResult {
         .get("schema")
         .and_then(|s| s.as_str())
         .ok_or("missing schema")?;
-    ensure_equal(&schema, &"ee.error.v1", "error schema")
+    ensure_equal(&schema, &"ee.error.v2", "error schema")
 }
 
 #[test]

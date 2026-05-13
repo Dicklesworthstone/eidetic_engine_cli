@@ -20,7 +20,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use serde_json::Value;
 
 type TestResult = Result<(), String>;
 
@@ -36,7 +38,7 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     }
 }
 
-fn j6_fixture_codes(repo: &PathBuf) -> Result<BTreeSet<String>, String> {
+fn j6_fixture_codes(repo: &std::path::Path) -> Result<BTreeSet<String>, String> {
     let dir = repo.join("tests/fixtures/failure_modes");
     let mut codes = BTreeSet::new();
     for entry in std::fs::read_dir(&dir).map_err(|e| format!("read_dir: {e}"))? {
@@ -51,10 +53,10 @@ fn j6_fixture_codes(repo: &PathBuf) -> Result<BTreeSet<String>, String> {
     Ok(codes)
 }
 
-fn taxonomy_codes(repo: &PathBuf) -> Result<BTreeSet<String>, String> {
+fn taxonomy_codes(repo: &std::path::Path) -> Result<BTreeSet<String>, String> {
     let path = repo.join("docs/degraded_code_taxonomy.md");
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     // Every code in the taxonomy appears in a markdown table as
     // `| `<name>` |` (backticked, surrounded by table delimiters).
     // Use a regex-free scan: look for any backticked lowercase token.
@@ -67,7 +69,9 @@ fn taxonomy_codes(repo: &PathBuf) -> Result<BTreeSet<String>, String> {
                 if let Some(end) = rest.find('`') {
                     let token = &rest[..end];
                     if !token.is_empty()
-                        && token.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                        && token
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
                         && token.starts_with(|c: char| c.is_ascii_lowercase())
                     {
                         codes.insert(token.to_owned());
@@ -83,19 +87,125 @@ fn taxonomy_codes(repo: &PathBuf) -> Result<BTreeSet<String>, String> {
     // Strip non-code lowercase tokens that appear in prose (e.g., "info",
     // "low", "warning" are severity names, not codes).
     let prose_tokens: BTreeSet<&str> = [
-        "build_time", "response_time", "mixed",
-        "info", "low", "warning", "medium", "high", "critical",
-        "code", "severity", "bead", "surface", "feature_flag",
+        "build_time",
+        "response_time",
+        "mixed",
+        "info",
+        "low",
+        "warning",
+        "medium",
+        "high",
+        "critical",
+        "code",
+        "severity",
+        "bead",
+        "surface",
+        "feature_flag",
         // Feature flag NAMES (appear in backticks but aren't degraded codes)
-        "fnx-runtime", "frankensearch", "fsqlite",
-        "asupersync", "cass", "mcp",
+        "fnx-runtime",
+        "frankensearch",
+        "fsqlite",
+        "asupersync",
+        "cass",
+        "mcp",
         // Markdown rendering artifacts
-        "data", "ee", "fnx", "src", "tests", "docs",
+        "data",
+        "ee",
+        "fnx",
+        "src",
+        "tests",
+        "docs",
     ]
     .into_iter()
     .collect();
     codes.retain(|code| !prose_tokens.contains(code.as_str()));
     Ok(codes)
+}
+
+fn taxonomy_section_codes(doc: &str, section_header: &str) -> Result<BTreeSet<String>, String> {
+    let section = doc
+        .split(section_header)
+        .nth(1)
+        .and_then(|s| s.split("### `").next())
+        .ok_or_else(|| format!("{section_header} section not found"))?;
+    Ok(section
+        .lines()
+        .filter_map(|line| {
+            line.split('`').nth(1).filter(|token| {
+                token
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                    && token.len() > 3
+            })
+        })
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn build_time_taxonomy_codes(repo: &Path) -> Result<BTreeSet<String>, String> {
+    let doc = std::fs::read_to_string(repo.join("docs/degraded_code_taxonomy.md"))
+        .map_err(|e| format!("read taxonomy: {e}"))?;
+    taxonomy_section_codes(&doc, "### `build_time`")
+}
+
+fn collect_fixture_golden_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> TestResult {
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
+        let entry = entry.map_err(|e| format!("read entry in {}: {e}", dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_fixture_golden_paths(&path, paths)?;
+            continue;
+        }
+        let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+            continue;
+        };
+        if matches!(extension, "golden" | "json" | "snap") {
+            paths.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn collect_build_time_degraded_violations(
+    value: &Value,
+    build_time_codes: &BTreeSet<String>,
+    json_path: &str,
+    violations: &mut Vec<String>,
+) {
+    match value {
+        Value::Object(object) => {
+            if let Some(Value::Array(degraded)) = object.get("degraded") {
+                for (index, entry) in degraded.iter().enumerate() {
+                    if let Some(code) = entry.get("code").and_then(Value::as_str)
+                        && build_time_codes.contains(code)
+                    {
+                        violations.push(format!("{json_path}/degraded[{index}].code = {code}"));
+                    }
+                }
+            }
+            for (key, child) in object {
+                let child_path = format!("{json_path}/{key}");
+                collect_build_time_degraded_violations(
+                    child,
+                    build_time_codes,
+                    &child_path,
+                    violations,
+                );
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                let child_path = format!("{json_path}[{index}]");
+                collect_build_time_degraded_violations(
+                    child,
+                    build_time_codes,
+                    &child_path,
+                    violations,
+                );
+            }
+        }
+        _ => {}
+    }
 }
 
 #[test]
@@ -150,38 +260,50 @@ fn no_build_time_code_appears_in_fixtures_response_time_section() -> TestResult 
 
     // Naively split on the section headers; verify codes in the
     // build_time table don't reappear under response_time/mixed.
-    let build_time_section = doc
-        .split("### `build_time`")
-        .nth(1)
-        .and_then(|s| s.split("### `").next())
-        .ok_or_else(|| "build_time section not found".to_owned())?;
-    let response_time_section = doc
-        .split("### `response_time`")
-        .nth(1)
-        .ok_or_else(|| "response_time section not found".to_owned())?;
+    let build_time_codes = taxonomy_section_codes(&doc, "### `build_time`")?;
+    let response_time_codes = taxonomy_section_codes(&doc, "### `response_time`")?;
 
-    let build_time_codes: BTreeSet<&str> = build_time_section
-        .lines()
-        .filter_map(|l| {
-            l.split('`').nth(1).filter(|t| {
-                t.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-                    && t.len() > 3
-            })
-        })
+    let dupes: Vec<&String> = build_time_codes
+        .intersection(&response_time_codes)
         .collect();
-    let response_time_codes: BTreeSet<&str> = response_time_section
-        .lines()
-        .filter_map(|l| {
-            l.split('`').nth(1).filter(|t| {
-                t.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-                    && t.len() > 3
-            })
-        })
-        .collect();
-
-    let dupes: Vec<&&str> = build_time_codes.intersection(&response_time_codes).collect();
     ensure(
         dupes.is_empty(),
         format!("codes appear in BOTH build_time and response_time sections: {dupes:?}"),
+    )
+}
+
+#[test]
+fn fixture_golden_degraded_arrays_do_not_emit_build_time_codes() -> TestResult {
+    let repo = repo_root();
+    let build_time_codes = build_time_taxonomy_codes(&repo)?;
+    let mut paths = Vec::new();
+    collect_fixture_golden_paths(&repo.join("tests/fixtures/golden"), &mut paths)?;
+
+    let mut parsed_json_count = 0usize;
+    let mut violations = Vec::new();
+    for path in paths {
+        let content =
+            std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let Ok(value) = serde_json::from_str::<Value>(&content) else {
+            continue;
+        };
+        parsed_json_count += 1;
+        let relative = path
+            .strip_prefix(&repo)
+            .map_or_else(|_| path.display().to_string(), |p| p.display().to_string());
+        collect_build_time_degraded_violations(
+            &value,
+            &build_time_codes,
+            &relative,
+            &mut violations,
+        );
+    }
+
+    ensure(parsed_json_count > 0, "no JSON fixture goldens were parsed")?;
+    ensure(
+        violations.is_empty(),
+        format!(
+            "build-time code(s) emitted in response degraded[]; move them to capabilities.unimplemented[]: {violations:?}",
+        ),
     )
 }

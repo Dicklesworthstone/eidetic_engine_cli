@@ -61,10 +61,20 @@ pub struct SearchOptions {
     pub limit: u32,
     pub speed: SpeedMode,
     pub explain: bool,
+    /// Evaluate validity windows at this timestamp. Defaults to now.
+    pub as_of: Option<DateTime<Utc>>,
     /// Include tombstoned memories in result hits. Default command behavior
     /// excludes tombstoned memories so stale search-index documents cannot
     /// silently re-enter active retrieval.
     pub include_tombstoned: bool,
+    /// Include memories whose `valid_to` is before the validity reference time.
+    pub include_expired: bool,
+    /// Include memories whose `valid_from` is after the validity reference time.
+    pub include_future: bool,
+    /// Include search hits whose indexed validity status is explicitly stale.
+    /// The current memory row schema derives validity from windows and does not
+    /// persist a stale status, but older indexes may carry the field.
+    pub include_stale: bool,
     /// Minimum score (0.0..=1.0) for a hit to be returned. `None` falls
     /// back to [`DEFAULT_RELEVANCE_FLOOR`]. Set to `Some(0.0)` to disable.
     /// Bead bd-17c65.2.1 (B1).
@@ -600,6 +610,59 @@ impl SearchDegradation {
     }
 
     #[must_use]
+    fn future_validity_filtered(filtered: usize) -> Self {
+        Self {
+            code: "future_validity_filtered".to_string(),
+            severity: "low".to_string(),
+            message: format!(
+                "Excluded {filtered} not-yet-valid memor{suffix} from search results because valid_from is after the validity reference time.",
+                suffix = if filtered == 1 { "y" } else { "ies" },
+            ),
+            repair: Some("Pass --include-future or --as-of <RFC3339> to inspect them.".to_string()),
+        }
+    }
+
+    #[must_use]
+    fn stale_validity_filtered(filtered: usize) -> Self {
+        Self {
+            code: "stale_validity_filtered".to_string(),
+            severity: "low".to_string(),
+            message: format!(
+                "Excluded {filtered} stale memor{suffix} from search results because indexed validity_status is stale.",
+                suffix = if filtered == 1 { "y" } else { "ies" },
+            ),
+            repair: Some("Pass --include-stale to inspect stale memories.".to_string()),
+        }
+    }
+
+    #[must_use]
+    fn malformed_validity_filtered(filtered: usize) -> Self {
+        Self {
+            code: "malformed_validity_filtered".to_string(),
+            severity: "medium".to_string(),
+            message: format!(
+                "Excluded {filtered} memor{suffix} with malformed validity timestamps.",
+                suffix = if filtered == 1 { "y" } else { "ies" },
+            ),
+            repair: Some("Use `ee why <memory-id> --json` or `ee doctor --json` to inspect validity metadata.".to_string()),
+        }
+    }
+
+    #[must_use]
+    fn validity_filtered_significant_recall_drop(filtered: usize, remaining: usize) -> Self {
+        Self {
+            code: "validity_filtered_significant_recall_drop".to_string(),
+            severity: "info".to_string(),
+            message: format!(
+                "Validity window filtering removed {filtered} candidate{filtered_suffix}; {remaining} candidate{remaining_suffix} remain.",
+                filtered_suffix = if filtered == 1 { "" } else { "s" },
+                remaining_suffix = if remaining == 1 { "" } else { "s" },
+            ),
+            repair: Some("Consider --as-of, --include-expired, --include-future, or --include-stale when historic or inactive memories are expected.".to_string()),
+        }
+    }
+
+    #[must_use]
     fn tombstone_visibility_unavailable(error: &str) -> Self {
         Self {
             code: "tombstone_visibility_unavailable".to_string(),
@@ -812,6 +875,19 @@ impl SearchReport {
                                     serde_json::json!(tombstoned_at),
                                 );
                             }
+                        }
+                        if let Some(valid_from) = metadata_string(meta, "valid_from") {
+                            obj_map.insert("validFrom".to_string(), serde_json::json!(valid_from));
+                        }
+                        if let Some(valid_to) = metadata_string(meta, "valid_to") {
+                            obj_map.insert("validTo".to_string(), serde_json::json!(valid_to));
+                        }
+                        if let Some(status) = metadata_string(meta, "validity_status") {
+                            obj_map.insert("validityStatus".to_string(), serde_json::json!(status));
+                        }
+                        if let Some(kind) = metadata_string(meta, "validity_window_kind") {
+                            obj_map
+                                .insert("validityWindowKind".to_string(), serde_json::json!(kind));
                         }
                     }
                     if let Some(ref explanation) = hit.explanation {
@@ -2551,23 +2627,59 @@ fn apply_tombstone_visibility(
     let mut visible_hits = Vec::with_capacity(hits.len());
     let mut filtered = 0usize;
     let mut expired_filtered = 0usize;
+    let mut future_filtered = 0usize;
+    let mut stale_filtered = 0usize;
+    let mut malformed_filtered = 0usize;
     let mut included = 0usize;
+    let reference_time = options.as_of.unwrap_or_else(Utc::now);
 
     for mut hit in hits {
         match connection.get_memory(&hit.doc_id) {
-            Ok(Some(memory)) if memory.tombstoned_at.is_some() => {
-                if options.include_tombstoned {
-                    mark_hit_tombstoned(&mut hit, memory.tombstoned_at.as_deref());
-                    included = included.saturating_add(1);
-                    visible_hits.push(hit);
-                } else {
-                    filtered = filtered.saturating_add(1);
+            Ok(Some(memory)) => {
+                if memory.tombstoned_at.is_some() {
+                    if options.include_tombstoned {
+                        mark_hit_tombstoned(&mut hit, memory.tombstoned_at.as_deref());
+                        included = included.saturating_add(1);
+                    } else {
+                        filtered = filtered.saturating_add(1);
+                        continue;
+                    }
+                }
+
+                let indexed_stale = hit_indexed_validity_status(&hit) == Some("stale");
+                if indexed_stale && !options.include_stale {
+                    stale_filtered = stale_filtered.saturating_add(1);
+                    continue;
+                }
+
+                match memory_validity_visibility(
+                    memory.valid_from.as_deref(),
+                    memory.valid_to.as_deref(),
+                    reference_time,
+                    options.include_expired,
+                    options.include_future,
+                ) {
+                    MemoryValidityVisibility::Visible => {
+                        mark_hit_validity(
+                            &mut hit,
+                            &memory.valid_from,
+                            &memory.valid_to,
+                            reference_time,
+                        );
+                        visible_hits.push(hit);
+                    }
+                    MemoryValidityVisibility::Expired => {
+                        expired_filtered = expired_filtered.saturating_add(1);
+                    }
+                    MemoryValidityVisibility::Future => {
+                        future_filtered = future_filtered.saturating_add(1);
+                    }
+                    MemoryValidityVisibility::Malformed => {
+                        malformed_filtered = malformed_filtered.saturating_add(1);
+                    }
                 }
             }
-            Ok(Some(memory)) if memory_is_expired(memory.valid_to.as_deref()) => {
-                expired_filtered = expired_filtered.saturating_add(1);
-            }
-            Ok(_) => visible_hits.push(hit),
+            Ok(None) => visible_hits.push(hit),
             Err(error) => {
                 degraded.push(SearchDegradation::tombstone_visibility_unavailable(
                     &error.to_string(),
@@ -2580,18 +2692,30 @@ fn apply_tombstone_visibility(
     let total_before = visible_hits
         .len()
         .saturating_add(filtered)
-        .saturating_add(expired_filtered);
+        .saturating_add(expired_filtered)
+        .saturating_add(future_filtered)
+        .saturating_add(stale_filtered)
+        .saturating_add(malformed_filtered);
+    let validity_filtered = expired_filtered
+        .saturating_add(future_filtered)
+        .saturating_add(stale_filtered)
+        .saturating_add(malformed_filtered);
     tracing::info!(
         target: "ee.search",
-        event = "tombstone_filter",
+        event = "visibility_filter",
         surface = "search",
         total_before,
         tombstoned_count = filtered.saturating_add(included),
         included = options.include_tombstoned,
         tombstoned_included_count = included,
         tombstoned_filtered_count = filtered,
+        validity_reference_time = %reference_time.to_rfc3339(),
         expired_filtered_count = expired_filtered,
-        "tombstone_filter"
+        future_filtered_count = future_filtered,
+        stale_filtered_count = stale_filtered,
+        malformed_filtered_count = malformed_filtered,
+        valid_count = visible_hits.len(),
+        "visibility_filter"
     );
 
     if filtered > 0 {
@@ -2600,6 +2724,25 @@ fn apply_tombstone_visibility(
     if expired_filtered > 0 {
         degraded.push(SearchDegradation::expired_filtered(expired_filtered));
     }
+    if future_filtered > 0 {
+        degraded.push(SearchDegradation::future_validity_filtered(future_filtered));
+    }
+    if stale_filtered > 0 {
+        degraded.push(SearchDegradation::stale_validity_filtered(stale_filtered));
+    }
+    if malformed_filtered > 0 {
+        degraded.push(SearchDegradation::malformed_validity_filtered(
+            malformed_filtered,
+        ));
+    }
+    if validity_filtered > 0 && validity_filtered.saturating_mul(2) >= total_before {
+        degraded.push(
+            SearchDegradation::validity_filtered_significant_recall_drop(
+                validity_filtered,
+                visible_hits.len(),
+            ),
+        );
+    }
     if included > 0 {
         degraded.push(SearchDegradation::tombstoned_in_results(included));
     }
@@ -2607,10 +2750,101 @@ fn apply_tombstone_visibility(
     visible_hits
 }
 
-fn memory_is_expired(valid_to: Option<&str>) -> bool {
-    valid_to
-        .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
-        .is_some_and(|timestamp| Utc::now() > timestamp.with_timezone(&Utc))
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MemoryValidityVisibility {
+    Visible,
+    Expired,
+    Future,
+    Malformed,
+}
+
+fn memory_validity_visibility(
+    valid_from: Option<&str>,
+    valid_to: Option<&str>,
+    reference_time: DateTime<Utc>,
+    include_expired: bool,
+    include_future: bool,
+) -> MemoryValidityVisibility {
+    if let Some(valid_from) = valid_from {
+        let Some(valid_from) = parse_validity_timestamp(valid_from) else {
+            return MemoryValidityVisibility::Malformed;
+        };
+        if valid_from > reference_time && !include_future {
+            return MemoryValidityVisibility::Future;
+        }
+    }
+
+    if let Some(valid_to) = valid_to {
+        let Some(valid_to) = parse_validity_timestamp(valid_to) else {
+            return MemoryValidityVisibility::Malformed;
+        };
+        if valid_to < reference_time && !include_expired {
+            return MemoryValidityVisibility::Expired;
+        }
+    }
+
+    MemoryValidityVisibility::Visible
+}
+
+fn parse_validity_timestamp(raw: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+}
+
+fn hit_indexed_validity_status(hit: &SearchHit) -> Option<&str> {
+    hit.metadata
+        .as_ref()
+        .and_then(|metadata| metadata_string(metadata, "validity_status"))
+        .or_else(|| {
+            hit.metadata
+                .as_ref()
+                .and_then(|metadata| metadata_string(metadata, "validityStatus"))
+        })
+}
+
+fn validity_status_at(
+    valid_from: Option<&str>,
+    valid_to: Option<&str>,
+    reference_time: DateTime<Utc>,
+) -> &'static str {
+    let from = match valid_from {
+        Some(raw) => match parse_validity_timestamp(raw) {
+            Some(timestamp) => Some(timestamp),
+            None => return "malformed",
+        },
+        None => None,
+    };
+    let to = match valid_to {
+        Some(raw) => match parse_validity_timestamp(raw) {
+            Some(timestamp) => Some(timestamp),
+            None => return "malformed",
+        },
+        None => None,
+    };
+
+    match (from, to) {
+        (None, None) => "unknown",
+        (from, to) => {
+            if from.is_some_and(|timestamp| timestamp > reference_time) {
+                "future"
+            } else if to.is_some_and(|timestamp| timestamp < reference_time) {
+                "expired"
+            } else {
+                "current"
+            }
+        }
+    }
+}
+
+fn validity_window_kind(valid_from: Option<&str>, valid_to: Option<&str>) -> &'static str {
+    match (valid_from, valid_to) {
+        (None, None) => "unbounded",
+        (Some(from), Some(to)) if from == to => "instant",
+        (Some(_), Some(_)) => "bounded",
+        (Some(_), None) => "starts_at",
+        (None, Some(_)) => "ends_at",
+    }
 }
 
 fn mark_hit_tombstoned(hit: &mut SearchHit, tombstoned_at: Option<&str>) {
@@ -2623,6 +2857,38 @@ fn mark_hit_tombstoned(hit: &mut SearchHit, tombstoned_at: Option<&str>) {
                 serde_json::json!(tombstoned_at),
             );
         }
+    }
+    hit.metadata = Some(metadata);
+}
+
+fn mark_hit_validity(
+    hit: &mut SearchHit,
+    valid_from: &Option<String>,
+    valid_to: &Option<String>,
+    reference_time: DateTime<Utc>,
+) {
+    let indexed_status = hit_indexed_validity_status(hit).map(str::to_owned);
+    let mut metadata = hit.metadata.take().unwrap_or_else(|| serde_json::json!({}));
+    if let Some(object) = metadata.as_object_mut() {
+        if let Some(valid_from) = valid_from {
+            object.insert("valid_from".to_string(), serde_json::json!(valid_from));
+        }
+        if let Some(valid_to) = valid_to {
+            object.insert("valid_to".to_string(), serde_json::json!(valid_to));
+        }
+        object.insert(
+            "validity_status".to_string(),
+            serde_json::json!(indexed_status.as_deref().unwrap_or_else(|| {
+                validity_status_at(valid_from.as_deref(), valid_to.as_deref(), reference_time)
+            })),
+        );
+        object.insert(
+            "validity_window_kind".to_string(),
+            serde_json::json!(validity_window_kind(
+                valid_from.as_deref(),
+                valid_to.as_deref()
+            )),
+        );
     }
     hit.metadata = Some(metadata);
 }
@@ -2717,7 +2983,11 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Default,
             explain: false,
+            as_of: None,
             include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
             relevance_floor: None,
             source_mode,
             strict_source_mode,
@@ -2927,7 +3197,11 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Default,
             explain: false,
+            as_of: None,
             include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
             relevance_floor: None,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
@@ -2965,6 +3239,148 @@ mod tests {
         assert_eq!(json["results"][0]["tombstoned"], true);
         assert!(json["results"][0]["tombstonedAt"].is_string());
         assert_eq!(json["results"][0]["metadata"]["tombstoned"], true);
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn validity_visibility_respects_windows_as_of_and_overrides() {
+        let reference = DateTime::parse_from_rfc3339("2026-05-13T00:00:00Z")
+            .expect("valid reference time")
+            .with_timezone(&Utc);
+
+        assert_eq!(
+            memory_validity_visibility(None, None, reference, false, false),
+            MemoryValidityVisibility::Visible
+        );
+        assert_eq!(
+            memory_validity_visibility(Some("2026-06-01T00:00:00Z"), None, reference, false, false,),
+            MemoryValidityVisibility::Future
+        );
+        assert_eq!(
+            memory_validity_visibility(Some("2026-06-01T00:00:00Z"), None, reference, false, true,),
+            MemoryValidityVisibility::Visible
+        );
+        assert_eq!(
+            memory_validity_visibility(None, Some("2026-05-01T00:00:00Z"), reference, false, false,),
+            MemoryValidityVisibility::Expired
+        );
+        assert_eq!(
+            memory_validity_visibility(None, Some("2026-05-01T00:00:00Z"), reference, true, false,),
+            MemoryValidityVisibility::Visible
+        );
+        assert_eq!(
+            memory_validity_visibility(Some("not-a-time"), None, reference, true, true),
+            MemoryValidityVisibility::Malformed
+        );
+        assert_eq!(
+            validity_status_at(
+                Some("2026-01-01T00:00:00Z"),
+                Some("2026-06-30T00:00:00Z"),
+                reference,
+            ),
+            "current"
+        );
+    }
+
+    #[test]
+    fn indexed_stale_validity_status_excluded_by_default_and_opt_in() -> TestResult {
+        let workspace = unique_test_dir("stale-validity-visibility");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let database_path = workspace.join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                "wsp_11234567890123456789012345",
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("stale validity visibility".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_10000000000000000000000001",
+                &CreateMemoryInput {
+                    workspace_id: "wsp_11234567890123456789012345".to_string(),
+                    level: "semantic".to_string(),
+                    kind: "fact".to_string(),
+                    content: "Indexed stale validity status should be opt-in only.".to_string(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "agent_assertion".to_string(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        let hit = SearchHit {
+            doc_id: "mem_10000000000000000000000001".to_string(),
+            score: 0.9,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(0.9),
+            rerank_score: None,
+            metadata: Some(serde_json::json!({ "validity_status": "stale" })),
+            explanation: None,
+        };
+        let base_options = SearchOptions {
+            workspace_path: workspace,
+            database_path: Some(database_path),
+            index_dir: None,
+            query: "stale validity".to_string(),
+            limit: 10,
+            speed: SpeedMode::Default,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+        };
+
+        let mut degraded = Vec::new();
+        let visible = apply_tombstone_visibility(&base_options, vec![hit.clone()], &mut degraded);
+        assert!(visible.is_empty());
+        assert_eq!(degraded[0].code, "stale_validity_filtered");
+
+        let mut include_options = base_options;
+        include_options.include_stale = true;
+        let mut degraded = Vec::new();
+        let visible = apply_tombstone_visibility(&include_options, vec![hit], &mut degraded);
+        assert_eq!(visible.len(), 1);
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "stale validity".to_string(),
+            requested_limit: 10,
+            results: visible,
+            elapsed_ms: 1.0,
+            errors: Vec::new(),
+            degraded,
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+        };
+        let json = report.data_json();
+        assert_eq!(json["results"][0]["validityStatus"], "stale");
+        assert_eq!(json["results"][0]["metadata"]["validity_status"], "stale");
         Ok(())
     }
 
@@ -3026,7 +3442,11 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Default,
             explain: false,
+            as_of: None,
             include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
             relevance_floor: None,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
@@ -3059,7 +3479,11 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Default,
             explain: false,
+            as_of: None,
             include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
             relevance_floor: None,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
@@ -3088,7 +3512,11 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Default,
             explain: false,
+            as_of: None,
             include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
             relevance_floor: None,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
@@ -3223,7 +3651,11 @@ mod tests {
             limit: 5,
             speed: SpeedMode::Default,
             explain: true,
+            as_of: None,
             include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
             relevance_floor: Some(0.0),
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
@@ -3319,7 +3751,11 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Default,
             explain: false,
+            as_of: None,
             include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
             relevance_floor: None,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
@@ -3341,7 +3777,11 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Quality,
             explain: true,
+            as_of: None,
             include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
             relevance_floor: None,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
@@ -3377,7 +3817,11 @@ mod tests {
             limit: 10,
             speed: SpeedMode::Default,
             explain: false,
+            as_of: None,
             include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
             relevance_floor: None,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,

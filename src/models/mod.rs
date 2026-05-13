@@ -293,6 +293,8 @@ pub const RESPONSE_SCHEMA_V1: &str = "ee.response.v1";
 
 /// Error envelope schema for failed command output.
 pub const ERROR_SCHEMA_V1: &str = "ee.error.v1";
+/// Current error envelope schema for failed command output.
+pub const ERROR_SCHEMA_V2: &str = "ee.error.v2";
 
 /// Schema for query request documents (`--query-file`).
 pub const QUERY_SCHEMA_V1: &str = "ee.query.v1";
@@ -353,6 +355,12 @@ pub enum DomainError {
         repair: Option<String>,
         details_json: String,
     },
+    UsageCodeWithDetails {
+        code: &'static str,
+        message: String,
+        repair: Option<String>,
+        details_json: String,
+    },
     Configuration {
         message: String,
         repair: Option<String>,
@@ -404,9 +412,9 @@ pub enum DomainError {
 impl std::fmt::Display for DomainError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Usage { message, .. } | Self::UsageWithDetails { message, .. } => {
-                write!(f, "usage error: {message}")
-            }
+            Self::Usage { message, .. }
+            | Self::UsageWithDetails { message, .. }
+            | Self::UsageCodeWithDetails { message, .. } => write!(f, "usage error: {message}"),
             Self::Configuration { message, .. } => write!(f, "configuration error: {message}"),
             Self::Storage { message, .. } => write!(f, "storage error: {message}"),
             Self::SearchIndex { message, .. } => write!(f, "search index error: {message}"),
@@ -716,6 +724,7 @@ impl DomainError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::Usage { .. } | Self::UsageWithDetails { .. } => "usage",
+            Self::UsageCodeWithDetails { code, .. } => code,
             Self::Configuration { .. } => "configuration",
             Self::Storage { .. } => "storage",
             Self::SearchIndex { .. } => "search_index",
@@ -734,6 +743,7 @@ impl DomainError {
         match self {
             Self::Usage { message, .. }
             | Self::UsageWithDetails { message, .. }
+            | Self::UsageCodeWithDetails { message, .. }
             | Self::Configuration { message, .. }
             | Self::Storage { message, .. }
             | Self::SearchIndex { message, .. }
@@ -755,6 +765,7 @@ impl DomainError {
         match self {
             Self::Usage { repair, .. }
             | Self::UsageWithDetails { repair, .. }
+            | Self::UsageCodeWithDetails { repair, .. }
             | Self::Configuration { repair, .. }
             | Self::Storage { repair, .. }
             | Self::SearchIndex { repair, .. }
@@ -920,7 +931,9 @@ impl DomainError {
     #[must_use]
     pub const fn exit_code(&self) -> ProcessExitCode {
         match self {
-            Self::Usage { .. } | Self::UsageWithDetails { .. } => ProcessExitCode::Usage,
+            Self::Usage { .. }
+            | Self::UsageWithDetails { .. }
+            | Self::UsageCodeWithDetails { .. } => ProcessExitCode::Usage,
             Self::Configuration { .. } => ProcessExitCode::Configuration,
             Self::Storage { .. } => ProcessExitCode::Storage,
             Self::SearchIndex { .. } => ProcessExitCode::SearchIndex,

@@ -676,7 +676,7 @@ fn gate20_cli_missing_database_returns_stable_degraded_error() -> TestResult {
 
     ensure_json_equal(
         actual.get("schema"),
-        JsonValue::String("ee.error.v1".to_owned()),
+        JsonValue::String("ee.error.v2".to_owned()),
         "missing database error schema",
     )?;
     ensure_json_equal(

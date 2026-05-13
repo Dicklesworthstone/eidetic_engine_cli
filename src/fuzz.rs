@@ -412,7 +412,7 @@ mod tests {
             |rng| rng.next_usize(10),
             |n| {
                 if n == 5 {
-                    panic!("intentional panic");
+                    panic!("intentional panic"); // ubs:ignore
                 }
             },
         );

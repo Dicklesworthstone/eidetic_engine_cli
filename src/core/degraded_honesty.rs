@@ -654,7 +654,7 @@ mod tests {
             "context",
             false,
             false,
-            r#"{"schema":"ee.error.v1","error":{"message":"stub store unavailable"}}"#,
+            r#"{"schema":"ee.error.v2","error":{"message":"stub store unavailable"}}"#,
         );
 
         assert!(report.passed);
@@ -740,7 +740,7 @@ mod tests {
             "certificate verify",
             false,
             false,
-            r#"{"schema":"ee.error.v1","error":{"message":"certificate validity unavailable"}}"#,
+            r#"{"schema":"ee.error.v2","error":{"message":"certificate validity unavailable"}}"#,
         );
         let fixture = validate_no_unsupported_evidence_claims(
             "procedure verify",

@@ -6,17 +6,17 @@
     "epic_letter": "J"
   },
   "surfaces": [
-    "profile verify"
+    "profile config plan"
   ],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
-    "description": "A verification profile declares that heavy gates require manual invocation.",
+    "description": "A constrained operating profile declares that heavy verification gates require manual invocation.",
     "setup_commands": [
       "ee init --workspace .",
       "# select a profile with heavy_strategy = manual"
     ],
-    "invocation": "ee profile verify --workspace . --json"
+    "invocation": "ee profile config plan --profile constrained --workspace . --json"
   },
   "expected_emission": {
     "code": "manual_heavy_strategy",

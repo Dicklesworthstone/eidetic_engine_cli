@@ -14,9 +14,11 @@
     "description": "An existing procedural rule already covers the remember-time evidence cluster, so a duplicate proposal is not created.",
     "setup_commands": [
       "ee init --workspace .",
-      "ee remember 'Always run cargo fmt before release.' --workspace . --level procedural --kind rule --tags release"
+      "ee remember 'Cargo release rule 0: run cargo fmt --check before release.' --workspace . --level procedural --kind rule --tags cargo,release --json",
+      "ee remember 'Cargo release rule 1: run cargo fmt --check before release.' --workspace . --level procedural --kind rule --tags cargo,release --json",
+      "ee rule add 'Run cargo fmt --check before release work.' --workspace . --tag cargo --tag release --source-memory <first-memory-id> --source-memory <second-memory-id> --json"
     ],
-    "invocation": "ee remember 'Release process includes cargo fmt.' --workspace . --tags release --json"
+    "invocation": "ee remember 'Cargo release rule 2: run cargo fmt --check before release.' --workspace . --level procedural --kind rule --tags cargo,release --json"
   },
   "expected_emission": {
     "code": "auto_propose_skipped_existing_rule_covers",

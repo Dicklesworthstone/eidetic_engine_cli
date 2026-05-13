@@ -2,10 +2,10 @@
 # J3 — Epic B: search honesty & quality e2e driver.
 #
 # Drives `ee search` and asserts the search response exposes the honesty
-# signals shipped by B1-B5/B7/B8 and records TODOs for B6, B10, B11.
+# signals shipped by B1-B8/B11 and records TODOs for B10.
 #
-# Shipped (real assertions):  B1, B2, B3, B4, B5, B7, B8
-# Not yet shipped (todo):     B6, B10, B11
+# Shipped (real assertions):  B1, B2, B3, B4, B5, B6, B7, B8, B11
+# Not yet shipped (todo):     B10
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -274,13 +274,208 @@ else
 fi
 
 # B6 — --source-mode flag (lexical_only|semantic_only|hybrid).
-todo_assert "b6_source_mode_flag" "bd-17c65.2.3" \
-    "ee search lacks --source-mode for forcing lexical/semantic isolation."
+B6_LEXICAL_JSON=$(ee_workspace search "forbidden dependencies" \
+    --source-mode lexical_only \
+    --relevance-floor 0.0 \
+    --json || true)
+assert_jq "$B6_LEXICAL_JSON" '.data.request.sourceMode' "lexical_only" "b6_lexical_request_source_mode"
+assert_jq "$B6_LEXICAL_JSON" '.data.metrics.sourceModeRequested' "lexical_only" "b6_lexical_metric_requested"
+assert_jq "$B6_LEXICAL_JSON" '.data.metrics.sourceModeApplied' "lexical_only" "b6_lexical_metric_applied"
+B6_LEXICAL_NON_LEXICAL_COUNT=$(printf '%s' "$B6_LEXICAL_JSON" \
+    | jq '[.data.results[]? | select(.source != "lexical")] | length' 2>/dev/null \
+    || echo 0)
+e2e_log_assert_eq "$B6_LEXICAL_NON_LEXICAL_COUNT" "0" "b6_lexical_only_returns_lexical_sources"
+
+B6_SEMANTIC_JSON=$(ee_workspace search "forbidden dependencies" \
+    --source-mode semantic_only \
+    --relevance-floor 0.0 \
+    --json || true)
+assert_jq "$B6_SEMANTIC_JSON" '.data.request.sourceMode' "semantic_only" "b6_semantic_request_source_mode"
+assert_jq "$B6_SEMANTIC_JSON" '.data.metrics.sourceModeRequested' "semantic_only" "b6_semantic_metric_requested"
+assert_jq "$B6_SEMANTIC_JSON" '.data.metrics.sourceModeApplied' "semantic_only" "b6_semantic_metric_applied"
+B6_SEMANTIC_BAD_SOURCE_COUNT=$(printf '%s' "$B6_SEMANTIC_JSON" \
+    | jq '[.data.results[]? | select(.source != "semantic_fast" and .source != "semantic_quality")] | length' 2>/dev/null \
+    || echo 0)
+e2e_log_assert_eq "$B6_SEMANTIC_BAD_SOURCE_COUNT" "0" "b6_semantic_only_returns_semantic_sources"
+
+B6_HYBRID_JSON=$(ee_workspace search "forbidden dependencies" \
+    --source-mode hybrid \
+    --relevance-floor 0.0 \
+    --json || true)
+assert_jq "$B6_HYBRID_JSON" '.data.request.sourceMode' "hybrid" "b6_hybrid_request_source_mode"
+assert_jq "$B6_HYBRID_JSON" '.data.metrics.sourceModeRequested' "hybrid" "b6_hybrid_metric_requested"
+
+B6_EMPTY_INDEX_DIR="$EPIC_WORKSPACE/b6-empty-index-lexical"
+mkdir -p "$B6_EMPTY_INDEX_DIR"
+B6_LEXICAL_UNAVAILABLE_JSON=$(ee_workspace search "source mode unavailable" \
+    --index-dir "$B6_EMPTY_INDEX_DIR" \
+    --source-mode lexical_only \
+    --json || true)
+B6_LEXICAL_UNAVAILABLE_RESULT_COUNT=$(printf '%s' "$B6_LEXICAL_UNAVAILABLE_JSON" \
+    | jq '.data.results | length' 2>/dev/null \
+    || echo 1)
+e2e_log_assert_eq "$B6_LEXICAL_UNAVAILABLE_RESULT_COUNT" "0" "b6_lexical_unavailable_returns_no_results"
+B6_LEXICAL_UNAVAILABLE_CODE_COUNT=$(printf '%s' "$B6_LEXICAL_UNAVAILABLE_JSON" \
+    | jq '[.data.degraded[]?.code // empty] | map(select(. == "lexical_unavailable")) | length' 2>/dev/null \
+    || echo 0)
+if [ "$B6_LEXICAL_UNAVAILABLE_CODE_COUNT" -gt 0 ]; then
+    e2e_log_assert_eq "true" "true" "b6_lexical_unavailable_degraded_code"
+else
+    e2e_log_assert_eq "$B6_LEXICAL_UNAVAILABLE_CODE_COUNT" ">=1" "b6_lexical_unavailable_degraded_code"
+fi
 
 # B10 — output redaction.
 todo_assert "b10_output_redaction" "bd-17c65.2.7" \
     "Search output redaction policy not yet implemented."
 
 # B11 — valid_from/valid_to filtering + --as-of historic replay.
-todo_assert "b11_validity_window_filtering" "bd-17c65.2.10" \
-    "valid_from/valid_to filtering and --as-of historic replay not yet wired."
+B11_QUERY="b11 validity window marker zeta"
+B11_REFERENCE_TIME="2098-01-01T00:00:00Z"
+B11_REPLAY_TIME="2099-06-15T00:00:00Z"
+B11_CURRENT_JSON=$(ee_workspace remember \
+    --level semantic \
+    --kind fact \
+    --tags b11,validity \
+    --valid-from "2020-01-01T00:00:00Z" \
+    --valid-to "2099-01-01T00:00:00Z" \
+    "$B11_QUERY current memory" \
+    --json || true)
+B11_EXPIRED_JSON=$(ee_workspace remember \
+    --level semantic \
+    --kind fact \
+    --tags b11,validity \
+    --valid-from "2020-01-01T00:00:00Z" \
+    --valid-to "2021-01-01T00:00:00Z" \
+    "$B11_QUERY expired memory" \
+    --json || true)
+B11_FUTURE_JSON=$(ee_workspace remember \
+    --level semantic \
+    --kind fact \
+    --tags b11,validity \
+    --valid-from "2099-06-01T00:00:00Z" \
+    "$B11_QUERY future memory" \
+    --json || true)
+B11_CURRENT_ID=$(printf '%s' "$B11_CURRENT_JSON" | jq -r '.data.memory_id // empty' 2>/dev/null || true)
+B11_EXPIRED_ID=$(printf '%s' "$B11_EXPIRED_JSON" | jq -r '.data.memory_id // empty' 2>/dev/null || true)
+B11_FUTURE_ID=$(printf '%s' "$B11_FUTURE_JSON" | jq -r '.data.memory_id // empty' 2>/dev/null || true)
+if [ -n "$B11_CURRENT_ID" ] && [ -n "$B11_EXPIRED_ID" ] && [ -n "$B11_FUTURE_ID" ]; then
+    B11_DEFAULT_SEARCH_JSON=$(ee_workspace search "$B11_QUERY" \
+        --as-of "$B11_REFERENCE_TIME" \
+        --relevance-floor 0.0 \
+        --json || true)
+    B11_DEFAULT_CURRENT_COUNT=$(printf '%s' "$B11_DEFAULT_SEARCH_JSON" \
+        | jq --arg id "$B11_CURRENT_ID" '[.data.results[]?.docId // empty] | map(select(. == $id)) | length' 2>/dev/null \
+        || echo 0)
+    B11_DEFAULT_EXPIRED_COUNT=$(printf '%s' "$B11_DEFAULT_SEARCH_JSON" \
+        | jq --arg id "$B11_EXPIRED_ID" '[.data.results[]?.docId // empty] | map(select(. == $id)) | length' 2>/dev/null \
+        || echo 0)
+    B11_DEFAULT_FUTURE_COUNT=$(printf '%s' "$B11_DEFAULT_SEARCH_JSON" \
+        | jq --arg id "$B11_FUTURE_ID" '[.data.results[]?.docId // empty] | map(select(. == $id)) | length' 2>/dev/null \
+        || echo 0)
+    if [ "$B11_DEFAULT_CURRENT_COUNT" -gt 0 ]; then
+        e2e_log_assert_eq "true" "true" "b11_search_default_keeps_current_memory"
+    else
+        e2e_log_assert_eq "$B11_DEFAULT_CURRENT_COUNT" ">=1" "b11_search_default_keeps_current_memory"
+    fi
+    e2e_log_assert_eq "$B11_DEFAULT_EXPIRED_COUNT" "0" "b11_search_default_excludes_expired"
+    e2e_log_assert_eq "$B11_DEFAULT_FUTURE_COUNT" "0" "b11_search_default_excludes_future"
+    B11_DEFAULT_FILTER_CODES=$(printf '%s' "$B11_DEFAULT_SEARCH_JSON" \
+        | jq '[.data.degraded[]?.code // empty] | map(select(. == "expired_filtered" or . == "future_validity_filtered")) | length' 2>/dev/null \
+        || echo 0)
+    if [ "$B11_DEFAULT_FILTER_CODES" -gt 0 ]; then
+        e2e_log_assert_eq "true" "true" "b11_search_default_reports_validity_filtering"
+    else
+        e2e_log_assert_eq "$B11_DEFAULT_FILTER_CODES" ">=1" "b11_search_default_reports_validity_filtering"
+    fi
+
+    B11_INCLUDE_SEARCH_JSON=$(ee_workspace search "$B11_QUERY" \
+        --as-of "$B11_REFERENCE_TIME" \
+        --include-expired \
+        --include-future \
+        --relevance-floor 0.0 \
+        --json || true)
+    B11_INCLUDE_EXPIRED_COUNT=$(printf '%s' "$B11_INCLUDE_SEARCH_JSON" \
+        | jq --arg id "$B11_EXPIRED_ID" '[.data.results[]? | select(.docId == $id and .validityStatus == "expired")] | length' 2>/dev/null \
+        || echo 0)
+    B11_INCLUDE_FUTURE_COUNT=$(printf '%s' "$B11_INCLUDE_SEARCH_JSON" \
+        | jq --arg id "$B11_FUTURE_ID" '[.data.results[]? | select(.docId == $id and .validityStatus == "future")] | length' 2>/dev/null \
+        || echo 0)
+    if [ "$B11_INCLUDE_EXPIRED_COUNT" -gt 0 ]; then
+        e2e_log_assert_eq "true" "true" "b11_search_include_expired_returns_lifecycle"
+    else
+        e2e_log_assert_eq "$B11_INCLUDE_EXPIRED_COUNT" ">=1" "b11_search_include_expired_returns_lifecycle"
+    fi
+    if [ "$B11_INCLUDE_FUTURE_COUNT" -gt 0 ]; then
+        e2e_log_assert_eq "true" "true" "b11_search_include_future_returns_lifecycle"
+    else
+        e2e_log_assert_eq "$B11_INCLUDE_FUTURE_COUNT" ">=1" "b11_search_include_future_returns_lifecycle"
+    fi
+
+    B11_REPLAY_SEARCH_JSON=$(ee_workspace search "$B11_QUERY" \
+        --as-of "$B11_REPLAY_TIME" \
+        --relevance-floor 0.0 \
+        --json || true)
+    B11_REPLAY_FUTURE_COUNT=$(printf '%s' "$B11_REPLAY_SEARCH_JSON" \
+        | jq --arg id "$B11_FUTURE_ID" '[.data.results[]?.docId // empty] | map(select(. == $id)) | length' 2>/dev/null \
+        || echo 0)
+    if [ "$B11_REPLAY_FUTURE_COUNT" -gt 0 ]; then
+        e2e_log_assert_eq "true" "true" "b11_search_as_of_replay_includes_future_after_start"
+    else
+        e2e_log_assert_eq "$B11_REPLAY_FUTURE_COUNT" ">=1" "b11_search_as_of_replay_includes_future_after_start"
+    fi
+
+    B11_CONTEXT_DEFAULT_JSON=$(ee_workspace context "$B11_QUERY" \
+        --as-of "$B11_REFERENCE_TIME" \
+        --max-tokens 1200 \
+        --candidate-pool 20 \
+        --json || true)
+    B11_CONTEXT_CURRENT_COUNT=$(printf '%s' "$B11_CONTEXT_DEFAULT_JSON" \
+        | jq --arg id "$B11_CURRENT_ID" '[.data.pack.items[]?.memoryId // empty] | map(select(. == $id)) | length' 2>/dev/null \
+        || echo 0)
+    B11_CONTEXT_EXPIRED_COUNT=$(printf '%s' "$B11_CONTEXT_DEFAULT_JSON" \
+        | jq --arg id "$B11_EXPIRED_ID" '[.data.pack.items[]?.memoryId // empty] | map(select(. == $id)) | length' 2>/dev/null \
+        || echo 0)
+    B11_CONTEXT_FUTURE_COUNT=$(printf '%s' "$B11_CONTEXT_DEFAULT_JSON" \
+        | jq --arg id "$B11_FUTURE_ID" '[.data.pack.items[]?.memoryId // empty] | map(select(. == $id)) | length' 2>/dev/null \
+        || echo 0)
+    if [ "$B11_CONTEXT_CURRENT_COUNT" -gt 0 ]; then
+        e2e_log_assert_eq "true" "true" "b11_context_default_keeps_current_memory"
+    else
+        e2e_log_assert_eq "$B11_CONTEXT_CURRENT_COUNT" ">=1" "b11_context_default_keeps_current_memory"
+    fi
+    e2e_log_assert_eq "$B11_CONTEXT_EXPIRED_COUNT" "0" "b11_context_default_excludes_expired"
+    e2e_log_assert_eq "$B11_CONTEXT_FUTURE_COUNT" "0" "b11_context_default_excludes_future"
+
+    B11_CONTEXT_INCLUDE_EXPIRED_JSON=$(ee_workspace context "$B11_QUERY expired memory" \
+        --as-of "$B11_REFERENCE_TIME" \
+        --include-expired \
+        --max-tokens 1200 \
+        --candidate-pool 20 \
+        --json || true)
+    B11_CONTEXT_INCLUDE_FUTURE_JSON=$(ee_workspace context "$B11_QUERY future memory" \
+        --as-of "$B11_REFERENCE_TIME" \
+        --include-future \
+        --max-tokens 1200 \
+        --candidate-pool 20 \
+        --json || true)
+    B11_CONTEXT_INCLUDE_EXPIRED_COUNT=$(printf '%s' "$B11_CONTEXT_INCLUDE_EXPIRED_JSON" \
+        | jq --arg id "$B11_EXPIRED_ID" '[.data.pack.items[]? | select(.memoryId == $id and .lifecycle.validity_status == "expired")] | length' 2>/dev/null \
+        || echo 0)
+    B11_CONTEXT_INCLUDE_FUTURE_COUNT=$(printf '%s' "$B11_CONTEXT_INCLUDE_FUTURE_JSON" \
+        | jq --arg id "$B11_FUTURE_ID" '[.data.pack.items[]? | select(.memoryId == $id and .lifecycle.validity_status == "future")] | length' 2>/dev/null \
+        || echo 0)
+    if [ "$B11_CONTEXT_INCLUDE_EXPIRED_COUNT" -gt 0 ]; then
+        e2e_log_assert_eq "true" "true" "b11_context_include_expired_lifecycle"
+    else
+        e2e_log_assert_eq "$B11_CONTEXT_INCLUDE_EXPIRED_COUNT" ">=1" "b11_context_include_expired_lifecycle"
+    fi
+    if [ "$B11_CONTEXT_INCLUDE_FUTURE_COUNT" -gt 0 ]; then
+        e2e_log_assert_eq "true" "true" "b11_context_include_future_lifecycle"
+    else
+        e2e_log_assert_eq "$B11_CONTEXT_INCLUDE_FUTURE_COUNT" ">=1" "b11_context_include_future_lifecycle"
+    fi
+
+    e2e_log_note "b11_include_stale is covered by indexed-metadata unit tests; public remember CLI derives validity_status from valid_from/valid_to."
+else
+    e2e_log_assert_eq "missing_fixture_memory" "present" "b11_validity_fixture_created"
+fi

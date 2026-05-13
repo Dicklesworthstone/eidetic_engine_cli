@@ -587,7 +587,7 @@ fn malformed_json_renders_as_toon_error() -> TestResult {
 
     let toon = render_toon_from_json("{invalid");
 
-    ensure_contains(&toon, "schema: ee.error.v1", "error response has schema")?;
+    ensure_contains(&toon, "schema: ee.error.v2", "error response has schema")?;
     ensure_contains(&toon, "error:", "error response has error section")?;
     ensure_contains(&toon, "code:", "error response has error code")
 }
@@ -669,7 +669,7 @@ mod unit_tests {
     fn malformed_json_produces_error_toon() -> TestResult {
         let toon = render_toon_from_json("{invalid json");
 
-        ensure_contains(&toon, "schema: ee.error.v1", "error uses error schema")?;
+        ensure_contains(&toon, "schema: ee.error.v2", "error uses error schema")?;
         ensure_contains(&toon, "toon_encoding_failed", "error code present")
     }
 
@@ -677,7 +677,7 @@ mod unit_tests {
     fn empty_json_produces_error_toon() -> TestResult {
         let toon = render_toon_from_json("");
 
-        ensure_contains(&toon, "schema: ee.error.v1", "error uses error schema")
+        ensure_contains(&toon, "schema: ee.error.v2", "error uses error schema")
     }
 
     #[test]

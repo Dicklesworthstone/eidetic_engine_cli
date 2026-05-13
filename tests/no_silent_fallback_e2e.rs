@@ -309,7 +309,7 @@ fn cass_subprocess_failure_uses_json_error_envelope_and_logged_evidence() -> Tes
     )?;
     ensure_equal(
         &result.parsed.pointer("/schema"),
-        &Some(&json!("ee.error.v1")),
+        &Some(&json!("ee.error.v2")),
         "cass error schema",
     )?;
     ensure_equal(

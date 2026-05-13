@@ -8,7 +8,7 @@
 
 use clap::Parser;
 use ee::cli::Cli;
-use ee::models::{DomainError, ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
+use ee::models::{DomainError, ERROR_SCHEMA_V2, RESPONSE_SCHEMA_V1};
 use ee::output::{
     DegradationSeverity, FieldProfile, OutputContext, Renderer, ResponseEnvelope,
     error_response_json, error_response_toon, render_toon_from_json,
@@ -61,7 +61,7 @@ fn ensure<T: std::fmt::Debug + PartialEq>(actual: T, expected: T, context: &str)
 #[test]
 fn malformed_json_unclosed_brace_produces_stable_error() -> TestResult {
     let toon = render_toon_from_json("{not valid json");
-    ensure_contains(&toon, "schema: ee.error.v1", "error schema")?;
+    ensure_contains(&toon, "schema: ee.error.v2", "error schema")?;
     ensure_contains(&toon, "code: toon_encoding_failed", "error code")?;
     ensure_contains(&toon, "error:", "error section")
 }
@@ -69,49 +69,49 @@ fn malformed_json_unclosed_brace_produces_stable_error() -> TestResult {
 #[test]
 fn malformed_json_trailing_comma_produces_stable_error() -> TestResult {
     let toon = render_toon_from_json(r#"{"key": "value",}"#);
-    ensure_contains(&toon, "schema: ee.error.v1", "error schema")?;
+    ensure_contains(&toon, "schema: ee.error.v2", "error schema")?;
     ensure_contains(&toon, "code: toon_encoding_failed", "error code")
 }
 
 #[test]
 fn malformed_json_unquoted_key_produces_stable_error() -> TestResult {
     let toon = render_toon_from_json(r#"{key: "value"}"#);
-    ensure_contains(&toon, "schema: ee.error.v1", "error schema")?;
+    ensure_contains(&toon, "schema: ee.error.v2", "error schema")?;
     ensure_contains(&toon, "code: toon_encoding_failed", "error code")
 }
 
 #[test]
 fn malformed_json_single_quotes_produces_stable_error() -> TestResult {
     let toon = render_toon_from_json("{'key': 'value'}");
-    ensure_contains(&toon, "schema: ee.error.v1", "error schema")?;
+    ensure_contains(&toon, "schema: ee.error.v2", "error schema")?;
     ensure_contains(&toon, "code: toon_encoding_failed", "error code")
 }
 
 #[test]
 fn malformed_json_empty_string_produces_stable_error() -> TestResult {
     let toon = render_toon_from_json("");
-    ensure_contains(&toon, "schema: ee.error.v1", "error schema")?;
+    ensure_contains(&toon, "schema: ee.error.v2", "error schema")?;
     ensure_contains(&toon, "code: toon_encoding_failed", "error code")
 }
 
 #[test]
 fn malformed_json_only_whitespace_produces_stable_error() -> TestResult {
     let toon = render_toon_from_json("   \n\t  ");
-    ensure_contains(&toon, "schema: ee.error.v1", "error schema")?;
+    ensure_contains(&toon, "schema: ee.error.v2", "error schema")?;
     ensure_contains(&toon, "code: toon_encoding_failed", "error code")
 }
 
 #[test]
 fn malformed_json_nested_invalid_produces_stable_error() -> TestResult {
     let toon = render_toon_from_json(r#"{"outer": {"inner": }}"#);
-    ensure_contains(&toon, "schema: ee.error.v1", "error schema")?;
+    ensure_contains(&toon, "schema: ee.error.v2", "error schema")?;
     ensure_contains(&toon, "code: toon_encoding_failed", "error code")
 }
 
 #[test]
 fn malformed_json_array_invalid_produces_stable_error() -> TestResult {
     let toon = render_toon_from_json("[1, 2, 3,]");
-    ensure_contains(&toon, "schema: ee.error.v1", "error schema")?;
+    ensure_contains(&toon, "schema: ee.error.v2", "error schema")?;
     ensure_contains(&toon, "code: toon_encoding_failed", "error code")
 }
 
@@ -119,7 +119,7 @@ fn malformed_json_array_invalid_produces_stable_error() -> TestResult {
 fn malformed_json_control_char_produces_stable_error() -> TestResult {
     // Raw control character in string (not escaped)
     let toon = render_toon_from_json("{\"key\": \"value\x01\"}");
-    ensure_contains(&toon, "schema: ee.error.v1", "error schema")?;
+    ensure_contains(&toon, "schema: ee.error.v2", "error schema")?;
     ensure_contains(&toon, "code: toon_encoding_failed", "error code")
 }
 
@@ -417,7 +417,7 @@ fn error_json_has_required_envelope_fields() -> TestResult {
 
     ensure_starts_with(
         &json,
-        &format!("{{\"schema\":\"{ERROR_SCHEMA_V1}\""),
+        &format!("{{\"schema\":\"{ERROR_SCHEMA_V2}\""),
         "schema field first",
     )?;
     ensure_contains(&json, "\"error\":{", "error object")?;
@@ -436,7 +436,7 @@ fn error_toon_has_required_fields() -> TestResult {
     };
     let toon = error_response_toon(&error);
 
-    ensure_contains(&toon, &format!("schema: {ERROR_SCHEMA_V1}"), "schema field")?;
+    ensure_contains(&toon, &format!("schema: {ERROR_SCHEMA_V2}"), "schema field")?;
     ensure_contains(&toon, "error:", "error section")?;
     ensure_contains(&toon, "code: storage", "code field")?;
     ensure_contains(&toon, "message:", "message field")?;

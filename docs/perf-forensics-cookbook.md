@@ -318,4 +318,4 @@ These scenarios are covered by automated tests:
 |--------|-------------|
 | `ee.perf.artifact_summary.v1` | Normalized performance artifact |
 | `ee.response.v1` | Standard response envelope |
-| `ee.error.v1` | Error response envelope |
+| `ee.error.v2` | Error response envelope |

@@ -6,16 +6,16 @@
     "epic_letter": "G"
   },
   "surfaces": [
-    "curate candidates"
+    "review workspace"
   ],
   "severity": "low",
   "repair_present": true,
   "trigger": {
-    "description": "curate candidates was asked to include CASS evidence, but workspace-scope CASS evidence span listing is not implemented.",
+    "description": "review workspace was asked to include CASS evidence, but workspace-scope CASS evidence span listing is not implemented.",
     "setup_commands": [
       "ee init --workspace ."
     ],
-    "invocation": "ee curate candidates --workspace . --include-cass --json"
+    "invocation": "ee review workspace --workspace . --include-cass --json"
   },
   "expected_emission": {
     "code": "cass_evidence_not_available",

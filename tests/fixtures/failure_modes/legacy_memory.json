@@ -14,9 +14,9 @@
     "description": "A context pack includes pre-v1 legacy evidence that must be revalidated.",
     "setup_commands": [
       "ee init --workspace .",
-      "# import or insert a legacy-evidence memory through a test harness"
+      "ee import jsonl --workspace . --source legacy-memory.jsonl --json"
     ],
-    "invocation": "ee context 'task' --workspace . --json"
+    "invocation": "ee pack 'J6 legacy imported memory marker' --workspace . --json"
   },
   "expected_emission": {
     "code": "legacy_memory",

@@ -92,10 +92,69 @@ lists alphabetically and so the contract test can cross-check
       "No memories scored above relevance floor",
       "considered"
     ],
-    "repair_contains": "lower --relevance-floor"
+    "repair_contains": "lower --relevance-floor",
+
+    // Optional. The exact full text of the repair hint emitted by
+    // production for this code. Use `repair_string` when the code emits
+    // exactly one repair template. Use `repair_strings` (array) when
+    // the same code emits one of several repair variants depending on
+    // its trigger branch (e.g. agent_mail_unavailable has three).
+    // Owned by J6.1 (bd-17c65.10.6.1). Present-state is per-fixture;
+    // a code's fixture is "pinned" once either field is populated.
+    "repair_string": "Lower --relevance-floor to inspect rejected matches.",
+
+    // Optional. A regex (PCRE2-subset compatible with the Rust `regex`
+    // crate) that extracts a runnable shell command from `repair_string`
+    // (or any element of `repair_strings`). MUST contain exactly one
+    // named capture group called `cmd`. Required when the repair hint
+    // is itself a runnable command. Absent when the hint is prose-only
+    // (e.g. "Check the configured Agent Mail snapshot path."). Allows
+    // an agent to mechanically extract the next action without parsing
+    // arbitrary prose. Owned by J6.1.
+    "repair_command_regex": "(?P<cmd>ee [a-z][a-z0-9 -]*(?: --[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }
 ```
+
+### Pinning repair contents (J6.1 contract)
+
+Beyond the substring assertion (`repair_contains`), fixtures can pin
+the *exact text* of the repair hint and a regex for extracting a
+runnable command. The schema fields are:
+
+- `repair_string` — single full literal that production emits.
+- `repair_strings` — array, when the code has multiple repair
+  variants. At most one of `repair_string` / `repair_strings` may be
+  set per fixture.
+- `repair_command_regex` — extraction regex with named capture `cmd`.
+  Optional; only present when the repair text is itself a runnable
+  command.
+
+When either pinning field is present, the J6.1 contract test
+(`tests/contracts/failure_mode_repair_string.rs`) asserts:
+
+1. The string(s) are non-empty.
+2. If `repair_command_regex` is present, it compiles under the Rust
+   `regex` crate and contains exactly one named capture named `cmd`.
+3. If both a pinning field and `repair_command_regex` are present,
+   the regex matches at least one of the pinned strings and the `cmd`
+   group is non-empty.
+4. If `repair_contains` is set alongside, the pinned string(s) must
+   each contain the `repair_contains` substring (consistency).
+
+The fixture-author workflow is:
+
+1. Locate the exact `repair: Some("…")` literal in `src/` for the
+   code.
+2. Paste it verbatim into `repair_string` (or `repair_strings` for
+   multi-variant codes).
+3. If the literal IS a runnable command, add `repair_command_regex`
+   targeting it.
+4. Run `cargo test --test contracts failure_mode_repair_string`.
+
+Backfill across all 138 `repair_present: true` fixtures is tracked
+under follow-up bead `bd-17c65.10.6.1.1` (incremental per-PR).
+
 
 ## Adding a fixture
 

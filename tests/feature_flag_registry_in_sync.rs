@@ -154,12 +154,10 @@ fn registry_index_pointer_present_in_silent_fallback_inventory() -> TestResult {
     // degraded_unavailable code lands on this registry.
     const INVENTORY: &str = include_str!("../docs/silent-fallback-inventory.md");
     if !INVENTORY.contains("feature_flag_registry.md") {
-        return Err(
-            "docs/silent-fallback-inventory.md should cross-reference \
+        return Err("docs/silent-fallback-inventory.md should cross-reference \
              docs/feature_flag_registry.md (the science-analytics flag \
              links the two). Add a pointer or update K7 acceptance."
-                .to_string(),
-        );
+            .to_string());
     }
     Ok(())
 }

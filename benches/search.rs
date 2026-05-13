@@ -17,7 +17,7 @@ use serde_json::{Value as JsonValue, json};
 use tempfile::TempDir;
 
 use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
-use ee::core::search::{SearchOptions, run_search};
+use ee::core::search::{SearchOptions, SearchSourceMode, run_search};
 use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
 use ee::models::WorkspaceId;
 use ee::search::SpeedMode;
@@ -247,8 +247,14 @@ fn quick_stats_for_scale(count: usize) -> QuickStats {
         limit: 20,
         speed: SpeedMode::Default,
         explain: false,
+        as_of: None,
         include_tombstoned: false,
+        include_expired: false,
+        include_future: false,
+        include_stale: false,
         relevance_floor: None,
+        source_mode: SearchSourceMode::Hybrid,
+        strict_source_mode: false,
     };
 
     for _ in 0..QUICK_WARMUP_ITERS {
@@ -414,8 +420,14 @@ fn run_criterion_mode() {
                 limit: 20,
                 speed: SpeedMode::Default,
                 explain: false,
+                as_of: None,
                 include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
                 relevance_floor: None,
+                source_mode: SearchSourceMode::Hybrid,
+                strict_source_mode: false,
             };
 
             b.iter(|| {

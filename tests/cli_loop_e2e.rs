@@ -537,7 +537,7 @@ fn cli_loop_why_unknown_memory_returns_error() -> TestResult {
     let why_json = stdout_json(&why)?;
     persist_json_artifact("why_unknown", &why_json);
     ensure(
-        why_json["schema"].as_str() == Some("ee.error.v1")
+        why_json["schema"].as_str() == Some("ee.error.v2")
             || why_json["success"].as_bool() == Some(false),
         "why unknown memory must return error or unsuccessful response",
     )

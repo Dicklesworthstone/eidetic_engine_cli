@@ -6,8 +6,7 @@
     "epic_letter": "J"
   },
   "surfaces": [
-    "doctor",
-    "diag graph",
+    "diag dependencies",
     "dependency contract"
   ],
   "severity": "medium",
@@ -15,9 +14,9 @@
   "trigger": {
     "description": "Graph analytics are feature-gated or the FrankenNetworkX projection cannot be built for the workspace.",
     "setup_commands": [
-      "ee diag graph --workspace . --json"
+      "ee diag dependencies --workspace . --json"
     ],
-    "invocation": "ee diag graph --workspace . --json"
+    "invocation": "ee diag dependencies --workspace . --json"
   },
   "expected_emission": {
     "code": "graph_unavailable",

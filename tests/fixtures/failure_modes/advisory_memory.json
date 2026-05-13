@@ -14,9 +14,9 @@
     "description": "A context pack includes memories whose trust posture is advisory rather than validated policy.",
     "setup_commands": [
       "ee init --workspace .",
-      "# add an advisory source memory through CASS or agent assertion fixtures"
+      "ee import jsonl --workspace . --source advisory-memory.jsonl --json"
     ],
-    "invocation": "ee context 'task' --workspace . --json"
+    "invocation": "ee pack 'J6 advisory imported memory marker' --workspace . --json"
   },
   "expected_emission": {
     "code": "advisory_memory",

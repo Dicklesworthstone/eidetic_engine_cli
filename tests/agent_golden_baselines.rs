@@ -16,8 +16,9 @@ use ee::core::agent_detect::AgentInventoryReport;
 use ee::core::doctor::{CheckResult, DoctorReport, Posture};
 use ee::core::status::{
     CapabilityReport, CurationHealthReport, DegradationReport, DerivedAssetReport,
-    DerivedAssetStatus, FeedbackHealthReport, FeedbackHealthStatus, MemoryHealthReport,
-    MemoryHealthStatus, RuntimeReport, StatusReport, WorkspaceDiagnosticReport,
+    DerivedAssetStatus, FeedbackHealthReport, FeedbackHealthStatus, GraphComputeReport,
+    GraphComputeStatus, GraphSnapshotArtifactReport, GraphSnapshotMemoryGraphReport,
+    MemoryHealthReport, MemoryHealthStatus, RuntimeReport, StatusReport, WorkspaceDiagnosticReport,
     WorkspaceStatusReport,
 };
 use ee::models::{CapabilityStatus, error_codes};
@@ -27,6 +28,7 @@ use serde_json::{Value, json};
 type TestResult = Result<(), String>;
 
 const DOCTOR_GOLDEN_WORKSPACE: &str = "tests/fixtures";
+const GRAPH_ALGORITHMS: &[&str] = &["pagerank"];
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
@@ -570,7 +572,7 @@ fn validate_json_contract(case: ContractCase, stdout: &str, exit_code: Option<i3
                 }
             }
         }
-        Some("ee.error.v1") => {
+        Some("ee.error.v2") => {
             let error = value.get("error").ok_or_else(|| {
                 contract_failure(
                     case,
@@ -938,6 +940,11 @@ fn capabilities_json_output_matches_golden() -> TestResult {
     )?;
     ensure_contains(&stdout, "\"subsystems\":[", "capabilities JSON subsystems")?;
     ensure_contains(&stdout, "\"features\":[", "capabilities JSON features")?;
+    ensure_contains(
+        &stdout,
+        "\"unimplemented\":[",
+        "capabilities JSON build-time gaps",
+    )?;
     ensure_contains(&stdout, "\"commands\":[", "capabilities JSON commands")?;
     ensure_contains(&stdout, "\"output\":", "capabilities JSON output metadata")?;
     ensure_contains(
@@ -1058,8 +1065,36 @@ fn healthy_feedback_health() -> FeedbackHealthReport {
     }
 }
 
-fn graph_unimplemented_asset() -> DerivedAssetReport {
-    DerivedAssetReport::unimplemented("graph_snapshot", ".ee/graph")
+fn graph_compute_available() -> GraphComputeReport {
+    GraphComputeReport {
+        status: GraphComputeStatus::Available,
+        available_algorithms: GRAPH_ALGORITHMS,
+        live_compute_supported: true,
+        fnx_runtime_version: "0.1.0",
+        last_used_at: None,
+    }
+}
+
+fn graph_snapshot_empty_report() -> GraphSnapshotArtifactReport {
+    GraphSnapshotArtifactReport {
+        status: DerivedAssetStatus::Empty,
+        last_built_at: None,
+        snapshot_path: None,
+        snapshot_generation: None,
+        memory_graph: GraphSnapshotMemoryGraphReport {
+            node_count: 0,
+            edge_count: 0,
+            generation: 0,
+            matches_db_generation: false,
+            availability: "live_compute_available",
+        },
+        next_refresh_via: "ee graph centrality-refresh --workspace .",
+    }
+}
+
+fn graph_snapshot_empty_asset() -> DerivedAssetReport {
+    let report = graph_snapshot_empty_report();
+    DerivedAssetReport::from_graph_snapshot_artifact(&report)
 }
 
 fn status_missing_db_report() -> StatusReport {
@@ -1076,17 +1111,22 @@ fn status_missing_db_report() -> StatusReport {
         memory_health: unavailable_memory_health(),
         curation_health: CurationHealthReport::unavailable(),
         feedback_health: unavailable_feedback_health(),
+        graph_compute: graph_compute_available(),
+        graph_snapshot_artifact: graph_snapshot_empty_report(),
         derived_assets: vec![
             DerivedAssetReport {
                 name: "search_index",
+                kind: "persisted_index",
                 status: DerivedAssetStatus::Missing,
                 source_high_watermark: None,
                 asset_high_watermark: None,
                 high_watermark_lag: None,
                 path: ".ee/index",
+                last_built_at: None,
+                memory_graph: None,
                 repair: None,
             },
-            graph_unimplemented_asset(),
+            graph_snapshot_empty_asset(),
         ],
         agent_inventory: AgentInventoryReport::not_inspected(),
         degradations: vec![
@@ -1126,17 +1166,22 @@ fn status_pending_migration_report() -> StatusReport {
         memory_health: unavailable_memory_health(),
         curation_health: CurationHealthReport::unavailable(),
         feedback_health: unavailable_feedback_health(),
+        graph_compute: graph_compute_available(),
+        graph_snapshot_artifact: graph_snapshot_empty_report(),
         derived_assets: vec![
             DerivedAssetReport {
                 name: "search_index",
+                kind: "persisted_index",
                 status: DerivedAssetStatus::Unavailable,
                 source_high_watermark: None,
                 asset_high_watermark: None,
                 high_watermark_lag: None,
                 path: ".ee/index",
+                last_built_at: None,
+                memory_graph: None,
                 repair: Some("Run `ee doctor --json` to inspect storage and filesystem access."),
             },
-            graph_unimplemented_asset(),
+            graph_snapshot_empty_asset(),
         ],
         agent_inventory: AgentInventoryReport::not_inspected(),
         degradations: vec![
@@ -1176,17 +1221,22 @@ fn status_stale_index_lexical_only_report() -> StatusReport {
         memory_health: healthy_memory_health(),
         curation_health: CurationHealthReport::not_inspected(),
         feedback_health: healthy_feedback_health(),
+        graph_compute: graph_compute_available(),
+        graph_snapshot_artifact: graph_snapshot_empty_report(),
         derived_assets: vec![
             DerivedAssetReport {
                 name: "search_index",
+                kind: "persisted_index",
                 status: DerivedAssetStatus::Stale,
                 source_high_watermark: Some(5),
                 asset_high_watermark: Some(3),
                 high_watermark_lag: Some(2),
                 path: ".ee/index",
+                last_built_at: None,
+                memory_graph: None,
                 repair: Some("ee index rebuild --workspace ."),
             },
-            graph_unimplemented_asset(),
+            graph_snapshot_empty_asset(),
         ],
         agent_inventory: AgentInventoryReport::not_inspected(),
         degradations: vec![DegradationReport {
@@ -1212,25 +1262,25 @@ fn status_search_unimplemented_report() -> StatusReport {
         memory_health: healthy_memory_health(),
         curation_health: CurationHealthReport::not_inspected(),
         feedback_health: healthy_feedback_health(),
+        graph_compute: graph_compute_available(),
+        graph_snapshot_artifact: graph_snapshot_empty_report(),
         derived_assets: vec![
             DerivedAssetReport {
                 name: "search_index",
+                kind: "persisted_index",
                 status: DerivedAssetStatus::Unavailable,
                 source_high_watermark: None,
                 asset_high_watermark: None,
                 high_watermark_lag: None,
                 path: ".ee/index",
+                last_built_at: None,
+                memory_graph: None,
                 repair: Some("Use a binary built with search support enabled."),
             },
-            graph_unimplemented_asset(),
+            graph_snapshot_empty_asset(),
         ],
         agent_inventory: AgentInventoryReport::not_inspected(),
-        degradations: vec![DegradationReport {
-            code: "search_unimplemented",
-            severity: "high",
-            message: "Search has no compiled implementation in this binary.",
-            repair: "Use a binary built with search support enabled.",
-        }],
+        degradations: vec![],
     }
 }
 
@@ -1638,7 +1688,7 @@ fn error_responses_have_error_schema_envelope() -> TestResult {
     ensure(stderr.is_empty(), "json error stderr must be empty")?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.error.v1\"",
+        "{\"schema\":\"ee.error.v2\"",
         "error JSON schema envelope",
     )?;
     ensure_contains(&stdout, "\"code\":\"usage\"", "error code")?;

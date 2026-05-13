@@ -926,7 +926,7 @@ fn memory_poisoning_scenario_contract_is_complete() -> TestResult {
     )?;
     ensure_equal(
         string_field(poisoned_command, "stdout_schema")?,
-        "ee.error.v1",
+        "ee.error.v2",
         "poisoned memory returns JSON error",
     )?;
 

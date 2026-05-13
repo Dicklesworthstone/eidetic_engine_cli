@@ -79,7 +79,7 @@ fn outcome_nonexistent_memory_id_returns_error_envelope() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "error schema",
     )?;
     ensure_equal(

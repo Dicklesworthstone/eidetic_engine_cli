@@ -102,6 +102,14 @@ fn validate_kind_fields(kind: &str, fields: Option<&Value>) -> TestResult {
             "orphans_in_schema",
             "orphans_in_src",
         ],
+        "field_selector" => &[
+            "surface",
+            "preset",
+            "explicit_fields_count",
+            "fields_in_response",
+            "rejected_field_count",
+            "elapsed_us",
+        ],
         _ => &[],
     };
     if required.is_empty() {

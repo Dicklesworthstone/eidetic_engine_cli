@@ -2809,6 +2809,8 @@ pub fn render_status_json(report: &StatusReport) -> String {
         render_memory_health_json(d, &report.memory_health);
         render_curation_health_json(d, &report.curation_health);
         render_feedback_health_json(d, &report.feedback_health);
+        render_graph_compute_json(d, &report.graph_compute);
+        render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
         render_derived_assets_json(d, &report.derived_assets, true);
         render_agent_inventory_json(d, "agentInventory", &report.agent_inventory, false);
         d.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
@@ -2999,6 +3001,7 @@ fn render_derived_assets_json(
 ) {
     parent.field_array_of_objects("derivedAssets", assets, |obj, asset| {
         obj.field_str("name", asset.name);
+        obj.field_str("kind", asset.kind);
         obj.field_str("status", asset.status.as_str());
         match asset.source_high_watermark {
             Some(value) => obj.field_raw("sourceHighWatermark", &value.to_string()),
@@ -3013,9 +3016,75 @@ fn render_derived_assets_json(
             None => obj.field_raw("highWatermarkLag", "null"),
         };
         obj.field_str("path", asset.path);
+        if asset.name == "graph_snapshot_artifact" {
+            match asset.last_built_at.as_deref() {
+                Some(value) => obj.field_str("lastBuiltAt", value),
+                None => obj.field_raw("lastBuiltAt", "null"),
+            };
+        }
+        if let Some(memory_graph) = asset.memory_graph.as_ref() {
+            obj.field_object("memoryGraph", |graph| {
+                graph.field_raw("nodeCount", &memory_graph.node_count.to_string());
+                graph.field_raw("edgeCount", &memory_graph.edge_count.to_string());
+                graph.field_raw("generation", &memory_graph.generation.to_string());
+                graph.field_bool("matchesDbGeneration", memory_graph.matches_db_generation);
+                graph.field_str("availability", memory_graph.availability);
+            });
+        }
         if include_repair && let Some(repair) = asset.repair {
             obj.field_str("repair", repair);
         }
+    });
+}
+
+fn render_graph_compute_json(
+    parent: &mut JsonBuilder,
+    report: &crate::core::status::GraphComputeReport,
+) {
+    parent.field_object("graphCompute", |graph| {
+        graph.field_str("status", report.status.as_str());
+        graph.field_raw(
+            "availableAlgorithms",
+            &string_array_json(report.available_algorithms.iter().copied()),
+        );
+        graph.field_bool("liveComputeSupported", report.live_compute_supported);
+        graph.field_str("fnxRuntimeVersion", report.fnx_runtime_version);
+        match report.last_used_at.as_deref() {
+            Some(value) => graph.field_str("lastUsedAt", value),
+            None => graph.field_raw("lastUsedAt", "null"),
+        };
+    });
+}
+
+fn render_graph_snapshot_artifact_json(
+    parent: &mut JsonBuilder,
+    report: &crate::core::status::GraphSnapshotArtifactReport,
+) {
+    parent.field_object("graphSnapshotArtifact", |snapshot| {
+        snapshot.field_str("status", report.status.as_str());
+        match report.last_built_at.as_deref() {
+            Some(value) => snapshot.field_str("lastBuiltAt", value),
+            None => snapshot.field_raw("lastBuiltAt", "null"),
+        };
+        match report.snapshot_path {
+            Some(value) => snapshot.field_str("snapshotPath", value),
+            None => snapshot.field_raw("snapshotPath", "null"),
+        };
+        match report.snapshot_generation {
+            Some(value) => snapshot.field_raw("snapshotGeneration", &value.to_string()),
+            None => snapshot.field_raw("snapshotGeneration", "null"),
+        };
+        snapshot.field_object("memoryGraph", |graph| {
+            graph.field_raw("nodeCount", &report.memory_graph.node_count.to_string());
+            graph.field_raw("edgeCount", &report.memory_graph.edge_count.to_string());
+            graph.field_raw("generation", &report.memory_graph.generation.to_string());
+            graph.field_bool(
+                "matchesDbGeneration",
+                report.memory_graph.matches_db_generation,
+            );
+            graph.field_str("availability", report.memory_graph.availability);
+        });
+        snapshot.field_str("nextRefreshVia", report.next_refresh_via);
     });
 }
 
@@ -3088,6 +3157,8 @@ pub fn render_status_json_with_meta(
             r.field_str("asyncBoundary", report.runtime.async_boundary);
         });
         render_memory_health_json(d, &report.memory_health);
+        render_graph_compute_json(d, &report.graph_compute);
+        render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
         render_derived_assets_json(d, &report.derived_assets, true);
         render_agent_inventory_json(d, "agentInventory", &report.agent_inventory, false);
         d.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
@@ -3488,6 +3559,10 @@ pub fn render_dependency_diagnostics_json(report: &DependencyDiagnosticsReport) 
         d.field_str("defaultFeatureProfile", report.default_feature_profile);
         render_dependency_diagnostics_summary(d, report);
         d.field_array_of_strs("forbiddenCrates", report.forbidden_crates);
+        let degraded_entries = dependency_contract_degraded_entries(report);
+        d.field_array_of_objects("degraded", &degraded_entries, |obj, entry| {
+            render_dependency_contract_degradation(obj, entry);
+        });
         d.field_array_of_objects("entries", report.entries, render_dependency_contract_entry);
         d.field_object("driftPolicy", |policy| {
             policy.field_str(
@@ -3798,6 +3873,73 @@ fn render_dependency_diagnostics_summary(
             &report.summary.blocked_feature_count.to_string(),
         );
     });
+}
+
+fn dependency_contract_degraded_entries(
+    report: &DependencyDiagnosticsReport,
+) -> Vec<DependencyContractEntry> {
+    report
+        .entries
+        .iter()
+        .copied()
+        .filter(|entry| entry.readiness() != "ready")
+        .collect()
+}
+
+fn render_dependency_contract_degradation(obj: &mut JsonBuilder, entry: &DependencyContractEntry) {
+    obj.field_str("code", entry.degradation_code);
+    obj.field_str("severity", "medium");
+    obj.field_str("message", &dependency_contract_degradation_message(entry));
+    obj.field_str("repair", &dependency_contract_degradation_repair(entry));
+    obj.field_str("dependency", entry.name);
+    obj.field_str("owningSurface", entry.owning_surface);
+    obj.field_str("status", entry.status);
+    obj.field_str("readiness", entry.readiness());
+    obj.field_str("diagnosticCommand", entry.diagnostic_command);
+}
+
+fn dependency_contract_degradation_message(entry: &DependencyContractEntry) -> String {
+    match entry.degradation_code {
+        "diagram_backend_unavailable" => format!(
+            "Diagram backend dependency {} is unavailable; plain Mermaid/text output remains available.",
+            entry.name
+        ),
+        "graph_unavailable" => format!(
+            "Graph dependency {} is feature-gated; graph analytics are unavailable until the optional profile is enabled.",
+            entry.name
+        ),
+        "mcp_unavailable" => format!(
+            "MCP adapter dependency {} is unavailable because the optional MCP surface is planned but not linked.",
+            entry.name
+        ),
+        _ => format!(
+            "Dependency {} for {} is unavailable with readiness {}.",
+            entry.name,
+            entry.owning_surface,
+            entry.readiness()
+        ),
+    }
+}
+
+fn dependency_contract_degradation_repair(entry: &DependencyContractEntry) -> String {
+    match entry.degradation_code {
+        "diagram_backend_unavailable" => {
+            "Use plain Mermaid output until the FrankenMermaid adapter contract is linked and audited."
+                .to_string()
+        }
+        "graph_unavailable" => {
+            "Enable the accepted graph optional feature profile and rerun ee diag graph --json."
+                .to_string()
+        }
+        "mcp_unavailable" => {
+            "Enable the mcp feature only after the MCP dependency audit passes; inspect ee diag dependencies --json."
+                .to_string()
+        }
+        _ => format!(
+            "Inspect {} and satisfy the dependency contract before enabling {}.",
+            entry.diagnostic_command, entry.owning_surface
+        ),
+    }
 }
 
 fn render_dependency_contract_entry(obj: &mut JsonBuilder, entry: &DependencyContractEntry) {
@@ -5177,6 +5319,13 @@ pub fn render_capabilities_json(report: &CapabilitiesReport) -> String {
             obj.field_bool("enabled", feat.enabled);
             obj.field_str("description", feat.description);
         });
+        d.field_array_of_objects("unimplemented", &report.unimplemented, |obj, gap| {
+            obj.field_str("code", gap.code);
+            obj.field_str("featureFlag", gap.feature_flag);
+            obj.field_str("shipTarget", gap.ship_target);
+            obj.field_str("trackingBead", gap.tracking_bead);
+            obj.field_str("userMessage", gap.user_message);
+        });
         d.field_array_of_objects("commands", &report.commands, |obj, cmd| {
             obj.field_str("name", cmd.name);
             obj.field_bool("available", cmd.available);
@@ -5200,6 +5349,10 @@ pub fn render_capabilities_json(report: &CapabilitiesReport) -> String {
                 &report.enabled_feature_count().to_string(),
             );
             s.field_raw("totalFeatures", &report.features.len().to_string());
+            s.field_raw(
+                "unimplementedCapabilities",
+                &report.unimplemented_count().to_string(),
+            );
             s.field_raw(
                 "availableCommands",
                 &report.available_command_count().to_string(),
@@ -5355,6 +5508,16 @@ pub fn render_capabilities_human(report: &CapabilitiesReport) -> String {
             "  {} {} — {}\n",
             icon, feat.name, feat.description
         ));
+    }
+
+    if !report.unimplemented.is_empty() {
+        output.push_str("\nUnimplemented capabilities:\n");
+        for gap in &report.unimplemented {
+            output.push_str(&format!(
+                "  ○ {} ({}) — {}\n",
+                gap.code, gap.feature_flag, gap.user_message
+            ));
+        }
     }
 
     output.push_str("\nCommands:\n");
@@ -6433,20 +6596,6 @@ pub fn render_schema_export_toon(schema_id: Option<&str>) -> String {
     render_toon_from_json(&render_schema_export_json(schema_id))
 }
 
-struct McpManifestDegradation {
-    code: &'static str,
-    severity: &'static str,
-    message: &'static str,
-    repair: &'static str,
-}
-
-const MCP_FEATURE_DISABLED_DEGRADATION: McpManifestDegradation = McpManifestDegradation {
-    code: "mcp_feature_disabled",
-    severity: "low",
-    message: "The MCP stdio adapter feature is not enabled in this build; the command/schema manifest is still available.",
-    repair: "Build or install ee with the mcp feature enabled.",
-};
-
 /// Render the MCP adapter manifest as JSON.
 #[must_use]
 pub fn render_mcp_manifest_json() -> String {
@@ -6472,6 +6621,12 @@ pub fn render_mcp_manifest_json() -> String {
             capabilities.field_bool("prompts", cfg!(feature = "mcp"));
             capabilities.field_bool("experimental", false);
         });
+        if !cfg!(feature = "mcp") {
+            d.field_object("capabilityGap", |gap| {
+                gap.field_str("code", "mcp_feature_disabled");
+                gap.field_str("capabilitiesCommand", "ee capabilities --json");
+            });
+        }
         d.field_object("registry", |registry| {
             registry.field_str("commandSource", "COMMAND_MANIFEST");
             registry.field_str("schemaSource", "public_schemas");
@@ -6480,15 +6635,7 @@ pub fn render_mcp_manifest_json() -> String {
         });
         d.field_array_of_objects("tools", COMMAND_MANIFEST, render_mcp_tool_manifest_entry);
         d.field_array_of_objects("schemas", public_schemas(), render_public_schema_entry);
-        if cfg!(feature = "mcp") {
-            d.field_raw("degraded", "[]");
-        } else {
-            d.field_array_of_objects(
-                "degraded",
-                &[MCP_FEATURE_DISABLED_DEGRADATION],
-                render_mcp_manifest_degradation,
-            );
-        }
+        d.field_raw("degraded", "[]");
     });
     b.finish()
 }
@@ -6547,13 +6694,6 @@ fn render_public_schema_entry(obj: &mut JsonBuilder, schema: &SchemaEntry) {
     obj.field_str("category", schema.category);
 }
 
-fn render_mcp_manifest_degradation(obj: &mut JsonBuilder, degraded: &McpManifestDegradation) {
-    obj.field_str("code", degraded.code);
-    obj.field_str("severity", degraded.severity);
-    obj.field_str("message", degraded.message);
-    obj.field_str("repair", degraded.repair);
-}
-
 /// Render the MCP adapter manifest as human-readable text.
 #[must_use]
 pub fn render_mcp_manifest_human() -> String {
@@ -6568,8 +6708,8 @@ pub fn render_mcp_manifest_human() -> String {
     output.push_str(&format!("Tools: {}\n", COMMAND_MANIFEST.len()));
     output.push_str(&format!("Schemas: {}\n", public_schemas().len()));
     if !cfg!(feature = "mcp") {
-        output.push_str("\nDegraded: mcp_feature_disabled\n");
-        output.push_str("Build or install ee with the mcp feature enabled.\n");
+        output.push_str("\nCapability gap: mcp_feature_disabled\n");
+        output.push_str("Inspect build-time gaps with `ee capabilities --json`.\n");
     }
     output.push_str("\nUse `ee mcp manifest --json` for the machine-readable manifest.\n");
     output
@@ -7894,6 +8034,8 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
             render_memory_health_json(d, &report.memory_health);
             render_curation_health_json(d, &report.curation_health);
             render_feedback_health_json(d, &report.feedback_health);
+            render_graph_compute_json(d, &report.graph_compute);
+            render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
             render_derived_assets_json(
                 d,
                 &report.derived_assets,
@@ -7947,6 +8089,15 @@ pub fn render_capabilities_json_filtered(
                     obj.field_str("description", feat.description);
                 }
             });
+            d.field_array_of_objects("unimplemented", &report.unimplemented, |obj, gap| {
+                obj.field_str("code", gap.code);
+                obj.field_str("featureFlag", gap.feature_flag);
+                obj.field_str("shipTarget", gap.ship_target);
+                obj.field_str("trackingBead", gap.tracking_bead);
+                if profile.include_verbose_details() {
+                    obj.field_str("userMessage", gap.user_message);
+                }
+            });
             d.field_array_of_objects("commands", &report.commands, |obj, cmd| {
                 obj.field_str("name", cmd.name);
                 obj.field_bool("available", cmd.available);
@@ -7974,6 +8125,10 @@ pub fn render_capabilities_json_filtered(
                     &report.enabled_feature_count().to_string(),
                 );
                 s.field_raw("totalFeatures", &report.features.len().to_string());
+                s.field_raw(
+                    "unimplementedCapabilities",
+                    &report.unimplemented_count().to_string(),
+                );
                 s.field_raw(
                     "availableCommands",
                     &report.available_command_count().to_string(),
@@ -9343,9 +9498,11 @@ pub fn render_lab_capture_toon(report: &CaptureReport) -> String {
 /// Render a lab replay report as JSON.
 #[must_use]
 pub fn render_lab_replay_json(report: &ReplayReport) -> String {
+    let degraded = lab_replay_degraded_json(report);
     let json = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V1,
         "success": true,
+        "degraded": &degraded,
         "data": {
             "episode_id": report.episode_id,
             "replay_id": report.replay_id,
@@ -9357,10 +9514,49 @@ pub fn render_lab_replay_json(report: &ReplayReport) -> String {
             "episodeHashVerified": report.episode_hash_verified,
             "dry_run": report.dry_run,
             "warnings": report.warnings,
+            "degraded": &degraded,
             "replayed_at": report.replayed_at,
         }
     });
     json.to_string()
+}
+
+fn lab_replay_degraded_json(report: &ReplayReport) -> Vec<serde_json::Value> {
+    if report
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("lab_replay_unavailable"))
+    {
+        vec![lab_degradation_json("lab_replay_unavailable")]
+    } else {
+        Vec::new()
+    }
+}
+
+fn lab_degradation_json(code: &str) -> serde_json::Value {
+    let (severity, message, repair) = match code {
+        "lab_replay_unavailable" => (
+            "medium",
+            "Lab replay evidence is unavailable because stored episode inputs are missing.",
+            "Capture or provide stored episodes before running lab replay or counterfactual analysis.",
+        ),
+        "dry_run_no_durable_mutation" => (
+            "info",
+            "Lab counterfactual ran as a dry run and did not persist durable mutations.",
+            "Run without --dry-run after validating the counterfactual hypothesis.",
+        ),
+        _ => (
+            "medium",
+            "Lab analysis completed with degraded evidence.",
+            "Inspect the lab output and provide the missing replay evidence.",
+        ),
+    };
+    serde_json::json!({
+        "code": code,
+        "severity": severity,
+        "message": message,
+        "repair": repair,
+    })
 }
 
 /// Render a lab replay report as human-readable text.
@@ -9407,9 +9603,11 @@ pub fn render_lab_replay_toon(report: &ReplayReport) -> String {
 /// Render a lab counterfactual report as JSON.
 #[must_use]
 pub fn render_lab_counterfactual_json(report: &CounterfactualReport) -> String {
+    let degraded = lab_counterfactual_degraded_json(report);
     let json = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V1,
         "success": true,
+        "degraded": degraded,
         "data": {
             "run_id": report.run_id,
             "episode_id": report.episode_id,
@@ -9420,6 +9618,7 @@ pub fn render_lab_counterfactual_json(report: &CounterfactualReport) -> String {
             "confidenceState": report.confidence_state,
             "assumptions": report.assumptions,
             "degradationCodes": report.degradation_codes,
+            "degraded": degraded,
             "nextAction": report.next_action,
             "durableMutation": report.durable_mutation,
             "curationCandidates": report.curation_candidates,
@@ -9434,6 +9633,14 @@ pub fn render_lab_counterfactual_json(report: &CounterfactualReport) -> String {
         }
     });
     json.to_string()
+}
+
+fn lab_counterfactual_degraded_json(report: &CounterfactualReport) -> Vec<serde_json::Value> {
+    report
+        .degradation_codes
+        .iter()
+        .map(|code| lab_degradation_json(code))
+        .collect()
 }
 
 /// Render a lab counterfactual report as human-readable text.
@@ -10301,6 +10508,7 @@ pub fn render_learn_uncertainty_toon(report: &LearnUncertaintyReport) -> String 
 /// Render a learn cluster report as JSON.
 #[must_use]
 pub fn render_learn_cluster_json(report: &LearnClusterReport) -> String {
+    let degraded = learn_cluster_degraded_json(report);
     serde_json::json!({
         "schema": report.schema,
         "success": true,
@@ -10312,9 +10520,55 @@ pub fn render_learn_cluster_json(report: &LearnClusterReport) -> String {
         "clusterCount": report.cluster_count,
         "clusters": report.clusters,
         "degradations": report.degradations,
+        "degraded": degraded,
         "generatedAt": report.generated_at,
     })
     .to_string()
+}
+
+fn learn_cluster_degraded_json(report: &LearnClusterReport) -> Vec<serde_json::Value> {
+    report
+        .degradations
+        .iter()
+        .map(|degradation| learn_cluster_degradation_json(degradation))
+        .collect()
+}
+
+fn learn_cluster_degradation_json(degradation: &str) -> serde_json::Value {
+    let code = degradation.strip_prefix("degraded.").unwrap_or(degradation);
+    let (severity, message, repair) = match code {
+        "clustering_insufficient_data" => (
+            "warning",
+            "No embedding points were supplied for clustering.",
+            "Collect at least three related memories before proposing a curation candidate.",
+        ),
+        "clustering_threshold_too_strict" => (
+            "warning",
+            "No cluster reached the configured minimum member count.",
+            "Lower learn.cluster_coherence_threshold or collect stronger related evidence.",
+        ),
+        "clustering_silhouette_undefined_for_singleton" => (
+            "warning",
+            "Only one embedding point was supplied; silhouette is undefined.",
+            "Collect at least three related memories before promoting the cluster.",
+        ),
+        "clustering_silhouette_requires_two_clusters" => (
+            "warning",
+            "At least two clusters are required to compute silhouette scores.",
+            "Collect more diverse related memories before promoting the cluster.",
+        ),
+        _ => (
+            "warning",
+            "Learning cluster analysis completed with degraded confidence.",
+            "Inspect the learn cluster output and adjust the workspace evidence.",
+        ),
+    };
+    serde_json::json!({
+        "code": code,
+        "severity": severity,
+        "message": message,
+        "repair": repair,
+    })
 }
 
 /// Render a learn cluster report as human-readable text.
@@ -10339,8 +10593,11 @@ pub fn render_learn_cluster_human(report: &LearnClusterReport) -> String {
     }
     if !report.degradations.is_empty() {
         out.push_str("\nDegraded:\n");
-        for degradation in &report.degradations {
-            out.push_str(&format!("  {degradation}\n"));
+        for degradation in learn_cluster_degraded_json(report) {
+            let code = degradation["code"].as_str().unwrap_or("unknown");
+            let message = degradation["message"].as_str().unwrap_or("degraded");
+            let repair = degradation["repair"].as_str().unwrap_or("inspect output");
+            out.push_str(&format!("  {code}: {message} (repair: {repair})\n"));
         }
     }
     out
@@ -13567,6 +13824,7 @@ mod tests {
         let json = render_capabilities_json_filtered(&report, FieldProfile::Full);
 
         ensure_contains(&json, "\"subsystems\":", "has subsystems")?;
+        ensure_contains(&json, "\"unimplemented\":", "has build-time gaps")?;
         ensure_contains(&json, "\"description\":", "has descriptions")?;
         ensure_contains(&json, "\"summary\":", "has summary")
     }

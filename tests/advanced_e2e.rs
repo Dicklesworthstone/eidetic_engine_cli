@@ -276,7 +276,7 @@ fn recorder_event_missing_run_returns_not_found() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "error schema",
     )?;
     ensure_equal(
@@ -304,7 +304,7 @@ fn recorder_event_rejects_oversized_payload_with_stable_code() -> TestResult {
     let value = stdout_json(&output)?;
     ensure_equal(
         &value["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "error schema",
     )?;
     ensure_equal(
@@ -430,7 +430,7 @@ fn recorder_import_requires_dry_run_with_stable_error_code() -> TestResult {
     let value = stdout_json(&output)?;
     ensure_equal(
         &value["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "error schema",
     )?;
     ensure_equal(
@@ -525,7 +525,7 @@ fn assert_procedure_not_found(output: &std::process::Output, procedure_id: &str)
     let json = stdout_json(output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "error schema",
     )?;
     ensure_equal(
@@ -650,7 +650,7 @@ fn economy_report_degrades_until_db_backed_metrics_exist() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "response schema",
     )?;
     ensure_equal(
@@ -716,7 +716,7 @@ fn economy_simulate_degrades_instead_of_ranking_seed_artifacts() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "response schema",
     )?;
     ensure_equal(
@@ -738,7 +738,7 @@ fn economy_simulate_rejects_zero_budget() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         json.get("schema").unwrap_or(&serde_json::Value::Null),
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "error schema",
     )?;
     ensure_equal(
@@ -773,7 +773,7 @@ fn economy_prune_plan_dry_run_degrades_until_db_backed_metrics_exist() -> TestRe
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "response schema",
     )?;
     ensure_equal(
@@ -824,7 +824,7 @@ fn learn_experiment_run_dry_run_reports_missing_registered_proposal() -> TestRes
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "error schema",
     )?;
     ensure_equal(
@@ -866,7 +866,7 @@ fn learn_experiment_run_rejects_non_dry_run() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "error schema",
     )?;
     ensure_equal(
@@ -1121,7 +1121,7 @@ fn learn_close_rejects_invalid_confidence_delta() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "error schema",
     )?;
     ensure_equal(
@@ -1210,7 +1210,7 @@ fn rule_add_rejects_validated_rule_without_evidence() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "error schema",
     )?;
     ensure_equal(
@@ -1233,7 +1233,7 @@ fn rule_show_rejects_invalid_rule_id_as_json_error() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "error schema",
     )?;
     ensure_equal(
@@ -1818,7 +1818,7 @@ fn preflight_show_returns_stubbed_storage_details() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "preflight show error schema",
     )?;
     ensure_equal(
@@ -1860,7 +1860,7 @@ fn preflight_close_dry_run_records_feedback_shape() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "preflight close error schema",
     )?;
     ensure_equal(
@@ -1894,7 +1894,7 @@ fn preflight_close_without_cleared_infers_false_alarm_for_success() -> TestResul
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "preflight close error schema",
     )?;
     ensure_equal(
@@ -1917,7 +1917,7 @@ fn preflight_show_rejects_invalid_run_id_with_usage_error() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "error schema",
     )?;
     ensure_equal(
@@ -2120,7 +2120,7 @@ fn causal_promote_plan_invalid_action_still_returns_usage_error() -> TestResult 
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "error schema",
     )?;
     ensure_equal(
@@ -2336,9 +2336,9 @@ fn post_task_outcome_scenario_commands_emit_machine_data() -> TestResult {
 
         if output.status.code() == Some(0) {
             ensure(
-                schema != Some("ee.error.v1"),
+                schema != Some("ee.error.v2"),
                 format!(
-                    "ee {} should not emit ee.error.v1 on success",
+                    "ee {} should not emit ee.error.v2 on success",
                     args.join(" ")
                 ),
             )?;

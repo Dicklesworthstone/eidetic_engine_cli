@@ -171,6 +171,7 @@ fn pack_opt_out_matrix_controls_json_shape_and_coverage_fill() -> TestResult {
                             no_rendered_text,
                             no_skipped,
                             no_meta,
+                            include_non_affecting_degradations: None,
                         },
                     });
                 }

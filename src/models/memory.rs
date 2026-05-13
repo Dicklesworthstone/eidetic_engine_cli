@@ -494,7 +494,7 @@ mod tests {
             let rendered = level.to_string();
             let parsed = match MemoryLevel::from_str(&rendered) {
                 Ok(value) => value,
-                Err(error) => panic!("level {level:?} failed to round-trip: {error:?}"),
+                Err(error) => panic!("level {level:?} failed to round-trip: {error:?}"), // ubs:ignore
             };
             assert_eq!(parsed, level);
         }
@@ -503,7 +503,7 @@ mod tests {
     #[test]
     fn level_rejects_unknown_input() {
         let err = match MemoryLevel::from_str("Working") {
-            Ok(value) => panic!("expected error, got Ok({value:?})"),
+            Ok(value) => panic!("expected error, got Ok({value:?})"), // ubs:ignore
             Err(error) => error,
         };
         assert_eq!(
@@ -519,7 +519,7 @@ mod tests {
         for name in KNOWN_MEMORY_KINDS {
             let parsed = match MemoryKind::from_str(name) {
                 Ok(value) => value,
-                Err(error) => panic!("known kind `{name}` failed: {error:?}"),
+                Err(error) => panic!("known kind `{name}` failed: {error:?}"), // ubs:ignore
             };
             assert_eq!(parsed.as_str(), *name);
             assert!(MemoryKind::is_known(name));
@@ -530,7 +530,7 @@ mod tests {
     fn kind_accepts_custom_identifier() {
         let parsed = match MemoryKind::from_str("project-rule") {
             Ok(value) => value,
-            Err(error) => panic!("custom kind failed: {error:?}"),
+            Err(error) => panic!("custom kind failed: {error:?}"), // ubs:ignore
         };
         assert!(matches!(parsed, MemoryKind::Custom(_)));
         assert_eq!(parsed.as_str(), "project-rule");

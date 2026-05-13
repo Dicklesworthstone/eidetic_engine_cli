@@ -14,7 +14,7 @@ must not expose their current value.
 | `EE_CASS_BINARY` | integration | absolute path | none | Override the trusted cass import binary path. | Used before config and trusted PATH lookup for CASS import discovery. |
 | `EE_DATABASE_PATH` | paths | path | none | Override the configured storage database path. | Equivalent to overriding the storage database path in config. |
 | `EE_DEMO_EVIDENCE_ROOT` | paths | path | none | Override the demo evidence storage root. | Used by demo evidence capture surfaces. |
-| `EE_EXPERIMENTAL_TRIAD` | output | boolean flag | none | Enable experimental ee pack/note/why aliases. | Gates the agent-triad spike surface. |
+| `EE_EXPERIMENTAL_TRIAD` | output | boolean flag | none | Compatibility no-op for the promoted ee pack/note/why aliases. | Retained so spike-era scripts continue to run; it no longer gates behavior. |
 | `EE_FORMAT` | output | output format | none | Select the default output renderer. | Lower-priority compatibility alias for output format selection. |
 | `EE_HARMFUL_BURST_WINDOW_SECONDS` | tuning | integer seconds | none | Override the harmful feedback burst window in seconds. | Overrides feedback policy timing from config. |
 | `EE_HARMFUL_PER_SOURCE_PER_HOUR` | tuning | integer count | none | Override the harmful feedback rate limit per source. | Overrides feedback rate limits from config. |
@@ -35,4 +35,3 @@ must not expose their current value.
 | `EE_TEST_LOG_TEST_ID` | diagnostics | string | none | Name the active structured test-log scenario. | Identifies events emitted by the test logging harness. |
 | `EE_WORKSPACE` | paths | path | none | Override workspace root discovery. | Used after explicit `--workspace` and before cwd walk-up. |
 | `EE_WORKSPACE_REGISTRY` | paths | path | none | Override the workspace alias registry database path. | Controls where workspace aliases are stored. |
-

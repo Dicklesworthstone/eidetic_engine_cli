@@ -162,14 +162,11 @@ impl DaemonStatusReport {
                 "openJobsEligibleForCancellation": self.open_job_count,
                 "repair": "Start ee daemon --foreground --once --json to recover orphaned pending/running daemon jobs."
             },
-            "degraded": [
-                {
-                    "code": "daemon_background_mode_unimplemented",
-                    "severity": "low",
-                    "message": "Only bounded foreground daemon mode is implemented.",
-                    "repair": "ee daemon --foreground --once --json"
-                }
-            ],
+            "capabilityGap": {
+                "code": "daemon_background_mode_unimplemented",
+                "capabilitiesCommand": "ee capabilities --json"
+            },
+            "degraded": [],
         })
     }
 }

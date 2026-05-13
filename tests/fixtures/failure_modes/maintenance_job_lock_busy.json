@@ -13,10 +13,10 @@
   "trigger": {
     "description": "The cooperative maintenance job lock is already held by another process.",
     "setup_commands": [
-      "ee init --workspace .",
-      "# hold the maintenance job lock through a test harness"
+      "mkdir -p <workspace>/.ee",
+      "hold an exclusive flock on <workspace>/.ee/maintenance-job.lock"
     ],
-    "invocation": "ee job run decay_sweep --workspace . --json"
+    "invocation": "ee job run custom --workspace <workspace> --json"
   },
   "expected_emission": {
     "code": "maintenance_job_lock_busy",
@@ -24,6 +24,6 @@
     "message_contains": [
       "lock"
     ],
-    "repair_contains": "retry"
+    "repair_contains": "ee job run"
   }
 }

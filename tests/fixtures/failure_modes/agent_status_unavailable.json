@@ -8,7 +8,7 @@
   "surfaces": [
     "swarm brief"
   ],
-  "severity": "medium",
+  "severity": "warning",
   "repair_present": true,
   "trigger": {
     "description": "Swarm brief cannot collect local agent status inventory.",
@@ -19,10 +19,12 @@
   },
   "expected_emission": {
     "code": "agent_status_unavailable",
-    "severity": "medium",
+    "severity": "warning",
     "message_contains": [
       "agent status"
     ],
-    "repair_contains": "agent"
+    "repair_contains": "agent",
+    "repair_string": "ee agent status --json",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

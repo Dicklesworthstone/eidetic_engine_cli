@@ -1399,11 +1399,10 @@ impl std::error::Error for PaginationCursorError {}
 /// Compute deterministic hash of query shape for cursor scoping.
 #[must_use]
 pub fn compute_query_shape_hash(query: &str, filters: &QueryFilters) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    query.hash(&mut hasher);
-    format!("{:?}", filters).hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(query.as_bytes());
+    hasher.update(format!("{:?}", filters).as_bytes());
+    format!("blake3:{}", hasher.finalize().to_hex())
 }
 
 /// Parse pagination from an ee.query.v1 pagination object.

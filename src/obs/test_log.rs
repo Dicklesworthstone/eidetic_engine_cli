@@ -71,6 +71,8 @@ pub enum EventKind {
     VolatileStrip,
     /// Test-event schema gate summary.
     SchemaGate,
+    /// Output field selector application summary.
+    FieldSelector,
 }
 
 impl EventKind {
@@ -88,11 +90,12 @@ impl EventKind {
             Self::DbGenerationObserved => "db_generation_observed",
             Self::VolatileStrip => "volatile_strip",
             Self::SchemaGate => "schema_gate",
+            Self::FieldSelector => "field_selector",
         }
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 11] {
+    pub const fn all() -> [Self; 12] {
         [
             Self::CommandStart,
             Self::CommandEnd,
@@ -105,6 +108,7 @@ impl EventKind {
             Self::DbGenerationObserved,
             Self::VolatileStrip,
             Self::SchemaGate,
+            Self::FieldSelector,
         ]
     }
 }

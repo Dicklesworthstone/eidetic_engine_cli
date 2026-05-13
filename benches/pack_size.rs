@@ -305,6 +305,10 @@ impl PackSizeFixture {
             candidate_pool: Some(64),
             max_results: None,
             include_tombstoned: false,
+            as_of: None,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
             pagination: None,
             output_options: Default::default(),
         };

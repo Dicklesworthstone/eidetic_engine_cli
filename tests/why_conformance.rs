@@ -752,7 +752,7 @@ fn why_invalid_memory_id_returns_usage_error() -> TestResult {
 
     ensure_equal(
         &why_json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "error schema",
     )?;
     // Invalid ID format may return "usage" or "not_found" depending on validation order
@@ -793,7 +793,7 @@ fn why_nonexistent_memory_returns_not_found() -> TestResult {
 
     // Either error or unsuccessful response is acceptable
     ensure(
-        why_json["schema"].as_str() == Some("ee.error.v1")
+        why_json["schema"].as_str() == Some("ee.error.v2")
             || why_json["success"].as_bool() == Some(false),
         "nonexistent memory must return error or unsuccessful response",
     )

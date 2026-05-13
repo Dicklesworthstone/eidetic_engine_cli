@@ -17,7 +17,7 @@
     "setup_commands": [
       "ee init --workspace ."
     ],
-    "invocation": "ee lab replay --workspace . --json"
+    "invocation": "ee lab replay missing-episode-id --workspace . --json"
   },
   "expected_emission": {
     "code": "lab_replay_unavailable",

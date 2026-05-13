@@ -1,7 +1,7 @@
 //! EE-xufd: query-file validation errors produce JSON error envelope
 //!
 //! Validates that `ee pack --query-file` accepts supported tag/temporal filters
-//! and rejects unsupported fields with a proper ee.error.v1 envelope.
+//! and rejects unsupported fields with a proper ee.error.v2 envelope.
 //!
 //! NO MOCKS. Real ee binary, temp workspace.
 
@@ -62,7 +62,7 @@ fn assert_error_envelope(
         .get("schema")
         .and_then(|s| s.as_str())
         .ok_or_else(|| format!("{context}: missing schema field"))?;
-    ensure_equal(&schema, &"ee.error.v1", &format!("{context} schema"))?;
+    ensure_equal(&schema, &"ee.error.v2", &format!("{context} schema"))?;
 
     let error = json
         .get("error")

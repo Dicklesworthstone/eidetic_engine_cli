@@ -578,7 +578,7 @@ fn gate21_learn_cli_json_keeps_diagnostics_off_stdout() -> TestResult {
         .map_err(|error| format!("learn experiment run stdout must be JSON: {error}"))?;
     ensure_json_equal(
         run_value.get("schema"),
-        JsonValue::String("ee.error.v1".to_string()),
+        JsonValue::String("ee.error.v2".to_string()),
         "run schema",
     )?;
     ensure_json_equal(

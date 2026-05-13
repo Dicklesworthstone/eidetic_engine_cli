@@ -247,7 +247,7 @@ except json.JSONDecodeError as exc:
 
 if stdout_json_valid:
     observed_schema = parsed.get("schema")
-    if observed_schema == "ee.error.v1":
+    if observed_schema == "ee.error.v2":
         code = parsed.get("error", {}).get("code")
         if code:
             degradation_codes.append(code)
@@ -575,19 +575,19 @@ scenario_degraded() {
     run_ee_case degraded_search_missing_index "core-retrieval-pack-explain" \
         "context/search/why row" "README search workflow" \
         "boundary.search_index_missing_degraded.v1" "class=read_only" "read_only" \
-        "ee.error.v1" "4" "tests/fixtures/golden/agent/search_unavailable.json.golden" \
+        "ee.error.v2" "4" "tests/fixtures/golden/agent/search_unavailable.json.golden" \
         search "format before release" --workspace "${WORKSPACE}" --json
 
     run_ee_case degraded_context_missing_db "core-retrieval-pack-explain" \
         "context/search/why row" "README context workflow" \
         "boundary.search_index_missing_degraded.v1" "class=mixed" "failed_before_mutation" \
-        "ee.error.v1" "3" "none" \
+        "ee.error.v2" "3" "none" \
         context "prepare release" --workspace "${WORKSPACE}" --json
 
     run_ee_case degraded_why_missing_db "core-retrieval-pack-explain" \
         "context/search/why row" "README why workflow" \
         "boundary.search_index_missing_degraded.v1" "class=read_only" "read_only" \
-        "ee.error.v1" "3" "none" \
+        "ee.error.v2" "3" "none" \
         why mem_00000000000000000000000001 --workspace "${WORKSPACE}" --json
 }
 

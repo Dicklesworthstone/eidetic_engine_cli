@@ -177,7 +177,7 @@ where
 
 fn hook_serialization_failure_json(report_name: &str, error: &serde_json::Error) -> String {
     serde_json::json!({
-        "schema": crate::models::ERROR_SCHEMA_V1,
+        "schema": crate::models::ERROR_SCHEMA_V2,
         "error": {
             "code": "serialization_failed",
             "message": format!("Failed to serialize {report_name} as JSON."),
@@ -775,7 +775,7 @@ mod tests {
 
         assert_eq!(
             parsed["schema"].as_str(),
-            Some(crate::models::ERROR_SCHEMA_V1)
+            Some(crate::models::ERROR_SCHEMA_V2)
         );
         assert_eq!(
             parsed["error"]["code"].as_str(),

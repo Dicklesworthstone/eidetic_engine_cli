@@ -90,12 +90,12 @@ fn assert_json_error_contract(
     let json = stdout_json(output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "error schema",
     )?;
     ensure(
         json.get("success").is_none(),
-        "ee.error.v1 must not include success flag",
+        "ee.error.v2 must not include success flag",
     )?;
 
     let error = json
@@ -754,7 +754,7 @@ fn error_responses_use_ee_error_v1_schema() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "error schema",
     )?;
     ensure(json["error"].is_object(), "error field must be an object")?;

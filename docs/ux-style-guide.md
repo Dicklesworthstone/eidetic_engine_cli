@@ -12,7 +12,7 @@ Golden fixtures in `tests/fixtures/golden/` enforce these patterns.
    produces identical JSON output. IDs, timestamps, and ordering are stable.
 
 3. **Agent-native by default**: Every command supports `--json` for machine
-   consumption. The response envelope is always `ee.response.v1` or `ee.error.v1`.
+   consumption. The response envelope is always `ee.response.v1` or `ee.error.v2`.
 
 4. **Useful errors**: Errors include a repair hint (`next` action) when possible.
 
@@ -41,13 +41,13 @@ With `--meta`, additional fields are included:
 }
 ```
 
-## Error Envelope (ee.error.v1)
+## Error Envelope (ee.error.v2)
 
 All errors use this envelope:
 
 ```json
 {
-  "schema": "ee.error.v1",
+  "schema": "ee.error.v2",
   "error": {
     "code": "error_code",
     "message": "Human-readable description.",

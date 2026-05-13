@@ -14,9 +14,9 @@
   "trigger": {
     "description": "The quarantine report cannot canonicalize or inspect the requested workspace path.",
     "setup_commands": [
-      "ee trust quarantine --workspace <invalid-path> --json"
+      "ensure <invalid-path> does not exist"
     ],
-    "invocation": "ee trust quarantine --workspace <invalid-path> --json"
+    "invocation": "ee diag quarantine list --workspace <invalid-path> --json"
   },
   "expected_emission": {
     "code": "quarantine_workspace_unavailable",

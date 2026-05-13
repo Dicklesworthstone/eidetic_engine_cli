@@ -551,7 +551,7 @@ fn context_without_database_uses_honest_error_envelope_and_e2e_log() -> TestResu
     ensure_json_pointer(
         &result.parsed,
         "/schema",
-        json!("ee.error.v1"),
+        json!("ee.error.v2"),
         "error envelope schema",
     )?;
     ensure_json_pointer(
@@ -587,7 +587,7 @@ fn context_without_database_uses_honest_error_envelope_and_e2e_log() -> TestResu
     ensure_json_pointer(
         &log_json,
         "/parsedJsonSchema",
-        json!("ee.error.v1"),
+        json!("ee.error.v2"),
         "logged parsed schema",
     )?;
     ensure_json_pointer(
@@ -1455,7 +1455,7 @@ fn claim_commands_reject_invalid_claims_without_placeholder_success() -> TestRes
         ensure_json_pointer(
             &result.parsed,
             "/schema",
-            json!("ee.error.v1"),
+            json!("ee.error.v2"),
             &format!("{command} error response schema"),
         )?;
         ensure_json_pointer(
@@ -2079,7 +2079,7 @@ fn learn_read_and_proposal_commands_use_persisted_ledgers() -> TestResult {
     ensure_json_pointer(
         &run_result.parsed,
         "/schema",
-        json!("ee.error.v1"),
+        json!("ee.error.v2"),
         "learn experiment run missing proposal schema",
     )?;
     ensure_json_pointer(
@@ -2275,7 +2275,7 @@ fn economy_report_degrades_instead_of_reporting_seed_metrics() -> TestResult {
         .and_then(Value::as_str)
         .ok_or_else(|| "economy response missing schema".to_owned())?;
     match schema {
-        "ee.error.v1" => {
+        "ee.error.v2" => {
             ensure_json_pointer(
                 &result.parsed,
                 "/error/code",
@@ -2324,7 +2324,7 @@ fn economy_report_degrades_instead_of_reporting_seed_metrics() -> TestResult {
         }
         other => {
             return Err(format!(
-                "economy response schema must be ee.error.v1 or ee.response.v1, got {other}"
+                "economy response schema must be ee.error.v2 or ee.response.v1, got {other}"
             ));
         }
     }
@@ -3097,7 +3097,7 @@ fn review_session_reports_storage_error_without_unavailable_sentinel() -> TestRe
     ensure_json_pointer(
         &result.parsed,
         "/schema",
-        json!("ee.error.v1"),
+        json!("ee.error.v2"),
         "review session error response schema",
     )?;
     ensure_json_pointer(
@@ -3553,14 +3553,20 @@ fn daemon_foreground_runs_real_health_job_without_unavailable_sentinel() -> Test
     ensure_json_pointer(
         &log_json,
         "/degradationCodes",
-        json!(["daemon_background_mode_unimplemented"]),
-        "logged daemon foreground limitation code",
+        json!([]),
+        "daemon foreground build-time gap is not logged as response degradation",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/data/capabilityGap/code",
+        json!("daemon_background_mode_unimplemented"),
+        "daemon foreground capability gap code",
     )?;
     ensure_json_pointer(
         &log_json,
         "/repairCommand",
-        json!("Run ee daemon --foreground with an explicit tick limit."),
-        "logged daemon repair command",
+        json!(null),
+        "daemon foreground build-time gap has no response repair command",
     )?;
     ensure_json_pointer(
         &log_json,

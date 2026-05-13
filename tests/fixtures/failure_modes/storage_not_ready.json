@@ -9,13 +9,13 @@
     "health"
   ],
   "severity": "medium",
-  "repair_present": true,
+  "repair_present": false,
   "trigger": {
     "description": "The health probe sees storage as pending because workspace storage has not been initialized.",
     "setup_commands": [
       "mkdir -p <workspace>"
     ],
-    "invocation": "ee status --workspace <workspace> --json"
+    "invocation": "ee health --workspace <workspace> --json"
   },
   "expected_emission": {
     "code": "storage_not_ready",
@@ -23,7 +23,6 @@
     "message_contains": [
       "storage",
       "not been initialized"
-    ],
-    "repair_contains": "ee init"
+    ]
   }
 }

@@ -176,7 +176,7 @@ fn health_response_json_is_deterministic_for_one_probe() -> TestResult {
 }
 
 // ============================================================================
-// Error envelope (ee.error.v1)
+// Error envelope (ee.error.v2)
 // ============================================================================
 
 #[test]
@@ -190,7 +190,7 @@ fn error_envelope_json_roundtrips() -> TestResult {
         repair: Some("ee memory list".to_owned()),
     };
     let rendered = error_response_json(&error);
-    assert_roundtrip("error_envelope_json", &rendered, "ee.error.v1")
+    assert_roundtrip("error_envelope_json", &rendered, "ee.error.v2")
 }
 
 #[test]

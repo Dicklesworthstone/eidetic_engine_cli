@@ -175,7 +175,7 @@
 
 ### Appendix B — JSON output contracts  
 **Status:** ✓ Reconciled by follow-up
-**Evidence:** Appendix B now defines `ee.response.v1` as the canonical success envelope, `ee.error.v1` as the failure envelope, and treats command-specific examples as representative `data` payload sketches. `src/output/mod.rs::public_schemas()` is the single list/export registry, including the rule schemas listed by `ee schema list --json`.
+**Evidence:** Appendix B now defines `ee.response.v1` as the canonical success envelope, `ee.error.v2` as the failure envelope, and treats command-specific examples as representative `data` payload sketches. `src/output/mod.rs::public_schemas()` is the single list/export registry, including the rule schemas listed by `ee schema list --json`.
 **Action:** `eidetic_engine_cli-5mra` added schema-list golden coverage and a registry self-consistency test that exports every listed schema exactly once.
 
 ### Appendix C — example end-to-end agent flow

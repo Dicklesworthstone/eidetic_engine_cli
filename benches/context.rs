@@ -118,6 +118,10 @@ fn bench_context(c: &mut Criterion) {
                         candidate_pool: Some(50),
                         max_results: None,
                         include_tombstoned: false,
+                        as_of: None,
+                        include_expired: false,
+                        include_future: false,
+                        include_stale: false,
                         pagination: None,
                         output_options: Default::default(),
                     };
@@ -160,6 +164,10 @@ fn bench_context_memory_scales(c: &mut Criterion) {
                     candidate_pool: Some(50),
                     max_results: None,
                     include_tombstoned: false,
+                    as_of: None,
+                    include_expired: false,
+                    include_future: false,
+                    include_stale: false,
                     pagination: None,
                     output_options: Default::default(),
                 };

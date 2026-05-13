@@ -41,10 +41,7 @@ fn make_signal(code: &str) -> ContextResponseDegradation {
 /// Emulate the in-process filter the renderer applies: keep every
 /// signal whose category is `included_by_default`, OR unconditionally
 /// when `include_all` is true. Returns codes in the surviving order.
-fn apply_filter(
-    signals: &[ContextResponseDegradation],
-    include_all: bool,
-) -> Vec<String> {
+fn apply_filter(signals: &[ContextResponseDegradation], include_all: bool) -> Vec<String> {
     signals
         .iter()
         .filter(|d| include_all || d.category().included_by_default())
@@ -135,12 +132,12 @@ fn filter_preserves_relative_input_order_after_drops() -> TestResult {
     // refactors the filter into a more complex pipeline (priority
     // weighting, deduplication, etc.) must not silently reorder.
     let signals = vec![
-        make_signal("search_index_stale"),         // 0 → drop
-        make_signal("no_relevant_results"),         // 1 → keep
+        make_signal("search_index_stale"),           // 0 → drop
+        make_signal("no_relevant_results"),          // 1 → keep
         make_signal("graph_snapshot_unimplemented"), // 2 → drop
-        make_signal("duplicates_collapsed"),        // 3 → keep
-        make_signal("cass_unavailable"),            // 4 → drop
-        make_signal("weak_query_recall"),           // 5 → keep
+        make_signal("duplicates_collapsed"),         // 3 → keep
+        make_signal("cass_unavailable"),             // 4 → drop
+        make_signal("weak_query_recall"),            // 5 → keep
     ];
     let kept = apply_filter(&signals, false);
     let expected = vec![

@@ -1097,25 +1097,22 @@ pub fn compute_fixture_metrics(
 
 /// Compute data hash for determinism verification.
 pub fn compute_data_hash(report: &EvalRunReport) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    report.fixture_id.hash(&mut hasher);
-    report.fixture_family.hash(&mut hasher);
-    report.metrics.queries_evaluated.hash(&mut hasher);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(report.fixture_id.as_bytes());
+    hasher.update(report.fixture_family.as_bytes());
+    hasher.update(&report.metrics.queries_evaluated.to_le_bytes());
 
     for q in &report.metrics.per_query {
-        q.query.hash(&mut hasher);
+        hasher.update(q.query.as_bytes());
         for id in &q.expected_ids {
-            id.hash(&mut hasher);
+            hasher.update(id.as_bytes());
         }
         for id in &q.retrieved_ids {
-            id.hash(&mut hasher);
+            hasher.update(id.as_bytes());
         }
     }
 
-    format!("{:016x}", hasher.finish())
+    format!("blake3:{}", hasher.finalize().to_hex())
 }
 
 /// Schema version for pack-quality comparison report.

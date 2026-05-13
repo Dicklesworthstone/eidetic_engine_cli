@@ -109,7 +109,7 @@
       ],
       "cwd": "<repo>",
       "expected_exit_code": 7,
-      "stdout_schema": "ee.error.v1",
+      "stdout_schema": "ee.error.v2",
       "stderr_policy": "diagnostics_only",
       "stdout_artifact_path": "target/ee-e2e/usr_import_poisoned_memory_guard/<run-id>/03-remember-poisoned.stdout.json",
       "stderr_artifact_path": "target/ee-e2e/usr_import_poisoned_memory_guard/<run-id>/03-remember-poisoned.stderr.txt"
@@ -162,7 +162,7 @@
     },
     {
       "step": 3,
-      "schema": "ee.error.v1",
+      "schema": "ee.error.v2",
       "required_fields": [
         "error.code",
         "error.message",

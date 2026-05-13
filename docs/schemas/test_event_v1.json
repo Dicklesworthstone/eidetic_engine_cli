@@ -33,7 +33,8 @@
         "pack_hash_components",
         "db_generation_observed",
         "volatile_strip",
-        "schema_gate"
+        "schema_gate",
+        "field_selector"
       ]
     },
     "command": {
@@ -149,6 +150,24 @@
               "kinds_observed",
               "orphans_in_schema",
               "orphans_in_src"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "field_selector"}}},
+      "then": {
+        "properties": {
+          "fields": {
+            "type": "object",
+            "required": [
+              "surface",
+              "preset",
+              "explicit_fields_count",
+              "fields_in_response",
+              "rejected_field_count",
+              "elapsed_us"
             ]
           }
         }

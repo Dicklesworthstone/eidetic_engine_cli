@@ -1,7 +1,7 @@
 //! EE-90xb: remember rejects empty/whitespace content with error envelope
 //!
 //! Validates that `ee remember ''` and `ee remember '   '` produce proper
-//! ee.error.v1 envelope with validation error rather than storing empty memory.
+//! ee.error.v2 envelope with validation error rather than storing empty memory.
 //!
 //! NO MOCKS. Real ee binary, temp workspace.
 
@@ -52,7 +52,7 @@ fn assert_error_envelope(json: &serde_json::Value, context: &str) -> TestResult 
         .get("schema")
         .and_then(|s| s.as_str())
         .ok_or_else(|| format!("{context}: missing schema field"))?;
-    ensure_equal(&schema, &"ee.error.v1", &format!("{context} schema"))?;
+    ensure_equal(&schema, &"ee.error.v2", &format!("{context} schema"))?;
 
     let error = json
         .get("error")

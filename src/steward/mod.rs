@@ -4004,14 +4004,11 @@ impl DaemonForegroundReport {
                 .iter()
                 .map(DaemonForegroundTick::data_json)
                 .collect::<Vec<_>>(),
-            "degraded": [
-                {
-                    "code": "daemon_background_mode_unimplemented",
-                    "severity": "low",
-                    "message": "Only bounded foreground daemon mode is implemented.",
-                    "repair": "Run ee daemon --foreground with an explicit tick limit."
-                }
-            ],
+            "capabilityGap": {
+                "code": "daemon_background_mode_unimplemented",
+                "capabilitiesCommand": "ee capabilities --json"
+            },
+            "degraded": [],
         })
     }
 

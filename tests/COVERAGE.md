@@ -156,7 +156,7 @@ Each gate is mapped to its conformance tests, MUST clauses, and gap status.
 
 | Category | Requirement | Test Count |
 |----------|-------------|------------|
-| Error Envelope | MUST use ee.error.v1 schema | 28 |
+| Error Envelope | MUST use ee.error.v2 schema | 28 |
 | Abstention Codes | MUST include stable error code | 28 |
 | Severity | MUST declare severity level | 28 |
 | Repair Hints | MUST provide actionable repair command | 24 |

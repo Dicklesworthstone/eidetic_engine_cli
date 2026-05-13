@@ -27,6 +27,13 @@ fn fixtures_dir() -> PathBuf {
         .join("failure_modes")
 }
 
+fn failure_modes_driver_path() -> PathBuf {
+    repo_root()
+        .join("scripts")
+        .join("e2e_overhaul")
+        .join("failure_modes.sh")
+}
+
 fn collect_rust_files(root: &Path, files: &mut Vec<PathBuf>) -> TestResult {
     if root.is_file() {
         if root.extension().is_some_and(|extension| extension == "rs") {
@@ -61,6 +68,26 @@ fn fixture_codes() -> Result<BTreeSet<String>, String> {
             codes.insert(code.to_owned());
         }
     }
+    Ok(codes)
+}
+
+fn registered_driver_codes() -> TestResult<BTreeSet<String>> {
+    let driver_path = failure_modes_driver_path();
+    let content = fs::read_to_string(&driver_path)
+        .map_err(|error| format!("read {}: {error}", driver_path.display()))?;
+    let mut codes = BTreeSet::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        let Some(close_paren_index) = trimmed.find(')') else {
+            continue;
+        };
+        let candidate = &trimmed[..close_paren_index];
+        if is_code_candidate(candidate) {
+            codes.insert(candidate.to_owned());
+        }
+    }
+
     Ok(codes)
 }
 
@@ -214,6 +241,27 @@ fn every_degraded_code_emitted_in_source_has_a_fixture() -> TestResult {
     } else {
         Err(format!(
             "{} degraded/fallback code(s) still need failure-mode fixtures: {}",
+            missing.len(),
+            missing.join(", ")
+        ))
+    }
+}
+
+#[test]
+#[ignore = "J6 driver backfill is intentionally incremental; run manually to see unregistered fixtures"]
+fn every_failure_mode_fixture_has_driver_branch() -> TestResult {
+    let fixtures = fixture_codes()?;
+    let registered = registered_driver_codes()?;
+    let missing = fixtures
+        .difference(&registered)
+        .cloned()
+        .collect::<Vec<String>>();
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} failure-mode fixture(s) still need explicit driver branches in scripts/e2e_overhaul/failure_modes.sh: {}",
             missing.len(),
             missing.join(", ")
         ))

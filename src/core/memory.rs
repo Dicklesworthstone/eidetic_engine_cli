@@ -529,7 +529,24 @@ pub fn remember_memory(
                     options.auto_link,
                     &auto_links,
                 );
-                (auto_links, status.to_owned(), Vec::new())
+                // G7 (bd-17c65.7.6): commit to honest-unimplemented for
+                // the workflow-less case. When no workflow_id is provided
+                // we cannot meaningfully auto-link — surface that as a
+                // non-failure info degraded entry pointing at the
+                // explicit `ee memory link` path.
+                let degradations = if status == "no_workflow_required" {
+                    vec![RememberSuggestedLinkDegradation {
+                        code: "auto_link_disabled".to_owned(),
+                        severity: "info".to_owned(),
+                        message:
+                            "Automatic memory linking requires a workflow context. Use `ee memory link <from> <to> --relation <type>` to add explicit links."
+                                .to_owned(),
+                        repair: "ee memory link --help".to_owned(),
+                    }]
+                } else {
+                    Vec::new()
+                };
+                (auto_links, status.to_owned(), degradations)
             }
             Err(error) => (
                 Vec::new(),
@@ -2089,7 +2106,14 @@ fn auto_link_status(
     if !enabled {
         "disabled"
     } else if workflow_id.is_none() {
-        "no_workflow"
+        // G7 (bd-17c65.7.6): honest-unimplemented. Without a workflow
+        // context we cannot meaningfully auto-link. The status name
+        // explicitly says "required" so an agent reading it knows this
+        // is NOT a failure — it's an expected state outside a workflow.
+        // The caller emits an `auto_link_disabled` info-severity
+        // degraded entry pointing at the explicit `ee memory link`
+        // surface as the recovery path.
+        "no_workflow_required"
     } else if auto_links.is_empty() {
         "no_candidates"
     } else {
@@ -2330,7 +2354,11 @@ fn remember_search_neighbor_ids(
         limit: u32::try_from(REMEMBER_CURATION_NEIGHBOR_LIMIT + 1).unwrap_or(u32::MAX),
         speed: crate::search::SpeedMode::Default,
         explain: false,
+        as_of: None,
         include_tombstoned: false,
+        include_expired: false,
+        include_future: false,
+        include_stale: false,
         relevance_floor: Some(0.0),
         source_mode: crate::core::search::SearchSourceMode::Hybrid,
         strict_source_mode: false,
@@ -5979,6 +6007,78 @@ mod tests {
             audit.target_id,
             Some(reported.link_id.clone()),
             "audit target",
+        )
+    }
+
+    /// G7 (bd-17c65.7.6): when ee remember runs without a workflow_id,
+    /// the auto-link path commits to honest-unimplemented: status is
+    /// `"no_workflow_required"` (NOT `"no_workflow"`; the new name
+    /// signals this is a non-failure state) AND an info-severity
+    /// `auto_link_disabled` degraded entry surfaces with a pointer to
+    /// the explicit `ee memory link` recovery path.
+    #[test]
+    fn remember_memory_without_workflow_emits_auto_link_disabled_degradation() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let report = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "A workflow-less memory; no auto-linking possible.",
+            workflow_id: None,
+            level: "procedural",
+            kind: "rule",
+            tags: None,
+            confidence: 0.8,
+            source: None,
+            allow_secret_mention: false,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: true,
+            propose_candidates: true,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            report.auto_link_status.clone(),
+            "no_workflow_required".to_string(),
+            "workflow-less auto-link status is `no_workflow_required` (honest-unimplemented marker)",
+        )?;
+        ensure(report.auto_links.len(), 0, "no auto-links created without workflow")?;
+        ensure(
+            report.auto_link_degradations.len(),
+            1,
+            "exactly one auto_link_disabled degraded entry",
+        )?;
+        let degradation = report
+            .auto_link_degradations
+            .first()
+            .ok_or_else(|| "auto_link_disabled entry missing".to_string())?;
+        ensure(
+            degradation.code.clone(),
+            "auto_link_disabled".to_string(),
+            "degraded entry code",
+        )?;
+        ensure(
+            degradation.severity.clone(),
+            "info".to_string(),
+            "degraded entry severity",
+        )?;
+        ensure(
+            degradation.message.contains("workflow context"),
+            true,
+            "message mentions workflow context",
+        )?;
+        ensure(
+            degradation.message.contains("ee memory link"),
+            true,
+            "message points at `ee memory link`",
+        )?;
+        ensure(
+            degradation.repair.contains("ee memory link"),
+            true,
+            "repair points at `ee memory link --help`",
         )
     }
 

@@ -460,10 +460,10 @@ mod tests {
             .join("fixtures")
             .join("markdown_corner_cases");
         let mut entries = std::fs::read_dir(&root)
-            .unwrap_or_else(|error| panic!("read {}: {error}", root.display()))
+            .unwrap_or_else(|error| panic!("read {}: {error}", root.display())) // ubs:ignore
             .map(|entry| {
                 entry
-                    .unwrap_or_else(|error| panic!("read fixture entry: {error}"))
+                    .unwrap_or_else(|error| panic!("read fixture entry: {error}")) // ubs:ignore
                     .path()
             })
             .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
@@ -479,9 +479,9 @@ mod tests {
         let mut names = std::collections::BTreeSet::new();
         for path in entries {
             let content = std::fs::read_to_string(&path)
-                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display())); // ubs:ignore
             let fixture: MarkdownCornerFixture = serde_json::from_str(&content)
-                .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
+                .unwrap_or_else(|error| panic!("parse {}: {error}", path.display())); // ubs:ignore
             assert!(
                 names.insert(fixture.name.clone()),
                 "duplicate markdown corner fixture name: {}",
@@ -498,7 +498,7 @@ mod tests {
                 "heading" => escape_heading(&fixture.input),
                 "inline_code" => inline_code(&fixture.input),
                 "fenced_code_block" => fenced_code_block(&fixture.input),
-                other => panic!("{} unknown renderer {other}", fixture.name),
+                other => panic!("{} unknown renderer {other}", fixture.name), // ubs:ignore
             };
             assert_eq!(
                 rendered, fixture.expected,

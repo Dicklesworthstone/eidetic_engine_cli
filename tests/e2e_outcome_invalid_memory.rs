@@ -1,7 +1,7 @@
 //! EE-jp7a: outcome command with invalid memory ID returns error envelope
 //!
 //! Validates that `ee outcome <nonexistent-id> --signal helpful` produces proper
-//! ee.error.v1 envelope with NOT_FOUND error code rather than silent success.
+//! ee.error.v2 envelope with NOT_FOUND error code rather than silent success.
 //!
 //! NO MOCKS. Real ee binary, temp workspace.
 
@@ -52,7 +52,7 @@ fn assert_error_envelope(json: &serde_json::Value, context: &str) -> TestResult 
         .get("schema")
         .and_then(|s| s.as_str())
         .ok_or_else(|| format!("{context}: missing schema field"))?;
-    ensure_equal(&schema, &"ee.error.v1", &format!("{context} schema"))
+    ensure_equal(&schema, &"ee.error.v2", &format!("{context} schema"))
 }
 
 fn assert_not_found_error(json: &serde_json::Value, context: &str) -> TestResult {

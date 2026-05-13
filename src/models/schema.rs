@@ -14,7 +14,7 @@ use super::{
     CONFOUNDER_SCHEMA_V1, CONTEXT_PROFILE_SCHEMA_CATALOG_V1, CONTEXT_PROFILE_SCHEMA_V1,
     DECISION_PLANE_SCHEMA_V1, DECISION_TRACE_SCHEMA_V1, DRY_RUN_PREVIEW_SCHEMA_V1,
     ECONOMY_RECOMMENDATION_SCHEMA_V1, ECONOMY_REPORT_SCHEMA_V1, ECONOMY_SCHEMA_CATALOG_V1,
-    ECONOMY_SIMULATION_SCHEMA_V1, EMBEDDING_METADATA_SCHEMA_V1, ERROR_SCHEMA_V1,
+    ECONOMY_SIMULATION_SCHEMA_V1, EMBEDDING_METADATA_SCHEMA_V1, ERROR_SCHEMA_V2,
     EVAL_FIXTURE_SCHEMA_V1, EXPERIMENT_OUTCOME_SCHEMA_V1, EXPORT_AGENT_SCHEMA_V1,
     EXPORT_ARTIFACT_SCHEMA_V1, EXPORT_AUDIT_SCHEMA_V1, EXPORT_FOOTER_SCHEMA_V1,
     EXPORT_HEADER_SCHEMA_V1, EXPORT_LINK_SCHEMA_V1, EXPORT_MEMORY_SCHEMA_V1, EXPORT_TAG_SCHEMA_V1,
@@ -41,7 +41,7 @@ use super::{
 pub const KNOWN_SCHEMAS: &[&str] = &[
     RESPONSE_SCHEMA_V0,
     RESPONSE_SCHEMA_V1,
-    ERROR_SCHEMA_V1,
+    ERROR_SCHEMA_V2,
     BACKUP_CREATE_SCHEMA_V1,
     BACKUP_RESTORE_SCHEMA_V1,
     BACKUP_MANIFEST_SCHEMA_V1,
@@ -394,12 +394,12 @@ mod tests {
 
     #[test]
     fn schema_mismatch_detection() -> TestResult {
-        let result = validate_schema_match(RESPONSE_SCHEMA_V1, ERROR_SCHEMA_V1);
+        let result = validate_schema_match(RESPONSE_SCHEMA_V1, ERROR_SCHEMA_V2);
         ensure(
             result,
             Err(SchemaValidationError::SchemaMismatch {
                 expected: RESPONSE_SCHEMA_V1.to_owned(),
-                actual: ERROR_SCHEMA_V1.to_owned(),
+                actual: ERROR_SCHEMA_V2.to_owned(),
             }),
             "mismatched schemas should fail",
         )
@@ -498,7 +498,7 @@ mod tests {
             (
                 SchemaValidationError::SchemaMismatch {
                     expected: "ee.response.v1".to_owned(),
-                    actual: "ee.error.v1".to_owned(),
+                    actual: "ee.error.v2".to_owned(),
                 },
                 "schema mismatch: expected ee.response.v1",
             ),

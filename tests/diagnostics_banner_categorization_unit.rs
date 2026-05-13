@@ -184,7 +184,7 @@ fn unknown_codes_default_to_affects_this_response() -> TestResult {
     let unknown_codes = [
         "freshly_invented_code_42",
         "future_feature_warning",
-        "",  // empty string defaults too — not a special case
+        "", // empty string defaults too — not a special case
         "WEIRD_CASE_THAT_DOES_NOT_EXIST_YET",
         "snake_case_unknown",
         "camelCaseUnknown",
@@ -212,7 +212,10 @@ fn category_as_str_emits_stable_snake_case_identifiers() -> TestResult {
             DegradedCategory::WorkspaceStateNotPerResponse,
             "workspace_state_not_per_response",
         ),
-        (DegradedCategory::BuildTimeFeatureGap, "build_time_feature_gap"),
+        (
+            DegradedCategory::BuildTimeFeatureGap,
+            "build_time_feature_gap",
+        ),
     ];
     for (variant, expected) in cases {
         if variant.as_str() != expected {

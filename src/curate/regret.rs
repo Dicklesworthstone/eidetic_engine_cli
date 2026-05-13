@@ -1048,6 +1048,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn generate_candidate_from_actionable_regret() {
         let entry = RegretEntry::new(
             "reg_004",
@@ -1064,9 +1065,7 @@ mod tests {
             generate_candidate_from_regret(&entry, "ws_test", CounterfactualMode::DryRun);
 
         assert!(candidate.is_some());
-        let Some(c) = candidate else {
-            panic!("actionable regret should generate a curation candidate");
-        };
+        let c = candidate.expect("actionable regret should generate a curation candidate");
         assert_eq!(c.regret_entry_id, "reg_004");
         assert_eq!(c.workspace_id, "ws_test");
         assert!(c.dry_run);
@@ -1178,6 +1177,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn candidate_reason_format() {
         let entry = RegretEntry::new(
             "reg_011",
@@ -1190,11 +1190,9 @@ mod tests {
             "2026-04-30T12:00:00Z",
         );
 
-        let Some(candidate) =
+        let candidate =
             generate_candidate_from_regret(&entry, "ws_test", CounterfactualMode::DryRun)
-        else {
-            panic!("stale information regret should generate a candidate");
-        };
+                .expect("stale information regret should generate a candidate");
 
         assert!(candidate.reason.contains("stale_information"));
         assert!(candidate.reason.contains("supersede_memory"));

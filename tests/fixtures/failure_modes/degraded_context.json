@@ -8,7 +8,7 @@
   "surfaces": [
     "context"
   ],
-  "severity": "high",
+  "severity": "medium",
   "repair_present": false,
   "trigger": {
     "description": "A context pack has one or more degraded retrieval or packing signals, so the advisory banner summarizes them.",
@@ -20,7 +20,7 @@
   },
   "expected_emission": {
     "code": "degraded_context",
-    "severity": "high",
+    "severity": "medium",
     "message_contains": [
       "degraded context signal",
       "inspect degraded"

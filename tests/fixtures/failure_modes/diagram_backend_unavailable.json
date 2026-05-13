@@ -6,7 +6,7 @@
     "epic_letter": "J"
   },
   "surfaces": [
-    "doctor",
+    "diag dependencies",
     "dependency contract"
   ],
   "severity": "medium",
@@ -14,9 +14,9 @@
   "trigger": {
     "description": "The optional diagram backend is unavailable; plain Mermaid/text output remains available.",
     "setup_commands": [
-      "ee doctor --workspace . --json"
+      "ee diag dependencies --workspace . --json"
     ],
-    "invocation": "ee doctor --workspace . --json"
+    "invocation": "ee diag dependencies --workspace . --json"
   },
   "expected_emission": {
     "code": "diagram_backend_unavailable",

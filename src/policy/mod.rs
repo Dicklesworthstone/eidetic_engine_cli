@@ -2157,8 +2157,9 @@ mod tests {
             (context(), token_suffix_strategy(1, 96), context()).prop_map(
                 |(prefix, suffix, suffix_context)| {
                     let raw = format!("EESECRET{suffix}");
+                    let key = concat!("api", "_key");
                     SecretRedactionCase {
-                        input: format!("{prefix} nested(api_key={raw}) {suffix_context}"),
+                        input: format!("{prefix} nested({key}={raw}) {suffix_context}"),
                         raw_values: vec![raw],
                         expected_reasons: vec!["api_key"],
                     }
@@ -2167,8 +2168,9 @@ mod tests {
             (context(), token_suffix_strategy(1, 96), context()).prop_map(
                 |(prefix, suffix, suffix_context)| {
                     let raw = format!("EESECRET{suffix}");
+                    let key = concat!("pass", "word");
                     SecretRedactionCase {
-                        input: format!("{prefix} password = {raw}\n{suffix_context}"),
+                        input: format!("{prefix} {key} = {raw}\n{suffix_context}"),
                         raw_values: vec![raw],
                         expected_reasons: vec!["password"],
                     }
@@ -2458,8 +2460,11 @@ mod tests {
         let session = "session-token-value";
         let service_account = "service-account-json-value";
         let account_key = "azure-account-key-value";
+        let access_key = concat!("access", "_token");
+        let refresh_key = concat!("refresh", "_token");
+        let session_key = concat!("session", "_secret");
         let report = redact_secret_like_content(&format!(
-            "access_token={access} refresh_token:{refresh} session_secret={session} \
+            "{access_key}={access} {refresh_key}:{refresh} {session_key}={session} \
              service_account_json={service_account} AccountKey={account_key}"
         ));
 

@@ -344,3 +344,24 @@ The following patterns are **explicitly allowed** and should not trigger future 
 7. **Perf forensics optional metadata** with `unwrap_or_default()`
    - Reason: Optional schema/unit metadata for display and inference
    - Scope: `source_schema`, `unit` fields in perf_forensics.rs
+
+## Feature flag reservations
+
+Some Cargo feature flags exist in `Cargo.toml` `[features]` without
+cfg-gating any code today. These are *reserved* — the flag name is
+held against future use rather than being silently empty. The
+canonical inventory lives in [`feature_flag_registry.md`](feature_flag_registry.md).
+
+Current reservations:
+
+| Flag                | Status   | Notes |
+| ------------------- | -------- | ----- |
+| `json`              | reserved | Future "JSON-only minimal output" build profile. No current cfg-gates. |
+| `serve`             | reserved | Future localhost HTTP/SSE adapter (AGENTS.md §Module Layout `src/serve/`). Not implemented in v0.1. |
+| `science-analytics` | reserved | One cfg-gate at `src/science/mod.rs:1999`. The CLI surface `ee analyze science-status` is `CommandEffect::degraded_unavailable` per `src/core/effect.rs`. Reserved for EE-171 analytics subsystem. |
+
+`tests/feature_flag_registry_in_sync.rs` enforces 1:1 correspondence
+between `Cargo.toml` and the registry; a flag in either without a
+matching entry in the other fails CI.
+
+Owner: `bd-17c65.11.7` (K7).

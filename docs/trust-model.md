@@ -14,7 +14,7 @@ Memories pass through five integration stages:
 
 | Stage | Owner | Durable effect | Public check |
 | --- | --- | --- | --- |
-| Capture | `ee remember`, `ee import cass`, `ee import eidetic-legacy --dry-run` | Creates or previews memory evidence with provenance. | `ee.response.v1` or `ee.error.v1` |
+| Capture | `ee remember`, `ee import cass`, `ee import eidetic-legacy --dry-run` | Creates or previews memory evidence with provenance. | `ee.response.v1` or `ee.error.v2` |
 | Classify | redaction, trust class, source metadata | Assigns `trust_class`, `trust_subclass`, confidence, utility, and redaction posture. | `ee.memory.v1` fields |
 | Retrieve | `ee search`, `ee context` | Selects candidates without hiding degraded capabilities. | score components and `degraded[]` |
 | Pack | `ee context` | Emits compact context with provenance, trust signals, and advisory notes. | pack hash and provenance footer |

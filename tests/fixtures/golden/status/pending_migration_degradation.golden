@@ -22,6 +22,7 @@
     "derivedAssets": [
       {
         "name": "search_index",
+        "kind": "persisted_index",
         "status": "unavailable",
         "sourceHighWatermark": null,
         "assetHighWatermark": null,
@@ -30,13 +31,22 @@
         "repair": "Run `ee doctor --json` to inspect storage and filesystem access."
       },
       {
-        "name": "graph_snapshot",
-        "status": "unimplemented",
-        "sourceHighWatermark": null,
+        "name": "graph_snapshot_artifact",
+        "kind": "persisted_snapshot",
+        "status": "empty",
+        "sourceHighWatermark": 0,
         "assetHighWatermark": null,
-        "highWatermarkLag": null,
+        "highWatermarkLag": 0,
         "path": ".ee/graph",
-        "repair": "Implement the persistent derived asset before reporting a watermark."
+        "lastBuiltAt": null,
+        "memoryGraph": {
+          "nodeCount": 0,
+          "edgeCount": 0,
+          "generation": 0,
+          "matchesDbGeneration": false,
+          "availability": "live_compute_available"
+        },
+        "repair": "ee graph centrality-refresh --workspace ."
       }
     ],
     "degraded": [

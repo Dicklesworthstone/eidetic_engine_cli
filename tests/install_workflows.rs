@@ -514,7 +514,7 @@ fn update_without_dry_run_is_policy_denied_json() -> TestResult {
     ensure(!output.status.success(), "update apply should fail")?;
     ensure_equal(
         json_str(&value, "/schema")?,
-        Some("ee.error.v1"),
+        Some("ee.error.v2"),
         "error schema",
     )?;
     ensure_equal(

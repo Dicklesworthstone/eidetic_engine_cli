@@ -15,7 +15,7 @@ use std::str::FromStr;
 use chrono::{DateTime, Duration};
 use serde::Serialize;
 
-use crate::models::ERROR_SCHEMA_V1;
+use crate::models::ERROR_SCHEMA_V2;
 
 pub const SUBSYSTEM: &str = "curate";
 pub const DEFAULT_SPECIFICITY_MIN: f32 = 0.45;
@@ -83,7 +83,7 @@ where
     match serde_json::to_string(value) {
         Ok(json) => json,
         Err(error) => serde_json::json!({
-            "schema": ERROR_SCHEMA_V1,
+            "schema": ERROR_SCHEMA_V2,
             "error": {
                 "code": "serialization_failed",
                 "message": format!("Failed to serialize {type_name} as JSON."),
@@ -4028,7 +4028,7 @@ mod tests {
 
         assert_eq!(
             parsed["schema"].as_str(),
-            Some(crate::models::ERROR_SCHEMA_V1)
+            Some(crate::models::ERROR_SCHEMA_V2)
         );
         assert_eq!(
             parsed["error"]["code"].as_str(),

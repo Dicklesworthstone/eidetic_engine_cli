@@ -66,7 +66,7 @@ fn assert_error_envelope(json: &serde_json::Value, context: &str) -> TestResult 
         .get("schema")
         .and_then(|s| s.as_str())
         .ok_or_else(|| format!("{context}: missing schema field"))?;
-    ensure_equal(&schema, &"ee.error.v1", &format!("{context} schema"))
+    ensure_equal(&schema, &"ee.error.v2", &format!("{context} schema"))
 }
 
 fn assert_stderr_empty(output: &Output, context: &str) -> TestResult {

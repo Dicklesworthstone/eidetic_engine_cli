@@ -30,7 +30,7 @@ Use the root `frankensearch` crate with:
 
 The minimal Phase 0 integration should rebuild a complete index from `ee-db`
 records, open that index for search, and report degraded lexical or no-index
-status through stable `ee.status` / `ee.error.v1` output. It should not attempt
+status through stable `ee.status` / `ee.error.v2` output. It should not attempt
 incremental mutation until a later bead proves locking, staleness, and recovery.
 
 ## Source Snapshot

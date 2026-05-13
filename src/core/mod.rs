@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use crate::models::{
-    ARTIFACT_SUMMARY_SCHEMA_V1, ERROR_SCHEMA_V1, INSTALL_CHECK_SCHEMA_V1, INSTALL_PLAN_SCHEMA_V1,
+    ARTIFACT_SUMMARY_SCHEMA_V1, ERROR_SCHEMA_V2, INSTALL_CHECK_SCHEMA_V1, INSTALL_PLAN_SCHEMA_V1,
     RESPONSE_SCHEMA_V1, UPDATE_PLAN_SCHEMA_V1,
 };
 
@@ -185,7 +185,7 @@ pub fn build_features() -> Vec<BuildFeature> {
 pub fn supported_schemas() -> Vec<SupportedSchema> {
     vec![
         SupportedSchema::new("response", RESPONSE_SCHEMA_V1),
-        SupportedSchema::new("error", ERROR_SCHEMA_V1),
+        SupportedSchema::new("error", ERROR_SCHEMA_V2),
         SupportedSchema::new("version_provenance", VERSION_PROVENANCE_SCHEMA_V1),
         SupportedSchema::new("install_check", INSTALL_CHECK_SCHEMA_V1),
         SupportedSchema::new("install_plan", INSTALL_PLAN_SCHEMA_V1),

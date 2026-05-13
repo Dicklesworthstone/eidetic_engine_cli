@@ -1,5 +1,5 @@
 use crate::config::EnvVar;
-use crate::models::{ERROR_SCHEMA_V1, RESPONSE_SCHEMA_V1};
+use crate::models::{ERROR_SCHEMA_V2, RESPONSE_SCHEMA_V1};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentDocsTopic {
@@ -514,7 +514,7 @@ pub const CONTRACTS: &[ContractEntry] = &[
     },
     ContractEntry {
         name: "error",
-        schema: ERROR_SCHEMA_V1,
+        schema: ERROR_SCHEMA_V2,
         description: "Standard error response with code, message, and repair hint",
         stability: "stable",
     },

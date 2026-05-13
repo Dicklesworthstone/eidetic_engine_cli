@@ -16,7 +16,7 @@
       "ee init --workspace .",
       "# point search at an unreadable database while using a populated index fixture"
     ],
-    "invocation": "ee search 'query' --workspace . --json"
+    "invocation": "ee search 'query' --database ./unreadable-db --index-dir ./.ee/index --workspace . --json"
   },
   "expected_emission": {
     "code": "tombstone_visibility_unavailable",

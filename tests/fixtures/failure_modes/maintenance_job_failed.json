@@ -13,16 +13,15 @@
   "trigger": {
     "description": "A supervised maintenance job returns a failed outcome.",
     "setup_commands": [
-      "ee init --workspace .",
-      "# use a job fixture that fails in the handler"
+      "ee init --workspace ."
     ],
-    "invocation": "ee job run decay_sweep --workspace . --json"
+    "invocation": "ee job run decay_sweep --database ./missing-maintenance.db --dry-run --workspace . --json"
   },
   "expected_emission": {
     "code": "maintenance_job_failed",
     "severity": "medium",
     "message_contains": [
-      "did not complete successfully"
+      "Decay sweep database does not exist"
     ],
     "repair_contains": "ee job run"
   }

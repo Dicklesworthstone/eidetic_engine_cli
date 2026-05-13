@@ -286,7 +286,7 @@ fn perf_compare_malformed_json_returns_machine_error_on_stdout() -> TestResult {
         .map_err(|error| format!("perf compare error stdout must be valid JSON: {error}"))?;
     ensure_equal(
         &parsed["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "error schema",
     )?;
     ensure_equal(
@@ -1024,7 +1024,7 @@ fn ensure_pack_query_file_machine_error(
     ensure_no_ansi(&stdout, context)?;
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|error| format!("{context} stdout must be JSON: {error}"))?;
-    ensure_equal(&json["schema"], &serde_json::json!("ee.error.v1"), context)?;
+    ensure_equal(&json["schema"], &serde_json::json!("ee.error.v2"), context)?;
     ensure_equal(
         &json["error"]["code"],
         &serde_json::json!(expected_code),
@@ -3507,7 +3507,7 @@ fn procedure_export_skill_capsule_json_reports_missing_procedure() -> TestResult
     )?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.error.v1\"",
+        "{\"schema\":\"ee.error.v2\"",
         "procedure export error schema",
     )?;
     let value: serde_json::Value = serde_json::from_str(&stdout)
@@ -3563,7 +3563,7 @@ fn procedure_promote_dry_run_json_reports_missing_procedure() -> TestResult {
     )?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.error.v1\"",
+        "{\"schema\":\"ee.error.v2\"",
         "procedure promote error schema",
     )?;
     let value: serde_json::Value = serde_json::from_str(&stdout)
@@ -4047,7 +4047,7 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
         } else {
             ensure_equal(
                 &import_json["schema"],
-                &serde_json::json!("ee.error.v1"),
+                &serde_json::json!("ee.error.v2"),
                 "CASS import fallback error schema",
             )?;
             ensure_equal(
@@ -4649,7 +4649,7 @@ fn artifact_registry_registers_indexes_exports_and_supports_context() -> TestRes
             .map_err(|error| format!("{context} stdout must be JSON: {error}"))?;
         ensure_equal(
             &error_json["schema"],
-            &serde_json::json!("ee.error.v1"),
+            &serde_json::json!("ee.error.v2"),
             context,
         )?;
         ensure_equal(
@@ -6993,7 +6993,7 @@ fn pack_query_file_invalid_json_uses_stable_machine_error() -> TestResult {
         .map_err(|error| format!("invalid JSON error stdout must be JSON: {error}"))?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "invalid JSON error schema",
     )?;
     ensure_equal(
@@ -7039,7 +7039,7 @@ fn pack_query_file_unsupported_version_uses_stable_machine_error() -> TestResult
         .map_err(|error| format!("unsupported version error stdout must be JSON: {error}"))?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v1"),
+        &serde_json::json!("ee.error.v2"),
         "unsupported version error schema",
     )?;
     ensure_equal(
@@ -8210,10 +8210,12 @@ fn mcp_manifest_json_real_binary_smoke() -> TestResult {
         .ok_or("manifest degraded must be an array")?;
     if parsed["data"]["adapter"]["featureEnabled"] == serde_json::json!(false) {
         ensure(
-            degraded
-                .iter()
-                .any(|entry| entry["code"] == "mcp_feature_disabled"),
-            "default manifest should report mcp_feature_disabled degradation",
+            degraded.is_empty(),
+            "default manifest should not repeat build-time feature gaps in degraded[]",
+        )?;
+        ensure(
+            parsed["data"]["capabilityGap"]["code"] == serde_json::json!("mcp_feature_disabled"),
+            "default manifest should point to the mcp_feature_disabled capability gap",
         )?;
     }
 

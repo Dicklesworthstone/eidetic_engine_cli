@@ -8,7 +8,7 @@
   "surfaces": [
     "swarm brief"
   ],
-  "severity": "medium",
+  "severity": "warning",
   "repair_present": true,
   "trigger": {
     "description": "Swarm brief cannot collect Agent Mail inbox, reservation, or agent inventory state.",
@@ -19,10 +19,15 @@
   },
   "expected_emission": {
     "code": "agent_mail_unavailable",
-    "severity": "medium",
+    "severity": "warning",
     "message_contains": [
-      "agent mail"
+      "Agent Mail"
     ],
-    "repair_contains": "Agent Mail"
+    "repair_contains": "Agent Mail",
+    "repair_strings": [
+      "Provide a redacted Agent Mail snapshot path when collecting the brief.",
+      "Regenerate the redacted Agent Mail snapshot.",
+      "Check the configured Agent Mail snapshot path."
+    ]
   }
 }

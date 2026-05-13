@@ -2666,7 +2666,7 @@ fn no_mocks_public_outputs_redact_secret_like_memory_content() -> TestResult {
                 raw_content,
             ],
             expected_exit_code: 7,
-            expected_schema: "ee.error.v1",
+            expected_schema: "ee.error.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -2966,7 +2966,7 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
                 raw_content,
             ],
             expected_exit_code: 7,
-            expected_schema: "ee.error.v1",
+            expected_schema: "ee.error.v2",
             expect_clean_stderr: true,
         },
     )?;

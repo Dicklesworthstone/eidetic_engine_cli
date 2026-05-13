@@ -3,7 +3,7 @@
 //! Gathers subsystem status data and returns a structured report that
 //! the output layer renders as JSON or human-readable text.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
@@ -17,8 +17,9 @@ use crate::config::{
     resolve_workspace,
 };
 use crate::db::{
-    CreateWorkspaceInput, DbConnection, FeedbackSourceHarmfulCount, PROVENANCE_CHAIN_HASH_VERSION,
-    PROVENANCE_STATUS_UNVERIFIED, StoredCurationCandidate, StoredCurationTtlPolicy, StoredMemory,
+    CreateWorkspaceInput, DbConnection, FeedbackSourceHarmfulCount, GraphSnapshotStatus,
+    GraphSnapshotType, PROVENANCE_CHAIN_HASH_VERSION, PROVENANCE_STATUS_UNVERIFIED,
+    StoredCurationCandidate, StoredCurationTtlPolicy, StoredMemory,
     default_curation_ttl_policy_id_for_review_state,
 };
 use crate::models::{CapabilityStatus, MemoryId};
@@ -30,6 +31,29 @@ use super::outcome::{DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_S
 use super::{build_info, runtime_status};
 
 const MEMORY_STALE_AFTER_DAYS: i64 = 30;
+const GRAPH_SNAPSHOT_ASSET_NAME: &str = "graph_snapshot_artifact";
+const GRAPH_SNAPSHOT_ASSET_KIND: &str = "persisted_snapshot";
+const SEARCH_INDEX_ASSET_KIND: &str = "persisted_index";
+const GRAPH_SNAPSHOT_PATH: &str = ".ee/graph";
+const GRAPH_SNAPSHOT_REFRESH_COMMAND: &str = "ee graph centrality-refresh --workspace .";
+const GRAPH_LIVE_COMPUTE_AVAILABLE: &str = "live_compute_available";
+#[cfg(not(feature = "graph"))]
+const GRAPH_LIVE_COMPUTE_UNAVAILABLE: &str = "live_compute_unavailable";
+const FNX_RUNTIME_VERSION: &str = "0.1.0";
+const GRAPH_COMPUTE_ALGORITHMS: &[&str] = &[
+    "pagerank",
+    "betweenness",
+    "hits",
+    "louvain",
+    "communities",
+    "k_core",
+    "articulation",
+    "path",
+    "explain_link",
+    "centrality_refresh",
+    "feature_enrichment",
+    "neighborhood",
+];
 
 /// Memory subsystem health status.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -298,6 +322,8 @@ pub enum DerivedAssetStatus {
     Current,
     /// The source has advanced beyond the derived asset's high watermark.
     Stale,
+    /// The asset surface exists, but no artifact has been built yet.
+    Empty,
     /// The derived asset is expected but no usable files were found.
     Missing,
     /// The derived asset exists but is not usable.
@@ -316,6 +342,7 @@ impl DerivedAssetStatus {
         match self {
             Self::Current => "current",
             Self::Stale => "stale",
+            Self::Empty => "empty",
             Self::Missing => "missing",
             Self::Corrupt => "corrupt",
             Self::NotInspected => "not_inspected",
@@ -329,11 +356,14 @@ impl DerivedAssetStatus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DerivedAssetReport {
     pub name: &'static str,
+    pub kind: &'static str,
     pub status: DerivedAssetStatus,
     pub source_high_watermark: Option<u64>,
     pub asset_high_watermark: Option<u64>,
     pub high_watermark_lag: Option<u64>,
     pub path: &'static str,
+    pub last_built_at: Option<String>,
+    pub memory_graph: Option<GraphSnapshotMemoryGraphReport>,
     pub repair: Option<&'static str>,
 }
 
@@ -342,11 +372,14 @@ impl DerivedAssetReport {
     pub const fn not_inspected(name: &'static str, path: &'static str) -> Self {
         Self {
             name,
+            kind: SEARCH_INDEX_ASSET_KIND,
             status: DerivedAssetStatus::NotInspected,
             source_high_watermark: None,
             asset_high_watermark: None,
             high_watermark_lag: None,
             path,
+            last_built_at: None,
+            memory_graph: None,
             repair: Some("Run `ee status --workspace . --json` to inspect this asset."),
         }
     }
@@ -355,11 +388,14 @@ impl DerivedAssetReport {
     pub const fn unimplemented(name: &'static str, path: &'static str) -> Self {
         Self {
             name,
+            kind: GRAPH_SNAPSHOT_ASSET_KIND,
             status: DerivedAssetStatus::Unimplemented,
             source_high_watermark: None,
             asset_high_watermark: None,
             high_watermark_lag: None,
             path,
+            last_built_at: None,
+            memory_graph: None,
             repair: Some("Implement the persistent derived asset before reporting a watermark."),
         }
     }
@@ -368,11 +404,14 @@ impl DerivedAssetReport {
     pub const fn unavailable(name: &'static str, path: &'static str) -> Self {
         Self {
             name,
+            kind: SEARCH_INDEX_ASSET_KIND,
             status: DerivedAssetStatus::Unavailable,
             source_high_watermark: None,
             asset_high_watermark: None,
             high_watermark_lag: None,
             path,
+            last_built_at: None,
+            memory_graph: None,
             repair: Some("Run `ee doctor --json` to inspect storage and filesystem access."),
         }
     }
@@ -388,12 +427,34 @@ impl DerivedAssetReport {
 
         Self {
             name: "search_index",
+            kind: SEARCH_INDEX_ASSET_KIND,
             status,
             source_high_watermark: report.db_generation,
             asset_high_watermark: report.index_generation,
             high_watermark_lag: high_watermark_lag(report.db_generation, report.index_generation),
             path: ".ee/index",
+            last_built_at: report.last_rebuild_at.clone(),
+            memory_graph: None,
             repair: report.repair_hint,
+        }
+    }
+
+    #[must_use]
+    pub fn from_graph_snapshot_artifact(report: &GraphSnapshotArtifactReport) -> Self {
+        Self {
+            name: GRAPH_SNAPSHOT_ASSET_NAME,
+            kind: GRAPH_SNAPSHOT_ASSET_KIND,
+            status: report.status,
+            source_high_watermark: Some(report.memory_graph.generation),
+            asset_high_watermark: report.snapshot_generation,
+            high_watermark_lag: high_watermark_lag(
+                Some(report.memory_graph.generation),
+                report.snapshot_generation,
+            ),
+            path: GRAPH_SNAPSHOT_PATH,
+            last_built_at: report.last_built_at.clone(),
+            memory_graph: Some(report.memory_graph.clone()),
+            repair: Some(GRAPH_SNAPSHOT_REFRESH_COMMAND),
         }
     }
 }
@@ -410,6 +471,56 @@ fn high_watermark_lag(source: Option<u64>, asset: Option<u64>) -> Option<u64> {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StatusOptions {
     pub workspace_path: Option<PathBuf>,
+}
+
+/// Live graph algorithm readiness, independent of any persisted snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphComputeStatus {
+    Available,
+    Degraded,
+    Unavailable,
+}
+
+impl GraphComputeStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Degraded => "degraded",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Status for live FrankenNetworkX-backed graph computation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphComputeReport {
+    pub status: GraphComputeStatus,
+    pub available_algorithms: &'static [&'static str],
+    pub live_compute_supported: bool,
+    pub fnx_runtime_version: &'static str,
+    pub last_used_at: Option<String>,
+}
+
+/// Current memory-link graph facts exposed with the snapshot artifact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphSnapshotMemoryGraphReport {
+    pub node_count: u32,
+    pub edge_count: u32,
+    pub generation: u64,
+    pub matches_db_generation: bool,
+    pub availability: &'static str,
+}
+
+/// Persisted graph snapshot freshness, separate from live compute readiness.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphSnapshotArtifactReport {
+    pub status: DerivedAssetStatus,
+    pub last_built_at: Option<String>,
+    pub snapshot_path: Option<&'static str>,
+    pub snapshot_generation: Option<u64>,
+    pub memory_graph: GraphSnapshotMemoryGraphReport,
+    pub next_refresh_via: &'static str,
 }
 
 /// Workspace selection and ambiguity diagnostics for status output.
@@ -712,6 +823,8 @@ pub struct StatusReport {
     pub memory_health: MemoryHealthReport,
     pub curation_health: CurationHealthReport,
     pub feedback_health: FeedbackHealthReport,
+    pub graph_compute: GraphComputeReport,
+    pub graph_snapshot_artifact: GraphSnapshotArtifactReport,
     pub derived_assets: Vec<DerivedAssetReport>,
     pub agent_inventory: AgentInventoryReport,
     pub degradations: Vec<DegradationReport>,
@@ -745,7 +858,11 @@ impl StatusReport {
         let (memory_health, memory_health_degradations) =
             gather_memory_health(options.workspace_path.as_deref());
         let workspace = gather_workspace_status(options.workspace_path.as_deref());
-        let derived_assets = gather_derived_assets(options.workspace_path.as_deref());
+        let graph_compute = gather_graph_compute();
+        let graph_snapshot_artifact =
+            gather_graph_snapshot_artifact(options.workspace_path.as_deref());
+        let derived_assets =
+            gather_derived_assets(options.workspace_path.as_deref(), &graph_snapshot_artifact);
         let (curation_health, curation_degradations) =
             gather_curation_health(options.workspace_path.as_deref());
         let (feedback_health, feedback_degradations) =
@@ -777,6 +894,8 @@ impl StatusReport {
             memory_health,
             curation_health,
             feedback_health,
+            graph_compute,
+            graph_snapshot_artifact,
             derived_assets,
             agent_inventory,
             degradations,
@@ -815,14 +934,9 @@ fn push_storage_capability_degradation(
                 repair: "Run `ee doctor --json`.",
             });
         }
-        CapabilityStatus::Unimplemented => {
-            degradations.push(DegradationReport {
-                code: "storage_unimplemented",
-                severity: "high",
-                message: "Storage has no compiled implementation in this binary.",
-                repair: "Use a binary built with the storage subsystem enabled.",
-            });
-        }
+        // Build-time gaps are reported once through `ee capabilities`,
+        // not repeated in per-response `degraded[]`.
+        CapabilityStatus::Unimplemented => {}
     }
 }
 
@@ -857,14 +971,9 @@ fn push_search_capability_degradation(
                 repair: "Run `ee index status --workspace . --json`.",
             });
         }
-        CapabilityStatus::Unimplemented => {
-            degradations.push(DegradationReport {
-                code: "search_unimplemented",
-                severity: "high",
-                message: "Search has no compiled implementation in this binary.",
-                repair: "Use a binary built with search support enabled.",
-            });
-        }
+        // Build-time gaps are reported once through `ee capabilities`,
+        // not repeated in per-response `degraded[]`.
+        CapabilityStatus::Unimplemented => {}
     }
 }
 
@@ -889,7 +998,10 @@ fn gather_workspace_status(workspace_path: Option<&Path>) -> Option<WorkspaceSta
     ))
 }
 
-fn gather_derived_assets(workspace_path: Option<&Path>) -> Vec<DerivedAssetReport> {
+fn gather_derived_assets(
+    workspace_path: Option<&Path>,
+    graph_snapshot_artifact: &GraphSnapshotArtifactReport,
+) -> Vec<DerivedAssetReport> {
     let search_index = match workspace_path {
         Some(path) => {
             let options = IndexStatusOptions {
@@ -905,9 +1017,245 @@ fn gather_derived_assets(workspace_path: Option<&Path>) -> Vec<DerivedAssetRepor
         None => DerivedAssetReport::not_inspected("search_index", ".ee/index"),
     };
 
-    let graph_snapshot = DerivedAssetReport::unimplemented("graph_snapshot", ".ee/graph");
+    let graph_snapshot = DerivedAssetReport::from_graph_snapshot_artifact(graph_snapshot_artifact);
 
     vec![search_index, graph_snapshot]
+}
+
+fn gather_graph_compute() -> GraphComputeReport {
+    #[cfg(feature = "graph")]
+    {
+        GraphComputeReport {
+            status: GraphComputeStatus::Available,
+            available_algorithms: GRAPH_COMPUTE_ALGORITHMS,
+            live_compute_supported: true,
+            fnx_runtime_version: FNX_RUNTIME_VERSION,
+            last_used_at: None,
+        }
+    }
+    #[cfg(not(feature = "graph"))]
+    {
+        GraphComputeReport {
+            status: GraphComputeStatus::Unavailable,
+            available_algorithms: &[],
+            live_compute_supported: false,
+            fnx_runtime_version: FNX_RUNTIME_VERSION,
+            last_used_at: None,
+        }
+    }
+}
+
+fn gather_graph_snapshot_artifact(workspace_path: Option<&Path>) -> GraphSnapshotArtifactReport {
+    let Some(workspace_path) = workspace_path else {
+        return graph_snapshot_artifact_report(
+            DerivedAssetStatus::NotInspected,
+            None,
+            None,
+            None,
+            GraphSnapshotMemoryGraphReport {
+                node_count: 0,
+                edge_count: 0,
+                generation: 0,
+                matches_db_generation: false,
+                availability: graph_live_compute_availability(),
+            },
+        );
+    };
+
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return graph_snapshot_artifact_report(
+            DerivedAssetStatus::Unavailable,
+            None,
+            None,
+            None,
+            GraphSnapshotMemoryGraphReport {
+                node_count: 0,
+                edge_count: 0,
+                generation: 0,
+                matches_db_generation: false,
+                availability: graph_live_compute_availability(),
+            },
+        );
+    }
+
+    let connection = match DbConnection::open_file(&database_path) {
+        Ok(connection) => connection,
+        Err(_) => {
+            return graph_snapshot_artifact_report(
+                DerivedAssetStatus::Unavailable,
+                None,
+                None,
+                None,
+                GraphSnapshotMemoryGraphReport {
+                    node_count: 0,
+                    edge_count: 0,
+                    generation: 0,
+                    matches_db_generation: false,
+                    availability: graph_live_compute_availability(),
+                },
+            );
+        }
+    };
+
+    gather_graph_snapshot_artifact_from_connection(&connection, workspace_path)
+}
+
+fn gather_graph_snapshot_artifact_from_connection(
+    connection: &DbConnection,
+    workspace_path: &Path,
+) -> GraphSnapshotArtifactReport {
+    let (current_generation, node_count, edge_count) =
+        memory_graph_generation(connection).unwrap_or((0, 0, 0));
+    let mut snapshot = None;
+    for workspace_id in resolve_status_workspace_ids(connection, workspace_path) {
+        match connection.get_latest_graph_snapshot(&workspace_id, GraphSnapshotType::MemoryLinks) {
+            Ok(Some(candidate)) => {
+                if snapshot
+                    .as_ref()
+                    .is_none_or(|current: &crate::db::StoredGraphSnapshot| {
+                        candidate.snapshot_version > current.snapshot_version
+                    })
+                {
+                    snapshot = Some(candidate);
+                }
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return graph_snapshot_artifact_report(
+                    DerivedAssetStatus::Unavailable,
+                    None,
+                    None,
+                    None,
+                    GraphSnapshotMemoryGraphReport {
+                        node_count,
+                        edge_count,
+                        generation: current_generation,
+                        matches_db_generation: false,
+                        availability: graph_live_compute_availability(),
+                    },
+                );
+            }
+        }
+    }
+
+    let Some(snapshot) = snapshot else {
+        return graph_snapshot_artifact_report(
+            DerivedAssetStatus::Empty,
+            None,
+            None,
+            None,
+            GraphSnapshotMemoryGraphReport {
+                node_count,
+                edge_count,
+                generation: current_generation,
+                matches_db_generation: false,
+                availability: graph_live_compute_availability(),
+            },
+        );
+    };
+
+    let snapshot_generation = u64::from(snapshot.source_generation);
+    let matches_db_generation = snapshot_generation == current_generation;
+    let status = match snapshot.status {
+        GraphSnapshotStatus::Invalid | GraphSnapshotStatus::Archived => DerivedAssetStatus::Corrupt,
+        GraphSnapshotStatus::Stale => DerivedAssetStatus::Stale,
+        GraphSnapshotStatus::Valid if matches_db_generation => DerivedAssetStatus::Current,
+        GraphSnapshotStatus::Valid => DerivedAssetStatus::Stale,
+    };
+
+    graph_snapshot_artifact_report(
+        status,
+        Some(snapshot.created_at),
+        None,
+        Some(snapshot_generation),
+        GraphSnapshotMemoryGraphReport {
+            node_count: node_count.max(snapshot.node_count),
+            edge_count: edge_count.max(snapshot.edge_count),
+            generation: current_generation,
+            matches_db_generation,
+            availability: graph_live_compute_availability(),
+        },
+    )
+}
+
+fn graph_snapshot_artifact_report(
+    status: DerivedAssetStatus,
+    last_built_at: Option<String>,
+    snapshot_path: Option<&'static str>,
+    snapshot_generation: Option<u64>,
+    memory_graph: GraphSnapshotMemoryGraphReport,
+) -> GraphSnapshotArtifactReport {
+    GraphSnapshotArtifactReport {
+        status,
+        last_built_at,
+        snapshot_path,
+        snapshot_generation,
+        memory_graph,
+        next_refresh_via: GRAPH_SNAPSHOT_REFRESH_COMMAND,
+    }
+}
+
+fn graph_live_compute_availability() -> &'static str {
+    #[cfg(feature = "graph")]
+    {
+        GRAPH_LIVE_COMPUTE_AVAILABLE
+    }
+    #[cfg(not(feature = "graph"))]
+    {
+        GRAPH_LIVE_COMPUTE_UNAVAILABLE
+    }
+}
+
+fn memory_graph_generation(
+    connection: &DbConnection,
+) -> Result<(u64, u32, u32), crate::db::DbError> {
+    let links = connection.list_all_memory_links(None)?;
+    let mut nodes = BTreeSet::new();
+    for link in &links {
+        nodes.insert(link.src_memory_id.clone());
+        nodes.insert(link.dst_memory_id.clone());
+    }
+    let generation = u64::try_from(links.len()).unwrap_or(u64::MAX);
+    let node_count = u32::try_from(nodes.len()).unwrap_or(u32::MAX);
+    let edge_count = u32::try_from(links.len()).unwrap_or(u32::MAX);
+    Ok((generation, node_count, edge_count))
+}
+
+fn resolve_status_workspace_ids(connection: &DbConnection, workspace_path: &Path) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let workspace_key = workspace_path.to_string_lossy().to_string();
+    if let Some(workspace) = connection
+        .get_workspace_by_path(&workspace_key)
+        .ok()
+        .flatten()
+    {
+        push_unique_workspace_id(&mut candidates, workspace.id);
+    }
+    push_unique_workspace_id(&mut candidates, stable_workspace_id(workspace_path));
+
+    if let Ok(canonical) = workspace_path.canonicalize() {
+        let canonical_key = canonical.to_string_lossy().to_string();
+        if let Some(workspace) = connection
+            .get_workspace_by_path(&canonical_key)
+            .ok()
+            .flatten()
+        {
+            push_unique_workspace_id(&mut candidates, workspace.id);
+        }
+        push_unique_workspace_id(&mut candidates, stable_workspace_id(&canonical));
+    }
+
+    candidates
+}
+
+fn push_unique_workspace_id(candidates: &mut Vec<String>, workspace_id: String) {
+    if !candidates
+        .iter()
+        .any(|candidate| candidate == &workspace_id)
+    {
+        candidates.push(workspace_id);
+    }
 }
 
 fn gather_memory_health(
@@ -2144,6 +2492,107 @@ mod tests {
             Some("ee index rebuild --workspace ."),
             "repair",
         )
+    }
+
+    #[test]
+    fn graph_compute_report_separates_live_algorithm_availability() -> TestResult {
+        let report = gather_graph_compute();
+
+        ensure(
+            report.status,
+            GraphComputeStatus::Available,
+            "graph compute status",
+        )?;
+        ensure(
+            report.live_compute_supported,
+            true,
+            "live compute supported",
+        )?;
+        ensure(
+            report.available_algorithms.contains(&"pagerank"),
+            true,
+            "pagerank listed",
+        )
+    }
+
+    #[test]
+    fn graph_snapshot_artifact_reports_empty_without_persisted_snapshot() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_path = Path::new("/tmp/ee-status-graph-empty");
+        let workspace_id = stable_workspace_id(workspace_path);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let report = gather_graph_snapshot_artifact_from_connection(&connection, workspace_path);
+        let asset = DerivedAssetReport::from_graph_snapshot_artifact(&report);
+
+        ensure(report.status, DerivedAssetStatus::Empty, "artifact status")?;
+        ensure(report.memory_graph.node_count, 0, "node count")?;
+        ensure(report.memory_graph.edge_count, 0, "edge count")?;
+        ensure(
+            report.memory_graph.availability,
+            GRAPH_LIVE_COMPUTE_AVAILABLE,
+            "live availability",
+        )?;
+        ensure(asset.name, GRAPH_SNAPSHOT_ASSET_NAME, "asset name")?;
+        ensure(asset.kind, GRAPH_SNAPSHOT_ASSET_KIND, "asset kind")
+    }
+
+    #[test]
+    fn graph_snapshot_artifact_reports_current_persisted_snapshot() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_path = Path::new("/tmp/ee-status-graph-current");
+        let workspace_id = stable_workspace_id(workspace_path);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_graph_snapshot(
+                "gsnap_0000000000000000000000001",
+                &crate::db::CreateGraphSnapshotInput {
+                    workspace_id,
+                    snapshot_version: 1,
+                    schema_version: "ee.graph.snapshot_validation.v1".to_owned(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 0,
+                    edge_count: 0,
+                    metrics_json: "{}".to_owned(),
+                    content_hash: "blake3:empty".to_owned(),
+                    source_generation: 0,
+                    expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let report = gather_graph_snapshot_artifact_from_connection(&connection, workspace_path);
+
+        ensure(
+            report.status,
+            DerivedAssetStatus::Current,
+            "artifact status",
+        )?;
+        ensure(
+            report.memory_graph.matches_db_generation,
+            true,
+            "generation match",
+        )?;
+        ensure(report.snapshot_generation, Some(0), "snapshot generation")?;
+        ensure(report.last_built_at.is_some(), true, "last built timestamp")
     }
 
     #[test]

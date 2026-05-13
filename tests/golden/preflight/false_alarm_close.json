@@ -1,5 +1,5 @@
 {
-  "schema": "ee.error.v1",
+  "schema": "ee.error.v2",
   "error": {
     "code": "not_found",
     "message": "preflight run not found: pf_gate16_contract",

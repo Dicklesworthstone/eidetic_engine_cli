@@ -494,8 +494,8 @@ fn graph_neighborhood_invalid_direction_is_usage_error() -> TestResult {
     let parsed: Value =
         serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
     ensure(
-        parsed["schema"] == Value::String("ee.error.v1".to_string()),
-        "error envelope schema must be ee.error.v1",
+        parsed["schema"] == Value::String("ee.error.v2".to_string()),
+        "error envelope schema must be ee.error.v2",
     )?;
     ensure(
         parsed["error"]["message"]

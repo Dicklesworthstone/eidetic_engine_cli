@@ -529,7 +529,7 @@ mod tests {
     fn parse_invalid_decision_plane_error() {
         let result: Result<DecisionPlane, _> = "invalid".parse();
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.expect_err("avoid unwrap_err in production code");
         assert!(err.to_string().contains("invalid decision plane"));
     }
 

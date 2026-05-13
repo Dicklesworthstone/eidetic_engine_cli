@@ -21,8 +21,7 @@
     "code": "preflight_evidence_unavailable",
     "severity": "medium",
     "message_contains": [
-      "evidence",
-      "unavailable"
+      "No persisted evidence sources"
     ],
     "repair_contains": "preflight evidence"
   }

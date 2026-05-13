@@ -142,7 +142,7 @@ class ConsumeErrorEnvelope(unittest.TestCase):
 
     def test_error_envelope_renders_html_comment_with_code(self) -> None:
         resp = {
-            "schema": "ee.error.v1",
+            "schema": "ee.error.v2",
             "success": False,
             "error": {"code": "search_index_stale", "message": "rebuild required"},
         }

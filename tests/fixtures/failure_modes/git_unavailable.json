@@ -8,7 +8,7 @@
   "surfaces": [
     "swarm brief"
   ],
-  "severity": "medium",
+  "severity": "warning",
   "repair_present": true,
   "trigger": {
     "description": "Swarm brief cannot collect git state for the workspace.",
@@ -19,10 +19,15 @@
   },
   "expected_emission": {
     "code": "git_unavailable",
-    "severity": "medium",
+    "severity": "warning",
     "message_contains": [
-      "git"
+      "git was not found"
     ],
-    "repair_contains": "git"
+    "repair_contains": "git",
+    "repair_strings": [
+      "Run `git status --short` in the workspace.",
+      "Run `git log -n 8 --format=%H%x1f%ct%x1f%s` in the workspace."
+    ],
+    "repair_command_regex": "Run `(?<cmd>git [^`]+)`"
   }
 }

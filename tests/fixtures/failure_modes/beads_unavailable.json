@@ -8,7 +8,7 @@
   "surfaces": [
     "swarm brief"
   ],
-  "severity": "medium",
+  "severity": "warning",
   "repair_present": true,
   "trigger": {
     "description": "Swarm brief cannot collect Beads issue state.",
@@ -19,10 +19,12 @@
   },
   "expected_emission": {
     "code": "beads_unavailable",
-    "severity": "medium",
+    "severity": "warning",
     "message_contains": [
-      "beads"
+      "br was not found"
     ],
-    "repair_contains": "br"
+    "repair_contains": "br",
+    "repair_string": "br ready --json",
+    "repair_command_regex": "(?<cmd>br [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

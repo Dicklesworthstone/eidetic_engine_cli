@@ -38,6 +38,23 @@ The v0 response envelope is retained for the full `0.1.x` minor-version cycle.
 It may be removed when the project cuts `0.2.0`. New integrations should consume
 the default v1 envelope.
 
+## Status Graph Fields
+
+`ee status --json` no longer reports the persisted graph cache as
+`graph_snapshot`. The live graph algorithms and durable snapshot artifact are
+separate surfaces:
+
+- `data.graphCompute` reports whether on-demand graph algorithms such as
+  PageRank and betweenness are available.
+- `data.graphSnapshotArtifact` reports whether a persisted
+  `memory_links` snapshot has been built, is current, or is stale.
+- `data.derivedAssets[]` now uses `name: "graph_snapshot_artifact"` with
+  `kind: "persisted_snapshot"`; the old `graph_snapshot` asset name is removed.
+
+An empty snapshot artifact is normal on a fresh workspace. It means no
+`ee graph centrality-refresh --workspace .` run has produced a persisted
+snapshot yet; it does not mean live graph compute is unavailable.
+
 ## Core Documents
 
 - [Mechanical Boundary Command Inventory](./mechanical-boundary-command-inventory.md) — full command matrix
@@ -67,7 +84,7 @@ the default v1 envelope.
 **Degraded outputs:**
 ```json
 {
-  "schema": "ee.error.v1",
+  "schema": "ee.error.v2",
   "error": {
     "code": "search_index_unavailable",
     "message": "Search index is stale or unavailable.",
@@ -176,7 +193,7 @@ ee learn experiment run --id exp_database_contract_fixture --dry-run --json
 ee learn experiment run --id exp_database_contract_fixture --dry-run --json
 # Returns: UnsatisfiedDegradedMode error
 {
-  "schema": "ee.error.v1",
+  "schema": "ee.error.v2",
   "error": {
     "code": "unsatisfied_degraded_mode",
     "message": "Experiment execution requires persisted experiment definitions from an evaluation registry.",
@@ -272,7 +289,7 @@ ee learn experiment run --id exp_database_contract_fixture --dry-run --json
 **Degraded outputs:**
 ```json
 {
-  "schema": "ee.error.v1",
+  "schema": "ee.error.v2",
   "error": {
     "code": "situation_skill_required",
     "message": "Situation classification requires skill interpretation.",
@@ -297,7 +314,7 @@ ee learn experiment run --id exp_database_contract_fixture --dry-run --json
 **Degraded outputs:**
 ```json
 {
-  "schema": "ee.error.v1",
+  "schema": "ee.error.v2",
   "error": {
     "code": "rehearsal_unavailable",
     "message": "Rehearsal requires isolated sandbox implementation.",

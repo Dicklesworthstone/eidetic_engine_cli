@@ -16,7 +16,7 @@
     "setup_commands": [
       "mkdir -p <workspace>"
     ],
-    "invocation": "ee trust quarantine --workspace <workspace> --json"
+    "invocation": "ee diag quarantine list --workspace <workspace> --json"
   },
   "expected_emission": {
     "code": "quarantine_database_missing",

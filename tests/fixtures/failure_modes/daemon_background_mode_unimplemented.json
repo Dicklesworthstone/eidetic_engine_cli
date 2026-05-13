@@ -11,11 +11,11 @@
   "severity": "low",
   "repair_present": true,
   "trigger": {
-    "description": "Daemon reporting explains that only bounded foreground daemon mode exists today.",
+    "description": "Daemon status reporting explains that only bounded foreground daemon mode exists today.",
     "setup_commands": [
-      "ee init --workspace ."
+      "none"
     ],
-    "invocation": "ee daemon --foreground --once --workspace . --json"
+    "invocation": "ee daemon --json"
   },
   "expected_emission": {
     "code": "daemon_background_mode_unimplemented",

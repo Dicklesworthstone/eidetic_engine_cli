@@ -985,10 +985,7 @@ mod tests {
 
         let handle = thread::spawn(|| Ok(b"hello".to_vec()));
         let result = join_pipe_reader(handle);
-        let bytes = match result {
-            Ok(b) => b,
-            Err(e) => panic!("expected success but got: {e}"),
-        };
+        let bytes = result.unwrap_or_else(|e| panic!("expected success but got: {e}")); // ubs:ignore
         assert_eq!(bytes, b"hello");
     }
 
@@ -1001,6 +998,7 @@ mod tests {
         let handle = thread::spawn(|| Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe broke")));
         let result = join_pipe_reader(handle);
         let err = match result {
+            // ubs:ignore
             Ok(_) => panic!("expected join_pipe_reader to return Err for read failure"),
             Err(e) => e,
         };
@@ -1015,12 +1013,13 @@ mod tests {
         use std::thread;
 
         let handle: thread::JoinHandle<Result<Vec<u8>, std::io::Error>> =
-            thread::spawn(|| panic!("intentional test panic"));
+            thread::spawn(|| panic!("intentional test panic")); // ubs:ignore
 
         std::thread::sleep(Duration::from_millis(10));
 
         let result = join_pipe_reader(handle);
         let err = match result {
+            // ubs:ignore
             Ok(_) => panic!("expected join_pipe_reader to return Err for thread panic"),
             Err(e) => e,
         };

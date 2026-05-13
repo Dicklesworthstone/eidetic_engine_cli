@@ -91,7 +91,7 @@ impl SchemaCategory {
 /// Core response schemas.
 pub const CORE_SCHEMAS: &[SchemaEntry] = &[
     SchemaEntry::new("response", "ee.response.v1", SchemaCategory::Response),
-    SchemaEntry::new("error", "ee.error.v1", SchemaCategory::Error),
+    SchemaEntry::new("error", "ee.error.v2", SchemaCategory::Error),
     SchemaEntry::new(
         "version_provenance",
         "ee.version.provenance.v1",
@@ -1338,8 +1338,8 @@ mod tests {
             "core schemas must include ee.response.v1",
         )?;
         ensure(
-            versions.contains(&"ee.error.v1"),
-            "core schemas must include ee.error.v1",
+            versions.contains(&"ee.error.v2"),
+            "core schemas must include ee.error.v2",
         )
     }
 

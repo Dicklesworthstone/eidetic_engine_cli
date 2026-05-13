@@ -229,9 +229,9 @@ fn migrate_status_on_missing_database_returns_storage_error() -> TestResult {
         ));
     }
     let stdout = String::from_utf8_lossy(&status.stdout);
-    if !stdout.contains("\"schema\":\"ee.error.v1\"") {
+    if !stdout.contains("\"schema\":\"ee.error.v2\"") {
         return Err(format!(
-            "expected ee.error.v1 envelope on missing DB, got: {stdout}"
+            "expected ee.error.v2 envelope on missing DB, got: {stdout}"
         ));
     }
     Ok(())

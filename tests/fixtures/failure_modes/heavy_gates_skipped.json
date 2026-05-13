@@ -6,17 +6,17 @@
     "epic_letter": "J"
   },
   "surfaces": [
-    "profile verify"
+    "profile config plan"
   ],
   "severity": "info",
   "repair_present": true,
   "trigger": {
-    "description": "A constrained verification profile skips heavy cargo gates.",
+    "description": "A constrained operating profile plans a verification budget that skips heavy cargo gates.",
     "setup_commands": [
       "ee init --workspace .",
       "# select a profile whose verification budget omits heavy gates"
     ],
-    "invocation": "ee profile verify --workspace . --json"
+    "invocation": "ee profile config plan --profile constrained --workspace . --json"
   },
   "expected_emission": {
     "code": "heavy_gates_skipped",

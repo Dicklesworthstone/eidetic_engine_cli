@@ -13,10 +13,10 @@
   "trigger": {
     "description": "The maintenance job lock file cannot be opened.",
     "setup_commands": [
-      "ee init --workspace .",
-      "# make the lock path unwritable through a test harness"
+      "mkdir -p <workspace>",
+      "printf 'not a directory' > <workspace>/.ee"
     ],
-    "invocation": "ee job run decay_sweep --workspace . --json"
+    "invocation": "ee job run custom --workspace <workspace> --json"
   },
   "expected_emission": {
     "code": "maintenance_job_lock_open_failed",
@@ -24,6 +24,6 @@
     "message_contains": [
       "lock"
     ],
-    "repair_contains": "permissions"
+    "repair_contains": "ee job run"
   }
 }

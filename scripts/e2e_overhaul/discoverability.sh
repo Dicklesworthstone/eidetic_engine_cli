@@ -29,8 +29,12 @@ SECRET_JSON=$(ee_workspace remember \
     --level episodic --json 2>/dev/null || true)
 
 if printf '%s' "$SECRET_JSON" | jq . >/dev/null 2>&1; then
-    # The error envelope is `ee.error.v1` (top-level {schema, error}), not the
+    # The error envelope is `ee.error.v2` (top-level {schema, error}), not the
     # `ee.response.v1` `{success, error}` shape — accept either path.
+    SECRET_SCHEMA=$(printf '%s' "$SECRET_JSON" \
+        | jq -r '.schema // empty' 2>/dev/null || true)
+    e2e_log_assert_eq "$SECRET_SCHEMA" "ee.error.v2" "a10_error_schema_v2_on_policy_denied"
+
     RECOVERY_COUNT=$(printf '%s' "$SECRET_JSON" \
         | jq '(.error.details.recovery // []) | length' 2>/dev/null || echo 0)
     e2e_log_assert_num "$RECOVERY_COUNT" -ge 1 "f1_recovery_actions_present_on_policy_denied"
@@ -68,6 +72,10 @@ fi
 # Unknown prefix produces an error that names the supported prefixes.
 ALIAS_BAD_JSON=$(ee_workspace show "xyz_unknown_prefix_id" --json 2>/dev/null || true)
 if printf '%s' "$ALIAS_BAD_JSON" | jq . >/dev/null 2>&1; then
+    ALIAS_BAD_SCHEMA=$(printf '%s' "$ALIAS_BAD_JSON" \
+        | jq -r '.schema // empty' 2>/dev/null || true)
+    e2e_log_assert_eq "$ALIAS_BAD_SCHEMA" "ee.error.v2" "a10_error_schema_v2_on_alias_error"
+
     ALIAS_BAD_MSG=$(printf '%s' "$ALIAS_BAD_JSON" \
         | jq -r '.error.message // empty' 2>/dev/null || true)
     if printf '%s' "$ALIAS_BAD_MSG" | grep -qE 'Unknown ID prefix|prefix'; then

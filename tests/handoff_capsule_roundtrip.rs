@@ -287,8 +287,8 @@ fn handoff_inspect_reports_corrupted_capsule_as_storage_error() -> TestResult {
     )?;
     let json = stdout_json(&output)?;
     ensure(
-        json.get("schema").and_then(|v| v.as_str()) == Some("ee.error.v1"),
-        "corrupted inspect should emit ee.error.v1 envelope",
+        json.get("schema").and_then(|v| v.as_str()) == Some("ee.error.v2"),
+        "corrupted inspect should emit ee.error.v2 envelope",
     )?;
     ensure(
         json.pointer("/error/code").and_then(|v| v.as_str()) == Some("storage"),
@@ -374,8 +374,8 @@ fn handoff_resume_missing_capsule_returns_storage_error() -> TestResult {
     )?;
     let json = stdout_json(&output)?;
     ensure(
-        json.get("schema").and_then(|v| v.as_str()) == Some("ee.error.v1"),
-        "missing-capsule resume should emit ee.error.v1 envelope",
+        json.get("schema").and_then(|v| v.as_str()) == Some("ee.error.v2"),
+        "missing-capsule resume should emit ee.error.v2 envelope",
     )?;
     ensure(
         json.pointer("/error/code").and_then(|v| v.as_str()) == Some("storage"),

@@ -1250,6 +1250,7 @@ fn push_search_degradations(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lexical_memory_fallback_hits(
     connection: &DbConnection,
     workspace_path: &Path,
@@ -1308,6 +1309,7 @@ fn lexical_memory_fallback_hits(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fallback_memories_for_workspace(
     connection: &DbConnection,
     workspace_path: &Path,

@@ -21,7 +21,7 @@
     "code": "drift_no_evaluation_snapshots",
     "severity": "high",
     "message_contains": [
-      "No frozen evaluation snapshots"
+      "At least two evaluation snapshots"
     ],
     "repair_contains": "ee eval run"
   }

@@ -97,7 +97,7 @@ data:
 
 Error responses use the error schema:
 ```
-schema: ee.error.v1
+schema: ee.error.v2
 error:
   code: storage_unavailable
   message: Database not initialized
@@ -167,7 +167,7 @@ TOON output is deterministic:
 If TOON encoding fails (invalid JSON input), the output is:
 
 ```
-schema: ee.error.v1
+schema: ee.error.v2
 error:
   code: toon_encoding_failed
   message: "TOON encoding failed: <error details>"

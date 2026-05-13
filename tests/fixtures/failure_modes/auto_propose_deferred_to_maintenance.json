@@ -14,9 +14,10 @@
     "description": "Remember-time proposal exceeded its synchronous budget before durable write, so maintenance/review should produce candidates later.",
     "setup_commands": [
       "ee init --workspace .",
-      "# seed enough tagged evidence to exceed the synchronous proposal budget"
+      "ee remember 'J6 deferred proposal cluster alpha.' --workspace . --tags j6-deferred-proposal --json",
+      "ee remember 'J6 deferred proposal cluster beta.' --workspace . --tags j6-deferred-proposal --json"
     ],
-    "invocation": "ee remember 'Budget-heavy cluster fact.' --workspace . --tags cluster --json"
+    "invocation": "ee remember 'J6 deferred proposal cluster gamma.' --workspace . --tags j6-deferred-proposal --json"
   },
   "expected_emission": {
     "code": "auto_propose_deferred_to_maintenance",

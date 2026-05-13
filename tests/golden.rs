@@ -1603,7 +1603,7 @@ mod tests {
         )?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.error.v1"),
+            &serde_json::json!("ee.error.v2"),
             "preflight show error schema",
         )?;
         ensure_equal(
@@ -1639,7 +1639,7 @@ mod tests {
         )?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.error.v1"),
+            &serde_json::json!("ee.error.v2"),
             "preflight close error schema",
         )?;
         ensure_equal(

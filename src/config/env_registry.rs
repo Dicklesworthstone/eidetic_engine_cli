@@ -135,7 +135,9 @@ impl EnvVar {
             Self::CassBinary => "Override the trusted cass import binary path.",
             Self::DatabasePath => "Override the configured storage database path.",
             Self::DemoEvidenceRoot => "Override the demo evidence storage root.",
-            Self::ExperimentalTriad => "Enable experimental ee pack/note/why aliases.",
+            Self::ExperimentalTriad => {
+                "Compatibility no-op for the promoted ee pack/note/why aliases."
+            }
             Self::Format => "Select the default output renderer.",
             Self::HarmfulBurstWindowSeconds => {
                 "Override the harmful feedback burst window in seconds."

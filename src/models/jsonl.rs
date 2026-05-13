@@ -1785,7 +1785,7 @@ mod tests {
         field: &'static str,
         ctx: &str,
     ) -> TestResult {
-        let error = result.map(|_| ()).unwrap_err();
+        let error = result.map(|_| ()).expect_err("avoid unwrap_err in production code");
         ensure(
             error.record_type,
             record_type,
@@ -2640,7 +2640,7 @@ mod tests {
     fn parse_invalid_export_record_type_error() {
         let result: Result<ExportRecordType, _> = "invalid".parse();
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.expect_err("avoid unwrap_err in production code");
         assert!(err.to_string().contains("invalid export record type"));
         assert!(err.to_string().contains("'invalid'"));
     }
@@ -2649,7 +2649,7 @@ mod tests {
     fn parse_invalid_redaction_level_error() {
         let result: Result<RedactionLevel, _> = "invalid".parse();
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.expect_err("avoid unwrap_err in production code");
         assert!(err.to_string().contains("invalid redaction level"));
     }
 
@@ -2657,7 +2657,7 @@ mod tests {
     fn parse_invalid_export_scope_error() {
         let result: Result<ExportScope, _> = "invalid".parse();
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.expect_err("avoid unwrap_err in production code");
         assert!(err.to_string().contains("invalid export scope"));
     }
 
@@ -2703,7 +2703,7 @@ mod tests {
     fn parse_invalid_import_source_error() {
         let result: Result<ImportSource, _> = "invalid".parse();
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.expect_err("avoid unwrap_err in production code");
         assert!(err.to_string().contains("invalid import source"));
     }
 
@@ -2752,7 +2752,7 @@ mod tests {
     fn parse_invalid_trust_level_error() {
         let result: Result<TrustLevel, _> = "invalid".parse();
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.expect_err("avoid unwrap_err in production code");
         assert!(err.to_string().contains("invalid trust level"));
     }
 

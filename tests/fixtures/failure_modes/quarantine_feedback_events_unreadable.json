@@ -17,7 +17,7 @@
       "ee init --workspace .",
       "# use a harness fixture with unreadable or migrated-away feedback_events storage"
     ],
-    "invocation": "ee status --workspace . --json"
+    "invocation": "ee diag quarantine list --workspace . --json"
   },
   "expected_emission": {
     "code": "quarantine_feedback_events_unreadable",

@@ -148,7 +148,49 @@ else
 fi
 
 # ------------------------------------------------------------
-# D2-D5 (not shipped) — TODOs.
+# D5 (shipped) — --fields presets and explicit lists use canonical names.
+# ------------------------------------------------------------
+D5_EXPLICIT_JSON=$(ee_workspace status --fields command,version --json || true)
+if printf '%s' "$D5_EXPLICIT_JSON" | jq . >/dev/null 2>&1; then
+    D5_EXPLICIT_KEYS=$(printf '%s' "$D5_EXPLICIT_JSON" \
+        | jq -r '.data | keys | join(",")' 2>/dev/null || true)
+    e2e_log_assert_eq "$D5_EXPLICIT_KEYS" "command,version" \
+        "d5_explicit_field_list_exact_keys"
+else
+    e2e_log_assert_eq "invalid" "parseable" "d5_explicit_field_list_json_parses"
+fi
+
+D5_MINIMAL_JSON=$(ee_workspace status --fields minimal --json || true)
+if printf '%s' "$D5_MINIMAL_JSON" | jq . >/dev/null 2>&1; then
+    assert_jq "$D5_MINIMAL_JSON" '.fields' "minimal" "d5_minimal_fields_indicator"
+    assert_jq "$D5_MINIMAL_JSON" '.data | has("runtime")' "false" \
+        "d5_minimal_omits_runtime"
+else
+    e2e_log_assert_eq "invalid" "parseable" "d5_minimal_status_json_parses"
+fi
+
+D5_UNKNOWN_JSON=$(ee_workspace status --fields missingField --json || true)
+if printf '%s' "$D5_UNKNOWN_JSON" | jq . >/dev/null 2>&1; then
+    assert_jq "$D5_UNKNOWN_JSON" '.error.code' "usage_unknown_field" \
+        "d5_unknown_field_structured_code"
+    D5_ACCEPTED_COUNT=$(printf '%s' "$D5_UNKNOWN_JSON" \
+        | jq -r '.error.details.acceptedFields | length' 2>/dev/null || echo 0)
+    e2e_log_assert_num "$D5_ACCEPTED_COUNT" -ge 1 \
+        "d5_unknown_field_accepted_fields_present"
+else
+    e2e_log_assert_eq "invalid" "parseable" "d5_unknown_field_json_parses"
+fi
+
+D5_CONFLICT_JSON=$(ee_workspace status --fields minimal,summary --json || true)
+if printf '%s' "$D5_CONFLICT_JSON" | jq . >/dev/null 2>&1; then
+    assert_jq "$D5_CONFLICT_JSON" '.error.code' "usage_conflicting_presets" \
+        "d5_conflicting_presets_structured_code"
+else
+    e2e_log_assert_eq "invalid" "parseable" "d5_conflicting_presets_json_parses"
+fi
+
+# ------------------------------------------------------------
+# D2-D4 (not shipped) — TODOs.
 # ------------------------------------------------------------
 todo_assert "d2_json_markdown_parity" "bd-17c65.4.2" \
     "Markdown renderer should derive from canonical JSON tree (currently parallel)."
@@ -158,6 +200,3 @@ todo_assert "d3_pack_metadata_in_markdown" "bd-17c65.4.3" \
 
 todo_assert "d4_schema_drift_audit_in_ci" "bd-17c65.4.4" \
     "Schema-drift audit test (canonical_content_field) ships in D1 but D4 wants broader coverage."
-
-todo_assert "d5_fields_preset_interaction" "bd-17c65.4.5" \
-    "--fields preset and explicit field-list interaction not yet defined per-schema."

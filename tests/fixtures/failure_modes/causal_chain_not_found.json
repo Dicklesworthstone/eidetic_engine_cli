@@ -7,7 +7,8 @@
   },
   "surfaces": [
     "causal estimate",
-    "causal compare"
+    "causal compare",
+    "causal promote-plan"
   ],
   "severity": "warning",
   "repair_present": false,
@@ -16,7 +17,7 @@
     "setup_commands": [
       "ee init --workspace ."
     ],
-    "invocation": "ee causal estimate missing-chain --workspace . --json"
+    "invocation": "ee causal promote-plan trace_missing_chain --workspace . --json"
   },
   "expected_emission": {
     "code": "causal_chain_not_found",

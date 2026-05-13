@@ -8,7 +8,7 @@
   "surfaces": [
     "swarm brief"
   ],
-  "severity": "medium",
+  "severity": "warning",
   "repair_present": true,
   "trigger": {
     "description": "Swarm brief cannot collect remote compile host state from rch.",
@@ -19,10 +19,12 @@
   },
   "expected_emission": {
     "code": "rch_unavailable",
-    "severity": "medium",
+    "severity": "warning",
     "message_contains": [
-      "rch"
+      "rch was not found"
     ],
-    "repair_contains": "rch"
+    "repair_contains": "rch",
+    "repair_string": "rch status --json",
+    "repair_command_regex": "(?<cmd>rch [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

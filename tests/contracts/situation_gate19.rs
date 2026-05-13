@@ -10,7 +10,7 @@ use ee::core::situation::{
     SITUATION_LINK_DRY_RUN_SCHEMA_V1, SituationCompareOptions, classify_task, compare_situations,
     evaluate_built_in_situation_fixtures, plan_situation_link_dry_run,
 };
-use ee::models::{ERROR_SCHEMA_V1, SITUATION_CLASSIFY_SCHEMA_V1};
+use ee::models::{ERROR_SCHEMA_V2, SITUATION_CLASSIFY_SCHEMA_V1};
 use serde_json::Value as JsonValue;
 use std::env;
 use std::fs;
@@ -302,7 +302,7 @@ fn gate19_cli_explain_reports_not_found_until_stored_situations_exist() -> TestR
         serde_json::from_str(&stdout).map_err(|error| format!("stdout JSON: {error}"))?;
     ensure_json_equal(
         actual.get("schema"),
-        JsonValue::String(ERROR_SCHEMA_V1.to_owned()),
+        JsonValue::String(ERROR_SCHEMA_V2.to_owned()),
         "not-found schema",
     )?;
     ensure_json_equal(

@@ -6,24 +6,24 @@
     "epic_letter": "J"
   },
   "surfaces": [
-    "situation decisioning"
+    "situation classify"
   ],
-  "severity": "medium",
+  "severity": "warning",
   "repair_present": true,
   "trigger": {
-    "description": "Situation-aware decisioning is requested before that planner surface is implemented.",
+    "description": "Situation classification returns heuristic-only route hints because stored situation decisioning is unavailable.",
     "setup_commands": [
       "ee init --workspace ."
     ],
-    "invocation": "ee plan recommend --workspace . --json"
+    "invocation": "ee situation classify 'fix failing release workflow' --workspace . --json"
   },
   "expected_emission": {
     "code": "situation_decisioning_unavailable",
-    "severity": "medium",
+    "severity": "warning",
     "message_contains": [
-      "situation",
-      "unavailable"
+      "Situation routing",
+      "stored evidence"
     ],
-    "repair_contains": "plan"
+    "repair_contains": "ee status"
   }
 }

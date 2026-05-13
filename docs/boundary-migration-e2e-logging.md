@@ -120,7 +120,7 @@ Recommended `first_failure` values are stable short codes with one detail field:
 | `prompt_injection_not_quarantined:<evidence_id>` | instruction-like evidence is not quarantined before skill use. |
 | `direct_db_scraping_declared` | skill contract allows direct DB/index/store scraping. |
 | `missing_reproduction_command` | log cannot render a command for local reproduction. |
-| `error.code=<code>` | command returned a structured `ee.error.v1` payload. |
+| `error.code=<code>` | command returned a structured `ee.error.v2` payload. |
 
 ## Artifact Layout
 

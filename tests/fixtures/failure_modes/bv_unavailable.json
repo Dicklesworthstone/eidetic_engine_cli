@@ -8,7 +8,7 @@
   "surfaces": [
     "swarm brief"
   ],
-  "severity": "medium",
+  "severity": "warning",
   "repair_present": true,
   "trigger": {
     "description": "Swarm brief cannot collect graph-aware Beads triage from bv.",
@@ -19,10 +19,12 @@
   },
   "expected_emission": {
     "code": "bv_unavailable",
-    "severity": "medium",
+    "severity": "warning",
     "message_contains": [
-      "bv"
+      "bv was not found"
     ],
-    "repair_contains": "bv"
+    "repair_contains": "bv",
+    "repair_string": "bv --robot-triage --robot-triage-by-track",
+    "repair_command_regex": "(?<cmd>bv [a-z-][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }
