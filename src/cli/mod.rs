@@ -187,11 +187,44 @@ use crate::steward::{
     MAINTENANCE_JOB_SHOW_SCHEMA_V1, MAINTENANCE_RUN_SCHEMA_V1, MAINTENANCE_STATUS_SCHEMA_V1,
 };
 
+/// Top-level `before_help` prelude rendered by clap above the standard
+/// USAGE / OPTIONS / COMMANDS sections. Bead bd-17c65.6.3 (F3): without
+/// this, `ee --help` prints 40+ subcommands alphabetically and an agent
+/// has no signal for the most-used path. The prelude points at the
+/// 5-command core path, then groups the rest into stable categories so
+/// the alphabetical detail list below stays useful as a reference.
+const HELP_PRELUDE: &str = concat!(
+    "Most-used commands (start here):\n",
+    "  init          Initialize an ee workspace\n",
+    "  remember      Capture a durable memory\n",
+    "  search        Find relevant memories\n",
+    "  context       Assemble a task-specific context pack\n",
+    "  why           Explain why a memory was stored or selected\n",
+    "\n",
+    "Quick categories (the full alphabetical list is below):\n",
+    "\n",
+    "  Inspect:        status, doctor, capabilities, memory show, memory history\n",
+    "  Memory ops:     link, tag, memory expire, memory revise, outcome\n",
+    "  Curate:         curate (candidates|validate|apply), playbook, review\n",
+    "  Graph:          graph (pagerank|hits|communities|neighborhood|centrality-refresh)\n",
+    "  Maintenance:    maintenance, job, index, steward, daemon\n",
+    "  Import/Export:  import (cass|jsonl|eidetic-legacy), export, backup, handoff\n",
+    "  Diagnostics:    diag, eval, demo, db, analyze, audit, migrate\n",
+    "  Configuration:  install, completion, mcp, serve, agent\n",
+    "\n",
+    "Documentation:\n",
+    "  ee --help                  this view\n",
+    "  ee --agent-docs            long-form agent-oriented documentation\n",
+    "  ee capabilities            feature flags, discovered binaries, env overrides\n",
+    "  ee <subcommand> --help     per-command help\n",
+);
+
 #[derive(Clone, Debug, Parser, PartialEq)]
 #[command(
     name = "ee",
     version,
     about = "Durable, local-first, explainable memory for coding agents.",
+    before_help = HELP_PRELUDE,
     disable_colored_help = true,
     color = clap::ColorChoice::Never,
     disable_help_subcommand = true
@@ -6708,6 +6741,8 @@ where
                     workspace: workspace_path,
                     max_sections: args.max_sections,
                     task_frame_id: None,
+                    bound_workspace_id: None,
+                    include_prompt_fragment: true,
                 };
                 match resume_handoff(&options) {
                     Ok(report) => match cli.renderer() {
@@ -20593,6 +20628,30 @@ fn format_why_human(report: &crate::core::why::WhyReport) -> String {
         }
     }
 
+    if !report.verification_evidence.is_empty() {
+        output.push_str("\nVerification evidence:\n");
+        for evidence in &report.verification_evidence {
+            output.push_str(&format!(
+                "  {} [{} / {}]\n",
+                evidence.verification_id,
+                evidence.gate_name,
+                evidence.status.as_str()
+            ));
+            output.push_str(&format!(
+                "    authoritative: {}, commandHash: {}\n",
+                if evidence.is_authoritative_pass() {
+                    "yes"
+                } else {
+                    "no"
+                },
+                evidence.command_hash
+            ));
+            if evidence.offload.fallback_detected {
+                output.push_str("    fallback: detected\n");
+            }
+        }
+    }
+
     if !report.degraded.is_empty() {
         output.push_str("\nDegraded:\n");
         for degraded in &report.degraded {
@@ -20803,6 +20862,9 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
         })
     });
 
+    let verification_evidence = serde_json::to_value(&report.verification_evidence)
+        .unwrap_or_else(|_| serde_json::json!([]));
+
     let json = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V1,
         "success": true,
@@ -20820,6 +20882,7 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             "contradictions": contradictions,
             "links": links,
             "history": history,
+            "verificationEvidence": verification_evidence,
             "degraded": degraded,
         }
     });
@@ -21215,6 +21278,7 @@ impl RememberMemoryReport {
         let source_json = self.source.as_ref().map_or("null".to_string(), |s| {
             format!("\"{}\"", escape_json_string(s))
         });
+        let producer_json = self.producer.to_json_string_lossy();
         let valid_from_json = self.valid_from.as_ref().map_or("null".to_string(), |s| {
             format!("\"{}\"", escape_json_string(s))
         });
@@ -21247,7 +21311,7 @@ impl RememberMemoryReport {
         let curation_candidate_degradations_json = self.curation_candidate_degradations_json();
 
         let mut json = format!(
-            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"auto_links":{},"auto_link_status":"{}","auto_link_degradations":{},"curation_candidate":{},"curation_candidate_status":"{}","curation_candidate_degradations":{},"redaction_status":"{}"}}"#,
+            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"producer":{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"auto_links":{},"auto_link_status":"{}","auto_link_degradations":{},"curation_candidate":{},"curation_candidate_status":"{}","curation_candidate_degradations":{},"redaction_status":"{}"}}"#,
             self.version,
             self.memory_id,
             escape_json_string(&self.workspace_id),
@@ -21260,6 +21324,7 @@ impl RememberMemoryReport {
             tags_json,
             source_json,
             provenance_uri_json,
+            producer_json,
             valid_from_json,
             valid_to_json,
             escape_json_string(&self.validity_status),
