@@ -1,0 +1,2 @@
+{"ts":"2026-05-13T18:00:00Z","kind":"test_run_start","bead":"bd-fxt-ready-1"}
+{"ts":"2026-05-13T18:00:01Z","kind":"test_run_end","bead":"bd-fxt-ready-1","status":"pass"}

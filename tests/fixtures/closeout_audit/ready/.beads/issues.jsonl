@@ -1,0 +1,2 @@
+{"id":"bd-fxt-ready-1","title":"Ready fixture bead — closed, no open deps, no uncommitted refs","status":"in_progress","priority":2,"issue_type":"task","assignee":"CoralRiver","dependencies":[{"depends_on_id":"bd-fxt-ready-dep-closed","type":"blocks"}]}
+{"id":"bd-fxt-ready-dep-closed","title":"Dependency of ready fixture — closed","status":"closed","priority":2,"issue_type":"task"}

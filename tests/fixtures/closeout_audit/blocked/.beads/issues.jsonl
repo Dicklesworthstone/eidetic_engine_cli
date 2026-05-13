@@ -1,0 +1,2 @@
+{"id":"bd-fxt-blocked-1","title":"Blocked fixture — open dependency","status":"in_progress","priority":2,"issue_type":"task","assignee":"CoralRiver","dependencies":[{"depends_on_id":"bd-fxt-blocked-dep-open","type":"blocks"}]}
+{"id":"bd-fxt-blocked-dep-open","title":"Dependency of blocked fixture — still open","status":"open","priority":2,"issue_type":"task"}
