@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "scope_strict_excluded_evidence",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "search",
+    "context"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Strict scoped retrieval finds relevant evidence outside the requested trust lane and fails closed rather than returning partial scoped results.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "ee remember --workspace . --level semantic --kind fact 'Scoped strict fixture.' --json",
+      "ee index rebuild --workspace . --json",
+      "unset EE_AGENT_NAME"
+    ],
+    "invocation": "ee search 'Scoped strict fixture' --workspace . --memory-scope self --strict-scope --json"
+  },
+  "expected_emission": {
+    "code": "scope_strict_excluded_evidence",
+    "severity": "medium",
+    "message_contains": [
+      "Strict memory scope",
+      "returning no scoped results"
+    ],
+    "repair_contains": "--strict-scope"
+  }
+}

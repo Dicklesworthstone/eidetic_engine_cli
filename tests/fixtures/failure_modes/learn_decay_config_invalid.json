@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "learn_decay_config_invalid",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "maintenance run"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A maintenance run with decay enabled reads an invalid [learn.decay] workspace config.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "printf '[learn.decay\\n' > .ee/config.toml"
+    ],
+    "invocation": "ee maintenance run --include-decay --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "learn_decay_config_invalid",
+    "severity": "medium",
+    "message_contains": [
+      "decay config",
+      "parse"
+    ],
+    "repair_contains": "learn.decay",
+    "repair_string": "Fix [learn.decay] in .ee/config.toml and rerun ee maintenance run --include-decay --json."
+  }
+}

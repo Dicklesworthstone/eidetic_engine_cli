@@ -1,0 +1,34 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "level_transition_tombstoned_rejected",
+  "introduced_by": {
+    "bead": "bd-17c65.7.8",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "memory level",
+    "workflow close",
+    "curate apply",
+    "curate tombstone"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A lifecycle transition targets a memory that is already tombstoned, so the transition must be rejected instead of silently rewriting audit history.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Retired lifecycle fact.' --workspace . --level semantic --kind fact",
+      "ee curate tombstone <memory_id> --workspace . --reason 'superseded'"
+    ],
+    "invocation": "ee workflow close <workflow_id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "level_transition_tombstoned_rejected",
+    "severity": "medium",
+    "message_contains": [
+      "tombstoned",
+      "transition"
+    ],
+    "repair_contains": "ee memory history"
+  }
+}

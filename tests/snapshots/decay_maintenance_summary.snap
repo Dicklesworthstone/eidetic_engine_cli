@@ -1,0 +1,51 @@
+---
+source: scripts/e2e_overhaul/decay.sh
+expression: maintenance_run_include_decay_json
+---
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "schema": "ee.maintenance.run.v1",
+    "command": "maintenance run",
+    "requestedJob": "decay_sweep",
+    "dryRun": false,
+    "includeDecay": true,
+    "durableMutation": true,
+    "summary": {
+      "total": 1,
+      "succeeded": 1,
+      "skipped": 0,
+      "failed": 0
+    },
+    "results": [
+      {
+        "jobType": "decay_sweep",
+        "outcome": "success",
+        "dryRun": false,
+        "details": {
+          "schema": "ee.steward.score_decay.v1",
+          "command": "score_decay",
+          "decay": {
+            "schema": "decay_v1",
+            "enabled": true,
+            "memoriesDemoted": 1,
+            "memoriesTombstoned": 1,
+            "halfLivesApplied": true,
+            "thresholdDemote": 0.05,
+            "thresholdForget": 0.01,
+            "dryRun": false
+          },
+          "summary": {
+            "scannedCount": 3,
+            "changedCount": 2,
+            "appliedCount": 2,
+            "skippedCount": 1,
+            "demotedCount": 1,
+            "tombstonedCount": 1
+          }
+        }
+      }
+    ]
+  }
+}

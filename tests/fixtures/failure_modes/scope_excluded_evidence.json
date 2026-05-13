@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "scope_excluded_evidence",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "search",
+    "context"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "A scoped retrieval finds relevant candidate evidence, but some candidates are outside the requested trust lane.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "ee remember --workspace . --level semantic --kind fact 'Scoped mixed-trust fixture.' --json",
+      "ee index rebuild --workspace . --json",
+      "unset EE_AGENT_NAME"
+    ],
+    "invocation": "ee search 'Scoped mixed-trust fixture' --workspace . --memory-scope self --json"
+  },
+  "expected_emission": {
+    "code": "scope_excluded_evidence",
+    "severity": "low",
+    "message_contains": [
+      "excluded",
+      "outside the requested trust lane"
+    ],
+    "repair_contains": "--memory-scope swarm"
+  }
+}

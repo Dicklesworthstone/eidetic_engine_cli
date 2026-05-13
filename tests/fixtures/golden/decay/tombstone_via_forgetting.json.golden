@@ -1,0 +1,23 @@
+{
+  "schema": "ee.learn.summary.v1",
+  "success": true,
+  "summary": {
+    "period": "all",
+    "memories_created": 1,
+    "memories_promoted": 0,
+    "memories_demoted": 0,
+    "memories_demoted_via_decay": 0,
+    "memories_tombstoned_via_decay": 1,
+    "rules_learned": 0,
+    "rules_validated": 0,
+    "gaps_identified": 0,
+    "gaps_resolved": 0,
+    "observations_recorded": 0,
+    "candidates_proposed": 0,
+    "applied_rules": 0,
+    "harmful_feedback_count": 0,
+    "net_knowledge_delta": 0
+  },
+  "events": [],
+  "generatedAt": "NORMALIZED_TIMESTAMP"
+}

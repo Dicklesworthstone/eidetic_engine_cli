@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "level_transition_concurrent_conflict",
+  "introduced_by": {
+    "bead": "bd-17c65.7.8",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "memory level"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A planned lifecycle transition loses its compare-and-set race because another writer already changed the memory level or tombstone state.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Concurrent lifecycle marker.' --workspace . --level working --kind fact --workflow wf-conflict",
+      "ee memory level <memory_id> --from working --to episodic --reason 'first writer completed the workflow' --workspace . --json"
+    ],
+    "invocation": "ee memory level <memory_id> --from working --to episodic --reason 'stale worker retries the planned transition' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "level_transition_concurrent_conflict",
+    "severity": "medium",
+    "message_contains": [
+      "concurrent",
+      "transition"
+    ],
+    "repair_contains": "ee memory show"
+  }
+}

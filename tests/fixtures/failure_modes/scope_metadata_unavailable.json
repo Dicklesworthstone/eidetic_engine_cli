@@ -1,0 +1,35 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "scope_metadata_unavailable",
+  "introduced_by": {
+    "bead": "bd-17c65.10.6",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "search",
+    "context"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A scoped retrieval has search hits but cannot read memory metadata from the workspace database to verify trust-lane membership.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "ee remember --workspace . --level semantic --kind fact 'Scoped metadata fixture.' --json",
+      "ee index rebuild --workspace . --json",
+      "touch empty-scope.db"
+    ],
+    "invocation": "ee search 'Scoped metadata fixture' --workspace . --database empty-scope.db --memory-scope verified --json"
+  },
+  "expected_emission": {
+    "code": "scope_metadata_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "verify memory scope",
+      "memory database"
+    ],
+    "repair_contains": "ee doctor",
+    "repair_string": "ee doctor --json",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}

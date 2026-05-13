@@ -4,9 +4,16 @@
 //! and import sources. Includes security profiles and file-permission
 //! diagnostics.
 
+pub mod memory_decay;
 pub mod security_profile;
 pub mod trust_decay;
 
+pub use memory_decay::{
+    DEFAULT_DECAY_DEMOTE_THRESHOLD, DEFAULT_DECAY_FORGET_THRESHOLD, MEMORY_DECAY_SOURCE,
+    MemoryDecayAction, MemoryDecayEvaluation, MemoryDecayHalfLives, MemoryDecaySettings,
+    MemoryDecayThresholds, evaluate_memory_decay, evaluate_memory_decay_with_settings,
+    memory_decay_freshness_score, memory_decay_half_life_days,
+};
 pub use security_profile::{
     FilePermissionCheck, FilePermissionReport, ParseSecurityProfileError, SecurityProfile,
     check_workspace_permissions, load_profile_from_env,

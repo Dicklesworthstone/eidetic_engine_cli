@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "level_transition_requires_evidence",
+  "introduced_by": {
+    "bead": "bd-17c65.7.8",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "memory level",
+    "curate apply",
+    "workflow close"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A memory lifecycle promotion or demotion is requested without the evidence references required by the canonical transition table.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Evidence-free promotion candidate.' --workspace . --level episodic --kind fact"
+    ],
+    "invocation": "ee memory level <memory_id> --to semantic --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "level_transition_requires_evidence",
+    "severity": "medium",
+    "message_contains": [
+      "evidence",
+      "transition"
+    ],
+    "repair_contains": "--reason"
+  }
+}
