@@ -138,3 +138,9 @@ mod backup_import_roundtrip;
 
 #[path = "contracts/handoff_canonical_schema.rs"]
 mod handoff_canonical_schema;
+
+#[path = "contracts/handoff_resume_prompt_fragment.rs"]
+mod handoff_resume_prompt_fragment;
+
+#[path = "contracts/failure_mode_fixtures.rs"]
+mod failure_mode_fixtures;

@@ -656,6 +656,17 @@ pub struct ResumeOptions {
     pub max_sections: Option<usize>,
     /// Optional task-frame scope to merge into the resume payload.
     pub task_frame_id: Option<String>,
+    /// When set, the resume binds to the workspace identified by
+    /// this ID and compares against the capsule's `workspace` field
+    /// to surface workspace_mismatch_soft / _hard degradations.
+    /// `None` skips the comparison (legacy / unbounded resume).
+    /// Bead bd-17c65.13.2 (M1).
+    pub bound_workspace_id: Option<String>,
+    /// When false, callers can suppress rendering the
+    /// `prompt_fragment` markdown body to save bytes when they only
+    /// want the structured data. Defaults to `true`.
+    /// Bead bd-17c65.13.2 (M1).
+    pub include_prompt_fragment: bool,
 }
 
 impl Default for ResumeOptions {
@@ -666,6 +677,53 @@ impl Default for ResumeOptions {
             workspace: PathBuf::from("."),
             max_sections: None,
             task_frame_id: None,
+            bound_workspace_id: None,
+            include_prompt_fragment: true,
+        }
+    }
+}
+
+/// Ready-to-prepend prompt fragment that the next agent can paste into
+/// its system prompt without re-rendering. Mirrors `pack.text` from A4
+/// for the handoff surface (M1 / bd-17c65.13.2).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResumePromptFragment {
+    /// Markdown body. Stable structure: H1 capsule title, summary line,
+    /// then per-section H2 blocks for objective / next actions /
+    /// decisions when present. Invisible to standard markdown renderers
+    /// past the body (no trailing comments) so it composes cleanly when
+    /// prepended into a larger prompt.
+    pub text: String,
+    /// Approximate token count for the body (chars / 4, conservative).
+    /// Used by the next agent to budget its prompt; not authoritative
+    /// for billing-grade token math.
+    pub estimated_tokens: u32,
+    /// BLAKE3 prefix of the body so callers can correlate logged prompt
+    /// fragments back to the resume that produced them.
+    pub hash: String,
+}
+
+/// Workspace mismatch severity reported when a capsule produced in one
+/// workspace is resumed in another. The producer side (M0 / capsule
+/// fixtures) records the source workspace ID; the resume side compares
+/// against the bound workspace's ID to surface the mismatch as either
+/// soft (different root, recoverable) or hard (different workspace ID,
+/// memory IDs may not exist in the destination DB).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceMismatchSeverity {
+    None,
+    Soft,
+    Hard,
+}
+
+impl WorkspaceMismatchSeverity {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Soft => "soft",
+            Self::Hard => "hard",
         }
     }
 }
@@ -691,6 +749,15 @@ pub struct ResumeReport {
     pub artifact_pointers: Vec<ArtifactPointer>,
     pub degradations: Vec<DegradationInfo>,
     pub resumed_at: String,
+    /// Ready-to-prepend prompt body (M1 / bd-17c65.13.2). Always present
+    /// — `None` only when the capsule has zero usable content (no
+    /// sections, no objective, no actions).
+    pub prompt_fragment: Option<ResumePromptFragment>,
+    /// Workspace mismatch severity computed against
+    /// `ResumeOptions::bound_workspace_id`. `None` when no binding was
+    /// requested; `Soft`/`Hard` when a binding was requested and the
+    /// IDs differ.
+    pub workspace_mismatch: WorkspaceMismatchSeverity,
 }
 
 /// A memory selected for the resume payload.
@@ -730,6 +797,8 @@ impl ResumeReport {
             swarm_brief_summary: None,
             artifact_pointers: Vec::new(),
             degradations: Vec::new(),
+            prompt_fragment: None,
+            workspace_mismatch: WorkspaceMismatchSeverity::None,
             resumed_at: Utc::now().to_rfc3339(),
         }
     }
@@ -1493,7 +1562,148 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
         );
     }
 
+    // Bead bd-17c65.13.2 (M1): workspace mismatch detection. When the
+    // caller supplied a bound workspace ID, compare it to the capsule's
+    // recorded workspace and surface a degradation if they differ.
+    // Severity is `hard` whenever the IDs differ at all — the capsule's
+    // memory IDs and audit references all assume the source workspace,
+    // so any mismatch means memory IDs may not resolve in the bound
+    // workspace. `soft` is reserved for future cases where the resume
+    // surface can distinguish "different root, same project" from
+    // "different workspace altogether" (out of scope here).
+    if let Some(bound) = options.bound_workspace_id.as_deref() {
+        let capsule_workspace = report.workspace.as_deref();
+        if let Some(cap) = capsule_workspace {
+            if !workspace_ids_match(cap, bound) {
+                report.workspace_mismatch = WorkspaceMismatchSeverity::Hard;
+                report.degradations.push(
+                    DegradationInfo::new(
+                        "workspace_mismatch_hard",
+                        format!(
+                            "Capsule was created from workspace `{cap}` but this resume is bound to `{bound}`; memory IDs and audit references may not resolve in the bound workspace."
+                        ),
+                    )
+                    .with_next_action("re-import or rebuild the workspace before resuming"),
+                );
+            }
+        } else {
+            // Capsule has no workspace field — soft warn so the agent
+            // knows the binding can't be verified.
+            report.workspace_mismatch = WorkspaceMismatchSeverity::Soft;
+            report.degradations.push(
+                DegradationInfo::new(
+                    "workspace_mismatch_soft",
+                    "Capsule did not record a workspace ID; cannot verify it matches the bound workspace.".to_owned(),
+                )
+                .with_next_action("regenerate the capsule with a workspace-aware version of ee handoff create"),
+            );
+        }
+    }
+
+    // Bead bd-17c65.13.2 (M1): prompt fragment. Render a markdown body
+    // the next agent can prepend to its prompt. Stable structure for
+    // greppability; pack.text in A4 follows the same pattern.
+    if options.include_prompt_fragment {
+        report.prompt_fragment = Some(render_resume_prompt_fragment(&report));
+    }
+
     Ok(report)
+}
+
+/// Render the ready-to-prepend markdown body for `ee handoff resume`.
+/// Same project-wide layout as the A4 pack.text contract: H1 title,
+/// optional summary paragraph, then ## sections in a stable order:
+/// objective, next actions, recent decisions, selected memories,
+/// blockers. Empty sections are skipped (no "No X recorded" stubs in
+/// the prompt — that would waste the next agent's tokens).
+fn render_resume_prompt_fragment(report: &ResumeReport) -> ResumePromptFragment {
+    let mut body = String::new();
+    body.push_str(&format!("# Resumed Session: {}\n\n", report.capsule_id));
+
+    if let Some(workspace) = &report.workspace {
+        body.push_str(&format!("**Workspace:** `{}`\n\n", workspace));
+    }
+    if !matches!(report.workspace_mismatch, WorkspaceMismatchSeverity::None) {
+        body.push_str(&format!(
+            "**Workspace mismatch:** `{}` — see degradations below before relying on memory IDs.\n\n",
+            report.workspace_mismatch.as_str()
+        ));
+    }
+
+    if let Some(objective) = &report.current_objective {
+        if !objective.is_empty() {
+            body.push_str("## Current Objective\n\n");
+            body.push_str(objective);
+            body.push_str("\n\n");
+        }
+    }
+
+    if !report.next_actions.is_empty() {
+        body.push_str("## Next Actions\n\n");
+        for (idx, action) in report.next_actions.iter().enumerate() {
+            body.push_str(&format!("{}. {}\n", idx + 1, action.description));
+            if !action.reason.is_empty() {
+                body.push_str(&format!("   - *{}*\n", action.reason));
+            }
+        }
+        body.push('\n');
+    }
+
+    if !report.recent_decisions.is_empty() {
+        body.push_str("## Recent Decisions\n\n");
+        for decision in &report.recent_decisions {
+            body.push_str(&format!("- {decision}\n"));
+        }
+        body.push('\n');
+    }
+
+    if !report.selected_memories.is_empty() {
+        body.push_str("## Selected Memories\n\n");
+        for memory in &report.selected_memories {
+            body.push_str(&format!("- `{}` — {}\n", memory.id, memory.reason));
+        }
+        body.push('\n');
+    }
+
+    if !report.blockers.is_empty() {
+        body.push_str("## Blockers\n\n");
+        for blocker in &report.blockers {
+            body.push_str(&format!("- {}\n", blocker.description));
+        }
+        body.push('\n');
+    }
+
+    if !report.degradations.is_empty() {
+        body.push_str("## Degradations\n\n");
+        for degradation in &report.degradations {
+            body.push_str(&format!(
+                "- **{}** {}\n",
+                degradation.code, degradation.message
+            ));
+        }
+        body.push('\n');
+    }
+
+    // Token estimate: conservative chars/4 to match A4's convention.
+    // Saturating cast guards the upper bound; bodies in the wild are
+    // measured in low thousands of chars.
+    let estimated_tokens = u32::try_from(body.len() / 4).unwrap_or(u32::MAX);
+    let digest = blake3::hash(body.as_bytes()).to_hex();
+    let hash = format!("blake3:{}", &digest.as_str()[..16]);
+
+    ResumePromptFragment {
+        text: body,
+        estimated_tokens,
+        hash,
+    }
+}
+
+/// Compare two workspace IDs ignoring trivial cosmetic differences
+/// (leading/trailing whitespace, case). The IDs are deterministic
+/// BLAKE3-derived ULIDs in practice; this helper exists so a future
+/// change to workspace ID format can centralize the comparison.
+fn workspace_ids_match(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
 }
 
 fn find_latest_capsule(workspace: &Path) -> Result<PathBuf, DomainError> {
@@ -1776,6 +1986,8 @@ mod tests {
             workspace: dir.path().to_path_buf(),
             max_sections: None,
             task_frame_id: None,
+            bound_workspace_id: None,
+            include_prompt_fragment: true,
         })
         .map_err(|error| error.message())?;
         ensure(resume.active_focus.is_some(), "resume includes focus")?;
@@ -1857,6 +2069,8 @@ mod tests {
             workspace: dir.path().to_path_buf(),
             max_sections: None,
             task_frame_id: None,
+            bound_workspace_id: None,
+            include_prompt_fragment: true,
         })
         .map_err(|error| error.message())?;
         ensure(resume.task_frame.is_some(), "resume includes task frame")?;
