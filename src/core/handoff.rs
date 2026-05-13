@@ -50,6 +50,9 @@ pub const HANDOFF_INSPECT_SCHEMA_V1: &str = "ee.handoff.inspect.v1";
 /// Schema for handoff resume report.
 pub const HANDOFF_RESUME_SCHEMA_V1: &str = "ee.handoff.resume.v1";
 
+/// Schema for handoff HMAC key rotation report.
+pub const HANDOFF_ROTATE_KEY_SCHEMA_V1: &str = "ee.handoff.rotate_key.v1";
+
 /// Degraded code fired when a handoff capsule's captured memory set is stale.
 pub const HANDOFF_SNAPSHOT_STALE_CODE: &str = "handoff_snapshot_stale";
 
@@ -524,6 +527,64 @@ impl Default for CreateOptions {
             task_frame_id: None,
             bind_to_machine: false,
             machine_salt_path: None,
+        }
+    }
+}
+
+/// Options for rotating a handoff capsule HMAC key.
+#[derive(Clone, Debug)]
+pub struct RotateKeyOptions {
+    /// Workspace root selected by the CLI.
+    pub workspace: PathBuf,
+    /// Path to the capsule file to update in place.
+    pub capsule: PathBuf,
+    /// Override machine salt path for deterministic tests.
+    pub machine_salt_path: Option<PathBuf>,
+}
+
+impl Default for RotateKeyOptions {
+    fn default() -> Self {
+        Self {
+            workspace: PathBuf::from("."),
+            capsule: PathBuf::new(),
+            machine_salt_path: None,
+        }
+    }
+}
+
+/// Report from rotating a handoff capsule HMAC key.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RotateKeyReport {
+    pub schema: String,
+    pub capsule_id: String,
+    pub capsule_path: PathBuf,
+    pub key_mode: String,
+    pub body_sha256: String,
+    pub old_hmac_prefix: Option<String>,
+    pub new_hmac_prefix: String,
+    pub canonical_content_hash_before: String,
+    pub canonical_content_hash_after: String,
+    pub body_preserved: bool,
+    pub audit_id: Option<String>,
+    pub rotated_at: String,
+}
+
+impl RotateKeyReport {
+    #[must_use]
+    pub fn new(capsule_id: String, capsule_path: PathBuf) -> Self {
+        Self {
+            schema: HANDOFF_ROTATE_KEY_SCHEMA_V1.to_owned(),
+            capsule_id,
+            capsule_path,
+            key_mode: String::new(),
+            body_sha256: String::new(),
+            old_hmac_prefix: None,
+            new_hmac_prefix: String::new(),
+            canonical_content_hash_before: String::new(),
+            canonical_content_hash_after: String::new(),
+            body_preserved: false,
+            audit_id: None,
+            rotated_at: Utc::now().to_rfc3339(),
         }
     }
 }
@@ -1349,6 +1410,19 @@ fn write_private_secret(path: &Path, secret: &[u8; 32]) -> Result<(), DomainErro
     set_private_file_mode(path)
 }
 
+fn rotate_workspace_secret(workspace: &Path) -> Result<[u8; 32], DomainError> {
+    let path = hmac_workspace_secret_path(workspace);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
+            message: format!("Failed to create handoff key directory: {error}"),
+            repair: Some(format!("Check permissions for {}", parent.display())),
+        })?;
+    }
+    let secret = random_secret()?;
+    write_private_secret(&path, &secret)?;
+    Ok(secret)
+}
+
 #[cfg(unix)]
 fn set_private_file_mode(path: &Path) -> Result<(), DomainError> {
     use std::os::unix::fs::PermissionsExt;
@@ -1414,10 +1488,31 @@ fn derive_handoff_hmac_key(
 }
 
 fn sign_capsule_content(
-    mut capsule: serde_json::Value,
+    capsule: serde_json::Value,
     workspace: &Path,
     bind_to_machine: bool,
     machine_salt_path_override: Option<&Path>,
+) -> Result<serde_json::Value, DomainError> {
+    let workspace_secret = read_or_create_secret(&hmac_workspace_secret_path(workspace))?;
+    let machine_salt = if bind_to_machine {
+        let path = machine_salt_path(machine_salt_path_override);
+        Some(read_or_create_secret(&path)?)
+    } else {
+        None
+    };
+    sign_capsule_content_with_key_material(
+        capsule,
+        &workspace_secret,
+        machine_salt.as_ref(),
+        bind_to_machine,
+    )
+}
+
+fn sign_capsule_content_with_key_material(
+    mut capsule: serde_json::Value,
+    workspace_secret: &[u8; 32],
+    machine_salt: Option<&[u8; 32]>,
+    bind_to_machine: bool,
 ) -> Result<serde_json::Value, DomainError> {
     let workspace_identity = capsule
         .get("workspace_identity")
@@ -1431,18 +1526,11 @@ fn sign_capsule_content(
         .get("schema")
         .and_then(serde_json::Value::as_str)
         .unwrap_or(HANDOFF_CAPSULE_SCHEMA_V1);
-    let workspace_secret = read_or_create_secret(&hmac_workspace_secret_path(workspace))?;
-    let machine_salt = if bind_to_machine {
-        let path = machine_salt_path(machine_salt_path_override);
-        Some(read_or_create_secret(&path)?)
-    } else {
-        None
-    };
     let (key_bytes, key_derivation_input_hash) = derive_handoff_hmac_key(
         &workspace_identity,
         capsule_schema,
-        &workspace_secret,
-        machine_salt.as_ref(),
+        workspace_secret,
+        machine_salt,
     );
     let signed_body = signed_capsule_body(&capsule);
     let signed_body_bytes = canonical_json_string(&signed_body);
@@ -1658,6 +1746,40 @@ fn record_handoff_insecure_load_audit(
         details: Some(details.to_string()),
     };
     let _ = conn.insert_audit(&generate_audit_id(), &input);
+}
+
+fn record_handoff_hmac_rotate_audit(
+    workspace: &Path,
+    capsule_path: &Path,
+    capsule_id: &str,
+    key_mode: &str,
+    old_hmac_prefix: Option<&str>,
+    new_hmac_prefix: &str,
+    body_sha256: &str,
+) -> Option<String> {
+    let database_path = workspace.join(".ee").join("ee.db");
+    let conn = DbConnection::open_file(&database_path).ok()?;
+    let audit_id = generate_audit_id();
+    let details = serde_json::json!({
+        "schema": "ee.audit.handoff_hmac_rotate.v1",
+        "capsulePath": capsule_path.display().to_string(),
+        "capsuleId": capsule_id,
+        "keyMode": key_mode,
+        "oldHmacPrefix": old_hmac_prefix,
+        "newHmacPrefix": new_hmac_prefix,
+        "bodySha256": body_sha256,
+        "secretMaterialLogged": false,
+    });
+    let input = CreateAuditInput {
+        workspace_id: None,
+        actor: Some("ee handoff rotate-key".to_owned()),
+        action: audit_actions::HANDOFF_HMAC_ROTATE.to_owned(),
+        target_type: Some("handoff_capsule".to_owned()),
+        target_id: Some(capsule_id.to_owned()),
+        details: Some(details.to_string()),
+    };
+    conn.insert_audit(&audit_id, &input).ok()?;
+    Some(audit_id)
 }
 
 fn focus_memory_ids(focus_state: &crate::models::FocusState) -> Vec<String> {
@@ -2220,6 +2342,137 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         })?;
     }
 
+    Ok(report)
+}
+
+/// Rotate the workspace HMAC key and update one handoff capsule in place.
+pub fn rotate_handoff_key(options: &RotateKeyOptions) -> Result<RotateKeyReport, DomainError> {
+    if !options.capsule.exists() {
+        return Err(DomainError::Storage {
+            message: format!("Capsule not found: {}", options.capsule.display()),
+            repair: Some("Check the --capsule path and recreate the capsule if needed.".to_owned()),
+        });
+    }
+
+    let content =
+        std::fs::read_to_string(&options.capsule).map_err(|error| DomainError::Storage {
+            message: format!("Failed to read capsule: {error}"),
+            repair: Some(format!(
+                "Verify {} exists and is readable",
+                options.capsule.display()
+            )),
+        })?;
+    let capsule: serde_json::Value =
+        serde_json::from_str(&content).map_err(|error| DomainError::Storage {
+            message: format!("Failed to parse capsule: {error}"),
+            repair: Some("Verify the capsule file contains valid JSON".to_owned()),
+        })?;
+
+    verify_capsule_integrity(
+        &capsule,
+        &options.workspace,
+        options.machine_salt_path.as_deref(),
+    )?;
+
+    let capsule_id = capsule
+        .get("capsule_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned();
+    let old_integrity = capsule
+        .get("integrity")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            handoff_hmac_error(
+                HANDOFF_HMAC_MISSING_CODE,
+                "Handoff capsule is unsigned and cannot be rotated safely.",
+                "Recreate the capsule with this ee version.",
+            )
+        })?;
+    let key_mode = old_integrity
+        .get("keyMode")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let bind_to_machine = match key_mode.as_str() {
+        HANDOFF_HMAC_KEY_MODE_WORKSPACE_SECRET => false,
+        HANDOFF_HMAC_KEY_MODE_MACHINE_BOUND => true,
+        _ => {
+            return Err(handoff_hmac_error(
+                HANDOFF_CAPSULE_TAMPERED_CODE,
+                "Handoff capsule declares an unknown HMAC key mode.",
+                "Recreate the capsule with this ee version.",
+            ));
+        }
+    };
+    let old_hmac_prefix = old_integrity
+        .get("hmacPrefix")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let signed_body_before = signed_capsule_body(&capsule);
+    let signed_body_before_bytes = canonical_json_string(&signed_body_before);
+    let body_sha256 = format!("sha256:{}", sha256_hex(signed_body_before_bytes.as_bytes()));
+    let canonical_before = compute_canonical_capsule_hash(&capsule);
+
+    let new_workspace_secret = rotate_workspace_secret(&options.workspace)?;
+    let machine_salt = if bind_to_machine {
+        let path = machine_salt_path(options.machine_salt_path.as_deref());
+        Some(read_existing_secret(&path, STRICT_MODE_NO_SALT_FILE_CODE)?)
+    } else {
+        None
+    };
+    let rotated_capsule = sign_capsule_content_with_key_material(
+        signed_body_before.clone(),
+        &new_workspace_secret,
+        machine_salt.as_ref(),
+        bind_to_machine,
+    )?;
+    let rotated_body_bytes = canonical_json_string(&signed_capsule_body(&rotated_capsule));
+    let new_hmac_prefix = rotated_capsule
+        .get("integrity")
+        .and_then(|value| value.get("hmacPrefix"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let canonical_after = compute_canonical_capsule_hash(&rotated_capsule);
+    let body_preserved = signed_body_before_bytes == rotated_body_bytes;
+
+    let rotated_content = crate::core::serialize_pretty_or_error(&rotated_capsule);
+    std::fs::write(&options.capsule, rotated_content).map_err(|error| DomainError::Storage {
+        message: format!("Failed to write rotated capsule: {error}"),
+        repair: Some(format!(
+            "Check write permissions for {}",
+            options.capsule.display()
+        )),
+    })?;
+
+    let audit_id = record_handoff_hmac_rotate_audit(
+        &options.workspace,
+        &options.capsule,
+        &capsule_id,
+        &key_mode,
+        old_hmac_prefix.as_deref(),
+        &new_hmac_prefix,
+        &body_sha256,
+    );
+    tracing::info!(
+        event = "handoff_hmac_rotated",
+        capsule_id = %capsule_id,
+        old_hmac_prefix = old_hmac_prefix.as_deref().unwrap_or(""),
+        new_hmac_prefix = %new_hmac_prefix,
+        audit_entry_id = audit_id.as_deref().unwrap_or(""),
+        "handoff capsule HMAC rotated"
+    );
+
+    let mut report = RotateKeyReport::new(capsule_id, options.capsule.clone());
+    report.key_mode = key_mode;
+    report.body_sha256 = body_sha256;
+    report.old_hmac_prefix = old_hmac_prefix;
+    report.new_hmac_prefix = new_hmac_prefix;
+    report.canonical_content_hash_before = canonical_before;
+    report.canonical_content_hash_after = canonical_after;
+    report.body_preserved = body_preserved;
+    report.audit_id = audit_id;
     Ok(report)
 }
 
@@ -3639,6 +3892,16 @@ mod tests {
         Ok(output)
     }
 
+    fn capsule_integrity(path: &Path) -> Result<serde_json::Value, String> {
+        let capsule: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(path).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        capsule
+            .get("integrity")
+            .cloned()
+            .ok_or_else(|| "missing integrity".to_owned())
+    }
+
     #[test]
     fn handoff_hmac_default_mode_round_trips_same_workspace() -> TestResult {
         let dir = repo_tempdir()?;
@@ -3808,6 +4071,131 @@ mod tests {
             Err(error) => error,
         };
         ensure_equal(&error.code(), &STRICT_MODE_NO_SALT_FILE_CODE, "error code")
+    }
+
+    #[test]
+    fn handoff_hmac_rotate_key_preserves_body_and_changes_hmac() -> TestResult {
+        let dir = repo_tempdir()?;
+        let db_path = dir.path().join(".ee").join("ee.db");
+        if let Some(parent) = db_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let conn = DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+        conn.migrate().map_err(|error| error.to_string())?;
+
+        let output = create_test_capsule(dir.path(), false, None)?;
+        let before = capsule_integrity(&output)?;
+        let before_prefix = before
+            .get("hmacPrefix")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing old hmac prefix".to_owned())?
+            .to_owned();
+
+        let report = rotate_handoff_key(&RotateKeyOptions {
+            workspace: dir.path().to_path_buf(),
+            capsule: output.clone(),
+            machine_salt_path: None,
+        })
+        .map_err(|error| error.message())?;
+        let after = capsule_integrity(&output)?;
+        let after_prefix = after
+            .get("hmacPrefix")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing new hmac prefix".to_owned())?
+            .to_owned();
+
+        ensure(report.body_preserved, "rotated capsule body preserved")?;
+        ensure_equal(
+            &report.canonical_content_hash_before,
+            &report.canonical_content_hash_after,
+            "canonical hash preserved",
+        )?;
+        ensure(before_prefix != after_prefix, "hmac prefix changed")?;
+        ensure_equal(&report.new_hmac_prefix, &after_prefix, "report new prefix")?;
+        ensure(report.audit_id.is_some(), "rotation audit id recorded")?;
+
+        let resume = resume_handoff(&ResumeOptions {
+            path: output,
+            use_latest: false,
+            workspace: dir.path().to_path_buf(),
+            max_sections: None,
+            task_frame_id: None,
+            bound_workspace_id: None,
+            bound_workspace_identity: None,
+            include_prompt_fragment: false,
+            require_fresh: false,
+            insecure_skip_hmac: false,
+            machine_salt_path: None,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            &resume.capsule_id,
+            &report.capsule_id,
+            "rotated capsule resumes",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_hmac_key_files_are_private_on_posix() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = repo_tempdir()?;
+        let salt_dir = repo_tempdir()?;
+        let machine_salt = salt_dir.path().join("machine-salt");
+        let _output = create_test_capsule(dir.path(), true, Some(machine_salt.clone()))?;
+
+        let workspace_key = hmac_workspace_secret_path(dir.path());
+        let workspace_mode = fs::metadata(&workspace_key)
+            .map_err(|error| error.to_string())?
+            .permissions()
+            .mode()
+            & 0o777;
+        let salt_mode = fs::metadata(&machine_salt)
+            .map_err(|error| error.to_string())?
+            .permissions()
+            .mode()
+            & 0o777;
+        ensure_equal(&workspace_mode, &0o600, "workspace hmac key mode")?;
+        ensure_equal(&salt_mode, &0o600, "machine salt mode")
+    }
+
+    #[test]
+    fn handoff_hmac_rotate_report_redacts_secret_material() -> TestResult {
+        let dir = repo_tempdir()?;
+        let output = create_test_capsule(dir.path(), false, None)?;
+        let old_integrity = capsule_integrity(&output)?;
+        let old_full_hmac = old_integrity
+            .get("hmac")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing old full hmac".to_owned())?
+            .to_owned();
+        let report = rotate_handoff_key(&RotateKeyOptions {
+            workspace: dir.path().to_path_buf(),
+            capsule: output.clone(),
+            machine_salt_path: None,
+        })
+        .map_err(|error| error.message())?;
+        let new_integrity = capsule_integrity(&output)?;
+        let new_full_hmac = new_integrity
+            .get("hmac")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing new full hmac".to_owned())?
+            .to_owned();
+        let rendered = crate::core::serialize_or_error(&report);
+
+        ensure(
+            !rendered.contains(&old_full_hmac),
+            "report must not expose old full hmac",
+        )?;
+        ensure(
+            !rendered.contains(&new_full_hmac),
+            "report must not expose new full hmac",
+        )?;
+        ensure(
+            rendered.contains(&report.new_hmac_prefix),
+            "report keeps bounded hmac prefix",
+        )
     }
 
     #[test]
