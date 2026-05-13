@@ -2,10 +2,10 @@
 # J3 — Epic H: output rendering e2e driver.
 #
 # Asserts the H1 minimal-escape policy: characters that would not be markdown
-# syntax in their position no longer get escaped. Records TODOs for H2 + H4.
+# syntax in their position no longer get escaped. Also checks the H2/H4
+# CommonMark oracle and corner-case fixture coverage.
 #
-# Shipped (real assertions):  H1, H3
-# Not yet shipped (todo):     H2, H4
+# Shipped (real assertions): H1, H2, H3, H4
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -72,10 +72,42 @@ fi
 # ------------------------------------------------------------
 # H2 — escape roundtrip test (escape -> parse -> render -> equal).
 # ------------------------------------------------------------
-todo_assert "h2_escape_roundtrip_property_test" "bd-17c65.8.2" \
-    "Property test: escape_text(s) parsed by pulldown-cmark and re-rendered must equal s."
+if [ -f "$REPO_ROOT/tests/markdown_render_roundtrip.rs" ] &&
+    grep -q 'pulldown_cmark' "$REPO_ROOT/tests/markdown_render_roundtrip.rs" &&
+    grep -q 'context_markdown_commonmark_roundtrip_is_stable_for_generated_fixtures' \
+        "$REPO_ROOT/tests/markdown_render_roundtrip.rs"; then
+    e2e_log_assert_eq "true" "true" "h2_escape_roundtrip_property_test_present"
+else
+    e2e_log_assert_eq "missing" "present" "h2_escape_roundtrip_property_test_present"
+fi
 
 # H4 — corner cases (leading dashes, table pipes, fenced code that contains
 # fences, etc.).
-todo_assert "h4_escape_corner_cases_documented" "bd-17c65.8.4" \
-    "Markdown corner cases (leading dashes, table pipes, nested fences) not yet golden-tested."
+H4_FIXTURE_DIR="$REPO_ROOT/tests/fixtures/markdown_corner_cases"
+if [ -d "$H4_FIXTURE_DIR" ]; then
+    H4_FIXTURE_COUNT=$(find "$H4_FIXTURE_DIR" -type f -name '*.json' | wc -l | tr -d '[:space:]')
+else
+    H4_FIXTURE_COUNT=0
+fi
+e2e_log_assert_num "$H4_FIXTURE_COUNT" -ge 20 "h4_corner_fixture_count"
+
+for fixture in \
+    10_thematic_break_line \
+    11_setext_underline_line \
+    17_fenced_code_embedded_fence \
+    18_table_pipe_body_text \
+    22_blockquote_markers_neutralized; do
+    if [ -f "$H4_FIXTURE_DIR/$fixture.json" ]; then
+        e2e_log_assert_eq "true" "true" "h4_fixture_${fixture}_present"
+    else
+        e2e_log_assert_eq "missing" "present" "h4_fixture_${fixture}_present"
+    fi
+done
+
+if grep -q 'commonmark_corner_fixture_catalog_matches_renderer' \
+    "$REPO_ROOT/src/output/markdown.rs" &&
+    grep -q 'pulldown_cmark::Parser' "$REPO_ROOT/src/output/markdown.rs"; then
+    e2e_log_assert_eq "true" "true" "h4_corner_fixture_harness_present"
+else
+    e2e_log_assert_eq "missing" "present" "h4_corner_fixture_harness_present"
+fi

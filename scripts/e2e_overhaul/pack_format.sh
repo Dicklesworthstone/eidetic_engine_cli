@@ -8,8 +8,8 @@
 # picture of progress without flipping its exit code on known-unimplemented
 # surfaces.
 #
-# Shipped (real assertions):  A3, A7, A9
-# Not yet shipped (todo):     A1, A2, A4, A5, A6, A8, A11
+# Shipped (real assertions):  A3, A7, A8, A9
+# Not yet shipped (todo):     A1, A2, A4, A5, A6, A11
 #
 # Usage:
 #   scripts/e2e_overhaul/pack_format.sh
@@ -111,9 +111,41 @@ todo_assert "a2_shared_selection_formula_block" "bd-17c65.1.2" \
 todo_assert "a6_budget_breakdown_by_section" "bd-17c65.1.5" \
     "pack.budget today shows max+used; per-section breakdown not yet emitted."
 
-# A8 — pack.degraded[] uses the same shape as response.degraded[].
-todo_assert "a8_pack_degraded_shape_parity" "bd-17c65.1.8" \
-    "pack.degraded and response.degraded use slightly different shapes."
+# A8 — pack output profiles and opt-out flags.
+LEAN_JSON=$(ee_workspace context "prepare release v0.2.0" --max-tokens 1000 --pack-profile lean --json || true)
+STANDARD_JSON=$(ee_workspace context "prepare release v0.2.0" --max-tokens 1000 --pack-profile standard --json || true)
+VERBOSE_JSON=$(ee_workspace context "prepare release v0.2.0" --max-tokens 1000 --pack-profile verbose --json || true)
+
+if printf '%s' "$LEAN_JSON" | jq . >/dev/null 2>&1 &&
+    printf '%s' "$STANDARD_JSON" | jq . >/dev/null 2>&1 &&
+    printf '%s' "$VERBOSE_JSON" | jq . >/dev/null 2>&1; then
+    LEAN_BYTES=${#LEAN_JSON}
+    STANDARD_BYTES=${#STANDARD_JSON}
+    VERBOSE_BYTES=${#VERBOSE_JSON}
+    e2e_log_note "a8_profile_bytes lean=$LEAN_BYTES standard=$STANDARD_BYTES verbose=$VERBOSE_BYTES"
+    e2e_log_assert_num "$LEAN_BYTES" -lt "$STANDARD_BYTES" "a8_lean_smaller_than_standard"
+    e2e_log_assert_num "$STANDARD_BYTES" -lt "$VERBOSE_BYTES" "a8_verbose_larger_than_standard"
+
+    LEAN_HAS_TEXT=$(printf '%s' "$LEAN_JSON" | jq -r '.data.pack | has("text")')
+    LEAN_HAS_SKIPPED=$(printf '%s' "$LEAN_JSON" | jq -r '.data.pack | has("skipped")')
+    LEAN_COVERAGE=$(printf '%s' "$LEAN_JSON" | jq -r '.data.pack.meta.coverageFillCount // 0')
+    STANDARD_HAS_TEXT=$(printf '%s' "$STANDARD_JSON" | jq -r '.data.pack | has("text")')
+    STANDARD_HAS_SKIPPED=$(printf '%s' "$STANDARD_JSON" | jq -r '.data.pack | has("skipped")')
+    VERBOSE_HAS_FORMULA=$(printf '%s' "$VERBOSE_JSON" | jq -r '.data.pack.meta | has("selectionFormula")')
+    e2e_log_assert_eq "$LEAN_HAS_TEXT" "false" "a8_lean_omits_rendered_text"
+    e2e_log_assert_eq "$LEAN_HAS_SKIPPED" "false" "a8_lean_omits_skipped"
+    e2e_log_assert_eq "$LEAN_COVERAGE" "0" "a8_lean_disables_coverage_fill"
+    e2e_log_assert_eq "$STANDARD_HAS_TEXT" "true" "a8_standard_includes_rendered_text"
+    e2e_log_assert_eq "$STANDARD_HAS_SKIPPED" "true" "a8_standard_includes_skipped"
+    e2e_log_assert_eq "$VERBOSE_HAS_FORMULA" "true" "a8_verbose_includes_formula_metadata"
+
+    LEAN_SKIPPED_OVERRIDE=$(ee_workspace context "prepare release v0.2.0" \
+        --max-tokens 1000 --pack-profile lean --no-skipped=false --json || true)
+    OVERRIDE_HAS_SKIPPED=$(printf '%s' "$LEAN_SKIPPED_OVERRIDE" | jq -r '.data.pack | has("skipped")' 2>/dev/null || echo false)
+    e2e_log_assert_eq "$OVERRIDE_HAS_SKIPPED" "true" "a8_lean_no_skipped_false_restores_skipped"
+else
+    e2e_log_assert_eq "unparseable" "json" "a8_profile_json_parses"
+fi
 
 # A11 — pack.advisoryBanner stops being non-empty when nothing is degraded.
 todo_assert "a11_advisory_banner_conditional" "bd-17c65.1.10" \

@@ -55,7 +55,9 @@ _e2e_hash_string() {
     tmp=$(mktemp)
     printf '%s' "$str" > "$tmp"
     _e2e_hash_file "$tmp"
-    rm -f "$tmp"
+    if [ "${EE_E2E_KEEP_ARTIFACTS:-${EE_E2E_KEEP_WORKSPACE:-0}}" != "1" ]; then
+        rm -f "$tmp"
+    fi
 }
 
 # Emit a single JSON-line event. Uses python3 for JSON encoding so embedded
@@ -169,7 +171,11 @@ e2e_log_command() {
         "exit_code" "$rc" \
         "elapsed_ms" "$elapsed_ms"
     cat "$out_file"
-    rm -f "$out_file" "$err_file"
+    if [ "${EE_E2E_KEEP_ARTIFACTS:-${EE_E2E_KEEP_WORKSPACE:-0}}" = "1" ]; then
+        e2e_log_note "e2e_log_command_keep_artifacts stdout=$out_file stderr=$err_file"
+    else
+        rm -f "$out_file" "$err_file"
+    fi
     return $rc
 }
 

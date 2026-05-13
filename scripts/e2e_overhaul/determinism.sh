@@ -34,8 +34,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/e2e_overhaul/lib/shared.sh
 source "$SCRIPT_DIR/lib/shared.sh"
-require_jq
-epic_setup "epic_J_determinism"
 
 # Resolve a content hasher: prefer blake3sum (matches ee's pack hash),
 # fall back to shasum -a 256 on systems where blake3 isn't installed.
@@ -49,6 +47,41 @@ hash_stdin() {
     fi
 }
 
+VOLATILE_FIELD_NAMES=(
+    generatedAt
+    generated_at
+    last_accessed
+    last_accessed_at
+    last_seen_at
+    last_used_at
+    audit_ts
+    elapsedMs
+    elapsed_ms
+    startedAt
+    started_at
+    endedAt
+    ended_at
+    ts
+    timestamp
+    ee_binary_hash
+    databasePath
+    workspacePath
+    indexDir
+)
+
+volatile_field_delete_filter() {
+    local filter='walk(if type == "object" then del('
+    local separator=""
+    local field
+
+    for field in "${VOLATILE_FIELD_NAMES[@]}"; do
+        filter="${filter}${separator}.${field}"
+        separator=","
+    done
+
+    printf '%s) else . end)\n' "$filter"
+}
+
 # Strip every JSON field whose value legitimately varies per invocation
 # (timestamps, wall-clock elapsed counters, runtime-allocated IDs that
 # carry no semantic load). The list is the union of the variable-field
@@ -60,33 +93,15 @@ hash_stdin() {
 # depths (e.g. `data.metrics.elapsedMs` AND `data.results[].why` —
 # the latter shouldn't be stripped, only known-variable fields).
 strip_variable_fields() {
-    jq 'walk(
-        if type == "object" then
-            del(
-                .generatedAt,
-                .generated_at,
-                .last_accessed,
-                .last_seen_at,
-                .last_used_at,
-                .audit_ts,
-                .elapsedMs,
-                .elapsed_ms,
-                .startedAt,
-                .started_at,
-                .endedAt,
-                .ended_at,
-                .ts,
-                .timestamp,
-                .ee_binary_hash,
-                .databasePath,
-                .indexDir,
-                .workspacePath
-            )
-        else
-            .
-        end
-    )'
+    jq "$(volatile_field_delete_filter)"
 }
+
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+    return 0
+fi
+
+require_jq
+epic_setup "epic_J_determinism"
 
 # Run `ee ARGS...` three times, canonicalize each output, hash, and
 # emit an assert via the J1 logger. The assert name is the first arg.

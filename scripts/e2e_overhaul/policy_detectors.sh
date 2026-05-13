@@ -6,8 +6,8 @@
 # C1 + C3 fixes accept meta-policy phrases and dot/colon tags while still
 # rejecting real value-shape secrets.
 #
-# Shipped (real assertions):  C1, C3
-# Not yet shipped (todo):     C2, C4, C5
+# Shipped (real assertions):  C1, C2, C3, C4
+# Not yet shipped (todo):     C5
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -86,18 +86,52 @@ SPACE_TAG_OK=$(printf '%s' "$SPACE_TAG_JSON" | jq -r '.success // false' 2>/dev/
 e2e_log_assert_eq "$SPACE_TAG_OK" "false" "c3_tag_with_whitespace_rejected"
 
 # ------------------------------------------------------------
-# C2 (not shipped) — error envelope must explain *why* a secret was rejected
-# with a structured detector hit (regex name, span, severity).
+# C2 (shipped) — explicit bypass must persist with a visible degraded/audit
+# signal; workspace allow config must exempt only the matching context.
 # ------------------------------------------------------------
-DETECTOR_DETAIL=$(printf '%s' "$REAL_PAT_JSON" \
-    | jq -r '.error.details.detector // empty' 2>/dev/null || true)
-e2e_log_note "c2_detector_detail_present=${DETECTOR_DETAIL:-false}"
-todo_assert "c2_structured_detector_details" "bd-17c65.3.2" \
-    "Secret rejection lacks error.details.detector (regex name, span, severity)."
 
-# C4 — regex extension hook for project-specific secret patterns.
-todo_assert "c4_secret_regex_extension_hook" "bd-17c65.3.4" \
-    "No project-config secret regex registration surface yet."
+BYPASS_JSON=$(ee_workspace remember \
+    "Document redacted sample API_KEY=sk-FAKEabc123def456ghi789jkl012." \
+    --level procedural --kind rule --allow-secret-mention --json 2>/dev/null || true)
+assert_jq "$BYPASS_JSON" '.success // false' "true" "c2_allow_secret_mention_persists"
+assert_jq "$BYPASS_JSON" '.data.policy_bypass_used // false' "true" "c2_bypass_used_flag_visible"
+assert_jq "$BYPASS_JSON" '.data.policy_bypass.kind // empty' "flag" "c2_bypass_kind_flag"
+assert_jq "$BYPASS_JSON" '.data.degraded[0].code // empty' "policy_bypass_used" "c2_degraded_code_visible"
+
+printf '%s\n' \
+    '[policy.secret_detector]' \
+    'allow_phrases = ["OAuth refresh token"]' \
+    > "$EPIC_WORKSPACE/.ee/config.toml"
+CONFIG_BYPASS_JSON=$(ee_workspace remember \
+    "OAuth refresh token fixture uses API_KEY=sk-FAKEabc123def456ghi789jkl012 for documentation." \
+    --level semantic --kind fact --json 2>/dev/null || true)
+assert_jq "$CONFIG_BYPASS_JSON" '.success // false' "true" "c2_allow_phrase_persists"
+assert_jq "$CONFIG_BYPASS_JSON" '.data.policy_bypass.kind // empty' "config_phrase" "c2_allow_phrase_kind"
+
+# ------------------------------------------------------------
+# C4 (shipped) — programmatic error.details for tag and content rejection.
+# ------------------------------------------------------------
+
+assert_jq "$SPACE_TAG_JSON" '.error.details.detailCode // empty' \
+    "policy_tag_rejected_with_details" "c4_tag_detail_code"
+assert_jq_nonempty "$SPACE_TAG_JSON" '.error.details.acceptedPattern // empty' \
+    "c4_tag_accepted_pattern_present"
+assert_jq "$SPACE_TAG_JSON" '.error.details.acceptedExamples | index("v0.1.0") != null' \
+    "true" "c4_tag_examples_include_dotted_version"
+assert_jq "$SPACE_TAG_JSON" '.error.details.matchedAt[0].reason // empty' \
+    "space_disallowed" "c4_tag_rejected_reason"
+
+assert_jq "$REAL_PAT_JSON" '.error.details.detailCode // empty' \
+    "policy_secret_detected_with_offsets" "c4_secret_detail_code"
+assert_jq "$REAL_PAT_JSON" '.error.details.bypassFlag // empty' \
+    "--allow-secret-mention" "c4_secret_bypass_flag"
+assert_jq_nonempty "$REAL_PAT_JSON" '.error.details.matchedAt[0].pattern_id // empty' \
+    "c4_secret_pattern_id_present"
+SECRET_DETAIL_LEAKED=false
+if printf '%s' "$REAL_PAT_JSON" | grep -Fq 'ghp_abcdefghijklmnopqrstuvwxyz0123456789ABC'; then
+    SECRET_DETAIL_LEAKED=true
+fi
+e2e_log_assert_eq "$SECRET_DETAIL_LEAKED" "false" "c4_secret_details_do_not_echo_value"
 
 # C5 — corpora-level seed tests pin expected accept/reject behavior.
 SECRET_PATTERN_DIR="$REPO_ROOT/tests/fixtures/secret_patterns"

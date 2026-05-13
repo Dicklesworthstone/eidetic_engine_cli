@@ -6,8 +6,8 @@
 # use `content` (D1) plus `content_truncated` for list views. Also exercises
 # workspace auto-discovery via EE_WORKSPACE + walk-up (D7).
 #
-# Shipped (real assertions):  D1, D7
-# Not yet shipped (todo):     D2, D3, D4, D5, D6
+# Shipped (real assertions):  D1, D6, D7
+# Not yet shipped (todo):     D2, D3, D4, D5
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -122,7 +122,33 @@ rm -f /tmp/d7_env_$$.txt
 e2e_log_assert_num "$ENV_OK" -ge 1 "d7_workspace_resolves_via_env_var"
 
 # ------------------------------------------------------------
-# D2-D6 (not shipped) — TODOs.
+# D6 (shipped) — every context format carries the same canonical pack hash.
+# ------------------------------------------------------------
+CONTEXT_QUERY="release format renderer parity"
+CONTEXT_JSON=$(ee_workspace context "$CONTEXT_QUERY" --max-tokens 1500 --format json --no-rendered-text 2>/dev/null || true)
+if printf '%s' "$CONTEXT_JSON" | jq . >/dev/null 2>&1; then
+    CONTEXT_PACK_HASH=$(printf '%s' "$CONTEXT_JSON" | jq -r '.data.pack.hash // empty' 2>/dev/null || true)
+    if [ -n "$CONTEXT_PACK_HASH" ] && [ "$CONTEXT_PACK_HASH" != "null" ]; then
+        e2e_log_assert_eq "true" "true" "d6_json_pack_hash_present"
+
+        for FORMAT in human json toon jsonl compact hook markdown mermaid; do
+            FORMAT_OUTPUT=$(ee_workspace context "$CONTEXT_QUERY" \
+                --max-tokens 1500 --format "$FORMAT" 2>/dev/null || true)
+            if printf '%s' "$FORMAT_OUTPUT" | grep -Fq "$CONTEXT_PACK_HASH"; then
+                e2e_log_assert_eq "true" "true" "d6_${FORMAT}_carries_pack_hash"
+            else
+                e2e_log_assert_eq "missing" "$CONTEXT_PACK_HASH" "d6_${FORMAT}_carries_pack_hash"
+            fi
+        done
+    else
+        e2e_log_assert_eq "missing" "present" "d6_json_pack_hash_present"
+    fi
+else
+    e2e_log_assert_eq "invalid" "parseable" "d6_json_context_parses"
+fi
+
+# ------------------------------------------------------------
+# D2-D5 (not shipped) — TODOs.
 # ------------------------------------------------------------
 todo_assert "d2_json_markdown_parity" "bd-17c65.4.2" \
     "Markdown renderer should derive from canonical JSON tree (currently parallel)."
@@ -135,6 +161,3 @@ todo_assert "d4_schema_drift_audit_in_ci" "bd-17c65.4.4" \
 
 todo_assert "d5_fields_preset_interaction" "bd-17c65.4.5" \
     "--fields preset and explicit field-list interaction not yet defined per-schema."
-
-todo_assert "d6_all_renderers_from_canonical_tree" "bd-17c65.4.6" \
-    "Eight --format renderers don't all derive from the canonical pack tree yet."

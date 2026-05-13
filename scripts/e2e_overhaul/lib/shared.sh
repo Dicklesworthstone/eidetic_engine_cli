@@ -110,6 +110,10 @@ _epic_teardown() {
     local code=$?
     e2e_log_end
     if [ -n "$EPIC_WORKSPACE" ] && [ -d "$EPIC_WORKSPACE" ]; then
+        if [ "${EE_E2E_KEEP_WORKSPACE:-0}" = "1" ]; then
+            e2e_log_note "epic_teardown_keep_workspace workspace=$EPIC_WORKSPACE"
+            return "$code"
+        fi
         rm -rf "$EPIC_WORKSPACE"
     fi
     return "$code"

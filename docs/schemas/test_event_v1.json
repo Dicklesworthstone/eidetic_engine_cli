@@ -29,7 +29,11 @@
         "assert_fail",
         "golden_compare",
         "timer_lap",
-        "note"
+        "note",
+        "pack_hash_components",
+        "db_generation_observed",
+        "volatile_strip",
+        "schema_gate"
       ]
     },
     "command": {
@@ -42,12 +46,12 @@
     },
     "stdin_hash": {
       "type": "string",
-      "pattern": "^blake3:[0-9a-f]{64}$",
+      "pattern": "^(blake3:[0-9a-f]{64}|sha256:[0-9a-f]{64})$",
       "description": "BLAKE3 hash of the stdin bytes piped to the command. We hash rather than log bytes so the log never carries secret content."
     },
     "stdout_hash": {
       "type": "string",
-      "pattern": "^blake3:[0-9a-f]{64}$"
+      "pattern": "^(blake3:[0-9a-f]{64}|sha256:[0-9a-f]{64})$"
     },
     "stderr_excerpt": {
       "type": "string",
@@ -65,5 +69,90 @@
       "description": "Free-form per-test fields (label, expected/actual for asserts, blob_size, ...). Schema-flexible by design.",
       "additionalProperties": true
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"kind": {"const": "assert_ok"}}},
+      "then": {
+        "properties": {
+          "fields": {
+            "type": "object",
+            "required": ["label"]
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "assert_fail"}}},
+      "then": {
+        "properties": {
+          "fields": {
+            "type": "object",
+            "required": ["label", "expected", "actual"]
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "pack_hash_components"}}},
+      "then": {
+        "properties": {
+          "fields": {
+            "type": "object",
+            "required": [
+              "pack_request_hash",
+              "draft_items_hash",
+              "degraded_summary_hash",
+              "rendered_text_hash",
+              "composite_hash"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "db_generation_observed"}}},
+      "then": {
+        "properties": {
+          "fields": {
+            "type": "object",
+            "required": ["command", "health", "db_generation", "index_generation"]
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "volatile_strip"}}},
+      "then": {
+        "properties": {
+          "fields": {
+            "type": "object",
+            "required": [
+              "fields_stripped_count",
+              "fields_stripped",
+              "input_bytes",
+              "output_bytes"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "schema_gate"}}},
+      "then": {
+        "properties": {
+          "fields": {
+            "type": "object",
+            "required": [
+              "target_schema",
+              "log_lines_checked",
+              "kinds_observed",
+              "orphans_in_schema",
+              "orphans_in_src"
+            ]
+          }
+        }
+      }
+    }
+  ]
 }

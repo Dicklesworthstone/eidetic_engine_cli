@@ -2,10 +2,10 @@
 # J3 — Epic B: search honesty & quality e2e driver.
 #
 # Drives `ee search` and asserts the search response exposes the honesty
-# signals shipped by B1-B5/B7 and records TODOs for B6, B8, B10, B11.
+# signals shipped by B1-B5/B7/B8 and records TODOs for B6, B10, B11.
 #
-# Shipped (real assertions):  B1, B2, B3, B4, B5, B7
-# Not yet shipped (todo):     B6, B8, B10, B11
+# Shipped (real assertions):  B1, B2, B3, B4, B5, B7, B8
+# Not yet shipped (todo):     B6, B10, B11
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -143,13 +143,139 @@ else
     e2e_log_assert_eq "false" "true" "b7_diag_search_json_parses"
 fi
 
+# B8 — tombstone visibility semantics in search/context/why/graph/export.
+B8_QUERY="b8 tombstone visibility alpha marker"
+B8_REASON="b8-search-honesty-fixture"
+B8_TOMBSTONE_JSON=$(ee_workspace remember \
+    --level procedural \
+    --kind rule \
+    --tags b8,tombstone \
+    "$B8_QUERY tombstoned rule" \
+    --json || true)
+B8_ACTIVE_JSON=$(ee_workspace remember \
+    --level procedural \
+    --kind rule \
+    --tags b8,tombstone \
+    "b8 tombstone visibility beta active companion" \
+    --json || true)
+B8_MEMORY_ID=$(printf '%s' "$B8_TOMBSTONE_JSON" \
+    | jq -r '.data.memory_id // empty' 2>/dev/null || true)
+B8_ACTIVE_ID=$(printf '%s' "$B8_ACTIVE_JSON" \
+    | jq -r '.data.memory_id // empty' 2>/dev/null || true)
+if [ -n "$B8_MEMORY_ID" ] && [ -n "$B8_ACTIVE_ID" ]; then
+    ee_workspace memory link "$B8_MEMORY_ID" "$B8_ACTIVE_ID" \
+        --relation supports \
+        --actor search_honesty_e2e \
+        --json >/dev/null || true
+    ee_workspace curate tombstone "$B8_MEMORY_ID" \
+        --reason "$B8_REASON" \
+        --actor search_honesty_e2e \
+        --json >/dev/null || true
+
+    B8_DEFAULT_JSON=$(ee_workspace search "$B8_QUERY" --relevance-floor 0.0 --json || true)
+    B8_DEFAULT_COUNT=$(printf '%s' "$B8_DEFAULT_JSON" \
+        | jq --arg id "$B8_MEMORY_ID" '[.data.results[]?.docId // empty] | map(select(. == $id)) | length' 2>/dev/null \
+        || echo 0)
+    e2e_log_assert_eq "$B8_DEFAULT_COUNT" "0" "b8_search_excludes_tombstoned_by_default"
+    B8_FILTERED_COUNT=$(printf '%s' "$B8_DEFAULT_JSON" \
+        | jq '[.data.degraded[]?.code // empty] | map(select(. == "tombstoned_filtered")) | length' 2>/dev/null \
+        || echo 0)
+    if [ "$B8_FILTERED_COUNT" -gt 0 ]; then
+        e2e_log_assert_eq "true" "true" "b8_search_emits_tombstoned_filtered"
+    else
+        e2e_log_assert_eq "$B8_FILTERED_COUNT" ">=1" "b8_search_emits_tombstoned_filtered"
+    fi
+
+    B8_INCLUDE_JSON=$(ee_workspace search "$B8_QUERY" --include-tombstoned --relevance-floor 0.0 --json || true)
+    B8_INCLUDE_COUNT=$(printf '%s' "$B8_INCLUDE_JSON" \
+        | jq --arg id "$B8_MEMORY_ID" '[.data.results[]? | select(.docId == $id and .tombstoned == true and (.tombstonedAt // "") != "" and .metadata.tombstoned == true)] | length' 2>/dev/null \
+        || echo 0)
+    if [ "$B8_INCLUDE_COUNT" -gt 0 ]; then
+        e2e_log_assert_eq "true" "true" "b8_search_include_tombstoned_returns_marker"
+    else
+        e2e_log_assert_eq "$B8_INCLUDE_COUNT" ">=1" "b8_search_include_tombstoned_returns_marker"
+    fi
+    B8_DEGRADED_COUNT=$(printf '%s' "$B8_INCLUDE_JSON" \
+        | jq '[.data.degraded[]?.code // empty] | map(select(. == "tombstoned_in_results")) | length' 2>/dev/null \
+        || echo 0)
+    if [ "$B8_DEGRADED_COUNT" -gt 0 ]; then
+        e2e_log_assert_eq "true" "true" "b8_search_include_tombstoned_emits_degraded"
+    else
+        e2e_log_assert_eq "$B8_DEGRADED_COUNT" ">=1" "b8_search_include_tombstoned_emits_degraded"
+    fi
+
+    B8_CONTEXT_DEFAULT_JSON=$(ee_workspace context "$B8_QUERY" --json || true)
+    B8_CONTEXT_DEFAULT_COUNT=$(printf '%s' "$B8_CONTEXT_DEFAULT_JSON" \
+        | jq --arg id "$B8_MEMORY_ID" '[.data.pack.items[]?.memoryId // empty] | map(select(. == $id)) | length' 2>/dev/null \
+        || echo 0)
+    e2e_log_assert_eq "$B8_CONTEXT_DEFAULT_COUNT" "0" "b8_context_excludes_tombstoned_by_default"
+    B8_CONTEXT_INCLUDE_JSON=$(ee_workspace context "$B8_QUERY" --include-tombstoned --json || true)
+    B8_CONTEXT_INCLUDE_COUNT=$(printf '%s' "$B8_CONTEXT_INCLUDE_JSON" \
+        | jq --arg id "$B8_MEMORY_ID" '[.data.pack.items[]? | select(.memoryId == $id and .lifecycle.status == "tombstoned" and (.lifecycle.tombstonedAt // "") != "")] | length' 2>/dev/null \
+        || echo 0)
+    if [ "$B8_CONTEXT_INCLUDE_COUNT" -gt 0 ]; then
+        e2e_log_assert_eq "true" "true" "b8_context_include_tombstoned_has_lifecycle"
+    else
+        e2e_log_assert_eq "$B8_CONTEXT_INCLUDE_COUNT" ">=1" "b8_context_include_tombstoned_has_lifecycle"
+    fi
+
+    B8_WHY_JSON=$(ee_workspace why "$B8_MEMORY_ID" --json || true)
+    assert_jq "$B8_WHY_JSON" '.data.lifecycle.status' "tombstoned" "b8_why_tombstoned_status"
+    assert_jq "$B8_WHY_JSON" '.data.lifecycle.tombstoned_reason' "$B8_REASON" "b8_why_tombstoned_reason"
+
+    B8_MEMORY_LIST_JSON=$(ee_workspace memory list --json || true)
+    B8_MEMORY_LIST_COUNT=$(printf '%s' "$B8_MEMORY_LIST_JSON" \
+        | jq --arg id "$B8_MEMORY_ID" '[.data.memories[]? | select(.id == $id and .is_tombstoned == true)] | length' 2>/dev/null \
+        || echo 0)
+    if [ "$B8_MEMORY_LIST_COUNT" -gt 0 ]; then
+        e2e_log_assert_eq "true" "true" "b8_memory_list_includes_tombstoned_by_default"
+    else
+        e2e_log_assert_eq "$B8_MEMORY_LIST_COUNT" ">=1" "b8_memory_list_includes_tombstoned_by_default"
+    fi
+    B8_MEMORY_LIST_NO_JSON=$(ee_workspace memory list --no-tombstoned --json || true)
+    B8_MEMORY_LIST_NO_COUNT=$(printf '%s' "$B8_MEMORY_LIST_NO_JSON" \
+        | jq --arg id "$B8_MEMORY_ID" '[.data.memories[]?.id // empty] | map(select(. == $id)) | length' 2>/dev/null \
+        || echo 0)
+    e2e_log_assert_eq "$B8_MEMORY_LIST_NO_COUNT" "0" "b8_memory_list_no_tombstoned_excludes"
+
+    B8_GRAPH_DEFAULT_JSON=$(ee_workspace graph pagerank --json || true)
+    B8_GRAPH_EXCLUDED_COUNT=$(printf '%s' "$B8_GRAPH_DEFAULT_JSON" \
+        | jq --arg id "$B8_MEMORY_ID" '[.data.graph.excludedNodes[]?] | map(select(. == $id)) | length' 2>/dev/null \
+        || echo 0)
+    if [ "$B8_GRAPH_EXCLUDED_COUNT" -gt 0 ]; then
+        e2e_log_assert_eq "true" "true" "b8_graph_excludes_tombstoned_by_default"
+    else
+        e2e_log_assert_eq "$B8_GRAPH_EXCLUDED_COUNT" ">=1" "b8_graph_excludes_tombstoned_by_default"
+    fi
+    B8_GRAPH_INCLUDE_JSON=$(ee_workspace graph pagerank --include-tombstoned --json || true)
+    B8_GRAPH_INCLUDE_EXCLUDED_COUNT=$(printf '%s' "$B8_GRAPH_INCLUDE_JSON" \
+        | jq --arg id "$B8_MEMORY_ID" '[.data.graph.excludedNodes[]?] | map(select(. == $id)) | length' 2>/dev/null \
+        || echo 0)
+    e2e_log_assert_eq "$B8_GRAPH_INCLUDE_EXCLUDED_COUNT" "0" "b8_graph_include_tombstoned_recomputes"
+
+    B8_EXPORT_DIR="$EPIC_WORKSPACE/b8-export"
+    B8_EXPORT_JSON=$(ee_workspace export --output-dir "$B8_EXPORT_DIR" --redaction none --label b8-tombstone --json || true)
+    B8_RECORDS_PATH=$(printf '%s' "$B8_EXPORT_JSON" \
+        | jq -r '.data.recordsPath // empty' 2>/dev/null || true)
+    if [ -n "$B8_RECORDS_PATH" ] && [ -f "$B8_RECORDS_PATH" ]; then
+        B8_EXPORT_TOMBSTONE_COUNT=$(jq --arg id "$B8_MEMORY_ID" --arg reason "$B8_REASON" \
+            'select(.schema == "ee.export.memory.v1" and .memory_id == $id and (.tombstoned_at // "") != "" and .tombstoned_reason == $reason) | .memory_id' \
+            "$B8_RECORDS_PATH" 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$B8_EXPORT_TOMBSTONE_COUNT" -gt 0 ]; then
+            e2e_log_assert_eq "true" "true" "b8_export_includes_tombstone_metadata"
+        else
+            e2e_log_assert_eq "$B8_EXPORT_TOMBSTONE_COUNT" ">=1" "b8_export_includes_tombstone_metadata"
+        fi
+    else
+        e2e_log_assert_eq "missing_records_path" "present" "b8_export_records_path"
+    fi
+else
+    e2e_log_assert_eq "missing_fixture_memory" "present" "b8_tombstone_fixture_created"
+fi
+
 # B6 — --source-mode flag (lexical_only|semantic_only|hybrid).
 todo_assert "b6_source_mode_flag" "bd-17c65.2.3" \
     "ee search lacks --source-mode for forcing lexical/semantic isolation."
-
-# B8 — tombstone visibility semantics in search/pack/graph.
-todo_assert "b8_tombstone_visibility_documented" "bd-17c65.2.8" \
-    "Tombstone visibility through search/pack/graph is currently undocumented."
 
 # B10 — output redaction.
 todo_assert "b10_output_redaction" "bd-17c65.2.7" \

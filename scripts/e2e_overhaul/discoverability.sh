@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # J3 — Epic F: discoverability e2e driver.
 #
-# Asserts the shipped F1 (recovery actions), F2 (top-level aliases), F4
-# (capabilities binaries + env), F7 (didYouMean) surfaces and records TODOs
-# for the remaining F3, F5, F6 work.
+# Asserts the shipped F1 (recovery actions), F2 (top-level aliases), F4/F5
+# (capabilities binaries + env registry), F6 (completion aliases), F7
+# (didYouMean) surfaces and records TODOs for the remaining F3 work.
 #
-# Shipped (real assertions):  F1, F2, F4, F7
-# Not yet shipped (todo):     F3, F5, F6
+# Shipped (real assertions):  F1, F2, F4, F5, F6, F7
+# Not yet shipped (todo):     F3
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -109,10 +109,66 @@ fi
 todo_assert "f3_help_first5_section" "bd-17c65.6.3" \
     "ee --help lacks the curated 'First 5' commands section."
 
-# F5 — env var registry surfaced via `ee capabilities envs --json`.
-todo_assert "f5_env_var_registry_command" "bd-17c65.6.5" \
-    "No single canonical listing of consumed env vars + provenance."
+# F5 (shipped) — the EnvVar registry is surfaced through capabilities
+# `envOverrides`, using registry names/descriptions and suppressing sensitive
+# current values.
+if printf '%s' "$CAPS_JSON" | jq . >/dev/null 2>&1; then
+    F5_ENV_COUNT=$(printf '%s' "$CAPS_JSON" \
+        | jq '[.data.envOverrides[]? | select(.name | startswith("EE_"))] | length' \
+            2>/dev/null || echo 0)
+    e2e_log_assert_num "$F5_ENV_COUNT" -ge 10 "f5_env_registry_lists_ee_vars"
 
-# F6 — shell completion regeneration test (must not drift after F2).
-todo_assert "f6_completion_regen_test" "bd-17c65.6.6" \
-    "tests/golden/completion.snap should regen-and-diff after every clap surface change."
+    F5_HAS_CASS=$(printf '%s' "$CAPS_JSON" \
+        | jq -r 'any(.data.envOverrides[]?; .name == "EE_CASS_BINARY" and (.controls | length > 0))' \
+            2>/dev/null || echo false)
+    e2e_log_assert_eq "$F5_HAS_CASS" "true" "f5_env_registry_describes_cass_binary"
+
+    F5_SECRET_EXPOSED=$(printf '%s' "$CAPS_JSON" \
+        | jq -r 'any(.data.envOverrides[]?; .name == "EE_PREFLIGHT_BYPASS_SECRET" and has("currentValue"))' \
+            2>/dev/null || echo true)
+    e2e_log_assert_eq "$F5_SECRET_EXPOSED" "false" "f5_env_registry_suppresses_secret_value"
+
+    F5_ENV_JSON=$(
+        unset EE_REMEMBER_CURATION_SYNC_BUDGET_MS
+        EE_CASS_BINARY="/tmp/ee-f5-cass" \
+            EE_PREFLIGHT_BYPASS_SECRET="ee-f5-secret" \
+            ee_global capabilities --json 2>/dev/null || true
+    )
+    if printf '%s' "$F5_ENV_JSON" | jq . >/dev/null 2>&1; then
+        F5_CASS_SET=$(printf '%s' "$F5_ENV_JSON" \
+            | jq -r 'any(.data.envOverrides[]?; .name == "EE_CASS_BINARY" and .isSet == true and .currentValue == "/tmp/ee-f5-cass" and .source == "process_env")' \
+                2>/dev/null || echo false)
+        e2e_log_assert_eq "$F5_CASS_SET" "true" "f5_env_registry_reports_set_cass_binary"
+
+        F5_SECRET_SET_SAFE=$(printf '%s' "$F5_ENV_JSON" \
+            | jq -r 'any(.data.envOverrides[]?; .name == "EE_PREFLIGHT_BYPASS_SECRET" and .isSet == true and .source == "process_env" and (has("currentValue") | not))' \
+                2>/dev/null || echo false)
+        e2e_log_assert_eq "$F5_SECRET_SET_SAFE" "true" "f5_env_registry_reports_secret_without_value"
+
+        F5_DEFAULT_SOURCE=$(printf '%s' "$F5_ENV_JSON" \
+            | jq -r 'any(.data.envOverrides[]?; .name == "EE_REMEMBER_CURATION_SYNC_BUDGET_MS" and .defaultValue == "50" and .source == "registry_default")' \
+                2>/dev/null || echo false)
+        e2e_log_assert_eq "$F5_DEFAULT_SOURCE" "true" "f5_env_registry_reports_registry_default"
+    fi
+fi
+
+# F6 (shipped) — completion output includes top-level aliases and remains
+# valid bash syntax.
+BASH_COMPLETION=$(ee_global completion bash 2>/dev/null || true)
+if [ -n "$BASH_COMPLETION" ]; then
+    if printf '%s' "$BASH_COMPLETION" | bash -n 2>/dev/null; then
+        e2e_log_assert_eq "true" "true" "f6_bash_completion_syntax_valid"
+    else
+        e2e_log_assert_eq "bash -n failed" "valid" "f6_bash_completion_syntax_valid"
+    fi
+
+    for alias in show link tag history; do
+        if printf '%s' "$BASH_COMPLETION" | grep -q "ee,$alias)"; then
+            e2e_log_assert_eq "true" "true" "f6_bash_completion_alias_$alias"
+        else
+            e2e_log_assert_eq "missing" "ee,$alias)" "f6_bash_completion_alias_$alias"
+        fi
+    done
+else
+    e2e_log_assert_eq "empty" "non-empty" "f6_bash_completion_generated"
+fi
