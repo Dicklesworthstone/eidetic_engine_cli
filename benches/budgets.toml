@@ -34,6 +34,7 @@ benches = [
   "remember",
   "search",
   "context",
+  "pack_size",
   "why",
   "outcome",
   "status",
@@ -55,6 +56,7 @@ benches = [
   "remember",
   "search",
   "context",
+  "pack_size",
   "why",
   "outcome",
   "status",
@@ -82,6 +84,11 @@ description = "Hybrid lexical+semantic search over 5k memories"
 p50_ms_max = 95.0
 p99_ms_max = 240.0
 description = "Build 4k-token context pack from 100 memories"
+
+[operations.ee_pack_size]
+p50_ms_max = 95.0
+p99_ms_max = 240.0
+description = "Measure context pack JSON/text bytes, token usage, and bytes per token"
 
 [operations.ee_why]
 p50_ms_max = 25.0

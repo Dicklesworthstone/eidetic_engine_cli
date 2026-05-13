@@ -10,6 +10,7 @@ set -eu
 #   ./scripts/bench.sh --profile ci-smoke --json
 #   ./scripts/bench.sh --profile nightly
 #   ./scripts/bench.sh --profile stress --check-regression
+#   ./scripts/bench_pack_regression.sh
 #   ./scripts/bench.sh --quick            # Alias for --profile ci-smoke
 #
 # Environment:
@@ -96,14 +97,14 @@ case "$PROFILE" in
         RELEASE_BLOCKING=false
         ;;
     nightly)
-        BENCHMARKS="remember search context why outcome status import_cass link graph_pagerank curate_candidates"
+        BENCHMARKS="remember search context pack_size why outcome status import_cass link graph_pagerank curate_candidates"
         BENCH_ARGS="--warm-up-time 0.5 --measurement-time 2 --sample-size 20"
         PROFILE_CLASS="nightly_ci"
         WORKLOAD_TIER="medium"
         RELEASE_BLOCKING=false
         ;;
     stress)
-        BENCHMARKS="remember search context why outcome status import_cass link graph_pagerank curate_candidates"
+        BENCHMARKS="remember search context pack_size why outcome status import_cass link graph_pagerank curate_candidates"
         BENCH_ARGS=""
         PROFILE_CLASS="local_256gb"
         WORKLOAD_TIER="stress"
@@ -668,6 +669,21 @@ if [ "$CHECK_REGRESSION" = "true" ]; then
         echo "[!] No baseline file found - skipping regression check" >&2
     else
         echo "[!] jq not available - skipping regression check" >&2
+    fi
+
+    PACK_SIZE_GATE="$PROJECT_ROOT/scripts/bench_pack_regression.sh"
+    if [ -x "$PACK_SIZE_GATE" ]; then
+        echo "" >&2
+        echo "[*] Checking pack-size regression gate..." >&2
+        if "$PACK_SIZE_GATE" --skip-run --summary "$CRITERION_DIR/pack_size/summary.json"; then
+            echo "[+] pack-size regression gate passed" >&2
+        else
+            echo "[-] pack-size regression gate failed" >&2
+            FAILED=true
+        fi
+    else
+        echo "[!] Pack-size regression gate missing or not executable: $PACK_SIZE_GATE" >&2
+        FAILED=true
     fi
 fi
 

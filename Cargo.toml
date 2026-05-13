@@ -107,6 +107,10 @@ name = "context"
 harness = false
 
 [[bench]]
+name = "pack_size"
+harness = false
+
+[[bench]]
 name = "status"
 harness = false
 
