@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "perf_latency_evidence_partial",
+  "introduced_by": {
+    "bead": "bd-1zb7k.10.1",
+    "epic_letter": "O"
+  },
+  "surfaces": [
+    "perf explain-latency"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee perf explain-latency reads a J1 JSONL evidence log that contains at least one malformed line, so aggregation continues with the valid events but reports partial evidence.",
+    "setup_commands": [
+      "printf '%s\\n' 'not-json' > /tmp/ee-j1-partial.jsonl"
+    ],
+    "invocation": "ee perf explain-latency --surface context --log /tmp/ee-j1-partial.jsonl --json"
+  },
+  "expected_emission": {
+    "code": "perf_latency_evidence_partial",
+    "severity": "low",
+    "message_contains": [
+      "latency evidence log lines",
+      "not valid JSON events"
+    ],
+    "repair_contains": "Regenerate the J1 JSONL log"
+  }
+}

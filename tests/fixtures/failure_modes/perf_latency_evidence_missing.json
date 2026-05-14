@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "perf_latency_evidence_missing",
+  "introduced_by": {
+    "bead": "bd-1zb7k.10.1",
+    "epic_letter": "O"
+  },
+  "surfaces": [
+    "perf explain-latency"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee perf explain-latency is invoked without live J1 command_end timing evidence for the requested search or context surface. With no log configured, the report may use bounded fixture replay and still emits this degraded code so callers do not confuse fixture timing with live evidence.",
+    "setup_commands": [
+      "# leave EE_TEST_LOG_PATH unset to exercise bounded fixture replay; pass --log pointing at a log without matching command_end events to exercise no-timing recovery"
+    ],
+    "invocation": "ee perf explain-latency --surface search --json"
+  },
+  "expected_emission": {
+    "code": "perf_latency_evidence_missing",
+    "severity": "medium",
+    "message_contains": [
+      "J1 command_end timing evidence",
+      "fixture replay"
+    ],
+    "repair_contains": "EE_TEST_LOG_PATH=<path>"
+  }
+}

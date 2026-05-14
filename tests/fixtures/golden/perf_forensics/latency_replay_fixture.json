@@ -1,0 +1,33 @@
+{
+  "schema": "ee.perf.latency_replay_fixture.v1",
+  "samples": [
+    {
+      "surface": "search",
+      "profile": "instant",
+      "elapsed_ms": 18.5,
+      "workspace_generation": 12,
+      "index_generation": 9
+    },
+    {
+      "surface": "search",
+      "profile": "balanced",
+      "elapsed_ms": 31.0,
+      "workspace_generation": 12,
+      "index_generation": 9
+    },
+    {
+      "surface": "context",
+      "profile": "compact",
+      "elapsed_ms": 42.5,
+      "workspace_generation": 12,
+      "index_generation": 9
+    },
+    {
+      "surface": "context",
+      "profile": "balanced",
+      "elapsed_ms": 64.0,
+      "workspace_generation": 12,
+      "index_generation": 9
+    }
+  ]
+}
