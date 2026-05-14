@@ -61,8 +61,7 @@ pub struct InsightsSection {
     pub next_commands: Vec<&'static str>,
 }
 
-#[must_use]
-pub fn section_registry() -> BTreeMap<&'static str, SectionBuilder> {
+fn section_registry() -> BTreeMap<&'static str, SectionBuilder> {
     let mut registry = BTreeMap::new();
     registry.insert("coordination", coordination_section as SectionBuilder);
     registry.insert("graph", graph_section as SectionBuilder);
