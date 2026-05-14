@@ -222,6 +222,16 @@ wrapper, do not count local Cargo output as remote verification, and record the
 failed-offload caveat on the bead. The closeout audit only reports posture; it
 does not restart the daemon, cancel jobs, kill workers, or delete artifacts.
 
+RCH command surfaces differ by installed version. Some older runbooks use
+manual `rch exec -- cargo ...`; the current Mac agent host may expose only the
+hook/daemon command surface (`rch check`, `rch queue`, `rch status`, `rch
+diagnose`, `rch hook ...`) and reject `rch exec` as an unknown subcommand. In
+that state, do not run Cargo locally to compensate. Record the missing manual
+execution surface as a failed-offload caveat, keep the Cargo gate unverified,
+and use only non-Cargo preflight evidence (`rch check`, `rch queue --json`,
+`rch status --workers --jobs`) until a supported remote or hook-routed proof is
+available.
+
 ### J1 Artifact Manifests
 
 Structured E2E logs include `kind: "artifact_manifest"` events using manifest
