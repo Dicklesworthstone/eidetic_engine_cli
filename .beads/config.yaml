@@ -1,4 +1,7 @@
 # Beads Project Configuration
-# issue_prefix: eidetic_engine_cli
-# default_priority: 2
-# default_type: task
+# Issue IDs are bd-prefixed (current canonical scheme). External refs
+# from the legacy "eidetic_engine_cli-" scheme are preserved on each
+# row's external_ref field but are NOT the primary IDs.
+issue_prefix: bd
+default_priority: 2
+default_type: task
