@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use ee::core::handoff::{CapsuleProfile, CreateOptions, HANDOFF_CAPSULE_SCHEMA_V1, create_handoff};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::db::DbConnection;
+use ee::models::RedactionLevel;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -97,6 +98,7 @@ fn produce_capsule(workspace: &std::path::Path) -> Result<Value, String> {
         task_frame_id: None,
         bind_to_machine: false,
         machine_salt_path: None,
+        redaction_level: RedactionLevel::Standard,
     })
     .map_err(|error| format!("create_handoff: {error:?}"))?;
 

@@ -30,6 +30,7 @@ use ee::core::handoff::{
 };
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::db::DbConnection;
+use ee::models::RedactionLevel;
 use tempfile::TempDir;
 
 type TestResult = Result<(), String>;
@@ -97,6 +98,7 @@ fn build_capsule() -> Result<CapsuleFixture, String> {
         task_frame_id: None,
         bind_to_machine: false,
         machine_salt_path: None,
+        redaction_level: RedactionLevel::Standard,
     })
     .map_err(|error| format!("create_handoff: {error:?}"))?;
 

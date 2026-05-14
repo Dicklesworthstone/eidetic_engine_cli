@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use ee::core::handoff::{CapsuleProfile, CreateOptions, CreateReport, create_handoff};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::db::DbConnection;
+use ee::models::RedactionLevel;
 use tempfile::TempDir;
 
 type TestResult = Result<(), String>;
@@ -103,6 +104,7 @@ fn create_capsule(workspace: &Path, label: &str) -> Result<CreateReport, String>
         task_frame_id: None,
         bind_to_machine: false,
         machine_salt_path: None,
+        redaction_level: RedactionLevel::Standard,
     })
     .map_err(|error| format!("create_handoff: {error:?}"))
 }

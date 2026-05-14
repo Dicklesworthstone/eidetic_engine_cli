@@ -31,6 +31,7 @@ use ee::core::handoff::{
     WorkspaceMismatchSeverity, compare_workspace_identity, compute_workspace_identity_for_capsule,
     create_handoff, resume_handoff,
 };
+use ee::models::RedactionLevel;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -216,6 +217,7 @@ fn build_capsule_with_identity() -> Result<(TempDir, PathBuf, PathBuf), String> 
         task_frame_id: None,
         bind_to_machine: false,
         machine_salt_path: None,
+        redaction_level: RedactionLevel::Standard,
     })
     .map_err(|error| format!("create_handoff: {error:?}"))?;
 

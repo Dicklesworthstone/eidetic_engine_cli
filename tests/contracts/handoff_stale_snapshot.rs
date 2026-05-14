@@ -30,6 +30,7 @@ use ee::core::handoff::{
 };
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::db::{ApplyMemoryCurationInput, DbConnection};
+use ee::models::RedactionLevel;
 use ee::output::render_handoff_resume_json;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -93,6 +94,7 @@ fn build_capsule_with_seeds() -> Result<CapsuleFixture, String> {
         task_frame_id: None,
         bind_to_machine: false,
         machine_salt_path: None,
+        redaction_level: RedactionLevel::Standard,
     })
     .map_err(|error| format!("create_handoff: {error:?}"))?;
 
