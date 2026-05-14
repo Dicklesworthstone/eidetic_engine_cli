@@ -70,6 +70,11 @@ VOLATILE_FIELD_NAMES=(
     databasePath
     workspacePath
     indexDir
+    snapshotRefreshedAt
+    runDurationMs
+    witnessElapsedMs
+    witnessRecordedAt
+    algorithmStartedAt
 )
 
 volatile_field_delete_filter() {

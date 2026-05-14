@@ -278,6 +278,11 @@ run_stage "Basic E2E Scripts" "./scripts/e2e_test.sh"
 # exits 0 without running, so this stage stays fast in default CI.
 run_stage "Overhaul Integration E2E (J4)" "./scripts/e2e_overhaul.sh"
 
+# Gate 6.6: Graph determinism harness (F4.a). This is separate from the J4
+# epic registry because it tracks the GraphAccretion surfaces while they are
+# landing incrementally.
+run_stage "Graph Determinism E2E (F4.a)" "./scripts/e2e_overhaul/graph_determinism.sh"
+
 # Gate 7: Advanced End-to-End
 run_stage "Advanced E2E Scripts" "./scripts/e2e_advanced.sh"
 
