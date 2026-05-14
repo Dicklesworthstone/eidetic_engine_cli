@@ -136,21 +136,42 @@ just to this project:
 
 ```bash
 # ~/.zshrc — mount-guarded so it degrades to local builds if the drive is
-# unplugged rather than failing every cargo command.
+# unplugged rather than failing every cargo command. CARGO_TARGET_DIR
+# is set unconditionally for interactive shells; TMPDIR is more delicate
+# (see note below) and ONLY redirected per-cargo-invocation via a
+# function wrapper, not exported into interactive shells.
 if [ -d /Volumes/USBNVME16TB ]; then
   export CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target
-  export TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp
+fi
+
+# Unset the TMPDIR inherited from ~/.zshenv if it points at the ExFAT USB
+# scratch dir. Non-interactive shells (used by Codex and other agents) still
+# see TMPDIR=ExFAT from .zshenv — they don't load gitstatus, so they're
+# unaffected — but interactive shells need a socket-capable TMPDIR so that
+# gitstatusd (powerlevel10k's git-info daemon) can open its IPC socket.
+if [[ "${TMPDIR:-}" == /Volumes/USBNVME16TB/* ]]; then
+  unset TMPDIR
 fi
 ```
 
-Why both variables, not just `CARGO_TARGET_DIR`:
+Why TMPDIR is handled differently from CARGO_TARGET_DIR:
 
-- `CARGO_TARGET_DIR` redirects the persisted `target/{debug,release,…}` tree.
-- `TMPDIR` redirects the transient linker / debuginfo / fingerprint scratch
-  cargo writes during a build — easily several GB per session even when the
-  final `target/` is modest. Setting `CARGO_TARGET_DIR` alone leaves that
-  churn on the boot drive and is why the "disk 99% full" cycle kept
-  repeating before May 2026.
+- `CARGO_TARGET_DIR` is safe to export globally. Cargo writes plain
+  files; the destination's filesystem semantics don't matter beyond
+  needing write + space.
+- `TMPDIR` on the USB drive *would* recapture the linker / debuginfo /
+  fingerprint scratch cargo writes during a build (often several GB
+  per session) — that's why an earlier revision of this note set it
+  unconditionally. But the USB drive is **formatted ExFAT**, which
+  does not support Unix domain sockets. Interactive shells run
+  gitstatusd (the powerlevel10k git-info daemon) which opens an IPC
+  socket under `$TMPDIR`; pointing it at ExFAT broke the prompt with
+  no error in the foreground. So the live shape: interactive shells
+  unset the ExFAT TMPDIR (gitstatus works); non-interactive shells
+  and cargo invocations route through `.zshenv` / per-cargo wrappers
+  that re-set TMPDIR to the USB scratch dir. The cargo-side redirect
+  is in a `cargo()` shell function further down in `~/.zshrc` rather
+  than a global export.
 
 Hard rules for agents working on this Mac:
 
