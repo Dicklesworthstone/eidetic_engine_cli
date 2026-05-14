@@ -606,6 +606,195 @@ struct BackupDerivedPayload {
     bytes: Vec<u8>,
 }
 
+fn collect_derived_payloads(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    workspace_id: &str,
+    captured_at: &str,
+    degraded: &mut Vec<BackupDegradation>,
+) -> Vec<BackupDerivedPayload> {
+    let mut payloads = Vec::new();
+
+    let index_manifest = workspace_path
+        .join(WORKSPACE_MARKER)
+        .join("indexes")
+        .join("combined")
+        .join("manifest.json");
+    if index_manifest.is_file() {
+        collect_file_derived_payload(
+            &mut payloads,
+            &index_manifest,
+            "derived/index/combined_manifest.json",
+            "index_manifest",
+            captured_at,
+            None,
+            degraded,
+        );
+    } else {
+        degraded.push(BackupDegradation::warning(
+            "index_manifest_missing",
+            "no workspace index manifest was found for --include-derived backup",
+            "run ee index rebuild --workspace . before creating a backup that must include derived index metadata",
+        ));
+    }
+
+    match connection.list_graph_snapshots(workspace_id, None, 256) {
+        Ok(snapshots) => {
+            for snapshot in snapshots {
+                let value = graph_snapshot_json(&snapshot);
+                collect_json_derived_payload(
+                    &mut payloads,
+                    value,
+                    &format!(
+                        "derived/graph/snapshots/{}",
+                        safe_file_stem(&format!("{}.json", snapshot.id))
+                    ),
+                    "graph_snapshot",
+                    captured_at,
+                    None,
+                    degraded,
+                );
+            }
+        }
+        Err(error) => degraded.push(BackupDegradation::warning(
+            "graph_snapshot_backup_unavailable",
+            format!("graph snapshots could not be queried for --include-derived backup: {error}"),
+            "repair workspace migrations and rerun backup create --include-derived",
+        )),
+    }
+
+    match connection.list_task_episodes(Some(workspace_id), None, 256) {
+        Ok(episodes) => {
+            for episode in episodes {
+                let source_path = workspace_path
+                    .join(WORKSPACE_MARKER)
+                    .join("lab")
+                    .join("episodes")
+                    .join(safe_lab_episode_file_name(&episode.id));
+                if source_path.is_file() {
+                    collect_file_derived_payload(
+                        &mut payloads,
+                        &source_path,
+                        &format!(
+                            "derived/lab/episode_files/{}",
+                            safe_file_stem(&format!("{}.json", episode.id))
+                        ),
+                        "lab_episode",
+                        captured_at,
+                        Some(episode.id),
+                        degraded,
+                    );
+                }
+            }
+        }
+        Err(error) => degraded.push(BackupDegradation::warning(
+            "lab_episode_backup_unavailable",
+            format!("lab episodes could not be queried for --include-derived backup: {error}"),
+            "repair workspace migrations and rerun backup create --include-derived",
+        )),
+    }
+
+    payloads
+}
+
+fn collect_file_derived_payload(
+    payloads: &mut Vec<BackupDerivedPayload>,
+    source_path: &Path,
+    backup_relative_path: &str,
+    kind: &str,
+    captured_at: &str,
+    episode_id_if_lab: Option<String>,
+    degraded: &mut Vec<BackupDegradation>,
+) {
+    match fs::read(source_path) {
+        Ok(bytes) => push_derived_payload(
+            payloads,
+            backup_relative_path,
+            kind,
+            bytes,
+            captured_at,
+            episode_id_if_lab,
+        ),
+        Err(error) => degraded.push(BackupDegradation::warning(
+            "derived_asset_read_unavailable",
+            format!(
+                "derived asset '{}' could not be read for backup: {error}",
+                source_path.display()
+            ),
+            "repair derived asset permissions or rerun the producer command before backup create --include-derived",
+        )),
+    }
+}
+
+fn collect_json_derived_payload(
+    payloads: &mut Vec<BackupDerivedPayload>,
+    value: JsonValue,
+    backup_relative_path: &str,
+    kind: &str,
+    captured_at: &str,
+    episode_id_if_lab: Option<String>,
+    degraded: &mut Vec<BackupDegradation>,
+) {
+    match serde_json::to_vec_pretty(&value) {
+        Ok(mut bytes) => {
+            bytes.push(b'\n');
+            push_derived_payload(
+                payloads,
+                backup_relative_path,
+                kind,
+                bytes,
+                captured_at,
+                episode_id_if_lab,
+            );
+        }
+        Err(error) => degraded.push(BackupDegradation::warning(
+            "derived_asset_render_unavailable",
+            format!("derived asset '{kind}' could not be rendered for backup: {error}"),
+            "repair malformed derived metadata and rerun backup create --include-derived",
+        )),
+    }
+}
+
+fn push_derived_payload(
+    payloads: &mut Vec<BackupDerivedPayload>,
+    backup_relative_path: &str,
+    kind: &str,
+    bytes: Vec<u8>,
+    captured_at: &str,
+    episode_id_if_lab: Option<String>,
+) {
+    payloads.push(BackupDerivedPayload {
+        report: BackupDerivedAssetReport {
+            path: backup_relative_path.to_owned(),
+            kind: kind.to_owned(),
+            hash: Some(hash_bytes(&bytes)),
+            byte_size: Some(bytes.len() as u64),
+            captured_at: Some(captured_at.to_owned()),
+            episode_id_if_lab,
+        },
+        bytes,
+    });
+}
+
+fn graph_snapshot_json(snapshot: &StoredGraphSnapshot) -> JsonValue {
+    json!({
+        "schema": "ee.backup.graph_snapshot.v1",
+        "id": snapshot.id,
+        "workspaceId": snapshot.workspace_id,
+        "snapshotVersion": snapshot.snapshot_version,
+        "schemaVersion": snapshot.schema_version,
+        "graphType": snapshot.graph_type.as_str(),
+        "nodeCount": snapshot.node_count,
+        "edgeCount": snapshot.edge_count,
+        "metrics": serde_json::from_str::<JsonValue>(&snapshot.metrics_json).unwrap_or(JsonValue::Null),
+        "contentHash": snapshot.content_hash,
+        "sourceGeneration": snapshot.source_generation,
+        "createdAt": snapshot.created_at,
+        "expiresAt": snapshot.expires_at,
+        "status": snapshot.status.as_str(),
+    })
+}
+
 /// Create a verified backup directory with redacted JSONL records and a manifest.
 ///
 /// # Errors
@@ -637,7 +826,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     let records_path = backup_path.join(RECORDS_FILE);
     let manifest_path = backup_path.join(MANIFEST_FILE);
     let created_at = Utc::now().to_rfc3339();
-    let mut degraded = backup_degradations(&workspace_path, options.include_derived);
+    let mut degraded = backup_degradations(&workspace_path);
     degraded.extend(redaction_pattern_degradations(
         &export_data,
         options.redaction_level,

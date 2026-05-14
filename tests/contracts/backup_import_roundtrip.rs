@@ -216,6 +216,7 @@ fn run_roundtrip(redaction_level: RedactionLevel) -> Result<RoundtripFixture, St
         output_dir: Some(backup_dir.path().to_path_buf()),
         label: Some("l2-roundtrip".to_owned()),
         redaction_level,
+        include_derived: false,
         dry_run: false,
     })
     .map_err(|error| format!("create_backup: {error:?}"))?;
@@ -353,6 +354,7 @@ fn backup_records_jsonl_is_deterministic_across_two_exports() -> TestResult {
         output_dir: Some(backup_dir_a.path().to_path_buf()),
         label: Some("a".to_owned()),
         redaction_level: RedactionLevel::None,
+        include_derived: false,
         dry_run: false,
     })
     .map_err(|error| format!("backup a: {error:?}"))?;
@@ -362,6 +364,7 @@ fn backup_records_jsonl_is_deterministic_across_two_exports() -> TestResult {
         output_dir: Some(backup_dir_b.path().to_path_buf()),
         label: Some("b".to_owned()),
         redaction_level: RedactionLevel::None,
+        include_derived: false,
         dry_run: false,
     })
     .map_err(|error| format!("backup b: {error:?}"))?;
