@@ -67,8 +67,8 @@ use crate::core::curate::{
     validate_curation_candidate,
 };
 use crate::core::disk_pressure::{
-    ArtifactRetentionOptions, DiskPressureOptions, current_unix_seconds,
-    gather_artifact_retention_report, gather_disk_pressure_report,
+    ArtifactRetentionOptions, BuildAdmissionOptions, DiskPressureOptions, current_unix_seconds,
+    gather_artifact_retention_report, gather_build_admission_report, gather_disk_pressure_report,
 };
 use crate::core::doctor::{
     DependencyDiagnosticsReport, DoctorReport, FrankenHealthReport, IntegrityDiagnosticsOptions,
@@ -915,6 +915,10 @@ pub struct BackupCreateArgs {
     #[arg(long, value_enum, default_value_t = BackupRedaction::Standard)]
     pub redaction: BackupRedaction,
 
+    /// Include rebuildable derived asset manifests and lab evidence in the backup.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_derived: bool,
+
     /// Report the backup plan without creating files.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
@@ -986,9 +990,6 @@ pub enum BackupRedaction {
     Strict,
     /// Maximum redaction for third-party-facing bundles.
     Paranoid,
-    /// Legacy spelling retained for older command invocations.
-    #[value(hide = true)]
-    Full,
 }
 
 impl BackupRedaction {
@@ -999,7 +1000,6 @@ impl BackupRedaction {
             Self::Standard => RedactionLevel::Standard,
             Self::Strict => RedactionLevel::Strict,
             Self::Paranoid => RedactionLevel::Paranoid,
-            Self::Full => RedactionLevel::Full,
         }
     }
 }
@@ -1966,6 +1966,8 @@ pub enum DiagCommand {
     AdvisoryLock(DiagAdvisoryLockArgs),
     /// Report verification artifact retention budgets and preserve-only actions.
     Artifacts(DiagArtifactsArgs),
+    /// Preflight build and artifact sync paths before expensive work starts.
+    BuildAdmission(DiagBuildAdmissionArgs),
     /// Report claim verification posture: unverified, stale, and regressed claims.
     Claims(DiagClaimsArgs),
     /// Seed deterministic causal evidence for diagnostic fixture replay.
@@ -2142,12 +2144,24 @@ pub struct DiagArtifactsArgs {
     pub top_limit: usize,
 
     /// Recursive depth for bounded artifact measurement.
-    #[arg(long, default_value_t = 2, value_name = "N")]
+    #[arg(long, default_value_t = 1, value_name = "N")]
     pub consumer_depth: usize,
 
     /// Maximum entries to inspect per directory during bounded measurement.
-    #[arg(long, default_value_t = 4000, value_name = "N")]
+    #[arg(long, default_value_t = 256, value_name = "N")]
     pub consumer_entry_limit: usize,
+}
+
+/// Arguments for `ee diag build-admission`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagBuildAdmissionArgs {
+    /// Minimum free bytes required on each required build path.
+    #[arg(long, default_value_t = 1024 * 1024 * 1024u64, value_name = "BYTES")]
+    pub min_free_bytes: u64,
+
+    /// Artifact sync-down destination to include in the preflight. May be repeated.
+    #[arg(long = "artifact-destination", value_name = "PATH")]
+    pub artifact_destinations: Vec<PathBuf>,
 }
 
 /// Arguments for `ee diag memory-validity`.
@@ -7609,6 +7623,7 @@ where
                 handle_diag_advisory_lock(&cli, args, stdout, stderr)
             }
             DiagCommand::Artifacts(args) => handle_diag_artifacts(&cli, args, stdout),
+            DiagCommand::BuildAdmission(args) => handle_diag_build_admission(&cli, args, stdout),
             DiagCommand::Claims(args) => handle_diag_claims(&cli, args, stdout),
             DiagCommand::CausalEdge(args) => handle_diag_causal_edge(&cli, args, stdout, stderr),
             DiagCommand::CurationCandidate(args) => {
@@ -10263,6 +10278,7 @@ where
         output_dir: args.output_dir.clone(),
         label: args.label.clone(),
         redaction_level: args.redaction.to_model(),
+        include_derived: args.include_derived,
         dry_run: args.dry_run,
     };
 
@@ -10305,6 +10321,7 @@ where
         output_dir: args.output_dir.clone(),
         label: args.label.clone(),
         redaction_level: args.redaction.to_model(),
+        include_derived: false,
         dry_run: args.dry_run,
     };
 
@@ -11251,7 +11268,7 @@ fn redaction_level_invalid_parse_error(args: &[OsString]) -> Option<DomainError>
         let Some(raw_value) = raw_value else {
             continue;
         };
-        if CANONICAL_REDACTION_LEVELS.contains(&raw_value) || raw_value == "full" {
+        if CANONICAL_REDACTION_LEVELS.contains(&raw_value) {
             return None;
         }
 
@@ -15564,6 +15581,51 @@ where
                         action.suggestion
                     ));
                 }
+            }
+            write_stdout(stdout, &out)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&workspace_response_json(&report)) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(workspace_response_json(&report) + "\n"))
+        }
+    }
+}
+
+fn handle_diag_build_admission<W>(
+    cli: &Cli,
+    args: &DiagBuildAdmissionArgs,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let (workspace_path, workspace_source) = resolve_workspace_for_cli(cli.workspace.as_deref());
+    let report = gather_build_admission_report(&BuildAdmissionOptions {
+        workspace: workspace_path,
+        workspace_source: workspace_source.as_str(),
+        min_free_bytes: args.min_free_bytes,
+        artifact_destinations: args.artifact_destinations.clone(),
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let mut out = format!(
+                "build admission diagnostics\n\nadmitted: {}\nchecks: {}\nrecovery actions: {}\n",
+                report.admitted,
+                report.checks.len(),
+                report.recovery_actions.len()
+            );
+            for degradation in &report.degraded {
+                out.push_str(&format!(
+                    "\n{}: {}\nNext: {}\n",
+                    degradation.severity, degradation.message, degradation.repair
+                ));
             }
             write_stdout(stdout, &out)
         }
@@ -25298,11 +25360,12 @@ impl MemoryReviseReport {
                 } else {
                     "dry_run_only"
                 },
-                "degraded": if self.success && self.dry_run {
-                    vec!["revision_write_unavailable"]
-                } else {
-                    Vec::<&str>::new()
-                },
+                // N15.2 (bd-17c65.14.15.3): `ee memory revise` is no
+                // longer degraded-unavailable. Dry-run still abstains
+                // from writing, but that intent is conveyed by
+                // `policy: "dry_run_only"` above; there's no honest
+                // `degraded[]` code for "the user requested preview."
+                "degraded": Vec::<&str>::new(),
                 "error": self.error,
             }
         });
@@ -32099,6 +32162,7 @@ impl NormalizedInvocation {
                 Command::Diag(diag) => match diag {
                     DiagCommand::AdvisoryLock(_) => "diag advisory-lock".to_string(),
                     DiagCommand::Artifacts(_) => "diag artifacts".to_string(),
+                    DiagCommand::BuildAdmission(_) => "diag build-admission".to_string(),
                     DiagCommand::CausalEdge(_) => "diag causal-edge".to_string(),
                     DiagCommand::Claims(_) => "diag claims".to_string(),
                     DiagCommand::CurationCandidate(_) => "diag curation-candidate".to_string(),
@@ -32958,9 +33022,9 @@ mod tests {
 
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction, Cli,
-        Command, CurateCommand, DaemonCommand, DiagCommand, DiagQuarantineCommand, EconomyCommand,
-        FieldsLevel, FocusCommand, GraphCommand, HandoffCommand, ImportCommand, JobCommand,
-        LearnCommand, LearnExperimentCommand, MaintenanceCommand, MemoryCommand,
+        Command, CurateCommand, DaemonCommand, DiagCommand, DiagQuarantineCommand, DomainError,
+        EconomyCommand, FieldsLevel, FocusCommand, GraphCommand, HandoffCommand, ImportCommand,
+        JobCommand, LearnCommand, LearnExperimentCommand, MaintenanceCommand, MemoryCommand,
         OutcomeQuarantineCommand, OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand,
         RuleCommand, ShadowMode, SituationCommand, SwarmBriefArgs, SwarmCommand, TaskFrameCommand,
         TaskFrameSubgoalCommand, VerifyCommand, WorkflowCommand, decay_settings_from_config, run,
@@ -34413,7 +34477,8 @@ mod tests {
             "--database",
             "db.sqlite",
             "--redaction",
-            "full",
+            "paranoid",
+            "--include-derived",
             "--dry-run",
         ])
         .map_err(|error| format!("failed to parse backup create: {:?}", error.kind()))?;
@@ -34431,10 +34496,47 @@ mod tests {
                     &Some(std::path::PathBuf::from("db.sqlite")),
                     "database",
                 )?;
-                ensure_equal(&args.redaction, &BackupRedaction::Full, "redaction")?;
+                ensure_equal(&args.redaction, &BackupRedaction::Paranoid, "redaction")?;
+                ensure_equal(&args.include_derived, &true, "include derived")?;
                 ensure_equal(&args.dry_run, &true, "dry run")
             }
             other => Err(format!("expected backup create command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_rejects_legacy_full_redaction_cli_value() -> TestResult {
+        let args: Vec<std::ffi::OsString> =
+            ["ee", "backup", "create", "--redaction", "full", "--dry-run"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect();
+
+        let error = super::redaction_level_invalid_parse_error(&args)
+            .ok_or_else(|| "expected redaction_level_invalid domain error".to_string())?;
+        match error {
+            DomainError::UsageCodeWithDetails {
+                code,
+                message,
+                repair,
+                details_json,
+            } => {
+                ensure_equal(&code, &"redaction_level_invalid", "code")?;
+                ensure(
+                    message.contains("invalid redaction level 'full'"),
+                    "invalid redaction message should name the rejected legacy value",
+                )?;
+                ensure_equal(
+                    &repair,
+                    &Some("Use --redaction none|minimal|standard|strict|paranoid.".to_string()),
+                    "repair",
+                )?;
+                ensure(
+                    details_json.contains("\"acceptedValues\":[\"none\",\"minimal\",\"standard\",\"strict\",\"paranoid\"]"),
+                    "details should list the canonical five CLI redaction levels",
+                )
+            }
+            other => Err(format!("expected usage error, got {other:?}")),
         }
     }
 
@@ -39993,15 +40095,22 @@ default_half_life_days = 45
             &serde_json::json!(["content"]),
             "changed fields",
         )?;
+        // N15.2 (bd-17c65.14.15.3): the dry-run no longer carries a
+        // honesty-only degraded code; the abstention is conveyed by
+        // `policy: "dry_run_only"` already present in the envelope.
         ensure_equal(
             &value["data"]["degraded"],
-            &serde_json::json!(["revision_write_unavailable"]),
+            &serde_json::json!([]),
             "degraded code",
         )
     }
 
     #[test]
-    fn memory_revise_non_dry_run_is_policy_denied() -> TestResult {
+    fn memory_revise_non_dry_run_persists_new_revision() -> TestResult {
+        // N15.2 (bd-17c65.14.15.3): non-dry-run revisions are real
+        // writes. The CLI returns a success envelope with the new
+        // memory id, the revision_group_id (= logical_id), and the
+        // changed fields list.
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace = tempdir.path().to_string_lossy().into_owned();
         let (init_exit, _init_stdout, init_stderr) =
@@ -40040,25 +40149,52 @@ default_half_life_days = 45
             "--content",
             "Prefer deterministic context packs with provenance.",
         ]);
-        ensure_equal(&exit, &ProcessExitCode::PolicyDenied, "revise policy exit")?;
-        ensure(stderr.is_empty(), "revise policy json stderr clean")?;
+        ensure_equal(&exit, &ProcessExitCode::Success, "revise exit")?;
+        ensure(stderr.is_empty(), "revise json stderr clean")?;
 
         let value: serde_json::Value =
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.error.v2"),
-            "error schema",
+            &serde_json::json!("ee.response.v1"),
+            "response schema",
         )?;
         ensure_equal(
-            &value["error"]["code"],
-            &serde_json::json!("policy_denied"),
-            "policy code",
+            &value["data"]["dry_run"],
+            &serde_json::json!(false),
+            "dry_run is false",
         )?;
-        ensure_contains(
-            value["error"]["message"].as_str().unwrap_or_default(),
-            "revision writes are unavailable",
-            "policy message",
+        ensure_equal(
+            &value["data"]["persisted"],
+            &serde_json::json!(true),
+            "persisted",
+        )?;
+        ensure(
+            value["data"]["new_id"]
+                .as_str()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
+            "new_id is a non-empty string",
+        )?;
+        ensure_equal(
+            &value["data"]["revision_group_id"],
+            &serde_json::json!(memory_id),
+            "revision_group_id equals original id (singleton chain → revision 2)",
+        )?;
+        ensure_equal(
+            &value["data"]["revision_number"],
+            &serde_json::json!(2),
+            "revision_number = 2 (original was 1, this revision is 2)",
+        )?;
+        ensure_equal(
+            &value["data"]["changed_fields"],
+            &serde_json::json!(["content"]),
+            "changed_fields = [content]",
+        )?;
+        ensure_equal(
+            &value["data"]["degraded"],
+            &serde_json::json!([]),
+            "no degraded codes on successful revision",
         )
     }
 

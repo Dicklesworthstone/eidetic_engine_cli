@@ -5222,10 +5222,136 @@ pub fn revise_memory(options: &ReviseMemoryOptions<'_>) -> MemoryReviseReport {
         );
     }
 
-    MemoryReviseReport::write_unavailable(
+    // N15.2 (bd-17c65.14.15.3): turn on the immutable-revision write path.
+    //
+    // The transaction does three things atomically:
+    //   1. Inserts a new memory row with a fresh `id` but the same
+    //      `logical_id` as the original (the revision chain identifier
+    //      that V043 added). The new row carries `valid_from = now()`
+    //      and `valid_to = NULL` — it becomes the live row.
+    //   2. Sets the original row's `valid_to = now()`, marking it
+    //      superseded but not tombstoned.
+    //   3. Records a `memory.revise` audit entry with `from_id`,
+    //      `to_id`, `logical_id`, `revision_number`, `changed_fields`,
+    //      and the caller's reason.
+    let logical_id = match conn.get_memory_logical_id(options.original_memory_id) {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            // Pre-V043 rows or a race that deleted the row between
+            // `get_memory` and now. Fall back to the original id —
+            // post-V043 backfill guarantees logical_id == id for
+            // singletons anyway.
+            options.original_memory_id.to_owned()
+        }
+        Err(error) => {
+            return MemoryReviseReport::error(
+                options.original_memory_id.to_owned(),
+                format!("Failed to read revision chain identifier: {error}"),
+            );
+        }
+    };
+    let prior_chain_count = match conn.count_memory_chain(&logical_id) {
+        Ok(n) => n,
+        Err(error) => {
+            return MemoryReviseReport::error(
+                options.original_memory_id.to_owned(),
+                format!("Failed to count revision chain: {error}"),
+            );
+        }
+    };
+    let revision_number = prior_chain_count + 1;
+    let inherited_tags: Vec<String> = match conn.get_memory_tags(options.original_memory_id) {
+        Ok(tags) => tags,
+        Err(error) => {
+            return MemoryReviseReport::error(
+                options.original_memory_id.to_owned(),
+                format!("Failed to read existing tags: {error}"),
+            );
+        }
+    };
+    let new_tags = options.tags.clone().unwrap_or(inherited_tags);
+    let new_content = options.content.unwrap_or(&original.content).to_owned();
+    let new_level = options.level.unwrap_or(&original.level).to_owned();
+    let new_kind = options.kind.unwrap_or(&original.kind).to_owned();
+    let new_confidence = options.confidence.unwrap_or(original.confidence);
+    let new_provenance_uri = options
+        .provenance_uri
+        .map(str::to_owned)
+        .or_else(|| original.provenance_uri.clone());
+
+    let new_id = MemoryId::now().to_string();
+    let audit_id = generate_audit_id();
+    let revised_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let memory_input = CreateMemoryInput {
+        workspace_id: original.workspace_id.clone(),
+        level: new_level,
+        kind: new_kind,
+        content: new_content,
+        workflow_id: original.workflow_id.clone(),
+        confidence: new_confidence,
+        utility: original.utility,
+        importance: original.importance,
+        provenance_uri: new_provenance_uri,
+        trust_class: original.trust_class.clone(),
+        trust_subclass: original.trust_subclass.clone(),
+        tags: new_tags,
+        valid_from: Some(revised_at.clone()),
+        valid_to: None,
+    };
+    let audit_details = serde_json::json!({
+        "from_id": options.original_memory_id,
+        "to_id": new_id,
+        "logical_id": logical_id,
+        "revision_number": revision_number,
+        "changed_fields": changed_fields,
+        "reason": options.reason.as_str(),
+        "actor": options.actor.unwrap_or("ee memory revise"),
+        "revised_at": revised_at,
+    });
+
+    let result: Result<(), String> = conn
+        .with_transaction(|| {
+            conn.insert_memory_revision(&new_id, &logical_id, &memory_input)?;
+            let prior_updated =
+                conn.expire_memory_valid_to(options.original_memory_id, &revised_at)?;
+            if !prior_updated {
+                // The original row no longer has a NULL valid_to. This
+                // shouldn't happen given the earlier validation, but we
+                // bail out so the transaction rolls back rather than
+                // landing an orphan revision.
+                return Err(crate::db::DbError::MalformedRow {
+                    operation: crate::db::DbOperation::Execute,
+                    message: "Original memory's valid_to could not be set; revision aborted."
+                        .to_owned(),
+                });
+            }
+            conn.insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(original.workspace_id.clone()),
+                    actor: Some(options.actor.unwrap_or("ee memory revise").to_owned()),
+                    action: crate::db::audit_actions::MEMORY_REVISE.to_owned(),
+                    target_type: Some("memory".to_owned()),
+                    target_id: Some(new_id.clone()),
+                    details: Some(audit_details.to_string()),
+                },
+            )?;
+            Ok(())
+        })
+        .map_err(|error| format!("Failed to commit revision: {error}"));
+
+    if let Err(message) = result {
+        return MemoryReviseReport::error(options.original_memory_id.to_owned(), message);
+    }
+
+    MemoryReviseReport::success(
         options.original_memory_id.to_owned(),
+        new_id,
+        logical_id,
+        revision_number,
         options.reason.clone(),
         changed_fields,
+        false,
     )
 }
 

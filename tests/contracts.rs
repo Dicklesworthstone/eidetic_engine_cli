@@ -160,6 +160,9 @@ mod handoff_stale_snapshot;
 #[path = "contracts/n15_logical_id_foundation.rs"]
 mod n15_logical_id_foundation;
 
+#[path = "contracts/n15_memory_revise_write_path.rs"]
+mod n15_memory_revise_write_path;
+
 #[path = "contracts/failure_mode_fixtures.rs"]
 mod failure_mode_fixtures;
 

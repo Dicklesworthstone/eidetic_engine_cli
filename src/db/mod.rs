@@ -54,6 +54,12 @@ pub mod audit_actions {
     pub const MEMORY_EXPIRE: &str = "memory.expire";
     pub const MEMORY_SCORE_DECAY: &str = "memory.score_decay";
     pub const MEMORY_UPDATE: &str = "memory.update";
+    /// New revision row inserted with same logical_id as the original and
+    /// the prior row's `valid_to` set to the revision timestamp
+    /// (N15.2 / bd-17c65.14.15.3). Details carry `from_id`, `to_id`,
+    /// `logical_id`, `revision_number`, `changed_fields[]`, and the
+    /// caller's reason string.
+    pub const MEMORY_REVISE: &str = "memory.revise";
     pub const MEMORY_LEVEL_TRANSITION: &str = "memory.level_transition";
     pub const MEMORY_TOMBSTONE: &str = "memory.tombstone";
     pub const MEMORY_UNTOMBSTONE: &str = "memory.untombstone";
@@ -7925,6 +7931,144 @@ impl DbConnection {
             DbOperation::Execute,
             "UPDATE memories SET valid_to = ?1, updated_at = ?1 WHERE id = ?2 AND tombstoned_at IS NULL AND (valid_to IS NULL OR valid_to > ?1)",
             &[Value::Text(valid_to.to_string()), Value::Text(id.to_string())],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Insert a memory row as a *revision* of an existing one
+    /// (N15.2 / bd-17c65.14.15.3).
+    ///
+    /// Differs from the standard [`Self::insert_memory`] in two ways:
+    ///   - The caller supplies an explicit `logical_id` (the chain
+    ///     identifier shared with the original row), so the new row
+    ///     inherits it rather than defaulting to `id`.
+    ///   - The provenance chain hash is recomputed from the supplied
+    ///     fields so it reflects the revised content, not the original.
+    ///
+    /// The caller is responsible for wrapping this call together with
+    /// `expire_memory_valid_to(original_id, now)` and an audit insert
+    /// inside a single transaction — see `revise_memory` in
+    /// `core/memory.rs` for the canonical sequence.
+    pub fn insert_memory_revision(
+        &self,
+        new_id: &str,
+        logical_id: &str,
+        input: &CreateMemoryInput,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let provenance_chain_hash =
+            compute_memory_provenance_chain_hash_fields(&MemoryProvenanceChainFields {
+                id: new_id,
+                workspace_id: &input.workspace_id,
+                level: &input.level,
+                kind: &input.kind,
+                content: &input.content,
+                confidence: input.confidence,
+                utility: input.utility,
+                importance: input.importance,
+                provenance_uri: input.provenance_uri.as_deref(),
+                trust_class: &input.trust_class,
+                trust_subclass: input.trust_subclass.as_deref(),
+                created_at: &now,
+            });
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO memories (id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, created_at, updated_at, valid_from, valid_to, logical_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            &[
+                Value::Text(new_id.to_string()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.level.clone()),
+                Value::Text(input.kind.clone()),
+                Value::Text(input.content.clone()),
+                input.workflow_id.as_ref().map_or(Value::Null, |id| Value::Text(id.clone())),
+                Value::Float(input.confidence),
+                Value::Float(input.utility),
+                Value::Float(input.importance),
+                input.provenance_uri.as_ref().map_or(Value::Null, |uri| Value::Text(uri.clone())),
+                Value::Text(input.trust_class.clone()),
+                input.trust_subclass.as_ref().map_or(Value::Null, |s| Value::Text(s.clone())),
+                Value::Text(provenance_chain_hash),
+                Value::Text(PROVENANCE_CHAIN_HASH_VERSION.to_string()),
+                Value::Text(PROVENANCE_STATUS_UNVERIFIED.to_string()),
+                Value::Text(now.clone()),
+                Value::Text(now),
+                input.valid_from.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                input.valid_to.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                Value::Text(logical_id.to_string()),
+            ],
+        )?;
+        for tag in &input.tags {
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO memory_tags (memory_id, tag) VALUES (?1, ?2)",
+                &[Value::Text(new_id.to_string()), Value::Text(tag.clone())],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Count the rows in a memory's revision chain
+    /// (N15.2 / bd-17c65.14.15.3).
+    ///
+    /// Used to compute the next `revision_number` when extending a
+    /// chain. The count includes both the live row and any superseded
+    /// historical rows.
+    pub fn count_memory_chain(&self, logical_id: &str) -> Result<u32> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT COUNT(*) FROM memories WHERE logical_id = ?1",
+            &[Value::Text(logical_id.to_string())],
+        )?;
+        let count = rows
+            .first()
+            .and_then(|row| match row.get(0) {
+                Some(Value::BigInt(n)) => u32::try_from(*n).ok(),
+                Some(Value::Int(n)) => u32::try_from(*n).ok(),
+                _ => None,
+            })
+            .unwrap_or(0);
+        Ok(count)
+    }
+
+    /// Get the trust_class string for a memory (N7.1 Phase 6 /
+    /// ADR 0032 trust-class transitions amending ADR 0009). Returns
+    /// `None` if the memory does not exist.
+    pub fn get_memory_trust_class(&self, id: &str) -> Result<Option<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT trust_class FROM memories WHERE id = ?1 LIMIT 1",
+            &[Value::Text(id.to_string())],
+        )?;
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        match row.get(0) {
+            Some(Value::Text(s)) => Ok(Some(s.clone())),
+            _ => Ok(None),
+        }
+    }
+
+    /// Update the trust_class of a memory (N7.1 Phase 6). Returns
+    /// `true` if a row was updated, `false` if the memory does not
+    /// exist or is tombstoned. The caller emits the matching
+    /// `audit_actions::TRUST_CLASS_TRANSITION` audit entry — this
+    /// helper does NOT touch the audit log so the audit can be
+    /// composed within a larger transaction.
+    ///
+    /// The DB's CHECK constraint on `trust_class` enforces the
+    /// 5-class enum from ADR 0009; passing an invalid class returns
+    /// an error from the storage layer rather than panicking.
+    pub fn update_memory_trust_class(&self, id: &str, new_class: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET trust_class = ?1, updated_at = ?2 \
+             WHERE id = ?3 AND tombstoned_at IS NULL",
+            &[
+                Value::Text(new_class.to_string()),
+                Value::Text(now),
+                Value::Text(id.to_string()),
+            ],
         )?;
         Ok(affected > 0)
     }

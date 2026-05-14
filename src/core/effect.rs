@@ -1232,10 +1232,10 @@ impl EffectManifest {
                 "lab_replay_unavailable",
                 "Lab counterfactual analysis abstains until stored episodes exist",
             ),
-            CommandEffect::degraded_unavailable(
+            CommandEffect::durable_write(
                 "memory revise",
-                "revision_write_unavailable",
-                "Memory revision abstains until immutable revision writes are implemented",
+                vec!["memories", "audit_log"],
+                "Inserts a new memory row with the same logical_id as the original, sets the prior row's valid_to, and emits a memory.revise audit entry (N15.2 / bd-17c65.14.15.3)",
             ),
             CommandEffect::read_only(
                 "preflight guard",
