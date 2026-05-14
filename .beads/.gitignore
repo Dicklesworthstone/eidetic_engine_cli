@@ -1,22 +1,22 @@
-# Database
+# SQLite databases
 *.db
+*.db?*
 *.db-journal
-*.db-shm
 *.db-wal
+*.db-shm
 
-# Lock files
-*.lock
+# Daemon runtime files
+daemon.lock
+daemon.log
+daemon.pid
+bd.sock
 
-# Temporary
-last-touched
-*.tmp
+# Local version tracking (prevents upgrade notification spam after git ops)
+.local_version
 
-# Local history backups
-.br_history/
-
-# Sync state (local-only, per-machine)
-.sync.lock
-sync_base.jsonl
+# Legacy database files
+db.sqlite
+bd.db
 
 # Merge artifacts (temporary files from 3-way merge)
 beads.base.jsonl
@@ -26,18 +26,7 @@ beads.left.meta.json
 beads.right.jsonl
 beads.right.meta.json
 
-# Daemon runtime files
-daemon.lock
-daemon.log
-daemon.pid
-bd.sock
-sync-state.json
-
-# Worktree redirect file
-redirect
-
-# bv (beads viewer) lock file
-.bv.lock
-
-# Per-machine beads database schema version marker
-.local_version
+# Keep JSONL exports and config (source of truth for git)
+!issues.jsonl
+!metadata.json
+!config.json

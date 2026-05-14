@@ -1,6 +1,6 @@
 {
   "schema": "ee.vision_coverage.v1",
-  "generated_at": "2026-05-13T08:34:48Z",
+  "generated_at": "2026-05-14T19:21:51Z",
   "status": "warn",
   "release_tag_commit": false,
   "sources": {
@@ -12,13 +12,13 @@
     "beads": ".beads/issues.jsonl"
   },
   "surfaces": {
-    "total_documented": 65,
-    "implemented": 60,
+    "total_documented": 66,
+    "implemented": 61,
     "stubbed": 0,
     "missing": 5,
     "with_open_implements_bead": 0
   },
-  "gap_percentage": 7.69,
+  "gap_percentage": 7.58,
   "implemented_surfaces": [
     "analyze science-status",
     "backup create",
@@ -54,6 +54,7 @@
     "init",
     "memory expire",
     "memory history",
+    "memory level",
     "memory link",
     "memory list",
     "memory show",
@@ -128,6 +129,7 @@
     "mcp",
     "memory expire",
     "memory history",
+    "memory level",
     "memory link",
     "memory list",
     "memory show",
