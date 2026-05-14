@@ -137,12 +137,13 @@ mod tests {
     use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
     use ee::core::swarm_brief::{
         SWARM_BRIEF_REDACTION_STATUS, SWARM_BRIEF_SCHEMA_V1, SwarmBriefAgentInventorySummary,
-        SwarmBriefBead, SwarmBriefBvPick, SwarmBriefBvSummary, SwarmBriefCommit,
-        SwarmBriefDegradation, SwarmBriefDirtyFile, SwarmBriefFileReservation,
-        SwarmBriefHostProfileSummary, SwarmBriefRecommendation, SwarmBriefReport,
-        SwarmBriefResourcePressureHint, SwarmBriefSourceFreshness, SwarmBriefSourceKind,
-        SwarmBriefSourceProvenance, SwarmBriefSourceSnapshot, SwarmBriefSourceStatus,
-        apply_swarm_brief_advice, parse_agent_mail_snapshot_json, parse_beads_json, parse_git_log,
+        SwarmBriefBead, SwarmBriefBeadsDependencyCycleSummary, SwarmBriefBvPick,
+        SwarmBriefBvSummary, SwarmBriefCommit, SwarmBriefDegradation, SwarmBriefDirtyFile,
+        SwarmBriefFileReservation, SwarmBriefHostProfileSummary, SwarmBriefRecommendation,
+        SwarmBriefReport, SwarmBriefResourcePressureHint, SwarmBriefSourceFreshness,
+        SwarmBriefSourceKind, SwarmBriefSourceProvenance, SwarmBriefSourceSnapshot,
+        SwarmBriefSourceStatus, apply_swarm_brief_advice, parse_agent_mail_snapshot_json,
+        parse_beads_json, parse_git_log,
     };
     use ee::db::{
         CreateCurationCandidateInput, CreateMemoryInput, CreateMemoryLinkInput,
@@ -416,7 +417,7 @@ mod tests {
             &format!("{name} recommendation id ordering"),
         )?;
 
-        Ok(serde_json::json!({
+        let mut case = serde_json::json!({
             "case": name,
             "schema": report.schema,
             "workspace": report.workspace,
@@ -456,7 +457,19 @@ mod tests {
                 .iter()
                 .map(swarm_recommendation_case_json)
                 .collect::<Vec<_>>(),
-        }))
+        });
+        if let Some(cycles) = &report.beads.dependency_cycle_summary {
+            case.as_object_mut()
+                .ok_or_else(|| format!("{name} contract case must serialize to object"))?
+                .insert(
+                    "beadsDependencyCycleSummary".to_string(),
+                    serde_json::json!({
+                        "count": cycles.count,
+                        "examples": cycles.examples,
+                    }),
+                );
+        }
+        Ok(case)
     }
 
     fn ensure_sorted_strings(values: &[String], context: &str) -> TestResult {
@@ -570,6 +583,32 @@ mod tests {
             ),
         );
 
+        let mut beads_dependency_cycles = base_swarm_brief_report();
+        replace_swarm_source(
+            &mut beads_dependency_cycles,
+            swarm_source_ready(
+                SwarmBriefSourceKind::Beads,
+                Some(("br", &["ready", "--json"])),
+                3,
+            ),
+        );
+        beads_dependency_cycles.beads.dependency_cycle_summary =
+            Some(SwarmBriefBeadsDependencyCycleSummary {
+                count: 2,
+                examples: vec![
+                    vec![
+                        "bd-7g8".to_string(),
+                        "bd-uvcc".to_string(),
+                        "bd-7g8".to_string(),
+                    ],
+                    vec![
+                        "bd-lp4p".to_string(),
+                        "bd-z6kq".to_string(),
+                        "bd-lp4p".to_string(),
+                    ],
+                ],
+            });
+
         let mut rch_unavailable = base_swarm_brief_report();
         replace_swarm_source(
             &mut rch_unavailable,
@@ -653,6 +692,7 @@ mod tests {
             swarm_brief_contract_case("beads_stale_locked", beads_stale_locked)?,
             swarm_brief_contract_case("rch_unavailable", rch_unavailable)?,
             swarm_brief_contract_case("beads_tracker_stale", beads_tracker_stale)?,
+            swarm_brief_contract_case("beads_dependency_cycles", beads_dependency_cycles)?,
             swarm_brief_contract_case("rch_worker_topology_blocked", rch_worker_topology_blocked)?,
             swarm_brief_contract_case("high_resource_pressure", high_resource_pressure)?,
             swarm_brief_contract_case("workspace_ambiguity", workspace_ambiguity)?,
@@ -663,7 +703,7 @@ mod tests {
     #[test]
     fn swarm_brief_contract_matrix_matches_golden() -> TestResult {
         let cases = swarm_brief_contract_cases()?;
-        ensure_equal(&cases.len(), &14, "swarm brief contract case count")?;
+        ensure_equal(&cases.len(), &15, "swarm brief contract case count")?;
         let matrix = serde_json::json!({
             "schema": "ee.swarm.brief.contract_matrix.v1",
             "payloadSchema": SWARM_BRIEF_SCHEMA_V1,
