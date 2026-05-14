@@ -2687,7 +2687,14 @@ fn escape_markdown_text(input: &str) -> String {
                 output.push('\\');
                 output.push('+');
             }
-            '-' if line_start && markdown_next_is_space_or_eol(next_ch) => {
+            '=' if line_start && markdown_line_is_marker_run(&chars, i, '=', 1) => {
+                output.push('\\');
+                output.push('=');
+            }
+            '-' if line_start
+                && (markdown_next_is_space_or_eol(next_ch)
+                    || markdown_line_is_marker_run(&chars, i, '-', 3)) =>
+            {
                 output.push('\\');
                 output.push('-');
             }
@@ -2802,6 +2809,26 @@ fn markdown_next_is_space_or_eol(next: Option<char>) -> bool {
         None => true,
         Some(ch) => ch == ' ' || ch == '\t' || ch == '\n',
     }
+}
+
+fn markdown_line_is_marker_run(
+    chars: &[char],
+    start: usize,
+    marker: char,
+    min_count: usize,
+) -> bool {
+    let mut count = 0;
+    let mut index = start;
+    while index < chars.len() {
+        match chars[index] {
+            ch if ch == marker => count += 1,
+            ' ' | '\t' => {}
+            '\n' | '\r' => break,
+            _ => return false,
+        }
+        index += 1;
+    }
+    count >= min_count
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -5347,9 +5374,9 @@ mod tests {
         SectionQuota, SectionQuotas, TokenBudget, TokenEstimationStrategy,
         WORD_HEURISTIC_TOKEN_MULTIPLIER_DENOMINATOR, WORD_HEURISTIC_TOKEN_MULTIPLIER_NUMERATOR,
         assemble_draft, assemble_draft_with_cache_governor, assemble_draft_with_profile,
-        candidate_similarity, estimate_character_heuristic_tokens, estimate_tokens,
-        estimate_tokens_default, estimate_word_heuristic_tokens, facility_similarity,
-        pack_item_provenance_json, prewarm_pack_hotset, subsystem_name,
+        candidate_similarity, escape_markdown_text, estimate_character_heuristic_tokens,
+        estimate_tokens, estimate_tokens_default, estimate_word_heuristic_tokens,
+        facility_similarity, pack_item_provenance_json, prewarm_pack_hotset, subsystem_name,
     };
     use crate::cache::{CacheBudget, MemoryPressure};
     use crate::models::{ContextProfile, MemoryId, ProvenanceUri, TrustClass, UnitScore};
@@ -5368,6 +5395,20 @@ mod tests {
                 "intentional serialization failure",
             ))
         }
+    }
+
+    #[test]
+    fn context_markdown_escape_neutralizes_full_line_markers_without_overescaping() {
+        assert_eq!(
+            escape_markdown_text("Run v0.2.0 with mem_01ABC.\n---\nAfter"),
+            "Run v0.2.0 with mem_01ABC.\n\\---\nAfter"
+        );
+        assert_eq!(
+            escape_markdown_text("Before\n===\nAfter"),
+            "Before\n\\===\nAfter"
+        );
+        assert_eq!(escape_markdown_text("--- not a rule"), "--- not a rule");
+        assert_eq!(escape_markdown_text("1. first item"), "1\\. first item");
     }
 
     #[test]
