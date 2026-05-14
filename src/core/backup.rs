@@ -606,195 +606,6 @@ struct BackupDerivedPayload {
     bytes: Vec<u8>,
 }
 
-fn collect_derived_payloads(
-    connection: &DbConnection,
-    workspace_path: &Path,
-    workspace_id: &str,
-    captured_at: &str,
-    degraded: &mut Vec<BackupDegradation>,
-) -> Vec<BackupDerivedPayload> {
-    let mut payloads = Vec::new();
-
-    let index_manifest = workspace_path
-        .join(WORKSPACE_MARKER)
-        .join("indexes")
-        .join("combined")
-        .join("manifest.json");
-    if index_manifest.is_file() {
-        collect_file_derived_payload(
-            &mut payloads,
-            &index_manifest,
-            "derived/index/combined_manifest.json",
-            "index_manifest",
-            captured_at,
-            None,
-            degraded,
-        );
-    } else {
-        degraded.push(BackupDegradation::warning(
-            "index_manifest_missing",
-            "no workspace index manifest was found for --include-derived backup",
-            "run ee index rebuild --workspace . before creating a backup that must include derived index metadata",
-        ));
-    }
-
-    match connection.list_graph_snapshots(workspace_id, None, 256) {
-        Ok(snapshots) => {
-            for snapshot in snapshots {
-                let value = graph_snapshot_json(&snapshot);
-                collect_json_derived_payload(
-                    &mut payloads,
-                    value,
-                    &format!(
-                        "derived/graph/snapshots/{}",
-                        safe_file_stem(&format!("{}.json", snapshot.id))
-                    ),
-                    "graph_snapshot",
-                    captured_at,
-                    None,
-                    degraded,
-                );
-            }
-        }
-        Err(error) => degraded.push(BackupDegradation::warning(
-            "graph_snapshot_backup_unavailable",
-            format!("graph snapshots could not be queried for --include-derived backup: {error}"),
-            "repair workspace migrations and rerun backup create --include-derived",
-        )),
-    }
-
-    match connection.list_task_episodes(Some(workspace_id), None, 256) {
-        Ok(episodes) => {
-            for episode in episodes {
-                let source_path = workspace_path
-                    .join(WORKSPACE_MARKER)
-                    .join("lab")
-                    .join("episodes")
-                    .join(safe_lab_episode_file_name(&episode.id));
-                if source_path.is_file() {
-                    collect_file_derived_payload(
-                        &mut payloads,
-                        &source_path,
-                        &format!(
-                            "derived/lab/episode_files/{}",
-                            safe_file_stem(&format!("{}.json", episode.id))
-                        ),
-                        "lab_episode",
-                        captured_at,
-                        Some(episode.id),
-                        degraded,
-                    );
-                }
-            }
-        }
-        Err(error) => degraded.push(BackupDegradation::warning(
-            "lab_episode_backup_unavailable",
-            format!("lab episodes could not be queried for --include-derived backup: {error}"),
-            "repair workspace migrations and rerun backup create --include-derived",
-        )),
-    }
-
-    payloads
-}
-
-fn collect_file_derived_payload(
-    payloads: &mut Vec<BackupDerivedPayload>,
-    source_path: &Path,
-    backup_relative_path: &str,
-    kind: &str,
-    captured_at: &str,
-    episode_id_if_lab: Option<String>,
-    degraded: &mut Vec<BackupDegradation>,
-) {
-    match fs::read(source_path) {
-        Ok(bytes) => push_derived_payload(
-            payloads,
-            backup_relative_path,
-            kind,
-            bytes,
-            captured_at,
-            episode_id_if_lab,
-        ),
-        Err(error) => degraded.push(BackupDegradation::warning(
-            "derived_asset_read_unavailable",
-            format!(
-                "derived asset '{}' could not be read for backup: {error}",
-                source_path.display()
-            ),
-            "repair derived asset permissions or rerun the producer command before backup create --include-derived",
-        )),
-    }
-}
-
-fn collect_json_derived_payload(
-    payloads: &mut Vec<BackupDerivedPayload>,
-    value: JsonValue,
-    backup_relative_path: &str,
-    kind: &str,
-    captured_at: &str,
-    episode_id_if_lab: Option<String>,
-    degraded: &mut Vec<BackupDegradation>,
-) {
-    match serde_json::to_vec_pretty(&value) {
-        Ok(mut bytes) => {
-            bytes.push(b'\n');
-            push_derived_payload(
-                payloads,
-                backup_relative_path,
-                kind,
-                bytes,
-                captured_at,
-                episode_id_if_lab,
-            );
-        }
-        Err(error) => degraded.push(BackupDegradation::warning(
-            "derived_asset_render_unavailable",
-            format!("derived asset '{kind}' could not be rendered for backup: {error}"),
-            "repair malformed derived metadata and rerun backup create --include-derived",
-        )),
-    }
-}
-
-fn push_derived_payload(
-    payloads: &mut Vec<BackupDerivedPayload>,
-    backup_relative_path: &str,
-    kind: &str,
-    bytes: Vec<u8>,
-    captured_at: &str,
-    episode_id_if_lab: Option<String>,
-) {
-    payloads.push(BackupDerivedPayload {
-        report: BackupDerivedAssetReport {
-            path: backup_relative_path.to_owned(),
-            kind: kind.to_owned(),
-            hash: Some(hash_bytes(&bytes)),
-            byte_size: Some(bytes.len() as u64),
-            captured_at: Some(captured_at.to_owned()),
-            episode_id_if_lab,
-        },
-        bytes,
-    });
-}
-
-fn graph_snapshot_json(snapshot: &StoredGraphSnapshot) -> JsonValue {
-    json!({
-        "schema": "ee.backup.graph_snapshot.v1",
-        "id": snapshot.id,
-        "workspaceId": snapshot.workspace_id,
-        "snapshotVersion": snapshot.snapshot_version,
-        "schemaVersion": snapshot.schema_version,
-        "graphType": snapshot.graph_type.as_str(),
-        "nodeCount": snapshot.node_count,
-        "edgeCount": snapshot.edge_count,
-        "metrics": serde_json::from_str::<JsonValue>(&snapshot.metrics_json).unwrap_or(JsonValue::Null),
-        "contentHash": snapshot.content_hash,
-        "sourceGeneration": snapshot.source_generation,
-        "createdAt": snapshot.created_at,
-        "expiresAt": snapshot.expires_at,
-        "status": snapshot.status.as_str(),
-    })
-}
-
 /// Create a verified backup directory with redacted JSONL records and a manifest.
 ///
 /// # Errors
@@ -826,7 +637,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     let records_path = backup_path.join(RECORDS_FILE);
     let manifest_path = backup_path.join(MANIFEST_FILE);
     let created_at = Utc::now().to_rfc3339();
-    let mut degraded = backup_degradations(&workspace_path);
+    let mut degraded = backup_degradations(&workspace_path, options.include_derived);
     degraded.extend(redaction_pattern_degradations(
         &export_data,
         options.redaction_level,
@@ -2262,8 +2073,20 @@ fn collect_derived_payloads(
 ) -> Vec<BackupDerivedPayload> {
     let mut payloads = Vec::new();
     collect_index_manifest_payloads(workspace_path, captured_at, degraded, &mut payloads);
-    collect_graph_snapshot_payloads(connection, workspace_id, captured_at, degraded, &mut payloads);
-    collect_task_episode_payloads(connection, workspace_id, captured_at, degraded, &mut payloads);
+    collect_graph_snapshot_payloads(
+        connection,
+        workspace_id,
+        captured_at,
+        degraded,
+        &mut payloads,
+    );
+    collect_task_episode_payloads(
+        connection,
+        workspace_id,
+        captured_at,
+        degraded,
+        &mut payloads,
+    );
     collect_lab_episode_file_payloads(workspace_path, captured_at, degraded, &mut payloads);
     collect_wal_holds_payload(connection, captured_at, degraded, &mut payloads);
     payloads
@@ -2313,7 +2136,10 @@ fn collect_index_manifest_payloads(
             }
             Err(error) => degraded.push(BackupDegradation::warning(
                 "index_manifest_unreadable",
-                format!("index manifest '{}' could not be read: {error}", candidate.display()),
+                format!(
+                    "index manifest '{}' could not be read: {error}",
+                    candidate.display()
+                ),
                 "inspect .ee/index permissions and retry backup create --include-derived",
             )),
         }
@@ -2348,7 +2174,10 @@ fn collect_graph_snapshot_payloads(
     for snapshot in snapshots {
         match json_payload_bytes(&graph_snapshot_json(&snapshot, captured_at)) {
             Ok(bytes) => payloads.push(derived_payload(
-                format!("derived/graph/snapshots/{}.json", safe_file_stem(&snapshot.id)),
+                format!(
+                    "derived/graph/snapshots/{}.json",
+                    safe_file_stem(&snapshot.id)
+                ),
                 "graph_snapshot",
                 captured_at,
                 None,
@@ -2652,7 +2481,7 @@ fn backup_degradations(workspace_path: &Path, include_derived: bool) -> Vec<Back
         .join("indexes")
         .join("combined")
         .join("manifest.json");
-    if !index_manifest.is_file() {
+    if !include_derived && !index_manifest.is_file() {
         degraded.push(BackupDegradation::warning(
             "index_manifest_missing",
             "no workspace index manifest was found; backup includes the durable JSONL source of truth only",
@@ -3338,6 +3167,205 @@ mod tests {
         )
     }
 
+    #[test]
+    fn include_derived_writes_v2_manifest_and_wal_holds_state() -> TestResult {
+        let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let out = workspace.join("backups");
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace,
+            database_path: Some(database),
+            output_dir: Some(out),
+            label: Some("derived".to_owned()),
+            redaction_level: RedactionLevel::Standard,
+            include_derived: true,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            created.include_derived,
+            "report records include-derived mode",
+        )?;
+        ensure(
+            created
+                .derived
+                .iter()
+                .any(|derived| derived.kind == "wal_holds"),
+            "WAL hold state is included as a derived asset",
+        )?;
+        let manifest_text =
+            fs::read_to_string(&created.manifest_path).map_err(|error| error.to_string())?;
+        let manifest =
+            serde_json::from_str::<JsonValue>(&manifest_text).map_err(|error| error.to_string())?;
+        ensure_equal(
+            manifest.get("schema").and_then(JsonValue::as_str),
+            Some(BACKUP_MANIFEST_SCHEMA_V2),
+            "v2 manifest schema",
+        )?;
+        ensure(
+            manifest
+                .get("derived")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|derived| {
+                    derived.iter().any(|asset| {
+                        asset.get("kind").and_then(JsonValue::as_str) == Some("wal_holds")
+                    })
+                }),
+            "manifest derived array contains WAL hold state",
+        )?;
+
+        let verified = verify_backup(&BackupVerifyOptions {
+            backup_path: PathBuf::from(&created.backup_path),
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            verified.status.as_str(),
+            "verified",
+            "derived verify status",
+        )?;
+        ensure(
+            verified
+                .checked_derived
+                .iter()
+                .any(|derived| derived.kind == "wal_holds"),
+            "verify checks WAL hold derived asset",
+        )
+    }
+
+    #[test]
+    fn inspect_backup_reports_derived_assets() -> TestResult {
+        let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let out = workspace.join("backups");
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace,
+            database_path: Some(database),
+            output_dir: Some(out),
+            label: Some("inspect-derived".to_owned()),
+            redaction_level: RedactionLevel::Standard,
+            include_derived: true,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let inspected = inspect_backup(&BackupInspectOptions {
+            backup_path: PathBuf::from(&created.backup_path),
+        })
+        .map_err(|error| error.message())?;
+        let json = inspected.data_json();
+
+        ensure(
+            inspected
+                .derived
+                .iter()
+                .any(|derived| derived.kind == "wal_holds"),
+            "inspect reports WAL hold derived asset",
+        )?;
+        ensure(
+            json.get("derived")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|derived| {
+                    derived.iter().any(|asset| {
+                        asset.get("kind").and_then(JsonValue::as_str) == Some("wal_holds")
+                            && asset.get("byteSize").and_then(JsonValue::as_u64).is_some()
+                    })
+                }),
+            "inspect JSON exposes derived assets with byteSize",
+        )
+    }
+
+    #[test]
+    fn verify_and_restore_report_wal_holds_orphaned_warning() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection
+            .execute_raw("CREATE TABLE ee_wal_holds (id TEXT PRIMARY KEY)")
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw("INSERT INTO ee_wal_holds (id) VALUES ('hold_fixture')")
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        let out = workspace.join("backups");
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(out),
+            label: Some("wal-holds".to_owned()),
+            redaction_level: RedactionLevel::Standard,
+            include_derived: true,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let verified = verify_backup(&BackupVerifyOptions {
+            backup_path: PathBuf::from(&created.backup_path),
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(verified.status.as_str(), "degraded", "verify status")?;
+        ensure(
+            verified.issues.iter().any(|issue| {
+                issue.code == "wal_holds_orphaned"
+                    && issue.severity == "warning"
+                    && issue.path.as_deref() == Some("derived/wal_holds.json")
+            }),
+            "verify reports warning-only WAL hold orphan state",
+        )?;
+
+        let side_path = tempdir.path().join("restore-wal-holds-side-path");
+        let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace,
+            backup_path: PathBuf::from(&created.backup_path),
+            side_path,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure_equal(restored.status.as_str(), "degraded", "restore status")?;
+        ensure_equal(restored.issue_count, 1, "restore warning issue count")?;
+        ensure(
+            restored
+                .restored_derived
+                .iter()
+                .any(|derived| derived.kind == "wal_holds"),
+            "restore still materializes WAL hold derived asset",
+        )
+    }
+
+    #[test]
+    fn verify_backup_detects_corrupt_derived_asset() -> TestResult {
+        let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let out = workspace.join("backups");
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace,
+            database_path: Some(database),
+            output_dir: Some(out),
+            label: Some("derived-corrupt".to_owned()),
+            redaction_level: RedactionLevel::Standard,
+            include_derived: true,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        fs::write(
+            Path::new(&created.backup_path).join("derived/wal_holds.json"),
+            b"{\"schema\":\"tampered\"}\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let verified = verify_backup(&BackupVerifyOptions {
+            backup_path: PathBuf::from(&created.backup_path),
+        })
+        .map_err(|error| error.message())?;
+
+        ensure_equal(verified.status.as_str(), "failed", "verify status")?;
+        ensure(
+            verified
+                .issues
+                .iter()
+                .any(|issue| issue.code == "derived_asset_corrupt"),
+            "verify detects derived asset corruption",
+        )
+    }
+
     #[cfg(unix)]
     #[test]
     fn inspect_backup_rejects_symlink_manifest() -> TestResult {
@@ -3492,6 +3520,73 @@ mod tests {
             .into_iter()
             .sum::<usize>();
         ensure_equal(total_memories, 1, "restored memory count")
+    }
+
+    #[test]
+    fn restore_backup_to_side_path_materializes_derived_assets() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let episode_dir = workspace
+            .join(WORKSPACE_MARKER)
+            .join("lab")
+            .join("episodes");
+        fs::create_dir_all(&episode_dir).map_err(|error| error.to_string())?;
+        fs::write(
+            episode_dir.join("ep_restore.json"),
+            b"{\"schema\":\"ee.lab.frozen_episode.v1\",\"episode_id\":\"ep_restore\"}\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let out = workspace.join("backups");
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(out),
+            label: Some("restore-derived".to_owned()),
+            redaction_level: RedactionLevel::None,
+            include_derived: true,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        let side_path = tempdir.path().join("restore-derived-side-path");
+
+        let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace,
+            backup_path: PathBuf::from(&created.backup_path),
+            side_path: side_path.clone(),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure_equal(restored.status.as_str(), "completed", "restore status")?;
+        ensure(
+            restored
+                .restored_derived
+                .iter()
+                .any(|derived| derived.kind == "wal_holds"),
+            "restore report includes WAL hold derived asset",
+        )?;
+        ensure(
+            restored
+                .restored_derived
+                .iter()
+                .any(|derived| derived.lab_episode_path.is_some()),
+            "restore report includes materialized lab episode path",
+        )?;
+        ensure(
+            Path::new(&restored.restore_artifact_dir)
+                .join("derived/wal_holds.json")
+                .is_file(),
+            "restore artifact dir includes WAL hold state",
+        )?;
+        ensure(
+            side_path
+                .join(WORKSPACE_MARKER)
+                .join("lab")
+                .join("episodes")
+                .join("ep_restore.json")
+                .is_file(),
+            "restore side path includes frozen lab episode file",
+        )
     }
 
     #[test]
