@@ -76,18 +76,6 @@ _e2e_source_hash() {
     fi
 }
 
-_e2e_tmp_root() {
-    printf '%s\n' "${EE_E2E_ARTIFACT_TMPDIR:-${EE_E2E_TMPDIR:-${TMPDIR:-/tmp}}}"
-}
-
-_e2e_mktemp_file() {
-    local label="${1:-artifact}"
-    local root
-    root="$(_e2e_tmp_root)"
-    mkdir -p "$root"
-    mktemp "${root%/}/ee-e2e-${label}.XXXXXX"
-}
-
 # Emit a single JSON-line event. Uses python3 for JSON encoding so embedded
 # quotes/newlines/UTF-8 are handled correctly. No-op when log path unset.
 _e2e_emit_event() {
@@ -142,6 +130,18 @@ os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
 with open(log_path, "a", encoding="utf-8") as f:
     f.write(json.dumps(event) + "\n")
 PYEOF
+}
+
+_e2e_tmp_root() {
+    printf '%s\n' "${EE_E2E_ARTIFACT_TMPDIR:-${EE_E2E_TMPDIR:-${TMPDIR:-/tmp}}}"
+}
+
+_e2e_mktemp_file() {
+    local label="${1:-artifact}"
+    local root
+    root="$(_e2e_tmp_root)"
+    mkdir -p "$root"
+    mktemp "${root%/}/ee-e2e-${label}.XXXXXX"
 }
 
 # ============================================================================

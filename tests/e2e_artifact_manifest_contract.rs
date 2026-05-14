@@ -14,6 +14,18 @@ fn read_repo_file(path: &str) -> Result<String, String> {
     fs::read_to_string(repo_file(path)).map_err(|error| format!("failed to read `{path}`: {error}"))
 }
 
+fn tempdir() -> Result<tempfile::TempDir, String> {
+    let base = std::env::var_os("CARGO_TARGET_TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_file("target/tmp/e2e_artifact_manifest_contract"));
+    fs::create_dir_all(&base)
+        .map_err(|error| format!("failed to create temp base `{}`: {error}", base.display()))?;
+    tempfile::Builder::new()
+        .prefix("artifact-manifest-")
+        .tempdir_in(&base)
+        .map_err(|error| format!("failed to create tempdir in `{}`: {error}", base.display()))
+}
+
 fn write_fake_binary(path: &Path) -> Result<(), String> {
     let source = r#"#!/usr/bin/env bash
 set -uo pipefail
@@ -121,7 +133,7 @@ fn schema_registers_artifact_manifest_event_kind() -> TestResult {
 
 #[test]
 fn bash_harness_emits_command_artifact_manifest() -> TestResult {
-    let tmp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let tmp = tempdir()?;
     let fake_binary = tmp.path().join("fake-ee");
     let log_path = tmp.path().join("j1.jsonl");
     let target_dir = tmp.path().join("target-dir");
@@ -220,7 +232,7 @@ e2e_log_end
 
 #[test]
 fn bash_harness_warns_when_manifest_binary_hash_is_missing() -> TestResult {
-    let tmp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let tmp = tempdir()?;
     let log_path = tmp.path().join("j1.jsonl");
     let missing_binary = tmp.path().join("missing-ee");
 
