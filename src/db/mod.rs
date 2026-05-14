@@ -3790,6 +3790,51 @@ CREATE INDEX idx_graph_snapshots_v045_created ON graph_snapshots(created_at);
     "blake3:v045_graph_snapshot_typed_subgraphs_2026_05_14",
 );
 
+/// V046: Add graph algorithm witness ledger for CGSE complexity evidence.
+pub const V046_GRAPH_ALGORITHM_WITNESSES: Migration = Migration::new(
+    46,
+    "graph_algorithm_witnesses",
+    r#"
+CREATE TABLE graph_algorithm_witnesses (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    snapshot_id TEXT NOT NULL REFERENCES graph_snapshots(id) ON DELETE CASCADE,
+    algorithm TEXT NOT NULL CHECK (length(trim(algorithm)) > 0),
+    params_json TEXT NOT NULL CHECK (json_valid(params_json)),
+    witness_json TEXT NOT NULL CHECK (json_valid(witness_json)),
+    recorded_at TEXT NOT NULL CHECK (length(trim(recorded_at)) > 0)
+);
+
+CREATE INDEX idx_graph_algorithm_witnesses_lookup
+ON graph_algorithm_witnesses(workspace_id, snapshot_id, algorithm);
+"#,
+    "blake3:v046_graph_algorithm_witnesses_2026_05_14",
+);
+
+/// V047: Add graph algorithm result cache for reusable graph computations.
+pub const V047_GRAPH_ALGORITHM_RESULTS: Migration = Migration::new(
+    47,
+    "graph_algorithm_results",
+    r#"
+CREATE TABLE graph_algorithm_results (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    snapshot_id TEXT NOT NULL REFERENCES graph_snapshots(id) ON DELETE CASCADE,
+    algorithm TEXT NOT NULL CHECK (length(trim(algorithm)) > 0),
+    params_hash TEXT NOT NULL CHECK (params_hash GLOB 'blake3:*'),
+    result_json TEXT NOT NULL CHECK (json_valid(result_json)),
+    computed_at TEXT NOT NULL CHECK (length(trim(computed_at)) > 0),
+    ttl_seconds INTEGER NOT NULL CHECK (ttl_seconds > 0),
+    PRIMARY KEY (workspace_id, snapshot_id, algorithm, params_hash)
+);
+
+CREATE INDEX idx_graph_algorithm_results_lookup
+ON graph_algorithm_results(workspace_id, snapshot_id, algorithm);
+
+CREATE INDEX idx_graph_algorithm_results_computed
+ON graph_algorithm_results(workspace_id, computed_at);
+"#,
+    "blake3:v047_graph_algorithm_results_2026_05_14",
+);
+
 /// V042: Allow every pack omission reason emitted by the packer.
 pub const V042_PACK_OMISSION_REASONS: Migration = Migration::new(
     42,
@@ -3951,6 +3996,8 @@ pub const MIGRATIONS: &[Migration] = &[
     V043_LOGICAL_ID,
     V044_MEMORY_VALID_FROM_BACKFILL,
     V045_GRAPH_SNAPSHOT_TYPED_SUBGRAPHS,
+    V046_GRAPH_ALGORITHM_WITNESSES,
+    V047_GRAPH_ALGORITHM_RESULTS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -13257,6 +13304,50 @@ pub struct CreateGraphSnapshotInput {
     pub expires_at: Option<String>,
 }
 
+/// A stored graph algorithm witness row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredGraphAlgorithmWitness {
+    pub workspace_id: String,
+    pub snapshot_id: String,
+    pub algorithm: String,
+    pub params_json: String,
+    pub witness_json: String,
+    pub recorded_at: String,
+}
+
+/// Input for recording graph algorithm witness evidence.
+#[derive(Debug, Clone)]
+pub struct CreateGraphAlgorithmWitnessInput {
+    pub workspace_id: String,
+    pub snapshot_id: String,
+    pub algorithm: String,
+    pub params_json: String,
+    pub witness_json: String,
+}
+
+/// A stored graph algorithm result cache row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredGraphAlgorithmResult {
+    pub workspace_id: String,
+    pub snapshot_id: String,
+    pub algorithm: String,
+    pub params_hash: String,
+    pub result_json: String,
+    pub computed_at: String,
+    pub ttl_seconds: u64,
+}
+
+/// Input for writing a graph algorithm result cache row.
+#[derive(Debug, Clone)]
+pub struct CreateGraphAlgorithmResultInput {
+    pub workspace_id: String,
+    pub snapshot_id: String,
+    pub algorithm: String,
+    pub params_hash: String,
+    pub result_json: String,
+    pub ttl_seconds: u64,
+}
+
 impl DbConnection {
     /// Insert a new graph snapshot.
     pub fn insert_graph_snapshot(&self, id: &str, input: &CreateGraphSnapshotInput) -> Result<()> {
@@ -13368,6 +13459,161 @@ impl DbConnection {
         )?;
         Ok(rows > 0)
     }
+
+    /// Insert a graph algorithm witness row.
+    pub fn insert_graph_algorithm_witness(
+        &self,
+        input: &CreateGraphAlgorithmWitnessInput,
+    ) -> Result<()> {
+        let recorded_at = Utc::now().to_rfc3339();
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO graph_algorithm_witnesses (workspace_id, snapshot_id, algorithm, params_json, witness_json, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            &[
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.snapshot_id.clone()),
+                Value::Text(input.algorithm.clone()),
+                Value::Text(input.params_json.clone()),
+                Value::Text(input.witness_json.clone()),
+                Value::Text(recorded_at),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// List graph algorithm witnesses for a snapshot and optional algorithm.
+    pub fn list_graph_algorithm_witnesses(
+        &self,
+        workspace_id: &str,
+        snapshot_id: &str,
+        algorithm: Option<&str>,
+    ) -> Result<Vec<StoredGraphAlgorithmWitness>> {
+        let rows = if let Some(algorithm) = algorithm {
+            self.query_for(
+                DbOperation::Query,
+                "SELECT workspace_id, snapshot_id, algorithm, params_json, witness_json, recorded_at FROM graph_algorithm_witnesses WHERE workspace_id = ?1 AND snapshot_id = ?2 AND algorithm = ?3 ORDER BY recorded_at ASC, algorithm ASC, rowid ASC",
+                &[
+                    Value::Text(workspace_id.to_string()),
+                    Value::Text(snapshot_id.to_string()),
+                    Value::Text(algorithm.to_string()),
+                ],
+            )?
+        } else {
+            self.query_for(
+                DbOperation::Query,
+                "SELECT workspace_id, snapshot_id, algorithm, params_json, witness_json, recorded_at FROM graph_algorithm_witnesses WHERE workspace_id = ?1 AND snapshot_id = ?2 ORDER BY recorded_at ASC, algorithm ASC, rowid ASC",
+                &[
+                    Value::Text(workspace_id.to_string()),
+                    Value::Text(snapshot_id.to_string()),
+                ],
+            )?
+        };
+
+        rows.iter()
+            .map(stored_graph_algorithm_witness_from_row)
+            .collect()
+    }
+
+    /// Upsert a graph algorithm result cache row.
+    pub fn upsert_graph_algorithm_result(
+        &self,
+        input: &CreateGraphAlgorithmResultInput,
+    ) -> Result<()> {
+        let computed_at = Utc::now().to_rfc3339();
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO graph_algorithm_results (workspace_id, snapshot_id, algorithm, params_hash, result_json, computed_at, ttl_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(workspace_id, snapshot_id, algorithm, params_hash) DO UPDATE SET result_json = excluded.result_json, computed_at = excluded.computed_at, ttl_seconds = excluded.ttl_seconds",
+            &[
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.snapshot_id.clone()),
+                Value::Text(input.algorithm.clone()),
+                Value::Text(input.params_hash.clone()),
+                Value::Text(input.result_json.clone()),
+                Value::Text(computed_at),
+                Value::from_u64_clamped(input.ttl_seconds),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get one graph algorithm result cache row.
+    pub fn get_graph_algorithm_result(
+        &self,
+        workspace_id: &str,
+        snapshot_id: &str,
+        algorithm: &str,
+        params_hash: &str,
+    ) -> Result<Option<StoredGraphAlgorithmResult>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, snapshot_id, algorithm, params_hash, result_json, computed_at, ttl_seconds FROM graph_algorithm_results WHERE workspace_id = ?1 AND snapshot_id = ?2 AND algorithm = ?3 AND params_hash = ?4",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(snapshot_id.to_string()),
+                Value::Text(algorithm.to_string()),
+                Value::Text(params_hash.to_string()),
+            ],
+        )?;
+
+        if rows.is_empty() {
+            return Ok(None);
+        }
+
+        stored_graph_algorithm_result_from_row(&rows[0]).map(Some)
+    }
+
+    /// List graph algorithm result cache rows for a snapshot.
+    pub fn list_graph_algorithm_results(
+        &self,
+        workspace_id: &str,
+        snapshot_id: &str,
+        algorithm: Option<&str>,
+    ) -> Result<Vec<StoredGraphAlgorithmResult>> {
+        let rows = if let Some(algorithm) = algorithm {
+            self.query_for(
+                DbOperation::Query,
+                "SELECT workspace_id, snapshot_id, algorithm, params_hash, result_json, computed_at, ttl_seconds FROM graph_algorithm_results WHERE workspace_id = ?1 AND snapshot_id = ?2 AND algorithm = ?3 ORDER BY algorithm ASC, params_hash ASC",
+                &[
+                    Value::Text(workspace_id.to_string()),
+                    Value::Text(snapshot_id.to_string()),
+                    Value::Text(algorithm.to_string()),
+                ],
+            )?
+        } else {
+            self.query_for(
+                DbOperation::Query,
+                "SELECT workspace_id, snapshot_id, algorithm, params_hash, result_json, computed_at, ttl_seconds FROM graph_algorithm_results WHERE workspace_id = ?1 AND snapshot_id = ?2 ORDER BY algorithm ASC, params_hash ASC",
+                &[
+                    Value::Text(workspace_id.to_string()),
+                    Value::Text(snapshot_id.to_string()),
+                ],
+            )?
+        };
+
+        rows.iter()
+            .map(stored_graph_algorithm_result_from_row)
+            .collect()
+    }
+
+    /// Delete cached results for snapshots older than the latest snapshot of a graph type.
+    pub fn evict_stale_graph_algorithm_results(
+        &self,
+        workspace_id: &str,
+        graph_type: GraphSnapshotType,
+    ) -> Result<u64> {
+        self.execute_for(
+            DbOperation::Execute,
+            "DELETE FROM graph_algorithm_results WHERE workspace_id = ?1 AND snapshot_id IN (SELECT stale.id FROM graph_snapshots stale WHERE stale.workspace_id = ?1 AND stale.graph_type = ?2 AND stale.snapshot_version < (SELECT MAX(latest.snapshot_version) FROM graph_snapshots latest WHERE latest.workspace_id = ?1 AND latest.graph_type = ?2))",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(graph_type.as_str().to_string()),
+            ],
+        )
+    }
 }
 
 fn stored_graph_snapshot_from_row(row: &Row) -> Result<StoredGraphSnapshot> {
@@ -13398,6 +13644,29 @@ fn stored_graph_snapshot_from_row(row: &Row) -> Result<StoredGraphSnapshot> {
         created_at: required_text(row, 10, DbOperation::Query, "created_at")?.to_string(),
         expires_at: optional_text(row, 11)?.map(str::to_string),
         status,
+    })
+}
+
+fn stored_graph_algorithm_witness_from_row(row: &Row) -> Result<StoredGraphAlgorithmWitness> {
+    Ok(StoredGraphAlgorithmWitness {
+        workspace_id: required_text(row, 0, DbOperation::Query, "workspace_id")?.to_string(),
+        snapshot_id: required_text(row, 1, DbOperation::Query, "snapshot_id")?.to_string(),
+        algorithm: required_text(row, 2, DbOperation::Query, "algorithm")?.to_string(),
+        params_json: required_text(row, 3, DbOperation::Query, "params_json")?.to_string(),
+        witness_json: required_text(row, 4, DbOperation::Query, "witness_json")?.to_string(),
+        recorded_at: required_text(row, 5, DbOperation::Query, "recorded_at")?.to_string(),
+    })
+}
+
+fn stored_graph_algorithm_result_from_row(row: &Row) -> Result<StoredGraphAlgorithmResult> {
+    Ok(StoredGraphAlgorithmResult {
+        workspace_id: required_text(row, 0, DbOperation::Query, "workspace_id")?.to_string(),
+        snapshot_id: required_text(row, 1, DbOperation::Query, "snapshot_id")?.to_string(),
+        algorithm: required_text(row, 2, DbOperation::Query, "algorithm")?.to_string(),
+        params_hash: required_text(row, 3, DbOperation::Query, "params_hash")?.to_string(),
+        result_json: required_text(row, 4, DbOperation::Query, "result_json")?.to_string(),
+        computed_at: required_text(row, 5, DbOperation::Query, "computed_at")?.to_string(),
+        ttl_seconds: required_u64(row, 6, DbOperation::Query, "ttl_seconds")?,
     })
 }
 
@@ -13680,10 +13949,11 @@ mod tests {
     use sqlmodel_core::{Row, Value};
 
     use super::{
-        CreateArtifactInput, CreateArtifactLinkInput, CreateTaskEpisodeInput, CreateWorkspaceInput,
-        DatabaseConfig, DatabaseLocation, DatabaseOpenMode, DbConnection, DbError, DbOperation,
-        MIGRATION_TABLE_NAME, Migration, MigrationRecord, MigrationTableColumn,
-        StoredEpisodeAction, subsystem_name,
+        CreateArtifactInput, CreateArtifactLinkInput, CreateGraphAlgorithmResultInput,
+        CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput, CreateTaskEpisodeInput,
+        CreateWorkspaceInput, DatabaseConfig, DatabaseLocation, DatabaseOpenMode, DbConnection,
+        DbError, DbOperation, GraphSnapshotType, MIGRATION_TABLE_NAME, Migration, MigrationRecord,
+        MigrationTableColumn, StoredEpisodeAction, subsystem_name,
     };
     use crate::models::{
         EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose,
@@ -14642,6 +14912,14 @@ mod tests {
             "graph_snapshots table must exist",
         )?;
         ensure(
+            table_names.contains(&"graph_algorithm_witnesses"),
+            "graph_algorithm_witnesses table must exist",
+        )?;
+        ensure(
+            table_names.contains(&"graph_algorithm_results"),
+            "graph_algorithm_results table must exist",
+        )?;
+        ensure(
             table_names.contains(&"agent_installations"),
             "agent_installations table must exist",
         )?;
@@ -14669,6 +14947,343 @@ mod tests {
             table_names.contains(&"ee_advisory_locks"),
             "ee_advisory_locks table must exist",
         )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn graph_algorithm_witnesses_write_and_read_back() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace_id = "wsp_0123456789abcdef0123456789";
+        let snapshot_id = "gsnap_0123456789abcdef012345678";
+
+        connection.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: "/workspace/graph-witnesses".to_string(),
+                name: Some("graph-witnesses".to_string()),
+            },
+        )?;
+        connection.insert_graph_snapshot(
+            snapshot_id,
+            &CreateGraphSnapshotInput {
+                workspace_id: workspace_id.to_string(),
+                snapshot_version: 1,
+                schema_version: "ee.graph.snapshot.v1".to_string(),
+                graph_type: GraphSnapshotType::MemoryLinks,
+                node_count: 3,
+                edge_count: 2,
+                metrics_json: r#"{"nodes":[],"edges":[]}"#.to_string(),
+                content_hash: "blake3:graph-witness-test".to_string(),
+                source_generation: 0,
+                expires_at: None,
+            },
+        )?;
+
+        connection.insert_graph_algorithm_witness(&CreateGraphAlgorithmWitnessInput {
+            workspace_id: workspace_id.to_string(),
+            snapshot_id: snapshot_id.to_string(),
+            algorithm: "pagerank".to_string(),
+            params_json: r#"{"damping":0.85}"#.to_string(),
+            witness_json:
+                r#"{"elapsed_ms":7,"sampling_choice":"exact","decision_path_hash":"blake3:abc"}"#
+                    .to_string(),
+        })?;
+
+        let rows = connection.list_graph_algorithm_witnesses(
+            workspace_id,
+            snapshot_id,
+            Some("pagerank"),
+        )?;
+        ensure_equal(&rows.len(), &1, "witness row count")?;
+        let row = &rows[0];
+        ensure_equal(&row.workspace_id.as_str(), &workspace_id, "workspace id")?;
+        ensure_equal(&row.snapshot_id.as_str(), &snapshot_id, "snapshot id")?;
+        ensure_equal(&row.algorithm.as_str(), &"pagerank", "algorithm")?;
+        ensure_equal(
+            &row.params_json.as_str(),
+            &r#"{"damping":0.85}"#,
+            "params json",
+        )?;
+        ensure(
+            row.witness_json.contains("\"elapsed_ms\""),
+            "witness must include elapsed_ms",
+        )?;
+        ensure(
+            row.witness_json.contains("\"sampling_choice\""),
+            "witness must include sampling_choice",
+        )?;
+        ensure(
+            row.witness_json.contains("\"decision_path_hash\""),
+            "witness must include decision_path_hash",
+        )?;
+        ensure(!row.recorded_at.is_empty(), "recorded_at must be populated")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn graph_algorithm_witnesses_filter_by_snapshot_and_algorithm() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace_id = "wsp_1123456789abcdef0123456789";
+        let first_snapshot_id = "gsnap_1123456789abcdef012345678";
+        let second_snapshot_id = "gsnap_2123456789abcdef012345678";
+
+        connection.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: "/workspace/graph-witness-filter".to_string(),
+                name: Some("graph-witness-filter".to_string()),
+            },
+        )?;
+        for (snapshot_id, snapshot_version) in [(first_snapshot_id, 1), (second_snapshot_id, 2)] {
+            connection.insert_graph_snapshot(
+                snapshot_id,
+                &CreateGraphSnapshotInput {
+                    workspace_id: workspace_id.to_string(),
+                    snapshot_version,
+                    schema_version: "ee.graph.snapshot.v1".to_string(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 3,
+                    edge_count: 2,
+                    metrics_json: r#"{"nodes":[],"edges":[]}"#.to_string(),
+                    content_hash: format!("blake3:graph-witness-filter-{snapshot_version}"),
+                    source_generation: snapshot_version,
+                    expires_at: None,
+                },
+            )?;
+        }
+
+        for (snapshot_id, algorithm) in [
+            (first_snapshot_id, "pagerank"),
+            (first_snapshot_id, "betweenness"),
+            (second_snapshot_id, "pagerank"),
+        ] {
+            connection.insert_graph_algorithm_witness(&CreateGraphAlgorithmWitnessInput {
+                workspace_id: workspace_id.to_string(),
+                snapshot_id: snapshot_id.to_string(),
+                algorithm: algorithm.to_string(),
+                params_json: r#"{"limit":10}"#.to_string(),
+                witness_json: format!(
+                    r#"{{"elapsed_ms":11,"sampling_choice":"exact","decision_path_hash":"blake3:{algorithm}"}}"#
+                ),
+            })?;
+        }
+
+        let filtered = connection.list_graph_algorithm_witnesses(
+            workspace_id,
+            first_snapshot_id,
+            Some("pagerank"),
+        )?;
+        ensure_equal(&filtered.len(), &1, "filtered witness count")?;
+        ensure_equal(
+            &filtered[0].snapshot_id.as_str(),
+            &first_snapshot_id,
+            "filtered snapshot id",
+        )?;
+        ensure_equal(
+            &filtered[0].algorithm.as_str(),
+            &"pagerank",
+            "filtered algorithm",
+        )?;
+
+        let all_for_snapshot =
+            connection.list_graph_algorithm_witnesses(workspace_id, first_snapshot_id, None)?;
+        ensure_equal(&all_for_snapshot.len(), &2, "snapshot witness count")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn graph_algorithm_results_upsert_and_read_back() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace_id = "wsp_3123456789abcdef0123456789";
+        let snapshot_id = "gsnap_3123456789abcdef012345678";
+        let params_hash = "blake3:graph-result-params";
+
+        connection.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: "/workspace/graph-result-cache".to_string(),
+                name: Some("graph-result-cache".to_string()),
+            },
+        )?;
+        connection.insert_graph_snapshot(
+            snapshot_id,
+            &CreateGraphSnapshotInput {
+                workspace_id: workspace_id.to_string(),
+                snapshot_version: 1,
+                schema_version: "ee.graph.snapshot.v1".to_string(),
+                graph_type: GraphSnapshotType::MemoryLinks,
+                node_count: 3,
+                edge_count: 2,
+                metrics_json: r#"{"nodes":[],"edges":[]}"#.to_string(),
+                content_hash: "blake3:graph-result-cache".to_string(),
+                source_generation: 0,
+                expires_at: None,
+            },
+        )?;
+
+        connection.upsert_graph_algorithm_result(&CreateGraphAlgorithmResultInput {
+            workspace_id: workspace_id.to_string(),
+            snapshot_id: snapshot_id.to_string(),
+            algorithm: "pagerank".to_string(),
+            params_hash: params_hash.to_string(),
+            result_json: r#"{"scores":[["mem_a",0.75]]}"#.to_string(),
+            ttl_seconds: 300,
+        })?;
+        connection.upsert_graph_algorithm_result(&CreateGraphAlgorithmResultInput {
+            workspace_id: workspace_id.to_string(),
+            snapshot_id: snapshot_id.to_string(),
+            algorithm: "pagerank".to_string(),
+            params_hash: params_hash.to_string(),
+            result_json: r#"{"scores":[["mem_a",0.80]]}"#.to_string(),
+            ttl_seconds: 600,
+        })?;
+
+        let row = connection
+            .get_graph_algorithm_result(workspace_id, snapshot_id, "pagerank", params_hash)?
+            .ok_or_else(|| TestFailure::new("missing graph algorithm result"))?;
+        ensure_equal(&row.workspace_id.as_str(), &workspace_id, "workspace id")?;
+        ensure_equal(&row.snapshot_id.as_str(), &snapshot_id, "snapshot id")?;
+        ensure_equal(&row.algorithm.as_str(), &"pagerank", "algorithm")?;
+        ensure_equal(&row.params_hash.as_str(), &params_hash, "params hash")?;
+        ensure_equal(
+            &row.result_json.as_str(),
+            &r#"{"scores":[["mem_a",0.80]]}"#,
+            "upserted result json",
+        )?;
+        ensure_equal(&row.ttl_seconds, &600, "upserted ttl")?;
+        ensure(!row.computed_at.is_empty(), "computed_at must be populated")?;
+
+        let rows = connection.list_graph_algorithm_results(workspace_id, snapshot_id, None)?;
+        ensure_equal(&rows.len(), &1, "upsert keeps one cache row")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn graph_algorithm_results_filter_by_snapshot_and_algorithm() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace_id = "wsp_4123456789abcdef0123456789";
+        let snapshot_id = "gsnap_4123456789abcdef012345678";
+
+        connection.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: "/workspace/graph-result-filter".to_string(),
+                name: Some("graph-result-filter".to_string()),
+            },
+        )?;
+        connection.insert_graph_snapshot(
+            snapshot_id,
+            &CreateGraphSnapshotInput {
+                workspace_id: workspace_id.to_string(),
+                snapshot_version: 1,
+                schema_version: "ee.graph.snapshot.v1".to_string(),
+                graph_type: GraphSnapshotType::MemoryLinks,
+                node_count: 4,
+                edge_count: 3,
+                metrics_json: r#"{"nodes":[],"edges":[]}"#.to_string(),
+                content_hash: "blake3:graph-result-filter".to_string(),
+                source_generation: 0,
+                expires_at: None,
+            },
+        )?;
+
+        for (algorithm, params_hash) in [
+            ("pagerank", "blake3:result-filter-a"),
+            ("pagerank", "blake3:result-filter-b"),
+            ("betweenness", "blake3:result-filter-c"),
+        ] {
+            connection.upsert_graph_algorithm_result(&CreateGraphAlgorithmResultInput {
+                workspace_id: workspace_id.to_string(),
+                snapshot_id: snapshot_id.to_string(),
+                algorithm: algorithm.to_string(),
+                params_hash: params_hash.to_string(),
+                result_json: format!(r#"{{"algorithm":"{algorithm}"}}"#),
+                ttl_seconds: 300,
+            })?;
+        }
+
+        let pagerank_rows =
+            connection.list_graph_algorithm_results(workspace_id, snapshot_id, Some("pagerank"))?;
+        ensure_equal(&pagerank_rows.len(), &2, "pagerank result count")?;
+        ensure(
+            pagerank_rows
+                .iter()
+                .all(|row| row.algorithm.as_str() == "pagerank"),
+            "algorithm filter must only return pagerank rows",
+        )?;
+
+        let all_rows = connection.list_graph_algorithm_results(workspace_id, snapshot_id, None)?;
+        ensure_equal(&all_rows.len(), &3, "all result count")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn graph_algorithm_results_evicts_snapshots_older_than_latest() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace_id = "wsp_5123456789abcdef0123456789";
+        let old_snapshot_id = "gsnap_5123456789abcdef012345678";
+        let latest_snapshot_id = "gsnap_6123456789abcdef012345678";
+
+        connection.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: "/workspace/graph-result-evict".to_string(),
+                name: Some("graph-result-evict".to_string()),
+            },
+        )?;
+        for (snapshot_id, snapshot_version) in [(old_snapshot_id, 1), (latest_snapshot_id, 2)] {
+            connection.insert_graph_snapshot(
+                snapshot_id,
+                &CreateGraphSnapshotInput {
+                    workspace_id: workspace_id.to_string(),
+                    snapshot_version,
+                    schema_version: "ee.graph.snapshot.v1".to_string(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 4,
+                    edge_count: 3,
+                    metrics_json: r#"{"nodes":[],"edges":[]}"#.to_string(),
+                    content_hash: format!("blake3:graph-result-evict-{snapshot_version}"),
+                    source_generation: snapshot_version,
+                    expires_at: None,
+                },
+            )?;
+            connection.upsert_graph_algorithm_result(&CreateGraphAlgorithmResultInput {
+                workspace_id: workspace_id.to_string(),
+                snapshot_id: snapshot_id.to_string(),
+                algorithm: "pagerank".to_string(),
+                params_hash: format!("blake3:result-evict-{snapshot_version}"),
+                result_json: format!(r#"{{"snapshotVersion":{snapshot_version}}}"#),
+                ttl_seconds: 300,
+            })?;
+        }
+
+        let evicted = connection
+            .evict_stale_graph_algorithm_results(workspace_id, GraphSnapshotType::MemoryLinks)?;
+        ensure_equal(&evicted, &1, "evicted result count")?;
+        ensure(
+            connection
+                .list_graph_algorithm_results(workspace_id, old_snapshot_id, None)?
+                .is_empty(),
+            "old snapshot cache row must be evicted",
+        )?;
+        let latest_rows =
+            connection.list_graph_algorithm_results(workspace_id, latest_snapshot_id, None)?;
+        ensure_equal(&latest_rows.len(), &1, "latest snapshot result count")?;
 
         connection.close()?;
         Ok(())

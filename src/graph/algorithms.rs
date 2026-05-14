@@ -1,7 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use chrono::{DateTime, Utc};
 use fnx_runtime::CgseValue;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+use crate::db::{CreateGraphAlgorithmResultInput, DbConnection, StoredGraphAlgorithmResult};
+use crate::graph::{GraphError, GraphResult, graph_algorithm_params_hash};
 
 pub const DEFAULT_SAMPLE_THRESHOLD: usize = 500;
 pub const DEFAULT_SAMPLE_SIZE: usize = 100;
@@ -97,6 +103,195 @@ impl<R> SamplingRun<R> {
     pub fn into_result(self) -> R {
         self.result
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AlgorithmResultCacheRun<R> {
+    pub result: R,
+    pub params_hash: String,
+    pub cache_hit: bool,
+}
+
+impl<R> AlgorithmResultCacheRun<R> {
+    #[must_use]
+    pub fn into_result(self) -> R {
+        self.result
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct AlgorithmResultCacheSpec<'a> {
+    pub conn: &'a DbConnection,
+    pub workspace_id: &'a str,
+    pub snapshot_id: &'a str,
+    pub snapshot_content_hash: &'a str,
+    pub algorithm: &'a str,
+    pub params: &'a serde_json::Value,
+    pub ttl_seconds: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CachedComputation<R> {
+    result: R,
+    cache_hit: bool,
+}
+
+static ALGORITHM_CACHE_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+
+pub fn run_with_result_cache<R, Compute>(
+    spec: &AlgorithmResultCacheSpec<'_>,
+    compute: Compute,
+) -> GraphResult<AlgorithmResultCacheRun<R>>
+where
+    R: Clone + DeserializeOwned + Serialize,
+    Compute: FnOnce() -> GraphResult<R>,
+{
+    let params_hash =
+        graph_algorithm_params_hash(spec.algorithm, spec.snapshot_content_hash, spec.params)?;
+    let cache_key = format!(
+        "{}\0{}\0{}\0{}",
+        spec.workspace_id, spec.snapshot_id, spec.algorithm, params_hash
+    );
+    let cached = compute_or_load_algorithm_result(
+        &cache_key,
+        || load_cached_algorithm_result(spec, &params_hash),
+        compute,
+        |result| store_cached_algorithm_result(spec, &params_hash, result),
+    )?;
+
+    Ok(AlgorithmResultCacheRun {
+        result: cached.result,
+        params_hash,
+        cache_hit: cached.cache_hit,
+    })
+}
+
+fn compute_or_load_algorithm_result<R, Load, Compute, Store>(
+    cache_key: &str,
+    mut load: Load,
+    compute: Compute,
+    mut store: Store,
+) -> GraphResult<CachedComputation<R>>
+where
+    R: Clone,
+    Load: FnMut() -> GraphResult<Option<R>>,
+    Compute: FnOnce() -> GraphResult<R>,
+    Store: FnMut(&R) -> GraphResult<()>,
+{
+    if let Some(result) = load()? {
+        return Ok(CachedComputation {
+            result,
+            cache_hit: true,
+        });
+    }
+
+    let lock = algorithm_cache_lock(cache_key);
+    let _guard = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    if let Some(result) = load()? {
+        return Ok(CachedComputation {
+            result,
+            cache_hit: true,
+        });
+    }
+
+    let result = compute()?;
+    store(&result)?;
+    Ok(CachedComputation {
+        result,
+        cache_hit: false,
+    })
+}
+
+fn algorithm_cache_lock(cache_key: &str) -> Arc<Mutex<()>> {
+    let mut locks = ALGORITHM_CACHE_LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    locks
+        .entry(cache_key.to_owned())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+fn load_cached_algorithm_result<R>(
+    spec: &AlgorithmResultCacheSpec<'_>,
+    params_hash: &str,
+) -> GraphResult<Option<R>>
+where
+    R: DeserializeOwned,
+{
+    let row = spec
+        .conn
+        .get_graph_algorithm_result(
+            spec.workspace_id,
+            spec.snapshot_id,
+            spec.algorithm,
+            params_hash,
+        )
+        .map_err(|error| GraphError::storage("load graph algorithm result cache", error))?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    if !cached_algorithm_result_is_fresh(&row) {
+        return Ok(None);
+    }
+
+    match serde_json::from_str(&row.result_json) {
+        Ok(result) => Ok(Some(result)),
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::graph",
+                workspace_id = spec.workspace_id,
+                snapshot_id = spec.snapshot_id,
+                algorithm = spec.algorithm,
+                params_hash,
+                error = %error,
+                "graph algorithm result cache row could not be deserialized"
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn store_cached_algorithm_result<R>(
+    spec: &AlgorithmResultCacheSpec<'_>,
+    params_hash: &str,
+    result: &R,
+) -> GraphResult<()>
+where
+    R: Serialize,
+{
+    let result_json = serde_json::to_string(result)
+        .map_err(|error| GraphError::json("serialize graph algorithm result cache row", error))?;
+    spec.conn
+        .upsert_graph_algorithm_result(&CreateGraphAlgorithmResultInput {
+            workspace_id: spec.workspace_id.to_owned(),
+            snapshot_id: spec.snapshot_id.to_owned(),
+            algorithm: spec.algorithm.to_owned(),
+            params_hash: params_hash.to_owned(),
+            result_json,
+            ttl_seconds: spec.ttl_seconds,
+        })
+        .map_err(|error| GraphError::storage("store graph algorithm result cache", error))
+}
+
+fn cached_algorithm_result_is_fresh(row: &StoredGraphAlgorithmResult) -> bool {
+    let Ok(computed_at) = DateTime::parse_from_rfc3339(&row.computed_at) else {
+        return false;
+    };
+    let Ok(ttl_seconds) = i64::try_from(row.ttl_seconds) else {
+        return true;
+    };
+    let Some(ttl) = chrono::Duration::try_seconds(ttl_seconds) else {
+        return false;
+    };
+    computed_at
+        .with_timezone(&Utc)
+        .checked_add_signed(ttl)
+        .is_some_and(|expires_at| expires_at > Utc::now())
 }
 
 pub fn run_with_sampling<R, Exact, Approx>(
@@ -256,6 +451,21 @@ fn cgse_u64(value: u64) -> CgseValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    use crate::db::{
+        CreateGraphSnapshotInput, CreateWorkspaceInput, DbConnection, GraphSnapshotType,
+    };
+    use crate::graph::GraphResult;
+
+    type TestResult<T = ()> = Result<T, String>;
+
+    fn graph_result<T>(result: GraphResult<T>) -> Result<T, String> {
+        result.map_err(|error| error.to_string())
+    }
 
     #[test]
     fn run_with_sampling_uses_exact_under_threshold() {
@@ -346,5 +556,120 @@ mod tests {
             Some(&CgseValue::String("approximate".to_owned()))
         );
         assert_eq!(fields.get("snapshotVersion"), Some(&CgseValue::Int(11)));
+    }
+
+    #[test]
+    fn run_with_result_cache_reuses_stored_result() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_7123456789abcdef0123456789";
+        let snapshot_id = "gsnap_7123456789abcdef012345678";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: "/workspace/algorithm-result-cache".to_owned(),
+                    name: Some("algorithm-result-cache".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_graph_snapshot(
+                snapshot_id,
+                &CreateGraphSnapshotInput {
+                    workspace_id: workspace_id.to_owned(),
+                    snapshot_version: 1,
+                    schema_version: "ee.graph.snapshot.v1".to_owned(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 2,
+                    edge_count: 1,
+                    metrics_json: r#"{"nodes":[],"edges":[]}"#.to_owned(),
+                    content_hash: "blake3:algorithm-result-cache-snapshot".to_owned(),
+                    source_generation: 0,
+                    expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let params = serde_json::json!({"damping": 0.85});
+        let spec = AlgorithmResultCacheSpec {
+            conn: &connection,
+            workspace_id,
+            snapshot_id,
+            snapshot_content_hash: "blake3:algorithm-result-cache-snapshot",
+            algorithm: "pagerank",
+            params: &params,
+            ttl_seconds: 300,
+        };
+        let compute_count = AtomicUsize::new(0);
+
+        let first = graph_result(run_with_result_cache(&spec, || {
+            compute_count.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({"scores":[["mem_a",0.75]]}))
+        }))?;
+        let second = graph_result(run_with_result_cache(&spec, || {
+            compute_count.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({"scores":[["mem_a",0.25]]}))
+        }))?;
+
+        assert!(!first.cache_hit);
+        assert!(second.cache_hit);
+        assert_eq!(first.params_hash, second.params_hash);
+        assert_eq!(first.result, second.result);
+        assert_eq!(compute_count.load(Ordering::SeqCst), 1);
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn compute_or_load_algorithm_result_serializes_same_key_computes() -> TestResult {
+        let stored = Arc::new(Mutex::new(None::<u64>));
+        let compute_count = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(10));
+        let mut handles = Vec::new();
+
+        for _ in 0..10 {
+            let stored = Arc::clone(&stored);
+            let compute_count = Arc::clone(&compute_count);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || -> TestResult<(u64, bool)> {
+                barrier.wait();
+                let run = graph_result(compute_or_load_algorithm_result(
+                    "test\0same-algorithm-cache-key",
+                    || {
+                        Ok(*stored
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner))
+                    },
+                    || {
+                        compute_count.fetch_add(1, Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(25));
+                        Ok(42_u64)
+                    },
+                    |result| {
+                        *stored
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(*result);
+                        Ok(())
+                    },
+                ))?;
+                Ok((run.result, run.cache_hit))
+            }));
+        }
+
+        let mut cache_hits = 0;
+        for handle in handles {
+            let (result, cache_hit) = handle
+                .join()
+                .map_err(|_| "cache thread panicked".to_owned())??;
+            assert_eq!(result, 42);
+            if cache_hit {
+                cache_hits += 1;
+            }
+        }
+
+        assert_eq!(compute_count.load(Ordering::SeqCst), 1);
+        assert_eq!(cache_hits, 9);
+        Ok(())
     }
 }

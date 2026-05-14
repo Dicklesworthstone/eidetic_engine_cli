@@ -606,6 +606,8 @@ mod tests {
         "feedback_events_v037",
         "feedback_quarantine",
         "feedback_quarantine_v037",
+        "graph_algorithm_results",
+        "graph_algorithm_witnesses",
         "graph_snapshots",
         "import_ledger",
         "learning_observations",
@@ -638,6 +640,9 @@ mod tests {
     const CRITICAL_SCHEMA_INDEXES: &[&str] = &[
         "idx_audit_log_chain",
         "idx_ee_advisory_locks_holder",
+        "idx_graph_algorithm_results_computed",
+        "idx_graph_algorithm_results_lookup",
+        "idx_graph_algorithm_witnesses_lookup",
         "idx_graph_snapshots_workspace",
         "idx_import_ledger_source",
         "idx_learning_observations_workspace",
@@ -786,6 +791,29 @@ mod tests {
                 "evidence_json",
                 "observed_at",
                 "created_at",
+            ],
+        ),
+        (
+            "graph_algorithm_witnesses",
+            &[
+                "workspace_id",
+                "snapshot_id",
+                "algorithm",
+                "params_json",
+                "witness_json",
+                "recorded_at",
+            ],
+        ),
+        (
+            "graph_algorithm_results",
+            &[
+                "workspace_id",
+                "snapshot_id",
+                "algorithm",
+                "params_hash",
+                "result_json",
+                "computed_at",
+                "ttl_seconds",
             ],
         ),
     ];

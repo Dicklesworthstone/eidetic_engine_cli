@@ -3,7 +3,10 @@ use std::error::Error;
 use std::fmt;
 use std::time::Duration;
 
-use crate::db::{AcquireLockResult, AdvisoryLockId, CreateGraphSnapshotInput, DbOperation};
+use crate::db::{
+    AcquireLockResult, AdvisoryLockId, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
+    DbOperation,
+};
 use crate::db::{
     DbConnection, DbError, GraphSnapshotStatus, GraphSnapshotType, StoredGraphSnapshot,
     StoredMemoryLink,
@@ -19,12 +22,131 @@ use fnx_runtime::{CgseValue, CompatibilityMode};
 use sqlmodel_core::{Row, Value};
 
 pub mod algorithms;
+pub mod decay;
+pub mod health;
 
 pub const SUBSYSTEM: &str = "graph";
 pub const MODULE_CONTRACT: &str = GRAPH_MODULE_SCHEMA_V1;
 pub const REQUIRED_GRAPH_ENGINE: &str = "franken_networkx";
+pub const GRAPH_ALGORITHM_WITNESS_SCHEMA_V1: &str = "ee.graph.algorithm_witness.v1";
+pub const GRAPH_ALGORITHM_RESULT_CACHE_KEY_SCHEMA_V1: &str =
+    "ee.graph.algorithm_result_cache_key.v1";
 
 pub type GraphResult<T> = std::result::Result<T, GraphError>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComplexityWitnessCounters {
+    pub elapsed_ms: u64,
+    pub sampling_choice: String,
+    pub decision_path_hash: String,
+}
+
+pub fn graph_algorithm_params_hash(
+    algorithm: &str,
+    snapshot_content_hash: &str,
+    params: &serde_json::Value,
+) -> GraphResult<String> {
+    let canonical_params = canonical_graph_algorithm_params_json(params)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(GRAPH_ALGORITHM_RESULT_CACHE_KEY_SCHEMA_V1.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(algorithm.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(snapshot_content_hash.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(canonical_params.as_bytes());
+    Ok(format!("blake3:{}", hasher.finalize().to_hex()))
+}
+
+fn canonical_graph_algorithm_params_json(params: &serde_json::Value) -> GraphResult<String> {
+    serde_json::to_string(&canonical_graph_algorithm_params_value(params))
+        .map_err(|error| GraphError::json("serialize graph algorithm cache params", error))
+}
+
+fn canonical_graph_algorithm_params_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(canonical_graph_algorithm_params_value)
+                .collect(),
+        ),
+        serde_json::Value::Object(fields) => {
+            let mut sorted = serde_json::Map::new();
+            let mut keys: Vec<_> = fields.keys().collect();
+            keys.sort();
+            for key in keys {
+                if let Some(value) = fields.get(key) {
+                    sorted.insert(key.clone(), canonical_graph_algorithm_params_value(value));
+                }
+            }
+            serde_json::Value::Object(sorted)
+        }
+        other => other.clone(),
+    }
+}
+
+pub fn emit_complexity_witness(
+    conn: &DbConnection,
+    workspace_id: &str,
+    snapshot_id: &str,
+    name: &str,
+    snapshot_version: u64,
+    params: &serde_json::Value,
+    observed_counters: &ComplexityWitnessCounters,
+) -> GraphResult<()> {
+    if let Err(error) = persist_complexity_witness(
+        conn,
+        workspace_id,
+        snapshot_id,
+        name,
+        snapshot_version,
+        params,
+        observed_counters,
+    ) {
+        tracing::warn!(
+            target: "ee::graph",
+            workspace_id,
+            snapshot_id,
+            algorithm = name,
+            error = %error,
+            "graph algorithm complexity witness persistence failed"
+        );
+    }
+
+    Ok(())
+}
+
+fn persist_complexity_witness(
+    conn: &DbConnection,
+    workspace_id: &str,
+    snapshot_id: &str,
+    name: &str,
+    snapshot_version: u64,
+    params: &serde_json::Value,
+    observed_counters: &ComplexityWitnessCounters,
+) -> GraphResult<()> {
+    let params_json = serde_json::to_string(params)
+        .map_err(|error| GraphError::json("serialize graph algorithm witness params", error))?;
+    let witness_json = serde_json::to_string(&serde_json::json!({
+        "schema": GRAPH_ALGORITHM_WITNESS_SCHEMA_V1,
+        "algorithm": name,
+        "snapshot_version": snapshot_version,
+        "elapsed_ms": observed_counters.elapsed_ms,
+        "sampling_choice": observed_counters.sampling_choice.as_str(),
+        "decision_path_hash": observed_counters.decision_path_hash.as_str(),
+    }))
+    .map_err(|error| GraphError::json("serialize graph algorithm witness", error))?;
+
+    conn.insert_graph_algorithm_witness(&CreateGraphAlgorithmWitnessInput {
+        workspace_id: workspace_id.to_string(),
+        snapshot_id: snapshot_id.to_string(),
+        algorithm: name.to_string(),
+        params_json,
+        witness_json,
+    })
+    .map_err(|error| GraphError::storage("persist graph algorithm witness", error))
+}
 
 #[derive(Debug)]
 pub enum GraphError {
@@ -911,6 +1033,40 @@ struct CausalEvidenceGraphRow {
     method: String,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct RevisionDagMemoryRow {
+    memory_id: String,
+    logical_id: String,
+    valid_from: String,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct RevisionDagDerivedFromRow {
+    link_id: String,
+    src_memory_id: String,
+    dst_memory_id: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct RuleProvenanceRow {
+    rule_id: String,
+    memory_id: String,
+    role: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ContradictionSubgraphRow {
+    link_id: String,
+    src_memory_id: String,
+    dst_memory_id: String,
+    weight: f64,
+    confidence: f64,
+    directed: bool,
+    evidence_count: u32,
+    source: String,
+}
+
 /// Options for building a memory graph.
 #[derive(Debug, Clone, Default)]
 pub struct ProjectionOptions {
@@ -949,6 +1105,46 @@ pub fn build_causal_evidence_graph_from_table(
     build_causal_evidence_graph_from_rows(&rows)
 }
 
+/// Build the memory revision DAG for a workspace from logical revision chains.
+///
+/// Nodes are memory IDs. Edges inside a shared `logical_id` chain point from
+/// older to newer rows by `valid_from`, and explicit `derived_from` links add
+/// cross-chain provenance edges. The resulting directed graph must be acyclic.
+pub fn build_revision_dag_from_logical_ids(
+    conn: &DbConnection,
+    workspace_id: &str,
+) -> GraphResult<DiGraph> {
+    let memory_rows = revision_dag_memory_rows(conn, workspace_id)?;
+    let derived_from_rows = revision_dag_derived_from_rows(conn, workspace_id)?;
+    build_revision_dag_from_rows(&memory_rows, &derived_from_rows)
+}
+
+/// Build the rule-provenance bipartite graph for a workspace.
+///
+/// Rule nodes and memory nodes are tagged with a `bipartite_partition`
+/// attribute. Edges come from `rule_source_memories`; the current table shape
+/// only persists source evidence, so every emitted edge has `rule_role=source`.
+pub fn build_rule_provenance_bipartite_from_tables(
+    conn: &DbConnection,
+    workspace_id: &str,
+) -> GraphResult<Graph> {
+    let rows = rule_provenance_rows(conn, workspace_id)?;
+    build_rule_provenance_bipartite_from_rows(&rows)
+}
+
+/// Build a directed subgraph containing only persisted contradiction links.
+///
+/// Undirected `memory_links` rows are represented as reciprocal directed edges
+/// so this filtered view preserves the same traversal semantics as the main
+/// memory-link projection.
+pub fn build_contradiction_subgraph_from_memory_links(
+    conn: &DbConnection,
+    workspace_id: &str,
+) -> GraphResult<DiGraph> {
+    let rows = contradiction_subgraph_rows(conn, workspace_id)?;
+    build_contradiction_subgraph_from_rows(&rows)
+}
+
 fn build_causal_evidence_graph_from_rows(rows: &[CausalEvidenceGraphRow]) -> GraphResult<DiGraph> {
     let mut graph = DiGraph::new(CompatibilityMode::Strict);
     for row in rows {
@@ -964,6 +1160,96 @@ fn build_causal_evidence_graph_from_rows(rows: &[CausalEvidenceGraphRow]) -> Gra
                 operation: "add causal evidence edge",
                 source: error.to_string(),
             })?;
+    }
+    Ok(graph)
+}
+
+fn build_revision_dag_from_rows(
+    memory_rows: &[RevisionDagMemoryRow],
+    derived_from_rows: &[RevisionDagDerivedFromRow],
+) -> GraphResult<DiGraph> {
+    let mut graph = DiGraph::new(CompatibilityMode::Strict);
+    let mut chains: BTreeMap<String, Vec<&RevisionDagMemoryRow>> = BTreeMap::new();
+    let mut memory_ids = BTreeSet::new();
+    let mut adjacency: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+
+    for row in memory_rows {
+        graph.add_node(&row.memory_id);
+        memory_ids.insert(row.memory_id.clone());
+        chains.entry(row.logical_id.clone()).or_default().push(row);
+    }
+
+    for chain_rows in chains.values_mut() {
+        chain_rows.sort_by(|left, right| {
+            left.valid_from
+                .cmp(&right.valid_from)
+                .then_with(|| left.created_at.cmp(&right.created_at))
+                .then_with(|| left.memory_id.cmp(&right.memory_id))
+        });
+
+        for pair in chain_rows.windows(2) {
+            let older = pair[0];
+            let newer = pair[1];
+            add_revision_dag_edge(
+                &mut graph,
+                &mut adjacency,
+                &older.memory_id,
+                &newer.memory_id,
+                revision_supersedes_edge_attrs(&older.logical_id),
+            )?;
+        }
+    }
+
+    for row in derived_from_rows {
+        if memory_ids.contains(&row.src_memory_id) && memory_ids.contains(&row.dst_memory_id) {
+            add_revision_dag_edge(
+                &mut graph,
+                &mut adjacency,
+                &row.src_memory_id,
+                &row.dst_memory_id,
+                revision_derived_from_edge_attrs(&row.link_id),
+            )?;
+        }
+    }
+
+    if revision_dag_has_cycle(&memory_ids, &adjacency) {
+        return Err(GraphError::GraphEngine {
+            operation: "validate revision DAG acyclic",
+            source: "revision DAG contains a directed cycle".to_string(),
+        });
+    }
+
+    Ok(graph)
+}
+
+fn build_rule_provenance_bipartite_from_rows(rows: &[RuleProvenanceRow]) -> GraphResult<Graph> {
+    let mut graph = Graph::new(CompatibilityMode::Strict);
+    for row in rows {
+        graph.add_node_with_attrs(row.rule_id.as_str(), rule_provenance_node_attrs("rule"));
+        graph.add_node_with_attrs(row.memory_id.as_str(), rule_provenance_node_attrs("memory"));
+        graph
+            .add_edge_with_attrs(
+                row.rule_id.as_str(),
+                row.memory_id.as_str(),
+                rule_provenance_edge_attrs(row),
+            )
+            .map_err(|error| GraphError::GraphEngine {
+                operation: "add rule provenance edge",
+                source: error.to_string(),
+            })?;
+    }
+    Ok(graph)
+}
+
+fn build_contradiction_subgraph_from_rows(
+    rows: &[ContradictionSubgraphRow],
+) -> GraphResult<DiGraph> {
+    let mut graph = DiGraph::new(CompatibilityMode::Strict);
+    for row in rows {
+        add_contradiction_edge(&mut graph, &row.src_memory_id, &row.dst_memory_id, row)?;
+        if !row.directed {
+            add_contradiction_edge(&mut graph, &row.dst_memory_id, &row.src_memory_id, row)?;
+        }
     }
     Ok(graph)
 }
@@ -1036,6 +1322,167 @@ fn causal_evidence_graph_row_from_row(row: &Row) -> GraphResult<CausalEvidenceGr
     })
 }
 
+fn rule_provenance_rows(
+    conn: &DbConnection,
+    workspace_id: &str,
+) -> GraphResult<Vec<RuleProvenanceRow>> {
+    conn.query(
+        "SELECT rsm.rule_id, rsm.memory_id, 'source' AS rule_role
+         FROM rule_source_memories rsm
+         JOIN procedural_rules rules ON rules.id = rsm.rule_id
+         JOIN memories memory ON memory.id = rsm.memory_id
+         WHERE rules.workspace_id = ?1
+           AND memory.workspace_id = ?1
+           AND rules.tombstoned_at IS NULL
+           AND memory.tombstoned_at IS NULL
+         ORDER BY rsm.rule_id ASC, rsm.memory_id ASC",
+        &[Value::Text(workspace_id.to_string())],
+    )
+    .map_err(|error| GraphError::storage("query rule provenance rows", error))?
+    .iter()
+    .map(rule_provenance_row_from_row)
+    .collect()
+}
+
+fn rule_provenance_row_from_row(row: &Row) -> GraphResult<RuleProvenanceRow> {
+    Ok(RuleProvenanceRow {
+        rule_id: graph_row_text(row, 0, "rule_source_memories.rule_id")?,
+        memory_id: graph_row_text(row, 1, "rule_source_memories.memory_id")?,
+        role: graph_row_text(row, 2, "rule_source_memories.rule_role")?,
+    })
+}
+
+fn contradiction_subgraph_rows(
+    conn: &DbConnection,
+    workspace_id: &str,
+) -> GraphResult<Vec<ContradictionSubgraphRow>> {
+    conn.query(
+        "SELECT links.id, links.src_memory_id, links.dst_memory_id, links.weight, links.confidence,
+                links.directed, links.evidence_count, links.source
+         FROM memory_links links
+         JOIN memories src ON src.id = links.src_memory_id
+         JOIN memories dst ON dst.id = links.dst_memory_id
+         WHERE links.relation = 'contradicts'
+           AND src.workspace_id = ?1
+           AND dst.workspace_id = ?1
+           AND src.tombstoned_at IS NULL
+           AND dst.tombstoned_at IS NULL
+         ORDER BY links.src_memory_id ASC, links.dst_memory_id ASC, links.id ASC",
+        &[Value::Text(workspace_id.to_string())],
+    )
+    .map_err(|error| GraphError::storage("query contradiction subgraph rows", error))?
+    .iter()
+    .map(contradiction_subgraph_row_from_row)
+    .collect()
+}
+
+fn contradiction_subgraph_row_from_row(row: &Row) -> GraphResult<ContradictionSubgraphRow> {
+    let directed = match row.get(5) {
+        Some(Value::Int(value)) => *value != 0,
+        Some(Value::BigInt(value)) => *value != 0,
+        Some(value) => {
+            return Err(GraphError::GraphEngine {
+                operation: "parse contradiction directed flag",
+                source: format!("unexpected value {value:?}"),
+            });
+        }
+        None => {
+            return Err(GraphError::GraphEngine {
+                operation: "parse contradiction directed flag",
+                source: "missing memory_links.directed".to_string(),
+            });
+        }
+    };
+    let evidence_count = match row.get(6) {
+        Some(Value::Int(value)) => u32::try_from(*value),
+        Some(Value::BigInt(value)) => u32::try_from(*value),
+        Some(value) => {
+            return Err(GraphError::GraphEngine {
+                operation: "parse contradiction evidence count",
+                source: format!("unexpected value {value:?}"),
+            });
+        }
+        None => {
+            return Err(GraphError::GraphEngine {
+                operation: "parse contradiction evidence count",
+                source: "missing memory_links.evidence_count".to_string(),
+            });
+        }
+    }
+    .map_err(|_| GraphError::NumericOverflow {
+        field: "evidence_count",
+        value: u64::from(u32::MAX).saturating_add(1).to_string(),
+    })?;
+
+    Ok(ContradictionSubgraphRow {
+        link_id: graph_row_text(row, 0, "memory_links.id")?,
+        src_memory_id: graph_row_text(row, 1, "memory_links.src_memory_id")?,
+        dst_memory_id: graph_row_text(row, 2, "memory_links.dst_memory_id")?,
+        weight: graph_row_f64(row, 3, "memory_links.weight")?.clamp(0.0, 1.0),
+        confidence: graph_row_f64(row, 4, "memory_links.confidence")?.clamp(0.0, 1.0),
+        directed,
+        evidence_count,
+        source: graph_row_text(row, 7, "memory_links.source")?,
+    })
+}
+
+fn revision_dag_memory_rows(
+    conn: &DbConnection,
+    workspace_id: &str,
+) -> GraphResult<Vec<RevisionDagMemoryRow>> {
+    conn.query(
+        "SELECT id, COALESCE(logical_id, id) AS logical_id, COALESCE(valid_from, created_at) AS valid_from, created_at
+         FROM memories
+         WHERE workspace_id = ?1 AND tombstoned_at IS NULL
+         ORDER BY logical_id ASC, valid_from ASC, created_at ASC, id ASC",
+        &[Value::Text(workspace_id.to_string())],
+    )
+    .map_err(|error| GraphError::storage("query revision DAG memory rows", error))?
+    .iter()
+    .map(revision_dag_memory_row_from_row)
+    .collect()
+}
+
+fn revision_dag_memory_row_from_row(row: &Row) -> GraphResult<RevisionDagMemoryRow> {
+    Ok(RevisionDagMemoryRow {
+        memory_id: graph_row_text(row, 0, "memories.id")?,
+        logical_id: graph_row_text(row, 1, "memories.logical_id")?,
+        valid_from: graph_row_text(row, 2, "memories.valid_from")?,
+        created_at: graph_row_text(row, 3, "memories.created_at")?,
+    })
+}
+
+fn revision_dag_derived_from_rows(
+    conn: &DbConnection,
+    workspace_id: &str,
+) -> GraphResult<Vec<RevisionDagDerivedFromRow>> {
+    conn.query(
+        "SELECT links.id, links.src_memory_id, links.dst_memory_id
+         FROM memory_links links
+         JOIN memories src ON src.id = links.src_memory_id
+         JOIN memories dst ON dst.id = links.dst_memory_id
+         WHERE links.relation = 'derived_from'
+           AND src.workspace_id = ?1
+           AND dst.workspace_id = ?1
+           AND src.tombstoned_at IS NULL
+           AND dst.tombstoned_at IS NULL
+         ORDER BY links.src_memory_id ASC, links.dst_memory_id ASC, links.id ASC",
+        &[Value::Text(workspace_id.to_string())],
+    )
+    .map_err(|error| GraphError::storage("query revision DAG derived_from rows", error))?
+    .iter()
+    .map(revision_dag_derived_from_row_from_row)
+    .collect()
+}
+
+fn revision_dag_derived_from_row_from_row(row: &Row) -> GraphResult<RevisionDagDerivedFromRow> {
+    Ok(RevisionDagDerivedFromRow {
+        link_id: graph_row_text(row, 0, "memory_links.id")?,
+        src_memory_id: graph_row_text(row, 1, "memory_links.src_memory_id")?,
+        dst_memory_id: graph_row_text(row, 2, "memory_links.dst_memory_id")?,
+    })
+}
+
 fn causal_evidence_edge_attrs(row: &CausalEvidenceGraphRow) -> AttrMap {
     let mut attrs = AttrMap::new();
     attrs.insert(
@@ -1056,6 +1503,137 @@ fn causal_evidence_edge_attrs(row: &CausalEvidenceGraphRow) -> AttrMap {
         CgseValue::String(row.computed_at.clone()),
     );
     attrs
+}
+
+fn revision_supersedes_edge_attrs(logical_id: &str) -> AttrMap {
+    let mut attrs = AttrMap::new();
+    attrs.insert(
+        "transition_kind".to_string(),
+        CgseValue::String("supersedes".to_string()),
+    );
+    attrs.insert(
+        "logical_id".to_string(),
+        CgseValue::String(logical_id.to_string()),
+    );
+    attrs
+}
+
+fn revision_derived_from_edge_attrs(link_id: &str) -> AttrMap {
+    let mut attrs = AttrMap::new();
+    attrs.insert(
+        "transition_kind".to_string(),
+        CgseValue::String("derived_from".to_string()),
+    );
+    attrs.insert(
+        "link_id".to_string(),
+        CgseValue::String(link_id.to_string()),
+    );
+    attrs
+}
+
+fn rule_provenance_node_attrs(partition: &str) -> AttrMap {
+    let mut attrs = AttrMap::new();
+    attrs.insert(
+        "bipartite_partition".to_string(),
+        CgseValue::String(partition.to_string()),
+    );
+    attrs
+}
+
+fn rule_provenance_edge_attrs(row: &RuleProvenanceRow) -> AttrMap {
+    let mut attrs = AttrMap::new();
+    attrs.insert("rule_role".to_string(), CgseValue::String(row.role.clone()));
+    attrs
+}
+
+fn contradiction_edge_attrs(row: &ContradictionSubgraphRow) -> AttrMap {
+    let mut attrs = AttrMap::new();
+    attrs.insert(
+        "relation".to_string(),
+        CgseValue::String("contradicts".to_string()),
+    );
+    attrs.insert(
+        "link_id".to_string(),
+        CgseValue::String(row.link_id.clone()),
+    );
+    attrs.insert("weight".to_string(), CgseValue::Float(row.weight));
+    attrs.insert("confidence".to_string(), CgseValue::Float(row.confidence));
+    attrs.insert("directed".to_string(), CgseValue::Bool(row.directed));
+    attrs.insert(
+        "evidence_count".to_string(),
+        CgseValue::Int(i64::from(row.evidence_count)),
+    );
+    attrs.insert("source".to_string(), CgseValue::String(row.source.clone()));
+    attrs
+}
+
+fn add_contradiction_edge(
+    graph: &mut DiGraph,
+    src_memory_id: &str,
+    dst_memory_id: &str,
+    row: &ContradictionSubgraphRow,
+) -> GraphResult<()> {
+    graph
+        .add_edge_with_attrs(src_memory_id, dst_memory_id, contradiction_edge_attrs(row))
+        .map_err(|error| GraphError::GraphEngine {
+            operation: "add contradiction edge",
+            source: error.to_string(),
+        })
+}
+
+fn add_revision_dag_edge(
+    graph: &mut DiGraph,
+    adjacency: &mut BTreeMap<String, BTreeSet<String>>,
+    src_memory_id: &str,
+    dst_memory_id: &str,
+    attrs: AttrMap,
+) -> GraphResult<()> {
+    graph
+        .add_edge_with_attrs(src_memory_id, dst_memory_id, attrs)
+        .map_err(|error| GraphError::GraphEngine {
+            operation: "add revision DAG edge",
+            source: error.to_string(),
+        })?;
+    adjacency
+        .entry(src_memory_id.to_string())
+        .or_default()
+        .insert(dst_memory_id.to_string());
+    Ok(())
+}
+
+fn revision_dag_has_cycle(
+    memory_ids: &BTreeSet<String>,
+    adjacency: &BTreeMap<String, BTreeSet<String>>,
+) -> bool {
+    fn visit(
+        node: &str,
+        adjacency: &BTreeMap<String, BTreeSet<String>>,
+        visiting: &mut BTreeSet<String>,
+        visited: &mut BTreeSet<String>,
+    ) -> bool {
+        if visited.contains(node) {
+            return false;
+        }
+        if !visiting.insert(node.to_string()) {
+            return true;
+        }
+        if let Some(successors) = adjacency.get(node) {
+            for successor in successors {
+                if visit(successor, adjacency, visiting, visited) {
+                    return true;
+                }
+            }
+        }
+        visiting.remove(node);
+        visited.insert(node.to_string());
+        false
+    }
+
+    let mut visiting = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    memory_ids
+        .iter()
+        .any(|memory_id| visit(memory_id, adjacency, &mut visiting, &mut visited))
 }
 
 fn build_memory_graph_from_links(links: &[StoredMemoryLink]) -> GraphResult<MemoryGraphProjection> {
@@ -3777,9 +4355,9 @@ fn compare_neighborhood_edges(
 mod tests {
     use crate::db::{
         AdvisoryLockId, CreateCausalEvidenceInput, CreateGraphSnapshotInput, CreateMemoryInput,
-        CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection, DbError, DbOperation,
-        GraphSnapshotStatus, GraphSnapshotType, MemoryLinkRelation, MemoryLinkSource,
-        StoredGraphSnapshot,
+        CreateMemoryLinkInput, CreateProceduralRuleInput, CreateWorkspaceInput, DbConnection,
+        DbError, DbOperation, GraphSnapshotStatus, GraphSnapshotType, MemoryLinkRelation,
+        MemoryLinkSource, StoredGraphSnapshot,
     };
     use proptest::prelude::*;
     use proptest::test_runner::Config as ProptestConfig;
@@ -3797,6 +4375,8 @@ mod tests {
     const MEMORY_B: &str = "mem_00000000000000000000000012";
     const MEMORY_C: &str = "mem_00000000000000000000000013";
     const MEMORY_D: &str = "mem_00000000000000000000000014";
+    const RULE_A: &str = "rule_00000000000000000000000011";
+    const RULE_B: &str = "rule_00000000000000000000000012";
     const KARATE_SNAPSHOT_HASH: &str =
         "blake3:a45b1f3ca706d53664f5abdc3ab3b485ed21d28b8dc290c801d9be4d462cf201";
     const KARATE_EDGE_PAIRS: &[(u8, u8)] = &[
@@ -4367,6 +4947,107 @@ mod tests {
         assert_eq!(readiness.missing_capabilities().count(), 1);
     }
 
+    #[test]
+    fn emit_complexity_witness_persists_observed_counters() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let snapshot_id = "gsnap_0000000000000000000000321";
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-graph-witness".to_string(),
+                    name: Some("graph witness".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_graph_snapshot(
+                snapshot_id,
+                &CreateGraphSnapshotInput {
+                    workspace_id: WORKSPACE_ID.to_string(),
+                    snapshot_version: 7,
+                    schema_version: "ee.graph.snapshot.v1".to_string(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 3,
+                    edge_count: 2,
+                    metrics_json: r#"{"nodes":[],"edges":[]}"#.to_string(),
+                    content_hash: "blake3:graph-witness-emit".to_string(),
+                    source_generation: 7,
+                    expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        graph_result(super::emit_complexity_witness(
+            &connection,
+            WORKSPACE_ID,
+            snapshot_id,
+            "pagerank",
+            7,
+            &serde_json::json!({ "damping": 0.85 }),
+            &super::ComplexityWitnessCounters {
+                elapsed_ms: 19,
+                sampling_choice: "exact".to_string(),
+                decision_path_hash: "blake3:witness-decision".to_string(),
+            },
+        ))?;
+
+        let rows = connection
+            .list_graph_algorithm_witnesses(WORKSPACE_ID, snapshot_id, Some("pagerank"))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(rows.len(), 1);
+        let witness: serde_json::Value =
+            serde_json::from_str(&rows[0].witness_json).map_err(|error| error.to_string())?;
+        assert_eq!(witness["schema"], super::GRAPH_ALGORITHM_WITNESS_SCHEMA_V1);
+        assert_eq!(witness["elapsed_ms"], 19);
+        assert_eq!(witness["sampling_choice"], "exact");
+        assert_eq!(witness["decision_path_hash"], "blake3:witness-decision");
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn graph_algorithm_params_hash_is_canonical_and_snapshot_sensitive() -> TestResult {
+        let first = serde_json::json!({
+            "damping": 0.85,
+            "seeds": ["mem_b", "mem_a"],
+            "weights": {
+                "beta": 2,
+                "alpha": 1
+            }
+        });
+        let second = serde_json::json!({
+            "weights": {
+                "alpha": 1,
+                "beta": 2
+            },
+            "seeds": ["mem_b", "mem_a"],
+            "damping": 0.85
+        });
+
+        let first_hash = graph_result(super::graph_algorithm_params_hash(
+            "pagerank",
+            "blake3:snapshot-a",
+            &first,
+        ))?;
+        let second_hash = graph_result(super::graph_algorithm_params_hash(
+            "pagerank",
+            "blake3:snapshot-a",
+            &second,
+        ))?;
+        let different_snapshot_hash = graph_result(super::graph_algorithm_params_hash(
+            "pagerank",
+            "blake3:snapshot-b",
+            &second,
+        ))?;
+
+        assert_eq!(first_hash, second_hash);
+        assert_ne!(first_hash, different_snapshot_hash);
+        assert!(first_hash.starts_with("blake3:"));
+        Ok(())
+    }
+
     fn open_projection_db() -> Result<DbConnection, String> {
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
@@ -4382,6 +5063,21 @@ mod tests {
         insert_memory(&connection, MEMORY_A, "Graph source memory")?;
         insert_memory(&connection, MEMORY_B, "Graph bridge memory")?;
         insert_memory(&connection, MEMORY_C, "Graph target memory")?;
+        Ok(connection)
+    }
+
+    fn open_revision_dag_db() -> Result<DbConnection, String> {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-revision-dag".to_string(),
+                    name: Some("revision dag".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
         Ok(connection)
     }
 
@@ -4404,6 +5100,118 @@ mod tests {
                     tags: vec![],
                     valid_from: None,
                     valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn insert_revision_memory(
+        connection: &DbConnection,
+        id: &str,
+        logical_id: &str,
+        content: &str,
+        valid_from: &str,
+    ) -> TestResult {
+        connection
+            .insert_memory_revision(
+                id,
+                logical_id,
+                &CreateMemoryInput {
+                    workspace_id: WORKSPACE_ID.to_string(),
+                    level: "semantic".to_string(),
+                    kind: "fact".to_string(),
+                    content: content.to_string(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.6,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "agent_assertion".to_string(),
+                    trust_subclass: None,
+                    tags: vec![],
+                    valid_from: Some(valid_from.to_string()),
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn insert_derived_link(
+        connection: &DbConnection,
+        id: &str,
+        src: &str,
+        dst: &str,
+    ) -> TestResult {
+        connection
+            .insert_memory_link(
+                id,
+                &CreateMemoryLinkInput {
+                    src_memory_id: src.to_string(),
+                    dst_memory_id: dst.to_string(),
+                    relation: MemoryLinkRelation::DerivedFrom,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    directed: true,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: MemoryLinkSource::Agent,
+                    created_by: Some("agent:test".to_string()),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn insert_test_rule(
+        connection: &DbConnection,
+        id: &str,
+        workspace_id: &str,
+        source_memory_ids: Vec<String>,
+    ) -> TestResult {
+        connection
+            .insert_procedural_rule(
+                id,
+                &CreateProceduralRuleInput {
+                    workspace_id: workspace_id.to_string(),
+                    content: format!("Test procedural rule {id}"),
+                    confidence: 0.8,
+                    utility: 0.7,
+                    importance: 0.6,
+                    trust_class: "agent_validated".to_string(),
+                    scope: "workspace".to_string(),
+                    scope_pattern: None,
+                    maturity: "candidate".to_string(),
+                    protected: false,
+                    source_memory_ids,
+                    tags: vec![],
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn insert_link_with_relation(
+        connection: &DbConnection,
+        id: &str,
+        src: &str,
+        dst: &str,
+        relation: MemoryLinkRelation,
+        directed: bool,
+    ) -> TestResult {
+        connection
+            .insert_memory_link(
+                id,
+                &CreateMemoryLinkInput {
+                    src_memory_id: src.to_string(),
+                    dst_memory_id: dst.to_string(),
+                    relation,
+                    weight: 0.85,
+                    confidence: 0.9,
+                    directed,
+                    evidence_count: 3,
+                    last_reinforced_at: Some("2026-05-14T06:00:00Z".to_string()),
+                    source: MemoryLinkSource::Agent,
+                    created_by: Some("agent:test".to_string()),
+                    metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())
@@ -4432,6 +5240,356 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())
+    }
+
+    fn assert_rule_provenance_bipartite(graph: &super::Graph) -> TestResult {
+        for (left, right, _) in graph.edges_ordered_borrowed() {
+            let left_partition = graph
+                .node_attrs(left)
+                .and_then(|attrs| attrs.get("bipartite_partition"))
+                .ok_or_else(|| format!("missing partition attr for {left}"))?;
+            let right_partition = graph
+                .node_attrs(right)
+                .and_then(|attrs| attrs.get("bipartite_partition"))
+                .ok_or_else(|| format!("missing partition attr for {right}"))?;
+            assert_ne!(
+                left_partition, right_partition,
+                "rule provenance edge {left}-{right} must cross partitions"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rule_provenance_bipartite_preserves_source_edges() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_test_rule(
+            &connection,
+            RULE_A,
+            WORKSPACE_ID,
+            vec![MEMORY_A.to_string(), MEMORY_B.to_string()],
+        )?;
+
+        let graph = graph_result(super::build_rule_provenance_bipartite_from_tables(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+
+        assert_eq!(graph.node_count(), 3);
+        assert_eq!(graph.edge_count(), 2);
+        assert!(graph.has_edge(RULE_A, MEMORY_A));
+        assert!(graph.has_edge(RULE_A, MEMORY_B));
+        assert_eq!(graph.neighbors(RULE_A), Some(vec![MEMORY_A, MEMORY_B]));
+        let rule_attrs = graph
+            .node_attrs(RULE_A)
+            .ok_or_else(|| "rule node attrs should exist".to_string())?;
+        assert_eq!(
+            rule_attrs.get("bipartite_partition"),
+            Some(&CgseValue::String("rule".to_string()))
+        );
+        let memory_attrs = graph
+            .node_attrs(MEMORY_A)
+            .ok_or_else(|| "memory node attrs should exist".to_string())?;
+        assert_eq!(
+            memory_attrs.get("bipartite_partition"),
+            Some(&CgseValue::String("memory".to_string()))
+        );
+        let edge_attrs = graph
+            .edge_attrs(RULE_A, MEMORY_A)
+            .ok_or_else(|| "rule provenance edge attrs should exist".to_string())?;
+        assert_eq!(
+            edge_attrs.get("rule_role"),
+            Some(&CgseValue::String("source".to_string()))
+        );
+        assert_rule_provenance_bipartite(&graph)?;
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn rule_provenance_bipartite_filters_by_workspace() -> TestResult {
+        let connection = open_projection_db()?;
+        let other_workspace_id = "wsp_99999999999999999999999999";
+        connection
+            .insert_workspace(
+                other_workspace_id,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-rule-provenance-other".to_string(),
+                    name: Some("other workspace".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        insert_test_rule(
+            &connection,
+            RULE_B,
+            other_workspace_id,
+            vec![MEMORY_A.to_string()],
+        )?;
+
+        let graph = graph_result(super::build_rule_provenance_bipartite_from_tables(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+
+        assert_eq!(graph.node_count(), 0);
+        assert_eq!(graph.edge_count(), 0);
+        assert_rule_provenance_bipartite(&graph)?;
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn contradiction_subgraph_filters_to_contradict_edges() -> TestResult {
+        let connection = open_projection_db()?;
+        let contradiction_id = numbered_link_id(904);
+        insert_link_with_relation(
+            &connection,
+            &contradiction_id,
+            MEMORY_A,
+            MEMORY_B,
+            MemoryLinkRelation::Contradicts,
+            true,
+        )?;
+        insert_link_with_relation(
+            &connection,
+            &numbered_link_id(905),
+            MEMORY_B,
+            MEMORY_C,
+            MemoryLinkRelation::Supports,
+            true,
+        )?;
+
+        let graph = graph_result(super::build_contradiction_subgraph_from_memory_links(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+
+        assert_eq!(graph.node_count(), 2);
+        assert_eq!(graph.edge_count(), 1);
+        assert!(graph.has_edge(MEMORY_A, MEMORY_B));
+        assert!(!graph.has_edge(MEMORY_B, MEMORY_C));
+        let attrs = graph
+            .edge_attrs(MEMORY_A, MEMORY_B)
+            .ok_or_else(|| "contradiction edge attrs should exist".to_string())?;
+        assert_eq!(
+            attrs.get("relation"),
+            Some(&CgseValue::String("contradicts".to_string()))
+        );
+        assert_eq!(
+            attrs.get("link_id"),
+            Some(&CgseValue::String(contradiction_id))
+        );
+        assert_eq!(attrs.get("evidence_count"), Some(&CgseValue::Int(3)));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn contradiction_subgraph_expands_undirected_rows() -> TestResult {
+        let connection = open_projection_db()?;
+        let contradiction_id = numbered_link_id(906);
+        insert_link_with_relation(
+            &connection,
+            &contradiction_id,
+            MEMORY_B,
+            MEMORY_C,
+            MemoryLinkRelation::Contradicts,
+            false,
+        )?;
+
+        let graph = graph_result(super::build_contradiction_subgraph_from_memory_links(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+
+        assert_eq!(graph.node_count(), 2);
+        assert_eq!(graph.edge_count(), 2);
+        assert!(graph.has_edge(MEMORY_B, MEMORY_C));
+        assert!(graph.has_edge(MEMORY_C, MEMORY_B));
+        let attrs = graph
+            .edge_attrs(MEMORY_C, MEMORY_B)
+            .ok_or_else(|| "reverse contradiction edge attrs should exist".to_string())?;
+        assert_eq!(attrs.get("directed"), Some(&CgseValue::Bool(false)));
+        assert_eq!(
+            attrs.get("link_id"),
+            Some(&CgseValue::String(contradiction_id))
+        );
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn revision_dag_single_chain_orders_by_valid_from() -> TestResult {
+        let connection = open_revision_dag_db()?;
+        insert_revision_memory(
+            &connection,
+            MEMORY_C,
+            "logical_release_rule",
+            "third revision",
+            "2026-05-14T03:00:00Z",
+        )?;
+        insert_revision_memory(
+            &connection,
+            MEMORY_A,
+            "logical_release_rule",
+            "first revision",
+            "2026-05-14T01:00:00Z",
+        )?;
+        insert_revision_memory(
+            &connection,
+            MEMORY_B,
+            "logical_release_rule",
+            "second revision",
+            "2026-05-14T02:00:00Z",
+        )?;
+
+        let graph = graph_result(super::build_revision_dag_from_logical_ids(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+
+        assert_eq!(graph.node_count(), 3);
+        assert_eq!(graph.edge_count(), 2);
+        assert_eq!(graph.successors(MEMORY_A), Some(vec![MEMORY_B]));
+        assert_eq!(graph.successors(MEMORY_B), Some(vec![MEMORY_C]));
+        let attrs = graph
+            .edge_attrs(MEMORY_A, MEMORY_B)
+            .ok_or_else(|| "supersedes edge attrs should exist".to_string())?;
+        assert_eq!(
+            attrs.get("transition_kind"),
+            Some(&CgseValue::String("supersedes".to_string()))
+        );
+        assert_eq!(
+            attrs.get("logical_id"),
+            Some(&CgseValue::String("logical_release_rule".to_string()))
+        );
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn revision_dag_multi_chain_preserves_cross_derived_edge() -> TestResult {
+        let connection = open_revision_dag_db()?;
+        insert_revision_memory(
+            &connection,
+            MEMORY_A,
+            "logical_alpha",
+            "alpha first",
+            "2026-05-14T01:00:00Z",
+        )?;
+        insert_revision_memory(
+            &connection,
+            MEMORY_B,
+            "logical_alpha",
+            "alpha second",
+            "2026-05-14T02:00:00Z",
+        )?;
+        insert_revision_memory(
+            &connection,
+            MEMORY_C,
+            "logical_beta",
+            "beta first",
+            "2026-05-14T01:30:00Z",
+        )?;
+        insert_revision_memory(
+            &connection,
+            MEMORY_D,
+            "logical_beta",
+            "beta second",
+            "2026-05-14T02:30:00Z",
+        )?;
+        let link_id = numbered_link_id(901);
+        insert_derived_link(&connection, &link_id, MEMORY_B, MEMORY_D)?;
+
+        let graph = graph_result(super::build_revision_dag_from_logical_ids(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+
+        assert_eq!(graph.node_count(), 4);
+        assert_eq!(graph.edge_count(), 3);
+        assert!(graph.has_edge(MEMORY_A, MEMORY_B));
+        assert!(graph.has_edge(MEMORY_C, MEMORY_D));
+        assert!(graph.has_edge(MEMORY_B, MEMORY_D));
+        let attrs = graph
+            .edge_attrs(MEMORY_B, MEMORY_D)
+            .ok_or_else(|| "derived edge attrs should exist".to_string())?;
+        assert_eq!(
+            attrs.get("transition_kind"),
+            Some(&CgseValue::String("derived_from".to_string()))
+        );
+        assert_eq!(attrs.get("link_id"), Some(&CgseValue::String(link_id)));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn revision_dag_allows_branch_via_derived_from() -> TestResult {
+        let connection = open_revision_dag_db()?;
+        insert_revision_memory(
+            &connection,
+            MEMORY_A,
+            "logical_alpha",
+            "alpha first",
+            "2026-05-14T01:00:00Z",
+        )?;
+        insert_revision_memory(
+            &connection,
+            MEMORY_B,
+            "logical_alpha",
+            "alpha second",
+            "2026-05-14T02:00:00Z",
+        )?;
+        insert_revision_memory(
+            &connection,
+            MEMORY_C,
+            "logical_branch",
+            "branch target",
+            "2026-05-14T03:00:00Z",
+        )?;
+        let link_id = numbered_link_id(902);
+        insert_derived_link(&connection, &link_id, MEMORY_A, MEMORY_C)?;
+
+        let graph = graph_result(super::build_revision_dag_from_logical_ids(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+
+        assert_eq!(graph.node_count(), 3);
+        assert_eq!(graph.edge_count(), 2);
+        assert_eq!(graph.successors(MEMORY_A), Some(vec![MEMORY_B, MEMORY_C]));
+        assert!(graph.has_edge(MEMORY_A, MEMORY_B));
+        assert!(graph.has_edge(MEMORY_A, MEMORY_C));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn revision_dag_rejects_cycles() -> TestResult {
+        let connection = open_revision_dag_db()?;
+        insert_revision_memory(
+            &connection,
+            MEMORY_A,
+            "logical_alpha",
+            "alpha first",
+            "2026-05-14T01:00:00Z",
+        )?;
+        insert_revision_memory(
+            &connection,
+            MEMORY_B,
+            "logical_alpha",
+            "alpha second",
+            "2026-05-14T02:00:00Z",
+        )?;
+        let link_id = numbered_link_id(903);
+        insert_derived_link(&connection, &link_id, MEMORY_B, MEMORY_A)?;
+
+        let error = super::build_revision_dag_from_logical_ids(&connection, WORKSPACE_ID)
+            .err()
+            .ok_or_else(|| "cycle should be rejected".to_string())?;
+        assert!(error.to_string().contains("directed cycle"));
+
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]
