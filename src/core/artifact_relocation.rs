@@ -566,7 +566,7 @@ mod tests {
             .join(format!("{label}-{}-{unique}", std::process::id()))
     }
 
-    fn parent_dir(path: &Path) -> TestResult<&Path> {
+    fn parent_dir(path: &Path) -> Result<&Path, String> {
         path.parent()
             .ok_or_else(|| format!("path has no parent: {}", path.display()))
     }

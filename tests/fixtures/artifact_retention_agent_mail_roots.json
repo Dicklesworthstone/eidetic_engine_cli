@@ -1,0 +1,52 @@
+{
+  "schema": "ee.artifact_retention.agent_mail_roots.fixture.v1",
+  "introducedBy": {
+    "bead": "bd-1zb7k.11.5",
+    "surface": "diag artifacts"
+  },
+  "home": "/tmp/ee-agent-mail-fixture/home",
+  "archiveRoot": "/tmp/ee-agent-mail-fixture/home/.local/share/mcp_agent_mail",
+  "roots": [
+    {
+      "label": "agent_mail_archive",
+      "category": "agent_mail_archive",
+      "pathSource": "HOME/.local/share/mcp_agent_mail",
+      "retentionReason": "Agent Mail inbox, mailbox git archive, search indexes, backups, doctor bundles, and forensics snapshots",
+      "defaultTtlDays": 30,
+      "beadCloseoutRequired": true,
+      "budget": {
+        "warningBytes": 536870912,
+        "degradedBytes": 2147483648
+      },
+      "expectedSubpaths": [
+        "messages",
+        "backups",
+        "search"
+      ],
+      "expectedActions": [
+        "keep",
+        "compress_preserve",
+        "move_preserve",
+        "eligible_for_human_cleanup"
+      ],
+      "forbiddenActions": [
+        "delete",
+        "rm",
+        "rmdir",
+        "unlink"
+      ]
+    }
+  ],
+  "degradedCodes": [
+    {
+      "code": "agent_mail_unavailable",
+      "condition": "HOME is unset or HOME/.local/share/mcp_agent_mail is missing",
+      "repairContains": "Agent Mail"
+    },
+    {
+      "code": "agent_mail_archive_degraded",
+      "condition": "archive exists but exceeds retention budget or TTL",
+      "repairContains": "manifest"
+    }
+  ]
+}

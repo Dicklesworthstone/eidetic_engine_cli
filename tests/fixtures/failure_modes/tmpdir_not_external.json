@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "tmpdir_not_external",
+  "introduced_by": {
+    "bead": "bd-1zb7k.11.4",
+    "epic_letter": "P"
+  },
+  "surfaces": [
+    "diag build-admission",
+    "diag disk-pressure"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "The external build root exists, but TMPDIR points outside it.",
+    "setup_commands": [
+      "export TMPDIR=/tmp"
+    ],
+    "invocation": "ee diag build-admission --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "tmpdir_not_external",
+    "severity": "warning",
+    "message_contains": [
+      "tmpdir",
+      "not under"
+    ],
+    "repair_contains": "TMPDIR",
+    "repair_strings": [
+      "Set TMPDIR under /Volumes/USBNVME16TB/temp_agent_space before starting heavy Cargo work."
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "artifact_destination_not_external",
+  "introduced_by": {
+    "bead": "bd-1zb7k.11.4",
+    "epic_letter": "P"
+  },
+  "surfaces": [
+    "diag build-admission",
+    "verify"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "An artifact sync-down destination points outside the external build root while the external root is available.",
+    "setup_commands": [
+      "mkdir -p ./target/ee-e2e/sync-down"
+    ],
+    "invocation": "ee diag build-admission --workspace . --artifact-destination ./target/ee-e2e/sync-down --json"
+  },
+  "expected_emission": {
+    "code": "artifact_destination_not_external",
+    "severity": "warning",
+    "message_contains": [
+      "artifact",
+      "external build root"
+    ],
+    "repair_contains": "artifact sync-down",
+    "repair_strings": [
+      "Point artifact sync-down destinations at the external drive or pass an explicit external --artifact-destination."
+    ]
+  }
+}

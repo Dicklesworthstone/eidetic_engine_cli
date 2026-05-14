@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "agent_mail_archive_degraded",
+  "introduced_by": {
+    "bead": "bd-1zb7k.11.5",
+    "epic_letter": "P"
+  },
+  "surfaces": [
+    "diag artifacts"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Agent Mail archive exists but is above the artifact-retention budget or TTL.",
+    "setup_commands": [
+      "mkdir -p \"$HOME/.local/share/mcp_agent_mail/search\"",
+      "truncate -s 3G \"$HOME/.local/share/mcp_agent_mail/search/index.bin\""
+    ],
+    "invocation": "ee diag artifacts --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "agent_mail_archive_degraded",
+    "severity": "warning",
+    "message_contains": [
+      "Agent Mail archive"
+    ],
+    "repair_contains": "manifest",
+    "repair_strings": [
+      "Use compress_preserve or ee artifact relocate with a manifest; never delete Agent Mail archive files automatically."
+    ]
+  }
+}

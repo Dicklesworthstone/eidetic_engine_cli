@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "cargo_target_not_external",
+  "introduced_by": {
+    "bead": "bd-1zb7k.11.4",
+    "epic_letter": "P"
+  },
+  "surfaces": [
+    "diag build-admission",
+    "diag disk-pressure"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "The external build root exists, but CARGO_TARGET_DIR points outside it.",
+    "setup_commands": [
+      "export CARGO_TARGET_DIR=\"$PWD/target\""
+    ],
+    "invocation": "ee diag build-admission --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "cargo_target_not_external",
+    "severity": "warning",
+    "message_contains": [
+      "cargo_target",
+      "not under"
+    ],
+    "repair_contains": "CARGO_TARGET_DIR",
+    "repair_strings": [
+      "Set CARGO_TARGET_DIR under /Volumes/USBNVME16TB/temp_agent_space before starting heavy Cargo work."
+    ]
+  }
+}

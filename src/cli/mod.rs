@@ -2155,11 +2155,11 @@ pub struct DiagArtifactsArgs {
 /// Arguments for `ee diag build-admission`.
 #[derive(Clone, Debug, Eq, PartialEq, Parser)]
 pub struct DiagBuildAdmissionArgs {
-    /// Minimum free bytes required on each required build path.
-    #[arg(long, default_value_t = 1024 * 1024 * 1024u64, value_name = "BYTES")]
+    /// Minimum free bytes required for required build paths.
+    #[arg(long, default_value_t = 5 * 1024 * 1024 * 1024, value_name = "BYTES")]
     pub min_free_bytes: u64,
 
-    /// Artifact sync-down destination to include in the preflight. May be repeated.
+    /// Artifact sync-down destination to preflight. May be repeated.
     #[arg(long = "artifact-destination", value_name = "PATH")]
     pub artifact_destinations: Vec<PathBuf>,
 }
@@ -37151,6 +37151,32 @@ mod tests {
     }
 
     #[test]
+    fn diag_build_admission_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "diag",
+            "build-admission",
+            "--min-free-bytes",
+            "123",
+            "--artifact-destination",
+            "target/sync-down",
+        ])
+        .map_err(|e| format!("failed to parse diag build-admission: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::BuildAdmission(args))) => {
+                ensure_equal(&args.min_free_bytes, &123, "min free bytes")?;
+                ensure_equal(
+                    &args.artifact_destinations,
+                    &vec![PathBuf::from("target/sync-down")],
+                    "artifact destinations",
+                )
+            }
+            _ => Err("expected diag build-admission command".to_string()),
+        }
+    }
+
+    #[test]
     fn diag_artifacts_json_contract() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "diag", "artifacts", "--json"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "diag artifacts exit")?;
@@ -37167,6 +37193,45 @@ mod tests {
             "mutation policy",
         )?;
         ensure_contains(&stdout, "\"actions\":", "actions present")
+    }
+
+    #[test]
+    fn diag_build_admission_json_contract() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "diag",
+            "build-admission",
+            "--workspace",
+            ".",
+            "--min-free-bytes",
+            "0",
+            "--artifact-destination",
+            "target/sync-down",
+            "--json",
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "diag build-admission exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "diag build-admission stderr must be empty",
+        )?;
+        ensure_contains(&stdout, "\"schema\":\"ee.response.v1\"", "response schema")?;
+        ensure_contains(
+            &stdout,
+            "\"schema\":\"ee.build_admission.diagnostics.v1\"",
+            "data schema",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"mutationPolicy\":\"read_only_report_no_files_modified\"",
+            "mutation policy",
+        )?;
+        ensure_contains(&stdout, "\"admitted\":true", "admitted")?;
+        ensure_contains(&stdout, "\"checks\":[", "checks present")?;
+        ensure_contains(&stdout, "\"recoveryActions\":[", "recovery actions present")
     }
 
     #[test]

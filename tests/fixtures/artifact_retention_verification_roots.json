@@ -1,0 +1,225 @@
+{
+  "schema": "ee.artifact_retention.verification_roots.fixture.v1",
+  "introducedBy": {
+    "bead": "bd-1zb7k.11.3",
+    "surface": "diag artifacts"
+  },
+  "roots": [
+    {
+      "label": "tests_audit_artifacts",
+      "category": "verification_audit_artifacts",
+      "pathSource": "workspace/tests/audit_artifacts",
+      "retentionReason": "install, release, and verification audit JSON evidence",
+      "defaultTtlDays": null,
+      "beadCloseoutRequired": true,
+      "budget": {
+        "warningBytes": 268435456,
+        "degradedBytes": 1073741824
+      },
+      "expectedActions": [
+        "keep",
+        "compress_preserve",
+        "move_preserve",
+        "eligible_for_human_cleanup"
+      ],
+      "forbiddenActions": [
+        "delete",
+        "rm",
+        "rmdir",
+        "unlink"
+      ]
+    },
+    {
+      "label": "cargo_target_e2e",
+      "category": "e2e_retained_workspaces",
+      "pathSource": "CARGO_TARGET_DIR/ee-e2e",
+      "retentionReason": "E2E command dossiers and retained workspaces",
+      "defaultTtlDays": 14,
+      "beadCloseoutRequired": false,
+      "budget": {
+        "warningBytes": 2147483648,
+        "degradedBytes": 10737418240
+      },
+      "expectedActions": [
+        "keep",
+        "compress_preserve",
+        "move_preserve",
+        "eligible_for_human_cleanup"
+      ],
+      "forbiddenActions": [
+        "delete",
+        "rm",
+        "rmdir",
+        "unlink"
+      ]
+    },
+    {
+      "label": "workspace_target_e2e",
+      "category": "e2e_retained_workspaces",
+      "pathSource": "workspace/target/ee-e2e",
+      "retentionReason": "legacy or fallback E2E artifact root",
+      "defaultTtlDays": 14,
+      "beadCloseoutRequired": false,
+      "budget": {
+        "warningBytes": 2147483648,
+        "degradedBytes": 10737418240
+      },
+      "expectedActions": [
+        "keep",
+        "compress_preserve",
+        "move_preserve",
+        "eligible_for_human_cleanup"
+      ],
+      "forbiddenActions": [
+        "delete",
+        "rm",
+        "rmdir",
+        "unlink"
+      ]
+    },
+    {
+      "label": "golden_artifacts",
+      "category": "golden_artifacts",
+      "pathSource": "CARGO_TARGET_DIR/ee-golden-artifacts",
+      "retentionReason": "generated golden comparison artifacts",
+      "defaultTtlDays": 30,
+      "beadCloseoutRequired": true,
+      "budget": {
+        "warningBytes": 1073741824,
+        "degradedBytes": 5368709120
+      },
+      "expectedActions": [
+        "keep",
+        "compress_preserve",
+        "move_preserve",
+        "eligible_for_human_cleanup"
+      ],
+      "forbiddenActions": [
+        "delete",
+        "rm",
+        "rmdir",
+        "unlink"
+      ]
+    },
+    {
+      "label": "bench_artifacts",
+      "category": "benchmark_artifacts",
+      "pathSource": "CARGO_TARGET_DIR/ee-bench",
+      "retentionReason": "benchmark and performance regression JSON artifacts",
+      "defaultTtlDays": 30,
+      "beadCloseoutRequired": true,
+      "budget": {
+        "warningBytes": 1073741824,
+        "degradedBytes": 5368709120
+      },
+      "expectedActions": [
+        "keep",
+        "compress_preserve",
+        "move_preserve",
+        "eligible_for_human_cleanup"
+      ],
+      "forbiddenActions": [
+        "delete",
+        "rm",
+        "rmdir",
+        "unlink"
+      ]
+    },
+    {
+      "label": "tmp_e2e_workspaces",
+      "category": "e2e_retained_workspaces",
+      "pathSource": "TMPDIR",
+      "retentionReason": "temporary E2E workspaces and J1 stdout/stderr side artifacts",
+      "defaultTtlDays": 7,
+      "beadCloseoutRequired": false,
+      "budget": {
+        "warningBytes": 5368709120,
+        "degradedBytes": 21474836480
+      },
+      "expectedActions": [
+        "keep",
+        "compress_preserve",
+        "move_preserve",
+        "eligible_for_human_cleanup"
+      ],
+      "forbiddenActions": [
+        "delete",
+        "rm",
+        "rmdir",
+        "unlink"
+      ]
+    },
+    {
+      "label": "support_bundles",
+      "category": "support_bundles",
+      "pathSource": "workspace/.ee/support-bundles",
+      "retentionReason": "redacted diagnostic support bundles",
+      "defaultTtlDays": 30,
+      "beadCloseoutRequired": true,
+      "budget": {
+        "warningBytes": 1073741824,
+        "degradedBytes": 5368709120
+      },
+      "expectedActions": [
+        "keep",
+        "compress_preserve",
+        "move_preserve",
+        "eligible_for_human_cleanup"
+      ],
+      "forbiddenActions": [
+        "delete",
+        "rm",
+        "rmdir",
+        "unlink"
+      ]
+    },
+    {
+      "label": "j1_current_log",
+      "category": "j1_jsonl_log",
+      "pathSource": "EE_TEST_LOG_PATH",
+      "retentionReason": "current structured J1 JSONL event log",
+      "defaultTtlDays": 30,
+      "beadCloseoutRequired": true,
+      "budget": {
+        "warningBytes": 134217728,
+        "degradedBytes": 536870912
+      },
+      "expectedActions": [
+        "keep",
+        "compress_preserve",
+        "move_preserve",
+        "eligible_for_human_cleanup"
+      ],
+      "forbiddenActions": [
+        "delete",
+        "rm",
+        "rmdir",
+        "unlink"
+      ]
+    },
+    {
+      "label": "current_retention_manifest",
+      "category": "retention_manifest",
+      "pathSource": "EPIC_RETENTION_MANIFEST|EE_E2E_RETENTION_MANIFEST",
+      "retentionReason": "current per-run retained-artifact manifest",
+      "defaultTtlDays": 30,
+      "beadCloseoutRequired": true,
+      "budget": {
+        "warningBytes": 16777216,
+        "degradedBytes": 134217728
+      },
+      "expectedActions": [
+        "keep",
+        "compress_preserve",
+        "move_preserve",
+        "eligible_for_human_cleanup"
+      ],
+      "forbiddenActions": [
+        "delete",
+        "rm",
+        "rmdir",
+        "unlink"
+      ]
+    }
+  ]
+}

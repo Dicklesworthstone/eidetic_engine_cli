@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "build_admission_denied",
+  "introduced_by": {
+    "bead": "bd-1zb7k.11.4",
+    "epic_letter": "P"
+  },
+  "surfaces": [
+    "diag build-admission",
+    "verify"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A required build, temp, workspace, or artifact sync-down path has less free space than the admission threshold.",
+    "setup_commands": [
+      "export EE_BUILD_ADMISSION_MIN_FREE_BYTES=18446744073709551615"
+    ],
+    "invocation": "ee diag build-admission --workspace . --min-free-bytes 18446744073709551615 --json"
+  },
+  "expected_emission": {
+    "code": "build_admission_denied",
+    "severity": "medium",
+    "message_contains": [
+      "required build path",
+      "free-space admission threshold"
+    ],
+    "repair_contains": "external drive",
+    "repair_strings": [
+      "Move build outputs and temporary scratch to the external drive, reduce artifact sync-down, or ask the human before cleanup."
+    ]
+  }
+}

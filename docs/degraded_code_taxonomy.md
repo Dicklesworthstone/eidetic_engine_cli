@@ -54,7 +54,7 @@ A degraded entry's `code` is classified into one of three buckets:
 6. Suffix `_filtered`, `_collapsed`, `_capped` is ALWAYS
    `response_time` (data-dependent).
 
-## Full code inventory (100 codes)
+## Full code inventory
 
 > Sources of truth: `tests/fixtures/failure_modes/README.md` for the
 > agent-facing catalog AND the union of `pub const *_CODE` constants
@@ -85,7 +85,7 @@ A degraded entry's `code` is classified into one of three buckets:
 | `graph_unavailable` | doctor, diag graph | Build-time: `fnx-*` feature. Response-time: snapshot generation failed. Split per E5. |
 | `search_unavailable` | status, dependency contract | Build-time: `frankensearch`. Response-time: index manifest missing. Split per E5. |
 
-### `response_time` (104 codes — stay in `degraded[]`)
+### `response_time` codes — stay in `degraded[]`
 
 #### Search and pack quality (33)
 | Code | Severity (canonical) | Bead |
@@ -125,6 +125,17 @@ A degraded entry's `code` is classified into one of three buckets:
 | `weak_query_recall` | low | bd-17c65.2.5 (B5) |
 | `search_index_stale` | medium | bd-17c65.2.1 (B1) |
 | `search_index_degraded` | medium | bd-17c65.10.6 (J6) |
+| `conformal_calibration_insufficient` | warning | bd-17c65.14.2 (N2) |
+| `perf_latency_evidence_missing` | medium | bd-1zb7k.11 (P) |
+| `perf_latency_evidence_partial` | warning | bd-1zb7k.11 (P) |
+
+#### Disk pressure and build admission (4)
+| Code | Severity | Bead |
+|------|----------|------|
+| `artifact_destination_not_external` | warning | bd-1zb7k.11.4 (P4) |
+| `build_admission_denied` | medium | bd-1zb7k.11.4 (P4) |
+| `cargo_target_not_external` | warning | bd-1zb7k.11.4 (P4) |
+| `tmpdir_not_external` | warning | bd-1zb7k.11.4 (P4) |
 
 #### Storage and runtime state (8)
 | Code | Severity | Bead |
@@ -137,6 +148,7 @@ A degraded entry's `code` is classified into one of three buckets:
 | `storage_not_initialized` | medium | bd-17c65.10.6 (J6) |
 | `storage_not_ready` | medium | bd-17c65.10.6 (J6) |
 | `memory_health_unavailable` | low | bd-17c65.10.6 (J6) |
+| `wal_holds_orphaned` | high | bd-17c65.12.6 (derived backup assets) |
 
 #### Policy and detector (3)
 | Code | Severity | Bead |
@@ -333,6 +345,7 @@ A degraded entry's `code` is classified into one of three buckets:
 | Code | Severity | Bead |
 |------|----------|------|
 | `agent_mail_unavailable` | medium | bd-2nkbn (Agent Mail resilience) |
+| `agent_mail_archive_degraded` | warning | bd-1zb7k.11 (P) |
 | `agent_status_unavailable` | low | (TBD) |
 | `beads_unavailable` | medium | bd-1zb7k.4 (S3) |
 | `bv_unavailable` | medium | bd-1zb7k.4 (S3) |
@@ -374,6 +387,7 @@ A degraded entry's `code` is classified into one of three buckets:
 | `redaction_level_invalid` | low | bd-17c65.11.6 (K6) — error envelope; bad --redaction value |
 | `redaction_round_trip_marker_preserved` | info | bd-17c65.11.6 (K6) — import surfaces preserved markers |
 | `redaction_uncertain` | warning | bd-17c65.11.6 (K6) |
+| `derived_asset_corrupt` | high | bd-17c65.12.6 (derived backup assets) |
 | `semantic_dimension_exceeds_budget` | warning | (TBD) — composes with semantic-model gating |
 | `tombstone_visibility_unavailable` | medium | bd-17c65.2.8 (B8) |
 | `tripwire_inputs_incomplete` | low | (TBD) |

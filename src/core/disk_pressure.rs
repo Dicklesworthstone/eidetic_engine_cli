@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 pub const ARTIFACT_RETENTION_DIAGNOSTICS_SCHEMA_V1: &str = "ee.artifact_retention.diagnostics.v1";
+pub const BUILD_ADMISSION_DIAGNOSTICS_SCHEMA_V1: &str = "ee.build_admission.diagnostics.v1";
 pub const DISK_PRESSURE_DIAGNOSTICS_SCHEMA_V1: &str = "ee.disk_pressure.diagnostics.v1";
 pub const EXTERNAL_BUILD_ROOT: &str = "/Volumes/USBNVME16TB/temp_agent_space";
 
@@ -43,6 +44,14 @@ pub struct ArtifactRetentionOptions {
     pub consumer_depth: usize,
     pub consumer_entry_limit: usize,
     pub now_unix_seconds: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuildAdmissionOptions {
+    pub workspace: PathBuf,
+    pub workspace_source: &'static str,
+    pub min_free_bytes: u64,
+    pub artifact_destinations: Vec<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -148,6 +157,47 @@ pub struct DiskPressureRecoveryAction {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiskPressureGuidance {
+    pub code: &'static str,
+    pub severity: &'static str,
+    pub message: String,
+    pub repair: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildAdmissionReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub side_effect_free: bool,
+    pub mutation_policy: &'static str,
+    pub workspace: DiskPressureWorkspace,
+    pub external_build_root: String,
+    pub min_free_bytes: u64,
+    pub admitted: bool,
+    pub checks: Vec<BuildAdmissionCheck>,
+    pub degraded: Vec<BuildAdmissionDegradation>,
+    pub recovery_actions: Vec<DiskPressureRecoveryAction>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildAdmissionCheck {
+    pub label: &'static str,
+    pub role: &'static str,
+    pub path: String,
+    pub required: bool,
+    pub exists: bool,
+    pub nearest_existing_ancestor: Option<String>,
+    pub bytes_available: Option<u64>,
+    pub min_free_bytes: u64,
+    pub admitted: bool,
+    pub external_required: bool,
+    pub external: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildAdmissionDegradation {
     pub code: &'static str,
     pub severity: &'static str,
     pub message: String,
@@ -431,6 +481,186 @@ pub fn gather_artifact_retention_report(
         summary,
         roots,
         actions,
+    }
+}
+
+#[must_use]
+pub fn gather_build_admission_report(options: &BuildAdmissionOptions) -> BuildAdmissionReport {
+    let workspace = normalize_path(&options.workspace);
+    let external_root = Path::new(EXTERNAL_BUILD_ROOT);
+    let external_available = external_root.exists();
+    let tmpdir = env::var_os("TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir);
+    let cargo_target = env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace.join("target"));
+
+    let mut check_specs = vec![
+        (
+            "workspace",
+            "workspace_root",
+            workspace.clone(),
+            true,
+            false,
+        ),
+        (
+            "cargo_target",
+            "cargo_build_target",
+            cargo_target,
+            true,
+            true,
+        ),
+        ("tmpdir", "temporary_directory", tmpdir, true, true),
+    ];
+    for destination in &options.artifact_destinations {
+        check_specs.push((
+            "artifact_destination",
+            "artifact_sync_down_destination",
+            normalize_path(destination),
+            false,
+            true,
+        ));
+    }
+
+    let mut checks = Vec::with_capacity(check_specs.len());
+    let mut degraded = Vec::new();
+
+    for (label, role, path, required, external_required) in check_specs {
+        let exists = path.exists();
+        let nearest = nearest_existing_path(&path);
+        let capacity = nearest
+            .as_ref()
+            .and_then(|ancestor| statvfs_capacity(ancestor));
+        let bytes_available = capacity.as_ref().map(|capacity| capacity.available_bytes);
+        let has_required_space = bytes_available
+            .map(|available| available >= options.min_free_bytes)
+            .unwrap_or(false);
+        let external = path.starts_with(external_root);
+
+        if required && !has_required_space {
+            degraded.push(BuildAdmissionDegradation {
+                code: "build_admission_denied",
+                severity: "medium",
+                message: format!(
+                    "required build path `{label}` is below the free-space admission threshold."
+                ),
+                repair: "Move build outputs and temporary scratch to the external drive, reduce artifact sync-down, or ask the human before cleanup.".to_owned(),
+            });
+        }
+
+        if external_available && external_required && !external {
+            let (code, repair) = if label == "artifact_destination" {
+                (
+                    "artifact_destination_not_external",
+                    "Point artifact sync-down destinations at the external drive or pass an explicit external --artifact-destination.",
+                )
+            } else if label == "cargo_target" {
+                (
+                    "cargo_target_not_external",
+                    "Set CARGO_TARGET_DIR under /Volumes/USBNVME16TB/temp_agent_space before starting heavy Cargo work.",
+                )
+            } else {
+                (
+                    "tmpdir_not_external",
+                    "Set TMPDIR under /Volumes/USBNVME16TB/temp_agent_space before starting heavy Cargo work.",
+                )
+            };
+            degraded.push(BuildAdmissionDegradation {
+                code,
+                severity: "warning",
+                message: format!(
+                    "{label} path `{}` is not under the external build root {}.",
+                    path.display(),
+                    EXTERNAL_BUILD_ROOT
+                ),
+                repair: repair.to_owned(),
+            });
+        }
+
+        checks.push(BuildAdmissionCheck {
+            label,
+            role,
+            path: path_to_string(&path),
+            required,
+            exists,
+            nearest_existing_ancestor: nearest.as_ref().map(|path| path_to_string(path)),
+            bytes_available,
+            min_free_bytes: options.min_free_bytes,
+            admitted: !required || has_required_space,
+            external_required: external_available && external_required,
+            external,
+        });
+    }
+
+    let admitted = degraded
+        .iter()
+        .all(|entry| entry.code != "build_admission_denied");
+    let mut recovery_actions = Vec::new();
+    if degraded
+        .iter()
+        .any(|entry| entry.code == "cargo_target_not_external")
+    {
+        recovery_actions.push(DiskPressureRecoveryAction {
+            priority: 1,
+            kind: "move_preserve",
+            target: "cargo_target",
+            reason: "Cargo build output is not using the external build root.".to_owned(),
+            suggestion: format!("Set CARGO_TARGET_DIR under {EXTERNAL_BUILD_ROOT}."),
+        });
+    }
+    if degraded
+        .iter()
+        .any(|entry| entry.code == "tmpdir_not_external")
+    {
+        recovery_actions.push(DiskPressureRecoveryAction {
+            priority: 2,
+            kind: "move_preserve",
+            target: "tmpdir",
+            reason: "Temporary build scratch is not using the external build root.".to_owned(),
+            suggestion: format!("Set TMPDIR under {EXTERNAL_BUILD_ROOT}/tmp."),
+        });
+    }
+    if degraded
+        .iter()
+        .any(|entry| entry.code == "artifact_destination_not_external")
+    {
+        recovery_actions.push(DiskPressureRecoveryAction {
+            priority: 3,
+            kind: "move_preserve",
+            target: "artifact_destination",
+            reason: "Artifact sync-down destination is not on the external drive.".to_owned(),
+            suggestion: "Use an artifact sync-down destination under the external build root."
+                .to_owned(),
+        });
+    }
+    if !admitted {
+        recovery_actions.push(DiskPressureRecoveryAction {
+            priority: 4,
+            kind: "ask_human",
+            target: "build_admission",
+            reason: "One or more required build paths are below the admission threshold."
+                .to_owned(),
+            suggestion: "Ask the human before any cleanup; this diagnostic does not delete files."
+                .to_owned(),
+        });
+    }
+
+    BuildAdmissionReport {
+        schema: BUILD_ADMISSION_DIAGNOSTICS_SCHEMA_V1,
+        command: "diag build-admission",
+        side_effect_free: true,
+        mutation_policy: "read_only_report_no_files_modified",
+        workspace: DiskPressureWorkspace {
+            path: path_to_string(&workspace),
+            source: options.workspace_source,
+        },
+        external_build_root: EXTERNAL_BUILD_ROOT.to_owned(),
+        min_free_bytes: options.min_free_bytes,
+        admitted,
+        checks,
+        degraded,
+        recovery_actions,
     }
 }
 
@@ -1328,13 +1558,48 @@ mod tests {
 
     #[test]
     fn artifact_retention_actions_are_preservation_only() -> TestResult {
+        let normal_spec = ArtifactRetentionRootSpec {
+            label: "fixture",
+            category: "fixture",
+            path: PathBuf::from("/tmp/ee-artifact-retention-fixture"),
+            path_source: "fixture",
+            retention_reason: "fixture",
+            default_ttl_days: None,
+            bead_closeout_required: false,
+            warning_bytes: 10,
+            degraded_bytes: 20,
+        };
+        let ttl_spec = ArtifactRetentionRootSpec {
+            default_ttl_days: Some(7),
+            ..normal_spec.clone()
+        };
+        let closeout_spec = ArtifactRetentionRootSpec {
+            bead_closeout_required: true,
+            ..normal_spec.clone()
+        };
+        let empty_scan = ArtifactRetentionScan::default();
+        let scan8 = ArtifactRetentionScan {
+            bytes: 8,
+            artifact_count: 1,
+            ..ArtifactRetentionScan::default()
+        };
+        let scan12 = ArtifactRetentionScan {
+            bytes: 12,
+            artifact_count: 1,
+            ..ArtifactRetentionScan::default()
+        };
+        let scan24 = ArtifactRetentionScan {
+            bytes: 24,
+            artifact_count: 1,
+            ..ArtifactRetentionScan::default()
+        };
         let actions = [
-            classify_artifact_retention_action(false, 0, 0, 10, 20, None, None, false),
-            classify_artifact_retention_action(true, 8, 1, 10, 20, None, None, false),
-            classify_artifact_retention_action(true, 12, 1, 10, 20, None, None, false),
-            classify_artifact_retention_action(true, 24, 1, 10, 20, None, None, false),
-            classify_artifact_retention_action(true, 8, 1, 10, 20, Some(7), Some(8), false),
-            classify_artifact_retention_action(true, 24, 1, 10, 20, Some(7), Some(8), true),
+            classify_artifact_retention_action(false, &empty_scan, &normal_spec, None),
+            classify_artifact_retention_action(true, &scan8, &normal_spec, None),
+            classify_artifact_retention_action(true, &scan12, &normal_spec, None),
+            classify_artifact_retention_action(true, &scan24, &normal_spec, None),
+            classify_artifact_retention_action(true, &scan8, &ttl_spec, Some(8)),
+            classify_artifact_retention_action(true, &scan24, &closeout_spec, Some(8)),
         ];
         let expected = [
             ArtifactRetentionActionKind::Keep,
