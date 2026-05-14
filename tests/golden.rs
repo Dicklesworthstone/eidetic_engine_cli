@@ -465,7 +465,7 @@ mod tests {
                     "beadsDependencyCycleSummary".to_string(),
                     serde_json::json!({
                         "count": cycles.count,
-                        "examples": cycles.examples,
+                        "examples": &cycles.examples,
                     }),
                 );
         }
