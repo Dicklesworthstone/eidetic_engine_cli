@@ -209,6 +209,8 @@ use crate::steward::{
     MAINTENANCE_JOB_SHOW_SCHEMA_V1, MAINTENANCE_RUN_SCHEMA_V1, MAINTENANCE_STATUS_SCHEMA_V1,
 };
 
+mod insights;
+
 /// Top-level `before_help` prelude rendered by clap above the standard
 /// USAGE / OPTIONS / COMMANDS sections. Bead bd-17c65.6.3 (F3): without
 /// this, `ee --help` prints 40+ subcommands alphabetically and an agent
@@ -226,7 +228,7 @@ const HELP_PRELUDE: &str = concat!(
     "\n",
     "Quick categories (the full alphabetical list is below):\n",
     "\n",
-    "  Inspect:        status, doctor, capabilities, memory show, memory history\n",
+    "  Inspect:        status, doctor, capabilities, insights, memory show, memory history\n",
     "  Memory ops:     link, tag, memory level, memory expire, memory revise, outcome\n",
     "  Curate:         curate (candidates|validate|apply), playbook, review\n",
     "  Graph:          graph (pagerank|hits|communities|neighborhood|centrality-refresh)\n",
@@ -621,6 +623,8 @@ pub enum Command {
     /// Agent-safe installation checks and dry-run plans.
     #[command(subcommand)]
     Install(InstallCommand),
+    /// Bundle read-only operational insight sections for agents.
+    Insights(insights::InsightsArgs),
     /// Introspect ee's command, schema, and error maps.
     Introspect,
     /// Manage search indexes.
@@ -8065,6 +8069,7 @@ where
         Some(Command::Install(InstallCommand::Plan(ref args))) => {
             handle_install_plan(&cli, args, stdout)
         }
+        Some(Command::Insights(ref args)) => handle_insights(&cli, args, stdout, stderr),
         Some(Command::Introspect) => match cli.renderer() {
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &output::render_introspect_human())
@@ -9980,6 +9985,38 @@ where
     };
     let report = plan_install(&options);
     render_install_plan(cli, &report, stdout)
+}
+
+fn handle_insights<W, E>(
+    cli: &Cli,
+    args: &insights::InsightsArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let report = match insights::build_insights_report(args) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &insights::render_insights_human(&report))
+        }
+        output::Renderer::Toon => {
+            let json = insights::render_insights_json(&report);
+            write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(insights::render_insights_json(&report) + "\n"))
+        }
+    }
 }
 
 fn handle_analyze_science_status<W>(cli: &Cli, stdout: &mut W) -> ProcessExitCode
@@ -36285,6 +36322,7 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Success, "help exit")?;
         ensure_contains(&stdout, "Usage:", "help usage line")?;
         ensure_contains(&stdout, "status", "help status subcommand")?;
+        ensure_contains(&stdout, "insights", "help insights subcommand")?;
         ensure_contains(&stdout, "  note ", "help promotes note")?;
         ensure_contains(&stdout, "  pack ", "help promotes pack")?;
         ensure_contains(&stdout, "  why ", "help promotes why")?;
@@ -36304,6 +36342,57 @@ mod tests {
         ensure(pack_pos < search_pos, "help lists pack before search")?;
         ensure(why_pos < search_pos, "help lists why before search")?;
         ensure(stderr.is_empty(), "help stderr must be empty")
+    }
+
+    #[test]
+    fn insights_help_writes_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "insights", "--help"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "insights help exit")?;
+        ensure_contains(&stdout, "Usage:", "insights help usage")?;
+        ensure_contains(&stdout, "--section", "insights help section flag")?;
+        ensure_contains(&stdout, "--explain", "insights help explain flag")?;
+        ensure(stderr.is_empty(), "insights help stderr must be empty")
+    }
+
+    #[test]
+    fn insights_section_parser_accepts_known_section() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "insights", "--section", "graph"])
+            .map_err(|error| format!("failed to parse insights section: {:?}", error.kind()))?;
+        match parsed.command {
+            Some(Command::Insights(args)) => {
+                ensure_equal(&args.section.as_deref(), &Some("graph"), "insights section")
+            }
+            other => Err(format!("expected insights command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn insights_unknown_section_json_is_clear() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--json", "insights", "--section", "unknown"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "unknown section exit")?;
+        ensure(stderr.is_empty(), "unknown section JSON stderr clean")?;
+        let json: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("unknown section stdout must be JSON: {error}"))?;
+        ensure_equal(
+            &json["schema"],
+            &serde_json::json!("ee.error.v2"),
+            "error schema",
+        )?;
+        ensure_equal(
+            &json["error"]["code"],
+            &serde_json::json!("usage"),
+            "error code",
+        )?;
+        ensure_contains(
+            json["error"]["message"].as_str().unwrap_or_default(),
+            "Unknown insights section `unknown`",
+            "unknown section message",
+        )?;
+        ensure_contains(
+            json["error"]["message"].as_str().unwrap_or_default(),
+            "Available sections: coordination, graph, retrieval, verification",
+            "unknown section available list",
+        )
     }
 
     #[test]
