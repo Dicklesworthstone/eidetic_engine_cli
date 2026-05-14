@@ -45,6 +45,55 @@ reason = "format_native_omission"
 rationale = "Mermaid (which shares output::Renderer::Markdown) renders structural diagrams, not per-component score tables."
 since_schema = "ee.context.v1"
 
+[[omission]]
+renderer = "markdown"
+field = "pack.budget.maxTokens"
+reason = "format_native_omission"
+rationale = "Mermaid (which shares output::Renderer::Markdown) is a diagram of pack topology, not a budget record carrier."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "markdown"
+field = "pack.items[].content"
+reason = "format_native_omission"
+rationale = "Mermaid (which shares output::Renderer::Markdown) shows item/source nodes and intentionally omits prompt body text."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "markdown"
+field = "pack.items[].why"
+reason = "format_native_omission"
+rationale = "Mermaid (which shares output::Renderer::Markdown) renders graph edges and leaves explanatory rationale to Markdown or JSON."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "markdown"
+field = "pack.items[].scores.relevance"
+reason = "format_native_omission"
+rationale = "Mermaid (which shares output::Renderer::Markdown) omits per-item scores because the output is structural graph syntax."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "markdown"
+field = "pack.selectionAudit"
+reason = "format_native_omission"
+rationale = "Markdown and Mermaid carry selected item rationale inline; the full structured selection audit remains in JSON/TOON."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "markdown"
+field = "pack.provenanceFooter"
+reason = "format_native_omission"
+rationale = "Markdown and Mermaid show provenance at item/source edges instead of emitting the aggregate provenance footer object."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "markdown"
+field = "data.degraded[]"
+reason = "format_native_omission"
+rationale = "Mermaid (which shares output::Renderer::Markdown) omits degradation prose so the output remains valid diagram syntax."
+since_schema = "ee.context.v1"
+
 # === Compact: size-discipline drops =========================================
 # The `compact` format prioritizes byte budget over provenance richness.
 # It drops fields that are valuable for forensics but cost bytes per
@@ -55,6 +104,62 @@ renderer = "compact"
 field = "pack.items[].provenance.entries[]"
 reason = "compact_intentional_drop"
 rationale = "Compact format keeps a single provenance summary string per item rather than the full entries array."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "compact"
+field = "pack.query"
+reason = "compact_intentional_drop"
+rationale = "Compact format keeps the query value as the first tab-separated cell rather than a named pack.query field."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "compact"
+field = "pack.items[].content"
+reason = "compact_intentional_drop"
+rationale = "Compact format keeps only top item IDs and pack sizing so shell consumers avoid prompt-body payload expansion."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "compact"
+field = "pack.items[].why"
+reason = "compact_intentional_drop"
+rationale = "Compact format omits per-item rationale text to preserve its fixed-width summary contract."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "compact"
+field = "pack.items[].provenance"
+reason = "compact_intentional_drop"
+rationale = "Compact format intentionally omits provenance details; JSON and Markdown remain the forensic surfaces."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "compact"
+field = "pack.items[].scores.relevance"
+reason = "compact_intentional_drop"
+rationale = "Compact format omits scores and keeps only query, item count, budget, top IDs, and hash."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "compact"
+field = "pack.selectionAudit"
+reason = "compact_intentional_drop"
+rationale = "Compact format omits the selection audit so one-line hook-adjacent summaries stay small."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "compact"
+field = "pack.provenanceFooter"
+reason = "compact_intentional_drop"
+rationale = "Compact format omits the provenance footer because provenance-rich inspection belongs to JSON/Markdown."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "compact"
+field = "data.degraded[]"
+reason = "compact_intentional_drop"
+rationale = "Compact format omits degraded details; callers that need repair guidance should use JSON, hook, or Markdown."
 since_schema = "ee.context.v1"
 
 [[omission]]
@@ -74,4 +179,113 @@ renderer = "hook"
 field = "pack.selectionAudit"
 reason = "format_native_omission"
 rationale = "Hook consumers care about pack.items[].content and pack.text; the audit metadata is not part of the hook contract."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "hook"
+field = "pack.query"
+reason = "format_native_omission"
+rationale = "Hook output is keyed by pack_id and prompt items; the initiating query is intentionally not part of the hook contract."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "hook"
+field = "pack.budget.maxTokens"
+reason = "format_native_omission"
+rationale = "Hook output carries total selected tokens but omits maxTokens because hooks consume the already-built prompt fragment."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "hook"
+field = "pack.items[].why"
+reason = "format_native_omission"
+rationale = "Hook output inserts memory content into an agent prompt and leaves rationale inspection to JSON or Markdown."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "hook"
+field = "pack.items[].provenance"
+reason = "format_native_omission"
+rationale = "Hook output omits provenance to keep prompt injection surfaces compact and relies on JSON/Markdown for audit detail."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "hook"
+field = "pack.items[].scores.relevance"
+reason = "format_native_omission"
+rationale = "Hook output omits scoring fields because hooks only need selected content and token counts."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "hook"
+field = "pack.provenanceFooter"
+reason = "format_native_omission"
+rationale = "Hook output omits aggregate provenance footer metadata; forensic consumers should use JSON."
+since_schema = "ee.context.v1"
+
+# === Human: operator summary, not structured record carrier =================
+
+[[omission]]
+renderer = "human"
+field = "pack.items[].content"
+reason = "format_native_omission"
+rationale = "Human context output lists selected items and next steps; Markdown is the human-readable prompt body with content."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "human"
+field = "pack.items[].why"
+reason = "format_native_omission"
+rationale = "Human context output summarizes selected items and leaves detailed rationale to JSON or Markdown."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "human"
+field = "pack.items[].provenance"
+reason = "format_native_omission"
+rationale = "Human context output omits per-item provenance to stay scannable; Markdown and JSON retain source details."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "human"
+field = "pack.items[].scores.relevance"
+reason = "format_native_omission"
+rationale = "Human context output omits score components because the operator summary is not a scoring audit surface."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "human"
+field = "pack.selectionAudit"
+reason = "format_native_omission"
+rationale = "Human context output omits the structured selection audit and points users to JSON for the full contract."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "human"
+field = "pack.provenanceFooter"
+reason = "format_native_omission"
+rationale = "Human context output omits the aggregate provenance footer because it is an operator summary."
+since_schema = "ee.context.v1"
+
+# === JSONL: stream record subset ============================================
+
+[[omission]]
+renderer = "jsonl"
+field = "pack.items[].scores.relevance"
+reason = "format_native_omission"
+rationale = "JSONL context output streams selected item records and omits score components to keep each line compact."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "jsonl"
+field = "pack.selectionAudit"
+reason = "format_native_omission"
+rationale = "JSONL context output is a streaming item contract and omits the nested selection audit object."
+since_schema = "ee.context.v1"
+
+[[omission]]
+renderer = "jsonl"
+field = "pack.provenanceFooter"
+reason = "format_native_omission"
+rationale = "JSONL context output repeats per-item provenance and omits the aggregate provenance footer object."
 since_schema = "ee.context.v1"

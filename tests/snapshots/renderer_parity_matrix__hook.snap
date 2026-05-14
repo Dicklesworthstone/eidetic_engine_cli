@@ -1,0 +1,5 @@
+---
+source: tests/renderer_parity_matrix.rs
+expression: "render_context_response_for_format(&response, case.format)"
+---
+{"schema":"ee.hook.context_pack.v1","pack_id":"blake3:renderer-parity","total_tokens":21,"items":[{"id":"mem_00000000000000000000000001","content":"Run cargo fmt --check before release.","tokens":8},{"id":"mem_00000000000000000000000002","content":"A prior release failed when clippy was skipped.","tokens":13}],"degraded":[{"code":"renderer_parity_fixture","severity":"low","message":"Renderer parity fixture warning.","repair":"No repair; this is a deterministic test fixture."}]}

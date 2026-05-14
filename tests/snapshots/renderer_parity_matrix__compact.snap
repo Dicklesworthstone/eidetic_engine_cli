@@ -1,0 +1,5 @@
+---
+source: tests/renderer_parity_matrix.rs
+expression: "render_context_response_for_format(&response, case.format)"
+---
+renderer parity release	2/500	mem_00000000000000000000000001,mem_00000000000000000000000002	blake3:renderer-parity

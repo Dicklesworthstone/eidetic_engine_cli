@@ -1,0 +1,16 @@
+---
+source: tests/renderer_parity_matrix.rs
+expression: "render_context_response_for_format(&response, case.format)"
+---
+%% pack.hash: blake3:renderer-parity
+%% pack.schema: ee.response.v1
+graph TD
+  pack["context pack: renderer parity release"]
+  mem_mem_00000000000000000000000001["1: mem_00000000000000000000000001"]
+  pack --> mem_mem_00000000000000000000000001
+  src_file___AGENTS_md["AGENTS.md"]
+  mem_mem_00000000000000000000000001 --> src_file___AGENTS_md
+  mem_mem_00000000000000000000000002["2: mem_00000000000000000000000002"]
+  pack --> mem_mem_00000000000000000000000002
+  src_cass_session___renderer_parity_session["cass-session renderer-parity-session"]
+  mem_mem_00000000000000000000000002 --> src_cass_session___renderer_parity_session

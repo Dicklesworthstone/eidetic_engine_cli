@@ -1,0 +1,23 @@
+---
+source: tests/renderer_parity_matrix.rs
+expression: "render_context_response_for_format(&response, case.format)"
+---
+ee context "renderer parity release"
+
+Profile: compact | Budget: 21/500 tokens | Pack hash: blake3:renderer-parity
+
+Advisory: degraded — Context includes 1 degraded signal; validate advisory memory and repair degraded sources before relying on this pack.
+
+Advisory notes:
+  [medium] advisory_memory: 1 packed memory from agent assertions or CASS evidence and must be validated against provenance before being treated as policy.
+
+Items:
+  1. [procedural_rules] mem_00000000000000000000000001 (8t)
+  2. [failures] mem_00000000000000000000000002 (13t)
+
+Degraded:
+  [low] Renderer parity fixture warning.
+    Next: No repair; this is a deterministic test fixture.
+
+Next:
+  ee context --json "<query>"

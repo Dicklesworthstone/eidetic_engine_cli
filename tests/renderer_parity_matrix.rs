@@ -27,17 +27,10 @@
 //!      requires it. Walks 12 (surface, renderer) pairs that can be
 //!      exercised without a PackDraft fixture.
 //!
-//! What this file deliberately defers to D8.2 (a new follow-up bead
-//! to be filed when this lands):
-//!
-//!   - The FULL 8-format pack tree walk (rendering a ContextResponse
-//!     through every OutputFormat variant and matrix-checking every
-//!     canonical pack field). That needs a public `PackDraft` test
-//!     fixture helper, which the current public API doesn't expose
-//!     (PackCandidate::new requires several internal types).
-//!     Filing D8.2 with the explicit scope: ship the PackDraft
-//!     helper first, then the full matrix lands as a one-PR
-//!     mechanical write.
+//!   3. **Full context-pack renderer matrix** — render a deterministic
+//!      `ContextResponse` through every `OutputFormat` variant and
+//!      assert canonical pack fields are either present or allowlisted
+//!      in `tests/renderer_parity_omissions.toml`.
 //!
 //! Wiring: registered in `tests/contracts.rs` as a top-level test
 //! file at the same level as the other deferred-then-shipped
@@ -50,14 +43,22 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use ee::cli::OutputFormat;
 use ee::core::learn::{LEARN_UNCERTAINTY_SCHEMA_V1, LearnUncertaintyReport, UncertaintyItem};
 use ee::core::memory::{MemoryListFilter, MemoryListReport, MemorySummary};
 use ee::core::rule::{RuleEvidence, RuleLifecycle, RuleListFilter, RuleListReport, RuleSummary};
+use ee::models::{MemoryId, ProvenanceUri, TrustClass, UnitScore};
 use ee::output::{
     render_introspect_human, render_introspect_json, render_introspect_toon,
     render_learn_uncertainty_human, render_learn_uncertainty_json, render_learn_uncertainty_toon,
     render_memory_list_human, render_memory_list_json, render_memory_list_toon,
     render_rule_list_human, render_rule_list_json, render_rule_list_toon,
+};
+use ee::pack::{
+    ContextRequest, ContextResponse, ContextResponseDegradation, ContextResponseSeverity,
+    PackDraft, PackDraftItem, PackOmission, PackOmissionReason, PackProvenance, PackRejectionStage,
+    PackSection, PackSelectedItem, PackSelectionAudit, PackSelectionObjective, PackSelectionPhase,
+    PackSelectionStep, PackTrustSignal, TokenBudget,
 };
 
 type TestResult = Result<(), String>;
@@ -556,4 +557,417 @@ fn known_renderers_and_reasons_have_no_duplicates() -> TestResult {
         }
     }
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Full context-pack renderer matrix (D8.1)
+// ─────────────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy)]
+struct FormatCase {
+    name: &'static str,
+    format: OutputFormat,
+    renderer: &'static str,
+}
+
+const FORMAT_CASES: &[FormatCase] = &[
+    FormatCase {
+        name: "human",
+        format: OutputFormat::Human,
+        renderer: "human",
+    },
+    FormatCase {
+        name: "json",
+        format: OutputFormat::Json,
+        renderer: "json",
+    },
+    FormatCase {
+        name: "toon",
+        format: OutputFormat::Toon,
+        renderer: "toon",
+    },
+    FormatCase {
+        name: "jsonl",
+        format: OutputFormat::Jsonl,
+        renderer: "jsonl",
+    },
+    FormatCase {
+        name: "compact",
+        format: OutputFormat::Compact,
+        renderer: "compact",
+    },
+    FormatCase {
+        name: "hook",
+        format: OutputFormat::Hook,
+        renderer: "hook",
+    },
+    FormatCase {
+        name: "markdown",
+        format: OutputFormat::Markdown,
+        renderer: "markdown",
+    },
+    FormatCase {
+        name: "mermaid",
+        format: OutputFormat::Mermaid,
+        renderer: "markdown",
+    },
+];
+
+struct CanonicalPackField {
+    field: &'static str,
+    needles: &'static [(&'static str, &'static [&'static str])],
+}
+
+const CANONICAL_CONTEXT_PACK_FIELDS: &[CanonicalPackField] = &[
+    CanonicalPackField {
+        field: "pack.hash",
+        needles: &[
+            ("human", &["Pack hash: blake3:renderer-parity"]),
+            ("json", &["\"hash\":\"blake3:renderer-parity\""]),
+            ("toon", &["blake3:renderer-parity"]),
+            ("jsonl", &["\"packHash\":\"blake3:renderer-parity\""]),
+            ("compact", &["blake3:renderer-parity"]),
+            ("hook", &["\"pack_id\":\"blake3:renderer-parity\""]),
+            ("markdown", &["<!-- pack.hash: blake3:renderer-parity -->"]),
+            ("mermaid", &["%% pack.hash: blake3:renderer-parity"]),
+        ],
+    },
+    CanonicalPackField {
+        field: "pack.query",
+        needles: &[
+            ("human", &["renderer parity release"]),
+            ("json", &["\"query\":\"renderer parity release\""]),
+            ("toon", &["renderer parity release"]),
+            ("jsonl", &["\"query\":\"renderer parity release\""]),
+            ("compact", &["renderer parity release"]),
+            ("markdown", &["# Context Pack: renderer parity release"]),
+            ("mermaid", &["context pack: renderer parity release"]),
+        ],
+    },
+    CanonicalPackField {
+        field: "pack.budget.maxTokens",
+        needles: &[
+            ("human", &["Budget: 21/500 tokens"]),
+            ("json", &["\"maxTokens\":500"]),
+            ("toon", &["maxTokens"]),
+            ("jsonl", &["\"maxTokens\":500"]),
+            ("compact", &["2/500"]),
+            ("markdown", &["**Budget:** 21/500 tokens"]),
+        ],
+    },
+    CanonicalPackField {
+        field: "pack.items[].memoryId",
+        needles: &[
+            ("human", &["mem_"]),
+            ("json", &["\"memoryId\":\"mem_"]),
+            ("toon", &["memoryId"]),
+            ("jsonl", &["\"memoryId\":\"mem_"]),
+            ("compact", &["mem_"]),
+            ("hook", &["\"id\":\"mem_"]),
+            ("markdown", &["mem_"]),
+            ("mermaid", &["mem_"]),
+        ],
+    },
+    CanonicalPackField {
+        field: "pack.items[].content",
+        needles: &[
+            (
+                "json",
+                &["\"content\":\"Run cargo fmt --check before release.\""],
+            ),
+            ("toon", &["Run cargo fmt --check before release."]),
+            (
+                "jsonl",
+                &["\"content\":\"Run cargo fmt --check before release.\""],
+            ),
+            (
+                "hook",
+                &["\"content\":\"Run cargo fmt --check before release.\""],
+            ),
+            ("markdown", &["Run cargo fmt --check before release."]),
+        ],
+    },
+    CanonicalPackField {
+        field: "pack.items[].why",
+        needles: &[
+            ("json", &["matched renderer parity via fixture"]),
+            ("toon", &["matched renderer parity via fixture"]),
+            ("jsonl", &["matched renderer parity via fixture"]),
+            ("markdown", &["matched renderer parity via fixture"]),
+        ],
+    },
+    CanonicalPackField {
+        field: "pack.items[].provenance",
+        needles: &[
+            ("json", &["\"provenance\""]),
+            ("toon", &["provenance"]),
+            ("jsonl", &["\"provenance\""]),
+            ("markdown", &["file://AGENTS.md"]),
+            ("mermaid", &["AGENTS.md"]),
+        ],
+    },
+    CanonicalPackField {
+        field: "pack.items[].scores.relevance",
+        needles: &[
+            ("json", &["\"relevance\":0.82"]),
+            ("toon", &["relevance"]),
+            ("markdown", &["relevance 0.8200"]),
+        ],
+    },
+    CanonicalPackField {
+        field: "pack.selectionAudit",
+        needles: &[
+            ("json", &["\"selectionAudit\""]),
+            ("toon", &["selectionAudit"]),
+        ],
+    },
+    CanonicalPackField {
+        field: "pack.provenanceFooter",
+        needles: &[
+            ("json", &["\"provenanceFooter\""]),
+            ("toon", &["provenanceFooter"]),
+        ],
+    },
+    CanonicalPackField {
+        field: "data.degraded[]",
+        needles: &[
+            ("human", &["Degraded:", "Renderer parity fixture warning."]),
+            ("json", &["\"degraded\"", "renderer_parity_fixture"]),
+            ("toon", &["renderer_parity_fixture"]),
+            ("jsonl", &["\"degradedCount\":1"]),
+            ("hook", &["renderer_parity_fixture"]),
+            (
+                "markdown",
+                &["## Degradations", "Renderer parity fixture warning."],
+            ),
+        ],
+    },
+];
+
+fn fixed_memory_id(seed: u128) -> MemoryId {
+    MemoryId::from_uuid(uuid::Uuid::from_u128(seed))
+}
+
+fn score(value: f32) -> UnitScore {
+    UnitScore::parse(value).expect("fixture scores stay in unit interval")
+}
+
+fn make_context_response_fixture() -> ContextResponse {
+    let request = ContextRequest::new(ee::pack::ContextRequestInput {
+        query: "renderer parity release".to_owned(),
+        profile: Some(ee::pack::ContextPackProfile::Compact),
+        max_tokens: Some(500),
+        candidate_pool: Some(8),
+        max_results: None,
+        sections: vec![PackSection::ProceduralRules, PackSection::Failures],
+    })
+    .expect("valid context request fixture");
+
+    let mem_a = fixed_memory_id(1);
+    let mem_b = fixed_memory_id(2);
+    let provenance_a = PackProvenance::new(
+        ProvenanceUri::File {
+            path: "AGENTS.md".to_owned(),
+            span: None,
+        },
+        "project rule",
+    )
+    .expect("valid provenance note");
+    let provenance_b = PackProvenance::new(
+        ProvenanceUri::CassSession {
+            session: "renderer-parity-session".to_owned(),
+            span: None,
+        },
+        "prior failure",
+    )
+    .expect("valid provenance note");
+
+    let items = vec![
+        PackDraftItem {
+            rank: 1,
+            memory_id: mem_a,
+            section: PackSection::ProceduralRules,
+            content: "Run cargo fmt --check before release.".to_owned(),
+            estimated_tokens: 8,
+            relevance: score(0.82),
+            utility: score(0.74),
+            provenance: vec![provenance_a],
+            why: "matched renderer parity via fixture (relevance 0.8200, utility 0.7400)"
+                .to_owned(),
+            diversity_key: Some("release".to_owned()),
+            trust: PackTrustSignal::new(TrustClass::HumanExplicit, Some("project-rule".to_owned())),
+            redactions: Vec::new(),
+            tombstoned_at: None,
+            lifecycle: None,
+            selected_in: PackSelectionPhase::StrictMmr,
+        },
+        PackDraftItem {
+            rank: 2,
+            memory_id: mem_b,
+            section: PackSection::Failures,
+            content: "A prior release failed when clippy was skipped.".to_owned(),
+            estimated_tokens: 13,
+            relevance: score(0.67),
+            utility: score(0.58),
+            provenance: vec![provenance_b],
+            why: "matched renderer parity via fixture (relevance 0.6700, utility 0.5800)"
+                .to_owned(),
+            diversity_key: Some("failure".to_owned()),
+            trust: PackTrustSignal::new(TrustClass::CassEvidence, None),
+            redactions: Vec::new(),
+            tombstoned_at: None,
+            lifecycle: None,
+            selected_in: PackSelectionPhase::CoverageFill,
+        },
+    ];
+
+    let selected_items = items
+        .iter()
+        .map(|item| PackSelectedItem {
+            rank: item.rank,
+            memory_id: item.memory_id,
+            token_cost: item.estimated_tokens,
+            feasible: true,
+        })
+        .collect::<Vec<_>>();
+    let steps = items
+        .iter()
+        .map(|item| PackSelectionStep {
+            rank: item.rank,
+            memory_id: item.memory_id,
+            marginal_gain: if item.rank == 1 { 0.82 } else { 0.31 },
+            objective_value: if item.rank == 1 { 0.82 } else { 1.13 },
+            token_cost: item.estimated_tokens,
+            feasible: true,
+            covered_features: vec![item.section.as_str().to_owned()],
+        })
+        .collect::<Vec<_>>();
+
+    let draft = PackDraft {
+        query: request.query.clone(),
+        budget: TokenBudget::new(500).expect("non-zero budget"),
+        used_tokens: 21,
+        items,
+        omitted: vec![PackOmission {
+            memory_id: fixed_memory_id(3),
+            estimated_tokens: 900,
+            relevance: score(0.44),
+            utility: score(0.33),
+            reason: PackOmissionReason::TokenBudgetExceeded,
+            rejected_at: PackRejectionStage::Selection,
+            feasible: false,
+            could_fit_with_budget: Some(900),
+        }],
+        selection_audit: PackSelectionAudit {
+            profile: request.profile,
+            objective: PackSelectionObjective::MmrRedundancy,
+            algorithm_id: "renderer_parity_fixture",
+            algorithm_description: "Deterministic fixture for cross-renderer parity.",
+            candidate_count: 3,
+            selected_count: 2,
+            omitted_count: 1,
+            budget_limit: 500,
+            budget_used: 21,
+            total_objective_value: 1.13,
+            monotone: false,
+            submodular: false,
+            selected_items,
+            steps,
+        },
+        hash: Some("blake3:renderer-parity".to_owned()),
+    };
+
+    let degraded = vec![
+        ContextResponseDegradation::new(
+            "renderer_parity_fixture",
+            ContextResponseSeverity::Low,
+            "Renderer parity fixture warning.",
+            Some("No repair; this is a deterministic test fixture.".to_owned()),
+        )
+        .expect("valid degradation fixture"),
+    ];
+
+    ContextResponse::new(request, draft, degraded).expect("valid response fixture")
+}
+
+fn render_context_response_for_format(response: &ContextResponse, format: OutputFormat) -> String {
+    match format {
+        OutputFormat::Human => ee::output::render_context_response_human(response),
+        OutputFormat::Json => ee::output::render_context_response_json(response),
+        OutputFormat::Toon => ee::output::render_context_response_toon(response),
+        OutputFormat::Jsonl => ee::output::render_context_response_jsonl(response),
+        OutputFormat::Compact => ee::output::render_context_response_compact(response),
+        OutputFormat::Hook => ee::output::render_context_response_hook(response),
+        OutputFormat::Markdown => ee::output::render_context_response_markdown(response),
+        OutputFormat::Mermaid => ee::output::render_context_response_mermaid(response),
+    }
+}
+
+fn omission_allows(renderer: &str, field: &str, omissions: &[OmissionEntry]) -> bool {
+    omissions
+        .iter()
+        .any(|entry| entry.renderer == renderer && entry.field == field)
+}
+
+fn field_needles_for_format<'a>(
+    field: &'a CanonicalPackField,
+    format_name: &str,
+) -> Option<&'a [&'a str]> {
+    field
+        .needles
+        .iter()
+        .find_map(|(name, needles)| (*name == format_name).then_some(*needles))
+}
+
+#[test]
+fn context_pack_full_renderer_matrix_honors_canonical_fields_and_omissions() -> TestResult {
+    let response = make_context_response_fixture();
+    let omissions = parse_omissions_toml(&omissions_toml_path())?;
+    let mut failures = Vec::new();
+
+    for case in FORMAT_CASES {
+        let rendered = render_context_response_for_format(&response, case.format);
+        for field in CANONICAL_CONTEXT_PACK_FIELDS {
+            match field_needles_for_format(field, case.name) {
+                Some(needles) => {
+                    for needle in needles {
+                        if !rendered.contains(needle) {
+                            failures.push(format!(
+                                "format=`{}` field=`{}` missing expected marker {needle:?}",
+                                case.name, field.field,
+                            ));
+                        }
+                    }
+                }
+                None if !omission_allows(case.renderer, field.field, &omissions) => {
+                    failures.push(format!(
+                        "format=`{}` renderer=`{}` field=`{}` is absent but not allowlisted in tests/renderer_parity_omissions.toml",
+                        case.name, case.renderer, field.field,
+                    ));
+                }
+                None => {}
+            }
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "D8.1 full renderer parity matrix found {} issue(s):\n{}",
+            failures.len(),
+            failures.join("\n"),
+        ))
+    }
+}
+
+#[test]
+fn context_pack_renderer_outputs_match_d8_1_goldens() {
+    let response = make_context_response_fixture();
+    for case in FORMAT_CASES {
+        insta::assert_snapshot!(
+            case.name,
+            render_context_response_for_format(&response, case.format)
+        );
+    }
 }

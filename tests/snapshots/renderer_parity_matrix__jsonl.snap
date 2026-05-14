@@ -1,0 +1,8 @@
+---
+source: tests/renderer_parity_matrix.rs
+expression: "render_context_response_for_format(&response, case.format)"
+---
+{"schema":"ee.context.jsonl.header.v1","packHash":"blake3:renderer-parity","query":"renderer parity release","usedTokens":21,"maxTokens":500,"itemCount":2}
+{"schema":"ee.context.jsonl.item.v1","packHash":"blake3:renderer-parity","rank":1,"memoryId":"mem_00000000000000000000000001","section":"procedural_rules","content":"Run cargo fmt --check before release.","estimatedTokens":8,"why":"matched renderer parity via fixture (relevance 0.8200, utility 0.7400)","selectedIn":"strict_mmr","provenance":[{"uri":"file://AGENTS.md","scheme":"file","label":"AGENTS.md","note":"project rule"}]}
+{"schema":"ee.context.jsonl.item.v1","packHash":"blake3:renderer-parity","rank":2,"memoryId":"mem_00000000000000000000000002","section":"failures","content":"A prior release failed when clippy was skipped.","estimatedTokens":13,"why":"matched renderer parity via fixture (relevance 0.6700, utility 0.5800)","selectedIn":"coverage_fill","provenance":[{"uri":"cass-session://renderer-parity-session","scheme":"cass-session","label":"cass-session renderer-parity-session","note":"prior failure"}]}
+{"schema":"ee.context.jsonl.footer.v1","packHash":"blake3:renderer-parity","skippedTotal":1,"degradedCount":1}
