@@ -1373,11 +1373,13 @@ fn graph_snapshot_persistence_input(
     centrality: &CentralityRefreshReport,
     links: &[StoredMemoryLink],
 ) -> GraphResult<GraphSnapshotPersistenceInput> {
-    let metrics_json = graph_snapshot_metrics_json(centrality, links)?;
-    let content_hash = graph_snapshot_content_hash(&metrics_json);
+    let graph_type = GraphSnapshotType::MemoryLinks;
+    let metrics_json = graph_snapshot_metrics_json(graph_type, centrality, links)?;
+    let content_hash = graph_snapshot_content_hash(graph_type, &metrics_json);
     let source_generation = u32::try_from(links.len())
         .map_err(|_| GraphError::numeric_overflow("source link count", links.len()))?;
     Ok(GraphSnapshotPersistenceInput {
+        graph_type,
         node_count: u32::try_from(centrality.node_count)
             .map_err(|_| GraphError::numeric_overflow("node count", centrality.node_count))?,
         edge_count: u32::try_from(centrality.edge_count)
@@ -1389,6 +1391,7 @@ fn graph_snapshot_persistence_input(
 }
 
 struct GraphSnapshotPersistenceInput {
+    graph_type: GraphSnapshotType,
     node_count: u32,
     edge_count: u32,
     metrics_json: String,
@@ -1555,7 +1558,7 @@ fn persist_graph_snapshot_in_transaction(
     input: GraphSnapshotPersistenceInput,
     _write_owner: &GraphSnapshotWriteOwner<'_>,
 ) -> GraphResult<GraphRefreshSnapshot> {
-    let snapshot_version = next_graph_snapshot_version(conn, workspace_id)?;
+    let snapshot_version = next_graph_snapshot_version(conn, workspace_id, input.graph_type)?;
     let snapshot_id = generate_graph_snapshot_id();
 
     conn.insert_graph_snapshot(
@@ -1564,7 +1567,7 @@ fn persist_graph_snapshot_in_transaction(
             workspace_id: workspace_id.to_owned(),
             snapshot_version,
             schema_version: GRAPH_EXPORT_SCHEMA_V1.to_owned(),
-            graph_type: GraphSnapshotType::MemoryLinks,
+            graph_type: input.graph_type,
             node_count: input.node_count,
             edge_count: input.edge_count,
             metrics_json: input.metrics_json,
@@ -1577,7 +1580,7 @@ fn persist_graph_snapshot_in_transaction(
 
     Ok(GraphRefreshSnapshot {
         id: snapshot_id,
-        graph_type: GraphSnapshotType::MemoryLinks,
+        graph_type: input.graph_type,
         snapshot_version,
         source_generation: input.source_generation,
         content_hash: input.content_hash,
@@ -1730,6 +1733,7 @@ fn merge_centrality_scores(
 }
 
 fn graph_snapshot_metrics_json(
+    graph_type: GraphSnapshotType,
     centrality: &CentralityRefreshReport,
     links: &[StoredMemoryLink],
 ) -> GraphResult<String> {
@@ -1773,7 +1777,7 @@ fn graph_snapshot_metrics_json(
 
     let metrics = serde_json::json!({
         "schema": "ee.graph.snapshot.metrics.v1",
-        "graphType": GraphSnapshotType::MemoryLinks.as_str(),
+        "graphType": graph_type.as_str(),
         "graph": {
             "nodes": nodes.clone(),
             "edges": edges.clone(),
@@ -1799,14 +1803,22 @@ fn graph_snapshot_metrics_json(
         .map_err(|error| GraphError::json("serialize graph snapshot metrics", error))
 }
 
-fn graph_snapshot_content_hash(metrics_json: &str) -> String {
-    format!("blake3:{}", blake3::hash(metrics_json.as_bytes()).to_hex())
+fn graph_snapshot_content_hash(graph_type: GraphSnapshotType, metrics_json: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(graph_type.as_str().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(metrics_json.as_bytes());
+    format!("blake3:{}", hasher.finalize().to_hex())
 }
 
 #[cfg(any(feature = "graph", test))]
-fn next_graph_snapshot_version(conn: &DbConnection, workspace_id: &str) -> GraphResult<u32> {
+fn next_graph_snapshot_version(
+    conn: &DbConnection,
+    workspace_id: &str,
+    graph_type: GraphSnapshotType,
+) -> GraphResult<u32> {
     match conn
-        .get_latest_graph_snapshot(workspace_id, GraphSnapshotType::MemoryLinks)
+        .get_latest_graph_snapshot(workspace_id, graph_type)
         .map_err(|error| GraphError::storage("inspect latest graph snapshot", error))?
     {
         Some(snapshot) => snapshot
@@ -2685,7 +2697,10 @@ pub fn validate_snapshot(
         || snapshot.schema_version.starts_with("ee.graph.");
 
     let hash_verified = if options.verify_hash {
-        Some(graph_snapshot_content_hash(&snapshot.metrics_json) == snapshot.content_hash)
+        Some(
+            graph_snapshot_content_hash(snapshot.graph_type, &snapshot.metrics_json)
+                == snapshot.content_hash,
+        )
     } else {
         None
     };
@@ -5166,10 +5181,27 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.contains("mem_karate_34"));
         assert_eq!(
-            super::graph_snapshot_content_hash(&first),
+            super::graph_snapshot_content_hash(GraphSnapshotType::MemoryLinks, &first),
             KARATE_SNAPSHOT_HASH
         );
         Ok(())
+    }
+
+    #[test]
+    fn graph_snapshot_content_hash_includes_graph_type_tag() {
+        let metrics_json = r#"{"nodes":[{"id":"mem_same"}],"edges":[]}"#;
+        let memory_links =
+            super::graph_snapshot_content_hash(GraphSnapshotType::MemoryLinks, metrics_json);
+        let causal_evidence =
+            super::graph_snapshot_content_hash(GraphSnapshotType::CausalEvidence, metrics_json);
+
+        assert_ne!(memory_links, causal_evidence);
+        assert_eq!(
+            memory_links,
+            super::graph_snapshot_content_hash(GraphSnapshotType::MemoryLinks, metrics_json)
+        );
+        assert!(memory_links.starts_with("blake3:"));
+        assert!(causal_evidence.starts_with("blake3:"));
     }
 
     #[cfg(feature = "graph")]
@@ -5843,6 +5875,7 @@ mod tests {
             &connection,
             WORKSPACE_ID,
             super::GraphSnapshotPersistenceInput {
+                graph_type: GraphSnapshotType::MemoryLinks,
                 node_count: 2,
                 edge_count: 1,
                 metrics_json: serde_json::json!({
@@ -5893,7 +5926,11 @@ mod tests {
             u32::MAX,
         )?;
 
-        match super::next_graph_snapshot_version(&connection, WORKSPACE_ID) {
+        match super::next_graph_snapshot_version(
+            &connection,
+            WORKSPACE_ID,
+            GraphSnapshotType::MemoryLinks,
+        ) {
             Err(super::GraphError::SnapshotVersionOverflow) => {}
             Ok(version) => {
                 return Err(format!(
@@ -5939,6 +5976,7 @@ mod tests {
                         &connection,
                         WORKSPACE_ID,
                         super::GraphSnapshotPersistenceInput {
+                            graph_type: GraphSnapshotType::MemoryLinks,
                             node_count: 1,
                             edge_count: 0,
                             metrics_json: serde_json::json!({
@@ -6133,7 +6171,8 @@ mod tests {
         use crate::db::GraphSnapshotType;
         let connection = open_snapshot_db()?;
         let metrics_json = r#"{"nodes":[],"edges":[]}"#;
-        let content_hash = super::graph_snapshot_content_hash(metrics_json);
+        let content_hash =
+            super::graph_snapshot_content_hash(GraphSnapshotType::MemoryLinks, metrics_json);
         insert_graph_snapshot_with_hash(
             &connection,
             "gsnap_0000000000000000000000230",
@@ -6193,7 +6232,8 @@ mod tests {
         use crate::db::GraphSnapshotType;
         let connection = open_snapshot_db()?;
         let metrics_json = r#"{"nodes":[],"edges":[]}"#;
-        let content_hash = super::graph_snapshot_content_hash(metrics_json);
+        let content_hash =
+            super::graph_snapshot_content_hash(GraphSnapshotType::MemoryLinks, metrics_json);
         insert_graph_snapshot_with_hash(
             &connection,
             "gsnap_0000000000000000000000221",
