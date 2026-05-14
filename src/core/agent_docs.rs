@@ -192,6 +192,12 @@ pub struct EnvVarEntry {
 
 pub const ENV_VARS: &[EnvVarEntry] = &[
     EnvVarEntry {
+        name: EnvVar::AgentName.name(),
+        description: EnvVar::AgentName.description(),
+        default: EnvVar::AgentName.default_value(),
+        category: EnvVar::AgentName.category(),
+    },
+    EnvVarEntry {
         name: EnvVar::AgentMode.name(),
         description: EnvVar::AgentMode.description(),
         default: EnvVar::AgentMode.default_value(),
@@ -214,6 +220,12 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         description: EnvVar::DemoEvidenceRoot.description(),
         default: EnvVar::DemoEvidenceRoot.default_value(),
         category: EnvVar::DemoEvidenceRoot.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::DiagForceCapabilityGap.name(),
+        description: EnvVar::DiagForceCapabilityGap.description(),
+        default: EnvVar::DiagForceCapabilityGap.default_value(),
+        category: EnvVar::DiagForceCapabilityGap.category(),
     },
     EnvVarEntry {
         name: EnvVar::DisableToon.name(),

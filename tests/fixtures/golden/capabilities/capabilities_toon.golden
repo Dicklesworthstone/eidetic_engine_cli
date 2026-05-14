@@ -47,17 +47,22 @@ data:
       source: missing
       error: cass binary not found at 'cass'
       trusted: false
-  envOverrides[25]{name,category,controls,defaultValue,isSet,source}:
+  envOverrides[31]{name,category,controls,defaultValue,isSet,source}:
+    EE_AGENT_NAME,output,Identify the current agent for scoped memory retrieval.,null,false,unset
     EE_AGENT_MODE,output,Use agent-oriented output defaults.,null,false,unset
     EE_CASS_BINARY,integration,Override the trusted cass import binary path.,null,false,unset
     EE_DATABASE_PATH,paths,Override the configured storage database path.,null,false,unset
     EE_DEMO_EVIDENCE_ROOT,paths,Override the demo evidence storage root.,null,false,unset
+    EE_DIAG_FORCE_CAPABILITY_GAP,diagnostics,Force selected capability probes to report build-gap diagnostics.,null,false,unset
+    EE_DISABLE_TOON,output,Disable TOON output capability reporting and auto-selection.,null,false,unset
+    EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS,tuning,Disable Frankensearch neighbors during remember-time proposal.,null,false,unset
     EE_EXPERIMENTAL_TRIAD,output,Compatibility no-op for the promoted ee pack/note/why aliases.,null,false,unset
     EE_FORMAT,output,Select the default output renderer.,null,false,unset
     EE_HARMFUL_BURST_WINDOW_SECONDS,tuning,Override the harmful feedback burst window in seconds.,null,false,unset
     EE_HARMFUL_PER_SOURCE_PER_HOUR,tuning,Override the harmful feedback rate limit per source.,null,false,unset
     EE_HOOK_MODE,output,Use hook-oriented machine output defaults.,null,false,unset
     EE_INDEX_DIR,paths,Override the configured search index directory.,null,false,unset
+    EE_INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS,tuning,Override index publish advisory-lock retry attempts.,"200",false,registry_default
     EE_JSON,output,Request JSON output from renderer auto-detection.,null,false,unset
     EE_LOG_FORMAT,diagnostics,Select structured log format.,null,false,unset
     EE_LOG_JSON,diagnostics,Enable JSON command-start logs on stderr.,null,false,unset
@@ -68,11 +73,14 @@ data:
     EE_PROFILE,tuning,Override the default context pack profile.,null,false,unset
     EE_REMEMBER_CURATION_SYNC_BUDGET_MS,tuning,Override remember-time curation sync budget in milliseconds.,"50",false,registry_default
     EE_SECURITY_PROFILE,policy,Select security profile.,null,false,unset
+    EE_SCIENCE_BACKEND_PATH,integration,Configure an optional science analytics backend path; missing paths report backend-unavailable.,null,false,unset
     EE_TEST_LOG_LEVEL,diagnostics,Control structured test-log verbosity.,null,false,unset
     EE_TEST_LOG_PATH,diagnostics,Enable structured test logging at this JSONL path.,null,false,unset
     EE_TEST_LOG_TEST_ID,diagnostics,Name the active structured test-log scenario.,null,false,unset
     EE_WORKSPACE,paths,Override workspace root discovery.,null,false,unset
     EE_WORKSPACE_REGISTRY,paths,Override the workspace alias registry database path.,null,false,unset
+  index:
+    last_full_rebuild_at: null
   output:
     formats[8]{name,available,machineReadable,description}:
       json,true,true,Canonical stable response envelope
@@ -101,15 +109,15 @@ data:
         diagnostic:
           schema: ee.output_size_diagnostic.v1
           json:
-            bytes: 4024
-            estimatedTokens: 971
+            bytes: 5627
+            estimatedTokens: 1333
           toon:
-            bytes: 4104
-            estimatedTokens: 1061
+            bytes: 5959
+            estimatedTokens: 1495
           savings:
-            bytes: -80
-            tokens: -90
-            compressionRatio: 1.02
+            bytes: -332
+            tokens: -162
+            compressionRatio: 1.059
       - command: health
         diagnostic:
           schema: ee.output_size_diagnostic.v1

@@ -3,6 +3,7 @@ success: false
 data:
   command: doctor
   version: 0.1.0
+  posture: degraded_recoverable
   healthy: false
   checks[5]:
     - name: runtime

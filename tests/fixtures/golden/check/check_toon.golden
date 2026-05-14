@@ -1,12 +1,12 @@
 schema: ee.response.v1
-success: true
+success: false
 data:
   command: check
   version: 0.1.0
-  posture: degraded
-  workspaceInitialized: true
-  databaseReady: true
+  posture: needs_attention
+  workspaceInitialized: false
+  databaseReady: false
   searchReady: false
   runtimeReady: true
   suggestedActions[1]{priority,command,reason}:
-    3,ee index status --workspace . --json,Inspect search index readiness before rebuilding.
+    1,ee init --workspace .,Initialize workspace to enable memory storage.
