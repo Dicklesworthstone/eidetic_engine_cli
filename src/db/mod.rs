@@ -3692,6 +3692,104 @@ CREATE INDEX idx_memories_logical_id ON memories(logical_id);
     "blake3:v043_memory_logical_id_2026_05_13",
 );
 
+/// V044: Backfill revision validity starts for N15 immutable revisions.
+///
+/// V016 introduced nullable temporal windows because SQLite cannot add
+/// a NOT NULL column to an existing table without a constant default.
+/// N15.1 makes revision validity part of the immutable memory contract:
+/// every stored memory has a `valid_from` timestamp, and superseded
+/// revisions are identified by `valid_to IS NOT NULL`.
+pub const V044_MEMORY_VALID_FROM_BACKFILL: Migration = Migration::new(
+    44,
+    "memory_valid_from_backfill",
+    r#"
+UPDATE memories
+SET valid_from = created_at
+WHERE valid_from IS NULL;
+"#,
+    "blake3:v044_memory_valid_from_backfill_2026_05_14",
+);
+
+/// V045: Admit typed graph snapshot subgraphs for the F1 multi-graph framework.
+///
+/// Graph snapshots already store `graph_type` as text, but the V015 table
+/// constrains the allowed values. Rebuild the table with the typed-subgraph
+/// values so future F1 builders can persist distinct snapshot families.
+pub const V045_GRAPH_SNAPSHOT_TYPED_SUBGRAPHS: Migration = Migration::new(
+    45,
+    "graph_snapshot_typed_subgraphs",
+    r#"
+ALTER TABLE graph_snapshots RENAME TO graph_snapshots_v044;
+
+CREATE TABLE graph_snapshots (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'gsnap_*' AND length(id) = 31),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    snapshot_version INTEGER NOT NULL CHECK (snapshot_version > 0),
+    schema_version TEXT NOT NULL CHECK (length(trim(schema_version)) > 0),
+    graph_type TEXT NOT NULL CHECK (graph_type IN (
+        'memory_links',
+        'session_graph',
+        'procedure_graph',
+        'evidence_graph',
+        'composite',
+        'causal_evidence',
+        'revision_dag',
+        'rule_provenance',
+        'contradiction_subgraph'
+    )),
+    node_count INTEGER NOT NULL CHECK (node_count >= 0),
+    edge_count INTEGER NOT NULL CHECK (edge_count >= 0),
+    metrics_json TEXT NOT NULL CHECK (json_valid(metrics_json)),
+    content_hash TEXT NOT NULL CHECK (content_hash GLOB 'blake3:*'),
+    source_generation INTEGER NOT NULL CHECK (source_generation >= 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    expires_at TEXT CHECK (expires_at IS NULL OR length(trim(expires_at)) > 0),
+    status TEXT NOT NULL DEFAULT 'valid' CHECK (status IN (
+        'valid', 'stale', 'invalid', 'archived'
+    )),
+    UNIQUE (workspace_id, graph_type, snapshot_version)
+);
+
+INSERT INTO graph_snapshots (
+    id,
+    workspace_id,
+    snapshot_version,
+    schema_version,
+    graph_type,
+    node_count,
+    edge_count,
+    metrics_json,
+    content_hash,
+    source_generation,
+    created_at,
+    expires_at,
+    status
+)
+SELECT
+    id,
+    workspace_id,
+    snapshot_version,
+    schema_version,
+    graph_type,
+    node_count,
+    edge_count,
+    metrics_json,
+    content_hash,
+    source_generation,
+    created_at,
+    expires_at,
+    status
+FROM graph_snapshots_v044;
+
+CREATE INDEX idx_graph_snapshots_v045_workspace ON graph_snapshots(workspace_id);
+CREATE INDEX idx_graph_snapshots_v045_type ON graph_snapshots(graph_type);
+CREATE INDEX idx_graph_snapshots_v045_version ON graph_snapshots(snapshot_version);
+CREATE INDEX idx_graph_snapshots_v045_status ON graph_snapshots(status);
+CREATE INDEX idx_graph_snapshots_v045_created ON graph_snapshots(created_at);
+"#,
+    "blake3:v045_graph_snapshot_typed_subgraphs_2026_05_14",
+);
+
 /// V042: Allow every pack omission reason emitted by the packer.
 pub const V042_PACK_OMISSION_REASONS: Migration = Migration::new(
     42,
@@ -3851,6 +3949,8 @@ pub const MIGRATIONS: &[Migration] = &[
     V041_BAYES_POSTERIOR,
     V042_PACK_OMISSION_REASONS,
     V043_LOGICAL_ID,
+    V044_MEMORY_VALID_FROM_BACKFILL,
+    V045_GRAPH_SNAPSHOT_TYPED_SUBGRAPHS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -7754,6 +7854,8 @@ impl DbConnection {
         // SAME logical_id but a fresh id, and UPDATE the prior row's
         // `valid_to`. Until then, every memory's chain is a singleton —
         // logical_id is equal to id and the field is informational.
+        let valid_from = input.valid_from.clone().unwrap_or_else(|| now.clone());
+
         self.execute_for(
             DbOperation::Execute,
             "INSERT INTO memories (id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, created_at, updated_at, valid_from, valid_to, logical_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
@@ -7775,7 +7877,7 @@ impl DbConnection {
                 Value::Text(PROVENANCE_STATUS_UNVERIFIED.to_string()),
                 Value::Text(now.clone()),
                 Value::Text(now),
-                input.valid_from.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                Value::Text(valid_from),
                 input.valid_to.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
                 Value::Text(id.to_string()),
             ],
@@ -7846,7 +7948,7 @@ impl DbConnection {
         }
 
         if !include_tombstoned {
-            sql.push_str(" AND tombstoned_at IS NULL");
+            sql.push_str(" AND tombstoned_at IS NULL AND valid_to IS NULL");
         }
 
         sql.push_str(" ORDER BY id ASC");
@@ -7865,7 +7967,7 @@ impl DbConnection {
     ) -> Result<Vec<StoredMemory>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND workflow_id = ?2 AND id <> ?3 AND tombstoned_at IS NULL ORDER BY created_at DESC, id ASC LIMIT ?4",
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND workflow_id = ?2 AND id <> ?3 AND tombstoned_at IS NULL AND valid_to IS NULL ORDER BY created_at DESC, id ASC LIMIT ?4",
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::Text(workflow_id.to_string()),
@@ -7971,6 +8073,7 @@ impl DbConnection {
                 trust_subclass: input.trust_subclass.as_deref(),
                 created_at: &now,
             });
+        let valid_from = input.valid_from.clone().unwrap_or_else(|| now.clone());
         self.execute_for(
             DbOperation::Execute,
             "INSERT INTO memories (id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, created_at, updated_at, valid_from, valid_to, logical_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
@@ -7992,7 +8095,7 @@ impl DbConnection {
                 Value::Text(PROVENANCE_STATUS_UNVERIFIED.to_string()),
                 Value::Text(now.clone()),
                 Value::Text(now),
-                input.valid_from.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                Value::Text(valid_from),
                 input.valid_to.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
                 Value::Text(logical_id.to_string()),
             ],
@@ -8290,7 +8393,7 @@ impl DbConnection {
     pub fn get_tag_counts(&self, workspace_id: &str) -> Result<Vec<TagCount>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT mt.tag, COUNT(*) as count FROM memory_tags mt JOIN memories m ON mt.memory_id = m.id WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL GROUP BY mt.tag ORDER BY count DESC, mt.tag ASC",
+            "SELECT mt.tag, COUNT(*) as count FROM memory_tags mt JOIN memories m ON mt.memory_id = m.id WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND m.valid_to IS NULL GROUP BY mt.tag ORDER BY count DESC, mt.tag ASC",
             &[Value::Text(workspace_id.to_string())],
         )?;
 
@@ -8307,7 +8410,7 @@ impl DbConnection {
     pub fn list_memories_by_tag(&self, workspace_id: &str, tag: &str) -> Result<Vec<String>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT m.id FROM memories m JOIN memory_tags mt ON m.id = mt.memory_id WHERE m.workspace_id = ?1 AND mt.tag = ?2 AND m.tombstoned_at IS NULL ORDER BY m.id ASC",
+            "SELECT m.id FROM memories m JOIN memory_tags mt ON m.id = mt.memory_id WHERE m.workspace_id = ?1 AND mt.tag = ?2 AND m.tombstoned_at IS NULL AND m.valid_to IS NULL ORDER BY m.id ASC",
             &[Value::Text(workspace_id.to_string()), Value::Text(tag.to_string())],
         )?;
 
@@ -9491,7 +9594,7 @@ impl DbConnection {
     ) -> Result<Vec<WorkflowMemoryPromotion>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND workflow_id = ?2 AND level = 'working' AND tombstoned_at IS NULL AND importance >= 0.5 ORDER BY id ASC",
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND workflow_id = ?2 AND level = 'working' AND tombstoned_at IS NULL AND valid_to IS NULL AND importance >= 0.5 ORDER BY id ASC",
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::Text(workflow_id.to_string()),
@@ -13032,6 +13135,10 @@ pub enum GraphSnapshotType {
     ProcedureGraph,
     EvidenceGraph,
     Composite,
+    CausalEvidence,
+    RevisionDag,
+    RuleProvenance,
+    ContradictionSubgraph,
 }
 
 impl GraphSnapshotType {
@@ -13043,6 +13150,10 @@ impl GraphSnapshotType {
             Self::ProcedureGraph => "procedure_graph",
             Self::EvidenceGraph => "evidence_graph",
             Self::Composite => "composite",
+            Self::CausalEvidence => "causal_evidence",
+            Self::RevisionDag => "revision_dag",
+            Self::RuleProvenance => "rule_provenance",
+            Self::ContradictionSubgraph => "contradiction_subgraph",
         }
     }
 }
@@ -13063,6 +13174,10 @@ impl std::str::FromStr for GraphSnapshotType {
             "procedure_graph" => Ok(Self::ProcedureGraph),
             "evidence_graph" => Ok(Self::EvidenceGraph),
             "composite" => Ok(Self::Composite),
+            "causal_evidence" => Ok(Self::CausalEvidence),
+            "revision_dag" => Ok(Self::RevisionDag),
+            "rule_provenance" => Ok(Self::RuleProvenance),
+            "contradiction_subgraph" => Ok(Self::ContradictionSubgraph),
             other => Err(format!("unknown graph snapshot type: {other}")),
         }
     }
@@ -16982,9 +17097,23 @@ mod tests {
 
         connection.insert_memory("mem_00000000000000000000000001", &rule)?;
         connection.insert_memory("mem_00000000000000000000000002", &fact)?;
+        let expired_rule = super::CreateMemoryInput {
+            content: "Expired rule content".to_string(),
+            valid_to: Some("2026-01-02T00:00:00Z".to_string()),
+            ..rule.clone()
+        };
+        connection.insert_memory("mem_00000000000000000000000030", &expired_rule)?;
 
         let all = connection.list_memories("wsp_01234567890123456789012345", None, false)?;
         ensure_equal(&all.len(), &2, "list all returns 2")?;
+        ensure(
+            all.iter().all(|memory| memory.valid_to.is_none()),
+            "default list excludes superseded memories",
+        )?;
+        ensure(
+            all.iter().all(|memory| memory.valid_from.is_some()),
+            "inserted memories receive valid_from",
+        )?;
 
         let procedural = connection.list_memories(
             "wsp_01234567890123456789012345",
@@ -17005,6 +17134,16 @@ mod tests {
             &semantic[0].kind.as_str(),
             &"fact",
             "filtered memory is fact",
+        )?;
+
+        let with_history =
+            connection.list_memories("wsp_01234567890123456789012345", None, true)?;
+        ensure_equal(&with_history.len(), &3, "history-inclusive list returns 3")?;
+        ensure(
+            with_history
+                .iter()
+                .any(|memory| memory.id == "mem_00000000000000000000000030"),
+            "history-inclusive list includes superseded memory",
         )?;
 
         connection.close()?;
@@ -19274,6 +19413,12 @@ mod tests {
         connection.insert_memory("mem_tagcount000000000000000001", &mem1)?;
         connection.insert_memory("mem_tagcount000000000000000002", &mem2)?;
         connection.insert_memory("mem_tagcount000000000000000003", &mem3)?;
+        let expired = super::CreateMemoryInput {
+            content: "Expired common tag".to_string(),
+            valid_to: Some("2026-01-02T00:00:00Z".to_string()),
+            ..mem3.clone()
+        };
+        connection.insert_memory("mem_tagcount000000000000000004", &expired)?;
 
         let counts = connection.get_tag_counts("wsp_01234567890123456789012345")?;
         ensure_equal(&counts.len(), &2, "two unique tags")?;
@@ -19326,7 +19471,7 @@ mod tests {
             trust_subclass: None,
             tags: vec!["target".to_string(), "extra".to_string()],
             valid_from: None,
-            valid_to: None,
+            valid_to: Some("2026-01-02T00:00:00Z".to_string()),
         };
         let mem3 = super::CreateMemoryInput {
             workspace_id: "wsp_01234567890123456789012345".to_string(),
@@ -19351,14 +19496,14 @@ mod tests {
 
         let memories =
             connection.list_memories_by_tag("wsp_01234567890123456789012345", "target")?;
-        ensure_equal(&memories.len(), &2, "two memories with target tag")?;
+        ensure_equal(&memories.len(), &1, "one live memory with target tag")?;
         ensure(
             memories.contains(&"mem_bytag000000000000000000001".to_string()),
             "first memory included",
         )?;
         ensure(
-            memories.contains(&"mem_bytag000000000000000000002".to_string()),
-            "second memory included",
+            !memories.contains(&"mem_bytag000000000000000000002".to_string()),
+            "superseded tagged memory excluded",
         )?;
 
         let other = connection.list_memories_by_tag("wsp_01234567890123456789012345", "other")?;
