@@ -18,6 +18,8 @@
 //!    breaks this test loudly.
 //! 5. Two consecutive revises produce revision_number 2 and 3 with
 //!    the same logical_id. Chains compose; counts increment.
+//! 6. Superseded historical rows cannot be revised again; callers must
+//!    revise the current live row to keep the revision chain linear.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -298,6 +300,59 @@ fn two_revises_compose_into_chain_of_three() -> TestResult {
     if second_vt.is_some() {
         return Err(format!(
             "latest revision must be live (valid_to=NULL); got {second_vt:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn superseded_original_cannot_be_revised_again() -> TestResult {
+    let seed = seed_workspace("Original content for fork rejection test.")?;
+    let first = revise(
+        &seed.workspace,
+        &seed.db_path,
+        &seed.original_id,
+        "First live revision.",
+    )?;
+    let first_id = first
+        .new_id
+        .as_deref()
+        .ok_or_else(|| "first revision missing new_id".to_string())?;
+
+    let report = revise_memory(&ReviseMemoryOptions {
+        database_path: &seed.db_path,
+        original_memory_id: &seed.original_id,
+        content: Some("Attempted branch from superseded original."),
+        level: None,
+        kind: None,
+        confidence: None,
+        tags: None,
+        provenance_uri: None,
+        reason: ReviseReason::Correction,
+        actor: Some("contract-test"),
+        dry_run: false,
+    });
+
+    if report.success {
+        return Err(format!(
+            "revising superseded original {} should fail, produced new_id={:?}",
+            seed.original_id, report.new_id
+        ));
+    }
+    let error = report
+        .error
+        .as_deref()
+        .ok_or_else(|| "superseded revise failure should include an error".to_string())?;
+    if !error.contains("superseded") {
+        return Err(format!(
+            "superseded revise error should mention superseded, got {error:?}"
+        ));
+    }
+
+    let current_ids = fetch_current_memory_ids(&seed.db_path, &seed.workspace_id)?;
+    if current_ids != vec![first_id.to_string()] {
+        return Err(format!(
+            "failed fork attempt must leave only first live revision; current_ids={current_ids:?}"
         ));
     }
     Ok(())

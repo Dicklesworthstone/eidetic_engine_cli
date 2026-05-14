@@ -5105,6 +5105,25 @@ impl MemoryReviseReport {
         }
     }
 
+    /// Create a superseded-revision error report.
+    #[must_use]
+    pub fn superseded(original_id: String) -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            dry_run: false,
+            success: false,
+            original_id,
+            new_id: None,
+            revision_group_id: None,
+            revision_number: None,
+            reason: String::new(),
+            changed_fields: Vec::new(),
+            error: Some(
+                "Cannot revise superseded memory; revise the current revision instead".to_owned(),
+            ),
+        }
+    }
+
     /// Create a no-changes error report.
     #[must_use]
     pub fn no_changes(original_id: String) -> Self {
@@ -5173,6 +5192,10 @@ pub fn revise_memory(options: &ReviseMemoryOptions<'_>) -> MemoryReviseReport {
     // Check if tombstoned
     if original.tombstoned_at.is_some() {
         return MemoryReviseReport::tombstoned(options.original_memory_id.to_owned());
+    }
+
+    if original.valid_to.is_some() {
+        return MemoryReviseReport::superseded(options.original_memory_id.to_owned());
     }
 
     // Determine what fields are changing
