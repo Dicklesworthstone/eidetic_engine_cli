@@ -1000,6 +1000,8 @@ impl EffectManifest {
                 "claim verify",
                 "Verify executable claim evidence without mutating source records",
             ),
+            CommandEffect::read_only("config get", "Read one merged config key"),
+            CommandEffect::read_only("config show", "Show merged config values"),
             CommandEffect::read_only("context", "Assemble context pack (reads only)"),
             CommandEffect::read_only("completion", "Generate shell completion scripts"),
             CommandEffect::read_only("db status", "Report database status"),
@@ -1576,6 +1578,12 @@ impl EffectManifest {
                 vec![".ee/config.toml"],
                 "workspace profile config path plus requested profile",
                 "Apply operating profile configuration to the workspace config file",
+            ),
+            CommandEffect::config_file_write(
+                "config set",
+                vec![".ee/config.toml"],
+                "workspace config path plus exact config key and scalar value",
+                "Set a supported workspace configuration key",
             ),
             CommandEffect::config_file_write(
                 "certificate keygen",

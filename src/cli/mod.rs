@@ -51,6 +51,10 @@ use crate::core::causal::{
     trace_causal_chains_from_store,
 };
 use crate::core::check::CheckReport;
+use crate::core::config_surface::{
+    ConfigGetReport, ConfigSetReport, ConfigSurfaceError, ConfigSurfaceOptions, get_config,
+    set_config, show_config,
+};
 use crate::core::context::{
     ContextPackError, ContextPackOptions, ContextPackOutputOptionOverrides,
     ContextPackOutputOptions, ContextPackOutputProfile, run_context_pack,
@@ -560,6 +564,9 @@ pub enum Command {
     ContextShow(ContextShowArgs),
     /// Generate shell completion scripts for ee.
     Completion(CompletionArgs),
+    /// Inspect and update workspace configuration.
+    #[command(subcommand)]
+    Config(ConfigCommand),
     /// Review curation proposals without silently mutating memory.
     #[command(subcommand)]
     Curate(CurateCommand),
@@ -4397,6 +4404,57 @@ pub struct PerfBudgetCheckArgs {
     pub report: PathBuf,
 }
 
+/// Subcommands for `ee config`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum ConfigCommand {
+    /// Show merged config values, optionally filtered by pattern.
+    Show(ConfigShowArgs),
+    /// Get one config key with source attribution.
+    Get(ConfigGetArgs),
+    /// Set one workspace config key in `.ee/config.toml`.
+    Set(ConfigSetArgs),
+}
+
+/// Arguments for `ee config show`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct ConfigShowArgs {
+    /// Optional key or glob-style namespace pattern, such as graph.*.
+    pub pattern: Option<String>,
+
+    /// Config path to inspect. Defaults to <workspace>/.ee/config.toml.
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+}
+
+/// Arguments for `ee config get`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ConfigGetArgs {
+    /// Exact config key to read, such as graph.ppr.alpha.
+    pub key: String,
+
+    /// Config path to inspect. Defaults to <workspace>/.ee/config.toml.
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+}
+
+/// Arguments for `ee config set`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ConfigSetArgs {
+    /// Exact config key to write, such as graph.ppr.alpha.
+    pub key: String,
+
+    /// New scalar value.
+    pub value: String,
+
+    /// Config path to update. Defaults to <workspace>/.ee/config.toml.
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+
+    /// Report the planned write without mutating the config file.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
 /// Subcommands for `ee profile`.
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum ProfileCommand {
@@ -7613,6 +7671,9 @@ where
         Some(Command::Context(ref args)) => handle_context(&cli, args, stdout, stderr),
         Some(Command::ContextShow(ref args)) => handle_context_show(&cli, args, stdout, stderr),
         Some(Command::Completion(ref args)) => handle_completion(&cli, args, stdout),
+        Some(Command::Config(ref config_cmd)) => {
+            handle_config_command(&cli, config_cmd, stdout, stderr)
+        }
         Some(Command::Db(ref db_cmd)) => match db_cmd {
             DbCommand::Status(args) => handle_db_status(&cli, args, stdout),
             DbCommand::Check(args) => handle_db_check(&cli, args, stdout),
@@ -13486,6 +13547,219 @@ fn append_perf_next_commands(out: &mut String, next_commands: &[String]) {
     out.push_str("Next:\n");
     for command in next_commands.iter().take(3) {
         out.push_str(&format!("  {command}\n"));
+    }
+}
+
+fn handle_config_command<W, E>(
+    cli: &Cli,
+    command: &ConfigCommand,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_root =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    match command {
+        ConfigCommand::Show(args) => {
+            let options = ConfigSurfaceOptions {
+                workspace_root,
+                config_path: args.config.clone(),
+            };
+            match show_config(&options, args.pattern.as_deref()) {
+                Ok(report) => write_config_show_report(cli, &report, stdout),
+                Err(error) => {
+                    let domain_error = config_surface_error_to_domain(error);
+                    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+                }
+            }
+        }
+        ConfigCommand::Get(args) => {
+            let options = ConfigSurfaceOptions {
+                workspace_root,
+                config_path: args.config.clone(),
+            };
+            match get_config(&options, &args.key) {
+                Ok(report) => write_config_get_report(cli, &report, stdout),
+                Err(error) => {
+                    let domain_error = config_surface_error_to_domain(error);
+                    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+                }
+            }
+        }
+        ConfigCommand::Set(args) => {
+            let options = ConfigSurfaceOptions {
+                workspace_root,
+                config_path: args.config.clone(),
+            };
+            match set_config(&options, &args.key, &args.value, args.dry_run) {
+                Ok(report) => write_config_set_report(cli, &report, stdout),
+                Err(error) => {
+                    let domain_error = config_surface_error_to_domain(error);
+                    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+                }
+            }
+        }
+    }
+}
+
+fn write_config_show_report<W>(
+    cli: &Cli,
+    report: &crate::config::ConfigShowReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &config_show_human_output(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&serde_json::json!(report).to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_config_success(stdout, serde_json::json!(report)),
+    }
+}
+
+fn write_config_get_report<W>(
+    cli: &Cli,
+    report: &ConfigGetReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &config_get_human_output(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&serde_json::json!(report).to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_config_success(stdout, serde_json::json!(report)),
+    }
+}
+
+fn write_config_set_report<W>(
+    cli: &Cli,
+    report: &ConfigSetReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &config_set_human_output(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&serde_json::json!(report).to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_config_success(stdout, serde_json::json!(report)),
+    }
+}
+
+fn write_config_success<W>(stdout: &mut W, data: serde_json::Value) -> ProcessExitCode
+where
+    W: Write,
+{
+    let rendered = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": data,
+    });
+    write_stdout(stdout, &(rendered.to_string() + "\n"))
+}
+
+fn config_show_human_output(report: &crate::config::ConfigShowReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Config show: {} entries\n", report.entry_count));
+    for entry in &report.entries {
+        out.push_str(&format!(
+            "  {} = {} ({})\n",
+            entry.key, entry.value, entry.source
+        ));
+    }
+    out
+}
+
+fn config_get_human_output(report: &ConfigGetReport) -> String {
+    format!("{} = {} ({})\n", report.key, report.value, report.source)
+}
+
+fn config_set_human_output(report: &ConfigSetReport) -> String {
+    let result = if report.applied {
+        "written"
+    } else if report.would_write {
+        "planned"
+    } else {
+        "unchanged"
+    };
+    let before = report.before.as_deref().unwrap_or("<unset>");
+    let mut out = String::new();
+    out.push_str(&format!("Config set {}: {result}\n", report.key));
+    out.push_str(&format!("  Config: {}\n", report.config_path));
+    out.push_str(&format!("  Value: {before} -> {}\n", report.value));
+    out.push_str(&format!("  Dry-run: {}\n", report.dry_run));
+    if let Some(repair) = report.repair {
+        out.push_str(&format!("  Next: {repair}\n"));
+    }
+    out
+}
+
+fn config_surface_error_to_domain(error: ConfigSurfaceError) -> DomainError {
+    match error {
+        ConfigSurfaceError::UnknownKey { key } => DomainError::Configuration {
+            message: format!("Unknown config key `{key}`."),
+            repair: Some(
+                "Use `ee config show graph.* --json` to list supported graph keys.".into(),
+            ),
+        },
+        ConfigSurfaceError::InvalidPattern { pattern } => DomainError::Configuration {
+            message: format!("Unsupported config pattern `{pattern}`."),
+            repair: Some("Use `*`, `graph.*`, or an exact graph config key.".into()),
+        },
+        ConfigSurfaceError::InvalidValue {
+            key,
+            value,
+            expected,
+        } => DomainError::Configuration {
+            message: format!("Invalid value `{value}` for `{key}`; expected {expected}."),
+            repair: Some(
+                "Choose a value inside the documented range and retry `ee config set`.".into(),
+            ),
+        },
+        ConfigSurfaceError::Environment { source } => DomainError::Configuration {
+            message: format!("Could not load config defaults or environment: {source}"),
+            repair: Some("Check EE_* environment variables and path expansion inputs.".into()),
+        },
+        ConfigSurfaceError::Read { path, source } => DomainError::Configuration {
+            message: format!("Could not read config `{}`: {source}", path.display()),
+            repair: Some("Check the config path and file permissions.".into()),
+        },
+        ConfigSurfaceError::Parse { path, message } => DomainError::Configuration {
+            message: format!("Could not parse config `{}`: {message}", path.display()),
+            repair: Some("Fix .ee/config.toml, then rerun `ee config show --json`.".into()),
+        },
+        ConfigSurfaceError::Write { path, source } => DomainError::Configuration {
+            message: format!("Could not write config `{}`: {source}", path.display()),
+            repair: Some("Check the parent directory and file permissions.".into()),
+        },
     }
 }
 
@@ -31902,6 +32176,7 @@ const COMMAND_NAMES: &[&str] = &[
     "certificate",
     "check",
     "claim",
+    "config",
     "context",
     "curate",
     "daemon",
@@ -31966,6 +32241,7 @@ const BACKUP_SUBCOMMANDS: &[&str] = &["create", "list", "inspect", "restore", "v
 const CAUSAL_SUBCOMMANDS: &[&str] = &["trace", "compare", "estimate", "promote-plan"];
 const CERTIFICATE_SUBCOMMANDS: &[&str] = &["list", "show", "verify"];
 const CLAIM_SUBCOMMANDS: &[&str] = &["list", "show", "verify"];
+const CONFIG_SUBCOMMANDS: &[&str] = &["show", "get", "set"];
 const CURATE_SUBCOMMANDS: &[&str] = &[
     "candidates",
     "validate",
@@ -32175,6 +32451,11 @@ impl NormalizedInvocation {
                 Command::Context(_) => "context".to_string(),
                 Command::ContextShow(_) => "context-show".to_string(),
                 Command::Completion(_) => "completion".to_string(),
+                Command::Config(config) => match config {
+                    ConfigCommand::Show(_) => "config show".to_string(),
+                    ConfigCommand::Get(_) => "config get".to_string(),
+                    ConfigCommand::Set(_) => "config set".to_string(),
+                },
                 Command::Db(db) => match db {
                     DbCommand::Status(_) => "db status".to_string(),
                     DbCommand::Check(_) => "db check".to_string(),
@@ -32561,6 +32842,7 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "causal" => Some(CAUSAL_SUBCOMMANDS),
         "certificate" => Some(CERTIFICATE_SUBCOMMANDS),
         "claim" => Some(CLAIM_SUBCOMMANDS),
+        "config" => Some(CONFIG_SUBCOMMANDS),
         "curate" => Some(CURATE_SUBCOMMANDS),
         "demo" => Some(DEMO_SUBCOMMANDS),
         "diag" => Some(DIAG_SUBCOMMANDS),

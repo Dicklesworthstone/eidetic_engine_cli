@@ -18,6 +18,7 @@ pub mod causal;
 pub mod certificate;
 pub mod check;
 pub mod claims;
+pub mod config_surface;
 pub mod context;
 pub mod curate;
 pub mod degraded_honesty;
@@ -200,6 +201,8 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
             "profile_config_plan",
             profile::PROFILE_CONFIG_PLAN_SCHEMA_V1,
         ),
+        SupportedSchema::new("config_get", config_surface::CONFIG_GET_SCHEMA_V1),
+        SupportedSchema::new("config_set", config_surface::CONFIG_SET_SCHEMA_V1),
         SupportedSchema::new(
             "verification_recipe",
             profile::VERIFICATION_RECIPE_SCHEMA_V1,
