@@ -537,8 +537,11 @@ fn effect_manifest_tracks_degraded_unavailable_paths_as_non_mutating() -> TestRe
 
     let manifest = EffectManifest::build();
 
+    // N15.2 (bd-17c65.14.15.3) retired `revision_write_unavailable` from
+    // `memory revise` when the real write path turned on. The remaining
+    // entries here are the surfaces still in their honesty-only
+    // abstention state.
     for (command, code) in [
-        ("memory revise", "revision_write_unavailable"),
         ("lab replay", "lab_replay_unavailable"),
         ("economy report", "economy_metrics_unavailable"),
     ] {

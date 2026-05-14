@@ -297,12 +297,7 @@ fn memory_revise_effect_is_durable_write_not_degraded_unavailable() -> TestResul
     if !entry.requires_audit {
         return Err("memory revise must require an audit entry".to_string());
     }
-    if !entry
-        .write_surfaces
-        .db_tables
-        .iter()
-        .any(|t| *t == "memories")
-    {
+    if !entry.write_surfaces.db_tables.contains(&"memories") {
         return Err(format!(
             "memory revise write_surfaces.db_tables must include `memories`, got {:?}",
             entry.write_surfaces.db_tables
