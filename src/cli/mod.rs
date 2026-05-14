@@ -32536,6 +32536,7 @@ impl NormalizedInvocation {
                 Command::Health => "health".to_string(),
                 Command::Help => "help".to_string(),
                 Command::Init(_) => "init".to_string(),
+                Command::Insights(_) => "insights".to_string(),
                 Command::Import(import) => match import {
                     ImportCommand::Cass(_) => "import cass".to_string(),
                     ImportCommand::Jsonl(_) => "import jsonl".to_string(),
