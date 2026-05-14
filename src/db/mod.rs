@@ -8380,7 +8380,7 @@ impl DbConnection {
     pub fn list_all_tags(&self, workspace_id: &str) -> Result<Vec<String>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT DISTINCT mt.tag FROM memory_tags mt JOIN memories m ON mt.memory_id = m.id WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL ORDER BY mt.tag ASC",
+            "SELECT DISTINCT mt.tag FROM memory_tags mt JOIN memories m ON mt.memory_id = m.id WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND m.valid_to IS NULL ORDER BY mt.tag ASC",
             &[Value::Text(workspace_id.to_string())],
         )?;
 
@@ -19415,10 +19415,17 @@ mod tests {
         connection.insert_memory("mem_tagcount000000000000000003", &mem3)?;
         let expired = super::CreateMemoryInput {
             content: "Expired common tag".to_string(),
+            tags: vec!["common".to_string(), "expired-only".to_string()],
             valid_to: Some("2026-01-02T00:00:00Z".to_string()),
             ..mem3.clone()
         };
         connection.insert_memory("mem_tagcount000000000000000004", &expired)?;
+
+        let all_tags = connection.list_all_tags("wsp_01234567890123456789012345")?;
+        ensure(
+            !all_tags.contains(&"expired-only".to_string()),
+            "live tag list excludes expired-only tag",
+        )?;
 
         let counts = connection.get_tag_counts("wsp_01234567890123456789012345")?;
         ensure_equal(&counts.len(), &2, "two unique tags")?;

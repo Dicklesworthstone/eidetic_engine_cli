@@ -158,7 +158,6 @@ fi
 require_jq
 epic_setup "epic_F4_graph_determinism"
 
-seed_corpus
 MEM_A=$("$EE_BINARY" remember "Graph determinism source memory." \
     --workspace "$EPIC_WORKSPACE" --level semantic --kind note --json 2>/dev/null \
     | jq -r '.data.memory.id // .data.memory_id // .data.id // empty' 2>/dev/null || true)

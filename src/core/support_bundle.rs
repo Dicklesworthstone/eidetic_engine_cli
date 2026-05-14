@@ -1151,7 +1151,7 @@ fn collect_search_cache_hotset_entries(
         "SELECT m.id, COALESCE(COUNT(pi.memory_id), 0) AS hits
          FROM memories m
          LEFT JOIN pack_items pi ON pi.memory_id = m.id
-         WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL
+         WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND m.valid_to IS NULL
          GROUP BY m.id
          ORDER BY hits DESC, m.importance DESC, m.utility DESC, m.id ASC
          LIMIT 8",
@@ -1185,7 +1185,7 @@ fn collect_search_cache_hotset_entries(
         "SELECT ml.src_memory_id, COUNT(*) AS hits
          FROM memory_links ml
          JOIN memories m ON m.id = ml.src_memory_id
-         WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL
+         WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND m.valid_to IS NULL
          GROUP BY ml.src_memory_id
          ORDER BY hits DESC, ml.src_memory_id ASC
          LIMIT 4",
