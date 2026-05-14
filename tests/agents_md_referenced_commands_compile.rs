@@ -97,6 +97,9 @@ fn shell_tokenize(text: &str) -> Result<Vec<String>, String> {
             continue;
         }
         match ch {
+            '#' if !in_single && !in_double && current.is_empty() => {
+                break;
+            }
             '\\' if !in_single => {
                 escape = true;
             }
@@ -216,4 +219,32 @@ fn extractor_finds_at_least_a_few_examples() {
          separate skipped test.",
         candidates.len()
     );
+}
+
+#[test]
+fn shell_tokenize_strips_unquoted_inline_comments() -> TestResult {
+    let argv = shell_tokenize(
+        "ee context \"<task>\" --workspace . --json # use pack.text as prompt fragment",
+    )?;
+
+    assert_eq!(
+        argv,
+        vec!["ee", "context", "<task>", "--workspace", ".", "--json"]
+    );
+
+    let argv = shell_tokenize("ee remember \"hash#inside\" --tag foo#bar --json")?;
+
+    assert_eq!(
+        argv,
+        vec![
+            "ee",
+            "remember",
+            "hash#inside",
+            "--tag",
+            "foo#bar",
+            "--json"
+        ]
+    );
+
+    Ok(())
 }

@@ -27,7 +27,8 @@
     "repair_strings": [
       "Provide a redacted Agent Mail snapshot path when collecting the brief.",
       "Regenerate the redacted Agent Mail snapshot.",
-      "Check the configured Agent Mail snapshot path."
+      "Check the configured Agent Mail snapshot path.",
+      "Run `am doctor repair` or provide a current redacted Agent Mail snapshot."
     ]
   }
 }

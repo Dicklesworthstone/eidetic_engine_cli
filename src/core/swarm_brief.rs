@@ -414,6 +414,15 @@ pub struct SwarmBriefBeadsSummary {
     pub blocked: Vec<SwarmBriefBead>,
     pub in_progress: Vec<SwarmBriefBead>,
     pub deferred: Vec<SwarmBriefBead>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependency_cycle_summary: Option<SwarmBriefBeadsDependencyCycleSummary>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmBriefBeadsDependencyCycleSummary {
+    pub count: u64,
+    pub examples: Vec<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -799,6 +808,8 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for BeadsSourceAdapter<
             "deferred",
             &mut bucket_degraded,
         );
+        let dependency_cycle_summary =
+            collect_beads_dependency_cycles(self.runner, options, &mut degraded);
 
         if ready.is_empty()
             && blocked.is_empty()
@@ -828,16 +839,51 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for BeadsSourceAdapter<
             blocked,
             in_progress,
             deferred,
+            dependency_cycle_summary,
         };
         let item_count = summary.ready.len()
             + summary.blocked.len()
             + summary.in_progress.len()
-            + summary.deferred.len();
+            + summary.deferred.len()
+            + summary
+                .dependency_cycle_summary
+                .as_ref()
+                .map_or(0, |cycles| cycles.count as usize);
         SwarmBriefSourceOutput {
             snapshot: SwarmBriefSourceSnapshot::ready(source, provenance, item_count)
                 .with_freshness(freshness)
                 .with_degraded(degraded),
             contribution: SwarmBriefContribution::Beads(summary),
+        }
+    }
+}
+
+fn collect_beads_dependency_cycles<R: SwarmBriefCommandRunner>(
+    runner: &R,
+    options: &SwarmBriefCollectOptions,
+    degraded: &mut Vec<SwarmBriefDegradation>,
+) -> Option<SwarmBriefBeadsDependencyCycleSummary> {
+    let args = ["dep", "cycles", "--json"];
+    match runner.run("br", &args, &options.workspace, options.command_timeout_ms) {
+        Ok(output) => match parse_beads_dependency_cycles_json(&output.stdout) {
+            Ok(summary) => Some(summary),
+            Err(message) => {
+                degraded.push(SwarmBriefDegradation::warning(
+                    SwarmBriefSourceKind::Beads,
+                    BEADS_UNAVAILABLE_CODE,
+                    message,
+                    Some("br dep cycles --json".to_string()),
+                ));
+                None
+            }
+        },
+        Err(error) => {
+            degraded.push(error.to_degradation(
+                SwarmBriefSourceKind::Beads,
+                BEADS_UNAVAILABLE_CODE,
+                "br dep cycles --json",
+            ));
+            None
         }
     }
 }
@@ -1342,6 +1388,7 @@ fn apply_source_output(report: &mut SwarmBriefReport, output: SwarmBriefSourceOu
             report.beads.blocked.extend(summary.blocked);
             report.beads.in_progress.extend(summary.in_progress);
             report.beads.deferred.extend(summary.deferred);
+            report.beads.dependency_cycle_summary = summary.dependency_cycle_summary;
         }
         SwarmBriefContribution::Bv(summary) => {
             report.bv = Some(summary);
@@ -2567,6 +2614,40 @@ fn parse_beads_sync_status_json(input: &str) -> Result<BeadsSyncStatus, String> 
     })
 }
 
+fn parse_beads_dependency_cycles_json(
+    input: &str,
+) -> Result<SwarmBriefBeadsDependencyCycleSummary, String> {
+    let value = serde_json::from_str::<Value>(input)
+        .map_err(|error| format!("Beads dependency cycles JSON could not be parsed: {error}"))?;
+    let mut examples = value
+        .get("cycles")
+        .and_then(Value::as_array)
+        .map(|cycles| {
+            cycles
+                .iter()
+                .filter_map(|cycle| {
+                    let mut ids = cycle
+                        .as_array()?
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(redact_brief_text)
+                        .collect::<Vec<_>>();
+                    ids.retain(|id| !id.is_empty());
+                    (!ids.is_empty()).then_some(ids)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    examples.sort();
+    examples.dedup();
+    let count = value
+        .get("count")
+        .and_then(Value::as_u64)
+        .unwrap_or(examples.len() as u64);
+    examples.truncate(3);
+    Ok(SwarmBriefBeadsDependencyCycleSummary { count, examples })
+}
+
 fn parse_bead_item(item: &Value, source_bucket: &str) -> Option<SwarmBriefBead> {
     let id = string_field(item, &["id", "issue_id"])?;
     let title = string_field(item, &["title"]).unwrap_or_else(|| id.clone());
@@ -3568,7 +3649,8 @@ mod tests {
             )
             .with_output("br", &["blocked", "--json"], "[]")
             .with_output("br", &["list", "--status", "in_progress", "--json"], "[]")
-            .with_output("br", &["list", "--status", "deferred", "--json"], "[]");
+            .with_output("br", &["list", "--status", "deferred", "--json"], "[]")
+            .with_output("br", &["dep", "cycles", "--json"], r#"{"cycles":[],"count":0}"#);
 
         let output = BeadsSourceAdapter { runner: &runner }.collect(&options);
 
@@ -3609,7 +3691,12 @@ mod tests {
             )
             .with_output("br", &["blocked", "--json"], "[]")
             .with_output("br", &["list", "--status", "in_progress", "--json"], "[]")
-            .with_output("br", &["list", "--status", "deferred", "--json"], "[]");
+            .with_output("br", &["list", "--status", "deferred", "--json"], "[]")
+            .with_output(
+                "br",
+                &["dep", "cycles", "--json"],
+                r#"{"cycles":[],"count":0}"#,
+            );
 
         let output = BeadsSourceAdapter { runner: &runner }.collect(&options);
 
@@ -3624,6 +3711,55 @@ mod tests {
         );
         match output.contribution {
             SwarmBriefContribution::Beads(summary) => assert_eq!(summary.ready.len(), 1),
+            other => panic!("expected Beads contribution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn beads_dependency_cycles_are_collected_in_summary() {
+        let options = SwarmBriefCollectOptions::for_workspace(".");
+        let runner = FakeRunner::default()
+            .with_output(
+                "br",
+                &[
+                    "sync",
+                    "--status",
+                    "--json",
+                    "--no-auto-import",
+                    "--allow-stale",
+                ],
+                r#"{"jsonl_newer":false,"db_newer":false}"#,
+            )
+            .with_output(
+                "br",
+                &["ready", "--json"],
+                r#"[{"id":"bd-ready","title":"Ready work","status":"open"}]"#,
+            )
+            .with_output("br", &["blocked", "--json"], "[]")
+            .with_output("br", &["list", "--status", "in_progress", "--json"], "[]")
+            .with_output("br", &["list", "--status", "deferred", "--json"], "[]")
+            .with_output(
+                "br",
+                &["dep", "cycles", "--json"],
+                r#"{"cycles":[["bd-b","bd-a","bd-b"],["bd-z","bd-y","bd-z"]],"count":2}"#,
+            );
+
+        let output = BeadsSourceAdapter { runner: &runner }.collect(&options);
+
+        assert_eq!(output.snapshot.status, SwarmBriefSourceStatus::Ready);
+        assert_eq!(output.snapshot.item_count, 3);
+        match output.contribution {
+            SwarmBriefContribution::Beads(summary) => {
+                let cycles =
+                    require_some(summary.dependency_cycle_summary, "dependency cycle summary");
+                assert_eq!(cycles.count, 2);
+                assert_eq!(cycles.examples.len(), 2);
+                assert!(cycles.examples.contains(&vec![
+                    "bd-b".to_string(),
+                    "bd-a".to_string(),
+                    "bd-b".to_string()
+                ]));
+            }
             other => panic!("expected Beads contribution, got {other:?}"),
         }
     }
