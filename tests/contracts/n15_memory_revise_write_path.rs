@@ -36,6 +36,7 @@ struct SeededWorkspace {
     _dir: TempDir,
     workspace: PathBuf,
     db_path: PathBuf,
+    workspace_id: String,
     original_id: String,
 }
 
@@ -68,10 +69,16 @@ fn seed_workspace(content: &str) -> Result<SeededWorkspace, String> {
         propose_candidates: false,
     })
     .map_err(|error| format!("remember: {error:?}"))?;
+    let conn = DbConnection::open_file(&db_path).map_err(|error| format!("open db: {error}"))?;
+    let stored = conn
+        .get_memory(&report.memory_id.to_string())
+        .map_err(|error| format!("get_memory: {error}"))?
+        .ok_or_else(|| "remembered memory not found".to_string())?;
     Ok(SeededWorkspace {
         _dir: dir,
         workspace,
         db_path,
+        workspace_id: stored.workspace_id,
         original_id: report.memory_id.to_string(),
     })
 }
@@ -119,6 +126,14 @@ fn fetch_valid_to(db_path: &Path, id: &str) -> Result<Option<String>, String> {
         .map_err(|error| format!("get_memory: {error}"))?
         .ok_or_else(|| format!("memory {id} not found"))?;
     Ok(mem.valid_to)
+}
+
+fn fetch_current_memory_ids(db_path: &Path, workspace_id: &str) -> Result<Vec<String>, String> {
+    let conn = DbConnection::open_file(db_path).map_err(|error| format!("open db: {error}"))?;
+    let memories = conn
+        .list_memories(workspace_id, None, false)
+        .map_err(|error| format!("list_memories: {error}"))?;
+    Ok(memories.into_iter().map(|memory| memory.id).collect())
 }
 
 #[test]
@@ -182,6 +197,19 @@ fn revise_sets_original_valid_to_and_keeps_new_row_live() -> TestResult {
     if new_valid_to.is_some() {
         return Err(format!(
             "new revision row must have valid_to=NULL (live); got {new_valid_to:?}"
+        ));
+    }
+
+    let current_ids = fetch_current_memory_ids(&seed.db_path, &seed.workspace_id)?;
+    if current_ids.contains(&seed.original_id) {
+        return Err(format!(
+            "default current-state queries must exclude superseded original {}; current_ids={current_ids:?}",
+            seed.original_id
+        ));
+    }
+    if !current_ids.contains(&new_id.to_string()) {
+        return Err(format!(
+            "default current-state queries must include live revision {new_id}; current_ids={current_ids:?}"
         ));
     }
     Ok(())

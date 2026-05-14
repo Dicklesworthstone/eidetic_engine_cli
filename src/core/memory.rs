@@ -6387,7 +6387,11 @@ mod tests {
             Some("file://README.md#L74-77".to_string()),
             "provenance uri",
         )?;
-        ensure(memory.valid_from, None, "stored valid_from")?;
+        ensure(
+            memory.valid_from.is_some(),
+            true,
+            "stored valid_from assigned",
+        )?;
         ensure(memory.valid_to, None, "stored valid_to")?;
         let tags = connection
             .get_memory_tags(&report.memory_id.to_string())
