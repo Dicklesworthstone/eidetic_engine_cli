@@ -2175,7 +2175,7 @@ mod tests {
             source_id: Some("operator-note".to_string()),
             reason: Some("The memory directly avoided a release mistake.".to_string()),
             evidence_json: Some(r#"{"outcome":"success","redacted":true}"#.to_string()),
-            session_id: Some("sess_00000000000000000000000001".to_string()),
+            session_id: Some(OUTCOME_TEST_SESSION_ID.to_string()),
             event_id: Some("fb_11234567890123456789012345".to_string()),
             actor: Some("test".to_string()),
             dry_run: false,
@@ -2201,10 +2201,14 @@ mod tests {
         let audit = connection
             .list_audit_by_target("memory", OUTCOME_TEST_MEMORY_ID, None)
             .map_err(|error| error.to_string())?;
-        ensure_equal(&audit.len(), &1_usize, "audit row count")?;
-        let audit_row = audit
+        let feedback_audit = audit
+            .iter()
+            .filter(|row| row.action == crate::db::audit_actions::FEEDBACK_RECORD)
+            .collect::<Vec<_>>();
+        ensure_equal(&feedback_audit.len(), &1_usize, "feedback audit row count")?;
+        let audit_row = feedback_audit
             .first()
-            .ok_or_else(|| "audit row missing after length check".to_string())?;
+            .ok_or_else(|| "feedback audit row missing after length check".to_string())?;
         ensure_equal(
             &audit_row.action,
             &crate::db::audit_actions::FEEDBACK_RECORD.to_string(),

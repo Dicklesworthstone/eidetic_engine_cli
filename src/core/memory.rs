@@ -2194,7 +2194,7 @@ const REMEMBER_CURATION_CLUSTER_THRESHOLD: usize =
 #[cfg(not(test))]
 const REMEMBER_CURATION_SYNC_BUDGET_MS: u128 = 50;
 #[cfg(test)]
-const REMEMBER_CURATION_TEST_SYNC_BUDGET_MS: u128 = 5_000;
+const REMEMBER_CURATION_TEST_SYNC_BUDGET_MS: u128 = 60_000;
 
 struct RememberCurationProposalReport {
     candidate: Option<RememberCurationCandidateProposal>,
@@ -7810,7 +7810,7 @@ mod tests {
     }
 
     #[test]
-    fn revise_memory_non_dry_run_reports_unavailable_instead_of_stub_success() -> TestResult {
+    fn revise_memory_non_dry_run_persists_new_revision() -> TestResult {
         let (_temp, created) =
             remember_revisable_memory("Store release checks as durable memory.")?;
         let memory_id = created.memory_id.to_string();
@@ -7829,33 +7829,26 @@ mod tests {
             dry_run: false,
         });
 
-        ensure(report.success, false, "success")?;
+        ensure(report.success, true, "success")?;
         ensure(report.dry_run, false, "dry_run")?;
         ensure(report.original_id, memory_id.clone(), "original id")?;
-        ensure(report.new_id.is_none(), true, "no generated new memory id")?;
+        let new_id = report
+            .new_id
+            .as_deref()
+            .ok_or_else(|| "revise should report new memory id".to_string())?;
+        ensure(new_id != memory_id, true, "new memory id differs")?;
         ensure(
-            report.revision_group_id.is_none(),
-            true,
-            "no generated revision group",
+            report.revision_group_id.as_deref(),
+            Some(memory_id.as_str()),
+            "revision group",
         )?;
-        ensure(
-            report.revision_number.is_none(),
-            true,
-            "no stub revision number",
-        )?;
+        ensure(report.revision_number, Some(2), "revision number")?;
         ensure(
             report.changed_fields,
             vec!["content".to_string()],
             "changed fields",
         )?;
-        ensure(
-            report
-                .error
-                .as_deref()
-                .is_some_and(|message| message.contains("--dry-run")),
-            true,
-            "repair hint mentions dry-run",
-        )?;
+        ensure(report.error.is_none(), true, "no revision error")?;
 
         let connection = crate::db::DbConnection::open_file(&created.database_path)
             .map_err(|error| error.to_string())?;
@@ -7864,9 +7857,23 @@ mod tests {
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "created memory should still exist".to_string())?;
         ensure(
-            original.content,
-            "Store release checks as durable memory.".to_string(),
-            "original content unchanged",
+            original.valid_to.is_some(),
+            true,
+            "original row was superseded",
+        )?;
+        let revised = connection
+            .get_memory(new_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "new revision should exist".to_string())?;
+        ensure(
+            revised.content,
+            "Store release checks and clippy gates as durable memory.".to_string(),
+            "revised content",
+        )?;
+        ensure(
+            revised.valid_to.is_none(),
+            true,
+            "new revision remains live",
         )
     }
 

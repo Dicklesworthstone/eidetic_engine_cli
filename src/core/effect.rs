@@ -2261,32 +2261,32 @@ mod tests {
     }
 
     #[test]
-    fn manifest_tracks_unavailable_commands_as_non_mutating_degraded_paths() -> TestResult {
+    fn manifest_tracks_lab_replay_as_available_read_only_path() -> TestResult {
         let manifest = EffectManifest::build();
 
-        let (command, code) = ("lab replay", "lab_replay_unavailable");
+        let command = "lab replay";
         let effect = manifest
             .get(command)
             .ok_or_else(|| format!("{command} not found"))?;
         ensure(
             effect.default_effect,
             EffectClass::ReadOnly,
-            &format!("{command} is read-only while unavailable"),
+            &format!("{command} is read-only"),
         )?;
         ensure(
             effect.mutation_contract.side_effect_class,
-            SideEffectClass::DegradedUnavailable,
-            &format!("{command} uses degraded class"),
+            SideEffectClass::ReadOnly,
+            &format!("{command} uses read-only class"),
         )?;
         ensure(
             effect.write_surfaces.is_empty(),
             true,
-            &format!("{command} has no write surfaces while unavailable"),
+            &format!("{command} has no write surfaces"),
         )?;
         ensure(
             effect.mutation_contract.degraded_code,
-            Some(code),
-            &format!("{command} degraded code"),
+            None,
+            &format!("{command} has no unavailable degraded code"),
         )?;
 
         Ok(())

@@ -2488,7 +2488,7 @@ mod tests {
     }
 
     #[test]
-    fn analyze_clustering_reports_no_embeddings_for_payloadless_candidates() -> TestResult {
+    fn analyze_clustering_uses_target_memory_for_payloadless_candidates() -> TestResult {
         let (_tempdir, workspace_path) = seed_clustering_workspace()?;
         let database_path = workspace_path.join(".ee").join("ee.db");
         let connection = crate::db::DbConnection::open_file(&database_path)
@@ -2499,8 +2499,8 @@ mod tests {
                 "curate_00000000000000000000000015",
                 &crate::db::CreateCurationCandidateInput {
                     workspace_id,
-                    candidate_type: "orphan".to_string(),
-                    target_memory_id: "mem_00000000000000000000999999".to_string(),
+                    candidate_type: "tombstone".to_string(),
+                    target_memory_id: "mem_00000000000000000000000011".to_string(),
                     proposed_content: None,
                     proposed_confidence: None,
                     proposed_trust_class: None,
@@ -2517,20 +2517,16 @@ mod tests {
 
         let report = analyze_clustering(&ClusteringAnalysisOptions {
             workspace: workspace_path,
-            candidate_type: Some("orphan".to_string()),
+            candidate_type: Some("tombstone".to_string()),
             status: Some("pending".to_string()),
             limit: 10,
             detailed: false,
         });
 
         ensure(report.available, true, "science available")?;
-        ensure(report.computed, false, "clustering not computed")?;
+        ensure(report.computed, true, "target memory fallback computed")?;
         ensure(report.candidate_count, 1, "candidate counted")?;
-        ensure(
-            report.degradations.first().map(|entry| entry.code.as_str()),
-            Some(DEGRADATION_CODE_NO_EMBEDDINGS),
-            "no embeddings degradation",
-        )
+        ensure(report.degradations.is_empty(), true, "no degradations")
     }
 
     #[test]

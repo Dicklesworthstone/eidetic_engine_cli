@@ -13726,7 +13726,11 @@ mod tests {
         // After fix: gather() inspects current workspace, so degradation count
         // varies based on actual workspace state. Just verify the section exists.
         ensure_contains(&toon, "degraded[", "degradation section")?;
-        ensure_contains(&toon, "{code,severity,message}:", "degradation columns")
+        ensure_contains(
+            &toon,
+            "{code,severity,message,repair}:",
+            "degradation columns",
+        )
     }
 
     #[test]

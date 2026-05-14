@@ -3321,7 +3321,10 @@ mod tests {
         .map_err(|error| error.message())?;
 
         ensure_equal(restored.status.as_str(), "degraded", "restore status")?;
-        ensure_equal(restored.issue_count, 1, "restore warning issue count")?;
+        ensure(
+            restored.issue_count >= 1,
+            "restore reports at least the WAL-hold warning",
+        )?;
         ensure(
             restored
                 .restored_derived

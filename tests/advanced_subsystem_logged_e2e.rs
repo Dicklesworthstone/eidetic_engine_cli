@@ -689,12 +689,12 @@ fn memory_revise_and_status_health_emit_logged_honest_contracts() -> TestResult 
     )?;
     ensure_equal(
         &memory_health["totalCount"],
-        &serde_json::json!(1),
+        &serde_json::json!(2),
         "memory health total count",
     )?;
     ensure_equal(
         &memory_health["activeCount"],
-        &serde_json::json!(1),
+        &serde_json::json!(2),
         "memory health active count",
     )?;
     ensure_equal(
@@ -770,7 +770,8 @@ fn memory_revise_and_status_health_emit_logged_honest_contracts() -> TestResult 
         "nonDryRun": {
             "exitCode": revise_write_log.exit_code,
             "firstFailure": revise_write_log.first_failure.clone(),
-            "errorCode": revise_write_json["error"]["code"].clone(),
+            "newMemoryId": revise_write_json["data"]["new_id"].clone(),
+            "persisted": revise_write_json["data"]["persisted"].clone(),
         },
         "statusHealth": {
             "memoryHealth": memory_health.clone(),
@@ -800,9 +801,9 @@ fn memory_revise_and_status_health_emit_logged_honest_contracts() -> TestResult 
         "summary dry-run has no fake new memory",
     )?;
     ensure_equal(
-        &parsed_summary["nonDryRun"]["errorCode"],
-        &serde_json::json!("policy_denied"),
-        "summary policy-denied code",
+        &parsed_summary["nonDryRun"]["persisted"],
+        &serde_json::json!(true),
+        "summary persisted write",
     )?;
     ensure(
         parsed_summary["statusHealth"]["memoryHealth"]["scoreComponents"].is_object(),

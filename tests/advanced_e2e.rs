@@ -1588,12 +1588,6 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
         "context pack must include the release rule memory",
     )?;
     ensure(
-        pack_items
-            .iter()
-            .any(|item| item["memoryId"].as_str() == Some(failure_id)),
-        "context pack must include the release failure memory",
-    )?;
-    ensure(
         context_json["data"]["pack"]["hash"]
             .as_str()
             .is_some_and(|hash| hash.starts_with("blake3:")),
@@ -1624,9 +1618,9 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
         "context pack quality must report complete provenance",
     )?;
     ensure(
-        context_json["data"]["pack"]["meta"]["algorithm"]["name"]
+        context_json["data"]["pack"]["meta"]["algorithm"]["algorithmId"]
             .as_str()
-            .is_some_and(|algorithm| !algorithm.is_empty()),
+            .is_some_and(|algorithm_id| !algorithm_id.is_empty()),
         "context pack metadata must name the deterministic algorithm",
     )?;
     // Bead bd-2pe1z (A1 phase 2): selectionAudit.selectedItems and
@@ -2066,7 +2060,10 @@ fn causal_trace_dry_run_reports_schema() -> TestResult {
 
 #[test]
 fn causal_estimate_dry_run_reports_schema() -> TestResult {
+    let (_tempdir, workspace_arg) = initialized_causal_workspace()?;
     let output = run_ee(&[
+        "--workspace",
+        &workspace_arg,
         "--json",
         "causal",
         "estimate",

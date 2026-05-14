@@ -3204,7 +3204,8 @@ fn generate_id() -> String {
 mod tests {
     use super::*;
     use crate::db::{
-        CreateEvidenceSpanInput, CreateRecorderRunInput, CreateWorkspaceInput, DbConnection,
+        CreateEvidenceSpanInput, CreateRecorderRunInput, CreateSessionInput, CreateWorkspaceInput,
+        DbConnection,
     };
     use std::fs;
 
@@ -3304,6 +3305,31 @@ mod tests {
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "workspace row missing".to_owned())?;
         Ok((connection, workspace_row.id))
+    }
+
+    fn insert_procedure_session(
+        connection: &DbConnection,
+        workspace_id: &str,
+        session_id: &str,
+    ) -> TestResult {
+        connection
+            .insert_session(
+                session_id,
+                &CreateSessionInput {
+                    workspace_id: workspace_id.to_owned(),
+                    cass_session_id: format!("cass-{session_id}"),
+                    source_path: Some(format!("cass://{session_id}")),
+                    agent_name: Some("procedure-test".to_owned()),
+                    model: None,
+                    started_at: Some("2026-05-01T00:00:00Z".to_owned()),
+                    ended_at: None,
+                    message_count: 1,
+                    token_count: Some(16),
+                    content_hash: format!("blake3:{session_id}"),
+                    metadata_json: Some(r#"{"fixture":"procedure"}"#.to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())
     }
 
     #[test]
@@ -3835,12 +3861,14 @@ mod tests {
     fn verify_inspects_persisted_claim_evidence() -> TestResult {
         let workspace = procedure_store_workspace()?;
         let (connection, workspace_id) = procedure_store_connection(&workspace)?;
+        let session_id = "sess_61234567890123456789012345";
+        insert_procedure_session(&connection, &workspace_id, session_id)?;
         connection
             .insert_evidence_span(
                 "ev_61234567890123456789012345",
                 &CreateEvidenceSpanInput {
                     workspace_id,
-                    session_id: "sess_verify_claim".to_owned(),
+                    session_id: session_id.to_owned(),
                     memory_id: None,
                     cass_span_id: "span_verify_claim".to_owned(),
                     span_kind: "summary".to_owned(),
@@ -3914,12 +3942,14 @@ mod tests {
     fn verify_persisted_claim_evidence_query_error_is_failed_source() -> TestResult {
         let workspace = procedure_store_workspace()?;
         let (connection, workspace_id) = procedure_store_connection(&workspace)?;
+        let session_id = "sess_71234567890123456789012345";
+        insert_procedure_session(&connection, &workspace_id, session_id)?;
         connection
             .insert_evidence_span(
                 "ev_61234567890123456789067890",
                 &CreateEvidenceSpanInput {
                     workspace_id,
-                    session_id: "sess_verify_claim_query_error".to_owned(),
+                    session_id: session_id.to_owned(),
                     memory_id: None,
                     cass_span_id: "span_verify_claim_query_error".to_owned(),
                     span_kind: "summary".to_owned(),

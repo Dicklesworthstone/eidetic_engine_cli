@@ -36553,7 +36553,7 @@ mod tests {
         ensure_contains(&stdout, "degraded[", "status TOON degradation section")?;
         ensure_contains(
             &stdout,
-            "{code,severity,message}:",
+            "{code,severity,message,repair}:",
             "status TOON degradation columns",
         )?;
         ensure_ends_with(&stdout, '\n', "status TOON trailing newline")?;

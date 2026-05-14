@@ -623,9 +623,10 @@ mod tests {
     #[test]
     fn graph_set_rejects_invalid_ranges() -> TestResult {
         let temp = workspace()?;
-        let error = set_config(&options(temp.path()), "graph.ppr.alpha", "1.5", false)
-            .expect_err("invalid alpha must fail")
-            .to_string();
+        let error = match set_config(&options(temp.path()), "graph.ppr.alpha", "1.5", false) {
+            Ok(report) => return Err(format!("invalid alpha unexpectedly succeeded: {report:?}")),
+            Err(error) => error.to_string(),
+        };
         if error.contains("0.0..=1.0") {
             Ok(())
         } else {

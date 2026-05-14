@@ -4175,8 +4175,8 @@ mod tests {
             scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
         };
         let json = report.data_json();
-        assert_eq!(json["results"][0]["validityStatus"], "unknown");
-        assert_eq!(json["results"][0]["metadata"]["validity_status"], "unknown");
+        assert_eq!(json["results"][0]["validityStatus"], "current");
+        assert_eq!(json["results"][0]["metadata"]["validity_status"], "current");
         assert!(json["results"][0]["metadata"].get("valid_to").is_none());
         Ok(())
     }
