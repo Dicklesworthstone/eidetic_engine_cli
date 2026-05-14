@@ -7817,6 +7817,7 @@ where
                     task_frame_id: None,
                     bind_to_machine: args.bind_to_machine,
                     machine_salt_path: None,
+                    redaction_level: crate::models::RedactionLevel::Standard,
                 };
                 match create_handoff(&options) {
                     Ok(report) => match cli.renderer() {
