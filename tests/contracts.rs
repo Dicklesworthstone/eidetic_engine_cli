@@ -157,6 +157,9 @@ mod c4_rejection_error_details;
 #[path = "contracts/handoff_stale_snapshot.rs"]
 mod handoff_stale_snapshot;
 
+#[path = "contracts/n15_logical_id_foundation.rs"]
+mod n15_logical_id_foundation;
+
 #[path = "contracts/failure_mode_fixtures.rs"]
 mod failure_mode_fixtures;
 
