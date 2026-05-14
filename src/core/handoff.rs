@@ -3942,6 +3942,44 @@ mod tests {
     }
 
     #[test]
+    fn handoff_hmac_signing_same_body_is_deterministic_three_times() -> TestResult {
+        let dir = repo_tempdir()?;
+        let output = create_test_capsule(dir.path(), false, None)?;
+        let capsule: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&output).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        let signed_body = signed_capsule_body(&capsule);
+        let workspace_secret_bytes =
+            fs::read(hmac_workspace_secret_path(dir.path())).map_err(|error| error.to_string())?;
+        let workspace_secret: [u8; 32] = workspace_secret_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| "workspace hmac key should be 32 bytes".to_owned())?;
+        let mut observed = Vec::new();
+
+        for _ in 0..3 {
+            let signed = sign_capsule_content_with_key_material(
+                signed_body.clone(),
+                &workspace_secret,
+                None,
+                false,
+            )
+            .map_err(|error| error.message())?;
+            let hmac = signed
+                .get("integrity")
+                .and_then(|value| value.get("hmac"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing signed hmac".to_owned())?
+                .to_owned();
+            observed.push(hmac);
+        }
+
+        ensure_equal(&observed.len(), &3_usize, "three hmac observations")?;
+        ensure_equal(&observed[0], &observed[1], "first two hmacs match")?;
+        ensure_equal(&observed[1], &observed[2], "last two hmacs match")
+    }
+
+    #[test]
     fn handoff_hmac_missing_fails_closed() -> TestResult {
         let dir = repo_tempdir()?;
         let output = create_test_capsule(dir.path(), false, None)?;
@@ -3981,34 +4019,53 @@ mod tests {
     fn handoff_hmac_tampered_body_fails_closed() -> TestResult {
         let dir = repo_tempdir()?;
         let output = create_test_capsule(dir.path(), false, None)?;
-        let mut capsule: serde_json::Value =
+        let capsule: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&output).map_err(|error| error.to_string())?)
                 .map_err(|error| error.to_string())?;
-        capsule["sections"][0]["content"] =
-            serde_json::Value::String("tampered workspace section".to_owned());
-        fs::write(
-            &output,
-            serde_json::to_string_pretty(&capsule).map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
 
-        let error = match resume_handoff(&ResumeOptions {
-            path: output,
-            use_latest: false,
-            workspace: dir.path().to_path_buf(),
-            max_sections: None,
-            task_frame_id: None,
-            bound_workspace_id: None,
-            bound_workspace_identity: None,
-            include_prompt_fragment: false,
-            require_fresh: false,
-            insecure_skip_hmac: false,
-            machine_salt_path: None,
-        }) {
-            Ok(_) => panic!("tampered capsule should fail closed"),
-            Err(error) => error,
-        };
-        ensure_equal(&error.code(), &HANDOFF_CAPSULE_TAMPERED_CODE, "error code")
+        for index in 0..10 {
+            let mut tampered = capsule.clone();
+            if index == 0 {
+                tampered["sections"][0]["content"] = serde_json::Value::String(
+                    "tampered workspace section at signed body position zero".to_owned(),
+                );
+            } else {
+                let key = format!("tamper_marker_{index:02}");
+                tampered[key.as_str()] = serde_json::json!({
+                    "mutation": index,
+                    "signedBodyChange": true
+                });
+            }
+            fs::write(
+                &output,
+                serde_json::to_string_pretty(&tampered).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+
+            let error = match resume_handoff(&ResumeOptions {
+                path: output.clone(),
+                use_latest: false,
+                workspace: dir.path().to_path_buf(),
+                max_sections: None,
+                task_frame_id: None,
+                bound_workspace_id: None,
+                bound_workspace_identity: None,
+                include_prompt_fragment: false,
+                require_fresh: false,
+                insecure_skip_hmac: false,
+                machine_salt_path: None,
+            }) {
+                Ok(_) => panic!("tampered capsule should fail closed"),
+                Err(error) => error,
+            };
+            ensure_equal(
+                &error.code(),
+                &HANDOFF_CAPSULE_TAMPERED_CODE,
+                &format!("error code for mutation {index}"),
+            )?;
+        }
+
+        Ok(())
     }
 
     #[test]
@@ -4169,7 +4226,18 @@ mod tests {
     #[test]
     fn handoff_hmac_rotate_report_redacts_secret_material() -> TestResult {
         let dir = repo_tempdir()?;
+        let db_path = dir.path().join(".ee").join("ee.db");
+        if let Some(parent) = db_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let conn = DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+        conn.migrate().map_err(|error| error.to_string())?;
+
         let output = create_test_capsule(dir.path(), false, None)?;
+        let workspace_secret_bytes =
+            fs::read(hmac_workspace_secret_path(dir.path())).map_err(|error| error.to_string())?;
+        let workspace_secret_hex = bytes_to_lower_hex(&workspace_secret_bytes);
+        let workspace_secret_b64 = URL_SAFE_NO_PAD.encode(&workspace_secret_bytes);
         let old_integrity = capsule_integrity(&output)?;
         let old_full_hmac = old_integrity
             .get("hmac")
@@ -4188,19 +4256,41 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| "missing new full hmac".to_owned())?
             .to_owned();
+        let audit_id = report
+            .audit_id
+            .as_deref()
+            .ok_or_else(|| "missing rotate audit id".to_owned())?;
+        let audit = conn
+            .get_audit(audit_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing rotate audit row".to_owned())?;
+        let audit_details = audit.details.unwrap_or_default();
         let rendered = crate::core::serialize_or_error(&report);
+        let redaction_surface = format!("{rendered}\n{audit_details}");
 
         ensure(
-            !rendered.contains(&old_full_hmac),
-            "report must not expose old full hmac",
+            !redaction_surface.contains(&old_full_hmac),
+            "report/audit must not expose old full hmac",
         )?;
         ensure(
-            !rendered.contains(&new_full_hmac),
-            "report must not expose new full hmac",
+            !redaction_surface.contains(&new_full_hmac),
+            "report/audit must not expose new full hmac",
+        )?;
+        ensure(
+            !redaction_surface.contains(&workspace_secret_hex),
+            "report/audit must not expose workspace secret hex",
+        )?;
+        ensure(
+            !redaction_surface.contains(&workspace_secret_b64),
+            "report/audit must not expose workspace secret base64url",
         )?;
         ensure(
             rendered.contains(&report.new_hmac_prefix),
             "report keeps bounded hmac prefix",
+        )?;
+        ensure(
+            audit_details.contains("\"secretMaterialLogged\":false"),
+            "audit row explicitly records that secret material was not logged",
         )
     }
 
