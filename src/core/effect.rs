@@ -1217,20 +1217,18 @@ impl EffectManifest {
                 "economy_metrics_unavailable",
                 "Economy prune planning abstains until persisted workspace metrics exist",
             ),
-            CommandEffect::degraded_unavailable(
+            CommandEffect::workspace_file_write(
                 "lab capture",
-                "lab_replay_unavailable",
-                "Lab capture abstains until stored episodes are implemented",
+                vec![".ee/lab/episodes"],
+                "Writes a frozen episode artifact under .ee/lab/episodes/<EPISODE_ID>/ — task input, policy ids, evidence ids, pack hash, repository fingerprint (N15.3 / bd-17c65.14.15.4)",
             ),
-            CommandEffect::degraded_unavailable(
+            CommandEffect::read_only(
                 "lab replay",
-                "lab_replay_unavailable",
-                "Lab replay abstains until evidence-only replay artifacts exist",
+                "Re-assembles a pack against a previously captured frozen episode and reports whether the captured inputs still produce a matching pack hash (N15.4 / bd-17c65.14.15.5)",
             ),
-            CommandEffect::degraded_unavailable(
+            CommandEffect::read_only(
                 "lab counterfactual",
-                "lab_replay_unavailable",
-                "Lab counterfactual analysis abstains until stored episodes exist",
+                "Replays a frozen episode with single-input swaps and surfaces the pack diff between the captured pack and the counterfactual pack (N15.5 / bd-17c65.14.15.6)",
             ),
             CommandEffect::durable_write(
                 "memory revise",
