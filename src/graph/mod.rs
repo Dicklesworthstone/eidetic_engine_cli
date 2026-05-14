@@ -16,6 +16,9 @@ pub use fnx_algorithms::{
 };
 pub use fnx_classes::{AttrMap, Graph, digraph::DiGraph};
 use fnx_runtime::{CgseValue, CompatibilityMode};
+use sqlmodel_core::{Row, Value};
+
+pub mod algorithms;
 
 pub const SUBSYSTEM: &str = "graph";
 pub const MODULE_CONTRACT: &str = GRAPH_MODULE_SCHEMA_V1;
@@ -897,6 +900,17 @@ pub struct MemoryGraphProjection {
     pub build_ms: f64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct CausalEvidenceGraphRow {
+    edge_id: String,
+    failure_id: String,
+    candidate_cause_id: String,
+    contribution_score: f64,
+    evidence_count: u32,
+    computed_at: String,
+    method: String,
+}
+
 /// Options for building a memory graph.
 #[derive(Debug, Clone, Default)]
 pub struct ProjectionOptions {
@@ -919,6 +933,129 @@ pub fn build_memory_graph(
 ) -> GraphResult<MemoryGraphProjection> {
     let links = graph_projection_links(conn, options)?;
     build_memory_graph_from_links(&links)
+}
+
+/// Build the causal-evidence typed subgraph from persisted ledger rows.
+///
+/// The resulting graph has a node for each `failure_id` and
+/// `candidate_cause_id`, and one directed edge from the observed failure to
+/// the candidate cause. Edge attributes preserve the persisted contribution
+/// score, evidence count, method, row id, and computation timestamp.
+pub fn build_causal_evidence_graph_from_table(
+    conn: &DbConnection,
+    workspace_id: &str,
+) -> GraphResult<DiGraph> {
+    let rows = causal_evidence_graph_rows(conn, workspace_id)?;
+    build_causal_evidence_graph_from_rows(&rows)
+}
+
+fn build_causal_evidence_graph_from_rows(rows: &[CausalEvidenceGraphRow]) -> GraphResult<DiGraph> {
+    let mut graph = DiGraph::new(CompatibilityMode::Strict);
+    for row in rows {
+        graph.add_node(&row.failure_id);
+        graph.add_node(&row.candidate_cause_id);
+        graph
+            .add_edge_with_attrs(
+                &row.failure_id,
+                &row.candidate_cause_id,
+                causal_evidence_edge_attrs(row),
+            )
+            .map_err(|error| GraphError::GraphEngine {
+                operation: "add causal evidence edge",
+                source: error.to_string(),
+            })?;
+    }
+    Ok(graph)
+}
+
+/// Deterministic content hash for a causal-evidence graph projection.
+#[must_use]
+pub fn causal_evidence_graph_content_hash(graph: &DiGraph) -> String {
+    let edges = graph
+        .edges_ordered_borrowed()
+        .into_iter()
+        .map(|(source, target, attrs)| {
+            serde_json::json!({
+                "source": source,
+                "target": target,
+                "attrs": attrs
+                    .iter()
+                    .map(|(key, value)| (key.clone(), cgse_value_to_json(value)))
+                    .collect::<BTreeMap<_, _>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let nodes = graph.nodes_ordered().into_iter().collect::<Vec<_>>();
+    let payload = serde_json::json!({
+        "schema": "ee.graph.causal_evidence_projection.v1",
+        "graphType": GraphSnapshotType::CausalEvidence.as_str(),
+        "nodes": nodes,
+        "edges": edges,
+    });
+    let payload_json = serde_json::to_string(&payload)
+        .unwrap_or_else(|_| "{\"schema\":\"ee.graph.causal_evidence_projection.v1\"}".to_string());
+    graph_snapshot_content_hash(GraphSnapshotType::CausalEvidence, &payload_json)
+}
+
+fn causal_evidence_graph_rows(
+    conn: &DbConnection,
+    workspace_id: &str,
+) -> GraphResult<Vec<CausalEvidenceGraphRow>> {
+    conn.query(
+        "SELECT id, failure_id, candidate_cause_id, contribution_score, evidence_uris_json, computed_at, method
+         FROM causal_evidence
+         WHERE workspace_id = ?1
+         ORDER BY failure_id ASC, candidate_cause_id ASC, contribution_score DESC, computed_at ASC, id ASC",
+        &[Value::Text(workspace_id.to_string())],
+    )
+    .map_err(|error| GraphError::storage("query causal evidence graph rows", error))?
+    .iter()
+    .map(causal_evidence_graph_row_from_row)
+    .collect()
+}
+
+fn causal_evidence_graph_row_from_row(row: &Row) -> GraphResult<CausalEvidenceGraphRow> {
+    let evidence_uris_json = graph_row_text(row, 4, "causal_evidence.evidence_uris_json")?;
+    let evidence_count = serde_json::from_str::<Vec<String>>(&evidence_uris_json)
+        .map_err(|error| GraphError::json("parse causal evidence URIs", error))?
+        .len()
+        .try_into()
+        .map_err(|_| GraphError::NumericOverflow {
+            field: "evidence_count",
+            value: usize::MAX.to_string(),
+        })?;
+    Ok(CausalEvidenceGraphRow {
+        edge_id: graph_row_text(row, 0, "causal_evidence.id")?,
+        failure_id: graph_row_text(row, 1, "causal_evidence.failure_id")?,
+        candidate_cause_id: graph_row_text(row, 2, "causal_evidence.candidate_cause_id")?,
+        contribution_score: graph_row_f64(row, 3, "causal_evidence.contribution_score")?
+            .clamp(0.0, 1.0),
+        evidence_count,
+        computed_at: graph_row_text(row, 5, "causal_evidence.computed_at")?,
+        method: graph_row_text(row, 6, "causal_evidence.method")?,
+    })
+}
+
+fn causal_evidence_edge_attrs(row: &CausalEvidenceGraphRow) -> AttrMap {
+    let mut attrs = AttrMap::new();
+    attrs.insert(
+        "contribution_score".to_string(),
+        CgseValue::Float(row.contribution_score),
+    );
+    attrs.insert("method".to_string(), CgseValue::String(row.method.clone()));
+    attrs.insert(
+        "evidence_count".to_string(),
+        CgseValue::Int(i64::from(row.evidence_count)),
+    );
+    attrs.insert(
+        "edge_id".to_string(),
+        CgseValue::String(row.edge_id.clone()),
+    );
+    attrs.insert(
+        "computed_at".to_string(),
+        CgseValue::String(row.computed_at.clone()),
+    );
+    attrs
 }
 
 fn build_memory_graph_from_links(links: &[StoredMemoryLink]) -> GraphResult<MemoryGraphProjection> {
@@ -980,6 +1117,39 @@ fn build_memory_graph_from_links(links: &[StoredMemoryLink]) -> GraphResult<Memo
         edge_count,
         build_ms,
     })
+}
+
+fn graph_row_text(row: &Row, index: usize, column: &'static str) -> GraphResult<String> {
+    row.get(index)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| GraphError::InvalidSnapshotMetrics {
+            reason: format!("{column} column at index {index} is not text"),
+        })
+}
+
+fn graph_row_f64(row: &Row, index: usize, column: &'static str) -> GraphResult<f64> {
+    row.get(index)
+        .and_then(Value::as_f64)
+        .ok_or_else(|| GraphError::InvalidSnapshotMetrics {
+            reason: format!("{column} column at index {index} is not numeric"),
+        })
+}
+
+fn cgse_value_to_json(value: &CgseValue) -> serde_json::Value {
+    match value {
+        CgseValue::Bool(value) => serde_json::Value::Bool(*value),
+        CgseValue::Int(value) => serde_json::Value::Number((*value).into()),
+        CgseValue::Float(value) => serde_json::Number::from_f64(*value)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        CgseValue::String(value) => serde_json::Value::String(value.clone()),
+        CgseValue::Map(value) => serde_json::Value::Object(
+            value
+                .iter()
+                .map(|(key, value)| (key.clone(), cgse_value_to_json(value)))
+                .collect(),
+        ),
+    }
 }
 
 fn graph_projection_links(
@@ -3606,9 +3776,10 @@ fn compare_neighborhood_edges(
 #[cfg(test)]
 mod tests {
     use crate::db::{
-        AdvisoryLockId, CreateGraphSnapshotInput, CreateMemoryInput, CreateMemoryLinkInput,
-        CreateWorkspaceInput, DbConnection, DbError, DbOperation, GraphSnapshotStatus,
-        GraphSnapshotType, MemoryLinkRelation, MemoryLinkSource, StoredGraphSnapshot,
+        AdvisoryLockId, CreateCausalEvidenceInput, CreateGraphSnapshotInput, CreateMemoryInput,
+        CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection, DbError, DbOperation,
+        GraphSnapshotStatus, GraphSnapshotType, MemoryLinkRelation, MemoryLinkSource,
+        StoredGraphSnapshot,
     };
     use proptest::prelude::*;
     use proptest::test_runner::Config as ProptestConfig;
@@ -3616,8 +3787,8 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     use super::{
-        GraphCapabilityName, GraphError, GraphSurface, REQUIRED_GRAPH_ENGINE, module_readiness,
-        subsystem_name,
+        CgseValue, GraphCapabilityName, GraphError, GraphSurface, REQUIRED_GRAPH_ENGINE,
+        module_readiness, subsystem_name,
     };
     use crate::models::CapabilityStatus;
 
@@ -3625,6 +3796,7 @@ mod tests {
     const MEMORY_A: &str = "mem_00000000000000000000000011";
     const MEMORY_B: &str = "mem_00000000000000000000000012";
     const MEMORY_C: &str = "mem_00000000000000000000000013";
+    const MEMORY_D: &str = "mem_00000000000000000000000014";
     const KARATE_SNAPSHOT_HASH: &str =
         "blake3:a45b1f3ca706d53664f5abdc3ab3b485ed21d28b8dc290c801d9be4d462cf201";
     const KARATE_EDGE_PAIRS: &[(u8, u8)] = &[
@@ -4235,6 +4407,142 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())
+    }
+
+    fn insert_causal_evidence(
+        connection: &DbConnection,
+        id: &str,
+        failure_id: &str,
+        candidate_cause_id: &str,
+        contribution_score: f64,
+        evidence_uris: Vec<String>,
+        method: &str,
+    ) -> TestResult {
+        connection
+            .insert_causal_evidence(
+                id,
+                &CreateCausalEvidenceInput {
+                    workspace_id: WORKSPACE_ID.to_string(),
+                    failure_id: failure_id.to_string(),
+                    candidate_cause_id: candidate_cause_id.to_string(),
+                    contribution_score,
+                    evidence_uris,
+                    computed_at: Some(format!("2026-05-14T05:00:{}Z", &id[id.len() - 2..])),
+                    method: method.to_string(),
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn causal_evidence_graph_from_empty_table_is_empty() -> TestResult {
+        let connection = open_projection_db()?;
+        let graph = graph_result(super::build_causal_evidence_graph_from_table(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+
+        assert_eq!(graph.node_count(), 0);
+        assert_eq!(graph.edge_count(), 0);
+        assert_eq!(
+            super::causal_evidence_graph_content_hash(&graph),
+            super::causal_evidence_graph_content_hash(&graph)
+        );
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn causal_evidence_graph_from_single_failure_preserves_edge_attrs() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_causal_evidence(
+            &connection,
+            "cev_001",
+            MEMORY_A,
+            MEMORY_B,
+            0.75,
+            vec![
+                "agent-mail://causal/one".to_string(),
+                "agent-mail://causal/two".to_string(),
+            ],
+            "manual",
+        )?;
+
+        let graph = graph_result(super::build_causal_evidence_graph_from_table(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+
+        assert_eq!(graph.node_count(), 2);
+        assert_eq!(graph.edge_count(), 1);
+        assert!(graph.has_edge(MEMORY_A, MEMORY_B));
+        assert_eq!(graph.successors(MEMORY_A), Some(vec![MEMORY_B]));
+        let attrs = graph
+            .edge_attrs(MEMORY_A, MEMORY_B)
+            .ok_or_else(|| "causal edge attrs should exist".to_string())?;
+        assert_eq!(
+            attrs.get("contribution_score"),
+            Some(&CgseValue::Float(0.75))
+        );
+        assert_eq!(
+            attrs.get("method"),
+            Some(&CgseValue::String("manual".to_string()))
+        );
+        assert_eq!(attrs.get("evidence_count"), Some(&CgseValue::Int(2)));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn causal_evidence_graph_from_crossing_failures_is_deterministic() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_memory(&connection, MEMORY_D, "Shared causal graph target")?;
+        insert_causal_evidence(
+            &connection,
+            "cev_010",
+            MEMORY_A,
+            MEMORY_B,
+            0.9,
+            vec!["agent-mail://causal/a-b".to_string()],
+            "graph-inferred",
+        )?;
+        insert_causal_evidence(
+            &connection,
+            "cev_011",
+            MEMORY_C,
+            MEMORY_B,
+            0.6,
+            vec!["agent-mail://causal/c-b".to_string()],
+            "cass-derived",
+        )?;
+        insert_causal_evidence(
+            &connection,
+            "cev_012",
+            MEMORY_C,
+            MEMORY_D,
+            0.4,
+            vec!["agent-mail://causal/c-d".to_string()],
+            "manual",
+        )?;
+
+        let first = graph_result(super::build_causal_evidence_graph_from_table(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+        let second = graph_result(super::build_causal_evidence_graph_from_table(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+
+        assert_eq!(first.node_count(), 4);
+        assert_eq!(first.edge_count(), 3);
+        assert_eq!(first.successors(MEMORY_A), Some(vec![MEMORY_B]));
+        assert_eq!(first.successors(MEMORY_C), Some(vec![MEMORY_B, MEMORY_D]));
+        assert_eq!(
+            super::causal_evidence_graph_content_hash(&first),
+            super::causal_evidence_graph_content_hash(&second)
+        );
+
+        connection.close().map_err(|error| error.to_string())
     }
 
     fn insert_link(
