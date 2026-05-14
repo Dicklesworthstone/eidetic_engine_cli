@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.why.causal.v1.json",
+  "title": "ee.why.causal.v1",
+  "description": "Causal explanation block for ee why graph-accretion output.",
+  "type": "object",
+  "required": ["schema", "memoryId", "snapshotVersion", "paths", "minCut", "degraded"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.why.causal.v1"},
+    "memoryId": {"type": "string"},
+    "snapshotVersion": {"type": ["integer", "string"]},
+    "paths": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}},
+    "minCut": {"$ref": "#/$defs/jsonValue"},
+    "degraded": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}}
+  },
+  "field_presets": {
+    "minimal": ["schema", "memoryId"],
+    "summary": ["schema", "memoryId", "snapshotVersion", "minCut", "degraded"],
+    "standard": ["schema", "memoryId", "snapshotVersion", "paths", "minCut", "degraded"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "jsonObject": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

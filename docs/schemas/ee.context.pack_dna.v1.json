@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.context.pack_dna.v1.json",
+  "title": "ee.context.pack_dna.v1",
+  "description": "Graph-derived Pack DNA explanation block for context packs.",
+  "type": "object",
+  "required": ["schema", "snapshotVersion", "voronoiDominator", "communityOfMass", "egoSubgraph", "pprNeighbors", "degraded"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.context.pack_dna.v1"},
+    "snapshotVersion": {"type": ["integer", "string"]},
+    "voronoiDominator": {"$ref": "#/$defs/jsonValue"},
+    "communityOfMass": {"$ref": "#/$defs/jsonValue"},
+    "egoSubgraph": {"$ref": "#/$defs/jsonObject"},
+    "pprNeighbors": {"type": "array", "maxItems": 10, "items": {"$ref": "#/$defs/jsonObject"}},
+    "degraded": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}}
+  },
+  "field_presets": {
+    "minimal": ["schema", "snapshotVersion"],
+    "summary": ["schema", "snapshotVersion", "voronoiDominator", "communityOfMass", "degraded"],
+    "standard": ["schema", "snapshotVersion", "voronoiDominator", "communityOfMass", "egoSubgraph", "pprNeighbors", "degraded"],
+    "full": ["*"]
+  },
+  "examples": [
+    {
+      "schema": "ee.context.pack_dna.v1",
+      "snapshotVersion": 42,
+      "voronoiDominator": {
+        "memoryId": "mem_release_policy",
+        "distance": 0.0,
+        "reason": "selected item dominates the local evidence neighborhood"
+      },
+      "communityOfMass": {
+        "communityId": "release-readiness",
+        "mass": 0.72,
+        "topMemoryIds": ["mem_release_policy", "mem_rch_remote_required"]
+      },
+      "egoSubgraph": {
+        "nodes": [
+          {"id": "mem_release_policy", "kind": "memory"},
+          {"id": "mem_rch_remote_required", "kind": "memory"}
+        ],
+        "edges": [
+          {
+            "source": "mem_release_policy",
+            "target": "mem_rch_remote_required",
+            "relation": "supports",
+            "weight": 0.91
+          }
+        ]
+      },
+      "pprNeighbors": [
+        {
+          "memoryId": "mem_rch_remote_required",
+          "score": 0.41,
+          "rank": 1
+        }
+      ],
+      "degraded": []
+    }
+  ],
+  "$defs": {
+    "jsonObject": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

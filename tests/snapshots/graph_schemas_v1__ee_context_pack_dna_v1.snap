@@ -1,0 +1,5 @@
+---
+source: tests/contracts/graph_schemas_v1.rs
+expression: "ee.context.pack_dna.v1"
+---
+ee.context.pack_dna.v1

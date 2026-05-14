@@ -1,0 +1,5 @@
+---
+source: tests/contracts/graph_schemas_v1.rs
+expression: "ee.memory.impact_analysis.v1"
+---
+ee.memory.impact_analysis.v1

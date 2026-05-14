@@ -1,0 +1,5 @@
+---
+source: tests/contracts/graph_schemas_v1.rs
+expression: "ee.why.v1"
+---
+ee.why.v1

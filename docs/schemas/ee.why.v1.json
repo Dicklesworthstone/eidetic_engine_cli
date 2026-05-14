@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.why.v1.json",
+  "title": "ee.why.v1",
+  "description": "Augmentation contract for ee why output with graph-derived explanation blocks.",
+  "type": "object",
+  "required": ["schema", "memoryId", "graph"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.why.v1"},
+    "memoryId": {"type": "string"},
+    "graph": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bayesPosterior": {"$ref": "#/$defs/jsonValue"},
+        "loadBearing": {"$ref": "#/$defs/jsonValue"},
+        "hits": {"$ref": "#/$defs/jsonValue"},
+        "revisionLineage": {"$ref": "#/$defs/jsonValue"}
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["schema", "memoryId"],
+    "summary": ["schema", "memoryId", "graph"],
+    "standard": ["schema", "memoryId", "graph"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

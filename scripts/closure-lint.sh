@@ -26,6 +26,8 @@ BEADS_LOCK_WAIT_SECONDS="${EE_BEADS_LOCK_WAIT_SECONDS:-30}"
 CLI_MOD="src/cli/mod.rs"
 REPORT_FILE=".closure-lint-report.json"
 GOLDEN_DIR="tests/golden"
+SCHEMA_DIR="docs/schemas"
+SNAPSHOT_DIR="tests/snapshots"
 
 # Abstention patterns that indicate stub/placeholder closures
 ABSTENTION_REGEX='abstain|unavailable|degraded|stub|placeholder|removed simulation|honest empty|conservative abstention'
@@ -325,7 +327,31 @@ else
     done
 fi
 
-if [ -z "$BEAD_IDS" ]; then
+check_graph_schema_docs() {
+    for schema in \
+        "ee.insights.v1" \
+        "ee.context.pack_dna.v1" \
+        "ee.why.causal.v1" \
+        "ee.health.structural.v1" \
+        "ee.status.skyline.v1" \
+        "ee.memory.impact_analysis.v1" \
+        "ee.proximity.v1" \
+        "ee.why.v1" \
+        "ee.context.v1"; do
+        if [ ! -f "$SCHEMA_DIR/$schema.json" ]; then
+            add_violation "bd-bife.1" "schema-governance" "$schema" "missing $SCHEMA_DIR/$schema.json"
+        fi
+
+        snapshot_name=$(printf "%s" "$schema" | tr '.' '_')
+        if [ ! -f "$SNAPSHOT_DIR/graph_schemas_v1__${snapshot_name}.snap" ]; then
+            add_violation "bd-bife.1" "schema-governance" "$schema" "missing $SNAPSHOT_DIR/graph_schemas_v1__${snapshot_name}.snap"
+        fi
+    done
+}
+
+check_graph_schema_docs
+
+if [ -z "$BEAD_IDS" ] && [ "$VIOLATION_COUNT" -eq 0 ]; then
     if [ "$JSON_OUTPUT" != true ]; then
         if [ "$AUDIT_MODE" = true ]; then
             echo "No closed beads with implements-surface or honesty-only labels found."

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.health.structural.v1.json",
+  "title": "ee.health.structural.v1",
+  "description": "Structural health report using graph-derived coherence signals.",
+  "type": "object",
+  "required": ["schema", "snapshotVersion", "kTruss", "contradictionClusters", "summary", "degraded"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.health.structural.v1"},
+    "snapshotVersion": {"type": ["integer", "string"]},
+    "kTruss": {"$ref": "#/$defs/jsonObject"},
+    "contradictionClusters": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}},
+    "summary": {"$ref": "#/$defs/jsonObject"},
+    "degraded": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}}
+  },
+  "field_presets": {
+    "minimal": ["schema", "snapshotVersion"],
+    "summary": ["schema", "snapshotVersion", "summary", "degraded"],
+    "standard": ["schema", "snapshotVersion", "kTruss", "contradictionClusters", "summary", "degraded"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "jsonObject": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

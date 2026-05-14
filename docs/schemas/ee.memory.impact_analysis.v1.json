@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.memory.impact_analysis.v1.json",
+  "title": "ee.memory.impact_analysis.v1",
+  "description": "Impact analysis for memory revision and dominance-frontier planning.",
+  "type": "object",
+  "required": ["schema", "memoryId", "snapshotVersion", "revisionLineage", "frontiers", "degraded"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.memory.impact_analysis.v1"},
+    "memoryId": {"type": "string"},
+    "snapshotVersion": {"type": ["integer", "string"]},
+    "revisionLineage": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}},
+    "frontiers": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}},
+    "degraded": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}}
+  },
+  "field_presets": {
+    "minimal": ["schema", "memoryId"],
+    "summary": ["schema", "memoryId", "snapshotVersion", "degraded"],
+    "standard": ["schema", "memoryId", "snapshotVersion", "revisionLineage", "frontiers", "degraded"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "jsonObject": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

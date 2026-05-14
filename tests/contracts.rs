@@ -127,6 +127,9 @@ mod context_pack_dual_render;
 #[path = "contracts/schema_roundtrip.rs"]
 mod schema_roundtrip;
 
+#[path = "contracts/graph_schemas_v1.rs"]
+mod graph_schemas_v1;
+
 #[path = "contracts/audit_event_coverage.rs"]
 mod audit_event_coverage;
 

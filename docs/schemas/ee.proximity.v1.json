@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.proximity.v1.json",
+  "title": "ee.proximity.v1",
+  "description": "Pairwise memory proximity report derived from graph min-cut structures.",
+  "type": "object",
+  "required": ["schema", "memoryA", "memoryB", "snapshotVersion", "minCut", "interpretation", "treePath", "degraded"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.proximity.v1"},
+    "memoryA": {"type": "string"},
+    "memoryB": {"type": "string"},
+    "snapshotVersion": {"type": ["integer", "string"]},
+    "minCut": {"type": ["number", "null"]},
+    "interpretation": {"type": "string"},
+    "treePath": {"type": ["array", "null"], "items": {"type": "string"}},
+    "degraded": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}}
+  },
+  "field_presets": {
+    "minimal": ["schema", "memoryA", "memoryB"],
+    "summary": ["schema", "memoryA", "memoryB", "minCut", "interpretation", "degraded"],
+    "standard": ["schema", "memoryA", "memoryB", "snapshotVersion", "minCut", "interpretation", "treePath", "degraded"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "jsonObject": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

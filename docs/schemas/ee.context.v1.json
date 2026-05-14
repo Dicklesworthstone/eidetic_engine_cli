@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.context.v1.json",
+  "title": "ee.context.v1",
+  "description": "Augmentation contract for ee context output with graph-derived ranking fields.",
+  "type": "object",
+  "required": ["schema", "packDna", "proximityToSeed"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.context.v1"},
+    "packDna": {"$ref": "ee.context.pack_dna.v1.json"},
+    "proximityToSeed": {"type": ["number", "null"]},
+    "degraded": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}}
+  },
+  "field_presets": {
+    "minimal": ["schema"],
+    "summary": ["schema", "proximityToSeed", "degraded"],
+    "standard": ["schema", "packDna", "proximityToSeed", "degraded"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "jsonObject": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

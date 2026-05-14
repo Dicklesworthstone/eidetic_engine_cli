@@ -1,0 +1,5 @@
+---
+source: tests/contracts/graph_schemas_v1.rs
+expression: "ee.why.causal.v1"
+---
+ee.why.causal.v1

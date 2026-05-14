@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.insights.v1.json",
+  "title": "ee.insights.v1",
+  "description": "Insights bundle response data for graph-accretion findings.",
+  "type": "object",
+  "required": ["schema", "snapshotVersion", "generatedAt", "runDurationMs", "sections", "degradedSignals"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.insights.v1"},
+    "snapshotVersion": {"type": ["integer", "string"]},
+    "generatedAt": {"type": ["string", "null"]},
+    "runDurationMs": {"type": "integer", "minimum": 0},
+    "sections": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}},
+    "degradedSignals": {"type": "array", "items": {"$ref": "#/$defs/degradedSignal"}}
+  },
+  "field_presets": {
+    "minimal": ["schema", "snapshotVersion"],
+    "summary": ["schema", "snapshotVersion", "runDurationMs", "degradedSignals"],
+    "standard": ["schema", "snapshotVersion", "generatedAt", "runDurationMs", "sections", "degradedSignals"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "jsonObject": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+    "degradedSignal": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": {"$ref": "#/$defs/jsonValue"},
+      "properties": {
+        "code": {"type": "string"},
+        "severity": {"type": "string"},
+        "message": {"type": "string"},
+        "repair": {"type": ["string", "null"]}
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}
