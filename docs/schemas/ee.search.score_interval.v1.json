@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.search.score_interval.v1.json",
+  "title": "ee.search.score_interval.v1",
+  "description": "Closed split-conformal relevance score interval emitted on each ee search result.",
+  "type": "array",
+  "prefixItems": [
+    { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+    { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+  ],
+  "items": false,
+  "minItems": 2,
+  "maxItems": 2
+}
