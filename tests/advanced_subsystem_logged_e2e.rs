@@ -587,19 +587,26 @@ fn memory_revise_and_status_health_emit_logged_honest_contracts() -> TestResult 
         ],
         "dry-run changed fields",
     )?;
+    // N15.2 (bd-17c65.14.15.3): dry-run no longer carries the
+    // `revision_write_unavailable` honesty-only marker. The abstention
+    // intent is conveyed by `policy: "dry_run_only"` alone.
     ensure_equal(
         &revise_dry_run_json["data"]["degraded"],
-        &serde_json::json!(["revision_write_unavailable"]),
+        &serde_json::json!([]),
         "dry-run degraded code",
     )?;
 
+    // N15.2: non-dry-run now actually writes — exit 0, response
+    // envelope, new memory id populated. Previously this step
+    // exercised the abstention pathway (exit 7, ee.error.v2,
+    // code=policy_denied).
     let revise_write_log = run_logged_step(
         &scenario_dir,
         &workspace,
         &env_overrides,
         &StepSpec {
             subsystem: "memory",
-            name: "memory_revise_non_dry_run_policy_denied",
+            name: "memory_revise_non_dry_run_persists_revision",
             args: vec![
                 "--workspace".to_owned(),
                 workspace_arg.clone(),
@@ -610,33 +617,45 @@ fn memory_revise_and_status_health_emit_logged_honest_contracts() -> TestResult 
                 "--content".to_owned(),
                 "Run cargo fmt --check and clippy before release.".to_owned(),
             ],
-            expected_schema_contains: "ee.error.v2",
-            expected_exit_code: 7,
+            expected_schema_contains: "ee.response.v1",
+            expected_exit_code: 0,
             expect_clean_stderr: true,
         },
     )?;
     ensure_equal(
         &revise_write_log.exit_code,
-        &7,
-        "non-dry-run policy exit code",
+        &0,
+        "non-dry-run exit code is success",
     )?;
-    ensure(revise_write_log.stdout_json_valid, "policy stdout JSON")?;
-    ensure(revise_write_log.stderr_is_empty, "policy stderr clean")?;
-    ensure(
-        revise_write_log
-            .first_failure
-            .as_ref()
-            .is_some_and(|diagnosis| diagnosis == "error.code=policy_denied"),
-        format!(
-            "policy denial first-failure diagnosis missing: {:?}",
-            revise_write_log.first_failure
-        ),
-    )?;
+    ensure(revise_write_log.stdout_json_valid, "write stdout JSON")?;
+    ensure(revise_write_log.stderr_is_empty, "write stderr clean")?;
     let revise_write_json = read_logged_stdout_json(&revise_write_log)?;
     ensure_equal(
-        &revise_write_json["error"]["code"],
-        &serde_json::json!("policy_denied"),
-        "policy denied error code",
+        &revise_write_json["data"]["dry_run"],
+        &serde_json::json!(false),
+        "non-dry-run flag",
+    )?;
+    ensure_equal(
+        &revise_write_json["data"]["persisted"],
+        &serde_json::json!(true),
+        "non-dry-run persisted",
+    )?;
+    ensure(
+        revise_write_json["data"]["new_id"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "non-dry-run carries a new memory id",
+    )?;
+    ensure_equal(
+        &revise_write_json["data"]["revision_group_id"],
+        &serde_json::json!(original_memory_id),
+        "revision_group_id equals original (singleton chain → revision 2)",
+    )?;
+    ensure_equal(
+        &revise_write_json["data"]["revision_number"],
+        &serde_json::json!(2),
+        "revision_number = 2",
     )?;
 
     let status_log = run_logged_step(
