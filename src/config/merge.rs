@@ -1376,8 +1376,11 @@ mod tests {
 
     use super::{
         CURATION_SPECIFICITY_MIN_KEY, ConfigLayers, ConfigValueSource, EnvironmentConfigError,
-        GRAPH_CURATE_ONION_DECAY_MAX_KEY, GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY,
-        GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY, GRAPH_PPR_ALPHA_KEY,
+        GRAPH_CAUSAL_MIN_COST_NORMALIZATION_KEY,
+        GRAPH_CURATE_ARTICULATION_PROTECTION_MULTIPLIER_KEY, GRAPH_CURATE_ONION_DECAY_MAX_KEY,
+        GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY, GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY,
+        GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY, GRAPH_HITS_PROFILE_BOOST_KEY,
+        GRAPH_PACK_DNA_MAX_EDGES_KEY, GRAPH_PACK_DNA_MAX_ITEMS_KEY, GRAPH_PPR_ALPHA_KEY,
         LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY, LEARN_DECAY_DEMOTE_THRESHOLD_KEY,
         LEARN_DECAY_PROCEDURAL_RULE_HALF_LIFE_DAYS_KEY, PACK_DEFAULT_MAX_TOKENS_KEY,
         PACK_DEFAULT_PROFILE_KEY, POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY,
@@ -1763,5 +1766,32 @@ mod tests {
         sorted.sort_unstable();
 
         ensure_equal(&keys, &sorted, "source key ordering")
+    }
+
+    #[test]
+    fn show_report_includes_graph_threshold_keys() -> TestResult {
+        let defaults =
+            built_in_config(&expander()).map_err(|error| format!("defaults failed: {error}"))?;
+        let report = merge_config(&ConfigLayers::with_defaults(defaults)).to_show_report();
+        let keys: Vec<&str> = report.entries.iter().map(|entry| entry.key).collect();
+
+        for expected in [
+            GRAPH_PPR_ALPHA_KEY,
+            GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY,
+            GRAPH_CURATE_ONION_DECAY_MAX_KEY,
+            GRAPH_CURATE_ARTICULATION_PROTECTION_MULTIPLIER_KEY,
+            GRAPH_HITS_PROFILE_BOOST_KEY,
+            GRAPH_CAUSAL_MIN_COST_NORMALIZATION_KEY,
+            GRAPH_PACK_DNA_MAX_ITEMS_KEY,
+            GRAPH_PACK_DNA_MAX_EDGES_KEY,
+            GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY,
+            GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY,
+        ] {
+            if !keys.contains(&expected) {
+                return Err(format!("show report missing {expected}"));
+            }
+        }
+
+        Ok(())
     }
 }
