@@ -192,6 +192,7 @@ fn closeout_audit_script_tracks_current_coordination_surfaces() -> TestResult {
         "RCH_QUEUE_JSON",
         "rch_queue: %s (active=%s stale=%s queued=%s)",
         "rch_queue_stale_active_records",
+        "rch CLI rejects 'rch exec' as an unknown subcommand",
         "RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects RCH_ALIAS_PROJECT_ROOT=/data/projects rch queue --json",
     ] {
         if !script.contains(needle) {

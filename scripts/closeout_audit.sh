@@ -268,6 +268,7 @@ if [ "$RCH_QUEUE_STATUS" = "stale_active_records" ]; then
     CAVEATS+=("rch_queue_stale_active_records: ${RCH_STALE_ACTIVE_BUILDS} active RCH record(s) have no heartbeat/progress timestamp; cargo submissions may time out querying the daemon and fall back locally")
     NEXT_ACTIONS+=("inspect RCH before cargo: RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects RCH_ALIAS_PROJECT_ROOT=/data/projects rch queue --json")
     NEXT_ACTIONS+=("if a wrapper reports 'Daemon response timed out' or 'running locally', stop that wrapper and record the failed-offload caveat instead of counting local Cargo output")
+    NEXT_ACTIONS+=("if this host's rch CLI rejects 'rch exec' as an unknown subcommand, do not run Cargo locally; record the remote-exec surface mismatch and keep the Cargo gate unverified")
 elif [ "$RCH_QUEUE_STATUS" = "queued" ]; then
     CAVEATS+=("rch_queue_busy: ${RCH_QUEUED_BUILDS} queued RCH job(s); cargo verification may wait behind other agents")
 fi
