@@ -2064,7 +2064,399 @@ fn manifest_json(
     manifest
 }
 
-fn backup_degradations(workspace_path: &Path) -> Vec<BackupDegradation> {
+fn collect_derived_payloads(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    workspace_id: &str,
+    captured_at: &str,
+    degraded: &mut Vec<BackupDegradation>,
+) -> Vec<BackupDerivedPayload> {
+    let mut payloads = Vec::new();
+    collect_index_manifest_payloads(workspace_path, captured_at, degraded, &mut payloads);
+    collect_graph_snapshot_payloads(connection, workspace_id, captured_at, degraded, &mut payloads);
+    collect_task_episode_payloads(connection, workspace_id, captured_at, degraded, &mut payloads);
+    collect_lab_episode_file_payloads(workspace_path, captured_at, degraded, &mut payloads);
+    collect_wal_holds_payload(connection, captured_at, degraded, &mut payloads);
+    payloads
+}
+
+fn collect_index_manifest_payloads(
+    workspace_path: &Path,
+    captured_at: &str,
+    degraded: &mut Vec<BackupDegradation>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) {
+    let candidates = [
+        workspace_path
+            .join(WORKSPACE_MARKER)
+            .join("index")
+            .join("ee.index_manifest.json"),
+        workspace_path
+            .join(WORKSPACE_MARKER)
+            .join("index")
+            .join("meta.json"),
+        workspace_path
+            .join(WORKSPACE_MARKER)
+            .join("indexes")
+            .join("combined")
+            .join("manifest.json"),
+    ];
+    let mut included = false;
+    for candidate in candidates {
+        if !candidate.is_file() {
+            continue;
+        }
+        match fs::read(&candidate) {
+            Ok(bytes) => {
+                let name = candidate
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(safe_file_stem)
+                    .unwrap_or_else(|| "manifest.json".to_owned());
+                payloads.push(derived_payload(
+                    format!("derived/index/{name}"),
+                    "index_manifest",
+                    captured_at,
+                    None,
+                    bytes,
+                ));
+                included = true;
+            }
+            Err(error) => degraded.push(BackupDegradation::warning(
+                "index_manifest_unreadable",
+                format!("index manifest '{}' could not be read: {error}", candidate.display()),
+                "inspect .ee/index permissions and retry backup create --include-derived",
+            )),
+        }
+    }
+    if !included {
+        degraded.push(BackupDegradation::warning(
+            "index_manifest_missing",
+            "no workspace index manifest was found; backup includes the durable JSONL source of truth only",
+            "run ee index rebuild --workspace . before creating a backup that must include derived index metadata",
+        ));
+    }
+}
+
+fn collect_graph_snapshot_payloads(
+    connection: &DbConnection,
+    workspace_id: &str,
+    captured_at: &str,
+    degraded: &mut Vec<BackupDegradation>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) {
+    let snapshots = match connection.list_graph_snapshots(workspace_id, None, 256) {
+        Ok(snapshots) => snapshots,
+        Err(error) => {
+            degraded.push(BackupDegradation::warning(
+                "graph_snapshots_unreadable",
+                format!("graph snapshots could not be read from the database: {error}"),
+                "run ee db check --workspace . before retrying backup create --include-derived",
+            ));
+            return;
+        }
+    };
+    for snapshot in snapshots {
+        match json_payload_bytes(&graph_snapshot_json(&snapshot, captured_at)) {
+            Ok(bytes) => payloads.push(derived_payload(
+                format!("derived/graph/snapshots/{}.json", safe_file_stem(&snapshot.id)),
+                "graph_snapshot",
+                captured_at,
+                None,
+                bytes,
+            )),
+            Err(error) => degraded.push(BackupDegradation::warning(
+                "graph_snapshots_unreadable",
+                format!("graph snapshot payload could not be serialized: {error}"),
+                "run ee db check --workspace . before retrying backup create --include-derived",
+            )),
+        }
+    }
+}
+
+fn graph_snapshot_json(snapshot: &StoredGraphSnapshot, captured_at: &str) -> JsonValue {
+    json!({
+        "schema": "ee.backup.derived.graph_snapshot.v1",
+        "capturedAt": captured_at,
+        "snapshot": {
+            "id": &snapshot.id,
+            "workspaceId": &snapshot.workspace_id,
+            "snapshotVersion": snapshot.snapshot_version,
+            "schemaVersion": &snapshot.schema_version,
+            "graphType": snapshot.graph_type.as_str(),
+            "nodeCount": snapshot.node_count,
+            "edgeCount": snapshot.edge_count,
+            "metrics": serde_json::from_str::<JsonValue>(&snapshot.metrics_json).unwrap_or(JsonValue::Null),
+            "contentHash": &snapshot.content_hash,
+            "sourceGeneration": snapshot.source_generation,
+            "createdAt": &snapshot.created_at,
+            "expiresAt": &snapshot.expires_at,
+            "status": snapshot.status.as_str(),
+        }
+    })
+}
+
+fn collect_task_episode_payloads(
+    connection: &DbConnection,
+    workspace_id: &str,
+    captured_at: &str,
+    degraded: &mut Vec<BackupDegradation>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) {
+    let episodes = match connection.list_task_episodes(Some(workspace_id), None, 256) {
+        Ok(episodes) => episodes,
+        Err(error) => {
+            degraded.push(BackupDegradation::warning(
+                "lab_episodes_unreadable",
+                format!("stored lab episodes could not be read from the database: {error}"),
+                "run ee db check --workspace . before retrying backup create --include-derived",
+            ));
+            return;
+        }
+    };
+    for episode in episodes {
+        match json_payload_bytes(&task_episode_json(&episode, captured_at)) {
+            Ok(bytes) => payloads.push(derived_payload(
+                format!("derived/lab/episodes/{}.json", safe_file_stem(&episode.id)),
+                "lab_episode",
+                captured_at,
+                Some(episode.id),
+                bytes,
+            )),
+            Err(error) => degraded.push(BackupDegradation::warning(
+                "lab_episodes_unreadable",
+                format!("stored lab episode payload could not be serialized: {error}"),
+                "run ee db check --workspace . before retrying backup create --include-derived",
+            )),
+        }
+    }
+}
+
+fn task_episode_json(episode: &StoredTaskEpisode, captured_at: &str) -> JsonValue {
+    json!({
+        "schema": "ee.backup.derived.lab_episode.v1",
+        "capturedAt": captured_at,
+        "episode": {
+            "id": &episode.id,
+            "workspaceId": &episode.workspace_id,
+            "sessionId": &episode.session_id,
+            "taskInput": &episode.task_input,
+            "retrievedMemoryIds": &episode.retrieved_memory_ids,
+            "contextPackId": &episode.context_pack_id,
+            "actions": &episode.actions,
+            "outcome": &episode.outcome,
+            "outcomeDetails": &episode.outcome_details,
+            "startedAt": &episode.started_at,
+            "endedAt": &episode.ended_at,
+            "durationMs": episode.duration_ms,
+            "agent": &episode.agent,
+            "episodeHash": &episode.episode_hash,
+            "createdAt": &episode.created_at,
+        }
+    })
+}
+
+fn collect_lab_episode_file_payloads(
+    workspace_path: &Path,
+    captured_at: &str,
+    degraded: &mut Vec<BackupDegradation>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) {
+    collect_lab_episode_file_dir(
+        &workspace_path
+            .join(WORKSPACE_MARKER)
+            .join("lab")
+            .join("episodes"),
+        "workspace",
+        captured_at,
+        degraded,
+        payloads,
+    );
+    let Some(episode_dir) = home_lab_episode_dir() else {
+        return;
+    };
+    collect_lab_episode_file_dir(&episode_dir, "home", captured_at, degraded, payloads);
+}
+
+fn collect_lab_episode_file_dir(
+    episode_dir: &Path,
+    source_label: &str,
+    captured_at: &str,
+    degraded: &mut Vec<BackupDegradation>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) {
+    if !episode_dir.exists() {
+        return;
+    }
+    let entries = match fs::read_dir(episode_dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            degraded.push(BackupDegradation::warning(
+                "lab_episodes_unreadable",
+                format!(
+                    "lab episode directory '{}' could not be read: {error}",
+                    episode_dir.display()
+                ),
+                "inspect ~/.local/share/ee/lab/episodes permissions and retry backup create --include-derived",
+            ));
+            return;
+        }
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                degraded.push(BackupDegradation::warning(
+                    "lab_episodes_unreadable",
+                    format!("lab episode file '{}' could not be inspected: {error}", path.display()),
+                    "inspect ~/.local/share/ee/lab/episodes permissions and retry backup create --include-derived",
+                ));
+                continue;
+            }
+        };
+        if !metadata.file_type().is_file() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let safe_name = safe_file_stem(file_name);
+        match fs::read(&path) {
+            Ok(bytes) => payloads.push(derived_payload(
+                format!("derived/lab/episode_files/{source_label}/{safe_name}"),
+                "lab_episode",
+                captured_at,
+                Some(safe_file_stem(
+                    path.file_stem()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(file_name),
+                )),
+                bytes,
+            )),
+            Err(error) => degraded.push(BackupDegradation::warning(
+                "lab_episodes_unreadable",
+                format!("lab episode file '{}' could not be read: {error}", path.display()),
+                "inspect ~/.local/share/ee/lab/episodes permissions and retry backup create --include-derived",
+            )),
+        }
+    }
+}
+
+fn home_lab_episode_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| {
+        PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("ee")
+            .join("lab")
+            .join("episodes")
+    })
+}
+
+fn collect_wal_holds_payload(
+    connection: &DbConnection,
+    captured_at: &str,
+    degraded: &mut Vec<BackupDegradation>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) {
+    let tables = match connection.list_user_tables() {
+        Ok(tables) => tables,
+        Err(error) => {
+            degraded.push(BackupDegradation::warning(
+                "wal_holds_unreadable",
+                format!("WAL hold table state could not be inspected: {error}"),
+                "run ee db check --workspace . before retrying backup create --include-derived",
+            ));
+            return;
+        }
+    };
+    let present = tables.iter().any(|table| table == "ee_wal_holds");
+    let row_count = if present {
+        match connection.count_table_rows("ee_wal_holds") {
+            Ok(count) => Some(count),
+            Err(error) => {
+                degraded.push(BackupDegradation::warning(
+                    "wal_holds_unreadable",
+                    format!("WAL hold table rows could not be counted: {error}"),
+                    "run ee db check --workspace . before retrying backup create --include-derived",
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    match json_payload_bytes(&json!({
+        "schema": "ee.backup.derived.wal_holds.v1",
+        "capturedAt": captured_at,
+        "table": "ee_wal_holds",
+        "present": present,
+        "rowCount": row_count,
+    })) {
+        Ok(bytes) => payloads.push(derived_payload(
+            "derived/wal_holds.json",
+            "wal_holds",
+            captured_at,
+            None,
+            bytes,
+        )),
+        Err(error) => degraded.push(BackupDegradation::warning(
+            "wal_holds_unreadable",
+            format!("WAL hold state payload could not be serialized: {error}"),
+            "run ee db check --workspace . before retrying backup create --include-derived",
+        )),
+    }
+}
+
+fn derived_payload(
+    path: impl Into<String>,
+    kind: impl Into<String>,
+    captured_at: &str,
+    episode_id_if_lab: Option<String>,
+    bytes: Vec<u8>,
+) -> BackupDerivedPayload {
+    let path = path.into();
+    let kind = kind.into();
+    BackupDerivedPayload {
+        report: BackupDerivedAssetReport {
+            path,
+            kind,
+            hash: Some(hash_bytes(&bytes)),
+            byte_size: Some(bytes.len() as u64),
+            captured_at: Some(captured_at.to_owned()),
+            episode_id_if_lab,
+        },
+        bytes,
+    }
+}
+
+fn json_payload_bytes(value: &JsonValue) -> Result<Vec<u8>, serde_json::Error> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn safe_file_stem(value: &str) -> String {
+    let cleaned = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if cleaned.is_empty() {
+        "episode".to_owned()
+    } else {
+        cleaned
+    }
+}
+
+fn backup_degradations(workspace_path: &Path, include_derived: bool) -> Vec<BackupDegradation> {
     let mut degraded = Vec::new();
     let index_manifest = workspace_path
         .join(WORKSPACE_MARKER)
@@ -2078,11 +2470,13 @@ fn backup_degradations(workspace_path: &Path) -> Vec<BackupDegradation> {
             "run ee index rebuild --workspace . before creating a backup that must include derived index metadata",
         ));
     }
-    degraded.push(BackupDegradation::warning(
-        "graph_snapshot_not_included",
-        "graph snapshots are derived assets and are not included in the EE-223 backup foundation slice",
-        "run ee graph refresh after restore, or complete EE-298 for richer backup inspection",
-    ));
+    if !include_derived {
+        degraded.push(BackupDegradation::warning(
+            "graph_snapshot_not_included",
+            "graph snapshots are derived assets and are not included in the EE-223 backup foundation slice",
+            "run ee graph refresh after restore, or complete EE-298 for richer backup inspection",
+        ));
+    }
     degraded
 }
 
@@ -2250,6 +2644,25 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), DomainError> {
         message: format!("failed to flush '{}': {error}", path.display()),
         repair: Some("inspect disk health and retry backup creation".to_owned()),
     })
+}
+
+fn write_new_relative_file(
+    root: &Path,
+    relative_path: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, DomainError> {
+    let path = root.join(relative_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
+            message: format!(
+                "failed to create backup artifact directory '{}': {error}",
+                parent.display()
+            ),
+            repair: Some("retry backup creation with a writable output directory".to_owned()),
+        })?;
+    }
+    write_new_file(&path, bytes)?;
+    Ok(path)
 }
 
 fn hash_file(path: &Path) -> Result<String, DomainError> {
@@ -2449,6 +2862,7 @@ mod tests {
             output_dir: Some(out.clone()),
             label: Some("pre-test".to_owned()),
             redaction_level: RedactionLevel::Standard,
+            include_derived: false,
             dry_run: true,
         })
         .map_err(|error| error.message())?;
@@ -2530,6 +2944,7 @@ mod tests {
             output_dir: Some(out),
             label: Some("pre-test".to_owned()),
             redaction_level: RedactionLevel::Minimal,
+            include_derived: false,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -2574,6 +2989,7 @@ mod tests {
             output_dir: None,
             label: None,
             redaction_level: RedactionLevel::Standard,
+            include_derived: false,
             dry_run: false,
         });
 
@@ -2598,6 +3014,7 @@ mod tests {
             output_dir: None,
             label: None,
             redaction_level: RedactionLevel::Standard,
+            include_derived: false,
             dry_run: true,
         })
         .map_err(|error| error.message())?;
@@ -2631,6 +3048,7 @@ mod tests {
             output_dir: Some(out),
             label: Some("inspect".to_owned()),
             redaction_level: RedactionLevel::Standard,
+            include_derived: false,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -2674,6 +3092,7 @@ mod tests {
             output_dir: Some(out.clone()),
             label: Some("list".to_owned()),
             redaction_level: RedactionLevel::Standard,
+            include_derived: false,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -2708,6 +3127,7 @@ mod tests {
             output_dir: Some(out),
             label: Some("verify".to_owned()),
             redaction_level: RedactionLevel::Standard,
+            include_derived: false,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -2824,6 +3244,7 @@ mod tests {
             output_dir: Some(out),
             label: Some("restore".to_owned()),
             redaction_level: RedactionLevel::None,
+            include_derived: false,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -2894,6 +3315,7 @@ mod tests {
             output_dir: Some(out),
             label: Some("restore-dry-run".to_owned()),
             redaction_level: RedactionLevel::None,
+            include_derived: false,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -2928,6 +3350,7 @@ mod tests {
             output_dir: Some(out),
             label: Some("restore-non-empty".to_owned()),
             redaction_level: RedactionLevel::None,
+            include_derived: false,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -2965,6 +3388,7 @@ mod tests {
             output_dir: Some(out),
             label: Some("restore-symlink-parent".to_owned()),
             redaction_level: RedactionLevel::None,
+            include_derived: false,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
