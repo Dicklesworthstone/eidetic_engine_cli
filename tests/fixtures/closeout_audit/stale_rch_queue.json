@@ -1,0 +1,36 @@
+{
+  "api_version": "1.0",
+  "timestamp": 1778734801,
+  "command": "queue",
+  "success": true,
+  "data": {
+    "active_builds": [
+      {
+        "id": 52,
+        "command": "env cargo test --quiet --test adr_0029_docs",
+        "worker_id": "css",
+        "project_id": "eidetic_engine_cli-aaced065",
+        "started_at": "2026-05-14T04:58:00.532233+00:00",
+        "last_heartbeat_at": null,
+        "last_progress_at": null
+      },
+      {
+        "id": 53,
+        "command": "cargo test --test closeout_audit_runner_unit",
+        "worker_id": "csd",
+        "project_id": "eidetic_engine_cli-aaced065",
+        "started_at": "2026-05-14T04:59:00.532233+00:00",
+        "last_heartbeat_at": "2026-05-14T04:59:30.000000+00:00",
+        "last_progress_at": null
+      }
+    ],
+    "queued_builds": [
+      {
+        "id": 21,
+        "command": "env TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp cargo test --test renderer_parity_matrix -- --nocapture",
+        "project_id": "eidetic_engine_cli-aaced065",
+        "queued_at": "2026-05-14T04:57:11.550368+00:00"
+      }
+    ]
+  }
+}

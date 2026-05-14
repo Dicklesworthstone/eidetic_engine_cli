@@ -32,6 +32,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT_DEFAULT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ORIGINAL_CWD="$(pwd)"
 SCHEMA_ID="ee.closeout_audit.v1"
 
 usage() {
@@ -89,6 +90,19 @@ if [ -z "$BEAD_ID" ]; then
     echo "closeout_audit: --bead is required" >&2
     usage >&2
     exit 2
+fi
+
+case "$WORKSPACE_ROOT" in
+    /*) ;;
+    *) WORKSPACE_ROOT="$ORIGINAL_CWD/$WORKSPACE_ROOT" ;;
+esac
+
+RCH_QUEUE_JSON_RESOLVED="${RCH_QUEUE_JSON:-}"
+if [ -n "$RCH_QUEUE_JSON_RESOLVED" ]; then
+    case "$RCH_QUEUE_JSON_RESOLVED" in
+        /*) ;;
+        *) RCH_QUEUE_JSON_RESOLVED="$ORIGINAL_CWD/$RCH_QUEUE_JSON_RESOLVED" ;;
+    esac
 fi
 
 # Tool preflight. jq is required for JSONL parsing; git is required
@@ -151,6 +165,7 @@ UNCOMMITTED_REFS_JSON="[]"
 if cd "$WORKSPACE_ROOT" 2>/dev/null; then
     UNCOMMITTED_REFS_RAW="$(git status --porcelain 2>/dev/null \
         | awk 'NF >= 2 && $1 != "??" { sub(/^...\W*/, ""); print }' \
+        | grep -vE '^\.beads/issues\.jsonl$' \
         | xargs -I{} sh -c 'grep -lF "'"$BEAD_ID"'" "{}" 2>/dev/null || true' \
         | sort -u || true)"
     if [ -n "$UNCOMMITTED_REFS_RAW" ]; then
@@ -163,12 +178,39 @@ fi
 # We don't probe whether a specific build was offloaded — that's a
 # per-invocation property — only whether rch as a system is healthy.
 RCH_STATUS="unknown"
+RCH_QUEUE_STATUS="unknown"
+RCH_ACTIVE_BUILDS=0
+RCH_STALE_ACTIVE_BUILDS=0
+RCH_QUEUED_BUILDS=0
 if command -v rch >/dev/null 2>&1; then
     if rch check >/dev/null 2>&1; then
         RCH_STATUS="ready"
     else
         RCH_STATUS="local_fallback_likely"
     fi
+fi
+
+RCH_QUEUE_RAW=""
+if [ -n "$RCH_QUEUE_JSON_RESOLVED" ] && [ -f "$RCH_QUEUE_JSON_RESOLVED" ]; then
+    RCH_QUEUE_RAW="$(cat "$RCH_QUEUE_JSON_RESOLVED" 2>/dev/null || true)"
+elif command -v rch >/dev/null 2>&1; then
+    RCH_QUEUE_RAW="$(rch queue --json 2>/dev/null || true)"
+fi
+if [ -n "$RCH_QUEUE_RAW" ] && printf '%s' "$RCH_QUEUE_RAW" | jq -e '.success == true and (.data | type == "object")' >/dev/null 2>&1; then
+    RCH_ACTIVE_BUILDS="$(printf '%s' "$RCH_QUEUE_RAW" | jq '[.data.active_builds[]?] | length')"
+    RCH_STALE_ACTIVE_BUILDS="$(printf '%s' "$RCH_QUEUE_RAW" | jq '[.data.active_builds[]? | select((.last_heartbeat_at == null) and (.last_progress_at == null))] | length')"
+    RCH_QUEUED_BUILDS="$(printf '%s' "$RCH_QUEUE_RAW" | jq '[.data.queued_builds[]?] | length')"
+    if [ "$RCH_STALE_ACTIVE_BUILDS" -gt 0 ]; then
+        RCH_QUEUE_STATUS="stale_active_records"
+    elif [ "$RCH_QUEUED_BUILDS" -gt 0 ]; then
+        RCH_QUEUE_STATUS="queued"
+    elif [ "$RCH_ACTIVE_BUILDS" -gt 0 ]; then
+        RCH_QUEUE_STATUS="active"
+    else
+        RCH_QUEUE_STATUS="idle"
+    fi
+else
+    RCH_QUEUE_STATUS="unavailable"
 fi
 
 # Check agent mail reachability. Same liveness probe used in other
@@ -179,6 +221,8 @@ AGENT_MAIL_STATUS="unknown"
 AGENT_MAIL_HOST_PORT="${AGENT_MAIL_HOST:-127.0.0.1}:${AGENT_MAIL_PORT:-8765}"
 if command -v curl >/dev/null 2>&1; then
     if curl -fsS --connect-timeout 2 --max-time 4 \
+            "http://${AGENT_MAIL_HOST_PORT}/api/health" >/dev/null 2>&1 \
+        || curl -fsS --connect-timeout 2 --max-time 4 \
             "http://${AGENT_MAIL_HOST_PORT}/health" >/dev/null 2>&1; then
         AGENT_MAIL_STATUS="reachable"
     else
@@ -220,6 +264,13 @@ if [ "$RCH_STATUS" = "local_fallback_likely" ]; then
     CAVEATS+=("rch_health_check_failed: cargo evidence captured this session may have been local fallback rather than offloaded; verify before closure if the bead required remote builds")
     NEXT_ACTIONS+=("re-run cargo verification with explicit rch routing OR document the local-fallback context in the close_reason")
 fi
+if [ "$RCH_QUEUE_STATUS" = "stale_active_records" ]; then
+    CAVEATS+=("rch_queue_stale_active_records: ${RCH_STALE_ACTIVE_BUILDS} active RCH record(s) have no heartbeat/progress timestamp; cargo submissions may time out querying the daemon and fall back locally")
+    NEXT_ACTIONS+=("inspect RCH before cargo: RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects RCH_ALIAS_PROJECT_ROOT=/data/projects rch queue --json")
+    NEXT_ACTIONS+=("if a wrapper reports 'Daemon response timed out' or 'running locally', stop that wrapper and record the failed-offload caveat instead of counting local Cargo output")
+elif [ "$RCH_QUEUE_STATUS" = "queued" ]; then
+    CAVEATS+=("rch_queue_busy: ${RCH_QUEUED_BUILDS} queued RCH job(s); cargo verification may wait behind other agents")
+fi
 if [ "$AGENT_MAIL_STATUS" = "unreachable" ]; then
     CAVEATS+=("agent_mail_unreachable: reservation/inbox evidence could not be captured at audit time; rely on commit-message coordination")
 fi
@@ -255,6 +306,10 @@ RESULT_JSON="$(jq -nc \
     --argjson open_deps "$OPEN_DEPS_JSON" \
     --argjson uncommitted_refs "$UNCOMMITTED_REFS_JSON" \
     --arg rch_status "$RCH_STATUS" \
+    --arg rch_queue_status "$RCH_QUEUE_STATUS" \
+    --argjson rch_active_builds "$RCH_ACTIVE_BUILDS" \
+    --argjson rch_stale_active_builds "$RCH_STALE_ACTIVE_BUILDS" \
+    --argjson rch_queued_builds "$RCH_QUEUED_BUILDS" \
     --arg agent_mail_status "$AGENT_MAIL_STATUS" \
     --argjson j1_log_present "$J1_LOG_PRESENT" \
     --arg j1_log_path "$J1_LOG_PATH" \
@@ -272,6 +327,10 @@ RESULT_JSON="$(jq -nc \
             open_dependencies: $open_deps,
             uncommitted_files_referencing_bead: $uncommitted_refs,
             rch_status: $rch_status,
+            rch_queue_status: $rch_queue_status,
+            rch_active_builds: $rch_active_builds,
+            rch_stale_active_builds: $rch_stale_active_builds,
+            rch_queued_builds: $rch_queued_builds,
             agent_mail_status: $agent_mail_status,
             j1_log_present: $j1_log_present,
             j1_log_path: $j1_log_path
@@ -294,6 +353,11 @@ else
         printf '  assignee: %s\n' "$BEAD_ASSIGNEE"
     fi
     printf '  rch: %s\n' "$RCH_STATUS"
+    printf '  rch_queue: %s (active=%s stale=%s queued=%s)\n' \
+        "$RCH_QUEUE_STATUS" \
+        "$RCH_ACTIVE_BUILDS" \
+        "$RCH_STALE_ACTIVE_BUILDS" \
+        "$RCH_QUEUED_BUILDS"
     printf '  agent_mail: %s\n' "$AGENT_MAIL_STATUS"
     printf '  j1_log: %s\n' "$J1_LOG_PRESENT"
     if [ "$OPEN_DEPS_COUNT" -gt 0 ]; then

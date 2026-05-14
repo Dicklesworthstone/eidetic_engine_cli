@@ -205,6 +205,23 @@ evidence. If recovery is inconclusive, use the emitted
 `manual_inspection_commands` to inspect the worker and then record evidence
 explicitly through the S2 verification ledger.
 
+Before starting a Cargo gate from an agent session, run a non-mutating queue
+preflight with the same path topology used for offload:
+
+```bash
+RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects \
+RCH_ALIAS_PROJECT_ROOT=/data/projects \
+rch queue --json
+```
+
+`scripts/closeout_audit.sh --bead <id> --json` includes this queue posture in
+`evidence.rch_queue_status`. Treat `stale_active_records` as a warning that
+`rch exec` may hang while querying the daemon and then print
+`Daemon response timed out ... running locally`. If that happens, stop the local
+wrapper, do not count local Cargo output as remote verification, and record the
+failed-offload caveat on the bead. The closeout audit only reports posture; it
+does not restart the daemon, cancel jobs, kill workers, or delete artifacts.
+
 ### J1 Artifact Manifests
 
 Structured E2E logs include `kind: "artifact_manifest"` events using manifest

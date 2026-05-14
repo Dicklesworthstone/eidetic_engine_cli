@@ -60,17 +60,31 @@ fn fixture_path(scenario: &str) -> PathBuf {
 /// itself is non-destructive — every classification is a successful
 /// exit; only argument errors / missing tools yield non-zero).
 fn run_audit(scenario: &str, bead_id: &str) -> Result<Value, String> {
+    run_audit_with_env(scenario, bead_id, &[])
+}
+
+fn run_audit_with_env(
+    scenario: &str,
+    bead_id: &str,
+    envs: &[(&str, PathBuf)],
+) -> Result<Value, String> {
     let fixture = fixture_path(scenario);
     if !fixture.exists() {
         return Err(format!("fixture not found: {}", fixture.display(),));
     }
-    let output = Command::new("bash")
+    let mut command = Command::new("bash");
+    command
+        .current_dir(repo_root())
         .arg(script_path())
         .arg("--bead")
         .arg(bead_id)
         .arg("--json")
         .arg("--workspace-root")
-        .arg(&fixture)
+        .arg(&fixture);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command
         .output()
         .map_err(|e| format!("spawn closeout_audit.sh: {e}"))?;
     if !output.status.success() {
@@ -119,6 +133,10 @@ fn assert_envelope_shape(audit: &Value) -> TestResult {
         "open_dependencies",
         "uncommitted_files_referencing_bead",
         "rch_status",
+        "rch_queue_status",
+        "rch_active_builds",
+        "rch_stale_active_builds",
+        "rch_queued_builds",
         "agent_mail_status",
         "j1_log_present",
         "j1_log_path",
@@ -156,6 +174,140 @@ fn closeout_audit_script_is_bash_syntax_clean() -> TestResult {
             "`bash -n scripts/closeout_audit.sh` failed: {stderr}",
         ));
     }
+    Ok(())
+}
+
+#[test]
+fn closeout_audit_script_tracks_current_coordination_surfaces() -> TestResult {
+    let script = std::fs::read_to_string(script_path())
+        .map_err(|error| format!("read closeout_audit.sh: {error}"))?;
+
+    for needle in [
+        "http://${AGENT_MAIL_HOST_PORT}/api/health",
+        "http://${AGENT_MAIL_HOST_PORT}/health",
+        "^\\.beads/issues\\.jsonl$",
+        "ORIGINAL_CWD",
+        "WORKSPACE_ROOT=\"$ORIGINAL_CWD/$WORKSPACE_ROOT\"",
+        "RCH_QUEUE_JSON_RESOLVED",
+        "RCH_QUEUE_JSON",
+        "rch_queue: %s (active=%s stale=%s queued=%s)",
+        "rch_queue_stale_active_records",
+        "RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects RCH_ALIAS_PROJECT_ROOT=/data/projects rch queue --json",
+    ] {
+        if !script.contains(needle) {
+            return Err(format!("closeout audit script missing `{needle}`"));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn j11_operator_scripts_are_directly_executable() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    for relative_path in [
+        "scripts/closeout_audit.sh",
+        "scripts/failure_mode_impact.sh",
+        "scripts/rch_recover_verification.sh",
+    ] {
+        let path = repo_root().join(relative_path);
+        let mode = std::fs::metadata(&path)
+            .map_err(|error| format!("metadata {}: {error}", path.display()))?
+            .permissions()
+            .mode();
+        if mode & 0o111 == 0 {
+            return Err(format!("{relative_path} must be executable"));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn rch_stale_queue_fixture_warns_without_blocking_closeout() -> TestResult {
+    let queue_fixture = repo_root()
+        .join("tests")
+        .join("fixtures")
+        .join("closeout_audit")
+        .join("stale_rch_queue.json");
+    let audit = run_audit_with_env(
+        "ready",
+        "bd-fxt-ready-1",
+        &[("RCH_QUEUE_JSON", queue_fixture)],
+    )?;
+    assert_envelope_shape(&audit)?;
+
+    if audit["readiness"].as_str() == Some("blocked") {
+        return Err(format!(
+            "stale RCH queue should caveat, not block closeout by itself: {audit}",
+        ));
+    }
+    if audit["evidence"]["rch_queue_status"].as_str() != Some("stale_active_records") {
+        return Err(format!(
+            "expected rch_queue_status=stale_active_records, got {:?}",
+            audit["evidence"]["rch_queue_status"],
+        ));
+    }
+    if audit["evidence"]["rch_active_builds"].as_u64() != Some(2) {
+        return Err(format!(
+            "expected two active builds, got {:?}",
+            audit["evidence"]["rch_active_builds"],
+        ));
+    }
+    if audit["evidence"]["rch_stale_active_builds"].as_u64() != Some(1) {
+        return Err(format!(
+            "expected one stale active build, got {:?}",
+            audit["evidence"]["rch_stale_active_builds"],
+        ));
+    }
+    if audit["evidence"]["rch_queued_builds"].as_u64() != Some(1) {
+        return Err(format!(
+            "expected one queued build, got {:?}",
+            audit["evidence"]["rch_queued_builds"],
+        ));
+    }
+
+    let caveats = audit["caveats"].as_array().cloned().unwrap_or_default();
+    let has_stale_caveat = caveats.iter().any(|caveat| {
+        caveat
+            .as_str()
+            .unwrap_or("")
+            .starts_with("rch_queue_stale_active_records")
+    });
+    if !has_stale_caveat {
+        return Err(format!(
+            "expected stale RCH queue caveat, got caveats: {:?}",
+            caveats,
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn rch_queue_fixture_relative_path_resolves_before_workspace_cd() -> TestResult {
+    let audit = run_audit_with_env(
+        "ready",
+        "bd-fxt-ready-1",
+        &[(
+            "RCH_QUEUE_JSON",
+            PathBuf::from("tests/fixtures/closeout_audit/stale_rch_queue.json"),
+        )],
+    )?;
+    assert_envelope_shape(&audit)?;
+
+    if audit["evidence"]["rch_active_builds"].as_u64() != Some(2)
+        || audit["evidence"]["rch_stale_active_builds"].as_u64() != Some(1)
+        || audit["evidence"]["rch_queued_builds"].as_u64() != Some(1)
+    {
+        return Err(format!(
+            "relative RCH_QUEUE_JSON should be resolved before workspace cd; got evidence: {}",
+            audit["evidence"],
+        ));
+    }
+
     Ok(())
 }
 
