@@ -13,6 +13,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/e2e_overhaul/lib/shared.sh
 source "$SCRIPT_DIR/lib/shared.sh"
 
+GRAPH_DETERMINISM_WATCHDOG_PID=""
+
+start_graph_determinism_watchdog() {
+    local max_seconds="${EE_GRAPH_DETERMINISM_MAX_SECONDS:-180}"
+    (
+        sleep "$max_seconds"
+        echo "graph_determinism: timed out after ${max_seconds}s" >&2
+        kill -TERM "$$" 2>/dev/null || true
+    ) &
+    GRAPH_DETERMINISM_WATCHDOG_PID="$!"
+}
+
+stop_graph_determinism_watchdog() {
+    if [ -n "$GRAPH_DETERMINISM_WATCHDOG_PID" ]; then
+        kill "$GRAPH_DETERMINISM_WATCHDOG_PID" 2>/dev/null || true
+    fi
+}
+
 hash_stdin() {
     if command -v blake3sum >/dev/null 2>&1; then
         blake3sum | awk '{print $1}'
@@ -68,6 +86,12 @@ strip_variable_fields() {
     jq "$(volatile_field_delete_filter)"
 }
 
+ee_with_timeout() {
+    local timeout_seconds="${EE_GRAPH_DETERMINISM_TIMEOUT_SECONDS:-20}"
+    perl -e 'my $timeout = shift @ARGV; alarm $timeout; exec @ARGV' \
+        "$timeout_seconds" "$EE_BINARY" "$@"
+}
+
 hash_sample_for_run() {
     local run_index="$1"
     printf '{"schema":"ee.graph_determinism.self_test.v1","data":{"items":["a","b","c"]}}\n' \
@@ -103,7 +127,7 @@ canonical_hash_for_run() {
     local status
     local run_index="$1"
     shift
-    output=$("$EE_BINARY" "$@" --workspace "$EPIC_WORKSPACE" 2>/dev/null)
+    output=$(ee_with_timeout "$@" --workspace "$EPIC_WORKSPACE" 2>/dev/null)
     status=$?
     if [ "$status" -ne 0 ] || ! printf '%s' "$output" | jq . >/dev/null 2>&1; then
         return 1
@@ -128,14 +152,18 @@ run_json_surface_3x() {
 
     local h1 h2 h3
     h1=$(canonical_hash_for_run 1 "$@") || h1=""
-    h2=$(canonical_hash_for_run 2 "$@") || h2=""
-    h3=$(canonical_hash_for_run 3 "$@") || h3=""
-    if [ -z "$h1" ] || [ -z "$h2" ] || [ -z "$h3" ]; then
+    if [ -z "$h1" ]; then
         if [ "$mode" = "future" ]; then
             todo_assert "graph_determinism_${name}_available" "$tracking_bead" "$unavailable_description"
         else
             e2e_log_assert_eq "json_unavailable" "json_available" "graph_determinism_${name}_available"
         fi
+        return 0
+    fi
+    h2=$(canonical_hash_for_run 2 "$@") || h2=""
+    h3=$(canonical_hash_for_run 3 "$@") || h3=""
+    if [ -z "$h2" ] || [ -z "$h3" ]; then
+        e2e_log_assert_eq "json_unavailable_after_first_run" "json_available" "graph_determinism_${name}_stable_availability"
         return 0
     fi
     if [ -n "$h1" ] && [ "$h1" = "$h2" ] && [ "$h2" = "$h3" ]; then
@@ -156,12 +184,15 @@ if [ "${1:-}" = "--self-test-injection" ]; then
 fi
 
 require_jq
+start_graph_determinism_watchdog
+trap stop_graph_determinism_watchdog EXIT
 epic_setup "epic_F4_graph_determinism"
+trap 'stop_graph_determinism_watchdog; _epic_teardown' EXIT
 
-MEM_A=$("$EE_BINARY" remember "Graph determinism source memory." \
+MEM_A=$(ee_with_timeout remember "Graph determinism source memory." \
     --workspace "$EPIC_WORKSPACE" --level semantic --kind note --json 2>/dev/null \
     | jq -r '.data.memory.id // .data.memory_id // .data.id // empty' 2>/dev/null || true)
-MEM_B=$("$EE_BINARY" remember "Graph determinism destination memory." \
+MEM_B=$(ee_with_timeout remember "Graph determinism destination memory." \
     --workspace "$EPIC_WORKSPACE" --level semantic --kind note --json 2>/dev/null \
     | jq -r '.data.memory.id // .data.memory_id // .data.id // empty' 2>/dev/null || true)
 ANY_MEM="${MEM_A:-$MEM_B}"
