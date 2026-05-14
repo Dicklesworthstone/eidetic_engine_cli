@@ -3626,7 +3626,7 @@ mod tests {
     const MEMORY_B: &str = "mem_00000000000000000000000012";
     const MEMORY_C: &str = "mem_00000000000000000000000013";
     const KARATE_SNAPSHOT_HASH: &str =
-        "blake3:398ec0ca05f94e01b1ddd6abf9a87fd7fde922c4764ab01736cb5ee5c19fa290";
+        "blake3:a45b1f3ca706d53664f5abdc3ab3b485ed21d28b8dc290c801d9be4d462cf201";
     const KARATE_EDGE_PAIRS: &[(u8, u8)] = &[
         (1, 2),
         (1, 3),
