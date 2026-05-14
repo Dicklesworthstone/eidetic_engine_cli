@@ -43,6 +43,12 @@ e2e_log_assert_eq "${#DEFAULT_PREFIX}" "8" "m5_default_hmac_prefix_len"
 
 DEFAULT_RESUME=$(ee_workspace handoff resume "$DEFAULT_CAPSULE" --json)
 assert_jq "$DEFAULT_RESUME" '.capsule_id[0:5]' "hcap_" "m5_default_resume_success"
+DETERMINISM_PREFIX="$DEFAULT_PREFIX"
+for attempt in 1 2 3; do
+    ee_workspace handoff resume "$DEFAULT_CAPSULE" --json >/dev/null
+    e2e_log_assert_eq "$(hmac_prefix "$DEFAULT_CAPSULE")" "$DETERMINISM_PREFIX" \
+        "m5_hmac_prefix_stable_resume_$attempt"
+done
 
 ROTATE_JSON=$(ee_workspace handoff rotate-key --capsule "$DEFAULT_CAPSULE" --json)
 assert_jq "$ROTATE_JSON" '.body_preserved' "true" "m5_rotate_preserves_body"
