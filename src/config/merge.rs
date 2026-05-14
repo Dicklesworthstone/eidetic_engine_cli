@@ -15,9 +15,11 @@ use serde::Serialize;
 
 use super::env_registry::EnvVar;
 use super::file::{
-    CassConfig, ConfigFile, CurationConfig, FeedbackConfig, HandoffConfig, LearnConfig,
-    LearnDecayConfig, OutputRedactionConfig, PackConfig, PolicyConfig, PrivacyConfig,
-    RuntimeConfig, SearchConfig, SearchSpeed, SecretDetectorConfig, StorageConfig, TrustConfig,
+    CassConfig, ConfigFile, CurationConfig, FeedbackConfig, GraphCausalConfig, GraphConfig,
+    GraphCurateConfig, GraphGomoryHuConfig, GraphHealthConfig, GraphHitsConfig, GraphPackDnaConfig,
+    GraphPprConfig, HandoffConfig, LearnConfig, LearnDecayConfig, OutputRedactionConfig,
+    PackConfig, PolicyConfig, PrivacyConfig, RuntimeConfig, SearchConfig, SearchSpeed,
+    SecretDetectorConfig, StorageConfig, TrustConfig,
 };
 use super::path::{PathExpander, PathExpansionError};
 
@@ -39,6 +41,17 @@ pub const PACK_DEFAULT_FORMAT_KEY: &str = "pack.default_format";
 pub const PACK_DEFAULT_MAX_TOKENS_KEY: &str = "pack.default_max_tokens";
 pub const PACK_MMR_LAMBDA_KEY: &str = "pack.mmr_lambda";
 pub const PACK_CANDIDATE_POOL_KEY: &str = "pack.candidate_pool";
+pub const GRAPH_PPR_ALPHA_KEY: &str = "graph.ppr.alpha";
+pub const GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY: &str = "graph.health.contradiction_threshold";
+pub const GRAPH_CURATE_ONION_DECAY_MAX_KEY: &str = "graph.curate.onion_decay_max";
+pub const GRAPH_CURATE_ARTICULATION_PROTECTION_MULTIPLIER_KEY: &str =
+    "graph.curate.articulation_protection_multiplier";
+pub const GRAPH_HITS_PROFILE_BOOST_KEY: &str = "graph.hits.profile_boost";
+pub const GRAPH_CAUSAL_MIN_COST_NORMALIZATION_KEY: &str = "graph.causal.min_cost_normalization";
+pub const GRAPH_PACK_DNA_MAX_ITEMS_KEY: &str = "graph.pack_dna.max_items";
+pub const GRAPH_PACK_DNA_MAX_EDGES_KEY: &str = "graph.pack_dna.max_edges";
+pub const GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY: &str = "graph.gomory_hu.sample_threshold";
+pub const GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY: &str = "graph.gomory_hu.sample_size";
 pub const CURATION_DUPLICATE_SIMILARITY_KEY: &str = "curation.duplicate_similarity";
 pub const CURATION_HARMFUL_WEIGHT_KEY: &str = "curation.harmful_weight";
 pub const CURATION_DECAY_HALF_LIFE_DAYS_KEY: &str = "curation.decay_half_life_days";
@@ -268,6 +281,78 @@ impl MergedConfig {
                 PACK_CANDIDATE_POOL_KEY,
                 pool.to_string(),
                 self.source(PACK_CANDIDATE_POOL_KEY),
+            ));
+        }
+
+        // Graph section
+        if let Some(alpha) = self.values.graph.ppr.alpha {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_PPR_ALPHA_KEY,
+                alpha.to_string(),
+                self.source(GRAPH_PPR_ALPHA_KEY),
+            ));
+        }
+        if let Some(threshold) = self.values.graph.health.contradiction_threshold {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY,
+                threshold.to_string(),
+                self.source(GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY),
+            ));
+        }
+        if let Some(multiplier) = self.values.graph.curate.onion_decay_max {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_CURATE_ONION_DECAY_MAX_KEY,
+                multiplier.to_string(),
+                self.source(GRAPH_CURATE_ONION_DECAY_MAX_KEY),
+            ));
+        }
+        if let Some(multiplier) = self.values.graph.curate.articulation_protection_multiplier {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_CURATE_ARTICULATION_PROTECTION_MULTIPLIER_KEY,
+                multiplier.to_string(),
+                self.source(GRAPH_CURATE_ARTICULATION_PROTECTION_MULTIPLIER_KEY),
+            ));
+        }
+        if let Some(boost) = self.values.graph.hits.profile_boost {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_HITS_PROFILE_BOOST_KEY,
+                boost.to_string(),
+                self.source(GRAPH_HITS_PROFILE_BOOST_KEY),
+            ));
+        }
+        if let Some(normalization) = self.values.graph.causal.min_cost_normalization {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_CAUSAL_MIN_COST_NORMALIZATION_KEY,
+                normalization.to_string(),
+                self.source(GRAPH_CAUSAL_MIN_COST_NORMALIZATION_KEY),
+            ));
+        }
+        if let Some(max_items) = self.values.graph.pack_dna.max_items {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_PACK_DNA_MAX_ITEMS_KEY,
+                max_items.to_string(),
+                self.source(GRAPH_PACK_DNA_MAX_ITEMS_KEY),
+            ));
+        }
+        if let Some(max_edges) = self.values.graph.pack_dna.max_edges {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_PACK_DNA_MAX_EDGES_KEY,
+                max_edges.to_string(),
+                self.source(GRAPH_PACK_DNA_MAX_EDGES_KEY),
+            ));
+        }
+        if let Some(threshold) = self.values.graph.gomory_hu.sample_threshold {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY,
+                threshold.to_string(),
+                self.source(GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY),
+            ));
+        }
+        if let Some(size) = self.values.graph.gomory_hu.sample_size {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY,
+                size.to_string(),
+                self.source(GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY),
             ));
         }
 
@@ -511,6 +596,30 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             candidate_pool: Some(100),
         },
         handoff: HandoffConfig::default(),
+        graph: GraphConfig {
+            ppr: GraphPprConfig { alpha: Some(0.30) },
+            health: GraphHealthConfig {
+                contradiction_threshold: Some(0.20),
+            },
+            curate: GraphCurateConfig {
+                onion_decay_max: Some(3.0),
+                articulation_protection_multiplier: Some(0.5),
+            },
+            hits: GraphHitsConfig {
+                profile_boost: Some(0.5),
+            },
+            causal: GraphCausalConfig {
+                min_cost_normalization: Some(1.0),
+            },
+            pack_dna: GraphPackDnaConfig {
+                max_items: Some(10),
+                max_edges: Some(30),
+            },
+            gomory_hu: GraphGomoryHuConfig {
+                sample_threshold: Some(500),
+                sample_size: Some(100),
+            },
+        },
         curation: CurationConfig {
             duplicate_similarity: Some(0.92),
             harmful_weight: Some(2.5),
@@ -578,6 +687,7 @@ pub fn config_from_env(
         cass: CassConfig::default(),
         search: SearchConfig::default(),
         handoff: HandoffConfig::default(),
+        graph: GraphConfig::default(),
         pack: PackConfig {
             default_profile: optional_env_string(env, EnvVar::Profile.name())?,
             default_format: None,
@@ -824,6 +934,124 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
             ),
         },
         handoff: HandoffConfig::default(),
+        graph: GraphConfig {
+            ppr: GraphPprConfig {
+                alpha: pick_field(
+                    &mut sources,
+                    GRAPH_PPR_ALPHA_KEY,
+                    &layers.cli.graph.ppr.alpha,
+                    &layers.environment.graph.ppr.alpha,
+                    &layers.project.graph.ppr.alpha,
+                    &layers.user.graph.ppr.alpha,
+                    &layers.defaults.graph.ppr.alpha,
+                ),
+            },
+            health: GraphHealthConfig {
+                contradiction_threshold: pick_field(
+                    &mut sources,
+                    GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY,
+                    &layers.cli.graph.health.contradiction_threshold,
+                    &layers.environment.graph.health.contradiction_threshold,
+                    &layers.project.graph.health.contradiction_threshold,
+                    &layers.user.graph.health.contradiction_threshold,
+                    &layers.defaults.graph.health.contradiction_threshold,
+                ),
+            },
+            curate: GraphCurateConfig {
+                onion_decay_max: pick_field(
+                    &mut sources,
+                    GRAPH_CURATE_ONION_DECAY_MAX_KEY,
+                    &layers.cli.graph.curate.onion_decay_max,
+                    &layers.environment.graph.curate.onion_decay_max,
+                    &layers.project.graph.curate.onion_decay_max,
+                    &layers.user.graph.curate.onion_decay_max,
+                    &layers.defaults.graph.curate.onion_decay_max,
+                ),
+                articulation_protection_multiplier: pick_field(
+                    &mut sources,
+                    GRAPH_CURATE_ARTICULATION_PROTECTION_MULTIPLIER_KEY,
+                    &layers.cli.graph.curate.articulation_protection_multiplier,
+                    &layers
+                        .environment
+                        .graph
+                        .curate
+                        .articulation_protection_multiplier,
+                    &layers
+                        .project
+                        .graph
+                        .curate
+                        .articulation_protection_multiplier,
+                    &layers.user.graph.curate.articulation_protection_multiplier,
+                    &layers
+                        .defaults
+                        .graph
+                        .curate
+                        .articulation_protection_multiplier,
+                ),
+            },
+            hits: GraphHitsConfig {
+                profile_boost: pick_field(
+                    &mut sources,
+                    GRAPH_HITS_PROFILE_BOOST_KEY,
+                    &layers.cli.graph.hits.profile_boost,
+                    &layers.environment.graph.hits.profile_boost,
+                    &layers.project.graph.hits.profile_boost,
+                    &layers.user.graph.hits.profile_boost,
+                    &layers.defaults.graph.hits.profile_boost,
+                ),
+            },
+            causal: GraphCausalConfig {
+                min_cost_normalization: pick_field(
+                    &mut sources,
+                    GRAPH_CAUSAL_MIN_COST_NORMALIZATION_KEY,
+                    &layers.cli.graph.causal.min_cost_normalization,
+                    &layers.environment.graph.causal.min_cost_normalization,
+                    &layers.project.graph.causal.min_cost_normalization,
+                    &layers.user.graph.causal.min_cost_normalization,
+                    &layers.defaults.graph.causal.min_cost_normalization,
+                ),
+            },
+            pack_dna: GraphPackDnaConfig {
+                max_items: pick_field(
+                    &mut sources,
+                    GRAPH_PACK_DNA_MAX_ITEMS_KEY,
+                    &layers.cli.graph.pack_dna.max_items,
+                    &layers.environment.graph.pack_dna.max_items,
+                    &layers.project.graph.pack_dna.max_items,
+                    &layers.user.graph.pack_dna.max_items,
+                    &layers.defaults.graph.pack_dna.max_items,
+                ),
+                max_edges: pick_field(
+                    &mut sources,
+                    GRAPH_PACK_DNA_MAX_EDGES_KEY,
+                    &layers.cli.graph.pack_dna.max_edges,
+                    &layers.environment.graph.pack_dna.max_edges,
+                    &layers.project.graph.pack_dna.max_edges,
+                    &layers.user.graph.pack_dna.max_edges,
+                    &layers.defaults.graph.pack_dna.max_edges,
+                ),
+            },
+            gomory_hu: GraphGomoryHuConfig {
+                sample_threshold: pick_field(
+                    &mut sources,
+                    GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY,
+                    &layers.cli.graph.gomory_hu.sample_threshold,
+                    &layers.environment.graph.gomory_hu.sample_threshold,
+                    &layers.project.graph.gomory_hu.sample_threshold,
+                    &layers.user.graph.gomory_hu.sample_threshold,
+                    &layers.defaults.graph.gomory_hu.sample_threshold,
+                ),
+                sample_size: pick_field(
+                    &mut sources,
+                    GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY,
+                    &layers.cli.graph.gomory_hu.sample_size,
+                    &layers.environment.graph.gomory_hu.sample_size,
+                    &layers.project.graph.gomory_hu.sample_size,
+                    &layers.user.graph.gomory_hu.sample_size,
+                    &layers.defaults.graph.gomory_hu.sample_size,
+                ),
+            },
+        },
         curation: CurationConfig {
             duplicate_similarity: pick_field(
                 &mut sources,
@@ -1148,6 +1376,8 @@ mod tests {
 
     use super::{
         CURATION_SPECIFICITY_MIN_KEY, ConfigLayers, ConfigValueSource, EnvironmentConfigError,
+        GRAPH_CURATE_ONION_DECAY_MAX_KEY, GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY,
+        GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY, GRAPH_PPR_ALPHA_KEY,
         LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY, LEARN_DECAY_DEMOTE_THRESHOLD_KEY,
         LEARN_DECAY_PROCEDURAL_RULE_HALF_LIFE_DAYS_KEY, PACK_DEFAULT_MAX_TOKENS_KEY,
         PACK_DEFAULT_PROFILE_KEY, POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY,
@@ -1155,7 +1385,8 @@ mod tests {
         built_in_config, config_from_env, merge_config,
     };
     use crate::config::{
-        ConfigFile, CurationConfig, LearnConfig, LearnDecayConfig, PackConfig, PathExpander,
+        ConfigFile, CurationConfig, GraphConfig, GraphCurateConfig, GraphGomoryHuConfig,
+        GraphHealthConfig, GraphPprConfig, LearnConfig, LearnDecayConfig, PackConfig, PathExpander,
         PolicyConfig, SearchConfig, SearchSpeed, SecretDetectorConfig, StorageConfig,
     };
 
@@ -1203,6 +1434,22 @@ mod tests {
             "default profile",
         )?;
         ensure_equal(&defaults.pack.default_max_tokens, &Some(4000), "max tokens")?;
+        ensure_equal(&defaults.graph.ppr.alpha, &Some(0.30), "graph ppr alpha")?;
+        ensure_equal(
+            &defaults.graph.health.contradiction_threshold,
+            &Some(0.20),
+            "graph contradiction threshold",
+        )?;
+        ensure_equal(
+            &defaults.graph.curate.onion_decay_max,
+            &Some(3.0),
+            "graph onion decay max",
+        )?;
+        ensure_equal(
+            &defaults.graph.gomory_hu.sample_threshold,
+            &Some(500),
+            "graph gomory-hu sample threshold",
+        )?;
         ensure_equal(
             &defaults.curation.specificity_min,
             &Some(0.45),
@@ -1305,6 +1552,21 @@ mod tests {
                 default_speed: Some(SearchSpeed::Thorough),
                 ..SearchConfig::default()
             },
+            graph: GraphConfig {
+                ppr: GraphPprConfig { alpha: Some(0.40) },
+                health: GraphHealthConfig {
+                    contradiction_threshold: Some(0.25),
+                },
+                curate: GraphCurateConfig {
+                    onion_decay_max: Some(2.5),
+                    ..GraphCurateConfig::default()
+                },
+                gomory_hu: GraphGomoryHuConfig {
+                    sample_threshold: Some(750),
+                    ..GraphGomoryHuConfig::default()
+                },
+                ..GraphConfig::default()
+            },
             curation: CurationConfig {
                 specificity_min: Some(0.60),
                 ..CurationConfig::default()
@@ -1397,6 +1659,46 @@ mod tests {
             &merged.source(PACK_DEFAULT_MAX_TOKENS_KEY),
             &Some(ConfigValueSource::Default),
             "default max tokens source",
+        )?;
+        ensure_equal(
+            &merged.values.graph.ppr.alpha,
+            &Some(0.40),
+            "project graph ppr alpha",
+        )?;
+        ensure_equal(
+            &merged.source(GRAPH_PPR_ALPHA_KEY),
+            &Some(ConfigValueSource::Project),
+            "graph ppr alpha source",
+        )?;
+        ensure_equal(
+            &merged.values.graph.health.contradiction_threshold,
+            &Some(0.25),
+            "project graph contradiction threshold",
+        )?;
+        ensure_equal(
+            &merged.source(GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY),
+            &Some(ConfigValueSource::Project),
+            "graph contradiction threshold source",
+        )?;
+        ensure_equal(
+            &merged.values.graph.curate.onion_decay_max,
+            &Some(2.5),
+            "project graph onion decay max",
+        )?;
+        ensure_equal(
+            &merged.source(GRAPH_CURATE_ONION_DECAY_MAX_KEY),
+            &Some(ConfigValueSource::Project),
+            "graph onion decay max source",
+        )?;
+        ensure_equal(
+            &merged.values.graph.gomory_hu.sample_threshold,
+            &Some(750),
+            "project graph gomory-hu sample threshold",
+        )?;
+        ensure_equal(
+            &merged.source(GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY),
+            &Some(ConfigValueSource::Project),
+            "graph gomory-hu sample threshold source",
         )?;
         ensure_equal(
             &merged.values.curation.specificity_min,

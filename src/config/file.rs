@@ -22,6 +22,7 @@ pub struct ConfigFile {
     pub search: SearchConfig,
     pub pack: PackConfig,
     pub handoff: HandoffConfig,
+    pub graph: GraphConfig,
     pub curation: CurationConfig,
     pub learn: LearnConfig,
     pub feedback: FeedbackConfig,
@@ -72,6 +73,7 @@ impl ConfigFile {
             search: SearchConfig::parse(&document)?,
             pack: PackConfig::parse(&document)?,
             handoff: HandoffConfig::parse(&document)?,
+            graph: GraphConfig::parse(&document)?,
             curation: CurationConfig::parse(&document)?,
             learn: LearnConfig::parse(&document)?,
             feedback: FeedbackConfig::parse(&document)?,
@@ -244,6 +246,147 @@ impl HandoffStaleThresholdConfig {
                 "content_drift_score",
             )?,
             memories_revised: optional_u64_path(document, SECTIONS, "memories_revised")?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GraphConfig {
+    pub ppr: GraphPprConfig,
+    pub health: GraphHealthConfig,
+    pub curate: GraphCurateConfig,
+    pub hits: GraphHitsConfig,
+    pub causal: GraphCausalConfig,
+    pub pack_dna: GraphPackDnaConfig,
+    pub gomory_hu: GraphGomoryHuConfig,
+}
+
+impl GraphConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            ppr: GraphPprConfig::parse(document)?,
+            health: GraphHealthConfig::parse(document)?,
+            curate: GraphCurateConfig::parse(document)?,
+            hits: GraphHitsConfig::parse(document)?,
+            causal: GraphCausalConfig::parse(document)?,
+            pack_dna: GraphPackDnaConfig::parse(document)?,
+            gomory_hu: GraphGomoryHuConfig::parse(document)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GraphPprConfig {
+    pub alpha: Option<f64>,
+}
+
+impl GraphPprConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            alpha: optional_unit_float_path(document, &["graph", "ppr"], "alpha")?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GraphHealthConfig {
+    pub contradiction_threshold: Option<f64>,
+}
+
+impl GraphHealthConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            contradiction_threshold: optional_unit_float_path(
+                document,
+                &["graph", "health"],
+                "contradiction_threshold",
+            )?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GraphCurateConfig {
+    pub onion_decay_max: Option<f64>,
+    pub articulation_protection_multiplier: Option<f64>,
+}
+
+impl GraphCurateConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        const SECTIONS: &[&str] = &["graph", "curate"];
+        Ok(Self {
+            onion_decay_max: optional_positive_float_path(document, SECTIONS, "onion_decay_max")?,
+            articulation_protection_multiplier: optional_unit_float_path(
+                document,
+                SECTIONS,
+                "articulation_protection_multiplier",
+            )?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GraphHitsConfig {
+    pub profile_boost: Option<f64>,
+}
+
+impl GraphHitsConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            profile_boost: optional_nonnegative_float_path(
+                document,
+                &["graph", "hits"],
+                "profile_boost",
+            )?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GraphCausalConfig {
+    pub min_cost_normalization: Option<f64>,
+}
+
+impl GraphCausalConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            min_cost_normalization: optional_positive_float_path(
+                document,
+                &["graph", "causal"],
+                "min_cost_normalization",
+            )?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GraphPackDnaConfig {
+    pub max_items: Option<u64>,
+    pub max_edges: Option<u64>,
+}
+
+impl GraphPackDnaConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        const SECTIONS: &[&str] = &["graph", "pack_dna"];
+        Ok(Self {
+            max_items: optional_u64_path(document, SECTIONS, "max_items")?,
+            max_edges: optional_u64_path(document, SECTIONS, "max_edges")?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GraphGomoryHuConfig {
+    pub sample_threshold: Option<u64>,
+    pub sample_size: Option<u64>,
+}
+
+impl GraphGomoryHuConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        const SECTIONS: &[&str] = &["graph", "gomory_hu"];
+        Ok(Self {
+            sample_threshold: optional_u64_path(document, SECTIONS, "sample_threshold")?,
+            sample_size: optional_u64_path(document, SECTIONS, "sample_size")?,
         })
     }
 }
@@ -713,6 +856,22 @@ fn optional_nonnegative_float(
     }
 }
 
+fn optional_nonnegative_float_path(
+    document: &DocumentMut,
+    sections: &[&str],
+    key: &str,
+) -> Result<Option<f64>, ConfigParseError> {
+    match optional_float_path(document, sections, key)? {
+        Some(number) if number >= 0.0 => Ok(Some(number)),
+        Some(number) => Err(ConfigParseError::InvalidValue {
+            key: key_path_name(sections, key),
+            value: number.to_string(),
+            message: "expected a non-negative number".to_string(),
+        }),
+        None => Ok(None),
+    }
+}
+
 fn optional_positive_float_path(
     document: &DocumentMut,
     sections: &[&str],
@@ -914,6 +1073,30 @@ any_expired_in_pack = true
 content_drift_score = 0.15
 memories_revised = 0
 
+[graph.ppr]
+alpha = 0.30
+
+[graph.health]
+contradiction_threshold = 0.20
+
+[graph.curate]
+onion_decay_max = 3.0
+articulation_protection_multiplier = 0.5
+
+[graph.hits]
+profile_boost = 0.5
+
+[graph.causal]
+min_cost_normalization = 1.0
+
+[graph.pack_dna]
+max_items = 10
+max_edges = 30
+
+[graph.gomory_hu]
+sample_threshold = 500
+sample_size = 100
+
 [curation]
 duplicate_similarity = 0.92
 harmful_weight = 2.5
@@ -1007,6 +1190,52 @@ prompt_injection_guard = true
             &config.handoff.stale_threshold.memories_revised,
             &Some(0),
             "handoff stale memories revised threshold",
+        )?;
+        ensure_equal(&config.graph.ppr.alpha, &Some(0.30), "graph ppr alpha")?;
+        ensure_equal(
+            &config.graph.health.contradiction_threshold,
+            &Some(0.20),
+            "graph contradiction threshold",
+        )?;
+        ensure_equal(
+            &config.graph.curate.onion_decay_max,
+            &Some(3.0),
+            "graph onion decay max",
+        )?;
+        ensure_equal(
+            &config.graph.curate.articulation_protection_multiplier,
+            &Some(0.5),
+            "graph articulation protection multiplier",
+        )?;
+        ensure_equal(
+            &config.graph.hits.profile_boost,
+            &Some(0.5),
+            "graph hits profile boost",
+        )?;
+        ensure_equal(
+            &config.graph.causal.min_cost_normalization,
+            &Some(1.0),
+            "graph causal min-cost normalization",
+        )?;
+        ensure_equal(
+            &config.graph.pack_dna.max_items,
+            &Some(10),
+            "graph pack dna max items",
+        )?;
+        ensure_equal(
+            &config.graph.pack_dna.max_edges,
+            &Some(30),
+            "graph pack dna max edges",
+        )?;
+        ensure_equal(
+            &config.graph.gomory_hu.sample_threshold,
+            &Some(500),
+            "graph gomory-hu sample threshold",
+        )?;
+        ensure_equal(
+            &config.graph.gomory_hu.sample_size,
+            &Some(100),
+            "graph gomory-hu sample size",
         )?;
         ensure_equal(
             &config.curation.harmful_weight,
@@ -1110,6 +1339,12 @@ prompt_injection_guard = true
             &None,
             "handoff stale expired threshold",
         )?;
+        ensure_equal(&config.graph.ppr.alpha, &None, "graph ppr alpha")?;
+        ensure_equal(
+            &config.graph.gomory_hu.sample_threshold,
+            &None,
+            "graph gomory-hu sample threshold",
+        )?;
         ensure_equal(
             &config.privacy.redaction_classes,
             &None,
@@ -1153,6 +1388,31 @@ prompt_injection_guard = true
             matches!(
                 error,
                 ConfigParseError::InvalidValue { ref key, .. } if key == "pack.mmr_lambda"
+            ),
+            format!("unexpected error: {error:?}"),
+        )
+    }
+
+    #[test]
+    fn rejects_out_of_range_graph_thresholds() -> TestResult {
+        let error = expect_config_error("[graph.health]\ncontradiction_threshold = 2.0\n")?;
+
+        ensure(
+            matches!(
+                error,
+                ConfigParseError::InvalidValue { ref key, .. }
+                    if key == "graph.health.contradiction_threshold"
+            ),
+            format!("unexpected error: {error:?}"),
+        )?;
+
+        let error = expect_config_error("[graph.curate]\nonion_decay_max = 0.0\n")?;
+
+        ensure(
+            matches!(
+                error,
+                ConfigParseError::InvalidValue { ref key, .. }
+                    if key == "graph.curate.onion_decay_max"
             ),
             format!("unexpected error: {error:?}"),
         )
