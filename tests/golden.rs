@@ -2261,7 +2261,8 @@ mod tests {
         ensure_contains(&stdout, "format before release", "should have query")?;
         ensure_contains(&stdout, "cargo fmt --check", "should have memory content")?;
 
-        assert_golden("agent", "context_pack.md", &stdout)
+        let normalized = normalize_context_pack_text(&stdout);
+        assert_golden("agent", "context_pack.md", &normalized)
     }
 
     #[test]
