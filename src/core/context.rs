@@ -1075,6 +1075,7 @@ pub fn run_context_pack_with_performance(
         request.budget,
         pack_candidates,
         crate::pack::PackAssemblyOptions {
+            redaction_level: crate::models::RedactionLevel::Standard,
             include_coverage_fill: options.output_options.include_coverage_fill,
             output_redaction_enabled,
         },

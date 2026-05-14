@@ -9,8 +9,8 @@ use tiktoken_rs::{CoreBPE, cl100k_base};
 use crate::cache::{CacheBudget, MemoryPressure, assess_pressure};
 use crate::models::{
     ContextProfile, ContextProfileName, ContextProfileSection, ContextProfileSectionMix,
-    ERROR_SCHEMA_V2, MemoryId, MemoryScopeStats, ProvenanceUri, RESPONSE_SCHEMA_V1, TrustClass,
-    UnitScore,
+    ERROR_SCHEMA_V2, MemoryId, MemoryScopeStats, ProvenanceUri, RESPONSE_SCHEMA_V1, RedactionLevel,
+    TrustClass, UnitScore,
 };
 
 pub const SUBSYSTEM: &str = "pack";
@@ -30,6 +30,7 @@ pub const DEFAULT_COORDINATION_STALE_AFTER_MS: u64 = 86_400_000;
 pub struct PackAssemblyOptions {
     pub include_coverage_fill: bool,
     pub output_redaction_enabled: bool,
+    pub redaction_level: RedactionLevel,
 }
 
 impl Default for PackAssemblyOptions {
@@ -37,6 +38,7 @@ impl Default for PackAssemblyOptions {
         Self {
             include_coverage_fill: true,
             output_redaction_enabled: true,
+            redaction_level: RedactionLevel::Minimal,
         }
     }
 }

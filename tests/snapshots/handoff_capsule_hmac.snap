@@ -1,0 +1,29 @@
+---
+source: scripts/e2e_overhaul/handoff_hmac.sh
+expression: scrubbed_default_handoff_capsule
+---
+{
+  "schema": "ee.handoff.capsule.v1",
+  "capsule_id": "<hcap>",
+  "profile": "resume",
+  "integrity": {
+    "schema": "ee.handoff.integrity.v1",
+    "algorithm": "hmac-sha256",
+    "keyMode": "workspace_secret",
+    "bodySha256": "sha256:<signed-body>",
+    "keyDerivationInputHash": "blake3:<kdf-input>",
+    "hmac": "base64url:<hmac>",
+    "hmacPrefix": "<8 chars>"
+  },
+  "workspace_identity": {
+    "fingerprint": "<workspace-fingerprint>",
+    "canonical_root": "<workspace>",
+    "scope_kind": "standalone",
+    "repository_fingerprint": null
+  },
+  "section_count": 4,
+  "first_section": {
+    "title": "Workspace Identity",
+    "content_prefix": "Workspace: <workspace>"
+  }
+}

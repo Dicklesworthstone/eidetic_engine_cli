@@ -33,7 +33,7 @@ use crate::core::task_frame::{
     NON_EXECUTING_CONTRACT, TaskFrameRecord, TaskFrameShowOptions, show_task_frame,
 };
 use crate::db::{CreateAuditInput, DbConnection, audit_actions, generate_audit_id};
-use crate::models::DomainError;
+use crate::models::{DomainError, RedactionLevel};
 
 /// Schema for handoff capsule format.
 pub const HANDOFF_CAPSULE_SCHEMA_V1: &str = "ee.handoff.capsule.v1";
@@ -514,6 +514,8 @@ pub struct CreateOptions {
     /// Test/embedding override for the machine salt path. CLI callers
     /// leave this unset and use the platform default.
     pub machine_salt_path: Option<PathBuf>,
+    /// Redaction level requested for capsule content.
+    pub redaction_level: RedactionLevel,
 }
 
 impl Default for CreateOptions {
@@ -527,6 +529,7 @@ impl Default for CreateOptions {
             task_frame_id: None,
             bind_to_machine: false,
             machine_salt_path: None,
+            redaction_level: RedactionLevel::Standard,
         }
     }
 }
@@ -3718,6 +3721,7 @@ mod tests {
             task_frame_id: None,
             bind_to_machine: false,
             machine_salt_path: None,
+            redaction_level: RedactionLevel::Standard,
         })
         .map_err(|error| error.message())?;
         ensure(create.active_focus.is_some(), "create includes focus")?;
@@ -3801,6 +3805,7 @@ mod tests {
             task_frame_id: Some(frame_id.clone()),
             bind_to_machine: false,
             machine_salt_path: None,
+            redaction_level: RedactionLevel::Standard,
         })
         .map_err(|error| error.message())?;
         ensure(create.task_frame.is_some(), "create includes task frame")?;
@@ -3887,6 +3892,7 @@ mod tests {
             task_frame_id: None,
             bind_to_machine,
             machine_salt_path,
+            redaction_level: RedactionLevel::Standard,
         })
         .map_err(|error| error.message())?;
         Ok(output)
