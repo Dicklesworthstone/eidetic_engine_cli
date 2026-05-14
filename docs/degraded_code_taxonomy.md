@@ -306,13 +306,14 @@ A degraded entry's `code` is classified into one of three buckets:
 | `graph_snapshot_topology_unavailable` | low | bd-17c65.5.3 (E3) |
 | `graph_snapshot_unusable` | high | bd-17c65.5.3 (E3) |
 
-#### Integrity / schema (12)
+#### Integrity / schema (15)
 | Code | Severity | Bead |
 |------|----------|------|
 | `handoff_capsule_machine_mismatch` | high | bd-17c65.13.6 (M5) |
 | `handoff_capsule_tampered` | high | bd-17c65.13.6 (M5) |
 | `handoff_hmac_missing` | high | bd-17c65.13.6 (M5) |
 | `handoff_hmac_skipped` | high | bd-17c65.13.6 (M5) |
+| `handoff_snapshot_stale` | medium | bd-17c65.13.5 (M4) |
 | `integrity_database_missing` | high | bd-17c65.12.2 (L1) |
 | `integrity_database_open_failed` | high | bd-17c65.12.2 (L1) |
 | `integrity_provenance_sample_unavailable` | low | bd-17c65.12.2 (L1) |
