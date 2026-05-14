@@ -342,16 +342,19 @@ A degraded entry's `code` is classified into one of three buckets:
 | `quarantine_rows_unreadable` | medium | bd-17c65.10.6 (J6) |
 | `trust_quarantine_rows_unreadable` | medium | bd-17c65.10.6 (J6) |
 
-#### Coordination / external tools (6)
+#### Coordination / external tools (10)
 | Code | Severity | Bead |
 |------|----------|------|
 | `agent_mail_unavailable` | medium | bd-2nkbn (Agent Mail resilience) |
 | `agent_mail_archive_degraded` | warning | bd-1zb7k.11 (P) |
 | `agent_status_unavailable` | low | (TBD) |
+| `beads_tracker_stale` | warning | bd-1zb7k.13.1 (C1) |
 | `beads_unavailable` | medium | bd-1zb7k.4 (S3) |
 | `bv_unavailable` | medium | bd-1zb7k.4 (S3) |
 | `git_unavailable` | medium | bd-1zb7k.4 (S3) |
+| `rch_remote_required_fallback_prevented` | warning | bd-1zb7k.13.1 (C1) |
 | `rch_unavailable` | low | bd-1zb7k.5 (S4) |
+| `rch_worker_topology_blocked` | warning | bd-1zb7k.13.1 (C1) |
 
 #### Model registry / science (5)
 | Code | Severity | Bead |

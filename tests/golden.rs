@@ -280,6 +280,23 @@ mod tests {
         }
     }
 
+    fn swarm_source_degraded_with_freshness(
+        source: SwarmBriefSourceKind,
+        code: &str,
+        freshness_state: &'static str,
+        message: &str,
+        repair: &str,
+    ) -> SwarmBriefSourceSnapshot {
+        let mut snapshot = swarm_source_degraded(source, code, message, repair);
+        snapshot.freshness = SwarmBriefSourceFreshness {
+            observed_at: Some("2026-05-14T05:20:52Z".to_string()),
+            age_seconds: None,
+            stale_after_seconds: None,
+            state: freshness_state,
+        };
+        snapshot
+    }
+
     fn swarm_source_unavailable(
         source: SwarmBriefSourceKind,
         code: &str,
@@ -541,6 +558,18 @@ mod tests {
             ),
         );
 
+        let mut beads_tracker_stale = base_swarm_brief_report();
+        replace_swarm_source(
+            &mut beads_tracker_stale,
+            swarm_source_degraded_with_freshness(
+                SwarmBriefSourceKind::Beads,
+                "beads_tracker_stale",
+                "stale",
+                "Beads JSONL is newer than the local database; bucket reads may lag coordination history.",
+                "br sync --import-only",
+            ),
+        );
+
         let mut rch_unavailable = base_swarm_brief_report();
         replace_swarm_source(
             &mut rch_unavailable,
@@ -549,6 +578,17 @@ mod tests {
                 "rch_unavailable",
                 "RCH status was unavailable, so remote build pressure is unknown.",
                 "rch status --json",
+            ),
+        );
+
+        let mut rch_worker_topology_blocked = base_swarm_brief_report();
+        replace_swarm_source(
+            &mut rch_worker_topology_blocked,
+            swarm_source_unavailable(
+                SwarmBriefSourceKind::Rch,
+                "rch_worker_topology_blocked",
+                "RCH remote workers are visible, but workspace path mapping blocked offloaded verification.",
+                "Inspect RCH worker path mapping.",
             ),
         );
 
@@ -612,6 +652,8 @@ mod tests {
             swarm_brief_contract_case("agent_mail_unavailable", agent_mail_unavailable)?,
             swarm_brief_contract_case("beads_stale_locked", beads_stale_locked)?,
             swarm_brief_contract_case("rch_unavailable", rch_unavailable)?,
+            swarm_brief_contract_case("beads_tracker_stale", beads_tracker_stale)?,
+            swarm_brief_contract_case("rch_worker_topology_blocked", rch_worker_topology_blocked)?,
             swarm_brief_contract_case("high_resource_pressure", high_resource_pressure)?,
             swarm_brief_contract_case("workspace_ambiguity", workspace_ambiguity)?,
             swarm_brief_contract_case("secret_redaction", secret_redaction)?,
@@ -621,7 +663,7 @@ mod tests {
     #[test]
     fn swarm_brief_contract_matrix_matches_golden() -> TestResult {
         let cases = swarm_brief_contract_cases()?;
-        ensure_equal(&cases.len(), &12, "swarm brief contract case count")?;
+        ensure_equal(&cases.len(), &14, "swarm brief contract case count")?;
         let matrix = serde_json::json!({
             "schema": "ee.swarm.brief.contract_matrix.v1",
             "payloadSchema": SWARM_BRIEF_SCHEMA_V1,

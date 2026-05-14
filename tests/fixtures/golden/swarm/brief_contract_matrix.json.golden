@@ -1145,6 +1145,252 @@
       ]
     },
     {
+      "case": "beads_tracker_stale",
+      "schema": "ee.swarm.brief.v1",
+      "workspace": ".",
+      "redactionStatus": "paths_counts_subjects_only_no_content",
+      "sources": [
+        {
+          "source": "agent_inventory",
+          "status": "ready",
+          "freshness": "current",
+          "itemCount": 1,
+          "command": null,
+          "sideEffectFree": true,
+          "redaction": "paths_counts_subjects_only_no_content",
+          "degradedCodes": []
+        },
+        {
+          "source": "agent_mail",
+          "status": "ready",
+          "freshness": "current",
+          "itemCount": 1,
+          "command": null,
+          "sideEffectFree": true,
+          "redaction": "paths_counts_subjects_only_no_content",
+          "degradedCodes": []
+        },
+        {
+          "source": "beads",
+          "status": "degraded",
+          "freshness": "stale",
+          "itemCount": 0,
+          "command": null,
+          "sideEffectFree": true,
+          "redaction": "paths_counts_subjects_only_no_content",
+          "degradedCodes": [
+            "beads_tracker_stale"
+          ]
+        },
+        {
+          "source": "bv",
+          "status": "ready",
+          "freshness": "current",
+          "itemCount": 1,
+          "command": "bv --robot-triage --robot-triage-by-track",
+          "sideEffectFree": true,
+          "redaction": "paths_counts_subjects_only_no_content",
+          "degradedCodes": []
+        },
+        {
+          "source": "git",
+          "status": "ready",
+          "freshness": "current",
+          "itemCount": 1,
+          "command": "git status --short --branch --untracked-files=all",
+          "sideEffectFree": true,
+          "redaction": "paths_counts_subjects_only_no_content",
+          "degradedCodes": []
+        },
+        {
+          "source": "host_profile",
+          "status": "ready",
+          "freshness": "current",
+          "itemCount": 1,
+          "command": null,
+          "sideEffectFree": true,
+          "redaction": "paths_counts_subjects_only_no_content",
+          "degradedCodes": []
+        },
+        {
+          "source": "rch",
+          "status": "ready",
+          "freshness": "current",
+          "itemCount": 1,
+          "command": "rch status --json",
+          "sideEffectFree": true,
+          "redaction": "paths_counts_subjects_only_no_content",
+          "degradedCodes": []
+        }
+      ],
+      "degraded": [],
+      "fileSurfaceRisks": [],
+      "recommendations": [
+        {
+          "id": "rec.degraded.beads.beads_tracker_stale",
+          "kind": "degraded_capability",
+          "severity": "high",
+          "confidence": "high",
+          "reasonCodes": [
+            "beads_tracker_stale",
+            "source_status:degraded"
+          ],
+          "evidence": [
+            "could_not_know:beads:ready, blocked, deferred, and in-progress work"
+          ],
+          "suggestedCommands": [
+            "br sync --import-only"
+          ],
+          "mustNotDo": [
+            "Do not treat degraded beads data as complete evidence."
+          ]
+        },
+        {
+          "id": "rec.work_selection.no_ready_beads",
+          "kind": "work_selection",
+          "severity": "medium",
+          "confidence": "low",
+          "reasonCodes": [
+            "no_ready_work"
+          ],
+          "evidence": [
+            "beads.ready:0"
+          ],
+          "suggestedCommands": [
+            "bv --robot-triage",
+            "br blocked --json"
+          ],
+          "mustNotDo": [
+            "Do not claim a blocked bead without resolving its dependencies.",
+            "Do not infer the project is done from Beads alone when any source is degraded."
+          ]
+        }
+      ]
+    },
+    {
+      "case": "rch_worker_topology_blocked",
+      "schema": "ee.swarm.brief.v1",
+      "workspace": ".",
+      "redactionStatus": "paths_counts_subjects_only_no_content",
+      "sources": [
+        {
+          "source": "agent_inventory",
+          "status": "ready",
+          "freshness": "current",
+          "itemCount": 1,
+          "command": null,
+          "sideEffectFree": true,
+          "redaction": "paths_counts_subjects_only_no_content",
+          "degradedCodes": []
+        },
+        {
+          "source": "agent_mail",
+          "status": "ready",
+          "freshness": "current",
+          "itemCount": 1,
+          "command": null,
+          "sideEffectFree": true,
+          "redaction": "paths_counts_subjects_only_no_content",
+          "degradedCodes": []
+        },
+        {
+          "source": "beads",
+          "status": "ready",
+          "freshness": "current",
+          "itemCount": 1,
+          "command": "br ready --json",
+          "sideEffectFree": true,
+          "redaction": "paths_counts_subjects_only_no_content",
+          "degradedCodes": []
+        },
+        {
+          "source": "bv",
+          "status": "ready",
+          "freshness": "current",
+          "itemCount": 1,
+          "command": "bv --robot-triage --robot-triage-by-track",
+          "sideEffectFree": true,
+          "redaction": "paths_counts_subjects_only_no_content",
+          "degradedCodes": []
+        },
+        {
+          "source": "git",
+          "status": "ready",
+          "freshness": "current",
+          "itemCount": 1,
+          "command": "git status --short --branch --untracked-files=all",
+          "sideEffectFree": true,
+          "redaction": "paths_counts_subjects_only_no_content",
+          "degradedCodes": []
+        },
+        {
+          "source": "host_profile",
+          "status": "ready",
+          "freshness": "current",
+          "itemCount": 1,
+          "command": null,
+          "sideEffectFree": true,
+          "redaction": "paths_counts_subjects_only_no_content",
+          "degradedCodes": []
+        },
+        {
+          "source": "rch",
+          "status": "unavailable",
+          "freshness": "unknown",
+          "itemCount": 0,
+          "command": null,
+          "sideEffectFree": true,
+          "redaction": "paths_counts_subjects_only_no_content",
+          "degradedCodes": [
+            "rch_worker_topology_blocked"
+          ]
+        }
+      ],
+      "degraded": [],
+      "fileSurfaceRisks": [],
+      "recommendations": [
+        {
+          "id": "rec.degraded.rch.rch_worker_topology_blocked",
+          "kind": "degraded_capability",
+          "severity": "medium",
+          "confidence": "high",
+          "reasonCodes": [
+            "rch_worker_topology_blocked",
+            "source_status:unavailable"
+          ],
+          "evidence": [
+            "could_not_know:rch:remote build queue and active build pressure"
+          ],
+          "suggestedCommands": [
+            "Inspect RCH worker path mapping."
+          ],
+          "mustNotDo": [
+            "Do not treat degraded rch data as complete evidence."
+          ]
+        },
+        {
+          "id": "rec.work_selection.no_ready_beads",
+          "kind": "work_selection",
+          "severity": "medium",
+          "confidence": "medium",
+          "reasonCodes": [
+            "no_ready_work"
+          ],
+          "evidence": [
+            "beads.ready:0"
+          ],
+          "suggestedCommands": [
+            "bv --robot-triage",
+            "br blocked --json"
+          ],
+          "mustNotDo": [
+            "Do not claim a blocked bead without resolving its dependencies.",
+            "Do not infer the project is done from Beads alone when any source is degraded."
+          ]
+        }
+      ]
+    },
+    {
       "case": "high_resource_pressure",
       "schema": "ee.swarm.brief.v1",
       "workspace": ".",

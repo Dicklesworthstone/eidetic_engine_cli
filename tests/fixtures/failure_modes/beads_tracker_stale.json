@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "beads_tracker_stale",
+  "introduced_by": {
+    "bead": "bd-1zb7k.13.1",
+    "epic_letter": "C"
+  },
+  "surfaces": [
+    "swarm brief"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Swarm brief detects that Beads issues.jsonl is newer than the local Beads database.",
+    "setup_commands": [
+      "# create a Beads workspace where .beads/issues.jsonl has entries not imported into .beads/beads.db"
+    ],
+    "invocation": "ee swarm brief --sources beads --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "beads_tracker_stale",
+    "severity": "warning",
+    "message_contains": [
+      "Beads JSONL is newer than the local database"
+    ],
+    "repair_contains": "br sync --import-only",
+    "repair_string": "br sync --import-only",
+    "repair_command_regex": "(?<cmd>br sync --import-only)"
+  }
+}

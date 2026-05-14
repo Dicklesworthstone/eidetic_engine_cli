@@ -185,9 +185,12 @@ in the same commit, keeping the catalog complete by construction.
 | `lab_replay_unavailable` | lab capture, lab replay, lab counterfactual | medium | bd-17c65.10.6 (J6) |
 | `git_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
 | `beads_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
+| `beads_tracker_stale` | swarm brief | warning | bd-1zb7k.13.1 (C1) |
 | `bv_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
 | `agent_mail_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
+| `rch_remote_required_fallback_prevented` | swarm brief | warning | bd-1zb7k.13.1 (C1) |
 | `rch_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
+| `rch_worker_topology_blocked` | swarm brief | warning | bd-1zb7k.13.1 (C1) |
 | `agent_status_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
 | `swarm_scale_budget_exceeded` | swarm-scale benchmark | warning | bd-1zb7k.8 (S7) |
 | `swarm_scale_nondeterminism` | swarm-scale benchmark | high | bd-1zb7k.8 (S7) |

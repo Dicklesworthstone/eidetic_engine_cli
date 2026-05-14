@@ -25,9 +25,12 @@ pub const SWARM_BRIEF_SUMMARY_REDACTION_STATUS: &str =
 
 const GIT_UNAVAILABLE_CODE: &str = "git_unavailable";
 const BEADS_UNAVAILABLE_CODE: &str = "beads_unavailable";
+const BEADS_TRACKER_STALE_CODE: &str = "beads_tracker_stale";
 const BV_UNAVAILABLE_CODE: &str = "bv_unavailable";
 const AGENT_MAIL_UNAVAILABLE_CODE: &str = "agent_mail_unavailable";
 const RCH_UNAVAILABLE_CODE: &str = "rch_unavailable";
+const RCH_WORKER_TOPOLOGY_BLOCKED_CODE: &str = "rch_worker_topology_blocked";
+const RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE: &str = "rch_remote_required_fallback_prevented";
 const AGENT_STATUS_UNAVAILABLE_CODE: &str = "agent_status_unavailable";
 const MAX_SWARM_BRIEF_SUMMARY_RECOMMENDATIONS: usize = 5;
 
@@ -350,6 +353,14 @@ impl SwarmBriefSourceSnapshot {
         self.degraded = degraded;
         self
     }
+
+    fn with_freshness(mut self, freshness: SwarmBriefSourceFreshness) -> Self {
+        if freshness.state != "current" && self.status == SwarmBriefSourceStatus::Ready {
+            self.status = SwarmBriefSourceStatus::Degraded;
+        }
+        self.freshness = freshness;
+        self
+    }
 }
 
 /// Stable degraded-source record.
@@ -476,6 +487,8 @@ pub struct SwarmBriefAgentMailSnapshot {
     pub file_reservations: Vec<SwarmBriefFileReservation>,
     pub inbox: Vec<SwarmBriefInboxSummary>,
     pub threads: Vec<SwarmBriefThreadSummary>,
+    #[serde(skip)]
+    pub degraded: Vec<SwarmBriefDegradation>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -754,52 +767,61 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for BeadsSourceAdapter<
     fn collect(&self, options: &SwarmBriefCollectOptions) -> SwarmBriefSourceOutput {
         let source = SwarmBriefSourceKind::Beads;
         let provenance = SwarmBriefSourceProvenance::command("br", &["ready", "--json"]);
-        let mut degraded = Vec::new();
+        let mut freshness = SwarmBriefSourceFreshness::current();
+        let mut degraded = collect_beads_freshness(self.runner, options, &mut freshness);
+        let mut bucket_degraded = Vec::new();
 
         let ready = collect_beads_bucket(
             self.runner,
             options,
             &["ready", "--json"],
             "ready",
-            &mut degraded,
+            &mut bucket_degraded,
         );
         let blocked = collect_beads_bucket(
             self.runner,
             options,
             &["blocked", "--json"],
             "blocked",
-            &mut degraded,
+            &mut bucket_degraded,
         );
         let in_progress = collect_beads_bucket(
             self.runner,
             options,
             &["list", "--status", "in_progress", "--json"],
             "in_progress",
-            &mut degraded,
+            &mut bucket_degraded,
         );
         let deferred = collect_beads_bucket(
             self.runner,
             options,
             &["list", "--status", "deferred", "--json"],
             "deferred",
-            &mut degraded,
+            &mut bucket_degraded,
         );
 
         if ready.is_empty()
             && blocked.is_empty()
             && in_progress.is_empty()
             && deferred.is_empty()
-            && !degraded.is_empty()
+            && !bucket_degraded.is_empty()
         {
+            let primary_degradation = bucket_degraded.remove(0);
+            let mut unavailable_degraded = vec![primary_degradation.clone()];
+            unavailable_degraded.extend(degraded);
+            unavailable_degraded.extend(bucket_degraded);
             return SwarmBriefSourceOutput {
                 snapshot: SwarmBriefSourceSnapshot::unavailable(
                     source,
                     provenance,
-                    degraded.remove(0),
-                ),
+                    primary_degradation,
+                )
+                .with_freshness(freshness)
+                .with_degraded(unavailable_degraded),
                 contribution: SwarmBriefContribution::None,
             };
         }
+        degraded.extend(bucket_degraded);
 
         let summary = SwarmBriefBeadsSummary {
             ready,
@@ -813,9 +835,54 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for BeadsSourceAdapter<
             + summary.deferred.len();
         SwarmBriefSourceOutput {
             snapshot: SwarmBriefSourceSnapshot::ready(source, provenance, item_count)
+                .with_freshness(freshness)
                 .with_degraded(degraded),
             contribution: SwarmBriefContribution::Beads(summary),
         }
+    }
+}
+
+fn collect_beads_freshness<R: SwarmBriefCommandRunner>(
+    runner: &R,
+    options: &SwarmBriefCollectOptions,
+    freshness: &mut SwarmBriefSourceFreshness,
+) -> Vec<SwarmBriefDegradation> {
+    let args = [
+        "sync",
+        "--status",
+        "--json",
+        "--no-auto-import",
+        "--allow-stale",
+    ];
+    match runner.run("br", &args, &options.workspace, options.command_timeout_ms) {
+        Ok(output) => match parse_beads_sync_status_json(&output.stdout) {
+            Ok(status) if status.jsonl_newer && !status.db_newer => {
+                *freshness = SwarmBriefSourceFreshness {
+                    observed_at: status.last_import_time,
+                    age_seconds: None,
+                    stale_after_seconds: None,
+                    state: "stale",
+                };
+                vec![SwarmBriefDegradation::warning(
+                    SwarmBriefSourceKind::Beads,
+                    BEADS_TRACKER_STALE_CODE,
+                    "Beads JSONL is newer than the local database; bucket reads may lag coordination history.",
+                    Some("br sync --import-only".to_string()),
+                )]
+            }
+            Ok(_) => Vec::new(),
+            Err(message) => vec![SwarmBriefDegradation::warning(
+                SwarmBriefSourceKind::Beads,
+                BEADS_UNAVAILABLE_CODE,
+                message,
+                Some("br sync --status --json --no-auto-import --allow-stale".to_string()),
+            )],
+        },
+        Err(error) => vec![error.to_degradation(
+            SwarmBriefSourceKind::Beads,
+            BEADS_UNAVAILABLE_CODE,
+            "br sync --status --json --no-auto-import --allow-stale",
+        )],
     }
 }
 
@@ -941,12 +1008,14 @@ impl SwarmBriefSourceAdapter for AgentMailSnapshotFileAdapter {
                     let item_count = snapshot.file_reservations.len()
                         + snapshot.inbox.len()
                         + snapshot.threads.len();
+                    let degraded = snapshot.degraded.clone();
                     SwarmBriefSourceOutput {
                         snapshot: SwarmBriefSourceSnapshot::ready(
                             SwarmBriefSourceKind::AgentMail,
                             provenance,
                             item_count,
-                        ),
+                        )
+                        .with_degraded(degraded),
                         contribution: SwarmBriefContribution::AgentMail {
                             file_reservations: snapshot.file_reservations,
                             inbox: snapshot.inbox,
@@ -1047,11 +1116,7 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for RchSourceAdapter<'_
                 }
             },
             Err(error) => {
-                let degradation = error.to_degradation(
-                    SwarmBriefSourceKind::Rch,
-                    RCH_UNAVAILABLE_CODE,
-                    "rch status --json",
-                );
+                let degradation = rch_command_error_to_degradation(&error);
                 SwarmBriefSourceOutput {
                     snapshot: SwarmBriefSourceSnapshot::unavailable(
                         SwarmBriefSourceKind::Rch,
@@ -2479,6 +2544,29 @@ pub fn parse_beads_json(input: &str, source_bucket: &str) -> Result<Vec<SwarmBri
     Ok(beads)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BeadsSyncStatus {
+    jsonl_newer: bool,
+    db_newer: bool,
+    last_import_time: Option<String>,
+}
+
+fn parse_beads_sync_status_json(input: &str) -> Result<BeadsSyncStatus, String> {
+    let value = serde_json::from_str::<Value>(input)
+        .map_err(|error| format!("Beads sync status JSON could not be parsed: {error}"))?;
+    Ok(BeadsSyncStatus {
+        jsonl_newer: value
+            .get("jsonl_newer")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        db_newer: value
+            .get("db_newer")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        last_import_time: string_field(&value, &["last_import_time", "lastImportTime"]),
+    })
+}
+
 fn parse_bead_item(item: &Value, source_bucket: &str) -> Option<SwarmBriefBead> {
     let id = string_field(item, &["id", "issue_id"])?;
     let title = string_field(item, &["title"]).unwrap_or_else(|| id.clone());
@@ -2549,6 +2637,7 @@ fn parse_bv_pick(item: &Value) -> Option<SwarmBriefBvPick> {
 pub fn parse_agent_mail_snapshot_json(input: &str) -> Result<SwarmBriefAgentMailSnapshot, String> {
     let value = serde_json::from_str::<Value>(input)
         .map_err(|error| format!("Agent Mail snapshot JSON could not be parsed: {error}"))?;
+    let degraded = parse_agent_mail_health_degraded(&value);
     let reservations = value
         .get("file_reservations")
         .or_else(|| value.get("reservations"))
@@ -2595,7 +2684,66 @@ pub fn parse_agent_mail_snapshot_json(input: &str) -> Result<SwarmBriefAgentMail
         file_reservations: reservations,
         inbox,
         threads,
+        degraded,
     })
+}
+
+fn parse_agent_mail_health_degraded(value: &Value) -> Vec<SwarmBriefDegradation> {
+    let is_coordination_health = value
+        .get("schema")
+        .and_then(Value::as_str)
+        .is_some_and(|schema| schema == "ee.swarm.coordination_health.v1")
+        || value.get("fallback_active").is_some();
+    if !is_coordination_health {
+        return Vec::new();
+    }
+
+    let failed_checks = [
+        ("mcp_http", "mcp_http_reachable"),
+        ("am_agents_list", "am_agents_list_ok"),
+        ("am_send_single_recipient", "am_send_single_recipient_ok"),
+        ("am_send_multi_recipient", "am_send_multi_recipient_ok"),
+    ]
+    .into_iter()
+    .filter_map(|(label, key)| {
+        value
+            .get(key)
+            .and_then(Value::as_bool)
+            .is_some_and(|ok| !ok)
+            .then_some(label)
+    })
+    .collect::<Vec<_>>();
+    let fallback_active = value
+        .get("fallback_active")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !fallback_active && failed_checks.is_empty() {
+        return Vec::new();
+    }
+
+    let panic = value.get("observed_panic").and_then(Value::as_str);
+    let mut message = if failed_checks.is_empty() {
+        "Agent Mail transport health reported fallback mode, so live reservations and unread mail may be incomplete.".to_string()
+    } else {
+        format!(
+            "Agent Mail transport health is degraded; failed checks: {}.",
+            failed_checks.join(", ")
+        )
+    };
+    if let Some(panic) = panic.filter(|panic| !panic.is_empty()) {
+        message.push_str(" Observed panic: ");
+        message.push_str(panic);
+        message.push('.');
+    }
+
+    vec![SwarmBriefDegradation::warning(
+        SwarmBriefSourceKind::AgentMail,
+        AGENT_MAIL_UNAVAILABLE_CODE,
+        message,
+        Some(
+            "Run `am doctor repair` or provide a current redacted Agent Mail snapshot.".to_string(),
+        ),
+    )]
 }
 
 fn parse_file_reservation(item: &Value) -> Option<SwarmBriefFileReservation> {
@@ -2685,6 +2833,41 @@ pub fn parse_rch_status_json(input: &str) -> Result<Vec<SwarmBriefResourcePressu
     }
     hints.sort();
     Ok(hints)
+}
+
+fn rch_command_error_to_degradation(error: &SwarmBriefCommandError) -> SwarmBriefDegradation {
+    let message = match error {
+        SwarmBriefCommandError::Unavailable(message) => message.as_str(),
+        SwarmBriefCommandError::Failed { stderr, .. } => stderr.as_str(),
+        SwarmBriefCommandError::TimedOut { .. } | SwarmBriefCommandError::InvalidUtf8(_) => "",
+    };
+    let (code, repair) = if is_rch_worker_topology_blocked(message) {
+        (
+            RCH_WORKER_TOPOLOGY_BLOCKED_CODE,
+            "Inspect RCH worker path mapping; remote workers are visible but this workspace cannot be mapped.",
+        )
+    } else if is_rch_remote_required_fallback_prevented(message) {
+        (
+            RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE,
+            "Fix remote worker availability or unset the remote-required guard only with explicit approval.",
+        )
+    } else {
+        (RCH_UNAVAILABLE_CODE, "rch status --json")
+    };
+    error.to_degradation(SwarmBriefSourceKind::Rch, code, repair)
+}
+
+fn is_rch_worker_topology_blocked(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("rch-e327")
+        || (lower.contains("worker") && lower.contains("topology"))
+        || (lower.contains("worker") && lower.contains("path") && lower.contains("map"))
+}
+
+fn is_rch_remote_required_fallback_prevented(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("rch_require_remote")
+        || (lower.contains("remote") && lower.contains("required") && lower.contains("fallback"))
 }
 
 fn value_array(value: &Value) -> Option<&Vec<Value>> {
@@ -3331,6 +3514,178 @@ mod tests {
     }
 
     #[test]
+    fn agent_mail_health_snapshot_degrades_transport_fallback() {
+        let snapshot = require_ok(
+            parse_agent_mail_snapshot_json(
+                r#"{
+              "schema":"ee.swarm.coordination_health.v1",
+              "mcp_http_reachable":false,
+              "am_agents_list_ok":true,
+              "am_send_single_recipient_ok":true,
+              "am_send_multi_recipient_ok":false,
+              "observed_panic":"RefCell already borrowed",
+              "fallback_active":true
+            }"#,
+            ),
+            "valid Agent Mail health JSON",
+        );
+
+        assert_eq!(snapshot.degraded.len(), 1);
+        let degradation = &snapshot.degraded[0];
+        assert_eq!(degradation.code, AGENT_MAIL_UNAVAILABLE_CODE);
+        assert_eq!(degradation.source, SwarmBriefSourceKind::AgentMail);
+        assert!(degradation.message.contains("mcp_http"));
+        assert!(degradation.message.contains("am_send_multi_recipient"));
+        assert!(degradation.message.contains("RefCell already borrowed"));
+        let source = SwarmBriefSourceSnapshot::ready(
+            SwarmBriefSourceKind::AgentMail,
+            SwarmBriefSourceProvenance::local_probe(),
+            0,
+        )
+        .with_degraded(snapshot.degraded);
+        assert_eq!(source.status, SwarmBriefSourceStatus::Degraded);
+    }
+
+    #[test]
+    fn beads_sync_status_jsonl_newer_marks_source_degraded_not_unavailable() {
+        let options = SwarmBriefCollectOptions::for_workspace(".");
+        let runner = FakeRunner::default()
+            .with_output(
+                "br",
+                &[
+                    "sync",
+                    "--status",
+                    "--json",
+                    "--no-auto-import",
+                    "--allow-stale",
+                ],
+                r#"{"jsonl_newer":true,"db_newer":false,"last_import_time":"2026-05-14T05:20:52Z"}"#,
+            )
+            .with_output(
+                "br",
+                &["ready", "--json"],
+                r#"[{"id":"bd-ready","title":"Ready work","status":"open"}]"#,
+            )
+            .with_output("br", &["blocked", "--json"], "[]")
+            .with_output("br", &["list", "--status", "in_progress", "--json"], "[]")
+            .with_output("br", &["list", "--status", "deferred", "--json"], "[]");
+
+        let output = BeadsSourceAdapter { runner: &runner }.collect(&options);
+
+        assert_eq!(output.snapshot.status, SwarmBriefSourceStatus::Degraded);
+        assert_eq!(output.snapshot.freshness.state, "stale");
+        assert!(
+            output
+                .snapshot
+                .degraded
+                .iter()
+                .any(|item| item.code == BEADS_TRACKER_STALE_CODE)
+        );
+        match output.contribution {
+            SwarmBriefContribution::Beads(summary) => assert_eq!(summary.ready.len(), 1),
+            other => panic!("expected Beads contribution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn beads_sync_status_failure_preserves_bucket_results_with_degraded_freshness() {
+        let options = SwarmBriefCollectOptions::for_workspace(".");
+        let runner = FakeRunner::default()
+            .with_output(
+                "br",
+                &[
+                    "sync",
+                    "--status",
+                    "--json",
+                    "--no-auto-import",
+                    "--allow-stale",
+                ],
+                "not-json",
+            )
+            .with_output(
+                "br",
+                &["ready", "--json"],
+                r#"[{"id":"bd-ready","title":"Ready work","status":"open"}]"#,
+            )
+            .with_output("br", &["blocked", "--json"], "[]")
+            .with_output("br", &["list", "--status", "in_progress", "--json"], "[]")
+            .with_output("br", &["list", "--status", "deferred", "--json"], "[]");
+
+        let output = BeadsSourceAdapter { runner: &runner }.collect(&options);
+
+        assert_eq!(output.snapshot.status, SwarmBriefSourceStatus::Degraded);
+        assert_eq!(output.snapshot.freshness.state, "current");
+        assert!(
+            output
+                .snapshot
+                .degraded
+                .iter()
+                .any(|item| item.code == BEADS_UNAVAILABLE_CODE)
+        );
+        match output.contribution {
+            SwarmBriefContribution::Beads(summary) => assert_eq!(summary.ready.len(), 1),
+            other => panic!("expected Beads contribution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn beads_sync_status_stale_survives_bucket_unavailable() {
+        let options = SwarmBriefCollectOptions::for_workspace(".");
+        let runner = FakeRunner::default()
+            .with_output(
+                "br",
+                &[
+                    "sync",
+                    "--status",
+                    "--json",
+                    "--no-auto-import",
+                    "--allow-stale",
+                ],
+                r#"{"jsonl_newer":true,"db_newer":false,"last_import_time":"2026-05-14T05:20:52Z"}"#,
+            )
+            .with_error(
+                "br",
+                &["ready", "--json"],
+                SwarmBriefCommandError::Unavailable("br ready failed".to_string()),
+            )
+            .with_error(
+                "br",
+                &["blocked", "--json"],
+                SwarmBriefCommandError::Unavailable("br blocked failed".to_string()),
+            )
+            .with_error(
+                "br",
+                &["list", "--status", "in_progress", "--json"],
+                SwarmBriefCommandError::Unavailable("br in_progress failed".to_string()),
+            )
+            .with_error(
+                "br",
+                &["list", "--status", "deferred", "--json"],
+                SwarmBriefCommandError::Unavailable("br deferred failed".to_string()),
+            );
+
+        let output = BeadsSourceAdapter { runner: &runner }.collect(&options);
+
+        assert_eq!(output.snapshot.status, SwarmBriefSourceStatus::Unavailable);
+        assert_eq!(output.snapshot.freshness.state, "stale");
+        assert!(
+            output
+                .snapshot
+                .degraded
+                .iter()
+                .any(|item| item.code == BEADS_TRACKER_STALE_CODE)
+        );
+        assert!(
+            output
+                .snapshot
+                .degraded
+                .iter()
+                .any(|item| item.code == BEADS_UNAVAILABLE_CODE)
+        );
+        assert!(matches!(output.contribution, SwarmBriefContribution::None));
+    }
+
+    #[test]
     fn rch_parser_reports_queue_pressure() {
         let hints = require_ok(
             parse_rch_status_json(r#"{"queueDepth":5,"activeBuilds":2}"#),
@@ -3343,6 +3698,41 @@ mod tests {
 
         assert_eq!(by_message["rch active builds: 2"], "medium");
         assert_eq!(by_message["rch queue depth: 5"], "high");
+    }
+
+    #[test]
+    fn rch_command_error_maps_e327_to_worker_topology_blocked() {
+        let error = SwarmBriefCommandError::Failed {
+            status: Some(1),
+            stderr: "RCH-E327: worker path topology could not map /Users/project to /data/project"
+                .to_string(),
+        };
+        let degradation = rch_command_error_to_degradation(&error);
+
+        assert_eq!(degradation.code, RCH_WORKER_TOPOLOGY_BLOCKED_CODE);
+        assert_eq!(degradation.source, SwarmBriefSourceKind::Rch);
+        assert!(
+            degradation
+                .repair
+                .as_deref()
+                .is_some_and(|repair| repair.contains("worker path mapping"))
+        );
+    }
+
+    #[test]
+    fn rch_command_error_distinguishes_remote_required_fallback_prevented() {
+        let error = SwarmBriefCommandError::Failed {
+            status: Some(1),
+            stderr: "RCH_REQUIRE_REMOTE is set; remote required fallback prevented local execution"
+                .to_string(),
+        };
+        let degradation = rch_command_error_to_degradation(&error);
+
+        assert_eq!(
+            degradation.code,
+            RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE
+        );
+        assert_eq!(degradation.source, SwarmBriefSourceKind::Rch);
     }
 
     #[test]
