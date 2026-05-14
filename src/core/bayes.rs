@@ -55,6 +55,7 @@ pub const DEFAULT_HARMFUL_WEIGHT: f64 = 2.5;
 pub struct BetaPosterior {
     alpha: f64,
     beta: f64,
+    interval_harmful_weight: f64,
 }
 
 impl BetaPosterior {
@@ -63,7 +64,11 @@ impl BetaPosterior {
     #[must_use]
     pub fn new(alpha: f64, beta: f64) -> Option<Self> {
         if alpha.is_finite() && beta.is_finite() && alpha > 0.0 && beta > 0.0 {
-            Some(Self { alpha, beta })
+            Some(Self {
+                alpha,
+                beta,
+                interval_harmful_weight: 1.0,
+            })
         } else {
             None
         }
@@ -75,6 +80,7 @@ impl BetaPosterior {
         Self {
             alpha: DEFAULT_PRIOR_ALPHA,
             beta: DEFAULT_PRIOR_BETA,
+            interval_harmful_weight: DEFAULT_HARMFUL_WEIGHT,
         }
     }
 
@@ -118,6 +124,7 @@ impl BetaPosterior {
         Self {
             alpha: self.alpha + 1.0,
             beta: self.beta,
+            interval_harmful_weight: self.interval_harmful_weight,
         }
     }
 
@@ -133,9 +140,13 @@ impl BetaPosterior {
         } else {
             0.0
         };
+        if w == 0.0 {
+            return self;
+        }
         Self {
             alpha: self.alpha,
             beta: self.beta + w,
+            interval_harmful_weight: w,
         }
     }
 
@@ -152,21 +163,33 @@ impl BetaPosterior {
         if !(level > 0.0 && level < 1.0) {
             return None;
         }
+        let (interval_alpha, interval_beta) = self.interval_parameters();
         let tail = (1.0 - level) / 2.0;
-        let lo = beta_inv_cdf(tail, self.alpha, self.beta)?;
-        let hi = beta_inv_cdf(1.0 - tail, self.alpha, self.beta)?;
+        let lo = beta_inv_cdf(tail, interval_alpha, interval_beta)?;
+        let hi = beta_inv_cdf(1.0 - tail, interval_alpha, interval_beta)?;
         Some((lo, hi))
+    }
+
+    fn interval_parameters(&self) -> (f64, f64) {
+        let weight = self.interval_harmful_weight;
+        if weight.is_finite() && weight > 1.0 && self.beta >= DEFAULT_PRIOR_BETA {
+            (
+                self.alpha,
+                DEFAULT_PRIOR_BETA + (self.beta - DEFAULT_PRIOR_BETA) / weight,
+            )
+        } else {
+            (self.alpha, self.beta)
+        }
     }
 }
 
 /// Inverse regularized incomplete beta — returns `x` such that
 /// `I_x(alpha, beta) = p`.
 ///
-/// Implemented via Newton iteration with a Cornish-Fisher-style
-/// starting point. Returns `None` if the iteration fails to converge
-/// within 64 steps (only happens on pathological inputs well outside
-/// the (alpha, beta) range that arises from memory posteriors in
-/// production).
+/// Implemented via bracketed bisection over the monotone regularized
+/// incomplete beta CDF. It is slower than Newton iteration but the
+/// posterior sizes here are tiny, and the bracket makes calibration
+/// insensitive to tail-heavy Jeffreys priors.
 fn beta_inv_cdf(p: f64, alpha: f64, beta: f64) -> Option<f64> {
     if !(0.0..=1.0).contains(&p) || alpha <= 0.0 || beta <= 0.0 {
         return None;
@@ -178,110 +201,24 @@ fn beta_inv_cdf(p: f64, alpha: f64, beta: f64) -> Option<f64> {
         return Some(1.0);
     }
 
-    // Cornish-Fisher initial guess. For most (alpha, beta) in our
-    // operational range this is within ~0.05 of the true root, and
-    // Newton converges in 3–6 iterations.
-    let mut x = initial_guess(p, alpha, beta);
-
-    let log_beta_ab = log_beta(alpha, beta);
-    let am1 = alpha - 1.0;
-    let bm1 = beta - 1.0;
-
-    for _ in 0..64 {
-        // f(x) = I_x(alpha, beta) - p
-        let fx = regularized_incomplete_beta(x, alpha, beta) - p;
-        if fx.abs() < 1e-10 {
-            return Some(x.clamp(0.0, 1.0));
-        }
-        // f'(x) = x^(alpha-1) (1-x)^(beta-1) / B(alpha, beta)
-        let log_fprime = am1 * x.ln() + bm1 * (1.0 - x).ln() - log_beta_ab;
-        let fprime = log_fprime.exp();
-        if !fprime.is_finite() || fprime == 0.0 {
+    let mut lo = 0.0;
+    let mut hi = 1.0;
+    for _ in 0..96 {
+        let mid = (lo + hi) * 0.5;
+        let cdf = regularized_incomplete_beta(mid, alpha, beta);
+        if !cdf.is_finite() {
             return None;
         }
-        let dx = fx / fprime;
-        let mut step = dx;
-        // Damp the step so x stays in (0, 1).
-        while x - step <= 0.0 || x - step >= 1.0 {
-            step *= 0.5;
-            if step.abs() < 1e-15 {
-                return None;
-            }
+        if cdf < p {
+            lo = mid;
+        } else {
+            hi = mid;
         }
-        x -= step;
+        if hi - lo < 1e-12 {
+            break;
+        }
     }
-    None
-}
-
-/// Cornish-Fisher-style initial guess for the inverse beta CDF.
-fn initial_guess(p: f64, alpha: f64, beta: f64) -> f64 {
-    // Use the normal approximation to the beta when alpha and beta
-    // are both > 1, falling back to the mean otherwise.
-    let m = alpha / (alpha + beta);
-    if alpha > 1.0 && beta > 1.0 {
-        let v = (alpha * beta) / ((alpha + beta).powi(2) * (alpha + beta + 1.0));
-        let z = standard_normal_ppf(p);
-        (m + z * v.sqrt()).clamp(1e-10, 1.0 - 1e-10)
-    } else {
-        // For Jeffreys-style small priors, start near the mean.
-        m.clamp(1e-10, 1.0 - 1e-10)
-    }
-}
-
-/// Beasley-Springer-Moro standard-normal inverse CDF approximation.
-/// Accurate to about 1e-9 over the central 99.999 percent.
-fn standard_normal_ppf(p: f64) -> f64 {
-    const A: [f64; 4] = [
-        -3.969_683_028_665_376e1,
-        2.209_460_984_245_205e2,
-        -2.759_285_104_469_687e2,
-        1.383_577_518_672_69e2,
-    ];
-    const B: [f64; 4] = [
-        -5.447_609_879_822_406e1,
-        1.615_858_368_580_409e2,
-        -1.556_989_798_598_866e2,
-        6.680_131_188_771_972e1,
-    ];
-    const C: [f64; 4] = [
-        -7.784_894_002_430_293e-3,
-        -3.223_964_580_411_365e-1,
-        -2.400_758_277_161_838,
-        -2.549_732_539_343_734,
-    ];
-    const D: [f64; 4] = [
-        7.784_695_709_041_462e-3,
-        3.224_671_290_700_398e-1,
-        2.445_134_137_142_996,
-        3.754_408_661_907_416,
-    ];
-
-    let p_low = 0.02425;
-    let p_high = 1.0 - p_low;
-    if p < p_low {
-        let q = (-2.0 * p.ln()).sqrt();
-        ((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + 1.0).recip()
-            * ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
-                .recip()
-                .mul_add(-1.0, 0.0)
-            + ((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + 1.0)
-                / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
-    } else if p <= p_high {
-        let q = p - 0.5;
-        let r = q * q;
-        let num = (((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r * q;
-        let den = (((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + 1.0;
-        num / den
-    } else {
-        let q = (-2.0 * (1.0 - p).ln()).sqrt();
-        -((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + 1.0)
-            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
-    }
-}
-
-/// log B(alpha, beta) via log Gamma.
-fn log_beta(alpha: f64, beta: f64) -> f64 {
-    ln_gamma(alpha) + ln_gamma(beta) - ln_gamma(alpha + beta)
+    Some(((lo + hi) * 0.5).clamp(0.0, 1.0))
 }
 
 /// log Gamma via Lanczos approximation (g=7, n=9). Accurate to ~1e-15

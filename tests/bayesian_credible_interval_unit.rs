@@ -8,6 +8,8 @@
 //! These tests are pure math on [`ee::core::bayes::BetaPosterior`].
 //! No DB or fs interaction; runs in milliseconds.
 
+#![allow(clippy::expect_used)]
+
 use ee::core::bayes::{BetaPosterior, DEFAULT_HARMFUL_WEIGHT};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
@@ -158,7 +160,7 @@ fn ci90_covers_at_calibrated_frequency_for_balanced_rate() {
     //
     // Tolerance reasoning: stderr ~0.0095, three-sigma is ~3pp, so
     // 5pp leaves plenty of headroom for the harmful_weight bias.
-    let coverage = coverage_for(0.5, 40, 500, 0xfeedface_d00d_cafe);
+    let coverage = coverage_for(0.5, 40, 500, 0xfeed_face_d00d_cafe);
     assert!(
         coverage > 0.80 && coverage < 1.0,
         "ci90 coverage must be reasonably calibrated at p_true=0.5; got {coverage}"
@@ -167,7 +169,7 @@ fn ci90_covers_at_calibrated_frequency_for_balanced_rate() {
 
 #[test]
 fn ci90_covers_at_calibrated_frequency_for_high_rate() {
-    let coverage = coverage_for(0.85, 40, 500, 0xc0ffee_dead_beef);
+    let coverage = coverage_for(0.85, 40, 500, 0x00c0_ffee_dead_beef);
     assert!(
         coverage > 0.80 && coverage < 1.0,
         "ci90 coverage must be reasonably calibrated at p_true=0.85; got {coverage}"
@@ -222,11 +224,10 @@ fn ci_returns_none_or_valid_for_extreme_alpha_or_beta() {
     // that case the function must return None rather than a bogus
     // interval.
     let extreme = BetaPosterior::new(1e-6, 1.0).expect("tiny but positive alpha is valid");
-    match extreme.credible_interval(0.90) {
-        Some((lo, hi)) => assert!(
+    if let Some((lo, hi)) = extreme.credible_interval(0.90) {
+        assert!(
             lo <= hi && (0.0..=1.0).contains(&lo) && (0.0..=1.0).contains(&hi),
             "any returned CI must be a valid sub-interval of [0, 1]"
-        ),
-        None => {} // Acceptable when the iteration fails to converge.
+        );
     }
 }
