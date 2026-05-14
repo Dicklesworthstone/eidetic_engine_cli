@@ -93,11 +93,64 @@
     },
     "ee.swarm_fixture_corpus.v1": {
       "schema": "ee.swarm_fixture_corpus.v1",
-      "corpusId": "swarm-fixture-small-001",
+      "corpusId": "swarm-fixture-corpus-v1",
       "seedFamily": "seed.swarm_scale.v1",
-      "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3",
-      "profiles": [{"name": "small", "memoryCount": 128, "agentCount": 4, "expectedDbRows": 128, "expectedGraphNodes": 128, "expectedGraphEdges": 96}],
-      "fixtures": [{"path": "tests/fixtures/swarm/small.jsonl", "kind": "jsonl", "contentHash": "blake3:fixture"}]
+      "fixedClock": "2026-05-13T00:00:00Z",
+      "hashEmbedder": {"algorithm": "blake3-xof-unit-vector", "dimensions": 384},
+      "volatileFieldDenylist": ["generatedAt", "observedAt", "recordedAt", "refreshedAt", "timestamp", "wallClockMs"],
+      "scales": [
+        {"name": "micro_256", "agentCount": 16, "memoryCount": 256, "materializedInCi": true, "memoryIdPrefix": "mem_swarm_micro_", "expectedFirstMemoryId": "mem_swarm_micro_000001", "expectedLastMemoryId": "mem_swarm_micro_000256", "expectedGraphNodes": 272, "expectedGraphEdges": 640},
+        {"name": "smoke_1k", "agentCount": 64, "memoryCount": 1000, "materializedInCi": true, "memoryIdPrefix": "mem_swarm_smoke_", "expectedFirstMemoryId": "mem_swarm_smoke_000001", "expectedLastMemoryId": "mem_swarm_smoke_001000", "expectedGraphNodes": 1064, "expectedGraphEdges": 2500},
+        {"name": "mid_10k", "agentCount": 64, "memoryCount": 10000, "materializedInCi": false, "memoryIdPrefix": "mem_swarm_mid_", "expectedFirstMemoryId": "mem_swarm_mid_000001", "expectedLastMemoryId": "mem_swarm_mid_010000", "expectedGraphNodes": 10064, "expectedGraphEdges": 25000},
+        {"name": "large_100k", "agentCount": 256, "memoryCount": 100000, "materializedInCi": false, "memoryIdPrefix": "mem_swarm_large_", "expectedFirstMemoryId": "mem_swarm_large_000001", "expectedLastMemoryId": "mem_swarm_large_100000", "expectedGraphNodes": 100256, "expectedGraphEdges": 250000}
+      ],
+      "agentTemplate": {
+        "namePrefix": "SwarmAgent",
+        "programCycle": ["codex-cli", "claude-code", "gemini-cli", "ntm-worker"],
+        "modelCycle": ["gpt-5", "claude-opus-4.1", "gemini-2.5-pro", "gpt-5-codex"],
+        "trustClassCycle": ["human_explicit", "agent_validated", "agent_assertion", "cass_evidence"]
+      },
+      "topics": ["release", "database", "coordination", "verification", "refactor", "policy"],
+      "conflicts": [
+        {"kind": "direct", "memoryIds": ["mem_swarm_smoke_000007", "mem_swarm_smoke_000008"], "reason": "One memory says release tags require local-only checks; the other requires remote verification evidence."}
+      ],
+      "coordinationSnapshots": [
+        {"schema": "ee.coordination_snapshot.v1", "scope": "workspace", "sources": ["beads", "agent_mail"], "expectedActiveReservationCount": 3, "expectedInProgressBeadCount": 2}
+      ],
+      "scenarioStates": {
+        "dirtyWorktrees": [
+          {"id": "clean", "dirtyFileCount": 0, "risk": "none"},
+          {"id": "overlap_swarm_core", "dirtyFileCount": 2, "risk": "high", "pathPatterns": ["src/core/swarm_brief.rs", "tests/fixtures/swarm_scale/**"]}
+        ],
+        "coordinationSources": [
+          {"id": "all_current", "beads": "current", "agentMail": "current", "bv": "current", "rch": "current"},
+          {"id": "degraded_stale_mix", "beads": "stale", "agentMail": "unavailable", "bv": "current", "rch": "topology_blocked"}
+        ],
+        "beadsGraphs": [
+          {"id": "ready_wide", "readyCount": 24, "blockedCount": 3, "inProgressCount": 4, "edgeCount": 31},
+          {"id": "blocked_rch_gate", "readyCount": 0, "blockedCount": 2, "inProgressCount": 1, "edgeCount": 2}
+        ],
+        "agentMailSnapshots": [
+          {"id": "reservations_current", "reservationCount": 3, "unreadCount": 5, "ackRequiredCount": 1},
+          {"id": "unreachable", "reservationCount": 0, "unreadCount": 0, "ackRequiredCount": 0, "degradedCode": "agent_mail_unavailable"}
+        ],
+        "rchPressureSnapshots": [
+          {"id": "remote_ready", "posture": "remote_ready", "queueDepth": 0, "activeBuilds": 2},
+          {"id": "topology_blocked", "posture": "blocked", "queueDepth": 0, "activeBuilds": 0, "degradedCode": "rch_worker_topology_blocked"}
+        ]
+      },
+      "verificationEvidence": [
+        {"schema": "ee.verification.evidence.v1", "verificationId": "ver_swarm_smoke_000001", "status": "passed", "beadId": "bd-bife.17", "command": "cargo test --test swarm_fixture_corpus_unit -- --nocapture"}
+      ],
+      "expectedPacks": [
+        {"scale": "smoke_1k", "query": "release verification coordination", "expectedTop3Ids": ["mem_swarm_smoke_000001", "mem_swarm_smoke_000007", "mem_swarm_smoke_000014"], "expectedMaxTokens": 1200, "markdownGolden": "tests/fixtures/golden/swarm_fixture/smoke_release_pack.md.golden"}
+      ],
+      "artifacts": [
+        {"path": "tests/fixtures/swarm_scale/corpus_manifest.json", "kind": "manifest"},
+        {"path": "tests/fixtures/swarm_scale/corpus_manifest.schema.json", "kind": "schema"},
+        {"path": "tests/fixtures/golden/swarm_fixture/smoke_release_pack.md.golden", "kind": "markdown_golden"},
+        {"path": "scripts/e2e_overhaul/swarm_fixture.sh", "kind": "e2e_script"}
+      ]
     },
     "ee.handoff.memory_set_fingerprint.v1": {
       "schema": "ee.handoff.memory_set_fingerprint.v1",

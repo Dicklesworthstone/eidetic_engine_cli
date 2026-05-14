@@ -7,7 +7,26 @@
     "algorithm": "blake3-xof-unit-vector",
     "dimensions": 384
   },
+  "volatileFieldDenylist": [
+    "generatedAt",
+    "observedAt",
+    "recordedAt",
+    "refreshedAt",
+    "timestamp",
+    "wallClockMs"
+  ],
   "scales": [
+    {
+      "name": "micro_256",
+      "agentCount": 16,
+      "memoryCount": 256,
+      "materializedInCi": true,
+      "memoryIdPrefix": "mem_swarm_micro_",
+      "expectedFirstMemoryId": "mem_swarm_micro_000001",
+      "expectedLastMemoryId": "mem_swarm_micro_000256",
+      "expectedGraphNodes": 272,
+      "expectedGraphEdges": 640
+    },
     {
       "name": "smoke_1k",
       "agentCount": 64,
@@ -15,7 +34,9 @@
       "materializedInCi": true,
       "memoryIdPrefix": "mem_swarm_smoke_",
       "expectedFirstMemoryId": "mem_swarm_smoke_000001",
-      "expectedLastMemoryId": "mem_swarm_smoke_001000"
+      "expectedLastMemoryId": "mem_swarm_smoke_001000",
+      "expectedGraphNodes": 1064,
+      "expectedGraphEdges": 2500
     },
     {
       "name": "mid_10k",
@@ -24,7 +45,9 @@
       "materializedInCi": false,
       "memoryIdPrefix": "mem_swarm_mid_",
       "expectedFirstMemoryId": "mem_swarm_mid_000001",
-      "expectedLastMemoryId": "mem_swarm_mid_010000"
+      "expectedLastMemoryId": "mem_swarm_mid_010000",
+      "expectedGraphNodes": 10064,
+      "expectedGraphEdges": 25000
     },
     {
       "name": "large_100k",
@@ -33,7 +56,9 @@
       "materializedInCi": false,
       "memoryIdPrefix": "mem_swarm_large_",
       "expectedFirstMemoryId": "mem_swarm_large_000001",
-      "expectedLastMemoryId": "mem_swarm_large_100000"
+      "expectedLastMemoryId": "mem_swarm_large_100000",
+      "expectedGraphNodes": 100256,
+      "expectedGraphEdges": 250000
     }
   ],
   "agentTemplate": {
@@ -69,12 +94,89 @@
       "expectedInProgressBeadCount": 2
     }
   ],
+  "scenarioStates": {
+    "dirtyWorktrees": [
+      {
+        "id": "clean",
+        "dirtyFileCount": 0,
+        "risk": "none"
+      },
+      {
+        "id": "overlap_swarm_core",
+        "dirtyFileCount": 2,
+        "risk": "high",
+        "pathPatterns": ["src/core/swarm_brief.rs", "tests/fixtures/swarm_scale/**"]
+      }
+    ],
+    "coordinationSources": [
+      {
+        "id": "all_current",
+        "beads": "current",
+        "agentMail": "current",
+        "bv": "current",
+        "rch": "current"
+      },
+      {
+        "id": "degraded_stale_mix",
+        "beads": "stale",
+        "agentMail": "unavailable",
+        "bv": "current",
+        "rch": "topology_blocked"
+      }
+    ],
+    "beadsGraphs": [
+      {
+        "id": "ready_wide",
+        "readyCount": 24,
+        "blockedCount": 3,
+        "inProgressCount": 4,
+        "edgeCount": 31
+      },
+      {
+        "id": "blocked_rch_gate",
+        "readyCount": 0,
+        "blockedCount": 2,
+        "inProgressCount": 1,
+        "edgeCount": 2
+      }
+    ],
+    "agentMailSnapshots": [
+      {
+        "id": "reservations_current",
+        "reservationCount": 3,
+        "unreadCount": 5,
+        "ackRequiredCount": 1
+      },
+      {
+        "id": "unreachable",
+        "reservationCount": 0,
+        "unreadCount": 0,
+        "ackRequiredCount": 0,
+        "degradedCode": "agent_mail_unavailable"
+      }
+    ],
+    "rchPressureSnapshots": [
+      {
+        "id": "remote_ready",
+        "posture": "remote_ready",
+        "queueDepth": 0,
+        "activeBuilds": 2
+      },
+      {
+        "id": "topology_blocked",
+        "posture": "blocked",
+        "queueDepth": 0,
+        "activeBuilds": 0,
+        "degradedCode": "rch_worker_topology_blocked"
+      }
+    ]
+  },
   "verificationEvidence": [
     {
       "schema": "ee.verification.evidence.v1",
       "verificationId": "ver_swarm_smoke_000001",
       "status": "passed",
-      "beadId": "bd-1zb7k.6",
+      "beadId": "bd-bife.17",
       "command": "cargo test --test swarm_fixture_corpus_unit -- --nocapture"
     }
   ],
@@ -89,6 +191,7 @@
   ],
   "artifacts": [
     {"path": "tests/fixtures/swarm_scale/corpus_manifest.json", "kind": "manifest"},
+    {"path": "tests/fixtures/swarm_scale/corpus_manifest.schema.json", "kind": "schema"},
     {"path": "tests/fixtures/golden/swarm_fixture/smoke_release_pack.md.golden", "kind": "markdown_golden"},
     {"path": "scripts/e2e_overhaul/swarm_fixture.sh", "kind": "e2e_script"}
   ]

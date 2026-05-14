@@ -90,6 +90,15 @@ fn array_field<'a>(value: &'a Value, name: &str) -> Result<&'a Vec<Value>, Strin
         .ok_or_else(|| format!("field `{name}` must be an array"))
 }
 
+fn object_field<'a>(
+    value: &'a Value,
+    name: &str,
+) -> Result<&'a serde_json::Map<String, Value>, String> {
+    field(value, name)?
+        .as_object()
+        .ok_or_else(|| format!("field `{name}` must be an object"))
+}
+
 fn string_array(value: &Value, name: &str) -> Result<Vec<String>, String> {
     array_field(value, name)?
         .iter()
@@ -274,6 +283,39 @@ fn expected_pack<'a>(manifest: &'a Value, query: &str) -> Result<&'a Value, Stri
         .ok_or_else(|| format!("missing expected pack `{query}`"))
 }
 
+fn array_ids(value: &Value, field_name: &str) -> Result<BTreeSet<String>, String> {
+    array_field(value, field_name)?
+        .iter()
+        .map(|item| string_field(item, "id").map(str::to_owned))
+        .collect()
+}
+
+fn contains_key_recursive(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::Object(map) => {
+            map.contains_key(needle)
+                || map
+                    .values()
+                    .any(|item| contains_key_recursive(item, needle))
+        }
+        Value::Array(items) => items
+            .iter()
+            .any(|item| contains_key_recursive(item, needle)),
+        _ => false,
+    }
+}
+
+fn validate_manifest_rejects_volatile_keys(manifest: &Value) -> TestResult {
+    let denylist = string_array(manifest, "volatileFieldDenylist")?;
+    for key in &denylist {
+        ensure(
+            !contains_key_recursive(manifest, key),
+            &format!("manifest must not contain volatile field key `{key}`"),
+        )?;
+    }
+    Ok(())
+}
+
 fn render_expected_pack_markdown(
     manifest: &Value,
     corpus: &GeneratedCorpus,
@@ -328,9 +370,37 @@ fn swarm_fixture_manifest_contract_is_pinned() -> TestResult {
         "hash embedder dimensions",
     )?;
 
+    let micro = scale(&manifest, "micro_256")?;
+    ensure_eq(u64_field(micro, "agentCount")?, 16, "micro agents")?;
+    ensure_eq(u64_field(micro, "memoryCount")?, 256, "micro memories")?;
+    ensure_eq(
+        u64_field(micro, "expectedGraphNodes")?,
+        272,
+        "micro graph nodes",
+    )?;
+    ensure_eq(
+        u64_field(micro, "expectedGraphEdges")?,
+        640,
+        "micro graph edges",
+    )?;
+    ensure(
+        bool_field(micro, "materializedInCi")?,
+        "micro corpus must be CI-materialized",
+    )?;
+
     let smoke = scale(&manifest, "smoke_1k")?;
     ensure_eq(u64_field(smoke, "agentCount")?, 64, "smoke agents")?;
     ensure_eq(u64_field(smoke, "memoryCount")?, 1_000, "smoke memories")?;
+    ensure_eq(
+        u64_field(smoke, "expectedGraphNodes")?,
+        1_064,
+        "smoke graph nodes",
+    )?;
+    ensure_eq(
+        u64_field(smoke, "expectedGraphEdges")?,
+        2_500,
+        "smoke graph edges",
+    )?;
     ensure(
         bool_field(smoke, "materializedInCi")?,
         "smoke corpus must be CI-materialized",
@@ -347,10 +417,35 @@ fn swarm_fixture_manifest_contract_is_pinned() -> TestResult {
     )?;
 
     let large = scale(&manifest, "large_100k")?;
+    ensure_eq(u64_field(large, "agentCount")?, 256, "large agents")?;
     ensure(
         u64_field(large, "memoryCount")? >= 100_000,
         "large corpus must model 100k memories",
     )
+}
+
+#[test]
+fn generated_fixture_corpora_cover_16_64_and_256_agent_scales() -> TestResult {
+    let manifest = manifest()?;
+    let micro = generated_corpus(&manifest, "micro_256")?;
+    let mid = generated_corpus(&manifest, "mid_10k")?;
+    let large_scale = scale(&manifest, "large_100k")?;
+
+    ensure_eq(micro.agents.len(), 16, "micro agents")?;
+    ensure_eq(micro.memories.len(), 256, "micro memories")?;
+    ensure_eq(
+        micro.memories.first().map(|memory| memory.id.as_str()),
+        Some("mem_swarm_micro_000001"),
+        "micro first id",
+    )?;
+    ensure_eq(
+        micro.memories.last().map(|memory| memory.id.as_str()),
+        Some("mem_swarm_micro_000256"),
+        "micro last id",
+    )?;
+    ensure_eq(mid.agents.len(), 64, "mid agents")?;
+    ensure_eq(u64_field(large_scale, "agentCount")?, 256, "large agents")?;
+    Ok(())
 }
 
 #[test]
@@ -461,6 +556,82 @@ fn conflicts_and_expected_packs_reference_real_memories() -> TestResult {
         }
     }
     Ok(())
+}
+
+#[test]
+fn scenario_state_sections_cover_degraded_stale_and_contention_inputs() -> TestResult {
+    let manifest = manifest()?;
+    let states = field(&manifest, "scenarioStates")?;
+    let state_object = object_field(&manifest, "scenarioStates")?;
+    ensure_eq(state_object.len(), 5, "scenario state section count")?;
+
+    ensure(
+        array_ids(states, "dirtyWorktrees")?.contains("overlap_swarm_core"),
+        "dirty worktree states must include overlap risk",
+    )?;
+    ensure(
+        array_ids(states, "coordinationSources")?.contains("degraded_stale_mix"),
+        "coordination sources must include degraded/stale mix",
+    )?;
+    ensure(
+        array_ids(states, "beadsGraphs")?.contains("blocked_rch_gate"),
+        "Beads graph states must include RCH-blocked gate",
+    )?;
+    ensure(
+        array_ids(states, "agentMailSnapshots")?.contains("unreachable"),
+        "Agent Mail snapshots must include unreachable state",
+    )?;
+    ensure(
+        array_ids(states, "rchPressureSnapshots")?.contains("topology_blocked"),
+        "RCH pressure snapshots must include topology-blocked state",
+    )
+}
+
+#[test]
+fn fixture_manifest_rejects_volatile_field_names_by_contract() -> TestResult {
+    let manifest = manifest()?;
+    let denylist = string_array(&manifest, "volatileFieldDenylist")?;
+    ensure(
+        denylist.contains(&"generatedAt".to_string())
+            && denylist.contains(&"timestamp".to_string())
+            && denylist.contains(&"wallClockMs".to_string()),
+        "volatile field denylist must cover wall-clock and generated timestamp fields",
+    )?;
+    validate_manifest_rejects_volatile_keys(&manifest)
+}
+
+#[test]
+fn fixture_manifest_validation_rejects_nondeterministic_fields() -> TestResult {
+    let mut manifest = manifest()?;
+    manifest["scenarioStates"]["rchPressureSnapshots"][0]["generatedAt"] =
+        json!("2026-05-14T07:24:00Z");
+    let error = match validate_manifest_rejects_volatile_keys(&manifest) {
+        Ok(()) => {
+            return Err("volatile generatedAt field should be rejected".to_owned());
+        }
+        Err(error) => error,
+    };
+    ensure(
+        error.contains("generatedAt"),
+        "volatile field rejection should identify generatedAt",
+    )
+}
+
+#[test]
+fn scenario_state_summary_hash_is_byte_identical() -> TestResult {
+    let manifest = manifest()?;
+    let summary = json!({
+        "schema": EXPECTED_SCHEMA,
+        "scales": field(&manifest, "scales")?,
+        "scenarioStates": field(&manifest, "scenarioStates")?,
+    });
+    let first = stable_json_hash(&summary)?;
+    let second = stable_json_hash(&summary)?;
+    ensure_eq(first, second, "scenario state summary hash")?;
+    ensure(
+        stable_json_hash(&summary)?.starts_with("blake3:"),
+        "summary hash must use blake3 prefix",
+    )
 }
 
 #[test]

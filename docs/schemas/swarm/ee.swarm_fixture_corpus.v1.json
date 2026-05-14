@@ -2,41 +2,186 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://eidetic-engine/schemas/swarm/ee.swarm_fixture_corpus.v1.json",
   "title": "ee.swarm_fixture_corpus.v1",
-  "description": "Manifest for deterministic swarm-scale fixture corpora used by load, ranking, and pack-shape tests.",
+  "description": "Manifest for deterministic swarm-scale fixture corpora used by load, ranking, coordination, and pack-shape tests.",
   "type": "object",
-  "required": ["schema", "corpusId", "seedFamily", "workspaceFingerprint", "profiles", "fixtures"],
+  "required": ["schema", "corpusId", "seedFamily", "fixedClock", "hashEmbedder", "volatileFieldDenylist", "scales", "agentTemplate", "topics", "conflicts", "coordinationSnapshots", "scenarioStates", "verificationEvidence", "expectedPacks", "artifacts"],
   "additionalProperties": false,
   "properties": {
     "schema": {"type": "string", "const": "ee.swarm_fixture_corpus.v1"},
     "corpusId": {"type": "string"},
     "seedFamily": {"type": "string"},
-    "workspaceFingerprint": {"type": "string"},
-    "profiles": {
+    "fixedClock": {"type": "string"},
+    "hashEmbedder": {
+      "type": "object",
+      "required": ["algorithm", "dimensions"],
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {"type": "string"},
+        "dimensions": {"type": "integer", "minimum": 1}
+      }
+    },
+    "volatileFieldDenylist": {
       "type": "array",
+      "minItems": 1,
+      "items": {"type": "string"}
+    },
+    "scales": {
+      "type": "array",
+      "minItems": 4,
       "items": {
         "type": "object",
-        "required": ["name", "memoryCount", "agentCount", "expectedDbRows", "expectedGraphNodes", "expectedGraphEdges"],
+        "required": ["name", "agentCount", "memoryCount", "materializedInCi", "memoryIdPrefix", "expectedFirstMemoryId", "expectedLastMemoryId", "expectedGraphNodes", "expectedGraphEdges"],
         "additionalProperties": false,
         "properties": {
           "name": {"type": "string"},
-          "memoryCount": {"type": "integer", "minimum": 0},
-          "agentCount": {"type": "integer", "minimum": 0},
-          "expectedDbRows": {"type": "integer", "minimum": 0},
-          "expectedGraphNodes": {"type": "integer", "minimum": 0},
+          "agentCount": {"type": "integer", "minimum": 1},
+          "memoryCount": {"type": "integer", "minimum": 1},
+          "materializedInCi": {"type": "boolean"},
+          "memoryIdPrefix": {"type": "string"},
+          "expectedFirstMemoryId": {"type": "string"},
+          "expectedLastMemoryId": {"type": "string"},
+          "expectedGraphNodes": {"type": "integer", "minimum": 1},
           "expectedGraphEdges": {"type": "integer", "minimum": 0}
         }
       }
     },
-    "fixtures": {
+    "agentTemplate": {
+      "type": "object",
+      "required": ["namePrefix", "programCycle", "modelCycle", "trustClassCycle"],
+      "additionalProperties": false,
+      "properties": {
+        "namePrefix": {"type": "string"},
+        "programCycle": {"type": "array", "items": {"type": "string"}},
+        "modelCycle": {"type": "array", "items": {"type": "string"}},
+        "trustClassCycle": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "topics": {"type": "array", "items": {"type": "string"}},
+    "conflicts": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["path", "kind", "contentHash"],
+        "required": ["kind", "memoryIds", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {"type": "string", "enum": ["direct", "stale_replacement", "partial_overlap"]},
+          "memoryIds": {"type": "array", "minItems": 2, "items": {"type": "string"}},
+          "reason": {"type": "string"}
+        }
+      }
+    },
+    "coordinationSnapshots": {"type": "array", "items": {"type": "object"}},
+    "scenarioStates": {
+      "type": "object",
+      "required": ["dirtyWorktrees", "coordinationSources", "beadsGraphs", "agentMailSnapshots", "rchPressureSnapshots"],
+      "additionalProperties": false,
+      "properties": {
+        "dirtyWorktrees": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "required": ["id", "dirtyFileCount", "risk"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string"},
+              "dirtyFileCount": {"type": "integer", "minimum": 0},
+              "risk": {"type": "string"},
+              "pathPatterns": {"type": "array", "items": {"type": "string"}}
+            }
+          }
+        },
+        "coordinationSources": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "required": ["id", "beads", "agentMail", "bv", "rch"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string"},
+              "beads": {"type": "string"},
+              "agentMail": {"type": "string"},
+              "bv": {"type": "string"},
+              "rch": {"type": "string"}
+            }
+          }
+        },
+        "beadsGraphs": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "required": ["id", "readyCount", "blockedCount", "inProgressCount", "edgeCount"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string"},
+              "readyCount": {"type": "integer", "minimum": 0},
+              "blockedCount": {"type": "integer", "minimum": 0},
+              "inProgressCount": {"type": "integer", "minimum": 0},
+              "edgeCount": {"type": "integer", "minimum": 0}
+            }
+          }
+        },
+        "agentMailSnapshots": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "required": ["id", "reservationCount", "unreadCount", "ackRequiredCount"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string"},
+              "reservationCount": {"type": "integer", "minimum": 0},
+              "unreadCount": {"type": "integer", "minimum": 0},
+              "ackRequiredCount": {"type": "integer", "minimum": 0},
+              "degradedCode": {"type": "string"}
+            }
+          }
+        },
+        "rchPressureSnapshots": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "required": ["id", "posture", "queueDepth", "activeBuilds"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string"},
+              "posture": {"type": "string"},
+              "queueDepth": {"type": "integer", "minimum": 0},
+              "activeBuilds": {"type": "integer", "minimum": 0},
+              "degradedCode": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "verificationEvidence": {"type": "array", "items": {"type": "object"}},
+    "expectedPacks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["scale", "query", "expectedTop3Ids", "expectedMaxTokens", "markdownGolden"],
+        "additionalProperties": false,
+        "properties": {
+          "scale": {"type": "string"},
+          "query": {"type": "string"},
+          "expectedTop3Ids": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "string"}},
+          "expectedMaxTokens": {"type": "integer", "minimum": 1},
+          "markdownGolden": {"type": "string"}
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "kind"],
         "additionalProperties": false,
         "properties": {
           "path": {"type": "string"},
-          "kind": {"type": "string"},
-          "contentHash": {"type": "string"}
+          "kind": {"type": "string"}
         }
       }
     }
@@ -44,20 +189,69 @@
   "examples": [
     {
       "schema": "ee.swarm_fixture_corpus.v1",
-      "corpusId": "swarm-fixture-small-001",
+      "corpusId": "swarm-fixture-corpus-v1",
       "seedFamily": "seed.swarm_scale.v1",
-      "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3",
-      "profiles": [
-        {"name": "small", "memoryCount": 128, "agentCount": 4, "expectedDbRows": 128, "expectedGraphNodes": 128, "expectedGraphEdges": 96}
+      "fixedClock": "2026-05-13T00:00:00Z",
+      "hashEmbedder": {"algorithm": "blake3-xof-unit-vector", "dimensions": 384},
+      "volatileFieldDenylist": ["generatedAt", "observedAt", "recordedAt", "refreshedAt", "timestamp", "wallClockMs"],
+      "scales": [
+        {"name": "micro_256", "agentCount": 16, "memoryCount": 256, "materializedInCi": true, "memoryIdPrefix": "mem_swarm_micro_", "expectedFirstMemoryId": "mem_swarm_micro_000001", "expectedLastMemoryId": "mem_swarm_micro_000256", "expectedGraphNodes": 272, "expectedGraphEdges": 640},
+        {"name": "smoke_1k", "agentCount": 64, "memoryCount": 1000, "materializedInCi": true, "memoryIdPrefix": "mem_swarm_smoke_", "expectedFirstMemoryId": "mem_swarm_smoke_000001", "expectedLastMemoryId": "mem_swarm_smoke_001000", "expectedGraphNodes": 1064, "expectedGraphEdges": 2500},
+        {"name": "mid_10k", "agentCount": 64, "memoryCount": 10000, "materializedInCi": false, "memoryIdPrefix": "mem_swarm_mid_", "expectedFirstMemoryId": "mem_swarm_mid_000001", "expectedLastMemoryId": "mem_swarm_mid_010000", "expectedGraphNodes": 10064, "expectedGraphEdges": 25000},
+        {"name": "large_100k", "agentCount": 256, "memoryCount": 100000, "materializedInCi": false, "memoryIdPrefix": "mem_swarm_large_", "expectedFirstMemoryId": "mem_swarm_large_000001", "expectedLastMemoryId": "mem_swarm_large_100000", "expectedGraphNodes": 100256, "expectedGraphEdges": 250000}
       ],
-      "fixtures": [
-        {"path": "tests/fixtures/swarm/small.jsonl", "kind": "jsonl", "contentHash": "blake3:fixture"}
+      "agentTemplate": {
+        "namePrefix": "SwarmAgent",
+        "programCycle": ["codex-cli", "claude-code", "gemini-cli", "ntm-worker"],
+        "modelCycle": ["gpt-5", "claude-opus-4.1", "gemini-2.5-pro", "gpt-5-codex"],
+        "trustClassCycle": ["human_explicit", "agent_validated", "agent_assertion", "cass_evidence"]
+      },
+      "topics": ["release", "database", "coordination", "verification", "refactor", "policy"],
+      "conflicts": [
+        {"kind": "direct", "memoryIds": ["mem_swarm_smoke_000007", "mem_swarm_smoke_000008"], "reason": "One memory says release tags require local-only checks; the other requires remote verification evidence."}
+      ],
+      "coordinationSnapshots": [
+        {"schema": "ee.coordination_snapshot.v1", "scope": "workspace", "sources": ["beads", "agent_mail"], "expectedActiveReservationCount": 3, "expectedInProgressBeadCount": 2}
+      ],
+      "scenarioStates": {
+        "dirtyWorktrees": [
+          {"id": "clean", "dirtyFileCount": 0, "risk": "none"},
+          {"id": "overlap_swarm_core", "dirtyFileCount": 2, "risk": "high", "pathPatterns": ["src/core/swarm_brief.rs", "tests/fixtures/swarm_scale/**"]}
+        ],
+        "coordinationSources": [
+          {"id": "all_current", "beads": "current", "agentMail": "current", "bv": "current", "rch": "current"},
+          {"id": "degraded_stale_mix", "beads": "stale", "agentMail": "unavailable", "bv": "current", "rch": "topology_blocked"}
+        ],
+        "beadsGraphs": [
+          {"id": "ready_wide", "readyCount": 24, "blockedCount": 3, "inProgressCount": 4, "edgeCount": 31},
+          {"id": "blocked_rch_gate", "readyCount": 0, "blockedCount": 2, "inProgressCount": 1, "edgeCount": 2}
+        ],
+        "agentMailSnapshots": [
+          {"id": "reservations_current", "reservationCount": 3, "unreadCount": 5, "ackRequiredCount": 1},
+          {"id": "unreachable", "reservationCount": 0, "unreadCount": 0, "ackRequiredCount": 0, "degradedCode": "agent_mail_unavailable"}
+        ],
+        "rchPressureSnapshots": [
+          {"id": "remote_ready", "posture": "remote_ready", "queueDepth": 0, "activeBuilds": 2},
+          {"id": "topology_blocked", "posture": "blocked", "queueDepth": 0, "activeBuilds": 0, "degradedCode": "rch_worker_topology_blocked"}
+        ]
+      },
+      "verificationEvidence": [
+        {"schema": "ee.verification.evidence.v1", "verificationId": "ver_swarm_smoke_000001", "status": "passed", "beadId": "bd-bife.17", "command": "cargo test --test swarm_fixture_corpus_unit -- --nocapture"}
+      ],
+      "expectedPacks": [
+        {"scale": "smoke_1k", "query": "release verification coordination", "expectedTop3Ids": ["mem_swarm_smoke_000001", "mem_swarm_smoke_000007", "mem_swarm_smoke_000014"], "expectedMaxTokens": 1200, "markdownGolden": "tests/fixtures/golden/swarm_fixture/smoke_release_pack.md.golden"}
+      ],
+      "artifacts": [
+        {"path": "tests/fixtures/swarm_scale/corpus_manifest.json", "kind": "manifest"},
+        {"path": "tests/fixtures/swarm_scale/corpus_manifest.schema.json", "kind": "schema"},
+        {"path": "tests/fixtures/golden/swarm_fixture/smoke_release_pack.md.golden", "kind": "markdown_golden"},
+        {"path": "scripts/e2e_overhaul/swarm_fixture.sh", "kind": "e2e_script"}
       ]
     }
   ],
   "x-ee-status": {
     "shipped": false,
-    "tracking_bead": "bd-1zb7k.6",
+    "tracking_bead": "bd-bife.17",
     "available_in_build": false,
     "feature_flag": null,
     "expected_version": "0.3.0"

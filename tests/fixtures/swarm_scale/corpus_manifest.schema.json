@@ -9,11 +9,13 @@
     "seedFamily",
     "fixedClock",
     "hashEmbedder",
+    "volatileFieldDenylist",
     "scales",
     "agentTemplate",
     "topics",
     "conflicts",
     "coordinationSnapshots",
+    "scenarioStates",
     "verificationEvidence",
     "expectedPacks",
     "artifacts"
@@ -33,12 +35,17 @@
         "dimensions": {"type": "integer", "minimum": 1}
       }
     },
+    "volatileFieldDenylist": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string"}
+    },
     "scales": {
       "type": "array",
-      "minItems": 3,
+      "minItems": 4,
       "items": {
         "type": "object",
-        "required": ["name", "agentCount", "memoryCount", "materializedInCi", "memoryIdPrefix", "expectedFirstMemoryId", "expectedLastMemoryId"],
+        "required": ["name", "agentCount", "memoryCount", "materializedInCi", "memoryIdPrefix", "expectedFirstMemoryId", "expectedLastMemoryId", "expectedGraphNodes", "expectedGraphEdges"],
         "additionalProperties": false,
         "properties": {
           "name": {"type": "string"},
@@ -47,7 +54,9 @@
           "materializedInCi": {"type": "boolean"},
           "memoryIdPrefix": {"type": "string"},
           "expectedFirstMemoryId": {"type": "string"},
-          "expectedLastMemoryId": {"type": "string"}
+          "expectedLastMemoryId": {"type": "string"},
+          "expectedGraphNodes": {"type": "integer", "minimum": 1},
+          "expectedGraphEdges": {"type": "integer", "minimum": 0}
         }
       }
     },
@@ -77,6 +86,92 @@
       }
     },
     "coordinationSnapshots": {"type": "array", "items": {"type": "object"}},
+    "scenarioStates": {
+      "type": "object",
+      "required": ["dirtyWorktrees", "coordinationSources", "beadsGraphs", "agentMailSnapshots", "rchPressureSnapshots"],
+      "additionalProperties": false,
+      "properties": {
+        "dirtyWorktrees": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "required": ["id", "dirtyFileCount", "risk"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string"},
+              "dirtyFileCount": {"type": "integer", "minimum": 0},
+              "risk": {"type": "string"},
+              "pathPatterns": {"type": "array", "items": {"type": "string"}}
+            }
+          }
+        },
+        "coordinationSources": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "required": ["id", "beads", "agentMail", "bv", "rch"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string"},
+              "beads": {"type": "string"},
+              "agentMail": {"type": "string"},
+              "bv": {"type": "string"},
+              "rch": {"type": "string"}
+            }
+          }
+        },
+        "beadsGraphs": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "required": ["id", "readyCount", "blockedCount", "inProgressCount", "edgeCount"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string"},
+              "readyCount": {"type": "integer", "minimum": 0},
+              "blockedCount": {"type": "integer", "minimum": 0},
+              "inProgressCount": {"type": "integer", "minimum": 0},
+              "edgeCount": {"type": "integer", "minimum": 0}
+            }
+          }
+        },
+        "agentMailSnapshots": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "required": ["id", "reservationCount", "unreadCount", "ackRequiredCount"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string"},
+              "reservationCount": {"type": "integer", "minimum": 0},
+              "unreadCount": {"type": "integer", "minimum": 0},
+              "ackRequiredCount": {"type": "integer", "minimum": 0},
+              "degradedCode": {"type": "string"}
+            }
+          }
+        },
+        "rchPressureSnapshots": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "required": ["id", "posture", "queueDepth", "activeBuilds"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string"},
+              "posture": {"type": "string"},
+              "queueDepth": {"type": "integer", "minimum": 0},
+              "activeBuilds": {"type": "integer", "minimum": 0},
+              "degradedCode": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
     "verificationEvidence": {"type": "array", "items": {"type": "object"}},
     "expectedPacks": {
       "type": "array",
