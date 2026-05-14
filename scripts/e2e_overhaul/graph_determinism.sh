@@ -189,6 +189,10 @@ trap stop_graph_determinism_watchdog EXIT
 epic_setup "epic_F4_graph_determinism"
 trap 'stop_graph_determinism_watchdog; _epic_teardown' EXIT
 
+GRAPH_CPU_ARCH="$(uname -m 2>/dev/null || printf 'unknown')"
+GRAPH_RUSTC_VERSION="$(rustc --version 2>/dev/null || printf 'rustc unavailable')"
+e2e_log_note "graph_determinism_environment cpu_arch=${GRAPH_CPU_ARCH} rustc=${GRAPH_RUSTC_VERSION} ee_binary=${EE_BINARY}"
+
 MEM_A=$(ee_with_timeout remember "Graph determinism source memory." \
     --workspace "$EPIC_WORKSPACE" --level semantic --kind note --json 2>/dev/null \
     | jq -r '.data.memory.id // .data.memory_id // .data.id // empty' 2>/dev/null || true)

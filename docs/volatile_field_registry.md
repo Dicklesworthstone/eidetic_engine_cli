@@ -24,7 +24,16 @@ the Rust constant, and the shell list together.
 | `ee_binary_hash` | Per-build artifact hash | v0.1 | Included in run summaries and status-like diagnostics. |
 | `databasePath` / `workspacePath` | Machine-dependent absolute path | v0.1 | Canonicalized but environment-dependent. |
 | `indexDir` | Machine-dependent absolute path | v0.1 | Rebuildable derived asset location. |
+| `snapshotRefreshedAt` | Wall-clock graph snapshot refresh time | v0.2 | Graph determinism strips this before hash comparison. |
+| `runDurationMs` | Wall-clock graph or algorithm run duration | v0.2 | Measurement-only timing; not semantic graph content. |
+| `witnessElapsedMs` | Wall-clock algorithm witness duration | v0.2 | CGSE witness timing varies by host and load. |
+| `witnessRecordedAt` | Wall-clock witness persistence time | v0.2 | Audit timing for the witness record. |
+| `algorithmStartedAt` | Wall-clock graph algorithm start time | v0.2 | Used to explain operations, not rank or selection. |
 
 The registry is intentionally field-name based, not JSON-pointer based. These
 fields may appear at multiple nesting depths across command responses, golden
 fixtures, and E2E support logs.
+
+See `docs/agent-ux/float-determinism.md` for the graph-specific contract around
+same-machine byte determinism, cross-architecture float drift, and stable rank
+ordering for float-bearing surfaces.
