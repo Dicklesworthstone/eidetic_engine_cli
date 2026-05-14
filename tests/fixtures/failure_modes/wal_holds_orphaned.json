@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "wal_holds_orphaned",
+  "introduced_by": {
+    "bead": "bd-17c65.12.6",
+    "epic_letter": "L"
+  },
+  "surfaces": [
+    "backup verify",
+    "backup restore"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A backup manifest v2 includes WAL hold state whose rows should not be replayed into a restore side path.",
+    "setup_commands": [
+      "ee backup create --workspace . --include-derived",
+      "# ensure derived/wal_holds.json records present=true and rowCount > 0"
+    ],
+    "invocation": "ee backup verify <backup-id-or-path> --json"
+  },
+  "expected_emission": {
+    "code": "wal_holds_orphaned",
+    "severity": "warning",
+    "message_contains": [
+      "WAL hold state",
+      "restore side path"
+    ],
+    "repair_contains": "ee lab",
+    "repair_string": "ee lab list --workspace WS --json shows which episodes have unreachable LSNs; ee lab cleanup-orphaned releases them.",
+    "repair_command_regex": "(?P<cmd>ee lab [a-z][a-z0-9-]*(?: --[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}

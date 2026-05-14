@@ -17,3 +17,6 @@ pub const BACKUP_RESTORE_SCHEMA_V1: &str = "ee.backup.restore.v1";
 
 /// Schema for backup manifest files written by `ee backup create`.
 pub const BACKUP_MANIFEST_SCHEMA_V1: &str = "ee.backup.manifest.v1";
+
+/// Schema for backup manifests that include derived assets.
+pub const BACKUP_MANIFEST_SCHEMA_V2: &str = "ee.backup.manifest.v2";

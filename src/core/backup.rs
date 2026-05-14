@@ -15,14 +15,15 @@ use serde_json::{Value as JsonValue, json};
 use crate::config::WORKSPACE_MARKER;
 use crate::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
 use crate::db::{
-    DatabaseConfig, DbConnection, StoredAuditEntry, StoredMemory, StoredMemoryLink, audit_actions,
+    DatabaseConfig, DbConnection, StoredAuditEntry, StoredGraphSnapshot, StoredMemory,
+    StoredMemoryLink, StoredTaskEpisode, audit_actions,
 };
 use crate::models::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
-    BACKUP_MANIFEST_SCHEMA_V1, BACKUP_RESTORE_SCHEMA_V1, BACKUP_VERIFY_SCHEMA_V1, BackupId,
-    DomainError, ExportAuditRecord, ExportFooter, ExportHeader, ExportLinkRecord,
-    ExportMemoryRecord, ExportScope, ExportTagRecord, ExportWorkspaceRecord, ImportSource,
-    RedactionLevel, TrustLevel, jsonl::ExportRecordBuildError,
+    BACKUP_MANIFEST_SCHEMA_V1, BACKUP_MANIFEST_SCHEMA_V2, BACKUP_RESTORE_SCHEMA_V1,
+    BACKUP_VERIFY_SCHEMA_V1, BackupId, DomainError, ExportAuditRecord, ExportFooter, ExportHeader,
+    ExportLinkRecord, ExportMemoryRecord, ExportScope, ExportTagRecord, ExportWorkspaceRecord,
+    ImportSource, RedactionLevel, TrustLevel, jsonl::ExportRecordBuildError,
 };
 use crate::output::jsonl_export::{ExportStats, JsonlExporter};
 
@@ -40,6 +41,7 @@ pub struct BackupCreateOptions {
     pub output_dir: Option<PathBuf>,
     pub label: Option<String>,
     pub redaction_level: RedactionLevel,
+    pub include_derived: bool,
     pub dry_run: bool,
 }
 
@@ -89,6 +91,7 @@ pub struct BackupCreateReport {
     pub records_hash: Option<String>,
     pub redaction_level: RedactionLevel,
     pub export_scope: ExportScope,
+    pub include_derived: bool,
     pub total_records: u64,
     pub memory_count: u64,
     pub link_count: u64,
@@ -96,6 +99,7 @@ pub struct BackupCreateReport {
     pub audit_count: u64,
     pub verification_status: String,
     pub artifacts: Vec<BackupArtifactReport>,
+    pub derived: Vec<BackupDerivedAssetReport>,
     pub degraded: Vec<BackupDegradation>,
 }
 
@@ -119,6 +123,7 @@ impl BackupCreateReport {
             "recordsHash": self.records_hash,
             "redactionLevel": self.redaction_level.as_str(),
             "exportScope": self.export_scope.as_str(),
+            "includeDerived": self.include_derived,
             "counts": {
                 "totalRecords": self.total_records,
                 "memoryRecords": self.memory_count,
@@ -128,6 +133,7 @@ impl BackupCreateReport {
             },
             "verificationStatus": self.verification_status,
             "artifacts": self.artifacts.iter().map(BackupArtifactReport::data_json).collect::<Vec<_>>(),
+            "derived": self.derived.iter().map(BackupDerivedAssetReport::data_json).collect::<Vec<_>>(),
             "degraded": self.degraded.iter().map(BackupDegradation::data_json).collect::<Vec<_>>(),
         })
     }
@@ -204,6 +210,28 @@ impl BackupVerificationIssue {
         }
     }
 
+    fn warning(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            severity: "warning".to_owned(),
+            message: message.into(),
+            path: None,
+            expected: None,
+            actual: None,
+        }
+    }
+
+    fn high(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            severity: "high".to_owned(),
+            message: message.into(),
+            path: None,
+            expected: None,
+            actual: None,
+        }
+    }
+
     fn with_path(mut self, path: impl Into<String>) -> Self {
         self.path = Some(path.into());
         self
@@ -251,6 +279,7 @@ pub struct BackupInspectReport {
     pub counts: BackupCounts,
     pub verification_status: Option<String>,
     pub artifacts: Vec<BackupArtifactReport>,
+    pub derived: Vec<BackupDerivedAssetReport>,
     pub degraded: Vec<BackupDegradation>,
     pub issues: Vec<BackupVerificationIssue>,
 }
@@ -278,6 +307,7 @@ impl BackupInspectReport {
             "counts": self.counts.data_json(),
             "verificationStatus": self.verification_status,
             "artifacts": self.artifacts.iter().map(BackupArtifactReport::data_json).collect::<Vec<_>>(),
+            "derived": self.derived.iter().map(BackupDerivedAssetReport::data_json).collect::<Vec<_>>(),
             "degraded": self.degraded.iter().map(BackupDegradation::data_json).collect::<Vec<_>>(),
             "issues": self.issues.iter().map(BackupVerificationIssue::data_json).collect::<Vec<_>>(),
         })
@@ -345,6 +375,7 @@ pub struct BackupVerifyReport {
     pub manifest_path: String,
     pub manifest_hash: String,
     pub checked_artifacts: Vec<BackupArtifactReport>,
+    pub checked_derived: Vec<BackupDerivedAssetReport>,
     pub issues: Vec<BackupVerificationIssue>,
 }
 
@@ -365,6 +396,7 @@ pub struct BackupRestoreReport {
     pub import_status: String,
     pub imported_memory_count: u32,
     pub skipped_duplicate_count: u32,
+    pub restored_derived: Vec<BackupRestoredDerivedAssetReport>,
     pub issue_count: u32,
     pub next_actions: Vec<String>,
 }
@@ -391,6 +423,7 @@ impl BackupRestoreReport {
                 "memoriesSkippedDuplicate": self.skipped_duplicate_count,
                 "issues": self.issue_count,
             },
+            "restoredDerived": self.restored_derived.iter().map(BackupRestoredDerivedAssetReport::data_json).collect::<Vec<_>>(),
             "nextActions": self.next_actions,
         })
     }
@@ -418,6 +451,27 @@ impl BackupRestoreReport {
     }
 }
 
+/// One derived asset materialized during `ee backup restore`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackupRestoredDerivedAssetReport {
+    pub path: String,
+    pub kind: String,
+    pub restore_path: String,
+    pub lab_episode_path: Option<String>,
+}
+
+impl BackupRestoredDerivedAssetReport {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "path": self.path,
+            "kind": self.kind,
+            "restorePath": self.restore_path,
+            "labEpisodePath": self.lab_episode_path,
+        })
+    }
+}
+
 impl BackupVerifyReport {
     #[must_use]
     pub fn data_json(&self) -> JsonValue {
@@ -430,6 +484,7 @@ impl BackupVerifyReport {
             "manifestPath": self.manifest_path,
             "manifestHash": self.manifest_hash,
             "checkedArtifacts": self.checked_artifacts.iter().map(BackupArtifactReport::data_json).collect::<Vec<_>>(),
+            "checkedDerived": self.checked_derived.iter().map(BackupDerivedAssetReport::data_json).collect::<Vec<_>>(),
             "issues": self.issues.iter().map(BackupVerificationIssue::data_json).collect::<Vec<_>>(),
         })
     }
@@ -454,6 +509,43 @@ impl BackupArtifactReport {
             "hash": self.hash,
             "sizeBytes": self.size_bytes,
             "required": self.required,
+        })
+    }
+}
+
+/// One optional derived asset captured in a backup manifest v2.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackupDerivedAssetReport {
+    pub path: String,
+    pub kind: String,
+    pub hash: Option<String>,
+    pub byte_size: Option<u64>,
+    pub captured_at: Option<String>,
+    pub episode_id_if_lab: Option<String>,
+}
+
+impl BackupDerivedAssetReport {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "path": self.path,
+            "kind": self.kind,
+            "hash": self.hash,
+            "byteSize": self.byte_size,
+            "capturedAt": self.captured_at,
+            "episodeIdIfLab": self.episode_id_if_lab,
+        })
+    }
+
+    #[must_use]
+    pub fn manifest_json(&self) -> JsonValue {
+        json!({
+            "path": self.path,
+            "kind": self.kind,
+            "hash": self.hash,
+            "byte_size": self.byte_size,
+            "captured_at": self.captured_at,
+            "episode_id_if_lab": self.episode_id_if_lab,
         })
     }
 }
@@ -509,6 +601,11 @@ struct BackupExportData {
     audits: Vec<StoredAuditEntry>,
 }
 
+struct BackupDerivedPayload {
+    report: BackupDerivedAssetReport,
+    bytes: Vec<u8>,
+}
+
 /// Create a verified backup directory with redacted JSONL records and a manifest.
 ///
 /// # Errors
@@ -540,11 +637,26 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     let records_path = backup_path.join(RECORDS_FILE);
     let manifest_path = backup_path.join(MANIFEST_FILE);
     let created_at = Utc::now().to_rfc3339();
-    let mut degraded = backup_degradations(&workspace_path);
+    let mut degraded = backup_degradations(&workspace_path, options.include_derived);
     degraded.extend(redaction_pattern_degradations(
         &export_data,
         options.redaction_level,
     ));
+    let derived_payloads = if options.include_derived {
+        collect_derived_payloads(
+            &connection,
+            &workspace_path,
+            &export_data.workspace.workspace_id,
+            &created_at,
+            &mut degraded,
+        )
+    } else {
+        Vec::new()
+    };
+    let derived_reports = derived_payloads
+        .iter()
+        .map(|payload| payload.report.clone())
+        .collect::<Vec<_>>();
 
     let (records_bytes, stats) = render_records(
         &backup_id,
@@ -589,6 +701,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         records_hash: planned_records_artifact.hash.clone(),
         redaction_level: options.redaction_level,
         export_scope: ExportScope::All,
+        include_derived: options.include_derived,
         total_records: stats.total_records,
         memory_count: stats.memory_count,
         link_count: stats.link_count,
@@ -600,6 +713,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
             "verified".to_owned()
         },
         artifacts: vec![planned_records_artifact],
+        derived: derived_reports,
         degraded,
     };
 
@@ -617,6 +731,20 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
 
     ensure_backup_directory(&backup_root, &backup_path)?;
     write_new_file(&records_path, &records_bytes)?;
+    for payload in &derived_payloads {
+        write_new_relative_file(&backup_path, &payload.report.path, &payload.bytes)?;
+        tracing::info!(
+            target: "ee::backup",
+            event = "backup_create_derived_included",
+            backup_id = %backup_id,
+            kind = %payload.report.kind,
+            path = %payload.report.path,
+            hash = %payload.report.hash.as_deref().unwrap_or("unknown"),
+            byte_size = payload.report.byte_size.unwrap_or(0),
+            episode_id_if_lab = %payload.report.episode_id_if_lab.as_deref().unwrap_or(""),
+            "backup derived asset included"
+        );
+    }
     let manifest_bytes =
         serde_json::to_vec_pretty(&manifest_json).map_err(|error| DomainError::Storage {
             message: format!("failed to render backup manifest JSON: {error}"),
@@ -803,6 +931,7 @@ pub fn verify_backup(options: &BackupVerifyOptions) -> Result<BackupVerifyReport
     })?;
     let mut issues = inspect.issues;
     let mut checked_artifacts = Vec::new();
+    let mut checked_derived = Vec::new();
 
     for artifact in &inspect.artifacts {
         let Some(path) = safe_artifact_path(&backup_path, &artifact.path, &mut issues) else {
@@ -856,10 +985,89 @@ pub fn verify_backup(options: &BackupVerifyOptions) -> Result<BackupVerifyReport
         });
     }
 
-    let status = if issues.is_empty() {
+    for derived in &inspect.derived {
+        let Some(path) = safe_artifact_path(&backup_path, &derived.path, &mut issues) else {
+            continue;
+        };
+        if !path.is_file() {
+            issues.push(
+                BackupVerificationIssue::high(
+                    "derived_asset_missing",
+                    "derived backup asset is missing",
+                )
+                .with_path(derived.path.clone()),
+            );
+            continue;
+        }
+
+        let actual_size = file_size(&path)?;
+        if let Some(expected_size) = derived.byte_size
+            && actual_size != expected_size
+        {
+            tracing::warn!(
+                target: "ee::backup",
+                event = "backup_derived_corrupt",
+                kind = %derived.kind,
+                path = %derived.path,
+                mismatch = "byte_size",
+                expected = expected_size,
+                observed = actual_size,
+                "backup derived asset byte size mismatch"
+            );
+            issues.push(
+                BackupVerificationIssue::high(
+                    "derived_asset_corrupt",
+                    "derived backup asset size does not match manifest",
+                )
+                .with_path(derived.path.clone())
+                .with_expected_actual(expected_size.to_string(), actual_size.to_string()),
+            );
+        }
+
+        let actual_hash = hash_file(&path)?;
+        if let Some(expected_hash) = &derived.hash
+            && &actual_hash != expected_hash
+        {
+            tracing::warn!(
+                target: "ee::backup",
+                event = "backup_derived_corrupt",
+                kind = %derived.kind,
+                path = %derived.path,
+                mismatch = "hash",
+                expected_hash = %expected_hash,
+                observed_hash = %actual_hash,
+                "backup derived asset hash mismatch"
+            );
+            issues.push(
+                BackupVerificationIssue::high(
+                    "derived_asset_corrupt",
+                    "derived backup asset hash does not match manifest",
+                )
+                .with_path(derived.path.clone())
+                .with_expected_actual(expected_hash.clone(), actual_hash.clone()),
+            );
+        }
+
+        if derived.kind == "wal_holds" {
+            inspect_wal_holds_for_orphans(&path, &derived.path, &mut issues);
+        }
+
+        checked_derived.push(BackupDerivedAssetReport {
+            path: derived.path.clone(),
+            kind: derived.kind.clone(),
+            hash: Some(actual_hash),
+            byte_size: Some(actual_size),
+            captured_at: derived.captured_at.clone(),
+            episode_id_if_lab: derived.episode_id_if_lab.clone(),
+        });
+    }
+
+    let status = if issues.iter().any(backup_verification_issue_is_blocking) {
+        "failed"
+    } else if issues.is_empty() {
         "verified"
     } else {
-        "failed"
+        "degraded"
     };
     Ok(BackupVerifyReport {
         schema: BACKUP_VERIFY_SCHEMA_V1,
@@ -869,6 +1077,7 @@ pub fn verify_backup(options: &BackupVerifyOptions) -> Result<BackupVerifyReport
         manifest_path: inspect.manifest_path,
         manifest_hash: inspect.manifest_hash,
         checked_artifacts,
+        checked_derived,
         issues,
     })
 }
@@ -902,7 +1111,11 @@ pub fn restore_backup_to_side_path(
     let verify = verify_backup(&BackupVerifyOptions {
         backup_path: backup_path.clone(),
     })?;
-    if verify.status != "verified" {
+    if verify
+        .issues
+        .iter()
+        .any(backup_verification_issue_is_blocking)
+    {
         return Err(DomainError::Import {
             message: format!(
                 "backup '{}' failed integrity verification with {} issue(s)",
@@ -946,7 +1159,8 @@ pub fn restore_backup_to_side_path(
             import_status: "dry_run".to_owned(),
             imported_memory_count: 0,
             skipped_duplicate_count: 0,
-            issue_count: 0,
+            restored_derived: Vec::new(),
+            issue_count: u32::try_from(verify.issues.len()).unwrap_or(u32::MAX),
             next_actions,
         });
     }
@@ -977,6 +1191,12 @@ pub fn restore_backup_to_side_path(
         repair: Some("verify the backup records artifact and retry restore".to_owned()),
     })?;
     write_new_file(&restore_records_path, &records_bytes)?;
+    let restored_derived = copy_derived_artifacts_to_restore(
+        &backup_path,
+        &restore_artifact_dir,
+        &side_path,
+        &inspect,
+    )?;
 
     let import_report = import_jsonl_records(&JsonlImportOptions {
         workspace_path: side_path.clone(),
@@ -994,7 +1214,11 @@ pub fn restore_backup_to_side_path(
             "inspect the copied records.jsonl and retry with a fresh --side-path".to_owned(),
         ),
     })?;
-    let restore_status = if import_report.status == "completed" {
+    let restore_issue_count = import_report
+        .issues
+        .len()
+        .saturating_add(verify.issues.len());
+    let restore_status = if import_report.status == "completed" && verify.issues.is_empty() {
         "completed"
     } else {
         "degraded"
@@ -1015,7 +1239,8 @@ pub fn restore_backup_to_side_path(
         import_status: import_report.status.clone(),
         imported_memory_count: import_report.memories_imported,
         skipped_duplicate_count: import_report.memories_skipped_duplicate,
-        issue_count: u32::try_from(import_report.issues.len()).unwrap_or(u32::MAX),
+        restored_derived,
+        issue_count: u32::try_from(restore_issue_count).unwrap_or(u32::MAX),
         next_actions,
     })
 }
@@ -1051,6 +1276,141 @@ fn backup_artifact_path(
     Ok(path)
 }
 
+fn backup_verification_issue_is_blocking(issue: &BackupVerificationIssue) -> bool {
+    matches!(issue.severity.as_str(), "error" | "high" | "critical")
+}
+
+fn copy_derived_artifacts_to_restore(
+    backup_path: &Path,
+    restore_artifact_dir: &Path,
+    side_path: &Path,
+    inspect: &BackupInspectReport,
+) -> Result<Vec<BackupRestoredDerivedAssetReport>, DomainError> {
+    let mut restored = Vec::new();
+    for derived in &inspect.derived {
+        let mut issues = Vec::new();
+        let Some(source_path) = safe_artifact_path(backup_path, &derived.path, &mut issues) else {
+            let message = issues
+                .first()
+                .map(|issue| issue.message.clone())
+                .unwrap_or_else(|| "derived backup artifact path is invalid".to_owned());
+            return Err(DomainError::Import {
+                message,
+                repair: Some("recreate the backup in a safe filesystem path".to_owned()),
+            });
+        };
+        let bytes = fs::read(&source_path).map_err(|error| DomainError::Storage {
+            message: format!(
+                "failed to read derived backup asset '{}': {error}",
+                source_path.display()
+            ),
+            repair: Some("verify the backup directory and retry restore".to_owned()),
+        })?;
+        let observed_hash = hash_bytes(&bytes);
+        let expected_hash = derived.hash.as_deref().unwrap_or("unknown");
+        let validation_status = if derived.hash.as_deref() == Some(observed_hash.as_str()) {
+            "valid"
+        } else {
+            "mismatch"
+        };
+        tracing::info!(
+            target: "ee::backup",
+            event = "backup_restore_derived_validation",
+            kind = %derived.kind,
+            path = %derived.path,
+            expected_hash = %expected_hash,
+            observed_hash = %observed_hash,
+            status = validation_status,
+            "backup restore derived asset validation observed"
+        );
+        let restore_path = write_new_relative_file(restore_artifact_dir, &derived.path, &bytes)?;
+        let lab_episode_path = if derived.kind == "lab_episode"
+            && derived.path.starts_with("derived/lab/episode_files/")
+        {
+            Some(restore_lab_episode_file(side_path, &derived.path, &bytes)?)
+        } else {
+            None
+        };
+        restored.push(BackupRestoredDerivedAssetReport {
+            path: derived.path.clone(),
+            kind: derived.kind.clone(),
+            restore_path: restore_path.to_string_lossy().into_owned(),
+            lab_episode_path: lab_episode_path.map(|path| path.to_string_lossy().into_owned()),
+        });
+    }
+    Ok(restored)
+}
+
+fn restore_lab_episode_file(
+    side_path: &Path,
+    backup_relative_path: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, DomainError> {
+    let Some(file_name) = Path::new(backup_relative_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return Err(DomainError::Storage {
+            message: format!("derived lab episode path '{backup_relative_path}' has no file name"),
+            repair: Some("recreate the backup with valid lab episode artifact paths".to_owned()),
+        });
+    };
+    let lab_episode_dir = side_path
+        .join(WORKSPACE_MARKER)
+        .join("lab")
+        .join("episodes");
+    fs::create_dir_all(&lab_episode_dir).map_err(|error| DomainError::Storage {
+        message: format!(
+            "failed to create restored lab episode directory '{}': {error}",
+            lab_episode_dir.display()
+        ),
+        repair: Some("choose a writable --side-path".to_owned()),
+    })?;
+    let restored_path = lab_episode_dir.join(safe_file_stem(file_name));
+    write_new_file(&restored_path, bytes)?;
+    Ok(restored_path)
+}
+
+fn inspect_wal_holds_for_orphans(
+    path: &Path,
+    manifest_path: &str,
+    issues: &mut Vec<BackupVerificationIssue>,
+) {
+    let Ok(bytes) = fs::read(path) else {
+        return;
+    };
+    let Ok(value) = serde_json::from_slice::<JsonValue>(&bytes) else {
+        return;
+    };
+    let present = value
+        .get("present")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
+    let row_count = value
+        .get("rowCount")
+        .and_then(JsonValue::as_i64)
+        .unwrap_or(0);
+    if present && row_count > 0 {
+        tracing::warn!(
+            target: "ee::backup",
+            event = "backup_wal_holds_orphaned_after_restore",
+            path = %manifest_path,
+            held_lsn = "unknown",
+            row_count,
+            reachable_in_snapshot = false,
+            "backup WAL hold state is orphaned for restore replay"
+        );
+        issues.push(
+            BackupVerificationIssue::warning(
+                "wal_holds_orphaned",
+                "backup contains WAL hold state that must not be replayed into a restore side path",
+            )
+            .with_path(manifest_path.to_owned())
+            .with_expected_actual("0", row_count.to_string()),
+        );
+    }
+}
+
 fn inspect_manifest(
     backup_path: &Path,
     manifest_path: &Path,
@@ -1058,15 +1418,16 @@ fn inspect_manifest(
     manifest: &JsonValue,
 ) -> BackupInspectReport {
     let mut issues = Vec::new();
-    if json_string(manifest, "schema").as_deref() != Some(BACKUP_MANIFEST_SCHEMA_V1) {
+    let manifest_schema = json_string(manifest, "schema");
+    if !backup_manifest_schema_supported(manifest_schema.as_deref()) {
         issues.push(
             BackupVerificationIssue::error(
                 "manifest_schema_mismatch",
                 "backup manifest schema is missing or unsupported",
             )
             .with_expected_actual(
-                BACKUP_MANIFEST_SCHEMA_V1,
-                json_string(manifest, "schema").unwrap_or_else(|| "<missing>".to_owned()),
+                format!("{BACKUP_MANIFEST_SCHEMA_V1} or {BACKUP_MANIFEST_SCHEMA_V2}"),
+                manifest_schema.unwrap_or_else(|| "<missing>".to_owned()),
             ),
         );
     }
@@ -1084,6 +1445,30 @@ fn inspect_manifest(
     });
     let workspace = manifest.get("workspace").unwrap_or(&JsonValue::Null);
     let verification = manifest.get("verification").unwrap_or(&JsonValue::Null);
+    let artifacts = artifact_reports(manifest, &mut issues);
+    let derived = derived_asset_reports(manifest, &mut issues);
+    if !derived.is_empty() {
+        let kinds = derived
+            .iter()
+            .map(|asset| asset.kind.as_str())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(",");
+        let total_byte_size = derived
+            .iter()
+            .filter_map(|asset| asset.byte_size)
+            .sum::<u64>();
+        tracing::info!(
+            target: "ee::backup",
+            event = "backup_inspect_derived_summary",
+            backup_id = %backup_id,
+            derived_count = derived.len(),
+            kinds = %kinds,
+            total_byte_size,
+            "backup manifest derived asset summary inspected"
+        );
+    }
 
     BackupInspectReport {
         schema: BACKUP_INSPECT_SCHEMA_V1,
@@ -1101,10 +1486,18 @@ fn inspect_manifest(
         export_scope: json_string(manifest, "exportScope"),
         counts: backup_counts(manifest.get("counts").unwrap_or(&JsonValue::Null)),
         verification_status: json_string(verification, "status"),
-        artifacts: artifact_reports(manifest, &mut issues),
+        artifacts,
+        derived,
         degraded: degradation_reports(manifest),
         issues,
     }
+}
+
+fn backup_manifest_schema_supported(schema: Option<&str>) -> bool {
+    matches!(
+        schema,
+        Some(BACKUP_MANIFEST_SCHEMA_V1 | BACKUP_MANIFEST_SCHEMA_V2)
+    )
 }
 
 fn json_string(value: &JsonValue, key: &str) -> Option<String> {
@@ -1161,6 +1554,44 @@ fn artifact_reports(
                 hash: json_string(artifact, "hash"),
                 size_bytes: artifact.get("sizeBytes").and_then(JsonValue::as_u64),
                 required: json_bool(artifact, "required"),
+            })
+        })
+        .collect()
+}
+
+fn derived_asset_reports(
+    manifest: &JsonValue,
+    issues: &mut Vec<BackupVerificationIssue>,
+) -> Vec<BackupDerivedAssetReport> {
+    let Some(derived) = manifest.get("derived") else {
+        return Vec::new();
+    };
+    let Some(derived) = derived.as_array() else {
+        issues.push(BackupVerificationIssue::error(
+            "manifest_derived_invalid",
+            "backup manifest derived field must be an array",
+        ));
+        return Vec::new();
+    };
+
+    derived
+        .iter()
+        .enumerate()
+        .filter_map(|(index, asset)| {
+            let Some(path) = json_string(asset, "path") else {
+                issues.push(BackupVerificationIssue::error(
+                    "derived_asset_path_missing",
+                    format!("derived asset entry {index} does not include a path"),
+                ));
+                return None;
+            };
+            Some(BackupDerivedAssetReport {
+                path,
+                kind: json_string(asset, "kind").unwrap_or_else(|| "unknown".to_owned()),
+                hash: json_string(asset, "hash"),
+                byte_size: asset.get("byte_size").and_then(JsonValue::as_u64),
+                captured_at: json_string(asset, "captured_at"),
+                episode_id_if_lab: json_string(asset, "episode_id_if_lab"),
             })
         })
         .collect()
@@ -1590,8 +2021,12 @@ fn manifest_json(
     created_at: &str,
     manifest_hash: Option<&str>,
 ) -> JsonValue {
-    json!({
-        "schema": BACKUP_MANIFEST_SCHEMA_V1,
+    let mut manifest = json!({
+        "schema": if report.include_derived {
+            BACKUP_MANIFEST_SCHEMA_V2
+        } else {
+            BACKUP_MANIFEST_SCHEMA_V1
+        },
         "backupId": report.backup_id,
         "label": report.label,
         "createdAt": created_at,
@@ -1616,7 +2051,17 @@ fn manifest_json(
             "status": report.verification_status,
             "manifestHash": manifest_hash,
         },
-    })
+    });
+    if report.include_derived {
+        manifest["derived"] = JsonValue::Array(
+            report
+                .derived
+                .iter()
+                .map(BackupDerivedAssetReport::manifest_json)
+                .collect(),
+        );
+    }
+    manifest
 }
 
 fn backup_degradations(workspace_path: &Path) -> Vec<BackupDegradation> {

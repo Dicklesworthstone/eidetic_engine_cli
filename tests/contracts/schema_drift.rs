@@ -497,6 +497,11 @@ pub const BACKUP_SCHEMAS: &[SchemaEntry] = &[
         "ee.backup.manifest.v1",
         SchemaCategory::Backup,
     ),
+    SchemaEntry::new(
+        "backup_manifest_derived",
+        "ee.backup.manifest.v2",
+        SchemaCategory::Backup,
+    ),
 ];
 
 /// All registered schemas.

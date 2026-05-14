@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "derived_asset_corrupt",
+  "introduced_by": {
+    "bead": "bd-17c65.12.6",
+    "epic_letter": "L"
+  },
+  "surfaces": [
+    "backup verify",
+    "backup restore"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A backup manifest v2 derived asset hash or byte size does not match the asset on disk.",
+    "setup_commands": [
+      "ee backup create --workspace . --include-derived",
+      "# mutate one file under derived/ before verification"
+    ],
+    "invocation": "ee backup verify <backup-id-or-path> --json"
+  },
+  "expected_emission": {
+    "code": "derived_asset_corrupt",
+    "severity": "high",
+    "message_contains": [
+      "derived backup asset",
+      "manifest"
+    ],
+    "repair_contains": "ee backup verify",
+    "repair_string": "run ee backup verify <id-or-path> --json and repair issues",
+    "repair_command_regex": "(?P<cmd>ee [a-z][a-z0-9 -]*(?: <[a-z|-]+>)?(?: --[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}
