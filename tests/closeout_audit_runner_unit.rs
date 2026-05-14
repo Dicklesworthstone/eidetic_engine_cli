@@ -174,10 +174,7 @@ fn ready_fixture_reports_readiness_ready() -> TestResult {
             "ready fixture should report readiness=`ready`; got {readiness:?}. Full audit: {audit}",
         ));
     }
-    if audit["blockers"]
-        .as_array()
-        .map_or(false, |a| !a.is_empty())
-    {
+    if audit["blockers"].as_array().is_some_and(|a| !a.is_empty()) {
         return Err(format!(
             "ready fixture should have zero blockers; got {}",
             audit["blockers"],
@@ -220,10 +217,7 @@ fn ready_with_caveats_fixture_reports_readiness_ready_with_caveats() -> TestResu
             "ready_with_caveats fixture must NOT be classified `blocked`; got {readiness}. Full audit: {audit}",
         ));
     }
-    if audit["blockers"]
-        .as_array()
-        .map_or(false, |a| !a.is_empty())
-    {
+    if audit["blockers"].as_array().is_some_and(|a| !a.is_empty()) {
         return Err(format!(
             "ready_with_caveats fixture should have zero blockers; got {}",
             audit["blockers"],
@@ -262,9 +256,7 @@ fn blocked_fixture_reports_readiness_blocked_with_open_dependency() -> TestResul
     }
     let blockers = audit["blockers"].as_array().cloned().unwrap_or_default();
     if blockers.is_empty() {
-        return Err(format!(
-            "blocked fixture should have ≥1 blocker; got empty array",
-        ));
+        return Err("blocked fixture should have ≥1 blocker; got empty array".to_owned());
     }
     let has_open_dep_blocker = blockers
         .iter()
@@ -281,9 +273,10 @@ fn blocked_fixture_reports_readiness_blocked_with_open_dependency() -> TestResul
         .cloned()
         .unwrap_or_default();
     if open_deps.is_empty() {
-        return Err(format!(
-            "blocked fixture should list its open dependency in evidence.open_dependencies; got empty",
-        ));
+        return Err(
+            "blocked fixture should list its open dependency in evidence.open_dependencies; got empty"
+                .to_owned(),
+        );
     }
     let matching = open_deps.iter().any(|d| {
         d.get("id").and_then(Value::as_str) == Some("bd-fxt-blocked-dep-open")
