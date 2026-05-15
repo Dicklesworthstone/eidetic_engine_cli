@@ -66,5 +66,15 @@ verify = { type = "test", path = "tests/readme_perf_sync.rs" }
 verify = { type = "defer_bead", id = "bd-3usjw.22", defer_until = "2026-08-13" }
 ```
 
-The schema contract test validates the manifest shape, stable IDs, line anchors,
-hash format, hash value, and verification target form.
+The schema contract test (`tests/readme_invariant_manifest_schema.rs`)
+validates the manifest shape, stable IDs, line anchors, hash format, hash
+value, and verification target form. It enforces two drift gates:
+
+- `verify.type = "test"`: the referenced file must exist on disk under
+  `tests/` or `scripts/` relative to `CARGO_MANIFEST_DIR`. A manifest
+  entry pointing at a deleted test file fails CI.
+- `verify.type = "defer_bead"`: the referenced `bd-*` ID must appear in
+  `.beads/issues.jsonl` with a non-`closed` status. A `defer_bead` entry
+  whose target bead has been closed fails CI — that signals the manifest
+  entry should be migrated to a real `test` path (now that coverage
+  exists) or repointed at a different open bead.

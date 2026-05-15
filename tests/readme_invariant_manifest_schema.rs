@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use toml_edit::{DocumentMut, InlineTable, Table, Value};
 
@@ -53,6 +53,7 @@ fn readme_invariant_manifest_schema_is_pinned() {
     );
 
     let readme_lines: Vec<&str> = README.lines().collect();
+    let beads_index = load_beads_index();
     let mut ids = HashSet::new();
     let mut failures = Vec::new();
 
@@ -61,7 +62,7 @@ fn readme_invariant_manifest_schema_is_pinned() {
             validate_id(&entry, &mut ids, &mut failures);
             validate_classification(&entry, &mut failures);
             validate_anchor_hash(&entry, &readme_lines, &mut failures);
-            validate_verify(&entry, &mut failures);
+            validate_verify(&entry, &beads_index, &mut failures);
         }
     }
 
@@ -194,7 +195,7 @@ fn canonical_anchor_text(line: &str) -> String {
     line.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn validate_verify(entry: &Invariant<'_>, failures: &mut Vec<String>) {
+fn validate_verify(entry: &Invariant<'_>, beads: &BeadsIndex, failures: &mut Vec<String>) {
     match inline_str(entry.verify, "type").as_deref() {
         Some("test") => match inline_str(entry.verify, "path") {
             Some(path) if path.starts_with("tests/") || path.starts_with("scripts/") => {
@@ -213,7 +214,17 @@ fn validate_verify(entry: &Invariant<'_>, failures: &mut Vec<String>) {
         },
         Some("defer_bead") => {
             match inline_str(entry.verify, "id") {
-                Some(id) if id.starts_with("bd-") => {}
+                Some(id) if id.starts_with("bd-") => match beads.status_for(&id) {
+                    Some(status) if status == "closed" => failures.push(format!(
+                        "{} defer_bead {id} is closed — migrate this manifest entry to a real test path or a different open bead",
+                        entry.id
+                    )),
+                    Some(_) => {}
+                    None => failures.push(format!(
+                        "{} defer_bead {id} not found in .beads/issues.jsonl — check the ID or sync beads",
+                        entry.id
+                    )),
+                },
                 Some(id) => failures.push(format!(
                     "{} defer_bead verifier has invalid id {}",
                     entry.id, id
@@ -248,4 +259,43 @@ fn missing_verifier_file(path: &str) -> Option<String> {
     } else {
         Some(absolute.display().to_string())
     }
+}
+
+#[derive(Debug, Default)]
+struct BeadsIndex {
+    by_id: HashMap<String, String>,
+}
+
+impl BeadsIndex {
+    fn status_for(&self, id: &str) -> Option<&str> {
+        self.by_id.get(id).map(String::as_str)
+    }
+}
+
+fn load_beads_index() -> BeadsIndex {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let path = std::path::Path::new(manifest_dir).join(".beads/issues.jsonl");
+    let content = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+        panic!(
+            "the README-invariant gate requires {} to be readable: {err}",
+            path.display()
+        )
+    });
+    let mut by_id = HashMap::new();
+    for (line_idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(trimmed).unwrap_or_else(|err| {
+            panic!("{}:{} parses as JSON: {err}", path.display(), line_idx + 1)
+        });
+        if let (Some(id), Some(status)) = (
+            value.get("id").and_then(|v| v.as_str()),
+            value.get("status").and_then(|v| v.as_str()),
+        ) {
+            by_id.insert(id.to_owned(), status.to_owned());
+        }
+    }
+    BeadsIndex { by_id }
 }
