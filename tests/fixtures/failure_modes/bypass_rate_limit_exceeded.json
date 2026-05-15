@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "bypass_rate_limit_exceeded",
+  "introduced_by": {
+    "bead": "bd-3usjw.6.1",
+    "epic_letter": "W"
+  },
+  "surfaces": [
+    "preflight"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A workspace attempts more than five successful preflight bypass-token uses in one hour.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "for i in 1 2 3 4 5; do ee preflight issue-bypass-token --reason \"approved $i\" --json; done"
+    ],
+    "invocation": "ee preflight check --cmd 'rm -rf build-output' --override-token <sixth-token> --json"
+  },
+  "expected_emission": {
+    "code": "bypass_rate_limit_exceeded",
+    "severity": "high",
+    "message_contains": [
+      "rate limit",
+      "workspace"
+    ],
+    "repair_contains": "hourly window",
+    "repair_string": "Wait for the hourly window to clear or inspect recent bypass audit rows."
+  }
+}

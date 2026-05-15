@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "bypass_token_exhausted",
+  "introduced_by": {
+    "bead": "bd-3usjw.6.1",
+    "epic_letter": "W"
+  },
+  "surfaces": [
+    "preflight"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A one-shot preflight bypass token is reused after its max_uses allowance is consumed.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee preflight issue-bypass-token --reason 'approved once' --json",
+      "ee preflight check --cmd 'rm -rf build-output' --override-token <token> --json"
+    ],
+    "invocation": "ee preflight check --cmd 'rm -rf build-output' --override-token <same-token> --json"
+  },
+  "expected_emission": {
+    "code": "bypass_token_exhausted",
+    "severity": "high",
+    "message_contains": [
+      "bypass token",
+      "remaining uses"
+    ],
+    "repair_contains": "fresh one-shot",
+    "repair_string": "Issue a fresh one-shot bypass token if the command is still approved."
+  }
+}

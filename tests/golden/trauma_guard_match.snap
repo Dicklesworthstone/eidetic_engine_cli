@@ -1,0 +1,37 @@
+{
+  "schema": "ee.preflight.guard.v1",
+  "command": "rm -rf /tmp/work",
+  "exitCode": 7,
+  "checkedAt": "2026-05-15T00:00:00+00:00",
+  "matches": [
+    {
+      "ruleId": "builtin:rm_rf_root",
+      "pattern": "*rm -rf /*",
+      "action": "halt",
+      "message": "rm -rf targeting filesystem root is forbidden by AGENTS.md (\"Irreversible Git & Filesystem Actions\").",
+      "source": {
+        "kind": "builtin",
+        "name": "rm_rf_root"
+      },
+      "resolution": "enforced"
+    }
+  ],
+  "matchedMemories": [
+    {
+      "memory_id": "mem_00000000000000000000000001",
+      "kind": "risk",
+      "content": "Prior incident: rm -rf /tmp/work recursively removed another agent workspace.",
+      "provenance_uri": "cass-session://incident-rm-rf#L1-L3",
+      "severity": "high",
+      "severity_source": "inferred_from_memory_kind",
+      "score": 0.5714285714285714,
+      "matched_terms": [
+        "-rf",
+        "rm",
+        "tmp",
+        "work"
+      ]
+    }
+  ],
+  "degraded": []
+}

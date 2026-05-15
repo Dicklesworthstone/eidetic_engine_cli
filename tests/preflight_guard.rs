@@ -8,13 +8,19 @@
 // These integration tests use unwrap/expect as direct assertions on fixed fixtures.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use std::fs;
 use std::path::PathBuf;
 
 use ee::core::preflight_guard::{
     BypassTokenInput, GuardAction, MatchResolution, PREFLIGHT_GUARD_SCHEMA_V1,
     PreflightGuardOptions, PreflightGuardRegistry, RuleSource, issue_bypass_token,
-    run_preflight_guard, verify_bypass_token,
+    match_trauma_guard_memories, no_risk_memories_degradation, run_preflight_guard,
+    verify_bypass_token,
 };
+use ee::db::StoredMemory;
+
+const DESTRUCTIVE_PATTERN_FIXTURE: &str =
+    include_str!("fixtures/destructive_patterns/commands.json");
 
 fn opts(command: &str) -> PreflightGuardOptions {
     PreflightGuardOptions {
@@ -22,6 +28,239 @@ fn opts(command: &str) -> PreflightGuardOptions {
         workspace: PathBuf::from("."),
         bypass_tokens: Vec::new(),
         bypass_secret: None,
+    }
+}
+
+fn stored_memory(
+    id: &str,
+    kind: &str,
+    content: &str,
+    provenance_uri: Option<&str>,
+) -> StoredMemory {
+    StoredMemory {
+        id: id.to_owned(),
+        workspace_id: "wsp_01234567890123456789012345".to_owned(),
+        level: "procedural".to_owned(),
+        kind: kind.to_owned(),
+        content: content.to_owned(),
+        workflow_id: None,
+        confidence: 0.9,
+        utility: 0.8,
+        importance: 0.7,
+        provenance_uri: provenance_uri.map(str::to_owned),
+        trust_class: "human_explicit".to_owned(),
+        trust_subclass: None,
+        provenance_chain_hash: None,
+        provenance_chain_hash_version: "ee.memory.provenance_chain.v1".to_owned(),
+        provenance_verification_status: "unverified".to_owned(),
+        provenance_verified_at: None,
+        provenance_verification_note: None,
+        created_at: "2026-05-15T00:00:00Z".to_owned(),
+        updated_at: "2026-05-15T00:00:00Z".to_owned(),
+        tombstoned_at: None,
+        valid_from: None,
+        valid_to: None,
+    }
+}
+
+fn assert_trauma_guard_golden(name: &str, actual: &serde_json::Value) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("golden")
+        .join(format!("{name}.snap"));
+    let expected = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let actual = serde_json::to_string_pretty(actual)
+        .unwrap_or_else(|error| panic!("failed to serialize {name} golden: {error}"));
+
+    assert_eq!(
+        actual.trim_end(),
+        expected.trim_end(),
+        "golden snapshot {} changed",
+        path.display()
+    );
+}
+
+#[test]
+fn trauma_guard_memory_match_surfaces_provenance_for_destructive_command() {
+    let memories = vec![
+        stored_memory(
+            "mem_00000000000000000000000001",
+            "anti-pattern",
+            "Prior incident: rm -rf /tmp/work recursively removed another agent workspace.",
+            Some("cass-session://incident-rm-rf"),
+        ),
+        stored_memory(
+            "mem_00000000000000000000000002",
+            "rule",
+            "Run cargo fmt before release.",
+            Some("file://AGENTS.md"),
+        ),
+    ];
+
+    let matches = match_trauma_guard_memories("rm -rf /tmp/work", &memories);
+
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].memory_id, "mem_00000000000000000000000001");
+    assert_eq!(matches[0].kind, "anti-pattern");
+    assert_eq!(matches[0].severity, "high");
+    assert_eq!(matches[0].severity_source, "inferred_from_memory_kind");
+    assert_eq!(
+        matches[0].provenance_uri.as_deref(),
+        Some("cass-session://incident-rm-rf")
+    );
+    assert!(
+        matches[0].matched_terms.iter().any(|term| term == "rm"),
+        "expected command/memory overlap terms, got {:?}",
+        matches[0].matched_terms
+    );
+}
+
+#[test]
+fn trauma_guard_memory_match_orders_by_score_then_memory_id() {
+    let memories = vec![
+        stored_memory(
+            "mem_00000000000000000000000002",
+            "risk",
+            "git reset --hard can erase local changes.",
+            Some("file://risk.md"),
+        ),
+        stored_memory(
+            "mem_00000000000000000000000001",
+            "failure",
+            "A reset hard command caused a recovery incident.",
+            Some("cass-session://reset"),
+        ),
+    ];
+
+    let matches = match_trauma_guard_memories("git reset --hard HEAD~1", &memories);
+
+    assert_eq!(matches.len(), 2);
+    assert_eq!(matches[0].memory_id, "mem_00000000000000000000000002");
+    assert!(matches[0].score >= matches[1].score);
+}
+
+#[test]
+fn no_risk_memories_degradation_pins_fixture_code_and_repair() {
+    let degraded = no_risk_memories_degradation();
+
+    assert_eq!(degraded.code, "no_risk_memories");
+    assert_eq!(degraded.severity, "info");
+    assert_eq!(
+        degraded.repair,
+        "ee remember --kind risk --severity high <warning>"
+    );
+}
+
+#[test]
+fn trauma_guard_match_response_matches_golden_snapshot() {
+    let registry = PreflightGuardRegistry::with_builtins();
+    let mut report = run_preflight_guard(&registry, &opts("rm -rf /tmp/work"));
+    report.checked_at = "2026-05-15T00:00:00+00:00".to_owned();
+    report.matched_memories = match_trauma_guard_memories(
+        &report.command,
+        &[stored_memory(
+            "mem_00000000000000000000000001",
+            "risk",
+            "Prior incident: rm -rf /tmp/work recursively removed another agent workspace.",
+            Some("cass-session://incident-rm-rf#L1-L3"),
+        )],
+    );
+
+    assert_trauma_guard_golden("trauma_guard_match", &report.to_json());
+}
+
+#[test]
+fn trauma_guard_no_match_response_matches_golden_snapshot() {
+    let registry = PreflightGuardRegistry::with_builtins();
+    let mut report = run_preflight_guard(&registry, &opts("cargo fmt --check"));
+    report.checked_at = "2026-05-15T00:00:00+00:00".to_owned();
+
+    assert_trauma_guard_golden("trauma_guard_no_match", &report.to_json());
+}
+
+#[test]
+fn destructive_pattern_fixture_builtin_cases_match_registry() {
+    let fixture: serde_json::Value = serde_json::from_str(DESTRUCTIVE_PATTERN_FIXTURE)
+        .expect("destructive pattern fixture must be JSON");
+    assert_eq!(fixture["schema"], "ee.destructive_patterns.v1");
+
+    let cases = fixture["implementedCases"]
+        .as_array()
+        .expect("implementedCases must be an array");
+    assert!(
+        !cases.is_empty(),
+        "fixture must cover at least one implemented destructive pattern"
+    );
+
+    let registry = PreflightGuardRegistry::with_builtins();
+    for case in cases {
+        let id = case["id"].as_str().expect("case id");
+        let command = case["command"].as_str().expect("case command");
+        let expected_exit_code = case["expectedExitCode"].as_u64().expect("exit code") as u32;
+        let expected_action = case["expectedAction"].as_str().expect("expected action");
+        let expected_rule_ids = case["expectedRuleIds"]
+            .as_array()
+            .expect("expectedRuleIds array");
+
+        let report = run_preflight_guard(&registry, &opts(command));
+        assert_eq!(
+            report.exit_code, expected_exit_code,
+            "fixture case `{id}` exit code for `{command}`",
+        );
+
+        for expected_rule_id in expected_rule_ids {
+            let expected_rule_id = expected_rule_id.as_str().expect("rule id string");
+            let matched = report
+                .matches
+                .iter()
+                .find(|candidate| candidate.rule_id == expected_rule_id)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "fixture case `{id}` command `{command}` did not match rule `{expected_rule_id}`; matches={:?}",
+                        report.matches
+                    )
+                });
+            match expected_action {
+                "halt" => assert_eq!(matched.action, GuardAction::Halt),
+                "warn" => assert_eq!(matched.action, GuardAction::Warn),
+                other => panic!("unknown expected action `{other}`"),
+            }
+        }
+    }
+}
+
+#[test]
+fn destructive_pattern_fixture_tracks_required_contract_categories() {
+    let fixture: serde_json::Value = serde_json::from_str(DESTRUCTIVE_PATTERN_FIXTURE)
+        .expect("destructive pattern fixture must be JSON");
+    let implemented = fixture["implementedCases"]
+        .as_array()
+        .expect("implementedCases must be an array");
+    let planned = fixture["plannedCases"]
+        .as_array()
+        .expect("plannedCases must be an array");
+    let categories = implemented
+        .iter()
+        .chain(planned.iter())
+        .filter_map(|case| case["category"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for required in [
+        "recursive_delete_force",
+        "force_push",
+        "hard_reset",
+        "recursive_clean",
+        "kubectl_mass_delete",
+        "drop_table_sql",
+        "terraform_destroy",
+        "raw_block_device_write",
+        "filesystem_create",
+    ] {
+        assert!(
+            categories.contains(required),
+            "destructive pattern fixture missing required category `{required}`",
+        );
     }
 }
 

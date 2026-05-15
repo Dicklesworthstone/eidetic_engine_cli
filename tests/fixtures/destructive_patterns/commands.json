@@ -1,0 +1,119 @@
+{
+  "schema": "ee.destructive_patterns.v1",
+  "introducedBy": {
+    "bead": "bd-3usjw.6"
+  },
+  "implementedCases": [
+    {
+      "id": "recursive_delete_absolute",
+      "category": "recursive_delete_force",
+      "command": "rm -rf /tmp/work",
+      "expectedAction": "halt",
+      "expectedExitCode": 7,
+      "expectedRuleIds": [
+        "builtin:rm_rf_root"
+      ]
+    },
+    {
+      "id": "recursive_delete_home",
+      "category": "recursive_delete_force",
+      "command": "rm -rf ~/projects",
+      "expectedAction": "halt",
+      "expectedExitCode": 7,
+      "expectedRuleIds": [
+        "builtin:rm_rf_home"
+      ]
+    },
+    {
+      "id": "git_hard_reset",
+      "category": "hard_reset",
+      "command": "git reset --hard HEAD~1",
+      "expectedAction": "halt",
+      "expectedExitCode": 7,
+      "expectedRuleIds": [
+        "builtin:git_reset_hard"
+      ]
+    },
+    {
+      "id": "git_recursive_clean",
+      "category": "recursive_clean",
+      "command": "git clean -fd",
+      "expectedAction": "halt",
+      "expectedExitCode": 7,
+      "expectedRuleIds": [
+        "builtin:git_clean_fd"
+      ]
+    },
+    {
+      "id": "git_worktree_add",
+      "category": "worktree_add",
+      "command": "git worktree add ../parallel main",
+      "expectedAction": "halt",
+      "expectedExitCode": 7,
+      "expectedRuleIds": [
+        "builtin:git_worktree_add"
+      ]
+    },
+    {
+      "id": "git_force_push",
+      "category": "force_push",
+      "command": "git push --force origin main",
+      "expectedAction": "warn",
+      "expectedExitCode": 0,
+      "expectedRuleIds": [
+        "builtin:git_push_force"
+      ]
+    },
+    {
+      "id": "kubectl_mass_delete",
+      "category": "kubectl_mass_delete",
+      "command": "kubectl delete pods --all --all-namespaces",
+      "expectedAction": "halt",
+      "expectedExitCode": 7,
+      "expectedRuleIds": [
+        "builtin:kubectl_mass_delete"
+      ]
+    },
+    {
+      "id": "drop_table_sql",
+      "category": "drop_table_sql",
+      "command": "psql -c 'DROP TABLE memories;'",
+      "expectedAction": "halt",
+      "expectedExitCode": 7,
+      "expectedRuleIds": [
+        "builtin:drop_table_sql"
+      ]
+    },
+    {
+      "id": "terraform_destroy",
+      "category": "terraform_destroy",
+      "command": "terraform destroy -auto-approve",
+      "expectedAction": "halt",
+      "expectedExitCode": 7,
+      "expectedRuleIds": [
+        "builtin:terraform_destroy"
+      ]
+    },
+    {
+      "id": "raw_block_device_write",
+      "category": "raw_block_device_write",
+      "command": "dd if=/dev/zero of=/dev/sda bs=1M",
+      "expectedAction": "halt",
+      "expectedExitCode": 7,
+      "expectedRuleIds": [
+        "builtin:raw_block_device_write"
+      ]
+    },
+    {
+      "id": "filesystem_create",
+      "category": "filesystem_create",
+      "command": "mkfs.ext4 /dev/sdb",
+      "expectedAction": "halt",
+      "expectedExitCode": 7,
+      "expectedRuleIds": [
+        "builtin:filesystem_create"
+      ]
+    }
+  ],
+  "plannedCases": []
+}

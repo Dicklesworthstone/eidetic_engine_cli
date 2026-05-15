@@ -11,6 +11,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,36 @@ pub const DEFAULT_MAX_GENERATED_TRIPWIRES: usize = 8;
 
 /// Default age after which persisted preflight evidence must be refreshed.
 pub const DEFAULT_STALE_EVIDENCE_DAYS: i64 = 14;
+
+const TRAUMA_GUARD_PREFLIGHT_SURFACE: &str = "trauma_guard_preflight";
+
+fn elapsed_ms_since(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn preflight_trace_workspace_id(workspace: &Path) -> String {
+    let path = workspace.to_string_lossy();
+    let digest = blake3::hash(path.as_bytes()).to_hex().to_string();
+    format!("wsp_{}", &digest[..16])
+}
+
+fn trace_trauma_guard_preflight(
+    workspace: &Path,
+    phase: &'static str,
+    elapsed_ms: u64,
+    degraded_codes: &[&str],
+) {
+    tracing::info!(
+        workspace_id = %preflight_trace_workspace_id(workspace),
+        request_id = "preflight_run_request",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-3usjw.6"),
+        surface = TRAUMA_GUARD_PREFLIGHT_SURFACE,
+        phase,
+        elapsed_ms,
+        degraded_codes = ?degraded_codes,
+        "trauma guard preflight risk checkpoint"
+    );
+}
 
 /// Configuration for deterministic tripwire generation.
 #[derive(Clone, Debug, PartialEq)]
@@ -985,6 +1016,9 @@ fn risk_rank(level: RiskLevel) -> u8 {
 
 /// Run a preflight risk assessment.
 pub fn run_preflight(options: &RunOptions) -> Result<RunReport, DomainError> {
+    let started = Instant::now();
+    trace_trauma_guard_preflight(&options.workspace, "input", 0, &[]);
+
     let run_id = format!("{}{}", PREFLIGHT_RUN_ID_PREFIX, generate_id());
     let mut report = RunReport::new(run_id.clone(), options.task_input.clone());
     report.dry_run = options.dry_run;
@@ -1055,9 +1089,31 @@ pub fn run_preflight(options: &RunOptions) -> Result<RunReport, DomainError> {
     report.completed_at = Some(Utc::now().to_rfc3339());
 
     if options.persist_run && !options.dry_run {
+        let degraded_codes = report
+            .degraded
+            .iter()
+            .map(|degraded| degraded.code.as_str())
+            .collect::<Vec<_>>();
+        trace_trauma_guard_preflight(
+            &options.workspace,
+            "persistence",
+            elapsed_ms_since(started),
+            &degraded_codes,
+        );
         persist_preflight_run(&options.workspace, &report)?;
     }
 
+    let degraded_codes = report
+        .degraded
+        .iter()
+        .map(|degraded| degraded.code.as_str())
+        .collect::<Vec<_>>();
+    trace_trauma_guard_preflight(
+        &options.workspace,
+        "response",
+        elapsed_ms_since(started),
+        &degraded_codes,
+    );
     Ok(report)
 }
 

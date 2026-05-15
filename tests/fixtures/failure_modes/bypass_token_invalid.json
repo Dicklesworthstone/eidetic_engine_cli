@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "bypass_token_invalid",
+  "introduced_by": {
+    "bead": "bd-3usjw.6.1",
+    "epic_letter": "W"
+  },
+  "surfaces": [
+    "preflight"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A preflight bypass token is unknown to the workspace or was issued for another workspace.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee preflight check --cmd 'rm -rf build-output' --override-token not-a-real-token --json"
+  },
+  "expected_emission": {
+    "code": "bypass_token_invalid",
+    "severity": "high",
+    "message_contains": [
+      "bypass token",
+      "invalid"
+    ],
+    "repair_contains": "fresh bypass token",
+    "repair_string": "Issue a fresh bypass token after human confirmation."
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "schema": "ee.preflight.guard.v1",
+  "command": "cargo fmt --check",
+  "exitCode": 0,
+  "checkedAt": "2026-05-15T00:00:00+00:00",
+  "matches": [],
+  "matchedMemories": [],
+  "degraded": []
+}

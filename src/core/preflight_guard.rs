@@ -11,19 +11,53 @@
 //! the deterministic glob matcher shipped by `core::tripwire`.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use toml_edit::{DocumentMut, Item};
 
 use crate::core::tripwire::glob_match;
+use crate::db::StoredMemory;
 use crate::models::DomainError;
 
 /// Stable schema string for the JSON payload returned by `ee preflight <cmd>`.
 pub const PREFLIGHT_GUARD_SCHEMA_V1: &str = "ee.preflight.guard.v1";
+pub const NO_RISK_MEMORIES_CODE: &str = "no_risk_memories";
+pub const PREFLIGHT_PATTERNS_UNAVAILABLE_CODE: &str = "preflight_patterns_unavailable";
 
 /// Default location for workspace-side rules, relative to the workspace root.
 pub const PREFLIGHT_RULES_RELATIVE_PATH: &str = ".ee/preflight_rules.toml";
+
+const TRAUMA_GUARD_PREFLIGHT_SURFACE: &str = "trauma_guard_preflight";
+
+fn elapsed_ms_since(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn preflight_trace_workspace_id(workspace: &Path) -> String {
+    let path = workspace.to_string_lossy();
+    let digest = blake3::hash(path.as_bytes()).to_hex().to_string();
+    format!("wsp_{}", &digest[..16])
+}
+
+fn trace_trauma_guard_preflight(
+    workspace: &Path,
+    phase: &'static str,
+    elapsed_ms: u64,
+    degraded_codes: &[&str],
+) {
+    tracing::info!(
+        workspace_id = %preflight_trace_workspace_id(workspace),
+        request_id = "preflight_guard_request",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-3usjw.6"),
+        surface = TRAUMA_GUARD_PREFLIGHT_SURFACE,
+        phase,
+        elapsed_ms,
+        degraded_codes = ?degraded_codes,
+        "trauma guard preflight checkpoint"
+    );
+}
 
 /// Action the guard takes when a rule matches.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -185,6 +219,11 @@ fn rule_matches_command(rule: &PreflightGuardRule, command: &str) -> bool {
         match name.as_str() {
             "rm_rf_root" => return matches_rm_rf_target(command, RmTargetClass::Absolute),
             "rm_rf_home" => return matches_rm_rf_target(command, RmTargetClass::Home),
+            "kubectl_mass_delete" => return matches_kubectl_mass_delete(command),
+            "drop_table_sql" => return matches_drop_table_sql(command),
+            "terraform_destroy" => return matches_terraform_destroy(command),
+            "raw_block_device_write" => return matches_raw_block_device_write(command),
+            "filesystem_create" => return matches_filesystem_create(command),
             _ => {}
         }
     }
@@ -310,6 +349,87 @@ fn rm_target_matches_class(target: &str, target_class: RmTargetClass) -> bool {
         RmTargetClass::Absolute => target.starts_with('/'),
         RmTargetClass::Home => target.starts_with('~'),
     }
+}
+
+fn matches_kubectl_mass_delete(command: &str) -> bool {
+    shell_command_segments(command).iter().any(|segment| {
+        let Some(command_index) = shell_segment_command_index(segment) else {
+            return false;
+        };
+        if segment
+            .get(command_index)
+            .is_none_or(|word| word != "kubectl")
+        {
+            return false;
+        }
+        let args = &segment[command_index + 1..];
+        args.iter().any(|arg| arg == "delete")
+            && args.iter().any(|arg| arg == "--all")
+            && args
+                .iter()
+                .any(|arg| arg == "--all-namespaces" || arg == "-A")
+    })
+}
+
+fn matches_drop_table_sql(command: &str) -> bool {
+    command.to_ascii_lowercase().contains("drop table")
+}
+
+fn matches_terraform_destroy(command: &str) -> bool {
+    shell_command_segments(command).iter().any(|segment| {
+        let Some(command_index) = shell_segment_command_index(segment) else {
+            return false;
+        };
+        segment
+            .get(command_index)
+            .is_some_and(|word| word == "terraform")
+            && segment
+                .iter()
+                .skip(command_index + 1)
+                .any(|arg| arg == "destroy")
+    })
+}
+
+fn matches_raw_block_device_write(command: &str) -> bool {
+    shell_command_segments(command).iter().any(|segment| {
+        let Some(command_index) = shell_segment_command_index(segment) else {
+            return false;
+        };
+        segment.get(command_index).is_some_and(|word| word == "dd")
+            && segment
+                .iter()
+                .skip(command_index + 1)
+                .filter_map(|arg| arg.strip_prefix("of="))
+                .any(is_block_device_path)
+    })
+}
+
+fn matches_filesystem_create(command: &str) -> bool {
+    shell_command_segments(command).iter().any(|segment| {
+        let Some(command_index) = shell_segment_command_index(segment) else {
+            return false;
+        };
+        let Some(command_name) = segment.get(command_index) else {
+            return false;
+        };
+        let mkfs_command = command_name == "mkfs"
+            || command_name.starts_with("mkfs.")
+            || matches!(command_name.as_str(), "mke2fs" | "mkfs_ext4");
+        mkfs_command
+            && segment
+                .iter()
+                .skip(command_index + 1)
+                .any(|arg| is_block_device_path(arg))
+    })
+}
+
+fn is_block_device_path(path: &str) -> bool {
+    path.starts_with("/dev/sd")
+        || path.starts_with("/dev/xvd")
+        || path.starts_with("/dev/vd")
+        || path.starts_with("/dev/nvme")
+        || path.starts_with("/dev/disk")
+        || path.starts_with("/dev/rdisk")
 }
 
 fn shell_command_segments(command: &str) -> Vec<Vec<String>> {
@@ -506,6 +626,41 @@ fn builtin_rules() -> Vec<PreflightGuardRule> {
             message: "git push --force overwrites upstream history; ensure you have explicit user authorization (AGENTS.md \"Executing actions with care\").".to_owned(),
             source: RuleSource::Builtin { name: "git_push_force".to_owned() },
         },
+        PreflightGuardRule {
+            id: "builtin:kubectl_mass_delete".to_owned(),
+            pattern: "*kubectl delete*--all*".to_owned(),
+            action: GuardAction::Halt,
+            message: "kubectl mass deletion across namespaces can remove live workloads; require explicit approval before proceeding.".to_owned(),
+            source: RuleSource::Builtin { name: "kubectl_mass_delete".to_owned() },
+        },
+        PreflightGuardRule {
+            id: "builtin:drop_table_sql".to_owned(),
+            pattern: "*DROP TABLE*".to_owned(),
+            action: GuardAction::Halt,
+            message: "DROP TABLE is destructive database DDL; require explicit approval and backup evidence before proceeding.".to_owned(),
+            source: RuleSource::Builtin { name: "drop_table_sql".to_owned() },
+        },
+        PreflightGuardRule {
+            id: "builtin:terraform_destroy".to_owned(),
+            pattern: "*terraform destroy*".to_owned(),
+            action: GuardAction::Halt,
+            message: "terraform destroy tears down infrastructure and requires explicit approval before proceeding.".to_owned(),
+            source: RuleSource::Builtin { name: "terraform_destroy".to_owned() },
+        },
+        PreflightGuardRule {
+            id: "builtin:raw_block_device_write".to_owned(),
+            pattern: "*dd *of=/dev/*".to_owned(),
+            action: GuardAction::Halt,
+            message: "Writing raw bytes to a block device is destructive and requires explicit approval before proceeding.".to_owned(),
+            source: RuleSource::Builtin { name: "raw_block_device_write".to_owned() },
+        },
+        PreflightGuardRule {
+            id: "builtin:filesystem_create".to_owned(),
+            pattern: "*mkfs* /dev/*".to_owned(),
+            action: GuardAction::Halt,
+            message: "Creating a filesystem on a block device destroys existing data and requires explicit approval before proceeding.".to_owned(),
+            source: RuleSource::Builtin { name: "filesystem_create".to_owned() },
+        },
     ]
 }
 
@@ -545,6 +700,26 @@ pub struct GuardMatch {
     pub resolution: MatchResolution,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PreflightMemoryMatch {
+    pub memory_id: String,
+    pub kind: String,
+    pub content: String,
+    pub provenance_uri: Option<String>,
+    pub severity: &'static str,
+    pub severity_source: &'static str,
+    pub score: f64,
+    pub matched_terms: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PreflightGuardDegradation {
+    pub code: &'static str,
+    pub severity: &'static str,
+    pub message: String,
+    pub repair: String,
+}
+
 /// Outcome for one rule that matched.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -568,11 +743,13 @@ impl MatchResolution {
 }
 
 /// Final report from a guard run.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PreflightGuardReport {
     pub schema: String,
     pub command: String,
     pub matches: Vec<GuardMatch>,
+    pub matched_memories: Vec<PreflightMemoryMatch>,
+    pub degraded: Vec<PreflightGuardDegradation>,
     /// Process exit code: 0 if no enforced match, 7 (PolicyDenied per AGENTS.md
     /// exit-code table) if any match remained enforced after bypass attempts.
     pub exit_code: u32,
@@ -596,6 +773,8 @@ impl PreflightGuardReport {
                 "source": m.source,
                 "resolution": m.resolution.as_str(),
             })).collect::<Vec<_>>(),
+            "matchedMemories": self.matched_memories,
+            "degraded": self.degraded,
         })
     }
 
@@ -618,6 +797,21 @@ impl PreflightGuardReport {
                 message = m.message,
             ));
         }
+        if !self.matched_memories.is_empty() {
+            out.push_str("\nMatched memories:\n");
+            for memory in &self.matched_memories {
+                out.push_str(&format!(
+                    "  - [{} | {} | {:.4}] {}\n",
+                    memory.kind, memory.severity, memory.score, memory.memory_id
+                ));
+            }
+        }
+        for degraded in &self.degraded {
+            out.push_str(&format!(
+                "\nDegraded: {} ({})\nNext: {}\n",
+                degraded.message, degraded.code, degraded.repair
+            ));
+        }
         out
     }
 }
@@ -630,6 +824,9 @@ pub fn run_preflight_guard(
     registry: &PreflightGuardRegistry,
     options: &PreflightGuardOptions,
 ) -> PreflightGuardReport {
+    let started = Instant::now();
+    trace_trauma_guard_preflight(&options.workspace, "input", 0, &[]);
+
     let checked_at = chrono::Utc::now().to_rfc3339();
     let matches = registry.match_command(&options.command);
 
@@ -655,13 +852,140 @@ pub fn run_preflight_guard(
         });
     }
 
-    PreflightGuardReport {
+    let report = PreflightGuardReport {
         schema: PREFLIGHT_GUARD_SCHEMA_V1.to_owned(),
         command: options.command.clone(),
         exit_code: if any_enforced_halt { 7 } else { 0 },
         checked_at,
         matches: report_matches,
+        matched_memories: Vec::new(),
+        degraded: Vec::new(),
+    };
+    let degraded_codes = report
+        .degraded
+        .iter()
+        .map(|degraded| degraded.code)
+        .collect::<Vec<_>>();
+    trace_trauma_guard_preflight(
+        &options.workspace,
+        "response",
+        elapsed_ms_since(started),
+        &degraded_codes,
+    );
+    report
+}
+
+pub fn match_trauma_guard_memories(
+    command: &str,
+    memories: &[StoredMemory],
+) -> Vec<PreflightMemoryMatch> {
+    let command_terms = trauma_guard_command_terms(command);
+    if command_terms.is_empty() {
+        return Vec::new();
     }
+    let mut matches = memories
+        .iter()
+        .filter(|memory| trauma_guard_memory_kind(memory.kind.as_str()))
+        .filter_map(|memory| trauma_guard_memory_match(memory, &command_terms))
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+    matches
+}
+
+#[must_use]
+pub fn no_risk_memories_degradation() -> PreflightGuardDegradation {
+    PreflightGuardDegradation {
+        code: NO_RISK_MEMORIES_CODE,
+        severity: "info",
+        message: "Destructive command was recognized, but no matching risk, anti-pattern, or failure memories were available.".to_owned(),
+        repair: "ee remember --kind risk --severity high <warning>".to_owned(),
+    }
+}
+
+#[must_use]
+pub fn preflight_patterns_unavailable_degradation(
+    message: impl Into<String>,
+) -> PreflightGuardDegradation {
+    PreflightGuardDegradation {
+        code: PREFLIGHT_PATTERNS_UNAVAILABLE_CODE,
+        severity: "medium",
+        message: message.into(),
+        repair:
+            "Check the workspace preflight rule file or fall back to built-in destructive patterns."
+                .to_owned(),
+    }
+}
+
+fn trauma_guard_memory_match(
+    memory: &StoredMemory,
+    command_terms: &std::collections::BTreeSet<String>,
+) -> Option<PreflightMemoryMatch> {
+    let memory_terms = trauma_guard_text_terms(&memory.content);
+    let matched_terms = command_terms
+        .intersection(&memory_terms)
+        .cloned()
+        .collect::<Vec<_>>();
+    if matched_terms.is_empty() {
+        return None;
+    }
+    let score = matched_terms.len() as f64 / command_terms.len() as f64;
+    Some(PreflightMemoryMatch {
+        memory_id: memory.id.clone(),
+        kind: memory.kind.clone(),
+        content: memory.content.clone(),
+        provenance_uri: memory.provenance_uri.clone(),
+        severity: inferred_trauma_guard_severity(memory.kind.as_str()),
+        severity_source: "inferred_from_memory_kind",
+        score,
+        matched_terms,
+    })
+}
+
+fn trauma_guard_memory_kind(kind: &str) -> bool {
+    matches!(kind, "risk" | "anti-pattern" | "failure")
+}
+
+fn inferred_trauma_guard_severity(kind: &str) -> &'static str {
+    match kind {
+        "risk" | "anti-pattern" => "high",
+        "failure" => "medium",
+        _ => "info",
+    }
+}
+
+fn trauma_guard_command_terms(command: &str) -> std::collections::BTreeSet<String> {
+    let mut terms = trauma_guard_text_terms(command);
+    let lower = command.to_ascii_lowercase();
+    if lower.contains("rm") {
+        terms.extend(
+            ["delete", "remove", "recursive"]
+                .into_iter()
+                .map(str::to_owned),
+        );
+    }
+    if lower.contains("git reset") {
+        terms.extend(["reset", "hard"].into_iter().map(str::to_owned));
+    }
+    if lower.contains("git clean") {
+        terms.extend(["clean", "delete"].into_iter().map(str::to_owned));
+    }
+    if lower.contains("push") && lower.contains("force") {
+        terms.extend(["push", "force", "history"].into_iter().map(str::to_owned));
+    }
+    terms
+}
+
+fn trauma_guard_text_terms(text: &str) -> std::collections::BTreeSet<String> {
+    text.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
+        .map(str::trim)
+        .filter(|term| term.len() >= 2)
+        .map(str::to_ascii_lowercase)
+        .collect()
 }
 
 fn resolve_match(rule: &PreflightGuardRule, options: &PreflightGuardOptions) -> MatchResolution {

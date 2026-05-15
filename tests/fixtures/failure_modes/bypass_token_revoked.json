@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "bypass_token_revoked",
+  "introduced_by": {
+    "bead": "bd-3usjw.6.1",
+    "epic_letter": "W"
+  },
+  "surfaces": [
+    "preflight"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A preflight bypass token is presented after it was explicitly revoked.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee preflight issue-bypass-token --reason 'approved once' --json",
+      "ee preflight revoke-bypass-token --token <token> --json"
+    ],
+    "invocation": "ee preflight check --cmd 'rm -rf build-output' --override-token <revoked-token> --json"
+  },
+  "expected_emission": {
+    "code": "bypass_token_revoked",
+    "severity": "high",
+    "message_contains": [
+      "bypass token",
+      "revoked"
+    ],
+    "repair_contains": "fresh bypass token",
+    "repair_string": "Issue a fresh bypass token after renewed human confirmation."
+  }
+}

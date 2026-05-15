@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "bypass_token_expired",
+  "introduced_by": {
+    "bead": "bd-3usjw.6.1",
+    "epic_letter": "W"
+  },
+  "surfaces": [
+    "preflight"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A preflight bypass token is presented after its short TTL has elapsed.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee preflight issue-bypass-token --reason 'approved once' --ttl-minutes 1 --json"
+    ],
+    "invocation": "ee preflight check --cmd 'rm -rf build-output' --override-token <expired-token> --json"
+  },
+  "expected_emission": {
+    "code": "bypass_token_expired",
+    "severity": "medium",
+    "message_contains": [
+      "bypass token",
+      "expired"
+    ],
+    "repair_contains": "fresh bypass token",
+    "repair_string": "Issue a fresh bypass token with an explicit reason."
+  }
+}
