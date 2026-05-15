@@ -1,0 +1,19 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "command": "db status",
+  "report": {
+    "exists": true,
+    "fileSizeClass": "positive",
+    "journalModePresent": true,
+    "pageSizeClass": "positive",
+    "pageCountClass": "positive",
+    "schemaVersionMatchesCompiled": true,
+    "needsMigration": false,
+    "appliedMigrationCountClass": "positive",
+    "pendingMigrationVersions": [],
+    "tableCountClass": "many",
+    "error": null
+  },
+  "degraded": []
+}

@@ -1,0 +1,15 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "command": "db check-integrity",
+  "report": {
+    "checkType": "integrity_check",
+    "passed": true,
+    "integrityPassed": true,
+    "integrityIssues": null,
+    "foreignKeyPassed": true,
+    "foreignKeyViolations": null,
+    "message": "integrity_check passed"
+  },
+  "degraded": []
+}

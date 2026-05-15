@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn scenario_dir(name: &str) -> PathBuf {
     let ts = SystemTime::now()
@@ -88,6 +88,59 @@ fn report(stdout: &str) -> Value {
         .unwrap_or_else(|| panic!("missing data.report in {stdout}"))
 }
 
+fn pretty_json(value: &Value) -> String {
+    let mut rendered = serde_json::to_string_pretty(value).expect("render golden JSON");
+    rendered.push('\n');
+    rendered
+}
+
+fn assert_json_golden(actual: Value, expected: &str) {
+    let actual = pretty_json(&actual);
+    assert_eq!(actual, expected, "golden snapshot drift");
+}
+
+fn db_status_golden_view(parsed: &Value) -> Value {
+    let report = &parsed["data"]["report"];
+    json!({
+        "schema": parsed["schema"].clone(),
+        "success": parsed["success"].clone(),
+        "command": parsed["data"]["command"].clone(),
+        "report": {
+            "exists": report["exists"].clone(),
+            "fileSizeClass": if report["fileSizeBytes"].as_u64().unwrap_or(0) > 0 { "positive" } else { "zero" },
+            "journalModePresent": report["journalMode"].as_str().is_some_and(|mode| !mode.is_empty()),
+            "pageSizeClass": if report["pageSizeBytes"].as_u64().unwrap_or(0) > 0 { "positive" } else { "zero" },
+            "pageCountClass": if report["pageCount"].as_u64().unwrap_or(0) > 0 { "positive" } else { "zero" },
+            "schemaVersionMatchesCompiled": report["schemaVersion"] == report["latestCompiledSchemaVersion"],
+            "needsMigration": report["needsMigration"].clone(),
+            "appliedMigrationCountClass": if report["appliedMigrationCount"].as_u64().unwrap_or(0) > 0 { "positive" } else { "zero" },
+            "pendingMigrationVersions": report["pendingMigrationVersions"].clone(),
+            "tableCountClass": if report["tableCount"].as_u64().unwrap_or(0) > 5 { "many" } else { "few" },
+            "error": report["error"].clone(),
+        },
+        "degraded": parsed["degraded"].clone(),
+    })
+}
+
+fn db_check_integrity_golden_view(parsed: &Value) -> Value {
+    let report = &parsed["data"]["report"];
+    json!({
+        "schema": parsed["schema"].clone(),
+        "success": parsed["success"].clone(),
+        "command": parsed["data"]["command"].clone(),
+        "report": {
+            "checkType": report["checkType"].clone(),
+            "passed": report["passed"].clone(),
+            "integrityPassed": report["integrityPassed"].clone(),
+            "integrityIssues": report["integrityIssues"].clone(),
+            "foreignKeyPassed": report["foreignKeyPassed"].clone(),
+            "foreignKeyViolations": report["foreignKeyViolations"].clone(),
+            "message": report["message"].clone(),
+        },
+        "degraded": parsed["degraded"].clone(),
+    })
+}
+
 #[test]
 fn db_status_reports_missing_database_explicitly() {
     let dir = scenario_dir("status_missing");
@@ -133,7 +186,12 @@ fn db_status_reports_real_schema_state_for_initialized_workspace() {
         ee::models::ProcessExitCode::Success,
         "stdout={stdout}"
     );
-    let report = report(&stdout);
+    let parsed = parse_response(&stdout);
+    let report = parsed["data"]["report"].clone();
+    assert_json_golden(
+        db_status_golden_view(&parsed),
+        include_str!("golden/db_status.snap"),
+    );
 
     assert_eq!(report["exists"], Value::Bool(true));
     assert!(report["error"].is_null(), "unexpected error: {report}");
@@ -487,6 +545,10 @@ fn db_check_integrity_alias_runs_full_integrity_contract() {
         "stdout={stdout}"
     );
     let parsed = parse_response(&stdout);
+    assert_json_golden(
+        db_check_integrity_golden_view(&parsed),
+        include_str!("golden/db_check_integrity.snap"),
+    );
     assert_eq!(
         parsed["data"]["command"],
         Value::String("db check-integrity".into())
