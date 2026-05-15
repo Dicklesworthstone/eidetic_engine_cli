@@ -1,0 +1,67 @@
+---
+source: tests/ownership_snapshot.rs
+expression: value
+---
+{
+  "attributed": {
+    "schema": "ee.compile_blocker_attribution.v1",
+    "status": "attributed",
+    "diagnostic": {
+      "path": "src/core/ownership_snapshot.rs",
+      "line": 112,
+      "column": 9,
+      "errorCode": "E0425",
+      "message": "cannot find value `snapshot` in this scope"
+    },
+    "ownerCandidates": [
+      {
+        "owner": "NobleBasin",
+        "source": "agent_mail_reservation",
+        "confidence": "high",
+        "evidence": [
+          "diagnostic_path=src/core/ownership_snapshot.rs",
+          "matched_pattern=src/core/ownership_snapshot.rs",
+          "source=AgentMailReservation"
+        ],
+        "expiresAt": "2026-05-15T08:23:03Z",
+        "beadId": "bd-1zb7k.16.1",
+        "threadId": "bd-1zb7k.16.1",
+        "recommendedAction": "message NobleBasin in Agent Mail thread bd-1zb7k.16.1"
+      },
+      {
+        "owner": "NobleBasin",
+        "source": "beads_assignee",
+        "confidence": "low",
+        "evidence": [
+          "diagnostic_path=src/core/ownership_snapshot.rs",
+          "matched_pattern=src/core/ownership*.rs",
+          "source=BeadsAssignee"
+        ],
+        "expiresAt": null,
+        "beadId": "bd-1zb7k.16.1",
+        "threadId": null,
+        "recommendedAction": "coordinate on Bead bd-1zb7k.16.1 before editing"
+      }
+    ],
+    "fallbackCode": null,
+    "suggestedCommands": []
+  },
+  "unattributed": {
+    "schema": "ee.compile_blocker_attribution.v1",
+    "status": "unattributed",
+    "diagnostic": {
+      "path": "src/graph/unowned.rs",
+      "line": 9,
+      "column": 5,
+      "errorCode": "E0432",
+      "message": "unresolved import `crate::missing`"
+    },
+    "ownerCandidates": [],
+    "fallbackCode": "unattributed_compile_blocker",
+    "suggestedCommands": [
+      "br list --status in_progress --json",
+      "bv --robot-file-beads src/graph/unowned.rs",
+      "search Agent Mail for the source path before editing"
+    ]
+  }
+}

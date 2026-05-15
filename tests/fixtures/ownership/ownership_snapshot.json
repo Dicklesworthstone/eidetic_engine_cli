@@ -1,0 +1,58 @@
+{
+  "schema": "ee.ownership_snapshot.v1",
+  "generatedAt": "2026-05-15T06:20:00Z",
+  "reservations": [
+    {
+      "pathPattern": "src/core/ownership_snapshot.rs",
+      "holderAgent": "NobleBasin",
+      "exclusive": true,
+      "expiresAt": "2026-05-15T08:23:03Z",
+      "beadId": "bd-1zb7k.16.1",
+      "threadId": "bd-1zb7k.16.1",
+      "provenance": {
+        "sourceKind": "agent_mail_reservation",
+        "sourceId": "reservation-380",
+        "contentHash": "blake3:reservation380"
+      }
+    },
+    {
+      "pathPattern": "src/core/*.rs",
+      "holderAgent": "PriorAgent",
+      "exclusive": false,
+      "expiresAt": "2026-05-15T05:00:00Z",
+      "beadId": "bd-expired",
+      "threadId": "bd-expired",
+      "provenance": {
+        "sourceKind": "agent_mail_reservation",
+        "sourceId": "reservation-expired",
+        "contentHash": "blake3:reservationexpired"
+      }
+    }
+  ],
+  "beads": [
+    {
+      "beadId": "bd-1zb7k.16.1",
+      "title": "Ownership snapshot model",
+      "status": "in_progress",
+      "assignee": "NobleBasin",
+      "labels": ["coordination", "swarm"],
+      "filePatterns": ["src/core/ownership*.rs", "tests/ownership*.rs"],
+      "provenance": {
+        "sourceKind": "beads_issue",
+        "sourceId": "bd-1zb7k.16.1",
+        "contentHash": "blake3:beadbd1zb7k161"
+      }
+    }
+  ],
+  "dirtyFiles": [
+    {
+      "path": "src/core/ownership_snapshot.rs",
+      "status": "modified",
+      "provenance": {
+        "sourceKind": "git_status",
+        "sourceId": "working_tree",
+        "contentHash": "blake3:dirtyownership"
+      }
+    }
+  ]
+}
