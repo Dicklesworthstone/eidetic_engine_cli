@@ -63,7 +63,7 @@ fn seed_benchmark_fixture(temp_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
         );
         connection
             .insert_memory(
-                &format!("mem_ppr_context_bench_{index:06}"),
+                &format!("mem_ppr_context_bench_{index:08}"),
                 &CreateMemoryInput {
                     workspace_id: workspace_id.clone(),
                     level: "semantic".to_owned(),
@@ -89,8 +89,8 @@ fn seed_benchmark_fixture(temp_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
             .insert_memory_link(
                 &format!("link_{index:026}"),
                 &CreateMemoryLinkInput {
-                    src_memory_id: format!("mem_ppr_context_bench_{index:06}"),
-                    dst_memory_id: format!("mem_ppr_context_bench_{:06}", index + 1),
+                    src_memory_id: format!("mem_ppr_context_bench_{index:08}"),
+                    dst_memory_id: format!("mem_ppr_context_bench_{:08}", index + 1),
                     relation: MemoryLinkRelation::Supports,
                     weight: 1.0,
                     confidence: 1.0,
