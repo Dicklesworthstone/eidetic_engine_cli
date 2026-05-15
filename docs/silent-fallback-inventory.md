@@ -1,7 +1,7 @@
 # Silent Fallback Inventory (sos5.1)
 
 Generated: 2026-05-08
-Last updated: 2026-05-08 (eidetic_engine_cli-08rn: tag/temporal/trust/redaction filters)
+Last updated: 2026-05-15 (contract inventory resync for current source findings)
 
 This document inventories production code locations where `unwrap_or_default`, ignored
 `Result`s, or serialization fallbacks could hide data corruption or I/O failures.
@@ -282,6 +282,38 @@ empty strings which are semantically valid (no schema specified, no unit inferen
 | 504 | `stderr_bytes.take().unwrap_or_default()` | **MUST-FIX** | Same as 503 |
 
 **Linked bead:** eidetic_engine_cli-sos5.2 (same as Category 1)
+
+---
+
+## Category 19: Contract Inventory Resync (2026-05-15)
+
+The executable source of truth for this inventory is
+`tests/contracts/no_silent_fallback.rs`. The 2026-05-15 resync classified the
+current scanner findings without changing production behavior.
+
+Additional **MUST-FIX** groups now tracked by follow-up bead:
+
+| Surface | Classification | Linked bead | Reason |
+|---------|----------------|-------------|--------|
+| `src/cli/mod.rs` machine JSON/envelope serialization | MUST-FIX | `eidetic_engine_cli-sos5.3` | Machine-facing CLI output must not become an empty line on serialization failure. |
+| `src/core/context.rs` coordination hash serialization | MUST-FIX | `eidetic_engine_cli-sos5.3` | Context pack hashes must not silently omit coordination snapshot bytes. |
+| `src/cli/mod.rs` pack diff missing rank defaults | MUST-FIX | `eidetic_engine_cli-sos5.4` | Pack diff should distinguish an absent ledger rank from rank zero. |
+| `src/core/handoff.rs` stale-threshold defaults | MUST-FIX | `eidetic_engine_cli-sos5.4` | Stale handoff reports should distinguish unavailable counters from zero values. |
+| `src/core/handoff.rs` tag lookup defaults | MUST-FIX | `eidetic_engine_cli-sos5.7` | Snapshot hashes should not treat failed tag lookups as untagged memories. |
+| `src/core/memory.rs` provenance span extraction | MUST-FIX | `eidetic_engine_cli-sos5.7` | Evidence freshness should report invalid spans instead of using empty excerpts. |
+| `src/core/status.rs` audit access reads | MUST-FIX | `eidetic_engine_cli-sos5.7` | Memory health should not silently treat audit read failures as no access history. |
+
+Additional **SAFE** groups documented in the contract:
+
+| Surface | Reason |
+|---------|--------|
+| Query, graph, pagination, pack profile, and field selector defaults | Missing optional user filters or profiles intentionally select empty/default behavior after validation rejects malformed values. |
+| Pack replay, pack ledger, support-bundle, and coordination snapshot optional arrays | Missing optional diagnostic arrays mean empty diagnostic sections, not successful replacement of failed I/O. |
+| Search hit metadata, graph PPR neighbors, learn-cluster tags, curation tag hints, and cluster dimensions | Empty metadata or inputs are represented as generic/empty derived state, with explicit errors where required inputs are absent. |
+| Perf-forensics metadata and security profile env parsing | Missing optional metadata/env values choose documented defaults. |
+
+The scanner also ignores directories ending in `.tmp-sync` so remote sync
+scratch copies under `src/` do not get classified as production source.
 
 ---
 

@@ -60,6 +60,13 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "CASS subprocess reader thread failures must not become empty stdout/stderr.",
     ),
     must_fix(
+        "NSF-CASS-PIPE-TAKE",
+        "src/cass/process.rs",
+        "stdout_bytes.take().unwrap_or_default()",
+        "eidetic_engine_cli-sos5.2",
+        "CASS subprocess pipe capture should not convert a missing reader result into empty stdout/stderr.",
+    ),
+    must_fix(
         "NSF-HOOK-INSTALLER-JSON",
         "src/hooks/installer.rs",
         "serde_json::to_string",
@@ -272,6 +279,93 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "An eval fixture with no expected query matches has no retrieval queries to run; index and search failures still propagate once queries exist.",
     ),
     allowed(
+        "NSF-CLI-EVAL-FIRST-FAILURE-NO-QUERY",
+        "src/cli/mod.rs",
+        "\"expectedIds\": query.map",
+        "Eval first-failure output uses empty ID arrays only when no failing per-query metric exists; fixture status and reason codes still report the failure.",
+    ),
+    allowed(
+        "NSF-CLI-RESPONSE-FIELD-COUNT",
+        "src/cli/mod.rs",
+        "map(count_json_object_fields)",
+        "A response without a data object has zero selectable data fields for field-selector telemetry.",
+    ),
+    must_fix(
+        "NSF-CLI-ENVELOPE-JSON-SERIALIZE",
+        "src/cli/mod.rs",
+        "serde_json::to_string(&envelope).unwrap_or_default()",
+        "eidetic_engine_cli-sos5.3",
+        "Machine-facing envelope output must not silently serialize to an empty line.",
+    ),
+    must_fix(
+        "NSF-CLI-MACHINE-JSON-SERIALIZE",
+        "src/cli/mod.rs",
+        "serde_json::to_string(&json).unwrap_or_default()",
+        "eidetic_engine_cli-sos5.3",
+        "Machine-facing CLI JSON output must return a contextual error instead of an empty line on serialization failure.",
+    ),
+    allowed(
+        "NSF-CLI-PACK-DEFAULT-PROFILES",
+        "src/cli/mod.rs",
+        "pack_profile: args.pack_profile.unwrap_or_default()",
+        "Omitted pack/resource profiles intentionally use the default ContextOutputOptions profile.",
+    ),
+    allowed(
+        "NSF-CLI-CONTEXT-OUTPUT-DEFAULT-PROFILES",
+        "src/cli/mod.rs",
+        "args.pack_profile.unwrap_or_default()",
+        "Omitted context output profile arguments intentionally select default pack/resource output profiles.",
+    ),
+    allowed(
+        "NSF-CLI-PACK-DIFF-OPTIONAL-STRING-ARRAYS",
+        "src/cli/mod.rs",
+        "strings.sort()",
+        "Pack diff redaction-class arrays are optional ledger details; absent arrays mean no classes to compare.",
+    ),
+    must_fix(
+        "NSF-CLI-PACK-DIFF-RANK-DEFAULT",
+        "src/cli/mod.rs",
+        "let old_rank = old_item.rank.unwrap_or_default()",
+        "eidetic_engine_cli-sos5.4",
+        "Pack diff should distinguish a missing ledger rank from rank zero when reporting rank deltas.",
+    ),
+    allowed(
+        "NSF-CLI-PACK-REPLAY-SELECTED-ITEMS",
+        "src/cli/mod.rs",
+        "ledger_core_array(value, \"selectedItems\")",
+        "Pack replay with a missing selectedItems ledger array reports an empty replay section while ledger status/degradations remain available.",
+    ),
+    allowed(
+        "NSF-CLI-PACK-REPLAY-OMITTED-ITEMS",
+        "src/cli/mod.rs",
+        "ledger_core_array(value, \"omittedItems\")",
+        "Pack replay with a missing omittedItems ledger array reports no omitted items while ledger status/degradations remain available.",
+    ),
+    allowed(
+        "NSF-CLI-QUERY-PAGINATION-DEFAULT",
+        "src/cli/mod.rs",
+        "parse_pagination",
+        "Missing query-file pagination intentionally means default pagination bounds.",
+    ),
+    allowed(
+        "NSF-CLI-QUERY-GRAPH-SEEDS-DEFAULT",
+        "src/cli/mod.rs",
+        "let seed_memories = graph",
+        "Missing graph seedMemories in ee.query.v1 intentionally means no explicit graph seeds.",
+    ),
+    allowed(
+        "NSF-CLI-QUERY-GRAPH-TRAVERSAL-DEFAULT",
+        "src/cli/mod.rs",
+        "let traversal = graph",
+        "Missing graph traversal intentionally uses the QueryGraphTraversal default after validation handles malformed values.",
+    ),
+    allowed(
+        "NSF-CLI-QUERY-GRAPH-LINK-TYPES-DEFAULT",
+        "src/cli/mod.rs",
+        "let include_orphans = graph",
+        "Missing graph linkTypes intentionally means no relation filter after validation handles malformed values.",
+    ),
+    allowed(
         "NSF-CLI-REHEARSE-NO-COMMANDS",
         "src/cli/mod.rs",
         "(None, None) => return Ok(Vec::new())",
@@ -306,6 +400,19 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/core/context.rs",
         "tags_map.get",
         "A memory with no tag rows has an explicit empty tag set.",
+    ),
+    must_fix(
+        "NSF-CORE-CONTEXT-COORDINATION-HASH",
+        "src/core/context.rs",
+        "serde_json::to_string(coordination).unwrap_or_default()",
+        "eidetic_engine_cli-sos5.3",
+        "Context pack hashes should not silently drop coordination snapshot bytes when serialization fails.",
+    ),
+    allowed(
+        "NSF-CORE-CURATE-PROPOSED-CONTENT-TAGS",
+        "src/core/curate.rs",
+        "stored.proposed_content.as_deref().unwrap_or_default()",
+        "A curation candidate without proposed content can still derive tags from its reason and cluster membership.",
     ),
     allowed(
         "NSF-CORE-CLAIMS-NO-EVIDENCE",
@@ -343,11 +450,52 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "get(\"id\")",
         "Malformed optional task-frame evidence links are skipped rather than emitted as empty links.",
     ),
+    must_fix(
+        "NSF-CORE-HANDOFF-STALE-ADDED-DEFAULT",
+        "src/core/handoff.rs",
+        "threshold_field: \"memories_added\"",
+        "eidetic_engine_cli-sos5.4",
+        "Handoff stale-threshold reporting should distinguish unavailable added-memory counts from zero.",
+    ),
+    must_fix(
+        "NSF-CORE-HANDOFF-STALE-EXPIRED-DEFAULT",
+        "src/core/handoff.rs",
+        "threshold_field: \"any_expired_in_pack\"",
+        "eidetic_engine_cli-sos5.4",
+        "Handoff stale-threshold reporting should distinguish unavailable expired-memory counts from zero.",
+    ),
+    must_fix(
+        "NSF-CORE-HANDOFF-STALE-DRIFT-DEFAULT",
+        "src/core/handoff.rs",
+        "content_drift_score.unwrap_or_default()",
+        "eidetic_engine_cli-sos5.4",
+        "Handoff stale-threshold reporting should distinguish unavailable content drift from zero drift.",
+    ),
+    must_fix(
+        "NSF-CORE-HANDOFF-STALE-REVISED-DEFAULT",
+        "src/core/handoff.rs",
+        "threshold_field: \"memories_revised\"",
+        "eidetic_engine_cli-sos5.4",
+        "Handoff stale-threshold reporting should distinguish unavailable revised-memory counts from zero.",
+    ),
+    must_fix(
+        "NSF-CORE-HANDOFF-TAG-LOOKUP",
+        "src/core/handoff.rs",
+        "conn.get_memory_tags(&memory.id).unwrap_or_default()",
+        "eidetic_engine_cli-sos5.7",
+        "Handoff snapshot hashes should not silently treat failed tag lookups as untagged memories.",
+    ),
     allowed(
         "NSF-CORE-INDEX-HUMAN-DIMENSION",
         "src/core/index.rs",
         "quality_dimension.unwrap_or_default()",
         "Quality embedder dimension is optional human display text and is gated by quality model presence.",
+    ),
+    allowed(
+        "NSF-CORE-INDEX-VACUUM-NO-PARENT",
+        "src/core/index.rs",
+        "return Ok(Vec::new());",
+        "If the index parent directory does not exist, there are no stale index directories to vacuum.",
     ),
     allowed(
         "NSF-CORE-INIT-CWD",
@@ -404,6 +552,49 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "Learning path resolution keeps the existing relative path fallback and does not manufacture learned evidence.",
     ),
     allowed(
+        "NSF-CORE-LEARN-CLUSTER-NO-TAGS",
+        "src/core/learn.rs",
+        "snapshot\n.memory_tags",
+        "Learn-cluster embedding text represents untagged memories with an empty tags line.",
+    ),
+    allowed(
+        "NSF-CORE-LEGACY-NONUTF8-FILENAME",
+        "src/core/legacy_import.rs",
+        "name.starts_with(\"._\")",
+        "A non-UTF-8 legacy filename cannot match macOS metadata filenames and is still sorted by the path wire string.",
+    ),
+    must_fix(
+        "NSF-CORE-MEMORY-LINE-SPAN",
+        "src/core/memory.rs",
+        "extract_line_span(&contents, *span).unwrap_or_default()",
+        "eidetic_engine_cli-sos5.7",
+        "Evidence freshness should report an invalid provenance span instead of hashing an empty source excerpt.",
+    ),
+    allowed(
+        "NSF-CORE-MEMORY-SECRET-ALLOWLISTS",
+        "src/core/memory.rs",
+        "allow_phrases: config",
+        "Missing secret-detector allowlist arrays intentionally mean no configured bypass phrases or regexes.",
+    ),
+    allowed(
+        "NSF-CORE-MEMORY-SECRET-ALLOWREGEX",
+        "src/core/memory.rs",
+        "allow_regex: config",
+        "Missing secret-detector allow_regex config intentionally means no configured bypass regexes.",
+    ),
+    allowed(
+        "NSF-CORE-MEMORY-SCOPE-TEAM-MEMBERS",
+        "src/core/memory_scope.rs",
+        "team_members\n.unwrap_or_default()",
+        "Missing trust.team_members config intentionally produces an empty verified-agent set.",
+    ),
+    allowed(
+        "NSF-CORE-MEMORY-SCOPE-AGENT-URI",
+        "src/core/memory_scope.rs",
+        ".split(['/', '#', '?'])",
+        "An agent provenance URI with no name segment is normalized away rather than emitted as an empty agent.",
+    ),
+    allowed(
         "NSF-CORE-PLAN-RAND-ID",
         "src/core/plan.rs",
         "duration_since(SystemTime::UNIX_EPOCH)",
@@ -446,16 +637,215 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "Absent index-check detail appends no extra sentence while preserving the high-severity corruption signal.",
     ),
     allowed(
+        "NSF-CORE-SEARCH-NO-RELEVANT-TOP-SCORE",
+        "src/core/search.rs",
+        "let top_note = top_score",
+        "A no-relevant-results degradation may omit the optional top-score sentence while keeping the main degradation.",
+    ),
+    allowed(
+        "NSF-CORE-SEARCH-HIT-TAGS",
+        "src/core/search.rs",
+        "metadata_string(metadata, \"tags\")",
+        "Search hits without tag metadata are valid untagged memories.",
+    ),
+    allowed(
+        "NSF-CORE-SEARCH-HIT-TOKEN-CONTENT",
+        "src/core/search.rs",
+        "estimate_tokens_default",
+        "Search hit token estimates fall back to already-required content metadata when the analysis content key is absent.",
+    ),
+    allowed(
+        "NSF-CORE-SEARCH-HIT-SECTION",
+        "src/core/search.rs",
+        "match (level.unwrap_or_default(), kind.unwrap_or_default())",
+        "Missing optional search metadata classifies the pack item into the generic artifacts section.",
+    ),
+    allowed(
+        "NSF-CORE-SEARCH-HIT-PROVENANCE",
+        "src/core/search.rs",
+        "PackProvenance::new(uri",
+        "If derived provenance construction rejects the fallback URI, the hit can still be represented without provenance details.",
+    ),
+    must_fix(
+        "NSF-CORE-STATUS-AUDIT-ACCESS",
+        "src/core/status.rs",
+        "list_audit_entries",
+        "eidetic_engine_cli-sos5.7",
+        "Status memory health should surface audit-log read failures instead of treating all memories as never accessed.",
+    ),
+    allowed(
+        "NSF-CORE-SUPPORT-BUNDLE-PACK-QUERY",
+        "src/core/support_bundle.rs",
+        "let query = row_text(row, 1).unwrap_or_default()",
+        "Support-bundle pack summaries may represent a missing query column as an empty diagnostic field.",
+    ),
+    allowed(
+        "NSF-CORE-SWARM-BRIEF-BV-TOP-PICKS",
+        "src/core/swarm_brief.rs",
+        "\"topPickIds\"",
+        "A swarm brief without BV top picks intentionally reports an empty top-pick list.",
+    ),
+    allowed(
+        "NSF-CORE-SWARM-BRIEF-RECOMMENDATIONS",
+        "src/core/swarm_brief.rs",
+        "Swarm brief summary",
+        "A swarm brief summary without recommendation IDs intentionally renders no recommendation examples.",
+    ),
+    allowed(
+        "NSF-CORE-SWARM-BRIEF-CYCLE-EXAMPLES",
+        "src/core/swarm_brief.rs",
+        "examples.sort()",
+        "A Beads dependency-cycle payload without example cycles intentionally reports an empty examples list.",
+    ),
+    allowed(
+        "NSF-CORE-SWARM-BRIEF-BV-PICKS",
+        "src/core/swarm_brief.rs",
+        "let picks_value = quick_ref",
+        "BV robot JSON may omit top_picks while still reporting aggregate counts.",
+    ),
+    allowed(
+        "NSF-CORE-SWARM-BRIEF-MAIL-RESERVATIONS",
+        "src/core/swarm_brief.rs",
+        "let inbox = value",
+        "Agent Mail snapshots may omit reservations; missing arrays mean empty sections after JSON parse succeeds.",
+    ),
+    allowed(
+        "NSF-CORE-SWARM-BRIEF-MAIL-INBOX",
+        "src/core/swarm_brief.rs",
+        "let threads = value",
+        "Agent Mail snapshots may omit inbox entries; missing arrays mean empty sections after JSON parse succeeds.",
+    ),
+    allowed(
+        "NSF-CORE-SWARM-BRIEF-MAIL-THREADS",
+        "src/core/swarm_brief.rs",
+        "let mut reservations = reservations",
+        "Agent Mail snapshots may omit thread entries; missing arrays mean empty sections after JSON parse succeeds.",
+    ),
+    allowed(
+        "NSF-CORE-PERF-FORENSICS-SOURCE-SCHEMA",
+        "src/core/perf_forensics.rs",
+        "source_schema: normalized.source_schema.unwrap_or_default()",
+        "Perf artifacts treat source schema as optional metadata; missing values do not hide metric ingestion failure.",
+    ),
+    allowed(
+        "NSF-CORE-PERF-FORENSICS-UNIT",
+        "src/core/perf_forensics.rs",
+        "unit.unwrap_or_default().to_lowercase()",
+        "Perf metric unit is optional metadata; missing units simply skip unit-based volatility inference.",
+    ),
+    allowed(
         "NSF-MODELS-QUERY-MISSING-ARRAY-FILTER",
         "src/models/query.rs",
         "Result<Vec<String>, EqlQueryError>",
         "Missing optional EQL array filters are deliberate empty filter sets; present non-array or empty-string values still return EqlQueryError.",
     ),
     allowed(
+        "NSF-MODELS-QUERY-TAG-FILTERS",
+        "src/models/query.rs",
+        "let require_any = object",
+        "Missing tag filter arrays in ee.query.v1 intentionally mean no tag filter.",
+    ),
+    allowed(
+        "NSF-MODELS-QUERY-TAG-REQUIRE-ANY-FILTERS",
+        "src/models/query.rs",
+        "let exclude = object",
+        "Missing tag requireAny arrays in ee.query.v1 intentionally mean no alternate tag filter.",
+    ),
+    allowed(
+        "NSF-MODELS-QUERY-TAG-EXCLUDE-FILTERS",
+        "src/models/query.rs",
+        "TagFilters {",
+        "Missing tag exclude arrays in ee.query.v1 intentionally mean no tag exclusion filter.",
+    ),
+    allowed(
+        "NSF-MODELS-QUERY-TRUST-FILTERS",
+        "src/models/query.rs",
+        "let require_posture = object",
+        "Missing trust excludeClasses in ee.query.v1 intentionally means no trust-class exclusions.",
+    ),
+    allowed(
+        "NSF-MODELS-QUERY-REDACTION-FILTERS",
+        "src/models/query.rs",
+        "RedactionFilters {",
+        "Missing redaction allowCategories in ee.query.v1 intentionally means the default redaction policy.",
+    ),
+    allowed(
         "NSF-DB-FEEDBACK-SIGNAL",
         "src/db/mod.rs",
         "optional_text(row, 0)?.unwrap_or_default()",
         "Missing feedback signal maps to no positive/negative bucket and does not create a successful signal.",
+    ),
+    allowed(
+        "NSF-DB-LATEST-SCHEMA-EMPTY",
+        "src/db/mod.rs",
+        "MIGRATIONS\n.last()",
+        "A build with no compiled migrations would report schema version zero rather than hiding a database operation failure.",
+    ),
+    allowed(
+        "NSF-DB-PACK-LEDGER-NO-DEGRADATIONS",
+        "src/db/mod.rs",
+        "return Ok(Vec::new());",
+        "A pack ledger with no degraded JSON has an explicit empty degradation list.",
+    ),
+    allowed(
+        "NSF-DB-PACK-LEDGER-DEGRADATION-ARRAY",
+        "src/db/mod.rs",
+        "pack_ledger_core_array(ledger, \"degraded\")",
+        "A parsed pack ledger without a degraded array has no ledger-local degradations.",
+    ),
+    allowed(
+        "NSF-DB-PACK-LEDGER-DEGRADATION-SORT",
+        "src/db/mod.rs",
+        "let severity = value",
+        "Missing degradation sort-key fields are used only to produce a deterministic order for malformed diagnostic values.",
+    ),
+    allowed(
+        "NSF-DB-PACK-LEDGER-DEGRADATION-MESSAGE-SORT",
+        "src/db/mod.rs",
+        "let message = value",
+        "Missing degradation messages are used only to produce a deterministic order for malformed diagnostic values.",
+    ),
+    allowed(
+        "NSF-GRAPH-PPR-NO-NEIGHBORS",
+        "src/graph/ppr.rs",
+        "edges.sort_unstable_by_key",
+        "A graph node with no outgoing neighbors intentionally contributes an empty normalized edge list.",
+    ),
+    allowed(
+        "NSF-OUTPUT-FIELD-SELECTOR-COMMAND",
+        "src/output/mod.rs",
+        "requested_fields_for_selector(command, selector)",
+        "A response without a command name cannot match command-specific field selectors and is returned unchanged.",
+    ),
+    allowed(
+        "NSF-PACK-COORDINATION-SCHEMA",
+        "src/pack/mod.rs",
+        "coordination_string_field(value, &[\"schema\"])",
+        "A coordination snapshot without an explicit schema is treated as the current schema after the required sources array is validated.",
+    ),
+    allowed(
+        "NSF-PACK-COORDINATION-ENTRIES",
+        "src/pack/mod.rs",
+        "entries.sort()",
+        "A coordination source without entries intentionally contributes an empty entry list.",
+    ),
+    allowed(
+        "NSF-PACK-COORDINATION-DEGRADATIONS",
+        "src/pack/mod.rs",
+        "coordination_string_field(item, &[\"repair\"])",
+        "A coordination snapshot without degradation entries intentionally has no source degradations.",
+    ),
+    allowed(
+        "NSF-CURATE-CLUSTER-DIMENSION",
+        "src/curate/cluster_coherence.rs",
+        "points\n.first()",
+        "Cluster coherence converts an empty or zero-dimensional input into an explicit ClusterCoherenceError.",
+    ),
+    allowed(
+        "NSF-CURATE-CLUSTER-REPRESENTATIVE",
+        "src/curate/cluster_coherence.rs",
+        "representative_memory_id",
+        "Cluster representatives are derived after cluster membership validation and sorting.",
     ),
     allowed(
         "NSF-SERVE-DAEMON-DRY-RUN-ROWS",
@@ -478,7 +868,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     allowed(
         "NSF-POLICY-ENV-PROFILE",
         "src/policy/security_profile.rs",
-        "EE_SECURITY_PROFILE",
+        "read(EnvVar::SecurityProfile)",
         "Absent or invalid environment profile intentionally falls back to the default security profile.",
     ),
     allowed(
@@ -707,12 +1097,21 @@ fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String
         let entry = entry.map_err(|error| format!("failed to read dir entry: {error}"))?;
         let path = entry.path();
         if path.is_dir() {
+            if is_temp_sync_dir(&path) {
+                continue;
+            }
             collect_rust_files(&path, files)?;
         } else if path.extension().is_some_and(|extension| extension == "rs") {
             files.push(path);
         }
     }
     Ok(())
+}
+
+fn is_temp_sync_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".tmp-sync"))
 }
 
 fn ignored_test_module_lines(source: &str) -> Vec<bool> {
