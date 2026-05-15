@@ -16,6 +16,19 @@ pub const DAEMON_STATUS_SCHEMA_V1: &str = "ee.steward.daemon_status.v1";
 pub const DAEMON_RECOVERY_SCHEMA_V1: &str = "ee.steward.daemon_recovery.v1";
 pub const DAEMON_WRITE_OWNER_IDENTITY: &str = "ee-daemon-single-write-owner";
 
+fn trace_serve_localhost(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
+    tracing::info!(
+        workspace_id = "serve-localhost",
+        request_id = "daemon_foreground_request",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-3usjw.4"),
+        surface = "serve_localhost",
+        phase,
+        elapsed_ms,
+        degraded_codes = ?degraded_codes,
+        "serve localhost adapter checkpoint"
+    );
+}
+
 #[must_use]
 pub const fn subsystem_name() -> &'static str {
     SUBSYSTEM
@@ -185,8 +198,10 @@ pub fn record_daemon_foreground_start(
     workspace_path: &Path,
     options: &DaemonForegroundOptions,
 ) -> Result<DaemonRunPlan, String> {
+    trace_serve_localhost("input", 0, &[]);
     let table_path = daemon_job_table_path(workspace_path);
     if options.dry_run {
+        trace_serve_localhost("response", 0, &[]);
         return Ok(DaemonRunPlan {
             run_id: "dry-run".to_owned(),
             table_path,
@@ -227,7 +242,9 @@ pub fn record_daemon_foreground_start(
         }
     }
 
+    trace_serve_localhost("persistence", 0, &[]);
     append_daemon_job_rows(&table_path, &rows)?;
+    trace_serve_localhost("response", 0, &[]);
     Ok(DaemonRunPlan {
         run_id,
         table_path,
@@ -240,7 +257,9 @@ pub fn record_daemon_foreground_report(
     report: &DaemonForegroundReport,
     run_id: &str,
 ) -> Result<Vec<DaemonJobRow>, String> {
+    trace_serve_localhost("input", 0, &[]);
     if report.dry_run || run_id == "dry-run" {
+        trace_serve_localhost("response", 0, &[]);
         return Ok(Vec::new());
     }
 
@@ -258,7 +277,9 @@ pub fn record_daemon_foreground_report(
         }
     }
 
+    trace_serve_localhost("persistence", 0, &[]);
     append_daemon_job_rows(&daemon_job_table_path(workspace_path), &rows)?;
+    trace_serve_localhost("response", 0, &[]);
     Ok(rows)
 }
 
@@ -266,6 +287,7 @@ pub fn recover_orphaned_daemon_jobs(
     workspace_path: &Path,
     reason: &str,
 ) -> Result<DaemonRecoveryReport, String> {
+    trace_serve_localhost("input", 0, &[]);
     let table_path = daemon_job_table_path(workspace_path);
     let rows = load_daemon_job_rows(workspace_path)?;
     let latest = latest_daemon_rows(&rows);
@@ -305,9 +327,11 @@ pub fn recover_orphaned_daemon_jobs(
     }
 
     if !recovered_rows.is_empty() {
+        trace_serve_localhost("persistence", 0, &[]);
         append_daemon_job_rows(&table_path, &recovered_rows)?;
     }
 
+    trace_serve_localhost("response", 0, &[]);
     Ok(DaemonRecoveryReport {
         workspace: workspace_path.to_string_lossy().into_owned(),
         table_path,
@@ -323,6 +347,7 @@ pub fn daemon_status_report(
     requested_job_types: &[JobType],
     recent_limit: usize,
 ) -> Result<DaemonStatusReport, String> {
+    trace_serve_localhost("input", 0, &[]);
     let rows = load_daemon_job_rows(workspace_path)?;
     let mut latest = latest_daemon_rows(&rows);
     latest.sort_by(|left, right| {
@@ -333,6 +358,7 @@ pub fn daemon_status_report(
     });
     let open_job_count = latest.iter().filter(|row| row.is_open()).count();
     latest.truncate(recent_limit);
+    trace_serve_localhost("response", 0, &[]);
     Ok(DaemonStatusReport {
         workspace: workspace_path.to_string_lossy().into_owned(),
         requested_job_types: requested_job_types.to_vec(),

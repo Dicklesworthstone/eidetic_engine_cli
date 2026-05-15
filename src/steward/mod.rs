@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 use asupersync::runtime::yield_now::yield_now;
 use asupersync::time::sleep as asupersync_sleep;
 use asupersync::{CancelReason, Cx, Outcome};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use fnx_classes::Graph;
+use fnx_runtime::CompatibilityMode;
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, flock};
 #[cfg(unix)]
@@ -24,13 +26,16 @@ use rustix::io::Errno;
 use serde_json::{Value as JsonValue, json};
 
 use crate::db::{
-    ApplyMemoryDecayDemotionInput, ApplyMemoryScoreUpdateInput, CreateCurationCandidateInput,
-    DbConnection, FeedbackCounts, StoredAuditEntry, StoredFeedbackEvent, StoredMemory,
+    AcquireLockResult, AdvisoryLockId, ApplyMemoryDecayDemotionInput, ApplyMemoryScoreUpdateInput,
+    CreateCurationCandidateInput, DbConnection, FeedbackCounts, GraphSnapshotPruneCandidate,
+    GraphSnapshotType, StoredAuditEntry, StoredFeedbackEvent, StoredMemory, StoredMemoryLink,
     audit_actions, feedback_scoring,
 };
+use crate::graph::decay::{StructuralDecayMultiplier, compute_structural_decay_adjustment};
 use crate::policy::{
     MEMORY_DECAY_SOURCE, MemoryDecayAction, MemoryDecayEvaluation, MemoryDecayHalfLives,
     MemoryDecaySettings, MemoryDecayThresholds, evaluate_memory_decay_with_settings,
+    memory_decay_freshness_score,
 };
 
 pub const SUBSYSTEM: &str = "steward";
@@ -58,8 +63,95 @@ pub const MAINTENANCE_JOB_ROW_SCHEMA_V1: &str = "ee.maintenance.job_row.v1";
 
 pub const MAINTENANCE_JOB_LOCK_SCHEMA_V1: &str = "ee.steward.maintenance_job_lock.v1";
 pub const MAINTENANCE_JOB_LOCK_BUSY_CODE: &str = "maintenance_job_lock_busy";
+pub const GRAPH_SNAPSHOT_PRUNE_JOB_SCHEMA_V1: &str = "ee.graph.snapshot_prune.v1";
+const GRAPH_SNAPSHOT_PRUNE_DEFAULT_LIMIT: u32 = 10_000;
+const GRAPH_SNAPSHOT_PRUNE_RETENTION_DAYS: i64 = 7;
+const GRAPH_SNAPSHOT_PRUNE_LOCK_TTL_SECS: u64 = 300;
+const GRAPH_SNAPSHOT_PRUNE_LOCK_REASON: &str = "graph snapshot prune";
 
 static MAINTENANCE_JOB_PROCESS_GATES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
+
+struct GraphSnapshotPruneLockOwner<'a> {
+    conn: &'a DbConnection,
+    lock_ids: Vec<AdvisoryLockId>,
+    holder_id: String,
+    ttl_secs: u64,
+}
+
+struct GraphSnapshotPruneDetailsInput<'a> {
+    workspace_id: &'a str,
+    graph_type: GraphSnapshotType,
+    dry_run: bool,
+    retention_days: i64,
+    cutoff_timestamp: &'a str,
+    candidates: &'a [GraphSnapshotPruneCandidate],
+    pruned_count: u64,
+    pruned_bytes: u64,
+    lock_acquired: bool,
+    lock_holder_id: Option<&'a str>,
+}
+
+impl Drop for GraphSnapshotPruneLockOwner<'_> {
+    fn drop(&mut self) {
+        for lock_id in self.lock_ids.iter().rev() {
+            if let Err(error) = self.conn.release_advisory_lock(lock_id, &self.holder_id) {
+                tracing::warn!(
+                    target: "ee::steward",
+                    resource_type = lock_id.resource_type(),
+                    resource_id = lock_id.resource_id(),
+                    holder_id = self.holder_id.as_str(),
+                    lock_ttl_secs = self.ttl_secs,
+                    error = %error,
+                    "graph snapshot prune advisory lock release failed"
+                );
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum GraphSnapshotPruneLockError {
+    Busy {
+        resource_type: String,
+        resource_id: String,
+        holder_id: String,
+        acquired_at: String,
+    },
+    Storage {
+        resource_type: String,
+        resource_id: String,
+        message: String,
+    },
+}
+
+impl GraphSnapshotPruneLockError {
+    const fn code(&self) -> &'static str {
+        match self {
+            Self::Busy { .. } => "graph_snapshot_prune_lock_busy",
+            Self::Storage { .. } => "graph_snapshot_prune_lock_failed",
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            Self::Busy {
+                resource_type,
+                resource_id,
+                holder_id,
+                acquired_at,
+            } => format!(
+                "Graph snapshot prune lock {resource_type}:{resource_id} is held by {holder_id} since {acquired_at}"
+            ),
+            Self::Storage {
+                resource_type,
+                resource_id,
+                message,
+            } => format!(
+                "Failed to acquire graph snapshot prune lock {resource_type}:{resource_id}: {message}"
+            ),
+        }
+    }
+}
 
 #[must_use]
 pub const fn subsystem_name() -> &'static str {
@@ -257,6 +349,8 @@ pub enum JobType {
     HealthCheck,
     /// Prune derived caches without deleting source-of-truth data.
     CachePruning,
+    /// Prune archived graph snapshot derived rows after retention.
+    GraphSnapshotPrune,
     /// Compact and optimize storage.
     StorageCompact,
     /// Refresh graph link prediction inputs.
@@ -285,6 +379,7 @@ impl JobType {
             Self::QuarantineSweep => "quarantine_sweep",
             Self::HealthCheck => "health_check",
             Self::CachePruning => "cache_pruning",
+            Self::GraphSnapshotPrune => "graph_snapshot_prune",
             Self::StorageCompact => "storage_compact",
             Self::LinkPredictionRefresh => "link_prediction_refresh",
             Self::CentralityRefresh => "centrality_refresh",
@@ -306,6 +401,7 @@ impl JobType {
             Self::QuarantineSweep,
             Self::HealthCheck,
             Self::CachePruning,
+            Self::GraphSnapshotPrune,
             Self::StorageCompact,
             Self::LinkPredictionRefresh,
             Self::CentralityRefresh,
@@ -329,6 +425,9 @@ impl JobType {
             Self::QuarantineSweep => "Inspect quarantined harmful feedback rows",
             Self::HealthCheck => "Run health checks and generate diagnostics",
             Self::CachePruning => "Prune derived caches without deleting source-of-truth data",
+            Self::GraphSnapshotPrune => {
+                "Prune archived graph snapshot derived rows after retention"
+            }
             Self::StorageCompact => "Compact and optimize storage",
             Self::LinkPredictionRefresh => "Refresh graph link prediction inputs",
             Self::CentralityRefresh => "Refresh graph centrality metrics",
@@ -373,6 +472,7 @@ impl FromStr for JobType {
             "quarantine_sweep" => Ok(Self::QuarantineSweep),
             "health_check" => Ok(Self::HealthCheck),
             "cache_pruning" => Ok(Self::CachePruning),
+            "graph_snapshot_prune" => Ok(Self::GraphSnapshotPrune),
             "storage_compact" => Ok(Self::StorageCompact),
             "link_prediction_refresh" => Ok(Self::LinkPredictionRefresh),
             "centrality_refresh" => Ok(Self::CentralityRefresh),
@@ -1294,6 +1394,10 @@ pub fn default_budgets_for_job_type(job_type: JobType) -> Vec<ResourceBudget> {
             ResourceBudget::time_limit_ms(60_000), // 1 minute
             ResourceBudget::item_limit(10_000),
         ],
+        JobType::GraphSnapshotPrune => vec![
+            ResourceBudget::time_limit_ms(60_000), // 1 minute
+            ResourceBudget::item_limit(10_000),
+        ],
         JobType::StorageCompact => vec![
             ResourceBudget::time_limit_ms(600_000), // 10 minutes
         ],
@@ -1380,6 +1484,7 @@ pub struct ScoreDecayJobOptions {
     pub decay_interval_days: u32,
     pub min_delta: f32,
     pub include_decay_actions: bool,
+    pub structural_decay: bool,
     pub decay_thresholds: MemoryDecayThresholds,
     pub decay_half_lives: MemoryDecayHalfLives,
     pub dry_run: bool,
@@ -1397,6 +1502,7 @@ impl ScoreDecayJobOptions {
             decay_interval_days: DEFAULT_SCORE_DECAY_INTERVAL_DAYS,
             min_delta: DEFAULT_SCORE_DECAY_MIN_DELTA,
             include_decay_actions: false,
+            structural_decay: true,
             decay_thresholds: MemoryDecayThresholds::default(),
             decay_half_lives: MemoryDecayHalfLives::default(),
             dry_run: false,
@@ -1427,9 +1533,39 @@ pub struct ScoreDecayMemoryChange {
     pub forget_threshold: f32,
     pub feedback_total_count: u32,
     pub feedback_event_ids: Vec<String>,
+    pub structural_adjustment: Option<ScoreDecayStructuralAdjustment>,
     pub applied: bool,
     pub audit_id: Option<String>,
     pub lifecycle_audit_id: Option<String>,
+}
+
+/// Structural multiplier applied to one memory's age-based decay.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScoreDecayStructuralAdjustment {
+    pub memory_id: String,
+    pub onion_layer: Option<usize>,
+    pub max_layer: usize,
+    pub is_articulation_point: bool,
+    pub base_decay: f32,
+    pub structural_multiplier: f32,
+    pub adjusted_decay: f32,
+    pub rationale: String,
+}
+
+impl ScoreDecayStructuralAdjustment {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "memoryId": self.memory_id,
+            "onionLayer": self.onion_layer,
+            "maxLayer": self.max_layer,
+            "isArticulationPoint": self.is_articulation_point,
+            "baseDecay": score_json(self.base_decay),
+            "structuralMultiplier": score_json(self.structural_multiplier),
+            "adjustedDecay": score_json(self.adjusted_decay),
+            "rationale": self.rationale,
+        })
+    }
 }
 
 impl ScoreDecayMemoryChange {
@@ -1440,7 +1576,7 @@ impl ScoreDecayMemoryChange {
 
     #[must_use]
     pub fn data_json(&self) -> JsonValue {
-        json!({
+        let mut value = json!({
             "memoryId": self.memory_id,
             "oldConfidence": score_json(self.old_confidence),
             "newConfidence": score_json(self.new_confidence),
@@ -1463,7 +1599,11 @@ impl ScoreDecayMemoryChange {
             "applied": self.applied,
             "auditId": self.audit_id,
             "lifecycleAuditId": self.lifecycle_audit_id,
-        })
+        });
+        if let Some(adjustment) = &self.structural_adjustment {
+            value["structuralAdjustment"] = adjustment.data_json();
+        }
+        value
     }
 }
 
@@ -1486,6 +1626,7 @@ pub struct ScoreDecayJobReport {
     pub decay_interval_days: u32,
     pub min_delta: f32,
     pub include_decay_actions: bool,
+    pub structural_decay: bool,
     pub decay_thresholds: MemoryDecayThresholds,
     pub decay_half_lives: MemoryDecayHalfLives,
     pub changes: Vec<ScoreDecayMemoryChange>,
@@ -1494,6 +1635,35 @@ pub struct ScoreDecayJobReport {
 impl ScoreDecayJobReport {
     #[must_use]
     pub fn data_json(&self) -> JsonValue {
+        let structural_adjustments = self
+            .changes
+            .iter()
+            .filter_map(|change| change.structural_adjustment.as_ref())
+            .map(ScoreDecayStructuralAdjustment::data_json)
+            .collect::<Vec<_>>();
+        let mut decay = json!({
+            "schema": MEMORY_DECAY_SOURCE,
+            "enabled": self.include_decay_actions,
+            "memoriesDemoted": self.demoted_count,
+            "memoriesTombstoned": self.tombstoned_count,
+            "halfLivesApplied": self.include_decay_actions,
+            "halfLifeDays": {
+                "working": score_json(self.decay_half_lives.working),
+                "episodicEvent": score_json(self.decay_half_lives.episodic_event),
+                "episodicFailure": score_json(self.decay_half_lives.episodic_failure),
+                "semanticFact": score_json(self.decay_half_lives.semantic_fact),
+                "proceduralRule": score_json(self.decay_half_lives.procedural_rule),
+                "default": score_json(self.decay_half_lives.default),
+            },
+            "thresholdDemote": score_json(self.decay_thresholds.demote),
+            "thresholdForget": score_json(self.decay_thresholds.forget),
+            "dryRun": self.dry_run,
+        });
+        if self.include_decay_actions && self.structural_decay {
+            decay["structuralDecayEnabled"] = json!(true);
+            decay["structuralAdjustments"] = JsonValue::Array(structural_adjustments);
+        }
+
         json!({
             "schema": self.schema,
             "command": self.command,
@@ -1506,24 +1676,7 @@ impl ScoreDecayJobReport {
                 "decayIntervalDays": self.decay_interval_days,
                 "minDelta": score_json(self.min_delta),
             },
-            "decay": {
-                "schema": MEMORY_DECAY_SOURCE,
-                "enabled": self.include_decay_actions,
-                "memoriesDemoted": self.demoted_count,
-                "memoriesTombstoned": self.tombstoned_count,
-                "halfLivesApplied": self.include_decay_actions,
-                "halfLifeDays": {
-                    "working": score_json(self.decay_half_lives.working),
-                    "episodicEvent": score_json(self.decay_half_lives.episodic_event),
-                    "episodicFailure": score_json(self.decay_half_lives.episodic_failure),
-                    "semanticFact": score_json(self.decay_half_lives.semantic_fact),
-                    "proceduralRule": score_json(self.decay_half_lives.procedural_rule),
-                    "default": score_json(self.decay_half_lives.default),
-                },
-                "thresholdDemote": score_json(self.decay_thresholds.demote),
-                "thresholdForget": score_json(self.decay_thresholds.forget),
-                "dryRun": self.dry_run,
-            },
+            "decay": decay,
             "summary": {
                 "scannedCount": self.scanned_count,
                 "changedCount": self.changed_count,
@@ -1599,6 +1752,11 @@ pub fn run_score_decay_job(
     } else {
         BTreeMap::new()
     };
+    let structural_adjustments = if options.include_decay_actions && options.structural_decay {
+        structural_decay_adjustments(conn, &memories, &access_times, &as_of_timestamp, options)?
+    } else {
+        BTreeMap::new()
+    };
 
     let mut scanned_count = 0usize;
     let mut changes = Vec::new();
@@ -1623,6 +1781,7 @@ pub fn run_score_decay_job(
             &feedback_events,
             &as_of_timestamp,
             access_times.get(&memory.id).copied(),
+            structural_adjustments.get(&memory.id).cloned(),
             options,
         )?
         else {
@@ -1691,6 +1850,7 @@ pub fn run_score_decay_job(
         decay_interval_days: options.decay_interval_days,
         min_delta: options.min_delta,
         include_decay_actions: options.include_decay_actions,
+        structural_decay: options.structural_decay,
         decay_thresholds: options.decay_thresholds,
         decay_half_lives: options.decay_half_lives,
         changes,
@@ -1713,12 +1873,99 @@ fn validate_score_decay_options(options: &ScoreDecayJobOptions) -> Result<(), St
     Ok(())
 }
 
+fn structural_decay_adjustments(
+    conn: &DbConnection,
+    memories: &[StoredMemory],
+    access_times: &BTreeMap<String, DateTime<Utc>>,
+    as_of: &DateTime<Utc>,
+    options: &ScoreDecayJobOptions,
+) -> Result<BTreeMap<String, ScoreDecayStructuralAdjustment>, String> {
+    let memory_ids = memories
+        .iter()
+        .map(|memory| memory.id.clone())
+        .collect::<BTreeSet<_>>();
+    let links = conn
+        .list_all_memory_links(None)
+        .map_err(|error| format!("Failed to list memory links for structural decay: {error}"))?;
+    let graph = structural_decay_graph(&memory_ids, &links);
+    let mut adjustments = BTreeMap::new();
+    for memory in memories {
+        let reference =
+            memory_decay_reference_time(memory, access_times.get(&memory.id).copied(), as_of)?;
+        let half_life_days = f64::from(
+            options
+                .decay_half_lives
+                .for_memory(&memory.level, &memory.kind),
+        );
+        let age_days =
+            as_of.signed_duration_since(reference).num_seconds().max(0) as f64 / 86_400.0;
+        let base_decay = 1.0 - memory_decay_freshness_score(age_days, half_life_days);
+        let structural = compute_structural_decay_adjustment(&graph, &memory.id);
+        adjustments.insert(
+            memory.id.clone(),
+            score_decay_structural_adjustment(&memory.id, base_decay, structural),
+        );
+    }
+    Ok(adjustments)
+}
+
+fn structural_decay_graph(memory_ids: &BTreeSet<String>, links: &[StoredMemoryLink]) -> Graph {
+    let mut graph = Graph::new(CompatibilityMode::Strict);
+    for memory_id in memory_ids {
+        graph.add_node(memory_id);
+    }
+    for link in links {
+        if !memory_ids.contains(&link.src_memory_id) || !memory_ids.contains(&link.dst_memory_id) {
+            continue;
+        }
+        graph.add_node(&link.src_memory_id);
+        graph.add_node(&link.dst_memory_id);
+        let _ = graph
+            .extend_edges_unrecorded([(link.src_memory_id.as_str(), link.dst_memory_id.as_str())]);
+    }
+    graph
+}
+
+fn score_decay_structural_adjustment(
+    memory_id: &str,
+    base_decay: f32,
+    structural: StructuralDecayMultiplier,
+) -> ScoreDecayStructuralAdjustment {
+    let structural_multiplier = round_score(structural.structural_multiplier as f32);
+    let adjusted_decay = round_score((base_decay * structural_multiplier).clamp(0.0, 1.0));
+    ScoreDecayStructuralAdjustment {
+        memory_id: memory_id.to_owned(),
+        onion_layer: structural.onion_layer,
+        max_layer: structural.max_layer,
+        is_articulation_point: structural.is_articulation_point,
+        base_decay: round_score(base_decay),
+        structural_multiplier,
+        adjusted_decay,
+        rationale: structural.rationale,
+    }
+}
+
+fn structurally_adjusted_reference_time(
+    reference: DateTime<Utc>,
+    as_of: DateTime<Utc>,
+    adjustment: &ScoreDecayStructuralAdjustment,
+) -> Result<DateTime<Utc>, String> {
+    let age_seconds = as_of.signed_duration_since(reference).num_seconds().max(0);
+    let adjusted_seconds = (age_seconds as f64 * f64::from(adjustment.structural_multiplier))
+        .round()
+        .clamp(0.0, i64::MAX as f64) as i64;
+    as_of
+        .checked_sub_signed(ChronoDuration::seconds(adjusted_seconds))
+        .ok_or_else(|| "Structural decay adjusted timestamp is out of range".to_owned())
+}
+
 fn score_decay_change_for_memory(
     memory: &StoredMemory,
     feedback_counts: &FeedbackCounts,
     feedback_events: &[StoredFeedbackEvent],
     as_of: &DateTime<Utc>,
     last_accessed_at: Option<DateTime<Utc>>,
+    structural_adjustment: Option<ScoreDecayStructuralAdjustment>,
     options: &ScoreDecayJobOptions,
 ) -> Result<Option<ScoreDecayMemoryChange>, String> {
     let age_days = score_age_days(&memory.updated_at, as_of)?;
@@ -1730,6 +1977,11 @@ fn score_decay_change_for_memory(
     let delta = round_score(new_confidence - old_confidence);
     let decay_evaluation = if options.include_decay_actions {
         let reference = memory_decay_reference_time(memory, last_accessed_at, as_of)?;
+        let reference = structural_adjustment
+            .as_ref()
+            .map_or(Ok(reference), |adjustment| {
+                structurally_adjusted_reference_time(reference, *as_of, adjustment)
+            })?;
         evaluate_memory_decay_with_settings(
             memory,
             reference,
@@ -1783,6 +2035,7 @@ fn score_decay_change_for_memory(
             .filter(|event| score_decay_consumes_feedback_event(event))
             .map(|event| event.id.clone())
             .collect::<Vec<_>>(),
+        structural_adjustment,
         applied: false,
         audit_id: None,
         lifecycle_audit_id: None,
@@ -2128,6 +2381,8 @@ pub struct RunnerOptions {
     pub dry_run: bool,
     /// Whether decay_sweep should apply lifecycle demotion/tombstone decisions.
     pub include_decay_actions: bool,
+    /// Whether decay_sweep should adjust lifecycle decay by graph structure.
+    pub structural_decay: bool,
     /// Resolved decay settings from defaults and workspace config.
     pub decay_settings: MemoryDecaySettings,
     /// Whether to continue on non-fatal errors.
@@ -2139,7 +2394,10 @@ pub struct RunnerOptions {
 impl RunnerOptions {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            structural_decay: true,
+            ..Self::default()
+        }
     }
 
     #[must_use]
@@ -2193,6 +2451,12 @@ impl RunnerOptions {
     #[must_use]
     pub fn with_include_decay_actions(mut self, include_decay_actions: bool) -> Self {
         self.include_decay_actions = include_decay_actions;
+        self
+    }
+
+    #[must_use]
+    pub fn with_structural_decay(mut self, structural_decay: bool) -> Self {
+        self.structural_decay = structural_decay;
         self
     }
 
@@ -2479,6 +2743,7 @@ impl ManualRunner {
             JobType::QuarantineSweep => self.execute_quarantine_sweep(budget),
             JobType::HealthCheck => self.execute_health_check(budget),
             JobType::CachePruning => self.execute_cache_pruning(budget),
+            JobType::GraphSnapshotPrune => self.execute_graph_snapshot_prune(budget),
             JobType::StorageCompact => self.execute_storage_compact(budget),
             JobType::LinkPredictionRefresh => self.execute_graph_centrality_refresh(budget),
             JobType::CentralityRefresh => self.execute_graph_centrality_refresh(budget),
@@ -2919,6 +3184,7 @@ impl ManualRunner {
         options.item_limit = item_limit;
         options.dry_run = self.options.dry_run;
         options.include_decay_actions = self.options.include_decay_actions;
+        options.structural_decay = self.options.structural_decay;
         options.decay_thresholds = self.options.decay_settings.thresholds;
         options.decay_half_lives = self.options.decay_settings.half_lives;
         options.actor = self
@@ -3558,6 +3824,197 @@ impl ManualRunner {
         )
     }
 
+    fn execute_graph_snapshot_prune(
+        &self,
+        budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        let opened = match self.open_workspace_database_for_job(
+            GRAPH_SNAPSHOT_PRUNE_JOB_SCHEMA_V1,
+            "graph_snapshot_prune",
+            "ee maintenance graph-snapshot-prune --workspace . --dry-run --json",
+        ) {
+            Ok(opened) => opened,
+            Err(result) => return result,
+        };
+        let graph_type = GraphSnapshotType::MemoryLinks;
+        let lock_owner = if self.options.dry_run {
+            None
+        } else {
+            match acquire_graph_snapshot_prune_lock_owner(
+                &opened.connection,
+                &opened.workspace_id,
+                graph_type,
+            ) {
+                Ok(owner) => Some(owner),
+                Err(error) => {
+                    return steward_job_failure(
+                        GRAPH_SNAPSHOT_PRUNE_JOB_SCHEMA_V1,
+                        error.code(),
+                        error.message(),
+                        false,
+                        Some(&opened.database_path),
+                        "Retry after the current graph snapshot refresh or prune operation exits.",
+                    );
+                }
+            }
+        };
+        let limit = match self.options.item_limit {
+            Some(limit) => match u32::try_from(limit) {
+                Ok(limit) => limit,
+                Err(_) => {
+                    return steward_job_failure(
+                        GRAPH_SNAPSHOT_PRUNE_JOB_SCHEMA_V1,
+                        "graph_snapshot_prune_limit_too_large",
+                        "Graph snapshot prune item limit exceeds u32".to_owned(),
+                        self.options.dry_run,
+                        Some(&opened.database_path),
+                        "Use --item-limit with a value at or below 4294967295.",
+                    );
+                }
+            },
+            None => GRAPH_SNAPSHOT_PRUNE_DEFAULT_LIMIT,
+        };
+        let retention_days = GRAPH_SNAPSHOT_PRUNE_RETENTION_DAYS;
+        let cutoff_timestamp = (Utc::now() - ChronoDuration::days(retention_days))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let candidates = match opened
+            .connection
+            .list_archived_graph_snapshot_prune_candidates(
+                &opened.workspace_id,
+                graph_type,
+                &cutoff_timestamp,
+                limit,
+            ) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                let message = format!("Failed to list graph snapshot prune candidates: {error}");
+                return steward_job_failure(
+                    GRAPH_SNAPSHOT_PRUNE_JOB_SCHEMA_V1,
+                    "graph_snapshot_prune_candidate_query_failed",
+                    message,
+                    self.options.dry_run,
+                    Some(&opened.database_path),
+                    "ee doctor --json",
+                );
+            }
+        };
+        let candidate_count = usize_to_u64(candidates.len());
+        budget.record(ResourceType::Items, candidate_count);
+        if budget_cancels_before_mutation(budget) {
+            return (
+                RunOutcome::Cancelled,
+                Some(candidate_count),
+                Some("Budget exceeded before graph snapshot pruning".to_owned()),
+                Some(Self::graph_snapshot_prune_details(
+                    GraphSnapshotPruneDetailsInput {
+                        workspace_id: &opened.workspace_id,
+                        graph_type,
+                        dry_run: self.options.dry_run,
+                        retention_days,
+                        cutoff_timestamp: &cutoff_timestamp,
+                        candidates: &candidates,
+                        pruned_count: 0,
+                        pruned_bytes: 0,
+                        lock_acquired: lock_owner.is_some(),
+                        lock_holder_id: lock_owner.as_ref().map(|owner| owner.holder_id.as_str()),
+                    },
+                )),
+            );
+        }
+        let pruned_count = if self.options.dry_run || candidates.is_empty() {
+            0
+        } else {
+            match opened.connection.prune_archived_graph_snapshots(
+                &opened.workspace_id,
+                graph_type,
+                &cutoff_timestamp,
+                limit,
+            ) {
+                Ok(count) => count,
+                Err(error) => {
+                    let message = format!("Failed to prune archived graph snapshots: {error}");
+                    return steward_job_failure(
+                        GRAPH_SNAPSHOT_PRUNE_JOB_SCHEMA_V1,
+                        "graph_snapshot_prune_delete_failed",
+                        message,
+                        false,
+                        Some(&opened.database_path),
+                        "ee doctor --json",
+                    );
+                }
+            }
+        };
+        let pruned_bytes = candidates
+            .iter()
+            .take(usize::try_from(pruned_count).unwrap_or(usize::MAX))
+            .fold(0_u64, |total, candidate| {
+                total.saturating_add(candidate.metrics_bytes)
+            });
+
+        (
+            RunOutcome::Success,
+            Some(candidate_count),
+            None,
+            Some(Self::graph_snapshot_prune_details(
+                GraphSnapshotPruneDetailsInput {
+                    workspace_id: &opened.workspace_id,
+                    graph_type,
+                    dry_run: self.options.dry_run,
+                    retention_days,
+                    cutoff_timestamp: &cutoff_timestamp,
+                    candidates: &candidates,
+                    pruned_count,
+                    pruned_bytes,
+                    lock_acquired: lock_owner.is_some(),
+                    lock_holder_id: lock_owner.as_ref().map(|owner| owner.holder_id.as_str()),
+                },
+            )),
+        )
+    }
+
+    fn graph_snapshot_prune_details(input: GraphSnapshotPruneDetailsInput<'_>) -> JsonValue {
+        let candidate_bytes = input.candidates.iter().fold(0_u64, |total, candidate| {
+            total.saturating_add(candidate.metrics_bytes)
+        });
+        let candidates_json = input
+            .candidates
+            .iter()
+            .map(|candidate| {
+                json!({
+                    "snapshotId": candidate.snapshot.id.as_str(),
+                    "snapshotVersion": candidate.snapshot.snapshot_version,
+                    "createdAt": candidate.snapshot.created_at.as_str(),
+                    "metricsBytes": candidate.metrics_bytes,
+                    "contentHash": candidate.snapshot.content_hash.as_str(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let lock = json!({
+            "resourceType": "graph_snapshot_prune",
+            "resourceId": format!("{}:{}", input.workspace_id, input.graph_type.as_str()),
+            "ttlSeconds": GRAPH_SNAPSHOT_PRUNE_LOCK_TTL_SECS,
+            "acquired": input.lock_acquired,
+            "holderId": input.lock_holder_id,
+        });
+        json!({
+            "schema": GRAPH_SNAPSHOT_PRUNE_JOB_SCHEMA_V1,
+            "command": "maintenance graph-snapshot-prune",
+            "workspaceId": input.workspace_id,
+            "graphType": input.graph_type.as_str(),
+            "dryRun": input.dry_run,
+            "retentionDays": input.retention_days,
+            "cutoffTimestamp": input.cutoff_timestamp,
+            "candidateCount": input.candidates.len(),
+            "prunedCount": input.pruned_count,
+            "candidateBytes": candidate_bytes,
+            "prunedBytes": input.pruned_bytes,
+            "oldestRetainedAt": null,
+            "candidates": candidates_json,
+            "lock": lock,
+            "degraded": [],
+        })
+    }
+
     fn execute_storage_compact(
         &self,
         budget: &mut JobBudgetState,
@@ -3998,6 +4455,92 @@ struct OpenedWorkspaceDatabase {
     connection: DbConnection,
     database_path: PathBuf,
     workspace_id: String,
+}
+
+fn graph_snapshot_prune_holder_id() -> String {
+    let nonce = Utc::now().timestamp_nanos_opt().map_or_else(
+        || Utc::now().timestamp_micros().to_string(),
+        |value| value.to_string(),
+    );
+    format!("ee-graph-snapshot-prune-{}-{nonce}", std::process::id())
+}
+
+fn graph_snapshot_prune_lock_id(
+    workspace_id: &str,
+    graph_type: GraphSnapshotType,
+) -> AdvisoryLockId {
+    AdvisoryLockId::new(
+        "graph_snapshot_prune",
+        format!("{workspace_id}:{}", graph_type.as_str()),
+    )
+}
+
+fn graph_snapshot_refresh_lock_id(
+    workspace_id: &str,
+    graph_type: GraphSnapshotType,
+) -> AdvisoryLockId {
+    AdvisoryLockId::new(
+        "graph_snapshot",
+        format!("{workspace_id}:{}", graph_type.as_str()),
+    )
+}
+
+fn acquire_graph_snapshot_prune_lock_owner<'a>(
+    conn: &'a DbConnection,
+    workspace_id: &str,
+    graph_type: GraphSnapshotType,
+) -> Result<GraphSnapshotPruneLockOwner<'a>, GraphSnapshotPruneLockError> {
+    if let Err(error) = conn.ensure_advisory_locks_table() {
+        return Err(GraphSnapshotPruneLockError::Storage {
+            resource_type: "graph_snapshot_prune".to_owned(),
+            resource_id: format!("{workspace_id}:{}", graph_type.as_str()),
+            message: error.to_string(),
+        });
+    }
+
+    let holder_id = graph_snapshot_prune_holder_id();
+    let mut owner = GraphSnapshotPruneLockOwner {
+        conn,
+        lock_ids: Vec::new(),
+        holder_id,
+        ttl_secs: GRAPH_SNAPSHOT_PRUNE_LOCK_TTL_SECS,
+    };
+
+    for lock_id in [
+        graph_snapshot_prune_lock_id(workspace_id, graph_type),
+        graph_snapshot_refresh_lock_id(workspace_id, graph_type),
+    ] {
+        match conn.acquire_advisory_lock(
+            &lock_id,
+            &owner.holder_id,
+            Some(GRAPH_SNAPSHOT_PRUNE_LOCK_TTL_SECS),
+            Some(GRAPH_SNAPSHOT_PRUNE_LOCK_REASON),
+        ) {
+            Ok(AcquireLockResult::Acquired(_)) | Ok(AcquireLockResult::Expired { .. }) => {
+                owner.lock_ids.push(lock_id);
+            }
+            Ok(AcquireLockResult::AlreadyHeld {
+                holder_id,
+                acquired_at,
+            }) => {
+                return Err(GraphSnapshotPruneLockError::Busy {
+                    resource_type: lock_id.resource_type().to_owned(),
+                    resource_id: lock_id.resource_id().to_owned(),
+                    holder_id,
+                    acquired_at,
+                });
+            }
+            Err(error) => {
+                return Err(GraphSnapshotPruneLockError::Storage {
+                    resource_type: lock_id.resource_type().to_owned(),
+                    resource_id: lock_id.resource_id().to_owned(),
+                    message: error.to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(owner)
 }
 
 #[derive(Clone, Debug)]
@@ -4959,8 +5502,8 @@ pub fn diagnose_job(job: &Job) -> Vec<JobDiagnostic> {
 mod tests {
     use super::*;
     use crate::db::{
-        CreateFeedbackEventInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection,
-        audit_actions,
+        CreateFeedbackEventInput, CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput,
+        DbConnection, MemoryLinkRelation, MemoryLinkSource, audit_actions,
     };
     use asupersync::runtime::JoinError;
     use asupersync::{Budget, CancelReason, Cx, LabConfig, LabRuntime, Outcome};
@@ -5061,6 +5604,32 @@ mod tests {
             .map_err(|error| error.to_string())
     }
 
+    fn insert_score_memory_link(
+        connection: &DbConnection,
+        link_id: &str,
+        src_memory_id: &str,
+        dst_memory_id: &str,
+    ) -> Result<(), String> {
+        connection
+            .insert_memory_link(
+                link_id,
+                &CreateMemoryLinkInput {
+                    src_memory_id: src_memory_id.to_owned(),
+                    dst_memory_id: dst_memory_id.to_owned(),
+                    relation: MemoryLinkRelation::Supports,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    directed: false,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: MemoryLinkSource::Agent,
+                    created_by: Some("score-decay-test".to_owned()),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
     #[test]
     fn subsystem_name_is_stable() {
         assert_eq!(subsystem_name(), "steward");
@@ -5080,6 +5649,10 @@ mod tests {
     fn job_type_display() {
         assert_eq!(JobType::IndexRebuild.to_string(), "index_rebuild");
         assert_eq!(JobType::DecaySweep.to_string(), "decay_sweep");
+        assert_eq!(
+            JobType::GraphSnapshotPrune.to_string(),
+            "graph_snapshot_prune"
+        );
     }
 
     #[test]
@@ -5459,6 +6032,26 @@ mod tests {
     }
 
     #[test]
+    fn default_budgets_for_graph_snapshot_prune_bound_time_and_rows() -> TestResult {
+        let budgets = default_budgets_for_job_type(JobType::GraphSnapshotPrune);
+
+        ensure(
+            budgets
+                .iter()
+                .any(|budget| budget.resource == ResourceType::TimeMs && budget.limit == 60_000),
+            true,
+            "graph snapshot prune time budget",
+        )?;
+        ensure(
+            budgets
+                .iter()
+                .any(|budget| budget.resource == ResourceType::Items && budget.limit == 10_000),
+            true,
+            "graph snapshot prune row budget",
+        )
+    }
+
+    #[test]
     fn create_job_budget_uses_defaults() {
         let state = create_job_budget("job-006", JobType::DecaySweep, "2026-04-30T12:00:00Z");
         assert!(!state.budgets.is_empty());
@@ -5534,6 +6127,7 @@ mod tests {
         assert!(opts.workspace_id.is_none());
         assert!(opts.as_of.is_none());
         assert!(opts.actor.is_none());
+        assert!(opts.structural_decay);
         assert_eq!(opts.decay_settings, MemoryDecaySettings::default());
     }
 
@@ -5559,6 +6153,7 @@ mod tests {
             .with_workspace_id(SCORE_WORKSPACE_ID)
             .with_as_of("2099-01-01T00:00:00Z")
             .with_actor("runner-test")
+            .with_structural_decay(false)
             .with_decay_settings(decay_settings);
 
         assert!(opts.dry_run);
@@ -5573,6 +6168,7 @@ mod tests {
         assert_eq!(opts.workspace_id, Some(SCORE_WORKSPACE_ID.to_owned()));
         assert_eq!(opts.as_of, Some("2099-01-01T00:00:00Z".to_owned()));
         assert_eq!(opts.actor, Some("runner-test".to_owned()));
+        assert!(!opts.structural_decay);
         assert_eq!(opts.decay_settings, decay_settings);
     }
 
@@ -5768,6 +6364,101 @@ mod tests {
             .list_audit_by_target("memory", SCORE_MEMORY_A, None)
             .map_err(|error| error.to_string())?;
         ensure(audits.is_empty(), true, "dry run writes no audit rows")
+    }
+
+    #[test]
+    fn score_decay_structural_decay_protects_articulation_memory() -> TestResult {
+        const SCORE_MEMORY_C: &str = "mem_scoredecay0000000000000003";
+        const SCORE_MEMORY_D: &str = "mem_scoredecay0000000000000004";
+        let connection = open_score_decay_db()?;
+        insert_score_memory(&connection, SCORE_MEMORY_A, 0.8)?;
+        insert_score_memory(&connection, SCORE_MEMORY_B, 0.8)?;
+        insert_score_memory(&connection, SCORE_MEMORY_C, 0.8)?;
+        insert_score_memory(&connection, SCORE_MEMORY_D, 0.8)?;
+        for memory_id in [
+            SCORE_MEMORY_A,
+            SCORE_MEMORY_B,
+            SCORE_MEMORY_C,
+            SCORE_MEMORY_D,
+        ] {
+            set_score_memory_timestamp(&connection, memory_id, "2026-01-01T00:00:00Z")?;
+        }
+        insert_score_memory_link(
+            &connection,
+            "link_00000000000000000000000051",
+            SCORE_MEMORY_A,
+            SCORE_MEMORY_B,
+        )?;
+        insert_score_memory_link(
+            &connection,
+            "link_00000000000000000000000052",
+            SCORE_MEMORY_B,
+            SCORE_MEMORY_C,
+        )?;
+        insert_score_memory_link(
+            &connection,
+            "link_00000000000000000000000053",
+            SCORE_MEMORY_A,
+            SCORE_MEMORY_C,
+        )?;
+        insert_score_memory_link(
+            &connection,
+            "link_00000000000000000000000054",
+            SCORE_MEMORY_A,
+            SCORE_MEMORY_D,
+        )?;
+
+        let mut legacy = ScoreDecayJobOptions::new(SCORE_WORKSPACE_ID);
+        legacy.as_of = Some("2029-01-01T00:00:00Z".to_owned());
+        legacy.include_decay_actions = true;
+        legacy.structural_decay = false;
+        legacy.dry_run = true;
+        let legacy_report = run_score_decay_job(&connection, &legacy)?;
+
+        let mut structural = legacy.clone();
+        structural.structural_decay = true;
+        let structural_report = run_score_decay_job(&connection, &structural)?;
+
+        let legacy_bridge = legacy_report
+            .changes
+            .iter()
+            .find(|change| change.memory_id == SCORE_MEMORY_A)
+            .ok_or_else(|| "legacy bridge change missing".to_owned())?;
+        let structural_bridge = structural_report
+            .changes
+            .iter()
+            .find(|change| change.memory_id == SCORE_MEMORY_A)
+            .ok_or_else(|| "structural bridge change missing".to_owned())?;
+
+        ensure(
+            legacy_bridge.decay_action,
+            MemoryDecayAction::Demote,
+            "legacy bridge demotes",
+        )?;
+        ensure(
+            structural_bridge.decay_action,
+            MemoryDecayAction::Preserve,
+            "structural bridge preserves",
+        )?;
+        let adjustment = structural_bridge
+            .structural_adjustment
+            .as_ref()
+            .ok_or_else(|| "structural adjustment missing".to_owned())?;
+        ensure(
+            adjustment.is_articulation_point,
+            true,
+            "bridge articulation",
+        )?;
+        ensure(
+            adjustment.structural_multiplier < 1.0,
+            true,
+            "bridge multiplier protects",
+        )?;
+        ensure(
+            structural_report.data_json()["decay"]["structuralAdjustments"].is_array(),
+            true,
+            "structural adjustments json",
+        )
     }
 
     #[test]
@@ -6679,6 +7370,235 @@ mod tests {
 
         assert_eq!(result.job_type, JobType::CachePruning);
         assert_eq!(result.outcome, RunOutcome::Success);
+    }
+
+    #[test]
+    fn manual_runner_graph_snapshot_prune_uses_db_backed_report() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("ee.db");
+        {
+            let connection =
+                DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+            connection.migrate().map_err(|error| error.to_string())?;
+            connection
+                .insert_workspace(
+                    SCORE_WORKSPACE_ID,
+                    &CreateWorkspaceInput {
+                        path: temp.path().to_string_lossy().into_owned(),
+                        name: Some("graph-snapshot-prune-runner".to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+        }
+        let opts = RunnerOptions::new()
+            .with_dry_run(true)
+            .with_database_path(database_path)
+            .with_workspace_id(SCORE_WORKSPACE_ID);
+        let mut runner = ManualRunner::new(opts);
+
+        let result = runner.run_job_type(
+            JobType::GraphSnapshotPrune,
+            Some("graph snapshot prune dry run".to_owned()),
+        );
+
+        ensure(result.job_type, JobType::GraphSnapshotPrune, "job type")?;
+        ensure(result.outcome, RunOutcome::Success, "outcome")?;
+        ensure(result.items_processed, Some(0), "items processed")?;
+        let details = result
+            .details
+            .ok_or_else(|| "graph snapshot prune details missing".to_owned())?;
+        ensure(
+            details["schema"].as_str(),
+            Some(GRAPH_SNAPSHOT_PRUNE_JOB_SCHEMA_V1),
+            "schema",
+        )?;
+        ensure(
+            details["workspaceId"].as_str(),
+            Some(SCORE_WORKSPACE_ID),
+            "workspace id",
+        )?;
+        ensure(
+            details["lock"]["resourceType"].as_str(),
+            Some("graph_snapshot_prune"),
+            "lock resource type",
+        )?;
+        ensure(
+            details["lock"]["acquired"].as_bool(),
+            Some(false),
+            "dry-run does not acquire advisory locks",
+        )?;
+        ensure(
+            details["lock"]["holderId"].is_null(),
+            true,
+            "dry-run lock holder id",
+        )?;
+        ensure(
+            details["degraded"].as_array().map(Vec::is_empty),
+            Some(true),
+            "no taxonomy-only degradation",
+        )?;
+        ensure(
+            details["candidateCount"].as_u64(),
+            Some(0),
+            "candidate count",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn manual_runner_graph_snapshot_prune_acquires_and_releases_locks() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("ee.db");
+        {
+            let connection =
+                DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+            connection.migrate().map_err(|error| error.to_string())?;
+            connection
+                .insert_workspace(
+                    SCORE_WORKSPACE_ID,
+                    &CreateWorkspaceInput {
+                        path: temp.path().to_string_lossy().into_owned(),
+                        name: Some("graph-snapshot-prune-locks".to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+        }
+        let opts = RunnerOptions::new()
+            .with_database_path(database_path.clone())
+            .with_workspace_id(SCORE_WORKSPACE_ID);
+        let mut runner = ManualRunner::new(opts);
+
+        let result = runner.run_job_type(
+            JobType::GraphSnapshotPrune,
+            Some("graph snapshot prune lock acquisition".to_owned()),
+        );
+
+        ensure(result.outcome, RunOutcome::Success, "outcome")?;
+        let details = result
+            .details
+            .ok_or_else(|| "graph snapshot prune details missing".to_owned())?;
+        ensure(
+            details["lock"]["acquired"].as_bool(),
+            Some(true),
+            "lock acquired",
+        )?;
+        ensure(
+            details["lock"]["holderId"].as_str().is_some(),
+            true,
+            "lock holder id",
+        )?;
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .is_lock_held(&graph_snapshot_prune_lock_id(
+                    SCORE_WORKSPACE_ID,
+                    GraphSnapshotType::MemoryLinks,
+                ))
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            true,
+            "prune lock should release after the runner returns",
+        )?;
+        ensure(
+            connection
+                .is_lock_held(&graph_snapshot_refresh_lock_id(
+                    SCORE_WORKSPACE_ID,
+                    GraphSnapshotType::MemoryLinks,
+                ))
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            true,
+            "refresh-conflict lock should release after the runner returns",
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn manual_runner_graph_snapshot_prune_conflicts_with_refresh_lock() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                SCORE_WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: temp.path().to_string_lossy().into_owned(),
+                    name: Some("graph-snapshot-prune-conflict".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let refresh_lock_id =
+            graph_snapshot_refresh_lock_id(SCORE_WORKSPACE_ID, GraphSnapshotType::MemoryLinks);
+        match connection
+            .acquire_advisory_lock(
+                &refresh_lock_id,
+                "refresh-holder",
+                Some(GRAPH_SNAPSHOT_PRUNE_LOCK_TTL_SECS),
+                Some("test refresh lock"),
+            )
+            .map_err(|error| error.to_string())?
+        {
+            AcquireLockResult::Acquired(_) | AcquireLockResult::Expired { .. } => {}
+            AcquireLockResult::AlreadyHeld { holder_id, .. } => {
+                return Err(format!(
+                    "test refresh lock unexpectedly held by {holder_id}"
+                ));
+            }
+        }
+
+        let opts = RunnerOptions::new()
+            .with_database_path(database_path.clone())
+            .with_workspace_id(SCORE_WORKSPACE_ID);
+        let mut runner = ManualRunner::new(opts);
+
+        let result = runner.run_job_type(
+            JobType::GraphSnapshotPrune,
+            Some("graph snapshot prune lock conflict".to_owned()),
+        );
+
+        ensure(result.outcome, RunOutcome::Failed, "outcome")?;
+        let details = result
+            .details
+            .ok_or_else(|| "graph snapshot prune error details missing".to_owned())?;
+        ensure(
+            details["code"].as_str(),
+            Some("graph_snapshot_prune_lock_busy"),
+            "lock conflict code",
+        )?;
+        ensure(
+            details["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("graph_snapshot:")),
+            true,
+            "lock conflict identifies refresh lock",
+        )?;
+        ensure(
+            connection
+                .is_lock_held(&graph_snapshot_prune_lock_id(
+                    SCORE_WORKSPACE_ID,
+                    GraphSnapshotType::MemoryLinks,
+                ))
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            true,
+            "prune lock should release when refresh lock acquisition fails",
+        )?;
+        ensure(
+            connection
+                .is_lock_held(&refresh_lock_id)
+                .map_err(|error| error.to_string())?
+                .is_some(),
+            true,
+            "pre-existing refresh lock should remain held",
+        )?;
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]

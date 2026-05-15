@@ -29,6 +29,19 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     }
 }
 
+fn trace_mcp_top_level(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
+    tracing::info!(
+        workspace_id = "repo",
+        request_id = "mcp_parity_contract",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-3usjw.3"),
+        surface = "mcp_top_level",
+        phase,
+        elapsed_ms,
+        degraded_codes = ?degraded_codes,
+        "MCP top-level parity checkpoint"
+    );
+}
+
 fn scenario_dir(name: &str) -> Result<PathBuf, String> {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -43,6 +56,7 @@ fn scenario_dir(name: &str) -> Result<PathBuf, String> {
 }
 
 fn init_workspace(dir: &Path) -> TestResult {
+    trace_mcp_top_level("input", 0, &[]);
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
 
     let mut stdout = Vec::new();
@@ -65,9 +79,11 @@ fn init_workspace(dir: &Path) -> TestResult {
 }
 
 fn run_cli(args: Vec<OsString>) -> (ee::models::ProcessExitCode, String, String) {
+    trace_mcp_top_level("dispatch", 0, &[]);
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let exit = ee::cli::run(args, &mut stdout, &mut stderr);
+    trace_mcp_top_level("response", 0, &[]);
     (
         exit,
         String::from_utf8_lossy(&stdout).into_owned(),
@@ -76,6 +92,7 @@ fn run_cli(args: Vec<OsString>) -> (ee::models::ProcessExitCode, String, String)
 }
 
 fn run_mcp_tool_call(name: &str, arguments: JsonValue) -> Result<JsonValue, String> {
+    trace_mcp_top_level("dependency_check", 0, &[]);
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -85,8 +102,10 @@ fn run_mcp_tool_call(name: &str, arguments: JsonValue) -> Result<JsonValue, Stri
             "arguments": arguments
         }
     });
-    ee::mcp::handle_json_rpc_message(&request)
-        .ok_or_else(|| "MCP handler returned None for tools/call".to_owned())
+    let response = ee::mcp::handle_json_rpc_message(&request)
+        .ok_or_else(|| "MCP handler returned None for tools/call".to_owned())?;
+    trace_mcp_top_level("response", 0, &[]);
+    Ok(response)
 }
 
 fn extract_mcp_tool_text(response: &JsonValue) -> Result<String, String> {

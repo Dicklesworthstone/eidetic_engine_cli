@@ -4,6 +4,7 @@
 //! Supports dry-run mode, idempotent re-installation, and preservation of existing hooks.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,36 @@ pub const HOOK_INSTALL_SCHEMA_V1: &str = "ee.hooks.install.v1";
 
 /// Schema for hook status report.
 pub const HOOK_STATUS_SCHEMA_V1: &str = "ee.hooks.status.v1";
+
+const TRAUMA_GUARD_HOOK_HELPER_SURFACE: &str = "trauma_guard_hook_helper";
+
+fn elapsed_ms_since(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn hook_trace_workspace_id(hook_dir: &Path) -> String {
+    let path = hook_dir.to_string_lossy();
+    let digest = blake3::hash(path.as_bytes()).to_hex().to_string();
+    format!("hook_{}", &digest[..16])
+}
+
+fn trace_trauma_guard_hook_helper(
+    hook_dir: &Path,
+    phase: &'static str,
+    elapsed_ms: u64,
+    degraded_codes: &[&str],
+) {
+    tracing::info!(
+        workspace_id = %hook_trace_workspace_id(hook_dir),
+        request_id = "hook_installer_request",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-3usjw.7"),
+        surface = TRAUMA_GUARD_HOOK_HELPER_SURFACE,
+        phase,
+        elapsed_ms,
+        degraded_codes = ?degraded_codes,
+        "trauma guard hook helper checkpoint"
+    );
+}
 
 // ============================================================================
 // Hook Types
@@ -564,6 +595,9 @@ fn install_hooks_with_binary_path(
     options: &HookInstallOptions,
     ee_binary_path: &Path,
 ) -> Result<HookInstallReport, DomainError> {
+    let started = Instant::now();
+    trace_trauma_guard_hook_helper(&options.hook_dir, "input", 0, &[]);
+
     let now = Utc::now().to_rfc3339();
     let mut plan = Vec::new();
     let mut installed_count = 0u32;
@@ -608,6 +642,12 @@ fn install_hooks_with_binary_path(
     }
 
     if !options.dry_run && !writes.is_empty() {
+        trace_trauma_guard_hook_helper(
+            &options.hook_dir,
+            "persistence",
+            elapsed_ms_since(started),
+            &[],
+        );
         preflight_hook_writes(&options.hook_dir, &writes)?;
         for write in &writes {
             write_hook_file(&options.hook_dir, &write.target_path, &write.content)?;
@@ -618,7 +658,7 @@ fn install_hooks_with_binary_path(
         item.action == HookAction::NoChange.as_str() || item.action == HookAction::Skip.as_str()
     });
 
-    Ok(HookInstallReport {
+    let report = HookInstallReport {
         schema: HOOK_INSTALL_SCHEMA_V1.to_owned(),
         hook_dir: options.hook_dir.display().to_string(),
         dry_run: options.dry_run,
@@ -630,7 +670,14 @@ fn install_hooks_with_binary_path(
         no_change_count,
         idempotent,
         generated_at: now,
-    })
+    };
+    trace_trauma_guard_hook_helper(
+        &options.hook_dir,
+        "response",
+        elapsed_ms_since(started),
+        &[],
+    );
+    Ok(report)
 }
 
 // ============================================================================

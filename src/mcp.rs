@@ -31,6 +31,19 @@ use crate::output::public_schemas;
 pub const SUBSYSTEM: &str = "mcp";
 pub const MCP_SCHEMA_V1: &str = "ee.mcp.v1";
 
+fn trace_mcp_top_level(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
+    tracing::info!(
+        workspace_id = "mcp-stdio",
+        request_id = "mcp_json_rpc_request",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-3usjw.3"),
+        surface = "mcp_top_level",
+        phase,
+        elapsed_ms,
+        degraded_codes = ?degraded_codes,
+        "MCP top-level request checkpoint"
+    );
+}
+
 #[must_use]
 pub const fn subsystem_name() -> &'static str {
     SUBSYSTEM
@@ -1518,11 +1531,16 @@ fn is_json_rpc_notification(request: &Value) -> bool {
 pub fn handle_json_rpc_message(request: &Value) -> Option<Value> {
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
 
+    trace_mcp_top_level("input", 0, &[]);
     if is_json_rpc_notification(request) && method == "notifications/cancelled" {
+        trace_mcp_top_level("response", 0, &[]);
         return None;
     }
 
-    Some(handle_request(request))
+    trace_mcp_top_level("dispatch", 0, &[]);
+    let response = handle_request(request);
+    trace_mcp_top_level("response", 0, &[]);
+    Some(response)
 }
 
 fn handle_request(request: &Value) -> Value {

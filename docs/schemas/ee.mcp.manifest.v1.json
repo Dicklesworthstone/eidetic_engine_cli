@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mcp.manifest.v1.json",
+  "title": "ee.mcp.manifest.v1",
+  "description": "ee mcp manifest response envelope.",
+  "type": "object",
+  "required": ["schema", "success", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v1"},
+    "success": {"type": "boolean", "const": true},
+    "data": {
+      "type": "object",
+      "required": [
+        "command",
+        "schema",
+        "version",
+        "protocolVersion",
+        "adapter",
+        "capabilities",
+        "registry",
+        "tools",
+        "schemas",
+        "degraded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "command": {"type": "string", "const": "mcp manifest"},
+        "schema": {"type": "string", "const": "ee.mcp.manifest.v1"},
+        "version": {"type": "string"},
+        "protocolVersion": {"type": "string"},
+        "adapter": {
+          "type": "object",
+          "required": ["name", "transport", "feature", "featureEnabled", "runtime", "businessLogic"],
+          "additionalProperties": false,
+          "properties": {
+            "name": {"type": "string", "const": "ee"},
+            "transport": {"type": "string", "const": "stdio"},
+            "feature": {"type": "string", "const": "mcp"},
+            "featureEnabled": {"type": "boolean"},
+            "runtime": {"type": "string", "const": "asupersync"},
+            "businessLogic": {"type": "string", "const": "cli_core_services"}
+          }
+        },
+        "capabilities": {
+          "type": "object",
+          "required": ["tools", "resources", "prompts", "experimental"],
+          "additionalProperties": false,
+          "properties": {
+            "tools": {"type": "boolean"},
+            "resources": {"type": "boolean"},
+            "prompts": {"type": "boolean"},
+            "experimental": {"type": "boolean", "const": false}
+          }
+        },
+        "capabilityGap": {
+          "type": "object",
+          "required": ["code", "severity", "message", "repair", "feature", "capabilitiesCommand"],
+          "additionalProperties": false,
+          "properties": {
+            "code": {"type": "string", "const": "mcp_feature_disabled"},
+            "severity": {"type": "string", "const": "low"},
+            "message": {"type": "string"},
+            "repair": {"type": "string"},
+            "feature": {"type": "string", "const": "mcp"},
+            "capabilitiesCommand": {"type": "string", "const": "ee capabilities --json"}
+          }
+        },
+        "registry": {
+          "type": "object",
+          "required": ["commandSource", "schemaSource", "commandCount", "schemaCount"],
+          "additionalProperties": false,
+          "properties": {
+            "commandSource": {"type": "string"},
+            "schemaSource": {"type": "string"},
+            "commandCount": {"type": "integer"},
+            "schemaCount": {"type": "integer"}
+          }
+        },
+        "tools": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "schemas": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}}
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["command", "schema", "version"],
+    "summary": ["command", "schema", "version", "protocolVersion", "adapter", "capabilities", "capabilityGap"],
+    "standard": ["command", "schema", "version", "protocolVersion", "adapter", "capabilities", "capabilityGap", "registry", "tools", "schemas", "degraded"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}
