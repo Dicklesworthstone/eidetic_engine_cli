@@ -29,6 +29,8 @@ REPORT_FILE=".closure-lint-report.json"
 GOLDEN_DIR="tests/golden"
 SCHEMA_DIR="docs/schemas"
 SNAPSHOT_DIR="tests/snapshots"
+TEST_TRACING_HELPER="tests/support/test_tracing.rs"
+TEST_TRACING_LOG_DIR="tests/golden/logs"
 
 # Abstention patterns that indicate stub/placeholder closures
 DEFER_V2_REGEX='defer.*v2|deferred until v2|v1 honesty stub'
@@ -247,6 +249,76 @@ surface_has_golden_snapshot() {
     find "$GOLDEN_DIR" "tests/fixtures/golden" -type f \
         \( -name "*$surface*" -o -name "*$underscored*" \) 2>/dev/null |
         grep -q .
+}
+
+bead_is_bd3usjw_family() {
+    local bead_id="$1"
+    local parent
+
+    case "$bead_id" in
+        bd-3usjw|bd-3usjw.*) return 0 ;;
+    esac
+
+    parent=$(bead_parent "$bead_id")
+    [ "$parent" = "bd-3usjw" ]
+}
+
+bead_declared_rust_file_surfaces() {
+    local bead_id="$1"
+    jq -r --arg bead_id "$bead_id" '
+        select(.id == $bead_id)
+        | (.description // "")
+    ' "$BEADS_FILE" 2>/dev/null |
+        sed -n 's/^FILE SURFACE:[[:space:]]*//p' |
+        tr ',' '\n' |
+        sed -E 's/^[[:space:]]*//; s/[[:space:]].*$//; s/^`//; s/`$//' |
+        grep -E '^tests/.*\.rs$' || true
+}
+
+rust_test_surface_requires_tracing() {
+    case "$1" in
+        *e2e*.rs|*E2E*.rs) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+check_test_tracing_surface_contract() {
+    local bead_id="$1"
+    local surface="$2"
+
+    [ "$surface" = "e2e_test_logging_convention" ] || return 0
+
+    if [ ! -f "$TEST_TRACING_HELPER" ]; then
+        add_violation "$bead_id" "implements-surface" "$surface" "missing $TEST_TRACING_HELPER"
+    fi
+    if [ ! -d "$TEST_TRACING_LOG_DIR" ] ||
+        ! find "$TEST_TRACING_LOG_DIR" -type f 2>/dev/null | grep -q .; then
+        add_violation "$bead_id" "implements-surface" "$surface" "missing golden trace log fixtures under $TEST_TRACING_LOG_DIR"
+    fi
+    if [ -f "tests/test_tracing_support_smoke.rs" ] &&
+        ! grep -q 'init_test_tracing' "tests/test_tracing_support_smoke.rs"; then
+        add_violation "$bead_id" "implements-surface" "$surface" "test tracing smoke exemplar does not call init_test_tracing"
+    fi
+}
+
+check_bd3usjw_e2e_test_tracing() {
+    local bead_id="$1"
+    local surface="$2"
+    local test_file
+
+    bead_is_bd3usjw_family "$bead_id" || return 0
+
+    for test_file in $(bead_declared_rust_file_surfaces "$bead_id"); do
+        rust_test_surface_requires_tracing "$test_file" || continue
+        if [ ! -f "$test_file" ]; then
+            add_violation "$bead_id" "implements-surface" "$surface" "declared e2e FILE SURFACE missing: $test_file"
+            continue
+        fi
+        if grep -q '#\[test\]' "$test_file" &&
+            ! grep -q 'init_test_tracing' "$test_file"; then
+            add_violation "$bead_id" "implements-surface" "$surface" "$test_file does not call init_test_tracing"
+        fi
+    done
 }
 
 close_reason_contains_abstention() {
@@ -587,6 +659,11 @@ for bead_id in $BEAD_IDS; do
             if ! surface_has_golden_snapshot "$surface"; then
                 add_violation "$bead_id" "implements-surface" "$surface" "missing $GOLDEN_DIR/$surface.snap"
             fi
+
+            # Rule 4: New bd-3usjw e2e implementation tests must emit the
+            # structured test tracing contract before their bead can close.
+            check_test_tracing_surface_contract "$bead_id" "$surface"
+            check_bd3usjw_e2e_test_tracing "$bead_id" "$surface"
         done
     fi
 

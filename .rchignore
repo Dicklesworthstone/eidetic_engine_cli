@@ -58,3 +58,7 @@ perf.data.*
 # Test run artifacts
 *.test_output
 *.test_log
+
+# Volatile audit pointers can be transient/broken symlinks and are not inputs to
+# remote Cargo verification.
+tests/audit_artifacts/latest_*.json

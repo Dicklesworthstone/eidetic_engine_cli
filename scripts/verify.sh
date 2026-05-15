@@ -61,6 +61,7 @@ if [ -d "${DEFAULT_AGENT_BUILD_ROOT}" ]; then
 fi
 
 ARTIFACT_DIRS=""
+TRACE_LOG_DIRS=""
 STAGE_RESULTS=""
 TOTAL_START=$(date +%s)
 
@@ -182,6 +183,25 @@ snapshot_proposal_guard() {
     echo "    removal of redundant .snap.new files still requires explicit approval"
 }
 
+test_trace_root() {
+    if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+        printf "%s/ee-test-tracing" "${CARGO_TARGET_DIR%/}"
+    else
+        printf "%s/target/ee-test-tracing" "$REPO_ROOT"
+    fi
+}
+
+capture_test_trace_artifacts() {
+    local name="$1"
+    local trace_root
+    trace_root="$(test_trace_root)"
+
+    if [ -d "$trace_root" ] &&
+        find "$trace_root" -type f -name '*.jsonl' -print -quit 2>/dev/null | grep -q .; then
+        TRACE_LOG_DIRS="${TRACE_LOG_DIRS}  ${name}: ${trace_root}\n"
+    fi
+}
+
 run_stage() {
     local name="$1"
     local cmd="$2"
@@ -199,6 +219,7 @@ run_stage() {
         local duration=$((end_time - start_time))
         echo "[+] PASS: $name (${duration}s)"
         STAGE_RESULTS="${STAGE_RESULTS}PASS ${name} (${duration}s)\n"
+        capture_test_trace_artifacts "$name"
 
         # Capture artifact paths from E2E output
         local artifacts
@@ -313,6 +334,14 @@ if [ -n "$ARTIFACT_DIRS" ]; then
     echo ""
     echo "Artifact directories:"
     printf "%b" "$ARTIFACT_DIRS"
+fi
+
+echo ""
+echo "Test tracing log paths:"
+if [ -n "$TRACE_LOG_DIRS" ]; then
+    printf "%b" "$TRACE_LOG_DIRS"
+else
+    echo "  none recorded"
 fi
 
 artifact_retention_summary
