@@ -835,7 +835,7 @@ fn safe_episode_file_name(episode_id: &str) -> String {
 fn frozen_episode_hash(report: &CaptureReport) -> String {
     hash_content(
         format!(
-            "{}\n{}\n{:?}\n{:?}\n{:?}\n{}\n{}",
+            "{}\n{}\n{:?}\n{:?}\n{:?}\n{}\n{}\n{}",
             report.episode_id,
             report.task_input,
             report.pack_hash,
@@ -843,6 +843,7 @@ fn frozen_episode_hash(report: &CaptureReport) -> String {
             report.evidence_ids,
             report.memories_captured,
             report.actions_captured,
+            report.wal_retention_kind,
         )
         .as_bytes(),
     )
@@ -851,7 +852,7 @@ fn frozen_episode_hash(report: &CaptureReport) -> String {
 fn frozen_episode_artifact_hash(artifact: &FrozenEpisodeArtifact) -> String {
     hash_content(
         format!(
-            "{}\n{}\n{:?}\n{:?}\n{:?}\n{}\n{}",
+            "{}\n{}\n{:?}\n{:?}\n{:?}\n{}\n{}\n{}",
             artifact.episode_id,
             artifact.task_input,
             artifact.pack_hash,
@@ -859,6 +860,7 @@ fn frozen_episode_artifact_hash(artifact: &FrozenEpisodeArtifact) -> String {
             artifact.evidence_ids,
             artifact.memories_captured,
             artifact.actions_captured,
+            artifact.wal_retention_kind,
         )
         .as_bytes(),
     )
@@ -1382,6 +1384,53 @@ mod tests {
             "missing frozen inputs",
         )?;
         ensure(replay.episode_hash_verified, true, "episode hash verified")
+    }
+
+    #[test]
+    fn replay_rejects_frozen_episode_with_tampered_wal_retention_kind() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let capture = capture_episode(&CaptureOptions {
+            workspace: tempdir.path().to_path_buf(),
+            session_id: Some("session_lab_tamper".to_string()),
+            task_input: Some("verify retained snapshot replay".to_string()),
+            dry_run: false,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        let artifact_path = frozen_episode_path(tempdir.path(), &capture.episode_id);
+        let artifact_text =
+            fs::read_to_string(&artifact_path).map_err(|error| error.to_string())?;
+        let mut artifact: serde_json::Value =
+            serde_json::from_str(&artifact_text).map_err(|error| error.to_string())?;
+        artifact["wal_retention_kind"] =
+            serde_json::Value::String(WAL_RETENTION_KIND_HOLD.to_string());
+        let tampered = serde_json::to_vec_pretty(&artifact).map_err(|error| error.to_string())?;
+        fs::write(&artifact_path, tampered).map_err(|error| error.to_string())?;
+
+        let replay = replay_episode(&ReplayOptions {
+            workspace: tempdir.path().to_path_buf(),
+            episode_id: capture.episode_id,
+            verify_hash: true,
+            record_trace: true,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(replay.status, ReplayStatus::Diverged, "replay status")?;
+        ensure(
+            replay.episode_hash_verified,
+            false,
+            "episode hash verification rejects WAL-retention tampering",
+        )?;
+        ensure(
+            replay
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("hash")),
+            true,
+            "tamper warning",
+        )
     }
 
     #[test]
