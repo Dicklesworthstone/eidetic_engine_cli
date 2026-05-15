@@ -1,0 +1,47 @@
+{
+  "schema": "ee.status.posture_states.v1",
+  "states": [
+    {
+      "name": "ok",
+      "subsystems": [
+        "ok",
+        "ok"
+      ],
+      "overall": "ok"
+    },
+    {
+      "name": "initializing",
+      "subsystems": [
+        "initializing",
+        "initializing"
+      ],
+      "overall": "initializing"
+    },
+    {
+      "name": "degraded_recoverable",
+      "subsystems": [
+        "ok",
+        "degraded_recoverable"
+      ],
+      "overall": "degraded_recoverable"
+    },
+    {
+      "name": "degraded_required",
+      "subsystems": [
+        "ok",
+        "degraded_required",
+        "degraded_recoverable"
+      ],
+      "overall": "degraded_required"
+    },
+    {
+      "name": "blocked",
+      "subsystems": [
+        "ok",
+        "blocked",
+        "degraded_required"
+      ],
+      "overall": "blocked"
+    }
+  ]
+}

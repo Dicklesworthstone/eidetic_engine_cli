@@ -10,6 +10,7 @@ use toml_edit::{DocumentMut, Item};
 
 const BASELINE_PATH: &str = "benches/baselines/v0.1.json";
 const PERF_BASELINE_PATH: &str = "benches/baselines/perf_v0_2.json";
+const GRAPH_BASELINE_PATH: &str = "benches/baselines/graph-v0.1.json";
 const BUDGETS_PATH: &str = "benches/budgets.toml";
 const REGRESSION_TOLERANCE: f64 = 1.30;
 // Debug `cargo test` runs include instrumentation and can execute this
@@ -86,6 +87,16 @@ fn toml_bool(value: &Item, key: &str) -> Result<bool, String> {
         .as_value()
         .and_then(|field| field.as_bool())
         .ok_or_else(|| format!("TOML field `{key}` must be a boolean"))
+}
+
+fn toml_f64(value: &Item, key: &str) -> Result<f64, String> {
+    let field = toml_field(value, key)?
+        .as_value()
+        .ok_or_else(|| format!("TOML field `{key}` must be a scalar"))?;
+    field
+        .as_float()
+        .or_else(|| field.as_integer().map(|integer| integer as f64))
+        .ok_or_else(|| format!("TOML field `{key}` must be numeric"))
 }
 
 fn toml_string_array(value: &Item, key: &str) -> Result<Vec<String>, String> {
@@ -313,6 +324,152 @@ fn j9_benchmark_surface_covers_required_operations() -> TestResult {
                 ));
             }
         }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn g6_gomory_hu_benchmark_is_wired_into_regression_gate() -> TestResult {
+    let cargo_toml = fs::read_to_string("Cargo.toml")
+        .map_err(|error| format!("failed to read Cargo.toml: {error}"))?;
+    let bench_script = fs::read_to_string("scripts/bench.sh")
+        .map_err(|error| format!("failed to read scripts/bench.sh: {error}"))?;
+    let regression_script = fs::read_to_string("scripts/bench_perf_regression.sh")
+        .map_err(|error| format!("failed to read scripts/bench_perf_regression.sh: {error}"))?;
+    let bench_source = fs::read_to_string("benches/graph_gomory_hu.rs")
+        .map_err(|error| format!("failed to read benches/graph_gomory_hu.rs: {error}"))?;
+    let budgets = budgets_manifest()?;
+    let graph_baseline = fs::read_to_string(GRAPH_BASELINE_PATH)
+        .map_err(|error| format!("failed to read `{GRAPH_BASELINE_PATH}`: {error}"))?;
+    let graph_baseline: Value = serde_json::from_str(&graph_baseline)
+        .map_err(|error| format!("invalid graph baseline JSON: {error}"))?;
+
+    if !cargo_toml.contains("name = \"graph_gomory_hu\"") {
+        return Err("Cargo.toml missing graph_gomory_hu bench target".to_owned());
+    }
+    if !bench_script.contains("graph_gomory_hu") {
+        return Err("scripts/bench.sh missing graph_gomory_hu profile entry".to_owned());
+    }
+    for expected in [
+        "graph_*) compare_only=true",
+        "EE_BENCH_COMPARE_ONLY=1 cargo bench --bench \"$bench\"",
+        "append_result \"ee_$bench\" \"budget_checked\"",
+    ] {
+        if !bench_script.contains(expected) {
+            return Err(format!(
+                "scripts/bench.sh missing graph compare-only guard `{expected}`"
+            ));
+        }
+    }
+    for expected in ["scripts/bench.sh", "--check-regression"] {
+        if !regression_script.contains(expected) {
+            return Err(format!(
+                "scripts/bench_perf_regression.sh missing `{expected}`"
+            ));
+        }
+    }
+    for expected in [
+        "BUILD_BUDGET_P50_MS: f64 = 5000.0",
+        "BUILD_BUDGET_P99_MS: f64 = 9000.0",
+        "QUERY_BUDGET_P50_MS: f64 = 0.1",
+        "assert_build_budget",
+        "assert_query_budget",
+        "compare_only_mode_enabled",
+    ] {
+        if !bench_source.contains(expected) {
+            return Err(format!("benches/graph_gomory_hu.rs missing `{expected}`"));
+        }
+    }
+
+    let operations = budgets
+        .get("operations")
+        .ok_or_else(|| "missing TOML field `operations`".to_owned())?
+        .as_table()
+        .ok_or_else(|| "`operations` must be a TOML table".to_owned())?;
+    let operation = operations
+        .get("ee_graph_gomory_hu")
+        .ok_or_else(|| "benches/budgets.toml missing `ee_graph_gomory_hu`".to_owned())?;
+    if toml_string(operation, "description")?
+        != "Build Gomory-Hu proximity tree and run cached-style min-cut query"
+    {
+        return Err("ee_graph_gomory_hu budget description drifted".to_owned());
+    }
+
+    let baseline_operation = graph_baseline
+        .pointer("/operations/graph_gomory_hu")
+        .ok_or_else(|| "graph baseline missing operations.graph_gomory_hu".to_owned())?;
+    for field in ["p50_ms", "p99_ms", "query_p50_ms"] {
+        if baseline_operation.get(field).is_none() {
+            return Err(format!("graph_gomory_hu baseline missing `{field}`"));
+        }
+    }
+    for scale in ["10_memories", "100_memories", "1000_memories"] {
+        let pointer = format!("/operations/graph_gomory_hu/scales/{scale}");
+        if graph_baseline.pointer(&pointer).is_none() {
+            return Err(format!("graph_gomory_hu baseline missing scale `{scale}`"));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn graph_ppr_deliberate_regression_is_rejected_by_compare_only_gate() -> TestResult {
+    let bench_script = fs::read_to_string("scripts/bench.sh")
+        .map_err(|error| format!("failed to read scripts/bench.sh: {error}"))?;
+    let bench_source = fs::read_to_string("benches/graph_ppr.rs")
+        .map_err(|error| format!("failed to read benches/graph_ppr.rs: {error}"))?;
+    let budgets = budgets_manifest()?;
+    let graph_baseline = fs::read_to_string(GRAPH_BASELINE_PATH)
+        .map_err(|error| format!("failed to read `{GRAPH_BASELINE_PATH}`: {error}"))?;
+    let graph_baseline: Value = serde_json::from_str(&graph_baseline)
+        .map_err(|error| format!("invalid graph baseline JSON: {error}"))?;
+
+    for expected in [
+        "graph_*) compare_only=true",
+        "EE_BENCH_COMPARE_ONLY=1 cargo bench --bench \"$bench\"",
+        "append_result \"ee_$bench\" \"failed\"",
+        "FAILED=true",
+    ] {
+        if !bench_script.contains(expected) {
+            return Err(format!(
+                "scripts/bench.sh missing graph failure propagation `{expected}`"
+            ));
+        }
+    }
+
+    for expected in [
+        "const BUDGET_P50_MS: f64 = 30.0",
+        "fn assert_budget",
+        "stats.p50_ms <= BUDGET_P50_MS",
+        "compare_only_mode_enabled",
+    ] {
+        if !bench_source.contains(expected) {
+            return Err(format!("benches/graph_ppr.rs missing `{expected}`"));
+        }
+    }
+
+    let operations = budgets
+        .get("operations")
+        .ok_or_else(|| "missing TOML field `operations`".to_owned())?
+        .as_table()
+        .ok_or_else(|| "`operations` must be a TOML table".to_owned())?;
+    let operation = operations
+        .get("ee_graph_ppr")
+        .ok_or_else(|| "benches/budgets.toml missing `ee_graph_ppr`".to_owned())?;
+    let budget_p50_ms = toml_f64(operation, "p50_ms_max")?;
+
+    let baseline_p50_ms = graph_baseline
+        .pointer("/operations/graph_ppr/scales/1000_memories")
+        .ok_or_else(|| "graph baseline missing graph_ppr 1000_memories scale".to_owned())
+        .and_then(|scale| baseline_f64(scale, "p50_ms"))?;
+    let deliberate_regression_p50_ms = baseline_p50_ms * 1.50;
+    if deliberate_regression_p50_ms <= budget_p50_ms {
+        return Err(format!(
+            "50% graph_ppr regression should exceed the compare-only budget: baseline {:.3}ms, regressed {:.3}ms, budget {:.3}ms",
+            baseline_p50_ms, deliberate_regression_p50_ms, budget_p50_ms
+        ));
     }
 
     Ok(())

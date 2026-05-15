@@ -23,6 +23,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Instant;
 
 type TestResult = Result<(), String>;
 
@@ -69,7 +70,31 @@ fn assert_exact_golden(relative: &str, actual: &str) -> TestResult {
     )
 }
 
+fn elapsed_ms_since(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn trace_trauma_guard_preflight_contract(
+    phase: &'static str,
+    elapsed_ms: u64,
+    degraded_codes: &[&str],
+) {
+    tracing::info!(
+        workspace_id = "preflight_tripwires_contract",
+        request_id = "preflight_tripwires_contract_request",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-3usjw.6"),
+        surface = "trauma_guard_preflight",
+        phase,
+        elapsed_ms,
+        degraded_codes = ?degraded_codes,
+        "preflight tripwire contract checkpoint"
+    );
+}
+
 fn assert_cli_preflight_run_stdout_clean(args: &[&str], display: &str, code: &str) -> TestResult {
+    let started = Instant::now();
+    trace_trauma_guard_preflight_contract("dispatch", 0, &[]);
+
     let output = Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
         .output()
@@ -108,6 +133,7 @@ fn assert_cli_preflight_run_stdout_clean(args: &[&str], display: &str, code: &st
         &serde_json::json!(code),
         "public CLI preflight degraded code",
     )?;
+    trace_trauma_guard_preflight_contract("response", elapsed_ms_since(started), &[code]);
     Ok(())
 }
 

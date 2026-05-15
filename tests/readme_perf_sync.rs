@@ -3,6 +3,7 @@ use serde_json::Value;
 const README: &str = include_str!("../README.md");
 const PERF_BASELINE: &str = include_str!("../benches/baselines/perf_v0_2.json");
 const HARDWARE_CLASSES: &str = include_str!("../benches/baselines/hardware_classes.toml");
+const PERF_SYNC_GOLDEN: &str = include_str!("golden/perf_table_sync.snap");
 
 const CANONICAL_ROWS: [(&str, &str); 10] = [
     ("ee_remember", "`ee remember` (single record)"),
@@ -26,7 +27,21 @@ const CANONICAL_ROWS: [(&str, &str); 10] = [
     ),
 ];
 
+fn trace_perf_table_sync(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
+    tracing::info!(
+        workspace_id = "repo",
+        request_id = "readme_perf_sync_contract",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-3usjw.8"),
+        surface = "perf_table_sync",
+        phase,
+        elapsed_ms,
+        degraded_codes = ?degraded_codes,
+        "perf table sync contract checkpoint"
+    );
+}
+
 fn perf_block() -> Result<&'static str, String> {
+    trace_perf_table_sync("input", 0, &[]);
     let start = README
         .find("<!-- perf:begin")
         .ok_or_else(|| "README missing perf begin marker".to_owned())?;
@@ -35,30 +50,38 @@ fn perf_block() -> Result<&'static str, String> {
         .find(end_marker)
         .ok_or_else(|| "README missing perf end marker".to_owned())?;
     let end = start + relative_end + end_marker.len();
+    trace_perf_table_sync("response", 0, &[]);
     Ok(&README[start..end])
 }
 
 #[test]
 fn readme_perf_block_is_bound_to_canonical_hardware_manifest() -> Result<(), String> {
-    if README.matches("<!-- perf:begin").count() != 1 {
-        return Err("README must contain exactly one perf begin marker".to_owned());
-    }
-    if README.matches("<!-- perf:end -->").count() != 1 {
-        return Err("README must contain exactly one perf end marker".to_owned());
-    }
+    assert_eq!(
+        README.matches("<!-- perf:begin").count(),
+        1,
+        "README must contain exactly one perf begin marker"
+    );
+    assert_eq!(
+        README.matches("<!-- perf:end -->").count(),
+        1,
+        "README must contain exactly one perf end marker"
+    );
 
     let block = perf_block()?;
-    if !block.starts_with(
-        "<!-- perf:begin hardware-class=mac-m3-pro baseline=benches/baselines/perf_v0_2.json -->",
-    ) {
-        return Err("README perf begin marker must pin mac-m3-pro perf_v0_2".to_owned());
-    }
-    if !HARDWARE_CLASSES.contains("[classes.mac-m3-pro]") {
-        return Err("hardware class manifest missing mac-m3-pro".to_owned());
-    }
-    if !HARDWARE_CLASSES.contains("file = \"benches/baselines/perf_v0_2.json\"") {
-        return Err("hardware class manifest does not pin perf_v0_2 baseline".to_owned());
-    }
+    assert!(
+        block.starts_with(
+            "<!-- perf:begin hardware-class=mac-m3-pro baseline=benches/baselines/perf_v0_2.json -->",
+        ),
+        "README perf begin marker must pin mac-m3-pro perf_v0_2"
+    );
+    assert!(
+        HARDWARE_CLASSES.contains("[classes.mac-m3-pro]"),
+        "hardware class manifest missing mac-m3-pro"
+    );
+    assert!(
+        HARDWARE_CLASSES.contains("file = \"benches/baselines/perf_v0_2.json\""),
+        "hardware class manifest does not pin perf_v0_2 baseline"
+    );
     Ok(())
 }
 
@@ -71,13 +94,11 @@ fn readme_perf_rows_follow_canonical_order_and_shape() -> Result<(), String> {
         .filter(|line| !line.starts_with("|---"))
         .collect::<Vec<_>>();
 
-    if rows.len() != CANONICAL_ROWS.len() {
-        return Err(format!(
-            "README perf table has {} rows; expected {}",
-            rows.len(),
-            CANONICAL_ROWS.len()
-        ));
-    }
+    assert_eq!(
+        rows.len(),
+        CANONICAL_ROWS.len(),
+        "README perf table row count"
+    );
 
     for ((_, expected_label), row) in CANONICAL_ROWS.iter().zip(rows.iter()) {
         let cells = row
@@ -85,29 +106,26 @@ fn readme_perf_rows_follow_canonical_order_and_shape() -> Result<(), String> {
             .split('|')
             .map(str::trim)
             .collect::<Vec<_>>();
-        if cells.len() != 4 {
-            return Err(format!("README perf row must have 4 cells: {row}"));
-        }
-        if cells[0] != *expected_label {
-            return Err(format!(
-                "README perf row order mismatch: expected `{expected_label}`, got `{}`",
-                cells[0]
-            ));
-        }
-        if cells[1] != "`mac-m3-pro`" {
-            return Err(format!("README perf row has wrong hardware class: {row}"));
-        }
-        if !(cells[2].ends_with(" ms") || cells[2].ends_with(" s")) {
-            return Err(format!("README perf p50 must include units: {row}"));
-        }
-        if !(cells[3].ends_with(" ms") || cells[3].ends_with(" s")) {
-            return Err(format!("README perf p99 must include units: {row}"));
-        }
+        assert_eq!(cells.len(), 4, "README perf row must have 4 cells: {row}");
+        assert_eq!(cells[0], *expected_label, "README perf row order mismatch");
+        assert_eq!(
+            cells[1], "`mac-m3-pro`",
+            "README perf row has wrong hardware class: {row}"
+        );
+        assert!(
+            cells[2].ends_with(" ms") || cells[2].ends_with(" s"),
+            "README perf p50 must include units: {row}"
+        );
+        assert!(
+            cells[3].ends_with(" ms") || cells[3].ends_with(" s"),
+            "README perf p99 must include units: {row}"
+        );
     }
 
-    if !block.contains("Last synced: ") || !block.contains(" from sha256:") {
-        return Err("README perf block missing sync footer".to_owned());
-    }
+    assert!(
+        block.contains("Last synced: ") && block.contains(" from sha256:"),
+        "README perf block missing sync footer"
+    );
     Ok(())
 }
 
@@ -115,9 +133,11 @@ fn readme_perf_rows_follow_canonical_order_and_shape() -> Result<(), String> {
 fn baseline_contains_every_readme_synced_operation() -> Result<(), String> {
     let baseline: Value = serde_json::from_str(PERF_BASELINE)
         .map_err(|error| format!("invalid baseline: {error}"))?;
-    if baseline.get("schema").and_then(Value::as_str) != Some("ee.perf.baseline.v1") {
-        return Err("perf_v0_2 must use ee.perf.baseline.v1 schema".to_owned());
-    }
+    assert_eq!(
+        baseline.get("schema").and_then(Value::as_str),
+        Some("ee.perf.baseline.v1"),
+        "perf_v0_2 must use ee.perf.baseline.v1 schema"
+    );
 
     let operations = baseline
         .get("operations")
@@ -128,12 +148,23 @@ fn baseline_contains_every_readme_synced_operation() -> Result<(), String> {
         let operation = operations
             .get(key)
             .ok_or_else(|| format!("perf_v0_2 missing operation {key}"))?;
-        if operation.get("p50_ms").and_then(Value::as_f64).is_none() {
-            return Err(format!("operation {key} missing p50_ms"));
-        }
-        if operation.get("p99_ms").and_then(Value::as_f64).is_none() {
-            return Err(format!("operation {key} missing p99_ms"));
-        }
+        assert!(
+            operation.get("p50_ms").and_then(Value::as_f64).is_some(),
+            "operation {key} missing p50_ms"
+        );
+        assert!(
+            operation.get("p99_ms").and_then(Value::as_f64).is_some(),
+            "operation {key} missing p99_ms"
+        );
     }
+    Ok(())
+}
+
+#[test]
+fn readme_perf_block_matches_golden_snapshot() -> Result<(), String> {
+    let expected = PERF_SYNC_GOLDEN
+        .strip_suffix('\n')
+        .unwrap_or(PERF_SYNC_GOLDEN);
+    assert_eq!(perf_block()?, expected, "README perf block drifted");
     Ok(())
 }

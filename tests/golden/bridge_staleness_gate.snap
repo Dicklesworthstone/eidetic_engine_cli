@@ -1,0 +1,20 @@
+---
+surface: bridge_staleness_gate
+bead: bd-3usjw.33
+schema: ee.closure_surface_golden.v1
+purpose: scripts/bridge-staleness.sh emits a non-blocking advisory report for stale bridge-plan state.
+command: scripts/bridge-staleness.sh --json
+report: .bridge-staleness-report.json
+output_schema: ee.bridge.staleness.v1
+signals:
+  - plan_mtime_age_days
+  - vision_coverage_gap_low
+  - in_progress_beads_mtime
+checks:
+  - Report JSON includes code, severity, message, repair, and details for each signal.
+  - Quiet mode writes the report file without making verify.sh fail on advisory signals.
+  - The report file matches stdout for the same invocation.
+verified_by:
+  - cargo test --test bridge_staleness_gate -- --nocapture
+  - scripts/verify.sh stage Bridge Staleness Advisory
+

@@ -1,0 +1,17 @@
+{
+  "schema": "ee.eval.golden_manifest.v1",
+  "golden_root": "tests/golden/eval",
+  "canonical_eval_report_goldens": [
+    "tests/fixtures/golden/eval/fx.async_migration.v1/report.json.golden",
+    "tests/fixtures/golden/eval/fx.dangerous_cleanup.v1/report.json.golden",
+    "tests/fixtures/golden/eval/fx.release_failure.v1/report.json.golden"
+  ],
+  "snapshot_goldens": [
+    "tests/golden/eval.snap",
+    "tests/golden/eval-report.snap"
+  ],
+  "notes": [
+    "This manifest is the stable closure-lint anchor for beads that cite tests/golden/eval.",
+    "Executable eval fixtures remain under tests/fixtures/eval/<fixture>/."
+  ]
+}

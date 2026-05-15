@@ -1,0 +1,34 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_algorithm_unavailable",
+  "introduced_by": {
+    "bead": "bd-3usjw.2",
+    "epic_letter": "Bridge Part II"
+  },
+  "surfaces": [
+    "graph centrality"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The latest memory-link graph snapshot exists, but the requested centrality algorithm has no persisted scores in that snapshot.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Centrality source memory.' --workspace . --level semantic --kind fact --json",
+      "ee remember 'Centrality target memory.' --workspace . --level semantic --kind fact --json",
+      "ee graph centrality-refresh --workspace . --json"
+    ],
+    "invocation": "ee graph centrality --algorithm authority --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_algorithm_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "Graph centrality algorithm",
+      "no computed scores"
+    ],
+    "repair_contains": "ee graph centrality-refresh --algorithm authority",
+    "repair_string": "ee graph centrality-refresh --algorithm authority",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}

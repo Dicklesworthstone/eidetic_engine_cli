@@ -446,10 +446,14 @@ mod tests {
             "fileSurfaceRisks": report.file_surface_risks.iter().map(|risk| {
                 serde_json::json!({
                     "pathPattern": risk.path_pattern,
+                    "gitStatusBuckets": risk.git_status_buckets,
+                    "reservationHolders": risk.reservation_holders,
+                    "relatedBeadIds": risk.related_bead_ids,
                     "severity": risk.severity,
                     "score": risk.score,
                     "riskFactors": risk.risk_factors,
                     "evidence": risk.evidence,
+                    "suggestedCommands": risk.suggested_commands,
                 })
             }).collect::<Vec<_>>(),
             "recommendations": report
@@ -583,6 +587,18 @@ mod tests {
             ),
         );
 
+        let mut beads_db_newer = base_swarm_brief_report();
+        replace_swarm_source(
+            &mut beads_db_newer,
+            swarm_source_degraded_with_freshness(
+                SwarmBriefSourceKind::Beads,
+                "beads_tracker_stale",
+                "stale",
+                "Beads database is newer than JSONL; exported tracker files may lag coordination history.",
+                "br sync --flush-only",
+            ),
+        );
+
         let mut beads_dependency_cycles = base_swarm_brief_report();
         replace_swarm_source(
             &mut beads_dependency_cycles,
@@ -626,8 +642,19 @@ mod tests {
             swarm_source_unavailable(
                 SwarmBriefSourceKind::Rch,
                 "rch_worker_topology_blocked",
-                "RCH remote workers are visible, but workspace path mapping blocked offloaded verification.",
-                "Inspect RCH worker path mapping.",
+                "RCH-E327 worker topology blocked remote-required verification; selected worker: css; root metadata redacted; remote workers may be visible but this workspace cannot be mapped.",
+                "Inspect RCH worker path mapping; remote workers are visible but this workspace cannot be mapped.",
+            ),
+        );
+
+        let mut rch_remote_required_fallback_prevented = base_swarm_brief_report();
+        replace_swarm_source(
+            &mut rch_remote_required_fallback_prevented,
+            swarm_source_unavailable(
+                SwarmBriefSourceKind::Rch,
+                "rch_remote_required_fallback_prevented",
+                "RCH_REQUIRE_REMOTE prevented local fallback, so this Cargo gate has no valid remote evidence.",
+                "Fix remote worker availability or unset the remote-required guard only with explicit approval.",
             ),
         );
 
@@ -692,8 +719,13 @@ mod tests {
             swarm_brief_contract_case("beads_stale_locked", beads_stale_locked)?,
             swarm_brief_contract_case("rch_unavailable", rch_unavailable)?,
             swarm_brief_contract_case("beads_tracker_stale", beads_tracker_stale)?,
+            swarm_brief_contract_case("beads_db_newer", beads_db_newer)?,
             swarm_brief_contract_case("beads_dependency_cycles", beads_dependency_cycles)?,
             swarm_brief_contract_case("rch_worker_topology_blocked", rch_worker_topology_blocked)?,
+            swarm_brief_contract_case(
+                "rch_remote_required_fallback_prevented",
+                rch_remote_required_fallback_prevented,
+            )?,
             swarm_brief_contract_case("high_resource_pressure", high_resource_pressure)?,
             swarm_brief_contract_case("workspace_ambiguity", workspace_ambiguity)?,
             swarm_brief_contract_case("secret_redaction", secret_redaction)?,
@@ -703,7 +735,7 @@ mod tests {
     #[test]
     fn swarm_brief_contract_matrix_matches_golden() -> TestResult {
         let cases = swarm_brief_contract_cases()?;
-        ensure_equal(&cases.len(), &15, "swarm brief contract case count")?;
+        ensure_equal(&cases.len(), &17, "swarm brief contract case count")?;
         let matrix = serde_json::json!({
             "schema": "ee.swarm.brief.contract_matrix.v1",
             "payloadSchema": SWARM_BRIEF_SCHEMA_V1,

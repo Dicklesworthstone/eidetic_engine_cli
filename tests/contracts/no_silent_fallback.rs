@@ -722,6 +722,12 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "Agent Mail snapshots may omit thread entries; missing arrays mean empty sections after JSON parse succeeds.",
     ),
     allowed(
+        "NSF-CORE-SWARM-BRIEF-RCH-OPTIONAL-WORKER",
+        "src/core/swarm_brief.rs",
+        "summarize_rch_topology_blocked_message",
+        "An RCH-E327 degradation may omit the selected worker; the topology-blocked code and redacted root summary remain explicit.",
+    ),
+    allowed(
         "NSF-CORE-PERF-FORENSICS-SOURCE-SCHEMA",
         "src/core/perf_forensics.rs",
         "source_schema: normalized.source_schema.unwrap_or_default()",
@@ -810,6 +816,36 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/graph/ppr.rs",
         "edges.sort_unstable_by_key",
         "A graph node with no outgoing neighbors intentionally contributes an empty normalized edge list.",
+    ),
+    allowed(
+        "NSF-GRAPH-PACK-DNA-NO-PPR-SEEDS",
+        "src/graph/pack_dna.rs",
+        "query_seed_weights.is_empty() || limit == 0",
+        "Pack DNA PPR neighbors are explicitly empty when there are no valid query seeds or the caller requested a zero-neighbor limit.",
+    ),
+    allowed(
+        "NSF-GRAPH-CAUSAL-CLOSURE-NO-SUCCESSORS",
+        "src/graph/causal.rs",
+        "closure\n.successors(failure_id)\n.unwrap_or_default()",
+        "A failure node with no transitive causal successors intentionally has an empty ancestor list.",
+    ),
+    allowed(
+        "NSF-GRAPH-CAUSAL-TERMINAL-NO-SUCCESSORS",
+        "src/graph/causal.rs",
+        "graph\n.successors(&ancestor.memory_id)\n.unwrap_or_default()",
+        "A reachable ancestor with no outgoing causal successors is intentionally treated as terminal.",
+    ),
+    allowed(
+        "NSF-GRAPH-CAUSAL-NO-NODE-ATTRS",
+        "src/graph/causal.rs",
+        "graph.node_attrs(node).cloned().unwrap_or_default()",
+        "Causal flow projection permits nodes without optional attributes while adding required demand metadata explicitly.",
+    ),
+    allowed(
+        "NSF-GRAPH-CAUSAL-BFS-NO-SUCCESSORS",
+        "src/graph/causal.rs",
+        "graph.successors(&current).unwrap_or_default()",
+        "Causal shortest-path traversal uses an empty successor list as the explicit leaf-node case.",
     ),
     allowed(
         "NSF-OUTPUT-FIELD-SELECTOR-COMMAND",

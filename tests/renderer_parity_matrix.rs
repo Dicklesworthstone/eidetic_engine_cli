@@ -791,6 +791,8 @@ fn make_context_response_fixture() -> ContextResponse {
             estimated_tokens: 8,
             relevance: score(0.82),
             utility: score(0.74),
+            proximity_to_seed: None,
+            score_breakdown: None,
             provenance: vec![provenance_a],
             why: "matched renderer parity via fixture (relevance 0.8200, utility 0.7400)"
                 .to_owned(),
@@ -809,6 +811,8 @@ fn make_context_response_fixture() -> ContextResponse {
             estimated_tokens: 13,
             relevance: score(0.67),
             utility: score(0.58),
+            proximity_to_seed: None,
+            score_breakdown: None,
             provenance: vec![provenance_b],
             why: "matched renderer parity via fixture (relevance 0.6700, utility 0.5800)"
                 .to_owned(),

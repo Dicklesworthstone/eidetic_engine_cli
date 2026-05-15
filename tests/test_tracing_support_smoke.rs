@@ -42,11 +42,16 @@ fn test_tracing_helper_emits_normalized_jsonl_contract() -> TestResult {
         for required in [
             "actual",
             "bead_id",
+            "degraded_codes",
+            "elapsed_ms",
             "expected",
             "fixture_name",
             "message",
             "phase",
+            "request_id",
+            "surface",
             "test_name",
+            "workspace_id",
         ] {
             if !fields.contains_key(required) {
                 return Err(format!(

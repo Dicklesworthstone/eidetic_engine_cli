@@ -1,0 +1,7 @@
+{
+  "schema": "ee.closure_lint.fixture_obligation_case.v1",
+  "case": "fixture_no_emit",
+  "bead_id": "bd-3usjw.no-emit",
+  "description": "A fixture file may exist for nearby coverage, but no DEGRADATION REQUIREMENT code= declaration means the closure-lint obligation does not fire.",
+  "expected": "pass"
+}

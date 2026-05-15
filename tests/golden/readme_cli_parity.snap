@@ -1,0 +1,14 @@
+---
+surface: readme_cli_parity
+bead: bd-3usjw.38
+schema: ee.closure_surface_golden.v1
+purpose: README command-table rows stay aligned with registered clap subcommands.
+primary_test: tests/readme_cli_parity.rs
+coverage:
+  - Parses README command-table rows beginning with `ee`.
+  - Expands documented slash-separated leaf alternates.
+  - Invokes each extracted command path with --help.
+  - Requires every documented command path to resolve and print non-empty help.
+verified_by:
+  - cargo test --test readme_cli_parity
+

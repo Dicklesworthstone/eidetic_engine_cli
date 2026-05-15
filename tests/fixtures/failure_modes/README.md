@@ -35,6 +35,9 @@ in the same commit, keeping the catalog complete by construction.
 | `malformed_validity_filtered` | search | medium | bd-17c65.10.6 (J6) |
 | `validity_filtered_significant_recall_drop` | search, context | info | bd-17c65.10.6 (J6) |
 | `output_redaction_disabled` | search, context | info | bd-17c65.2.9 (B10) |
+| `redaction_level_invalid` | export, handoff create, context, support bundle | low | bd-17c65.11.6 (K6) |
+| `redaction_pattern_matched` | export, handoff create, context, support bundle | medium | bd-17c65.11.6 (K6) |
+| `redaction_round_trip_marker_preserved` | import jsonl | info | bd-17c65.11.6 (K6) |
 | `handoff_snapshot_stale` | handoff resume | medium | bd-17c65.13.5 (M4) |
 | `profile_search_limit_capped` | search, diag search | low | bd-17c65.2.4 (B7) |
 | `context_profile_budget_capped` | context | low | bd-17c65.10.6 (J6) |
@@ -95,8 +98,12 @@ in the same commit, keeping the catalog complete by construction.
 | `why_result_target_unsupported_source` | why | medium | bd-17c65.10.6 (J6) |
 | `graph_memory_not_in_snapshot` | why | low | bd-17c65.10.6 (J6) |
 | `graph_query_relative_features_unavailable` | why | low | bd-17c65.10.6 (J6) |
+| `db_migration_pending` | db status | medium | bd-3usjw.1 |
+| `db_wal_stale` | db status | medium | bd-3usjw.1 |
+| `no_risk_memories` | preflight check | info | bd-3usjw.6 |
 | `preflight_evidence_unavailable` | preflight | medium | bd-17c65.10.6 (J6) |
 | `preflight_evidence_stale` | preflight | warning | bd-17c65.10.6 (J6) |
+| `preflight_patterns_unavailable` | preflight check | medium | bd-3usjw.6 |
 | `quarantine_workspace_unavailable` | quarantine, status | medium | bd-17c65.10.6 (J6) |
 | `quarantine_database_missing` | quarantine, status | medium | bd-17c65.10.6 (J6) |
 | `quarantine_database_unreadable` | quarantine, status | medium | bd-17c65.10.6 (J6) |
@@ -154,6 +161,7 @@ in the same commit, keeping the catalog complete by construction.
 | `learn_decay_config_invalid` | maintenance run | medium | bd-17c65.10.6 (J6) |
 | `learn_decay_config_read_failed` | maintenance run | medium | bd-17c65.10.6 (J6) |
 | `graph_feature_disabled` | graph, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
+| `graph_algorithm_unavailable` | graph centrality | medium | bd-3usjw.2 |
 | `graph_snapshot_missing` | graph export, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
 | `graph_snapshot_stale` | graph export, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
 | `graph_snapshot_unusable` | graph export, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
@@ -195,12 +203,12 @@ in the same commit, keeping the catalog complete by construction.
 | `lab_replay_unavailable` | lab capture, lab replay, lab counterfactual | medium | bd-17c65.10.6 (J6) |
 | `git_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
 | `beads_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
-| `beads_tracker_stale` | swarm brief | warning | bd-1zb7k.13.1 (C1) |
+| `beads_tracker_stale` | swarm brief | warning | bd-1zb7k.13.3 (C3) |
 | `bv_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
 | `agent_mail_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
-| `rch_remote_required_fallback_prevented` | swarm brief | warning | bd-1zb7k.13.1 (C1) |
+| `rch_remote_required_fallback_prevented` | swarm brief | warning | bd-1zb7k.13.4 (C4) |
 | `rch_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
-| `rch_worker_topology_blocked` | swarm brief | warning | bd-1zb7k.13.1 (C1) |
+| `rch_worker_topology_blocked` | swarm brief | warning | bd-1zb7k.13.4 (C4) |
 | `agent_status_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
 | `swarm_scale_budget_exceeded` | swarm-scale benchmark | warning | bd-1zb7k.8 (S7) |
 | `swarm_scale_nondeterminism` | swarm-scale benchmark | high | bd-1zb7k.8 (S7) |

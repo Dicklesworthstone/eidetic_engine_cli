@@ -1,0 +1,7 @@
+{
+  "schema": "ee.closure_lint.fixture_obligation_case.v1",
+  "case": "fixture_stale_message",
+  "bead_id": "bd-3usjw.stale-surface",
+  "description": "Part II implements-surface bead declares code=stale_surface_code and ships the fixture, but omits tests/fixtures/failure_modes/stale_surface_code.json from FILE SURFACE.",
+  "expected": "fail"
+}

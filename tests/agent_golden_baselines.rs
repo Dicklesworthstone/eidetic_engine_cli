@@ -16,9 +16,10 @@ use ee::core::agent_detect::AgentInventoryReport;
 use ee::core::doctor::{CheckResult, DoctorReport, Posture};
 use ee::core::status::{
     CapabilityReport, CurationHealthReport, DegradationReport, DerivedAssetReport,
-    DerivedAssetStatus, FeedbackHealthReport, FeedbackHealthStatus, GraphComputeReport,
-    GraphComputeStatus, GraphSnapshotArtifactReport, GraphSnapshotMemoryGraphReport,
-    MemoryHealthReport, MemoryHealthStatus, RuntimeReport, StatusReport, WorkspaceDiagnosticReport,
+    DerivedAssetStatus, FeedbackHealthReport, FeedbackHealthStatus,
+    GraphAlgorithmResultCacheReport, GraphComputeReport, GraphComputeStatus,
+    GraphSnapshotArtifactReport, GraphSnapshotMemoryGraphReport, MemoryHealthReport,
+    MemoryHealthStatus, RuntimeReport, StatusReport, WorkspaceDiagnosticReport,
     WorkspaceStatusReport,
 };
 use ee::models::posture::{
@@ -1074,6 +1075,7 @@ fn graph_compute_available() -> GraphComputeReport {
         available_algorithms: GRAPH_ALGORITHMS,
         live_compute_supported: true,
         fnx_runtime_version: "0.1.0",
+        result_cache: GraphAlgorithmResultCacheReport::not_inspected(),
         last_used_at: None,
     }
 }
@@ -1353,6 +1355,41 @@ fn status_search_unimplemented_report() -> StatusReport {
     }
 }
 
+fn status_posture_states_projection() -> Result<String, String> {
+    use SubsystemPostureStatus as S;
+
+    let rows = [
+        ("ok", vec![S::Ok, S::Ok]),
+        ("initializing", vec![S::Initializing, S::Initializing]),
+        ("degraded_recoverable", vec![S::Ok, S::DegradedRecoverable]),
+        (
+            "degraded_required",
+            vec![S::Ok, S::DegradedRequired, S::DegradedRecoverable],
+        ),
+        ("blocked", vec![S::Ok, S::Blocked, S::DegradedRequired]),
+    ];
+
+    let states = rows
+        .into_iter()
+        .map(|(name, subsystem_statuses)| {
+            let aggregate = S::aggregate(&subsystem_statuses);
+            json!({
+                "name": name,
+                "subsystems": subsystem_statuses
+                    .into_iter()
+                    .map(SubsystemPostureStatus::as_str)
+                    .collect::<Vec<_>>(),
+                "overall": aggregate.as_str(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    pretty_json(&json!({
+        "schema": "ee.status.posture_states.v1",
+        "states": states,
+    }))
+}
+
 fn status_degradation_projection(report: &StatusReport) -> Result<String, String> {
     let value: Value = serde_json::from_str(&render_status_json(report))
         .map_err(|error| format!("parse rendered status JSON: {error}"))?;
@@ -1482,6 +1519,12 @@ fn status_degradation_scenario_projections_match_goldens() -> TestResult {
         assert_golden("status", name, &projection)?;
     }
     Ok(())
+}
+
+#[test]
+fn status_posture_states_projection_matches_golden() -> TestResult {
+    let projection = status_posture_states_projection()?;
+    assert_golden("status", "posture_states", &projection)
 }
 
 #[test]

@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "no_risk_memories",
+  "introduced_by": {
+    "bead": "bd-3usjw.6",
+    "epic_letter": "CLOSE_THE_GAP"
+  },
+  "surfaces": [
+    "preflight check"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "A destructive command is recognized, but the workspace has no high-severity risk, anti-pattern, or failure memories to surface.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee preflight check --cmd 'rm -rf build-output' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "no_risk_memories",
+    "severity": "info",
+    "message_contains": [
+      "No matching high-severity risk memories",
+      "destructive command"
+    ],
+    "repair_contains": "ee remember --kind risk --severity high",
+    "repair_string": "ee remember --kind risk --severity high <warning>"
+  }
+}

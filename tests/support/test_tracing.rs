@@ -36,7 +36,10 @@ impl TestPhase {
 #[derive(Debug)]
 pub struct TestTraceGuard {
     bead_id: String,
+    request_id: String,
+    surface: String,
     test_name: String,
+    workspace_id: String,
     #[allow(dead_code)]
     path: PathBuf,
 }
@@ -58,9 +61,14 @@ impl TestTraceGuard {
     ) {
         tracing::info!(
             target: "ee.test_tracing",
+            workspace_id = %self.workspace_id,
+            request_id = %self.request_id,
             bead_id = %self.bead_id,
+            surface = %self.surface,
             test_name = %self.test_name,
             phase = phase.as_str(),
+            elapsed_ms = 0_u64,
+            degraded_codes = ?Vec::<String>::new(),
             fixture_name = fixture_name,
             actual = %actual.to_string(),
             expected = %expected.to_string(),
@@ -126,7 +134,10 @@ pub fn init_test_tracing(bead_id: &str, test_name: &str) -> TestTraceGuard {
 
     TestTraceGuard {
         bead_id: bead_id.to_owned(),
+        request_id: format!("{bead_id}:{test_name}"),
+        surface: "e2e_test_logging_convention".to_owned(),
         test_name: test_name.to_owned(),
+        workspace_id: "test-workspace".to_owned(),
         path,
     }
 }

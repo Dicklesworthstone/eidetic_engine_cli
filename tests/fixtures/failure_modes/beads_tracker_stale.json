@@ -2,7 +2,7 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "beads_tracker_stale",
   "introduced_by": {
-    "bead": "bd-1zb7k.13.1",
+    "bead": "bd-1zb7k.13.3",
     "epic_letter": "C"
   },
   "surfaces": [
@@ -11,9 +11,10 @@
   "severity": "warning",
   "repair_present": true,
   "trigger": {
-    "description": "Swarm brief detects that Beads issues.jsonl is newer than the local Beads database.",
+    "description": "Swarm brief detects that Beads issues.jsonl or the local Beads database is newer than its counterpart.",
     "setup_commands": [
-      "# create a Beads workspace where .beads/issues.jsonl has entries not imported into .beads/beads.db"
+      "# create a Beads workspace where .beads/issues.jsonl has entries not imported into .beads/beads.db",
+      "# the sibling DB-newer case is covered by swarm brief unit tests and repairs with br sync --flush-only"
     ],
     "invocation": "ee swarm brief --sources beads --workspace . --json"
   },

@@ -18,40 +18,40 @@
           "slug": "claude",
           "detected": true,
           "evidence": [
-            "override root exists: /data/projects/eidetic_engine_cli/tests/fixtures/agent_detect/claude/projects"
+            "override root exists: $EE_AGENT_FIXTURE_ROOT/tests/fixtures/agent_detect/claude/projects"
           ],
           "rootPaths": [
-            "/data/projects/eidetic_engine_cli/tests/fixtures/agent_detect/claude/projects"
+            "$EE_AGENT_FIXTURE_ROOT/tests/fixtures/agent_detect/claude/projects"
           ]
         },
         {
           "slug": "codex",
           "detected": true,
           "evidence": [
-            "override root exists: /data/projects/eidetic_engine_cli/tests/fixtures/agent_detect/codex/sessions"
+            "override root exists: $EE_AGENT_FIXTURE_ROOT/tests/fixtures/agent_detect/codex/sessions"
           ],
           "rootPaths": [
-            "/data/projects/eidetic_engine_cli/tests/fixtures/agent_detect/codex/sessions"
+            "$EE_AGENT_FIXTURE_ROOT/tests/fixtures/agent_detect/codex/sessions"
           ]
         },
         {
           "slug": "cursor",
           "detected": true,
           "evidence": [
-            "override root exists: /data/projects/eidetic_engine_cli/tests/fixtures/agent_detect/cursor/.cursor"
+            "override root exists: $EE_AGENT_FIXTURE_ROOT/tests/fixtures/agent_detect/cursor/.cursor"
           ],
           "rootPaths": [
-            "/data/projects/eidetic_engine_cli/tests/fixtures/agent_detect/cursor/.cursor"
+            "$EE_AGENT_FIXTURE_ROOT/tests/fixtures/agent_detect/cursor/.cursor"
           ]
         },
         {
           "slug": "gemini",
           "detected": true,
           "evidence": [
-            "override root exists: /data/projects/eidetic_engine_cli/tests/fixtures/agent_detect/gemini/tmp"
+            "override root exists: $EE_AGENT_FIXTURE_ROOT/tests/fixtures/agent_detect/gemini/tmp"
           ],
           "rootPaths": [
-            "/data/projects/eidetic_engine_cli/tests/fixtures/agent_detect/gemini/tmp"
+            "$EE_AGENT_FIXTURE_ROOT/tests/fixtures/agent_detect/gemini/tmp"
           ]
         }
       ],

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 type TestResult = Result<(), String>;
 
@@ -16,6 +16,19 @@ fn unique_report_path(prefix: &str) -> Result<PathBuf, String> {
     fs::create_dir_all(&dir)
         .map_err(|error| format!("failed to create {}: {error}", dir.display()))?;
     Ok(dir.join(format!("{prefix}-{}-{now}.json", std::process::id())))
+}
+
+fn trace_swarm_subcommand_gate(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
+    tracing::info!(
+        workspace_id = "repo",
+        request_id = "vision_coverage_gate_contract",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-3usjw.5"),
+        surface = "swarm_subcommand",
+        phase,
+        elapsed_ms,
+        degraded_codes = ?degraded_codes,
+        "vision coverage gate contract checkpoint"
+    );
 }
 
 fn ensure_beads_snapshot() -> TestResult {
@@ -46,6 +59,8 @@ fn run_gate(
     release_tag: bool,
     compare_ref: Option<&str>,
 ) -> Result<std::process::Output, String> {
+    let started = Instant::now();
+    trace_swarm_subcommand_gate("input", 0, &[]);
     ensure_beads_snapshot()?;
     let mut command = Command::new("sh");
     command
@@ -60,9 +75,11 @@ fn run_gate(
     if let Some(ref_name) = compare_ref {
         command.arg("--compare-ref").arg(ref_name);
     }
-    command
+    let output = command
         .output()
-        .map_err(|error| format!("failed to run vision coverage gate: {error}"))
+        .map_err(|error| format!("failed to run vision coverage gate: {error}"))?;
+    trace_swarm_subcommand_gate("response", started.elapsed().as_millis() as u64, &[]);
+    Ok(output)
 }
 
 fn read_report(report_path: &PathBuf) -> Result<serde_json::Value, String> {

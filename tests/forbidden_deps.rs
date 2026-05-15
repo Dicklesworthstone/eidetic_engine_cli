@@ -32,6 +32,54 @@ const FORBIDDEN_CRATES: &[&str] = &[
     "reqwest",
 ];
 
+/// fnx_algorithms calls currently permitted in ee graph surfaces.
+///
+/// This list is intentionally explicit: adding a graph algorithm call should
+/// update the audit before it can land, so forbidden transitive dependencies
+/// pulled by new algorithm modules are reviewed through the same gate.
+const AUDITED_FNX_ALGORITHM_CALLS: &[&str] = &[
+    "articulation_points",
+    "betweenness_centrality_directed",
+    "dominance_frontiers",
+    "ego_graph",
+    "find_cycle_directed",
+    "gomory_hu_tree",
+    "hits_centrality_directed",
+    "immediate_dominators",
+    "k_core",
+    "k_truss",
+    "label_propagation_communities",
+    "louvain_communities",
+    "min_cost_flow",
+    "onion_layers",
+    "pagerank_directed",
+    "pagerank_with_params",
+    "shortest_path_unweighted_directed",
+    "simrank_similarity",
+    "transitive_closure",
+    "voronoi_cells",
+];
+
+/// GraphAccretion roadmap algorithms from bd-igvt.5, using the Rust fnx
+/// function names rather than Python `_rust` adapter names.
+const ROADMAP_FNX_ALGORITHM_CALLS: &[&str] = &[
+    "pagerank_directed",
+    "betweenness_centrality_directed",
+    "k_truss",
+    "onion_layers",
+    "articulation_points",
+    "transitive_closure",
+    "min_cost_flow",
+    "gomory_hu_tree",
+    "immediate_dominators",
+    "dominance_frontiers",
+    "voronoi_cells",
+    "ego_graph",
+    "hits_centrality_directed",
+    "louvain_communities",
+    "simrank_similarity",
+];
+
 /// AI/LLM client crates that must never appear in the core binary.
 /// The mechanical CLI boundary prohibits runtime LLM dependencies.
 const FORBIDDEN_AI_CRATES: &[&str] = &[
@@ -114,6 +162,103 @@ fn fail_with_hits(scenario: &str, hits: BTreeSet<&'static str>) -> ! {
     );
 }
 
+fn audited_fnx_algorithm_call_set() -> BTreeSet<&'static str> {
+    AUDITED_FNX_ALGORITHM_CALLS.iter().copied().collect()
+}
+
+fn direct_fnx_algorithm_calls_in_source() -> BTreeSet<String> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut calls = BTreeSet::new();
+    collect_fnx_algorithm_calls(&root.join("src/graph"), &mut calls);
+    collect_fnx_algorithm_calls(&root.join("src/cli/mod.rs"), &mut calls);
+    calls
+}
+
+fn collect_fnx_algorithm_calls(path: &std::path::Path, calls: &mut BTreeSet<String>) {
+    if path.is_dir() {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            collect_fnx_algorithm_calls(&entry.path(), calls);
+        }
+        return;
+    }
+
+    if path.extension().and_then(|value| value.to_str()) != Some("rs") {
+        return;
+    }
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return;
+    };
+    collect_fnx_algorithm_calls_from_text(&content, calls);
+}
+
+fn collect_fnx_algorithm_calls_from_text(text: &str, calls: &mut BTreeSet<String>) {
+    let mut import_block = String::new();
+    let mut in_import_block = false;
+
+    for line in text.lines() {
+        collect_qualified_fnx_calls(line, calls);
+
+        let trimmed = line.trim();
+        if in_import_block {
+            import_block.push(' ');
+            import_block.push_str(trimmed);
+            if trimmed.contains("};") {
+                collect_fnx_import_symbols(&import_block, calls);
+                import_block.clear();
+                in_import_block = false;
+            }
+            continue;
+        }
+
+        if trimmed.starts_with("use fnx_algorithms::{") {
+            import_block.push_str(trimmed);
+            if trimmed.contains("};") {
+                collect_fnx_import_symbols(&import_block, calls);
+                import_block.clear();
+            } else {
+                in_import_block = true;
+            }
+        } else if trimmed.starts_with("use fnx_algorithms::") {
+            collect_fnx_import_symbols(trimmed, calls);
+        }
+    }
+}
+
+fn collect_qualified_fnx_calls(line: &str, calls: &mut BTreeSet<String>) {
+    let mut rest = line;
+    while let Some(index) = rest.find("fnx_algorithms::") {
+        let after_prefix = &rest[index + "fnx_algorithms::".len()..];
+        let symbol: String = after_prefix
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+            .collect();
+        if is_fnx_algorithm_function_symbol(&symbol) {
+            calls.insert(symbol);
+        }
+        rest = after_prefix;
+    }
+}
+
+fn collect_fnx_import_symbols(import: &str, calls: &mut BTreeSet<String>) {
+    for symbol in import
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .filter(|symbol| is_fnx_algorithm_function_symbol(symbol))
+    {
+        calls.insert(symbol.to_owned());
+    }
+}
+
+fn is_fnx_algorithm_function_symbol(symbol: &str) -> bool {
+    symbol
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_lowercase())
+        && !matches!(symbol, "as" | "fnx_algorithms" | "use")
+}
+
 #[test]
 fn default_feature_tree_excludes_forbidden_crates() {
     let tree = run_cargo_tree(&[]);
@@ -141,9 +286,45 @@ fn no_default_features_tree_excludes_forbidden_crates() {
     }
 }
 
+#[test]
+fn graph_algorithm_audit_covers_roadmap_calls() {
+    let audited = audited_fnx_algorithm_call_set();
+    let missing: Vec<_> = ROADMAP_FNX_ALGORITHM_CALLS
+        .iter()
+        .copied()
+        .filter(|function| !audited.contains(function))
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "GraphAccretion roadmap fnx algorithms missing from dependency audit: {missing:?}"
+    );
+}
+
+#[test]
+fn graph_algorithm_audit_tracks_direct_call_sites() {
+    let audited = audited_fnx_algorithm_call_set();
+    let calls = direct_fnx_algorithm_calls_in_source();
+    let unaudited: Vec<_> = calls
+        .iter()
+        .filter(|function| !audited.contains(function.as_str()))
+        .cloned()
+        .collect();
+
+    assert!(
+        unaudited.is_empty(),
+        "Direct fnx_algorithms calls must be added to AUDITED_FNX_ALGORITHM_CALLS: {unaudited:?}"
+    );
+}
+
 #[cfg(test)]
 mod self_tests {
-    use super::{FORBIDDEN_CRATES, forbidden_hits};
+    use std::collections::BTreeSet;
+
+    use super::{
+        AUDITED_FNX_ALGORITHM_CALLS, FORBIDDEN_CRATES, ROADMAP_FNX_ALGORITHM_CALLS,
+        collect_fnx_algorithm_calls_from_text, forbidden_hits,
+    };
 
     #[test]
     fn detects_each_forbidden_crate_when_present() {
@@ -189,6 +370,45 @@ mod self_tests {
             !super::FORBIDDEN_AI_CRATES.is_empty(),
             "AI crate list must not be empty"
         );
+    }
+
+    #[test]
+    fn collects_qualified_and_imported_fnx_algorithm_calls() {
+        let source = r#"
+            use fnx_algorithms::{
+                PageRankResult,
+                betweenness_centrality_directed,
+                louvain_communities,
+            };
+
+            fn run() {
+                let _ = fnx_algorithms::pagerank_directed(&graph);
+                let _ = fnx_algorithms::hits_centrality_directed(&graph);
+            }
+        "#;
+        let mut calls = BTreeSet::new();
+        collect_fnx_algorithm_calls_from_text(source, &mut calls);
+
+        assert!(calls.contains("betweenness_centrality_directed"));
+        assert!(calls.contains("hits_centrality_directed"));
+        assert!(calls.contains("louvain_communities"));
+        assert!(calls.contains("pagerank_directed"));
+        assert!(
+            !calls.contains("PageRankResult"),
+            "type-only imports should not be treated as algorithm call sites"
+        );
+    }
+
+    #[test]
+    fn roadmap_algorithm_list_is_a_subset_of_audited_calls() {
+        let audited: BTreeSet<_> = AUDITED_FNX_ALGORITHM_CALLS.iter().copied().collect();
+        let missing: Vec<_> = ROADMAP_FNX_ALGORITHM_CALLS
+            .iter()
+            .copied()
+            .filter(|function| !audited.contains(function))
+            .collect();
+
+        assert!(missing.is_empty(), "missing roadmap calls: {missing:?}");
     }
 }
 

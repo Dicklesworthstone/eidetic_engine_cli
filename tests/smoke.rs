@@ -7259,6 +7259,112 @@ fn pack_query_file_max_results_and_output_explain_are_observable() -> TestResult
 }
 
 #[cfg(unix)]
+fn seed_context_pack_dna_workspace(name: &str) -> Result<String, String> {
+    let workspace = unique_artifact_dir(name)?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+
+    let init = run_ee(&["--workspace", workspace_arg.as_str(), "--json", "init"])?;
+    let init_stderr = String::from_utf8_lossy(&init.stderr);
+    ensure(
+        init.status.success(),
+        format!("init should succeed; stderr: {init_stderr}"),
+    )?;
+    ensure(init.stderr.is_empty(), "init stderr clean")?;
+
+    let remember = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "remember",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--tags",
+        "pack-dna,graph,context",
+        "Pack DNA context should explain structural diversity.",
+    ])?;
+    let remember_stderr = String::from_utf8_lossy(&remember.stderr);
+    ensure(
+        remember.status.success(),
+        format!("remember should succeed; stderr: {remember_stderr}"),
+    )?;
+    ensure(remember.stderr.is_empty(), "remember stderr clean")?;
+
+    Ok(workspace_arg)
+}
+
+#[cfg(unix)]
+#[test]
+fn context_explain_emits_pack_dna() -> TestResult {
+    let workspace_arg = seed_context_pack_dna_workspace("context-pack-dna-explain")?;
+
+    let explained = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "context",
+        "--explain",
+        "pack dna structural diversity",
+    ])?;
+    let explained_stdout = String::from_utf8_lossy(&explained.stdout);
+    let explained_stderr = String::from_utf8_lossy(&explained.stderr);
+    ensure(
+        explained.status.success(),
+        format!("context --explain should succeed; stderr: {explained_stderr}"),
+    )?;
+    ensure(
+        explained.stderr.is_empty(),
+        "context --explain stderr clean",
+    )?;
+    ensure_no_ansi(&explained_stdout, "context --explain stdout")?;
+    let explained_json: serde_json::Value = serde_json::from_slice(&explained.stdout)
+        .map_err(|error| format!("context --explain stdout must be JSON: {error}"))?;
+    let pack_dna = explained_json
+        .pointer("/data/pack/packDna")
+        .ok_or_else(|| "context --explain should emit data.pack.packDna".to_string())?;
+    ensure_equal(
+        &pack_dna["schema"],
+        &serde_json::json!("ee.context.pack_dna.v1"),
+        "packDna schema",
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn context_no_pack_dna_suppresses_pack_dna() -> TestResult {
+    let workspace_arg = seed_context_pack_dna_workspace("context-pack-dna-suppressed")?;
+
+    let suppressed = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "context",
+        "--explain",
+        "--no-pack-dna",
+        "pack dna structural diversity",
+    ])?;
+    let suppressed_stdout = String::from_utf8_lossy(&suppressed.stdout);
+    let suppressed_stderr = String::from_utf8_lossy(&suppressed.stderr);
+    ensure(
+        suppressed.status.success(),
+        format!("context --no-pack-dna should succeed; stderr: {suppressed_stderr}"),
+    )?;
+    ensure(
+        suppressed.stderr.is_empty(),
+        "context --no-pack-dna stderr clean",
+    )?;
+    ensure_no_ansi(&suppressed_stdout, "context --no-pack-dna stdout")?;
+    let suppressed_json: serde_json::Value = serde_json::from_slice(&suppressed.stdout)
+        .map_err(|error| format!("context --no-pack-dna stdout must be JSON: {error}"))?;
+    ensure(
+        suppressed_json.pointer("/data/pack/packDna").is_none(),
+        "--no-pack-dna should suppress data.pack.packDna",
+    )
+}
+
+#[cfg(unix)]
 #[test]
 fn pack_query_file_rejects_unsafe_path_before_io() -> TestResult {
     ensure_pack_query_file_machine_error(
@@ -8213,9 +8319,38 @@ fn mcp_manifest_json_real_binary_smoke() -> TestResult {
             degraded.is_empty(),
             "default manifest should not repeat build-time feature gaps in degraded[]",
         )?;
+        let gap = &parsed["data"]["capabilityGap"];
+        ensure_equal(
+            &gap["code"],
+            &serde_json::json!("mcp_feature_disabled"),
+            "capability gap code",
+        )?;
+        ensure_equal(
+            &gap["severity"],
+            &serde_json::json!("low"),
+            "capability gap severity",
+        )?;
         ensure(
-            parsed["data"]["capabilityGap"]["code"] == serde_json::json!("mcp_feature_disabled"),
-            "default manifest should point to the mcp_feature_disabled capability gap",
+            gap["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("MCP stdio adapter feature")),
+            "capability gap message should identify the disabled MCP stdio adapter",
+        )?;
+        ensure(
+            gap["repair"]
+                .as_str()
+                .is_some_and(|repair| repair.contains("mcp feature")),
+            "capability gap repair should mention the mcp feature",
+        )?;
+        ensure_equal(
+            &gap["feature"],
+            &serde_json::json!("mcp"),
+            "capability gap feature",
+        )?;
+        ensure_equal(
+            &gap["capabilitiesCommand"],
+            &serde_json::json!("ee capabilities --json"),
+            "capability gap capabilities command",
         )?;
     }
 
@@ -8294,5 +8429,99 @@ fn daemon_foreground_once_json_runs_real_health_job_in_isolated_workspace() -> T
                 })
             }),
         "daemon foreground should run the health_check job successfully",
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn insights_section_pagination_json_is_deterministic_and_stdout_only() -> TestResult {
+    let workspace = unique_artifact_dir("insights-pagination-smoke")?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let args = [
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "insights",
+        "--section",
+        "topMemories",
+        "--limit",
+        "500",
+        "--offset",
+        "50",
+    ];
+
+    let first = run_ee(&args)?;
+    let second = run_ee(&args)?;
+    let first_stdout = String::from_utf8_lossy(&first.stdout);
+    let second_stdout = String::from_utf8_lossy(&second.stdout);
+    let stderr = String::from_utf8_lossy(&first.stderr);
+
+    ensure(
+        first.status.success(),
+        format!("insights pagination should succeed; stderr: {stderr}"),
+    )?;
+    ensure(first.stderr.is_empty(), "insights stderr must be empty")?;
+    ensure_no_ansi(&first_stdout, "insights stdout")?;
+    ensure_equal(
+        &first_stdout,
+        &second_stdout,
+        "insights pagination output should be byte-stable",
+    )?;
+
+    let parsed: serde_json::Value = serde_json::from_slice(&first.stdout)
+        .map_err(|error| format!("insights stdout must be valid JSON: {error}"))?;
+    ensure_equal(
+        &parsed["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "response schema",
+    )?;
+    ensure_equal(&parsed["success"], &serde_json::json!(true), "success")?;
+    ensure_equal(
+        &parsed["data"]["schema"],
+        &serde_json::json!("ee.insights.v1"),
+        "insights schema",
+    )?;
+    ensure_equal(
+        &parsed["data"]["mode"],
+        &serde_json::json!("section"),
+        "insights mode",
+    )?;
+    ensure_equal(
+        &parsed["data"]["selectedSection"],
+        &serde_json::json!("topMemories"),
+        "selected section",
+    )?;
+    ensure_equal(
+        &parsed["data"]["pagination"]["limit"],
+        &serde_json::json!(100),
+        "limit should clamp to max",
+    )?;
+    ensure_equal(
+        &parsed["data"]["pagination"]["offset"],
+        &serde_json::json!(50),
+        "offset should be preserved",
+    )?;
+    ensure_equal(
+        &parsed["data"]["pagination"]["returned"],
+        &serde_json::json!(0),
+        "empty section returned count",
+    )?;
+    ensure_equal(
+        &parsed["data"]["pagination"]["total"],
+        &serde_json::json!(0),
+        "empty section total count",
+    )?;
+    ensure(
+        parsed["data"]["sections"]
+            .as_array()
+            .is_some_and(|sections| sections.len() == 1),
+        "section mode should return exactly one section",
+    )?;
+    ensure(
+        parsed["data"]["sections"][0]["items"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "empty section should return empty items",
     )
 }

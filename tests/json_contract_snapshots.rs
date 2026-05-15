@@ -9,7 +9,7 @@ use ee::db::{
 };
 use ee::models::WorkspaceId;
 use insta::assert_json_snapshot;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 type TestResult = Result<(), String>;
 
@@ -66,6 +66,48 @@ fn unique_artifact_dir(prefix: &str) -> Result<PathBuf, String> {
         .tempdir()
         .map(tempfile::TempDir::keep)
         .map_err(|error| format!("failed to create {prefix} artifact directory: {error}"))
+}
+
+fn assert_graph_surface_snapshot(name: &str, value: Value) {
+    let mut settings = insta::Settings::clone_current();
+    settings.set_snapshot_path("snapshots");
+    settings.set_prepend_module_to_snapshot(false);
+    settings.bind(|| {
+        assert_json_snapshot!(name, canonical_json(value));
+    });
+}
+
+fn canonical_json(value: Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.into_iter().map(canonical_json).collect()),
+        Value::Object(object) => {
+            let mut entries: Vec<_> = object.into_iter().collect();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            let mut canonical = Map::new();
+            for (key, value) in entries {
+                canonical.insert(key, canonical_json(value));
+            }
+            Value::Object(canonical)
+        }
+        scalar => scalar,
+    }
+}
+
+fn schema_example(schema_id: &str) -> Result<Value, String> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("docs")
+        .join("schemas")
+        .join(format!("{schema_id}.json"));
+    let text =
+        fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    let schema: Value = serde_json::from_str(&text)
+        .map_err(|error| format!("parse {}: {error}", path.display()))?;
+    schema
+        .get("examples")
+        .and_then(Value::as_array)
+        .and_then(|examples| examples.first())
+        .cloned()
+        .ok_or_else(|| format!("{schema_id} must define examples[0] for snapshot coverage"))
 }
 
 fn seed_workspace(workspace: &Path, database: &Path) -> TestResult {
@@ -158,6 +200,20 @@ fn stable_workspace_id(workspace: &Path) -> String {
         *target = *source;
     }
     WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+}
+
+#[test]
+fn graph_json_surface_examples_match_snapshots() -> TestResult {
+    for (snapshot_name, schema_id) in [
+        ("insights", "ee.insights.v1"),
+        ("skyline", "ee.status.skyline.v1"),
+        ("pack_dna", "ee.context.pack_dna.v1"),
+        ("causal_explanation", "ee.why.causal.v1"),
+        ("health_structural", "ee.health.structural.v1"),
+    ] {
+        assert_graph_surface_snapshot(snapshot_name, schema_example(schema_id)?);
+    }
+    Ok(())
 }
 
 fn build_search_index(workspace: &Path, database: &Path, index_dir: &Path) -> TestResult {

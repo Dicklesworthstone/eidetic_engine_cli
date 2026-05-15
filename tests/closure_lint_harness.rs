@@ -105,6 +105,15 @@ fn write_workspace(
     Ok(())
 }
 
+fn write_text_file(root: &Path, relative: &str, contents: &str) -> TestResult {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create parent directory for {}: {error}", path.display()))?;
+    }
+    fs::write(&path, contents).map_err(|error| format!("write {}: {error}", path.display()))
+}
+
 fn run_linter(root: &Path) -> Result<(Output, Value), String> {
     run_linter_with_env(root, &[])
 }
@@ -272,6 +281,161 @@ fn closure_lint_accepts_clean_implementation_and_honesty_sibling() -> TestResult
         Vec::<(String, String, String)>::new(),
         "no violations",
     )
+}
+
+#[test]
+fn closure_lint_validates_referenced_test_paths_and_assertions() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    write_workspace(
+        temp.path(),
+        &[
+            r#"{"id":"closed-real-test","title":"[implements-surface:real-test] real implementation","status":"closed","description":"Tests: tests/closure_lint_test_files_fixtures/real_test_exists.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:real-test"]}"#,
+            r#"{"id":"closed-missing-test","title":"[implements-surface:missing-test] real implementation","status":"closed","description":"Tests: tests/closure_lint_test_files_fixtures/missing_test.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:missing-test"]}"#,
+            r#"{"id":"closed-glob-test","title":"[implements-surface:glob-test] real implementation","status":"closed","description":"Tests: tests/closure_lint_test_files_fixtures/glob_*.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:glob-test"]}"#,
+            r#"{"id":"closed-empty-test","title":"[implements-surface:empty-test] real implementation","status":"closed","description":"Tests: tests/closure_lint_test_files_fixtures/empty_test.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:empty-test"]}"#,
+            r#"{"id":"closed-ignored-test","title":"[implements-surface:ignored-test] real implementation","status":"closed","description":"Tests: tests/closure_lint_test_files_fixtures/ignored_test.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:ignored-test"]}"#,
+        ],
+        "",
+        &[
+            "real-test",
+            "missing-test",
+            "glob-test",
+            "empty-test",
+            "ignored-test",
+        ],
+    )?;
+    write_text_file(
+        temp.path(),
+        "tests/closure_lint_test_files_fixtures/real_test_exists.rs",
+        "#[test]\nfn real_test_exists() {\n    assert!(true);\n}\n",
+    )?;
+    write_text_file(
+        temp.path(),
+        "tests/closure_lint_test_files_fixtures/glob_match.rs",
+        "#[test]\nfn glob_match() {\n    assert_eq!(1 + 1, 2);\n}\n",
+    )?;
+    write_text_file(
+        temp.path(),
+        "tests/closure_lint_test_files_fixtures/empty_test.rs",
+        "#[test]\nfn empty_test() {}\n",
+    )?;
+    write_text_file(
+        temp.path(),
+        "tests/closure_lint_test_files_fixtures/ignored_test.rs",
+        "#[ignore]\n#[test]\nfn ignored_test() {\n    assert!(true);\n}\n",
+    )?;
+
+    let (output, report) = run_linter(temp.path())?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "linter should fail missing and assertion-free test references\n{}",
+            output_excerpt(&output)
+        ),
+    )?;
+    ensure_eq(report_status(&report)?, "fail", "report status")?;
+    ensure_eq(report_count(&report)?, 3, "report count")?;
+    ensure_eq(
+        violation_keys(&report)?,
+        vec![
+            (
+                "closed-empty-test".to_owned(),
+                "empty-test".to_owned(),
+                "tests/closure_lint_test_files_fixtures/empty_test.rs lacks assertion-style coverage"
+                    .to_owned(),
+            ),
+            (
+                "closed-ignored-test".to_owned(),
+                "ignored-test".to_owned(),
+                "tests/closure_lint_test_files_fixtures/ignored_test.rs has no non-ignored test"
+                    .to_owned(),
+            ),
+            (
+                "closed-missing-test".to_owned(),
+                "missing-test".to_owned(),
+                "referenced test path missing: tests/closure_lint_test_files_fixtures/missing_test.rs"
+                    .to_owned(),
+            ),
+        ],
+        "only missing and assertion-free test references should fail",
+    )
+}
+
+#[test]
+fn closure_lint_requires_failure_mode_fixtures_for_part_ii_codes() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    write_workspace(
+        temp.path(),
+        &[
+            r#"{"id":"bd-3usjw.valid","title":"[implements-surface:valid-failure-mode] real implementation","status":"closed","description":"DEGRADATION REQUIREMENT\n- code=valid_fixture_code when the substrate is stale.\n\nFILE SURFACE: tests/fixtures/failure_modes/valid_fixture_code.json","close_reason":"implemented with durable evidence","labels":["implements-surface:valid-failure-mode"],"parent":"bd-3usjw"}"#,
+            r#"{"id":"bd-3usjw.missing","title":"[implements-surface:missing-failure-mode] real implementation","status":"closed","description":"DEGRADATION REQUIREMENT\n- code=missing_fixture_code when the substrate is missing.\n\nFILE SURFACE: src/core/example.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:missing-failure-mode"],"parent":"bd-3usjw"}"#,
+            r#"{"id":"bd-3usjw.no-emit","title":"[implements-surface:fixture-no-emit] real implementation","status":"closed","description":"No degraded code is emitted by this read-only fixture-only surface.\n\nFILE SURFACE: tests/fixtures/failure_modes/fixture_no_emit_code.json","close_reason":"implemented with durable evidence","labels":["implements-surface:fixture-no-emit"],"parent":"bd-3usjw"}"#,
+            r#"{"id":"bd-3usjw.stale-surface","title":"[implements-surface:stale-failure-mode-surface] real implementation","status":"closed","description":"DEGRADATION REQUIREMENT\n- code=stale_surface_code when the fixture path is omitted from the file surface.\n\nFILE SURFACE: src/core/example.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:stale-failure-mode-surface"],"parent":"bd-3usjw"}"#,
+            r#"{"id":"older-clean","title":"[implements-surface:older-clean] real implementation","status":"closed","description":"DEGRADATION REQUIREMENT\n- code=older_missing_code should not be checked outside Part II.\n\nFILE SURFACE: src/core/example.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:older-clean"]}"#,
+        ],
+        "",
+        &[
+            "valid-failure-mode",
+            "missing-failure-mode",
+            "fixture-no-emit",
+            "stale-failure-mode-surface",
+            "older-clean",
+        ],
+    )?;
+    write_text_file(
+        temp.path(),
+        "tests/fixtures/failure_modes/valid_fixture_code.json",
+        r#"{"schema":"ee.failure_mode_fixture.v1","code":"valid_fixture_code"}"#,
+    )?;
+    write_text_file(
+        temp.path(),
+        "tests/fixtures/failure_modes/fixture_no_emit_code.json",
+        r#"{"schema":"ee.failure_mode_fixture.v1","code":"fixture_no_emit_code"}"#,
+    )?;
+    write_text_file(
+        temp.path(),
+        "tests/fixtures/failure_modes/stale_surface_code.json",
+        r#"{"schema":"ee.failure_mode_fixture.v1","code":"stale_surface_code"}"#,
+    )?;
+
+    let (output, report) = run_linter(temp.path())?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "linter should fail missing failure-mode fixture obligations\n{}",
+            output_excerpt(&output)
+        ),
+    )?;
+    ensure_eq(report_status(&report)?, "fail", "report status")?;
+    ensure_eq(report_count(&report)?, 2, "report count")?;
+    ensure_eq(
+        violation_keys(&report)?,
+        vec![
+            (
+                "bd-3usjw.missing".to_owned(),
+                "missing-failure-mode".to_owned(),
+                "emitted degraded code missing fixture: tests/fixtures/failure_modes/missing_fixture_code.json".to_owned(),
+            ),
+            (
+                "bd-3usjw.stale-surface".to_owned(),
+                "stale-failure-mode-surface".to_owned(),
+                "emitted degraded code fixture missing from FILE SURFACE: tests/fixtures/failure_modes/stale_surface_code.json".to_owned(),
+            ),
+        ],
+        "only missing fixture and missing FILE SURFACE fixture reference should fail",
+    )?;
+
+    let violations = report
+        .get("violations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "report.violations must be an array".to_owned())?;
+    for violation in violations {
+        string_field(violation, "bead_id")?;
+        string_field(violation, "missing_fixture_path")?;
+        string_field(violation, "emitted_code")?;
+        string_field(violation, "severity")?;
+    }
+    Ok(())
 }
 
 #[test]

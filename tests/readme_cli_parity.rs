@@ -38,6 +38,19 @@ fn ee_binary() -> &'static str {
     env!("CARGO_BIN_EXE_ee")
 }
 
+fn trace_readme_cli_parity(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
+    tracing::info!(
+        workspace_id = "repo",
+        request_id = "readme_cli_parity_contract",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-3usjw.38"),
+        surface = "readme_cli_parity",
+        phase,
+        elapsed_ms,
+        degraded_codes = ?degraded_codes,
+        "README CLI parity contract checkpoint"
+    );
+}
+
 /// Return true when `token` starts a placeholder / argument and should
 /// terminate the command-path prefix walk.
 fn is_arg_or_placeholder(token: &str) -> bool {
@@ -54,7 +67,7 @@ fn is_arg_or_placeholder(token: &str) -> bool {
 /// when no subcommand tokens are present.
 fn parse_full_command_group(group: &str) -> Option<Vec<String>> {
     let tokens: Vec<&str> = group.split_ascii_whitespace().collect();
-    if tokens.first().map_or(true, |first| *first != "ee") {
+    if tokens.first().is_none_or(|first| *first != "ee") {
         return None;
     }
     let mut path = Vec::new();
@@ -89,10 +102,7 @@ fn split_backtick_groups(line: &str) -> Vec<(String, String)> {
     let mut groups: Vec<(String, String)> = Vec::new();
     let mut remaining = line;
     let mut preceding = String::new();
-    loop {
-        let Some(start) = remaining.find('`') else {
-            break;
-        };
+    while let Some(start) = remaining.find('`') {
         preceding.push_str(&remaining[..start]);
         let after_open = &remaining[start + 1..];
         let Some(end) = after_open.find('`') else {
@@ -110,6 +120,7 @@ fn split_backtick_groups(line: &str) -> Vec<(String, String)> {
 /// subcommand paths (each represented as a `Vec<String>` excluding the
 /// leading `ee` token).
 fn parse_readme_commands(readme: &str) -> Vec<Vec<String>> {
+    trace_readme_cli_parity("input", 0, &[]);
     let mut commands: BTreeSet<Vec<String>> = BTreeSet::new();
     for line in readme.lines() {
         if !line.starts_with("| `ee ") {
@@ -141,11 +152,14 @@ fn parse_readme_commands(readme: &str) -> Vec<Vec<String>> {
             commands.insert(combined);
         }
     }
-    commands.into_iter().collect()
+    let commands = commands.into_iter().collect();
+    trace_readme_cli_parity("dispatch", 0, &[]);
+    commands
 }
 
 /// Run `ee <args...> --help` and return a structured outcome.
 fn invoke_help(path: &[String]) -> Result<(), String> {
+    trace_readme_cli_parity("dependency_check", 0, &[]);
     let output = Command::new(ee_binary())
         .args(path)
         .arg("--help")
@@ -165,6 +179,7 @@ fn invoke_help(path: &[String]) -> Result<(), String> {
             path.join(" ")
         ));
     }
+    trace_readme_cli_parity("response", 0, &[]);
     Ok(())
 }
 

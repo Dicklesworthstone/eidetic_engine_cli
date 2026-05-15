@@ -22,8 +22,8 @@ use ee::db::{GraphSnapshotType, StoredMemory};
 use ee::graph::{GRAPH_EXPORT_SCHEMA_V1, GraphExportFormat, GraphExportReport, GraphExportStatus};
 use ee::models::{DomainError, IMPORT_CASS_SCHEMA_V1, RESPONSE_SCHEMA_V1};
 use ee::output::{
-    error_response_json, render_curate_candidates_json, render_memory_list_json,
-    render_memory_show_json, render_schema_export_json,
+    error_response_json, render_curate_candidates_json, render_mcp_manifest_json,
+    render_memory_list_json, render_memory_show_json, render_schema_export_json,
 };
 use serde_json::{Value, json};
 
@@ -43,6 +43,12 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
     ("ee.export.v1", "ee.export.v1.json"),
     ("ee.curate.candidates.v1", "ee.curate.candidates.v1.json"),
     ("ee.graph.export.v1", "ee.graph.export.v1.json"),
+    (
+        "ee.graph.snapshot_prune.v1",
+        "ee.graph.snapshot_prune.v1.json",
+    ),
+    ("ee.db.inspect.v1", "ee.db.inspect.v1.json"),
+    ("ee.mcp.manifest.v1", "ee.mcp.manifest.v1.json"),
 ];
 
 fn repo_root() -> PathBuf {
@@ -91,6 +97,221 @@ fn docs_schema_files_are_strict_draft_2020_12_documents() -> TestResult {
         ensure_json_bool(&schema, "/additionalProperties", false)?;
         ensure_field_presets(schema_id, &schema)?;
     }
+    Ok(())
+}
+
+#[test]
+fn curate_disposition_schema_documents_structural_adjustments() -> TestResult {
+    let schema_id = "ee.curate.disposition.v1";
+    let schema = read_json(&schema_path("ee.curate.disposition.v1.json"))?;
+
+    ensure_json_str(
+        &schema,
+        "/$schema",
+        "https://json-schema.org/draft/2020-12/schema",
+    )?;
+    ensure_json_str(&schema, "/title", schema_id)?;
+    ensure_json_bool(&schema, "/additionalProperties", false)?;
+    ensure_field_presets(schema_id, &schema)?;
+    ensure_json_str(
+        &schema,
+        "/properties/data/properties/schema/const",
+        schema_id,
+    )?;
+    ensure_json_str(
+        &schema,
+        "/properties/data/properties/structuralAdjustments/items/$ref",
+        "#/$defs/structuralAdjustment",
+    )?;
+
+    let required = schema
+        .pointer("/$defs/structuralAdjustment/required")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "structuralAdjustment.required must be an array".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for field in [
+        "candidateId",
+        "memoryId",
+        "onionLayer",
+        "maxLayer",
+        "isArticulationPoint",
+        "baseDecay",
+        "structuralMultiplier",
+        "adjustedDecay",
+        "adjustedTtlThresholdSeconds",
+        "rationale",
+    ] {
+        if !required.contains(&field) {
+            return Err(format!("structuralAdjustment.required missing {field}"));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn memory_impact_analysis_schema_documents_revision_frontiers() -> TestResult {
+    let schema_id = "ee.memory.impact_analysis.v1";
+    let schema = read_json(&schema_path("ee.memory.impact_analysis.v1.json"))?;
+
+    ensure_json_str(
+        &schema,
+        "/$schema",
+        "https://json-schema.org/draft/2020-12/schema",
+    )?;
+    ensure_json_str(&schema, "/title", schema_id)?;
+    ensure_json_bool(&schema, "/additionalProperties", false)?;
+    ensure_field_presets(schema_id, &schema)?;
+    ensure_json_str(&schema, "/properties/schema/const", schema_id)?;
+    ensure_json_str(
+        &schema,
+        "/properties/impactAnalysis/$ref",
+        "#/$defs/impactAnalysis",
+    )?;
+    ensure_json_str(
+        &schema,
+        "/properties/frontiers/items/$ref",
+        "#/$defs/frontierItem",
+    )?;
+    ensure_json_str(
+        &schema,
+        "/$defs/frontierItem/properties/evidence/properties/algorithm/const",
+        "dominance_frontiers",
+    )?;
+
+    let impact_required = schema
+        .pointer("/$defs/impactAnalysis/required")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "impactAnalysis.required must be an array".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for field in [
+        "immediateDominator",
+        "dominanceFrontier",
+        "affectedMemoryCount",
+        "validationStatus",
+    ] {
+        if !impact_required.contains(&field) {
+            return Err(format!("impactAnalysis.required missing {field}"));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn graph_snapshot_prune_schema_documents_archived_row_safety() -> TestResult {
+    let schema_id = "ee.graph.snapshot_prune.v1";
+    let schema = read_json(&schema_path("ee.graph.snapshot_prune.v1.json"))?;
+
+    ensure_json_str(
+        &schema,
+        "/$schema",
+        "https://json-schema.org/draft/2020-12/schema",
+    )?;
+    ensure_json_str(&schema, "/title", schema_id)?;
+    ensure_json_bool(&schema, "/additionalProperties", false)?;
+    ensure_field_presets(schema_id, &schema)?;
+    ensure_json_str(&schema, "/properties/schema/const", schema_id)?;
+    ensure_json_str(
+        &schema,
+        "/properties/command/const",
+        "maintenance graph-snapshot-prune",
+    )?;
+    ensure_json_str(
+        &schema,
+        "/properties/candidates/items/$ref",
+        "#/$defs/pruneCandidate",
+    )?;
+    ensure_json_str(&schema, "/properties/lock/$ref", "#/$defs/pruneLock")?;
+    ensure_json_str(
+        &schema,
+        "/$defs/pruneLock/properties/resourceType/const",
+        "graph_snapshot_prune",
+    )?;
+
+    let required = schema
+        .pointer("/required")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "graph snapshot prune required must be an array".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for field in [
+        "workspaceId",
+        "graphType",
+        "dryRun",
+        "retentionDays",
+        "cutoffTimestamp",
+        "candidateCount",
+        "prunedCount",
+        "candidateBytes",
+        "prunedBytes",
+        "lock",
+        "degraded",
+    ] {
+        if !required.contains(&field) {
+            return Err(format!("graph snapshot prune required missing {field}"));
+        }
+    }
+
+    let example = schema
+        .pointer("/examples/0")
+        .ok_or_else(|| "graph snapshot prune schema must include an example".to_owned())?;
+    validate_json_schema(example, &schema, &schema, "$.examples[0]")
+        .map_err(|error| format!("graph snapshot prune example invalid: {error}"))?;
+
+    Ok(())
+}
+
+#[test]
+fn db_inspect_schema_documents_read_only_database_surfaces() -> TestResult {
+    let schema_id = "ee.db.inspect.v1";
+    let schema = read_json(&schema_path("ee.db.inspect.v1.json"))?;
+
+    ensure_json_str(
+        &schema,
+        "/$schema",
+        "https://json-schema.org/draft/2020-12/schema",
+    )?;
+    ensure_json_str(&schema, "/title", schema_id)?;
+    ensure_json_bool(&schema, "/additionalProperties", false)?;
+    ensure_field_presets(schema_id, &schema)?;
+    ensure_json_str(&schema, "/properties/schema/const", RESPONSE_SCHEMA_V1)?;
+    ensure_json_str(
+        &schema,
+        "/properties/data/properties/command/type",
+        "string",
+    )?;
+    ensure_json_str(&schema, "/properties/data/properties/report/type", "object")?;
+
+    let examples = schema
+        .pointer("/examples")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "db inspect schema examples must be an array".to_owned())?;
+    let commands = examples
+        .iter()
+        .filter_map(|example| {
+            example
+                .pointer("/data/command")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    for command in ["db status", "db inspect", "db check-integrity"] {
+        if !commands.iter().any(|value| value == command) {
+            return Err(format!("db inspect schema examples missing {command}"));
+        }
+    }
+
+    for (index, example) in examples.iter().enumerate() {
+        validate_json_schema(example, &schema, &schema, &format!("$.examples[{index}]"))
+            .map_err(|error| format!("db inspect example {index} invalid: {error}"))?;
+    }
+
     Ok(())
 }
 
@@ -173,6 +394,12 @@ fn canonical_response_fixtures_match_docs_schemas() -> TestResult {
         ("ee.export.v1", export_sample()),
         ("ee.curate.candidates.v1", curate_candidates_sample()?),
         ("ee.graph.export.v1", graph_export_sample()),
+        ("ee.db.inspect.v1", db_inspect_sample()?),
+        (
+            "ee.mcp.manifest.v1",
+            serde_json::from_str(&render_mcp_manifest_json())
+                .map_err(|error| format!("mcp manifest sample invalid JSON: {error}"))?,
+        ),
     ];
 
     for (schema_id, response) in fixture_cases {
@@ -374,6 +601,14 @@ fn graph_export_sample() -> Value {
         "success": true,
         "data": report.data_json(),
     })
+}
+
+fn db_inspect_sample() -> Result<Value, String> {
+    let schema = read_json(&schema_path("ee.db.inspect.v1.json"))?;
+    schema
+        .pointer("/examples/0")
+        .cloned()
+        .ok_or_else(|| "ee.db.inspect.v1 schema missing examples[0]".to_owned())
 }
 
 fn validate_json_schema(

@@ -2,7 +2,7 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "rch_remote_required_fallback_prevented",
   "introduced_by": {
-    "bead": "bd-1zb7k.13.1",
+    "bead": "bd-1zb7k.13.4",
     "epic_letter": "C"
   },
   "surfaces": [
@@ -22,7 +22,8 @@
     "code": "rch_remote_required_fallback_prevented",
     "severity": "warning",
     "message_contains": [
-      "remote required fallback prevented"
+      "RCH_REQUIRE_REMOTE",
+      "no valid remote evidence"
     ],
     "repair_contains": "Fix remote worker availability",
     "repair_string": "Fix remote worker availability or unset the remote-required guard only with explicit approval."

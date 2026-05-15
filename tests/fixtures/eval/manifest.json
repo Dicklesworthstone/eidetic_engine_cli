@@ -1,0 +1,39 @@
+{
+  "schema": "ee.eval.fixture_manifest.v1",
+  "fixture_root": "tests/fixtures/eval",
+  "discovery_contract": {
+    "loader": "src/eval/runner.rs::discover_fixtures",
+    "executable_fixture_shape": "subdirectories containing scenario.json and source_memory.json",
+    "root_json_policy": "ignored_by_runner"
+  },
+  "fixtures": [
+    {
+      "id": "fx.async_migration.v1",
+      "path": "tests/fixtures/eval/async_migration"
+    },
+    {
+      "id": "fx.dangerous_cleanup.v1",
+      "path": "tests/fixtures/eval/dangerous_cleanup"
+    },
+    {
+      "id": "fx.data_size_tiers.v1",
+      "path": "tests/fixtures/eval/data_size_tiers"
+    },
+    {
+      "id": "fx.memory_poisoning.v1",
+      "path": "tests/fixtures/eval/memory_poisoning"
+    },
+    {
+      "id": "fx.metamorphic_evaluation.v1",
+      "path": "tests/fixtures/eval/metamorphic_evaluation"
+    },
+    {
+      "id": "fx.release_failure.v1",
+      "path": "tests/fixtures/eval/release_failure"
+    },
+    {
+      "id": "fx.semantic_model_admissibility.v1",
+      "path": "tests/fixtures/eval/semantic_model_admissibility"
+    }
+  ]
+}

@@ -19,6 +19,8 @@ use std::process::Command;
 
 type TestResult = Result<(), String>;
 
+const FIXTURE_ROOT_PLACEHOLDER: &str = "$EE_AGENT_FIXTURE_ROOT";
+
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
         Ok(())
@@ -52,8 +54,13 @@ fn canonical_json(raw: &str) -> Result<String, String> {
         .map_err(|error| format!("failed to canonicalize JSON: {error}"))
 }
 
+fn normalize_agent_fixture_paths(raw: &str) -> String {
+    raw.replace(env!("CARGO_MANIFEST_DIR"), FIXTURE_ROOT_PLACEHOLDER)
+}
+
 fn assert_json_golden(name: &str, actual: &str) -> TestResult {
-    let canonical = canonical_json(actual)?;
+    let normalized = normalize_agent_fixture_paths(actual);
+    let canonical = canonical_json(&normalized)?;
     let path = golden_path(name);
     if env::var("UPDATE_GOLDEN").is_ok() {
         if let Some(parent) = path.parent() {

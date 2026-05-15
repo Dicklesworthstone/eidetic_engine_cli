@@ -2,7 +2,7 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "rch_worker_topology_blocked",
   "introduced_by": {
-    "bead": "bd-1zb7k.13.1",
+    "bead": "bd-1zb7k.13.4",
     "epic_letter": "C"
   },
   "surfaces": [
@@ -11,8 +11,9 @@
   "severity": "warning",
   "repair_present": true,
   "trigger": {
-    "description": "Swarm brief collects RCH posture while workers are reachable but workspace path topology prevents remote execution.",
+    "description": "Swarm brief collects RCH posture while the fleet is remote-ready but the selected worker cannot map this workspace path topology.",
     "setup_commands": [
+      "# status payload includes workersHealthy=3, selectedWorker=css, and absolute canonical/alias roots that must be redacted",
       "# run swarm brief --include-rch in a workspace whose path dependencies cannot be mapped onto the selected worker"
     ],
     "invocation": "ee swarm brief --include-rch --workspace . --json"
@@ -21,7 +22,9 @@
     "code": "rch_worker_topology_blocked",
     "severity": "warning",
     "message_contains": [
-      "RCH-E327"
+      "RCH-E327",
+      "selected worker",
+      "root metadata redacted"
     ],
     "repair_contains": "worker path mapping",
     "repair_string": "Inspect RCH worker path mapping; remote workers are visible but this workspace cannot be mapped."

@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "preflight_patterns_unavailable",
+  "introduced_by": {
+    "bead": "bd-3usjw.6",
+    "epic_letter": "CLOSE_THE_GAP"
+  },
+  "surfaces": [
+    "preflight check"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The destructive-command pattern catalog cannot be loaded, so the preflight trauma guard cannot classify the command safely.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "move or corrupt tests/fixtures/destructive_patterns in an isolated fixture workspace"
+    ],
+    "invocation": "ee preflight check --cmd 'rm -rf build-output' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "preflight_patterns_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "destructive pattern",
+      "unavailable"
+    ],
+    "repair_contains": "Restore the destructive pattern catalog",
+    "repair_string": "Restore the destructive pattern catalog, then rerun ee preflight check --cmd <command> --json."
+  }
+}

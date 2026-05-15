@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "db_wal_stale",
+  "introduced_by": {
+    "bead": "bd-3usjw.1",
+    "epic_letter": "CLOSE_THE_GAP"
+  },
+  "surfaces": [
+    "db status"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A WAL sidecar exists next to the workspace database without a matching SHM sidecar.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "touch .ee/ghost.db-wal"
+    ],
+    "invocation": "ee db status --workspace . --database .ee/ghost.db --wal --json"
+  },
+  "expected_emission": {
+    "code": "db_wal_stale",
+    "severity": "medium",
+    "message_contains": [
+      "WAL sidecar",
+      "stale"
+    ],
+    "repair_contains": "ee init",
+    "repair_string": "ee init --workspace .",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}

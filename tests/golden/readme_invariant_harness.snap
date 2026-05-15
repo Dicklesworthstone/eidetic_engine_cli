@@ -1,0 +1,17 @@
+---
+surface: readme_invariant_harness
+bead: bd-3usjw.22
+schema: ee.closure_surface_golden.v1
+purpose: README prose invariants are mechanically extracted and paired with tests.
+primary_tests:
+  - tests/readme_invariant_harness.rs
+  - tests/readme_invariant_manifest_schema.rs
+manifest: tests/readme_invariants/manifest.toml
+invariants:
+  - README candidate sentences with trigger words or numeric units must have manifest coverage.
+  - Manifest entries must point to an existing test path or a tracked defer marker.
+  - Adding or removing README invariant prose without manifest updates must fail the harness.
+verified_by:
+  - cargo test --test readme_invariant_harness
+  - cargo test --test readme_invariant_manifest_schema
+

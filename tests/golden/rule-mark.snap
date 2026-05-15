@@ -1,0 +1,248 @@
+{
+  "markDryRun": {
+    "data": {
+      "auditId": null,
+      "changed": true,
+      "command": "rule mark",
+      "databasePath": "<DATABASE>",
+      "degraded": [],
+      "dryRun": true,
+      "evidence": {
+        "distinctHarmfulSources": 0,
+        "harmfulOutcomes": 0,
+        "helpfulOutcomes": 1,
+        "interveningHelpfulFromHarmfulSources": false,
+        "manualCurationApproved": false,
+        "protectedRule": false,
+        "reviewApproved": true,
+        "supersedingRuleId": null,
+        "validationContradictions": 0,
+        "validationPasses": 1
+      },
+      "indexJobId": null,
+      "indexStatus": "dry_run_not_queued",
+      "persisted": false,
+      "previousRule": {
+        "confidence": 0.85,
+        "content": "Run cargo fmt --check before release.",
+        "createdAt": "<TIMESTAMP>",
+        "evidence": {
+          "requirement": "validated rules require at least one source memory",
+          "sourceMemoryCount": 1,
+          "status": "attached",
+          "verified": false
+        },
+        "id": "<RULE_ID>",
+        "importance": 0.5,
+        "lastAppliedAt": null,
+        "lastValidatedAt": null,
+        "lifecycle": {
+          "isActive": true,
+          "isTerminal": false,
+          "maturity": "candidate",
+          "nextAction": "record outcomes or validate evidence"
+        },
+        "maturity": "candidate",
+        "negativeFeedbackCount": 0,
+        "positiveFeedbackCount": 0,
+        "protected": false,
+        "scope": "workspace",
+        "scopePattern": null,
+        "sourceMemoryIds": [
+          "<SOURCE_MEMORY_ID>"
+        ],
+        "supersededBy": null,
+        "tags": [
+          "release"
+        ],
+        "tombstonedAt": null,
+        "trustClass": "human_explicit",
+        "updatedAt": "<TIMESTAMP>",
+        "utility": 0.5,
+        "workspaceId": "<WORKSPACE_ID>"
+      },
+      "rule": {
+        "confidence": 0.91,
+        "content": "Run cargo fmt --check before release.",
+        "createdAt": "<TIMESTAMP>",
+        "evidence": {
+          "requirement": "validated rules require at least one source memory",
+          "sourceMemoryCount": 1,
+          "status": "verified",
+          "verified": true
+        },
+        "id": "<RULE_ID>",
+        "importance": 0.5,
+        "lastAppliedAt": null,
+        "lastValidatedAt": "<TIMESTAMP>",
+        "lifecycle": {
+          "isActive": true,
+          "isTerminal": false,
+          "maturity": "validated",
+          "nextAction": "monitor feedback and decay signals"
+        },
+        "maturity": "validated",
+        "negativeFeedbackCount": 0,
+        "positiveFeedbackCount": 1,
+        "protected": false,
+        "scope": "workspace",
+        "scopePattern": null,
+        "sourceMemoryIds": [
+          "<SOURCE_MEMORY_ID>"
+        ],
+        "supersededBy": null,
+        "tags": [
+          "release"
+        ],
+        "tombstonedAt": null,
+        "trustClass": "human_explicit",
+        "updatedAt": "<TIMESTAMP>",
+        "utility": 0.54,
+        "workspaceId": "<WORKSPACE_ID>"
+      },
+      "ruleId": "<RULE_ID>",
+      "schema": "ee.rule.mark.v1",
+      "status": "would_mark",
+      "transition": {
+        "action": "promote",
+        "allowed": true,
+        "auditRequired": true,
+        "confidenceDelta": 0.06,
+        "nextMaturity": "validated",
+        "priorMaturity": "candidate",
+        "reason": "candidate has helpful outcome, validation evidence, and explicit review approval",
+        "requiresCuration": false,
+        "trigger": "validation_passed",
+        "utilityDelta": 0.04
+      },
+      "version": "0.1.0",
+      "workspaceId": "<WORKSPACE_ID>",
+      "workspacePath": "<WORKSPACE>"
+    },
+    "schema": "ee.response.v1",
+    "success": true
+  },
+  "markApply": {
+    "data": {
+      "auditId": "<AUDIT_ID>",
+      "changed": true,
+      "command": "rule mark",
+      "databasePath": "<DATABASE>",
+      "degraded": [],
+      "dryRun": false,
+      "evidence": {
+        "distinctHarmfulSources": 0,
+        "harmfulOutcomes": 0,
+        "helpfulOutcomes": 1,
+        "interveningHelpfulFromHarmfulSources": false,
+        "manualCurationApproved": false,
+        "protectedRule": false,
+        "reviewApproved": true,
+        "supersedingRuleId": null,
+        "validationContradictions": 0,
+        "validationPasses": 1
+      },
+      "indexJobId": "<INDEX_JOB_ID>",
+      "indexStatus": "queued",
+      "persisted": true,
+      "previousRule": {
+        "confidence": 0.85,
+        "content": "Run cargo fmt --check before release.",
+        "createdAt": "<TIMESTAMP>",
+        "evidence": {
+          "requirement": "validated rules require at least one source memory",
+          "sourceMemoryCount": 1,
+          "status": "attached",
+          "verified": false
+        },
+        "id": "<RULE_ID>",
+        "importance": 0.5,
+        "lastAppliedAt": null,
+        "lastValidatedAt": null,
+        "lifecycle": {
+          "isActive": true,
+          "isTerminal": false,
+          "maturity": "candidate",
+          "nextAction": "record outcomes or validate evidence"
+        },
+        "maturity": "candidate",
+        "negativeFeedbackCount": 0,
+        "positiveFeedbackCount": 0,
+        "protected": false,
+        "scope": "workspace",
+        "scopePattern": null,
+        "sourceMemoryIds": [
+          "<SOURCE_MEMORY_ID>"
+        ],
+        "supersededBy": null,
+        "tags": [
+          "release"
+        ],
+        "tombstonedAt": null,
+        "trustClass": "human_explicit",
+        "updatedAt": "<TIMESTAMP>",
+        "utility": 0.5,
+        "workspaceId": "<WORKSPACE_ID>"
+      },
+      "rule": {
+        "confidence": 0.91,
+        "content": "Run cargo fmt --check before release.",
+        "createdAt": "<TIMESTAMP>",
+        "evidence": {
+          "requirement": "validated rules require at least one source memory",
+          "sourceMemoryCount": 1,
+          "status": "verified",
+          "verified": true
+        },
+        "id": "<RULE_ID>",
+        "importance": 0.5,
+        "lastAppliedAt": null,
+        "lastValidatedAt": "<TIMESTAMP>",
+        "lifecycle": {
+          "isActive": true,
+          "isTerminal": false,
+          "maturity": "validated",
+          "nextAction": "monitor feedback and decay signals"
+        },
+        "maturity": "validated",
+        "negativeFeedbackCount": 0,
+        "positiveFeedbackCount": 1,
+        "protected": false,
+        "scope": "workspace",
+        "scopePattern": null,
+        "sourceMemoryIds": [
+          "<SOURCE_MEMORY_ID>"
+        ],
+        "supersededBy": null,
+        "tags": [
+          "release"
+        ],
+        "tombstonedAt": null,
+        "trustClass": "human_explicit",
+        "updatedAt": "<TIMESTAMP>",
+        "utility": 0.54,
+        "workspaceId": "<WORKSPACE_ID>"
+      },
+      "ruleId": "<RULE_ID>",
+      "schema": "ee.rule.mark.v1",
+      "status": "marked",
+      "transition": {
+        "action": "promote",
+        "allowed": true,
+        "auditRequired": true,
+        "confidenceDelta": 0.06,
+        "nextMaturity": "validated",
+        "priorMaturity": "candidate",
+        "reason": "candidate has helpful outcome, validation evidence, and explicit review approval",
+        "requiresCuration": false,
+        "trigger": "validation_passed",
+        "utilityDelta": 0.04
+      },
+      "version": "0.1.0",
+      "workspaceId": "<WORKSPACE_ID>",
+      "workspacePath": "<WORKSPACE>"
+    },
+    "schema": "ee.response.v1",
+    "success": true
+  }
+}

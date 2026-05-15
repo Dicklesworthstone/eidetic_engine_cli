@@ -127,11 +127,20 @@ mod context_pack_dual_render;
 #[path = "contracts/schema_roundtrip.rs"]
 mod schema_roundtrip;
 
+#[path = "contracts/singleflight_key_schema.rs"]
+mod singleflight_key_schema;
+
 #[path = "contracts/graph_schemas_v1.rs"]
 mod graph_schemas_v1;
 
+#[path = "contracts/graph_additive_only.rs"]
+mod graph_additive_only;
+
 #[path = "contracts/graph_config_behavior.rs"]
 mod graph_config_behavior;
+
+#[path = "contracts/cli_help_completeness.rs"]
+mod cli_help_completeness;
 
 #[path = "contracts/audit_event_coverage.rs"]
 mod audit_event_coverage;

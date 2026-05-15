@@ -12,7 +12,7 @@ expression: status
       "status": "not_inspected",
       "summary": {
         "detectedCount": 0,
-        "totalCount": 23
+        "totalCount": 22
       }
     },
     "capabilities": {
@@ -224,6 +224,14 @@ expression: status
           "maintenance",
           "agent_detection"
         ]
+      },
+      "workspace": {
+        "storage": {
+          "checksPassed": 1,
+          "fallback": null,
+          "reason": null,
+          "status": "ok"
+        }
       }
     },
     "runtime": {

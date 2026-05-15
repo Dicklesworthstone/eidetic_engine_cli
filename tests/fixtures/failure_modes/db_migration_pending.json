@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "db_migration_pending",
+  "introduced_by": {
+    "bead": "bd-3usjw.1",
+    "epic_letter": "CLOSE_THE_GAP"
+  },
+  "surfaces": [
+    "db status"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A database opens, but at least one compiled migration has not been applied.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "ee diag database-skew --workspace . --output-database ./db-migration-pending.db --skew schema-migration-required --json"
+    ],
+    "invocation": "ee db status --workspace . --database ./db-migration-pending.db --json"
+  },
+  "expected_emission": {
+    "code": "db_migration_pending",
+    "severity": "medium",
+    "message_contains": [
+      "pending migrations",
+      "db inspection"
+    ],
+    "repair_contains": "ee init",
+    "repair_string": "ee init --workspace .",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}

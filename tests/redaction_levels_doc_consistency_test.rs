@@ -139,3 +139,20 @@ fn doc_cross_references_test_event_kind() -> TestResult {
         "docs/redaction_levels.md must declare the canonical test-event `kind: \"redaction_apply\"`",
     )
 }
+
+#[test]
+fn doc_does_not_claim_unregistered_redaction_env_override() -> TestResult {
+    let doc = read_doc()?;
+    let env_registry_doc =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/env_vars.md"))
+            .map_err(|e| format!("read docs/env_vars.md: {e}"))?;
+
+    if doc.contains("`EE_REDACTION_") {
+        ensure(
+            env_registry_doc.contains("`EE_REDACTION_"),
+            "docs/redaction_levels.md claims an `EE_REDACTION_*` override, but docs/env_vars.md has no registered redaction env override",
+        )?;
+    }
+
+    Ok(())
+}

@@ -1,0 +1,7 @@
+{
+  "schema": "ee.closure_lint.fixture_obligation_case.v1",
+  "case": "emit_without_fixture",
+  "bead_id": "bd-3usjw.missing",
+  "description": "Part II implements-surface bead declares code=missing_fixture_code without shipping tests/fixtures/failure_modes/missing_fixture_code.json.",
+  "expected": "fail"
+}

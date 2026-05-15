@@ -1,0 +1,15 @@
+<!-- perf:begin hardware-class=mac-m3-pro baseline=benches/baselines/perf_v0_2.json -->
+| Operation | Hardware class | p50 | p99 |
+|---|---|---:|---:|
+| `ee remember` (single record) | `mac-m3-pro` | 8 ms | 22 ms |
+| `ee search "<q>"` (hybrid) | `mac-m3-pro` | 38 ms | 110 ms |
+| `ee context "<task>"` (markdown, 4k tokens) | `mac-m3-pro` | 95 ms | 240 ms |
+| `ee why <id>` | `mac-m3-pro` | 25 ms | 100 ms |
+| `ee init --workspace <dir>` (clean) | `mac-m3-pro` | 100 ms | 250 ms |
+| `ee audit timeline --limit 1000` | `mac-m3-pro` | 35 ms | 100 ms |
+| `ee import cass --limit 50` (cold) | `mac-m3-pro` | 4.1 s | 11 s |
+| `ee graph centrality-refresh` (PageRank, 5k links) | `mac-m3-pro` | 350 ms | 2.0 s |
+| `ee index rebuild` (full) | `mac-m3-pro` | 18 s | 41 s |
+| 4 concurrent audited memory writers | `mac-m3-pro` | 120 ms | 350 ms |
+Last synced: 2026-05-13T12:52:12Z from sha256:84433f76b5ae84ba96bb3546a75d432175c2fd0f1c477dff03cb59a31b7ab7e6
+<!-- perf:end -->

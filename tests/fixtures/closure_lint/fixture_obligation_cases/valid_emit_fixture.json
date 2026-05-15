@@ -1,0 +1,7 @@
+{
+  "schema": "ee.closure_lint.fixture_obligation_case.v1",
+  "case": "valid_emit_fixture",
+  "bead_id": "bd-3usjw.valid",
+  "description": "Part II implements-surface bead declares code=valid_fixture_code and lists tests/fixtures/failure_modes/valid_fixture_code.json in FILE SURFACE.",
+  "expected": "pass"
+}

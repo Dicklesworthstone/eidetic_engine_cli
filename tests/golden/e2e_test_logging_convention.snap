@@ -1,0 +1,28 @@
+{
+  "schema": "ee.test_logging_convention.golden.v1",
+  "surface": "e2e_test_logging_convention",
+  "beadId": "bd-3usjw.55",
+  "helper": "tests/support/test_tracing.rs",
+  "exemplarTest": "tests/test_tracing_support_smoke.rs",
+  "logGolden": "tests/golden/logs/test_tracing_support.jsonl.golden",
+  "requiredFields": [
+    "actual",
+    "bead_id",
+    "degraded_codes",
+    "elapsed_ms",
+    "expected",
+    "fixture_name",
+    "message",
+    "phase",
+    "request_id",
+    "surface",
+    "test_name",
+    "workspace_id"
+  ],
+  "phases": [
+    "setup",
+    "exercise",
+    "verify",
+    "teardown"
+  ]
+}

@@ -106,6 +106,7 @@ fn build_persisted_pack() -> Result<PackFixture, String> {
         include_stale: false,
         memory_scope: MemoryScope::Swarm,
         strict_scope: false,
+        ppr_weight: None,
         pagination: None,
         coordination_snapshot_path: None,
         coordination_stale_after_ms: ee::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,

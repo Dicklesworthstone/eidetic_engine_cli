@@ -1,0 +1,17 @@
+---
+surface: verify_time_budget
+bead: bd-3usjw.39
+schema: ee.closure_surface_golden.v1
+purpose: scripts/verify.sh reports and enforces per-stage elapsed-time budgets.
+budget_manifest: scripts/verify-budget.toml
+primary_tests:
+  - tests/verification_drift_guard.rs
+checks:
+  - Every verify.sh run_stage entry has a matching budget manifest stage.
+  - Every stage declares expected_seconds_p50 and regression_factor = 1.5.
+  - Non-benchmark p50 budgets sum to the 10-minute readiness target.
+  - Budget status reports ok, advisory, or fail for each stage.
+verified_by:
+  - cargo test --test verification_drift_guard verify_budget
+  - cargo test --test verification_drift_guard verify_sh_reports_and_enforces_stage_budgets
+

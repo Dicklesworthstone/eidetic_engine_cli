@@ -11,31 +11,57 @@ const TRIGGER_PATTERN: &str = r"(?i)\b(always|never|every|must|cannot|determinis
 const QUANT_PATTERN: &str =
     r"(?i)\b\d+(\.\d+)?\s*(ms|millisecond|seconds?|minutes?|hours?|kB|MB|GB|TB|tokens?)\b";
 
+fn trace_readme_invariant_harness(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
+    tracing::info!(
+        workspace_id = "repo",
+        request_id = "readme_invariant_harness_contract",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-3usjw.22"),
+        surface = "readme_invariant_harness",
+        phase,
+        elapsed_ms,
+        degraded_codes = ?degraded_codes,
+        "README invariant harness checkpoint"
+    );
+}
+
 #[test]
 fn readme_invariant_harness_covers_all_candidates() {
-    let trigger = Regex::new(TRIGGER_PATTERN).expect("trigger regex compiles");
-    let quant = Regex::new(QUANT_PATTERN).expect("quantitative regex compiles");
+    trace_readme_invariant_harness("input", 0, &[]);
+    let trigger = match Regex::new(TRIGGER_PATTERN) {
+        Ok(regex) => regex,
+        Err(err) => panic!("trigger regex did not compile: {err}"),
+    };
+    let quant = match Regex::new(QUANT_PATTERN) {
+        Ok(regex) => regex,
+        Err(err) => panic!("quantitative regex did not compile: {err}"),
+    };
 
-    let document = MANIFEST
-        .parse::<DocumentMut>()
-        .expect("manifest TOML parses");
+    let document = match MANIFEST.parse::<DocumentMut>() {
+        Ok(document) => document,
+        Err(err) => panic!("manifest TOML did not parse: {err}"),
+    };
 
-    let scrubber: Vec<Regex> = document["scrubber"]["denylist_regexes"]
-        .as_array()
-        .expect("scrubber denylist must be an array")
+    let denylist_regexes = match document["scrubber"]["denylist_regexes"].as_array() {
+        Some(regexes) => regexes,
+        None => panic!("scrubber denylist must be an array"),
+    };
+    let scrubber: Vec<Regex> = denylist_regexes
         .iter()
         .map(|value| {
-            let pattern = value
-                .as_str()
-                .expect("scrubber entry must be a TOML string");
+            let pattern = match value.as_str() {
+                Some(pattern) => pattern,
+                None => panic!("scrubber entry must be a TOML string"),
+            };
             Regex::new(pattern)
                 .unwrap_or_else(|err| panic!("scrubber pattern {pattern:?} did not compile: {err}"))
         })
         .collect();
 
-    let manifest_hashes: HashSet<String> = document["invariant"]
-        .as_array_of_tables()
-        .expect("manifest has [[invariant]] entries")
+    let invariant_entries = match document["invariant"].as_array_of_tables() {
+        Some(entries) => entries,
+        None => panic!("manifest has no [[invariant]] entries"),
+    };
+    let manifest_hashes: HashSet<String> = invariant_entries
         .iter()
         .filter_map(|table| table.get("sentence_hash").and_then(|item| item.as_str()))
         .map(str::to_owned)
@@ -82,6 +108,15 @@ fn readme_invariant_harness_covers_all_candidates() {
         }
     }
 
+    trace_readme_invariant_harness(
+        "response",
+        0,
+        if missing.is_empty() {
+            &[]
+        } else {
+            &["readme_invariant_manifest_gap"]
+        },
+    );
     assert!(
         missing.is_empty(),
         "{} README invariant(s) without manifest coverage:\n\n{}",

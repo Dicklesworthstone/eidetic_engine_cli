@@ -15,11 +15,26 @@ struct Invariant<'a> {
     verify: &'a InlineTable,
 }
 
+fn trace_readme_invariant_harness(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
+    tracing::info!(
+        workspace_id = "repo",
+        request_id = "readme_invariant_manifest_schema_contract",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-3usjw.22"),
+        surface = "readme_invariant_harness",
+        phase,
+        elapsed_ms,
+        degraded_codes = ?degraded_codes,
+        "README invariant manifest schema checkpoint"
+    );
+}
+
 #[test]
 fn readme_invariant_manifest_schema_is_pinned() {
-    let document = MANIFEST
-        .parse::<DocumentMut>()
-        .expect("manifest TOML parses");
+    trace_readme_invariant_harness("input", 0, &[]);
+    let document = match MANIFEST.parse::<DocumentMut>() {
+        Ok(document) => document,
+        Err(error) => panic!("manifest TOML parses: {error}"),
+    };
     assert_eq!(document["schema"].as_str(), Some("ee.readme_invariants.v1"));
     assert!(
         document["scrubber"]["denylist_regexes"]
@@ -28,9 +43,10 @@ fn readme_invariant_manifest_schema_is_pinned() {
         "scrubber denylist must be explicit"
     );
 
-    let invariants = document["invariant"]
-        .as_array_of_tables()
-        .expect("manifest has [[invariant]] entries");
+    let invariants = match document["invariant"].as_array_of_tables() {
+        Some(invariants) => invariants,
+        None => panic!("manifest has [[invariant]] entries"),
+    };
     assert!(
         !invariants.is_empty(),
         "manifest must seed at least one invariant"
@@ -49,6 +65,15 @@ fn readme_invariant_manifest_schema_is_pinned() {
         }
     }
 
+    trace_readme_invariant_harness(
+        "response",
+        0,
+        if failures.is_empty() {
+            &[]
+        } else {
+            &["readme_invariant_manifest_schema_drift"]
+        },
+    );
     assert!(
         failures.is_empty(),
         "README invariant manifest failures:\n{}",

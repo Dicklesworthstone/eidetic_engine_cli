@@ -9,7 +9,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -51,10 +51,26 @@ fn init_workspace(dir: &Path) {
     );
 }
 
+fn trace_db_inspect(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
+    tracing::info!(
+        workspace_id = "repo",
+        request_id = "db_inspection_integration_contract",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-3usjw.1"),
+        surface = "db_inspect",
+        phase,
+        elapsed_ms,
+        degraded_codes = ?degraded_codes,
+        "database inspection contract checkpoint"
+    );
+}
+
 fn run_cli(args: Vec<OsString>) -> (ee::models::ProcessExitCode, String) {
+    let started = Instant::now();
+    trace_db_inspect("dispatch", 0, &[]);
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let exit = ee::cli::run(args, &mut stdout, &mut stderr);
+    trace_db_inspect("response", started.elapsed().as_millis() as u64, &[]);
     (exit, String::from_utf8_lossy(&stdout).into_owned())
 }
 
@@ -204,6 +220,192 @@ fn db_status_counts_includes_per_table_row_counts_when_requested() {
 }
 
 #[test]
+fn db_status_reports_migration_pending_with_exit_8() {
+    let dir = scenario_dir("status_migration_pending");
+    init_workspace(&dir);
+    let skewed_db = dir.join("schema-migration-required.db");
+
+    let (skew_exit, skew_stdout) = run_cli(vec![
+        OsString::from("ee"),
+        OsString::from("diag"),
+        OsString::from("database-skew"),
+        OsString::from("--workspace"),
+        OsString::from(&dir),
+        OsString::from("--output-database"),
+        OsString::from(&skewed_db),
+        OsString::from("--skew"),
+        OsString::from("schema-migration-required"),
+        OsString::from("--json"),
+    ]);
+    assert_eq!(
+        skew_exit,
+        ee::models::ProcessExitCode::Success,
+        "stdout={skew_stdout}"
+    );
+
+    let (exit, stdout) = run_cli(vec![
+        OsString::from("ee"),
+        OsString::from("db"),
+        OsString::from("status"),
+        OsString::from("--workspace"),
+        OsString::from(&dir),
+        OsString::from("--database"),
+        OsString::from(&skewed_db),
+        OsString::from("--json"),
+    ]);
+    assert_eq!(
+        exit,
+        ee::models::ProcessExitCode::MigrationRequired,
+        "stdout={stdout}"
+    );
+    let parsed = parse_response(&stdout);
+    assert_eq!(parsed["success"], Value::Bool(false));
+    assert!(
+        parsed["degraded"].as_array().is_some_and(|entries| entries
+            .iter()
+            .any(|entry| entry["code"] == Value::String("db_migration_pending".into()))),
+        "expected db_migration_pending degraded entry in {parsed}"
+    );
+    let report = parsed["data"]["report"].clone();
+    assert_eq!(report["needsMigration"], Value::Bool(true));
+    assert!(
+        report["pendingMigrationVersions"]
+            .as_array()
+            .is_some_and(|pending| !pending.is_empty()),
+        "expected pending migrations in {report}"
+    );
+}
+
+#[test]
+fn db_status_reports_stale_wal_sidecar() {
+    let dir = scenario_dir("status_stale_wal");
+    fs::create_dir_all(dir.join(".ee")).expect("create workspace storage dir");
+    let db_path = dir.join(".ee").join("ghost.db");
+    let mut wal_path = db_path.as_os_str().to_os_string();
+    wal_path.push("-wal");
+    fs::File::create(PathBuf::from(wal_path)).expect("create empty wal sidecar");
+
+    let (exit, stdout) = run_cli(vec![
+        OsString::from("ee"),
+        OsString::from("db"),
+        OsString::from("status"),
+        OsString::from("--workspace"),
+        OsString::from(&dir),
+        OsString::from("--database"),
+        OsString::from(&db_path),
+        OsString::from("--wal"),
+        OsString::from("--json"),
+    ]);
+    assert_eq!(
+        exit,
+        ee::models::ProcessExitCode::Success,
+        "stdout={stdout}"
+    );
+    let parsed = parse_response(&stdout);
+    assert_eq!(parsed["success"], Value::Bool(false));
+    assert!(
+        parsed["degraded"].as_array().is_some_and(|entries| entries
+            .iter()
+            .any(|entry| entry["code"] == Value::String("db_wal_stale".into()))),
+        "expected db_wal_stale degraded entry in {parsed}"
+    );
+    let report = parsed["data"]["report"].clone();
+    assert_eq!(report["exists"], Value::Bool(false));
+    assert_eq!(report["walFileExists"], Value::Bool(true));
+    assert_eq!(report["shmFileExists"], Value::Bool(false));
+}
+
+#[test]
+fn db_inspect_returns_limited_rows_from_allowlisted_table() {
+    let dir = scenario_dir("inspect_workspaces");
+    init_workspace(&dir);
+
+    let (exit, stdout) = run_cli(vec![
+        OsString::from("ee"),
+        OsString::from("db"),
+        OsString::from("inspect"),
+        OsString::from("workspaces"),
+        OsString::from("--workspace"),
+        OsString::from(&dir),
+        OsString::from("--limit"),
+        OsString::from("1"),
+        OsString::from("--json"),
+    ]);
+    assert_eq!(
+        exit,
+        ee::models::ProcessExitCode::Success,
+        "stdout={stdout}"
+    );
+    let parsed = parse_response(&stdout);
+    assert_eq!(
+        parsed["data"]["command"],
+        Value::String("db inspect".into())
+    );
+    let report = parsed["data"]["report"].clone();
+    assert_eq!(report["table"], Value::String("workspaces".into()));
+    assert_eq!(report["exists"], Value::Bool(true));
+    assert_eq!(report["limit"], Value::from(1));
+    assert_eq!(report["returnedRowCount"], Value::from(1));
+    assert!(
+        report["tableRowCount"].as_i64().unwrap_or(0) >= 1,
+        "expected real table row count in {report}"
+    );
+    assert!(
+        report["columns"]
+            .as_array()
+            .is_some_and(|columns| columns.iter().any(|column| column.as_str() == Some("id"))),
+        "expected workspaces.id column in {report}"
+    );
+    let row = report["rows"]
+        .as_array()
+        .and_then(|rows| rows.first())
+        .unwrap_or_else(|| panic!("expected one row in {report}"));
+    assert!(
+        row["values"]["id"].as_str().is_some(),
+        "expected row values to include workspace id: {row}"
+    );
+    assert!(
+        row.get("sourceUri").is_some(),
+        "each inspected row should carry sourceUri when applicable, even if null"
+    );
+}
+
+#[test]
+fn db_inspect_rejects_unknown_table_without_running_arbitrary_sql() {
+    let dir = scenario_dir("inspect_unknown");
+    init_workspace(&dir);
+
+    let (exit, stdout) = run_cli(vec![
+        OsString::from("ee"),
+        OsString::from("db"),
+        OsString::from("inspect"),
+        OsString::from("workspaces;DROP TABLE workspaces"),
+        OsString::from("--workspace"),
+        OsString::from(&dir),
+        OsString::from("--json"),
+    ]);
+    assert_eq!(exit, ee::models::ProcessExitCode::Storage);
+    let parsed = parse_response(&stdout);
+    assert_eq!(parsed["success"], Value::Bool(false));
+    let report = parsed["data"]["report"].clone();
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("was not found"),
+        "expected unknown-table error in {report}"
+    );
+    assert!(
+        report["availableTables"]
+            .as_array()
+            .is_some_and(|tables| tables
+                .iter()
+                .any(|table| table.as_str() == Some("workspaces"))),
+        "expected available table list in {report}"
+    );
+}
+
+#[test]
 fn db_check_passes_for_freshly_initialized_database() {
     let dir = scenario_dir("check_ok");
     init_workspace(&dir);
@@ -264,6 +466,36 @@ fn db_check_quick_check_runs_without_foreign_key_check() {
         Value::Null,
         "quick check should not run foreign-key check"
     );
+}
+
+#[test]
+fn db_check_integrity_alias_runs_full_integrity_contract() {
+    let dir = scenario_dir("check_integrity_alias");
+    init_workspace(&dir);
+
+    let (exit, stdout) = run_cli(vec![
+        OsString::from("ee"),
+        OsString::from("db"),
+        OsString::from("check-integrity"),
+        OsString::from("--workspace"),
+        OsString::from(&dir),
+        OsString::from("--json"),
+    ]);
+    assert_eq!(
+        exit,
+        ee::models::ProcessExitCode::Success,
+        "stdout={stdout}"
+    );
+    let parsed = parse_response(&stdout);
+    assert_eq!(
+        parsed["data"]["command"],
+        Value::String("db check-integrity".into())
+    );
+    let report = parsed["data"]["report"].clone();
+    assert_eq!(report["passed"], Value::Bool(true));
+    assert_eq!(report["checkType"], Value::String("integrity_check".into()));
+    assert_eq!(report["integrityPassed"], Value::Bool(true));
+    assert_eq!(report["foreignKeyPassed"], Value::Bool(true));
 }
 
 #[test]

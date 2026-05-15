@@ -1,0 +1,19 @@
+---
+surface: bead_obsolescence_pass
+bead: bd-3usjw.41
+schema: ee.closure_surface_golden.v1
+purpose: scripts/bead-obsolescence.sh emits read-only advisory candidates for stale open beads.
+command: scripts/bead-obsolescence.sh --json
+report: .bead-obsolescence-report.json
+output_schema: ee.bead.obsolescence.v1
+checks:
+  - The script is advisory-only and does not mutate Beads.
+  - Candidate selection uses daysSinceUpdate, critical-path exclusions, recent comments, and in-progress sibling checks.
+  - The default stale threshold is 14 days.
+  - Lower test thresholds can surface current candidates without changing the default policy.
+verified_by:
+  - bash -n scripts/bead-obsolescence.sh
+  - shellcheck scripts/bead-obsolescence.sh
+  - scripts/bead-obsolescence.sh --json
+  - scripts/bead-obsolescence.sh --json --stale-days 1
+

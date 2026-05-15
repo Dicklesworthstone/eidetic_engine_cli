@@ -1,0 +1,19 @@
+---
+surface: gemini_pane_archive
+bead: bd-3usjw.16
+schema: ee.closure_surface_golden.v1
+purpose: root GEMINI_PANE review reports are archived under docs/archive/agent_reviews.
+archived_reports:
+  - docs/archive/agent_reviews/gemini_pane01_2026-05-10.md
+  - docs/archive/agent_reviews/gemini_pane10_2026-05-10.md
+  - docs/archive/agent_reviews/gemini_pane14_2026-05-10.md
+archive_index: docs/archive/agent_reviews/README.md
+checks:
+  - Repo root has no GEMINI_PANE*.md files.
+  - Archived files preserve the original report contents by git hash.
+  - README.md, AGENTS.md, docs, scripts, tests, and CI no longer reference the old root filenames.
+verified_by:
+  - find . -maxdepth 1 -name 'GEMINI_PANE*.md'
+  - git hash-object comparison against HEAD content for all archived reports
+  - rg old GEMINI_PANE names over README.md AGENTS.md docs scripts tests .github
+
