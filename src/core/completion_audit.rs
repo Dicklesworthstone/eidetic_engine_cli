@@ -109,6 +109,65 @@ pub struct CompletionChecklist {
     pub summary: ChecklistSummary,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceRecordStatus {
+    Pass,
+    Fail,
+    CapacityBlocked,
+    StaticOnly,
+    Stale,
+    Missing,
+    Inconclusive,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementSupport {
+    Direct,
+    Supporting,
+    Weak,
+    Blocked,
+    Stale,
+    Missing,
+    Contradicted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceRecord {
+    pub kind: String,
+    pub target: String,
+    pub source: String,
+    pub status: EvidenceRecordStatus,
+    pub strength: String,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceBundle {
+    pub records: Vec<EvidenceRecord>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MissingExpectation {
+    pub kind: String,
+    pub target: String,
+    pub required: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequirementEvidence {
+    pub requirement_id: String,
+    pub support: RequirementSupport,
+    pub confidence: String,
+    pub evidence_records: Vec<EvidenceRecord>,
+    pub missing_expectations: Vec<MissingExpectation>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RequirementAccumulator {
     kind: RequirementKind,
@@ -232,6 +291,140 @@ pub fn extract_completion_checklist(
         },
         requirements,
         unknown_clauses,
+    }
+}
+
+#[must_use]
+pub fn evaluate_completion_evidence(
+    checklist: &CompletionChecklist,
+    bundle: &EvidenceBundle,
+) -> Vec<RequirementEvidence> {
+    checklist
+        .requirements
+        .iter()
+        .map(|requirement| evaluate_requirement_evidence(requirement, bundle))
+        .collect()
+}
+
+fn evaluate_requirement_evidence(
+    requirement: &CompletionRequirement,
+    bundle: &EvidenceBundle,
+) -> RequirementEvidence {
+    let mut records = Vec::new();
+    let mut missing = Vec::new();
+
+    for expectation in &requirement.evidence_expectations {
+        let matches = matching_records(bundle, &expectation.kind, &expectation.target);
+        if matches.is_empty() {
+            missing.push(MissingExpectation {
+                kind: expectation.kind.clone(),
+                target: expectation.target.clone(),
+                required: expectation.strength == "direct",
+            });
+        }
+        records.extend(matches);
+    }
+
+    for expectation in &requirement.verification_expectations {
+        let matches = matching_records(bundle, &expectation.kind, &expectation.target);
+        if matches.is_empty() {
+            missing.push(MissingExpectation {
+                kind: expectation.kind.clone(),
+                target: expectation.target.clone(),
+                required: expectation.required,
+            });
+        }
+        records.extend(matches);
+    }
+
+    records.sort();
+    records.dedup();
+    missing.sort();
+    missing.dedup();
+
+    let support = classify_requirement_support(&records, &missing);
+    RequirementEvidence {
+        requirement_id: requirement.id.clone(),
+        support,
+        confidence: support_confidence(support).to_owned(),
+        evidence_records: records,
+        missing_expectations: missing,
+    }
+}
+
+fn matching_records(bundle: &EvidenceBundle, kind: &str, target: &str) -> Vec<EvidenceRecord> {
+    bundle
+        .records
+        .iter()
+        .filter(|record| record.kind == kind && target_matches(target, &record.target))
+        .cloned()
+        .collect()
+}
+
+fn target_matches(expected: &str, observed: &str) -> bool {
+    expected == observed || observed == "*" || expected == "*"
+}
+
+fn classify_requirement_support(
+    records: &[EvidenceRecord],
+    missing: &[MissingExpectation],
+) -> RequirementSupport {
+    if records
+        .iter()
+        .any(|record| record.status == EvidenceRecordStatus::Fail)
+    {
+        return RequirementSupport::Contradicted;
+    }
+    if records
+        .iter()
+        .any(|record| record.status == EvidenceRecordStatus::CapacityBlocked)
+    {
+        return RequirementSupport::Blocked;
+    }
+    if records
+        .iter()
+        .any(|record| record.status == EvidenceRecordStatus::Stale)
+    {
+        return RequirementSupport::Stale;
+    }
+    if records
+        .iter()
+        .any(|record| record.status == EvidenceRecordStatus::StaticOnly)
+    {
+        return RequirementSupport::Weak;
+    }
+    if !missing.is_empty() {
+        return RequirementSupport::Missing;
+    }
+    if records
+        .iter()
+        .any(|record| record.status == EvidenceRecordStatus::Inconclusive)
+    {
+        return RequirementSupport::Weak;
+    }
+    if records
+        .iter()
+        .any(|record| record.status == EvidenceRecordStatus::Pass && record.strength == "direct")
+    {
+        return RequirementSupport::Direct;
+    }
+    if records.iter().any(|record| {
+        record.status == EvidenceRecordStatus::Pass && record.strength == "supporting"
+    }) {
+        return RequirementSupport::Supporting;
+    }
+    RequirementSupport::Missing
+}
+
+fn support_confidence(support: RequirementSupport) -> &'static str {
+    match support {
+        RequirementSupport::Direct => "direct",
+        RequirementSupport::Supporting => "supporting",
+        RequirementSupport::Weak => "weak",
+        RequirementSupport::Blocked => "blocked",
+        RequirementSupport::Stale => "stale",
+        RequirementSupport::Missing => "missing",
+        RequirementSupport::Contradicted => "contradicted",
     }
 }
 
@@ -808,6 +1001,47 @@ mod tests {
             .any(|requirement| requirement.summary.contains(needle))
     }
 
+    fn requirement_with_summary<'a>(
+        checklist: &'a CompletionChecklist,
+        needle: &str,
+    ) -> &'a CompletionRequirement {
+        for requirement in &checklist.requirements {
+            if requirement.summary.contains(needle) {
+                return requirement;
+            }
+        }
+        panic!("missing requirement containing {needle}");
+    }
+
+    fn evidence_for_requirement<'a>(
+        evidence: &'a [RequirementEvidence],
+        requirement_id: &str,
+    ) -> &'a RequirementEvidence {
+        for item in evidence {
+            if item.requirement_id == requirement_id {
+                return item;
+            }
+        }
+        panic!("missing evidence for requirement {requirement_id}");
+    }
+
+    fn record(
+        kind: &str,
+        target: &str,
+        source: &str,
+        status: EvidenceRecordStatus,
+        strength: &str,
+    ) -> EvidenceRecord {
+        EvidenceRecord {
+            kind: kind.to_owned(),
+            target: target.to_owned(),
+            source: source.to_owned(),
+            status,
+            strength: strength.to_owned(),
+            summary: format!("{source}: {kind} {target}"),
+        }
+    }
+
     #[test]
     fn broad_swarm_objective_extracts_explicit_obligations_and_unknowns() {
         let objective = "First read ALL of the AGENTS.md file and README.md file. \
@@ -912,5 +1146,141 @@ mod tests {
                 .iter()
                 .all(|clause| clause.reason != "contradictory_instruction:AGENTS.md")
         );
+    }
+
+    #[test]
+    fn evidence_adapter_distinguishes_remote_rch_pass() {
+        let checklist = extract_completion_checklist(
+            "objective",
+            "Run all cargo builds and tests through RCH.",
+        );
+        let requirement = requirement_with_summary(&checklist, "RCH only");
+        let bundle = EvidenceBundle {
+            records: vec![
+                record(
+                    "rch",
+                    "remote build metadata",
+                    "rch job 159 on csd",
+                    EvidenceRecordStatus::Pass,
+                    "direct",
+                ),
+                record(
+                    "remote_rch",
+                    "cargo/build/test command",
+                    "cargo test --lib completion_audit",
+                    EvidenceRecordStatus::Pass,
+                    "direct",
+                ),
+            ],
+        };
+
+        let evidence = evaluate_completion_evidence(&checklist, &bundle);
+        let item = evidence_for_requirement(&evidence, &requirement.id);
+
+        assert_eq!(item.support, RequirementSupport::Direct);
+        assert!(item.missing_expectations.is_empty());
+        assert_eq!(item.evidence_records.len(), 2);
+    }
+
+    #[test]
+    fn evidence_adapter_distinguishes_rch_capacity_blocker_from_pass() {
+        let checklist = extract_completion_checklist(
+            "objective",
+            "Run all cargo builds and tests through RCH.",
+        );
+        let requirement = requirement_with_summary(&checklist, "RCH only");
+        let bundle = EvidenceBundle {
+            records: vec![record(
+                "remote_rch",
+                "cargo/build/test command",
+                "rch all_workers_at_capacity",
+                EvidenceRecordStatus::CapacityBlocked,
+                "direct",
+            )],
+        };
+
+        let evidence = evaluate_completion_evidence(&checklist, &bundle);
+        let item = evidence_for_requirement(&evidence, &requirement.id);
+
+        assert_eq!(item.support, RequirementSupport::Blocked);
+        assert_eq!(item.confidence, "blocked");
+    }
+
+    #[test]
+    fn evidence_adapter_treats_static_only_check_as_weak_proxy() {
+        let checklist = extract_completion_checklist(
+            "objective",
+            "Run all cargo builds and tests through RCH.",
+        );
+        let requirement = requirement_with_summary(&checklist, "RCH only");
+        let bundle = EvidenceBundle {
+            records: vec![record(
+                "remote_rch",
+                "cargo/build/test command",
+                "git diff --check only",
+                EvidenceRecordStatus::StaticOnly,
+                "weak",
+            )],
+        };
+
+        let evidence = evaluate_completion_evidence(&checklist, &bundle);
+        let item = evidence_for_requirement(&evidence, &requirement.id);
+
+        assert_eq!(item.support, RequirementSupport::Weak);
+        assert_eq!(item.confidence, "weak");
+    }
+
+    #[test]
+    fn evidence_adapter_flags_stale_beads_claim() {
+        let checklist = extract_completion_checklist("objective", "Track progress via Beads.");
+        let requirement = requirement_with_summary(&checklist, "Beads");
+        let bundle = EvidenceBundle {
+            records: vec![record(
+                "beads",
+                ".beads/issues.jsonl",
+                "bd-abc123 updated yesterday",
+                EvidenceRecordStatus::Stale,
+                "direct",
+            )],
+        };
+
+        let evidence = evaluate_completion_evidence(&checklist, &bundle);
+        let item = evidence_for_requirement(&evidence, &requirement.id);
+
+        assert_eq!(item.support, RequirementSupport::Stale);
+        assert_eq!(item.confidence, "stale");
+    }
+
+    #[test]
+    fn evidence_adapter_reports_missing_requirement_evidence() {
+        let checklist = extract_completion_checklist("objective", "Coordinate through Agent Mail.");
+        let requirement = requirement_with_summary(&checklist, "MCP Agent Mail");
+
+        let evidence = evaluate_completion_evidence(&checklist, &EvidenceBundle::default());
+        let item = evidence_for_requirement(&evidence, &requirement.id);
+
+        assert_eq!(item.support, RequirementSupport::Missing);
+        assert!(!item.missing_expectations.is_empty());
+    }
+
+    #[test]
+    fn evidence_adapter_prioritizes_contradictory_failures() {
+        let checklist = extract_completion_checklist("objective", "Coordinate through Agent Mail.");
+        let requirement = requirement_with_summary(&checklist, "MCP Agent Mail");
+        let bundle = EvidenceBundle {
+            records: vec![record(
+                "agent_mail",
+                "project inbox/outbox",
+                "mail service unavailable",
+                EvidenceRecordStatus::Fail,
+                "direct",
+            )],
+        };
+
+        let evidence = evaluate_completion_evidence(&checklist, &bundle);
+        let item = evidence_for_requirement(&evidence, &requirement.id);
+
+        assert_eq!(item.support, RequirementSupport::Contradicted);
+        assert_eq!(item.confidence, "contradicted");
     }
 }
