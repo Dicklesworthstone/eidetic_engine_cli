@@ -7,6 +7,12 @@ use fnx_runtime::CgseValue;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
+use crate::config::{
+    GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY, GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY,
+    GRAPH_FEATURE_LOAD_BEARING_ENABLED_KEY, GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY,
+    GRAPH_FEATURE_SKYLINE_ENABLED_KEY,
+};
+use crate::core::config_surface::{ConfigSurfaceOptions, get_config};
 use crate::db::{DbConnection, StoredMemoryLink};
 use crate::graph::gomory_hu::{
     GOMORY_HU_WEIGHT_ATTR, PROXIMITY_SCHEMA_V1, build_gomory_hu_tree, query_proximity,
@@ -143,6 +149,18 @@ struct HitsSectionSpec {
     next_commands: Vec<&'static str>,
 }
 
+struct BuiltSection {
+    section: InsightsSection,
+    degraded_signal: Option<InsightsDegradedSignal>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GraphFeatureGate {
+    key: &'static str,
+    message: &'static str,
+    repair: &'static str,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct InsightsBuildOptions<'a> {
     pub workspace: Option<&'a Path>,
@@ -213,7 +231,9 @@ pub fn build_insights_report_with_options(
         InsightsMode::FullBundle
     };
 
-    let (selected_section, sections, pagination) = if let Some(section) = args.section.as_deref() {
+    let (selected_section, sections, pagination, gated_degraded_signals) = if let Some(section) =
+        args.section.as_deref()
+    {
         let normalized = normalize_section_name(section);
         let Some((_, display_name, builder)) = registry
             .iter()
@@ -227,12 +247,14 @@ pub fn build_insights_report_with_options(
                 repair: Some(format!("ee insights --section <{available}>")),
             });
         };
-        let section = build_registry_section(display_name, *builder, options.workspace)?;
-        let section = paginate_section(section, args.offset, args.limit);
+        let built =
+            build_registry_section_with_runtime_gate(display_name, *builder, options.workspace)?;
+        let section = paginate_section(built.section, args.offset, args.limit);
         (
             Some((*display_name).to_owned()),
             vec![section.section],
             Some(section.pagination),
+            built.degraded_signal.into_iter().collect::<Vec<_>>(),
         )
     } else {
         (
@@ -244,6 +266,7 @@ pub fn build_insights_report_with_options(
                 })
                 .collect::<Result<Vec<_>, DomainError>>()?,
             None,
+            Vec::new(),
         )
     };
 
@@ -251,7 +274,11 @@ pub fn build_insights_report_with_options(
     let explain_command = explain_memory_id
         .as_ref()
         .map(|memory_id| format!("ee why {memory_id} --json"));
-    let degraded_signals = degraded_signals_for_sections(&sections);
+    let degraded_signals = if gated_degraded_signals.is_empty() {
+        degraded_signals_for_sections(&sections)
+    } else {
+        gated_degraded_signals
+    };
 
     Ok(InsightsReport {
         schema: INSIGHTS_SCHEMA_V1,
@@ -267,6 +294,31 @@ pub fn build_insights_report_with_options(
         available_sections,
         sections,
         degraded_signals,
+    })
+}
+
+fn build_registry_section_with_runtime_gate(
+    display_name: &str,
+    builder: SectionBuilder,
+    workspace: Option<&Path>,
+) -> Result<BuiltSection, DomainError> {
+    if let Some(gate) = graph_feature_gate_for_section(display_name) {
+        if !runtime_graph_feature_enabled(workspace, gate.key)? {
+            return Ok(BuiltSection {
+                section: builder(),
+                degraded_signal: Some(InsightsDegradedSignal {
+                    code: "graph_feature_disabled",
+                    severity: "medium",
+                    message: gate.message,
+                    repair: Some(gate.repair),
+                }),
+            });
+        }
+    }
+
+    Ok(BuiltSection {
+        section: build_registry_section(display_name, builder, workspace)?,
+        degraded_signal: None,
     })
 }
 
@@ -294,6 +346,56 @@ fn build_registry_section(
         }
         _ => Ok(builder()),
     }
+}
+
+fn graph_feature_gate_for_section(display_name: &str) -> Option<GraphFeatureGate> {
+    match display_name {
+        "authorities" | "hubs" => Some(GraphFeatureGate {
+            key: GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY,
+            message: "HITS profile insights are disabled by graph.feature.hits_profiles.enabled.",
+            repair: "ee config set graph.feature.hits_profiles.enabled true",
+        }),
+        "causalBottlenecks" => Some(GraphFeatureGate {
+            key: GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY,
+            message: "Causal bottleneck insights are disabled by graph.feature.causal_explain.enabled.",
+            repair: "ee config set graph.feature.causal_explain.enabled true",
+        }),
+        "knowledgeSkyline" => Some(GraphFeatureGate {
+            key: GRAPH_FEATURE_SKYLINE_ENABLED_KEY,
+            message: "Knowledge skyline insights are disabled by graph.feature.skyline.enabled.",
+            repair: "ee config set graph.feature.skyline.enabled true",
+        }),
+        "loadBearingMemories" => Some(GraphFeatureGate {
+            key: GRAPH_FEATURE_LOAD_BEARING_ENABLED_KEY,
+            message: "Load-bearing memory insights are disabled by graph.feature.load_bearing.enabled.",
+            repair: "ee config set graph.feature.load_bearing.enabled true",
+        }),
+        "revisionFrontiers" => Some(GraphFeatureGate {
+            key: GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY,
+            message: "Revision frontier insights are disabled by graph.feature.revision_dominance.enabled.",
+            repair: "ee config set graph.feature.revision_dominance.enabled true",
+        }),
+        _ => None,
+    }
+}
+
+fn runtime_graph_feature_enabled(
+    workspace: Option<&Path>,
+    key: &'static str,
+) -> Result<bool, DomainError> {
+    let Some(workspace) = workspace else {
+        return Ok(true);
+    };
+    let options = ConfigSurfaceOptions {
+        workspace_root: workspace.to_path_buf(),
+        config_path: None,
+    };
+    get_config(&options, key)
+        .map(|report| report.value == "true")
+        .map_err(|error| DomainError::Configuration {
+            message: format!("Could not read graph feature flag `{key}`: {error}"),
+            repair: Some("ee config show graph.feature.* --json".to_owned()),
+        })
 }
 
 fn degraded_signals_for_sections(sections: &[InsightsSection]) -> Vec<InsightsDegradedSignal> {
@@ -903,11 +1005,44 @@ fn placeholder_section(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     type TestResult = Result<(), String>;
 
     fn section_names(report: &InsightsReport) -> Vec<&'static str> {
         report.sections.iter().map(|section| section.name).collect()
+    }
+
+    fn unique_insights_workspace(prefix: &str) -> Result<std::path::PathBuf, String> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("clock moved backwards: {error}"))?
+            .as_nanos();
+        let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("ee-insights-feature-flags")
+            .join(format!("{prefix}-{}-{now}", std::process::id()));
+        fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        Ok(workspace)
+    }
+
+    fn write_graph_feature_config(
+        workspace: &std::path::Path,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let value = if enabled { "true" } else { "false" };
+        fs::write(
+            workspace.join(".ee").join("config.toml"),
+            format!(
+                "[graph.feature.causal_explain]\nenabled = {value}\n\
+                 [graph.feature.revision_dominance]\nenabled = {value}\n\
+                 [graph.feature.skyline]\nenabled = {value}\n\
+                 [graph.feature.load_bearing]\nenabled = {value}\n\
+                 [graph.feature.hits_profiles]\nenabled = {value}\n"
+            ),
+        )
+        .map_err(|error| error.to_string())
     }
 
     #[test]
@@ -1031,6 +1166,71 @@ mod tests {
                 Some("causalBottlenecks")
             );
             assert_eq!(section_names(&report), vec!["causalBottlenecks"]);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn selected_graph_feature_sections_emit_disabled_signal() -> TestResult {
+        let cases = [
+            (
+                "causalBottlenecks",
+                "Causal bottleneck insights are disabled by graph.feature.causal_explain.enabled.",
+                "ee config set graph.feature.causal_explain.enabled true",
+            ),
+            (
+                "revisionFrontiers",
+                "Revision frontier insights are disabled by graph.feature.revision_dominance.enabled.",
+                "ee config set graph.feature.revision_dominance.enabled true",
+            ),
+            (
+                "knowledgeSkyline",
+                "Knowledge skyline insights are disabled by graph.feature.skyline.enabled.",
+                "ee config set graph.feature.skyline.enabled true",
+            ),
+            (
+                "loadBearingMemories",
+                "Load-bearing memory insights are disabled by graph.feature.load_bearing.enabled.",
+                "ee config set graph.feature.load_bearing.enabled true",
+            ),
+            (
+                "hubs",
+                "HITS profile insights are disabled by graph.feature.hits_profiles.enabled.",
+                "ee config set graph.feature.hits_profiles.enabled true",
+            ),
+            (
+                "authorities",
+                "HITS profile insights are disabled by graph.feature.hits_profiles.enabled.",
+                "ee config set graph.feature.hits_profiles.enabled true",
+            ),
+        ];
+
+        for (section, message, repair) in cases {
+            let workspace = unique_insights_workspace(section)?;
+            write_graph_feature_config(&workspace, false)?;
+            let report = build_insights_report_with_options(
+                &InsightsArgs {
+                    section: Some(section.to_owned()),
+                    explain: None,
+                    limit: DEFAULT_SECTION_LIMIT,
+                    offset: 0,
+                },
+                InsightsBuildOptions {
+                    workspace: Some(&workspace),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+            assert_eq!(report.mode, InsightsMode::Section);
+            assert_eq!(report.selected_section.as_deref(), Some(section));
+            assert_eq!(section_names(&report), vec![section]);
+            assert!(report.sections[0].items.is_empty());
+            assert_eq!(report.degraded_signals.len(), 1);
+            assert_eq!(report.degraded_signals[0].code, "graph_feature_disabled");
+            assert_eq!(report.degraded_signals[0].severity, "medium");
+            assert_eq!(report.degraded_signals[0].message, message);
+            assert_eq!(report.degraded_signals[0].repair, Some(repair));
         }
 
         Ok(())
