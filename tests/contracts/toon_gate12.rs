@@ -148,13 +148,39 @@ fn assert_golden(name: &str, actual: &str) -> TestResult {
 
 fn normalize_status_toon(raw: &str, workspace: &Path) -> String {
     let workspace_path = workspace.to_string_lossy();
-    let path_normalized = raw.replace(workspace_path.as_ref(), "$STATUS_WORKSPACE");
+    let path_normalized = raw
+        .replace(workspace_path.as_ref(), "$STATUS_WORKSPACE")
+        .replace(env!("CARGO_MANIFEST_DIR"), "$STATUS_REPOSITORY");
     let mut normalized = String::new();
+    let mut in_agent_inventory = false;
     for line in path_normalized.lines() {
-        if line.trim_start().starts_with("fingerprint: ") {
-            let indent_len = line.len() - line.trim_start().len();
-            normalized.push_str(&line[..indent_len]);
-            normalized.push_str("fingerprint: <workspace-fingerprint>\n");
+        let trimmed = line.trim_start();
+        let indent_len = line.len() - trimmed.len();
+        let indent = &line[..indent_len];
+        if trimmed == "agentInventory:" {
+            in_agent_inventory = true;
+        }
+
+        let replacement = if trimmed.starts_with("fingerprint: ") {
+            Some("fingerprint: <workspace-fingerprint>")
+        } else if trimmed.starts_with("scopeKind: ") {
+            Some("scopeKind: <workspace-scope-kind>")
+        } else if trimmed.starts_with("repositoryRoot: ") {
+            Some("repositoryRoot: <repository-root>")
+        } else if trimmed.starts_with("repositoryFingerprint: ") {
+            Some("repositoryFingerprint: <repository-fingerprint>")
+        } else if trimmed.starts_with("subprojectPath: ") {
+            Some("subprojectPath: <subproject-path>")
+        } else if in_agent_inventory && trimmed.starts_with("totalCount: ") {
+            Some("totalCount: <agent-source-count>")
+        } else {
+            None
+        };
+
+        if let Some(replacement) = replacement {
+            normalized.push_str(indent);
+            normalized.push_str(replacement);
+            normalized.push('\n');
         } else {
             normalized.push_str(line);
             normalized.push('\n');

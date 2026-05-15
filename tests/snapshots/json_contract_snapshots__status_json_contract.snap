@@ -12,7 +12,7 @@ expression: status
       "status": "not_inspected",
       "summary": {
         "detectedCount": 0,
-        "totalCount": 22
+        "totalCount": 23
       }
     },
     "capabilities": {
@@ -138,52 +138,72 @@ expression: status
       "subsystems": [
         {
           "checksPassed": 1,
+          "fallback": null,
           "id": "runtime",
+          "reason": null,
           "status": "ok"
         },
         {
           "checksPassed": 1,
+          "fallback": null,
           "id": "storage",
+          "reason": null,
           "status": "ok"
         },
         {
           "checksPassed": 1,
+          "fallback": null,
           "id": "search",
+          "reason": null,
           "status": "ok"
         },
         {
           "checksPassed": 1,
+          "fallback": null,
           "id": "memory",
+          "reason": null,
           "status": "ok"
         },
         {
           "checksPassed": 1,
+          "fallback": null,
           "id": "graph_compute",
+          "reason": null,
           "status": "ok"
         },
         {
           "checksPassed": 1,
+          "fallback": null,
           "id": "pack",
+          "reason": null,
           "status": "ok"
         },
         {
           "checksPassed": 1,
+          "fallback": null,
           "id": "curate",
+          "reason": null,
           "status": "ok"
         },
         {
           "checksPassed": 1,
+          "fallback": null,
           "id": "feedback",
+          "reason": null,
           "status": "ok"
         },
         {
           "checksPassed": 1,
+          "fallback": null,
           "id": "maintenance",
+          "reason": null,
           "status": "ok"
         },
         {
           "checksPassed": 1,
+          "fallback": null,
           "id": "agent_detection",
+          "reason": null,
           "status": "ok"
         }
       ],

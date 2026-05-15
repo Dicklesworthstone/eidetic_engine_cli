@@ -11,12 +11,36 @@ data:
     markerPresent: false
     canonicalRoot: $STATUS_WORKSPACE
     fingerprint: <workspace-fingerprint>
-    scopeKind: standalone
-    repositoryRoot: null
-    repositoryFingerprint: null
-    subprojectPath: null
+    scopeKind: <workspace-scope-kind>
+    repositoryRoot: <repository-root>
+    repositoryFingerprint: <repository-fingerprint>
+    subprojectPath: <subproject-path>
     diagnostics[1]{code,severity,message,repair,selectedSource,selectedRoot,conflictingSource,conflictingRoot}:
-      workspace_selected_differs_from_discovered,warning,The selected workspace differs from the nearest initialized workspace discovered from the current directory.,Confirm --workspace/EE_WORKSPACE before running mutating commands.,explicit,$STATUS_WORKSPACE,discovered,/data/projects/eidetic_engine_cli
+      workspace_selected_differs_from_discovered,warning,The selected workspace differs from the nearest initialized workspace discovered from the current directory.,Confirm --workspace/EE_WORKSPACE before running mutating commands.,explicit,$STATUS_WORKSPACE,discovered,$STATUS_REPOSITORY
+  posture:
+    overall: blocked
+    workspace:
+      storage:
+        status: blocked
+        checksPassed: 0
+        reason: storage_not_initialized
+        fallback: ee init --workspace .
+    thisOperation:
+      status: ok
+      subsystemsUsed[9]: runtime,storage,search,memory,graph_compute,curate,feedback,maintenance,agent_detection
+      subsystemsSkipped[1]: pack
+      degradationsApplied[5]: storage_not_initialized,search_waiting_for_storage,memory_health_unavailable,curation_health_unavailable,feedback_health_unavailable
+    subsystems[10]{id,status,checksPassed,reason,fallback}:
+      runtime,ok,1,null,null
+      storage,blocked,0,storage_not_initialized,ee init --workspace .
+      search,initializing,0,waiting_for_storage,ee init --workspace .
+      memory,blocked,0,memory_unavailable,ee init --workspace .
+      graph_compute,ok,1,null,null
+      pack,blocked,0,pack_blocked_by_storage,ee init --workspace .
+      curate,initializing,0,curation_waiting_for_storage,ee init --workspace .
+      feedback,initializing,0,feedback_waiting_for_storage,ee init --workspace .
+      maintenance,degraded_recoverable,0,derived_asset_attention_available,ee index rebuild --workspace .
+      agent_detection,ok,1,null,null
   capabilities:
     runtime: ready
     storage: pending
@@ -41,6 +65,7 @@ data:
     scoreComponents:
       activeRatio: null
       freshnessScore: null
+      sourcedFrom: null
       confidenceScore: null
       provenanceScore: null
       tombstonePenalty: null
@@ -69,21 +94,58 @@ data:
     protectedRuleCount: 0
     lastInversionEvent: null
     nextDeterministicAction: run ee init --workspace .
-  derivedAssets[2]{name,status,sourceHighWatermark,assetHighWatermark,highWatermarkLag,path}:
-    search_index,missing,null,null,null,.ee/index
-    graph_snapshot,unimplemented,null,null,null,.ee/graph
+  graphCompute:
+    status: available
+    availableAlgorithms[12]: pagerank,betweenness,hits,louvain,communities,k_core,articulation,path,explain_link,centrality_refresh,feature_enrichment,neighborhood
+    liveComputeSupported: true
+    fnxRuntimeVersion: 0.1.0
+    lastUsedAt: null
+  graphSnapshotArtifact:
+    status: unavailable
+    lastBuiltAt: null
+    snapshotPath: null
+    snapshotGeneration: null
+    memoryGraph:
+      nodeCount: 0
+      edgeCount: 0
+      generation: 0
+      matchesDbGeneration: false
+      availability: live_compute_available
+    nextRefreshVia: ee graph centrality-refresh --workspace .
+  derivedAssets[2]:
+    - name: search_index
+      kind: persisted_index
+      status: missing
+      sourceHighWatermark: null
+      assetHighWatermark: null
+      highWatermarkLag: null
+      path: .ee/index
+    - name: graph_snapshot_artifact
+      kind: persisted_snapshot
+      status: unavailable
+      sourceHighWatermark: 0
+      assetHighWatermark: null
+      highWatermarkLag: 0
+      path: .ee/graph
+      lastBuiltAt: null
+      memoryGraph:
+        nodeCount: 0
+        edgeCount: 0
+        generation: 0
+        matchesDbGeneration: false
+        availability: live_compute_available
   agentInventory:
     schema: ee.agent.status.v1
     status: not_inspected
     formatVersion: 1
     summary:
       detectedCount: 0
-      totalCount: 22
+      totalCount: <agent-source-count>
     inspectionCommand: ee agent status --json
     degraded[0]:
-  degraded[5]{code,severity,message}:
-    storage_not_initialized,medium,Workspace storage is unavailable because .ee/ee.db is missing.
-    search_waiting_for_storage,medium,Search readiness is pending until workspace storage is initialized.
-    memory_health_unavailable,low,Memory health is unavailable because the workspace database is missing.
-    curation_health_unavailable,low,Curation health is unavailable because the workspace database is missing.
-    feedback_health_unavailable,low,Feedback health is unavailable because the workspace database is missing.
+  degraded[5]{code,severity,message,repair}:
+    storage_not_initialized,medium,Workspace storage is unavailable because .ee/ee.db is missing.,Run `ee init --workspace .`.
+    search_waiting_for_storage,medium,Search readiness is pending until workspace storage is initialized.,Run `ee init --workspace .`.
+    memory_health_unavailable,low,Memory health is unavailable because the workspace database is missing.,Run `ee init --workspace .` before inspecting memory health.
+    curation_health_unavailable,low,Curation health is unavailable because the workspace database is missing.,Run `ee init --workspace .` before inspecting curation health.
+    feedback_health_unavailable,low,Feedback health is unavailable because the workspace database is missing.,Run `ee init --workspace .` before inspecting feedback health.
