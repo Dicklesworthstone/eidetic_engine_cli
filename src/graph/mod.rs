@@ -22,6 +22,7 @@ use fnx_runtime::{CgseValue, CompatibilityMode};
 use sqlmodel_core::{Row, Value};
 
 pub mod algorithms;
+pub mod bipartite_provenance;
 pub mod causal;
 pub mod decay;
 pub mod gomory_hu;
