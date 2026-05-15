@@ -166,6 +166,9 @@ mod n15_logical_id_foundation;
 #[path = "contracts/n15_memory_revise_write_path.rs"]
 mod n15_memory_revise_write_path;
 
+#[path = "contracts/n15_lab_capture_wal_hold.rs"]
+mod n15_lab_capture_wal_hold;
+
 #[path = "contracts/failure_mode_fixtures.rs"]
 mod failure_mode_fixtures;
 
