@@ -37,11 +37,13 @@ impl TestPhase {
 pub struct TestTraceGuard {
     bead_id: String,
     test_name: String,
+    #[allow(dead_code)]
     path: PathBuf,
 }
 
 impl TestTraceGuard {
     #[must_use]
+    #[allow(dead_code)]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -129,6 +131,7 @@ pub fn init_test_tracing(bead_id: &str, test_name: &str) -> TestTraceGuard {
     }
 }
 
+#[allow(dead_code)]
 pub fn normalize_trace_jsonl(path: &Path) -> Result<String, String> {
     let contents = std::fs::read_to_string(path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
