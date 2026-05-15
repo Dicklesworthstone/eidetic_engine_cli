@@ -8357,6 +8357,153 @@ fn mcp_manifest_json_real_binary_smoke() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn mcp_validate_json_real_binary_smoke() -> TestResult {
+    let help_output = run_ee(&["mcp", "--help"])?;
+    let help_stdout = String::from_utf8_lossy(&help_output.stdout);
+    ensure(
+        help_output.status.success(),
+        "mcp help should exit successfully",
+    )?;
+    ensure(
+        help_stdout.contains("validate"),
+        "mcp help should list validate subcommand",
+    )?;
+
+    let output = run_ee(&["--json", "mcp", "validate"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    ensure(
+        output.status.success(),
+        format!("mcp validate should succeed; stderr: {stderr}"),
+    )?;
+    ensure(
+        output.stderr.is_empty(),
+        "mcp validate stderr must be empty",
+    )?;
+    ensure_no_ansi(&stdout, "mcp validate stdout")?;
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("mcp validate stdout must be valid JSON: {error}"))?;
+    ensure_equal(
+        &parsed["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "response schema",
+    )?;
+    ensure_equal(&parsed["success"], &serde_json::json!(true), "success")?;
+    ensure_equal(
+        &parsed["data"]["command"],
+        &serde_json::json!("mcp validate"),
+        "validate command",
+    )?;
+    ensure_equal(
+        &parsed["data"]["manifestSchema"],
+        &serde_json::json!("ee.mcp.manifest.v1"),
+        "manifest schema",
+    )?;
+    ensure_equal(&parsed["data"]["valid"], &serde_json::json!(true), "valid")?;
+    ensure_equal(
+        &parsed["data"]["status"],
+        &serde_json::json!("valid"),
+        "status",
+    )?;
+    ensure(
+        parsed["data"]["validationErrors"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "valid mcp validate response should have no validation errors",
+    )?;
+
+    let checks = parsed["data"]["checks"]
+        .as_array()
+        .ok_or("validate checks must be an array")?;
+    for expected in [
+        "schema_json_parse",
+        "manifest_json_parse",
+        "schema_id_matches_manifest",
+        "manifest_response_success",
+        "manifest_data_schema_matches",
+        "manifest_schema_list_includes_self",
+        "manifest_matches_json_schema",
+    ] {
+        ensure(
+            checks
+                .iter()
+                .any(|check| check["name"] == expected && check["valid"] == true),
+            format!("missing successful validate check {expected}"),
+        )?;
+    }
+
+    if parsed["data"]["adapterFeatureEnabled"] == serde_json::json!(false) {
+        ensure_equal(
+            &parsed["data"]["capabilityGap"]["code"],
+            &serde_json::json!("mcp_feature_disabled"),
+            "capability gap code",
+        )?;
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_validate_reports_invalid_schema_fixture() -> TestResult {
+    let workspace = unique_artifact_dir("mcp-validate-invalid-schema")?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let schema_path = workspace.join("invalid-mcp-schema.json");
+    fs::write(
+        &schema_path,
+        "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"https://eidetic-engine/schemas/ee.mcp.manifest.v1.json\",\"title\":\"ee.mcp.manifest.v1\",\"type\":\"object\",\"required\":[\"missingField\"]}\n",
+    )
+    .map_err(|error| error.to_string())?;
+    let schema_arg = schema_path.to_string_lossy().into_owned();
+
+    let output = run_ee(&[
+        "--json",
+        "mcp",
+        "validate",
+        "--manifest-schema",
+        &schema_arg,
+    ])?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    ensure(
+        output.status.success(),
+        format!("mcp validate invalid schema fixture should still report JSON; stderr: {stderr}"),
+    )?;
+    ensure(
+        output.stderr.is_empty(),
+        "mcp validate invalid schema stderr must be empty",
+    )?;
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("mcp validate stdout must be valid JSON: {error}"))?;
+    ensure_equal(
+        &parsed["data"]["command"],
+        &serde_json::json!("mcp validate"),
+        "validate command",
+    )?;
+    ensure_equal(&parsed["data"]["valid"], &serde_json::json!(false), "valid")?;
+    ensure_equal(
+        &parsed["data"]["status"],
+        &serde_json::json!("invalid"),
+        "status",
+    )?;
+    ensure(
+        parsed["data"]["validationErrors"]
+            .as_array()
+            .is_some_and(|errors| {
+                errors
+                    .iter()
+                    .any(|error| error == "manifest_matches_json_schema")
+            }),
+        "invalid schema should report manifest_matches_json_schema",
+    )?;
+
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn daemon_foreground_once_json_runs_real_health_job_in_isolated_workspace() -> TestResult {

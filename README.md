@@ -923,6 +923,7 @@ from default builds:
 
 ```bash
 ee mcp manifest --json
+ee mcp validate --json
 ```
 
 When the `mcp` feature is not enabled, the manifest succeeds and reports
@@ -930,7 +931,9 @@ When the `mcp` feature is not enabled, the manifest succeeds and reports
 `cargo build --release --features mcp` when you need the adapter itself. The
 manifest mirrors the CLI contracts for tools such as `ee_context`, `ee_search`,
 `ee_remember`, `ee_outcome`, `ee_curate_candidates`, and `ee_memory_show`.
-Schemas match CLI JSON exactly; the CLI is the compatibility contract.
+`ee mcp validate --json` checks that manifest contract against the public schema
+without starting the stdio adapter. Schemas match CLI JSON exactly; the CLI is
+the compatibility contract.
 
 ### Plain humans
 

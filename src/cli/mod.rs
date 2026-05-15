@@ -6950,6 +6950,15 @@ pub enum SchemaCommand {
 pub enum McpCommand {
     /// Print the MCP tool and schema manifest.
     Manifest,
+    /// Validate the MCP manifest against the public schema contract.
+    Validate(McpValidateArgs),
+}
+
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct McpValidateArgs {
+    /// Override the schema file used for validation.
+    #[arg(long = "manifest-schema", value_name = "PATH")]
+    pub manifest_schema: Option<PathBuf>,
 }
 
 /// Subcommands for `ee model`.
@@ -8728,6 +8737,9 @@ where
                 write_stdout(stdout, &(output::render_mcp_manifest_json() + "\n"))
             }
         },
+        Some(Command::Mcp(McpCommand::Validate(ref args))) => {
+            handle_mcp_validate(&cli, args, stdout)
+        }
         Some(Command::Model(ref model_cmd)) => {
             handle_model_command(&cli, model_cmd, stdout, stderr)
         }
@@ -9002,6 +9014,430 @@ fn args_contain_fields_flag(args: &[OsString]) -> bool {
         }
     }
     false
+}
+
+fn handle_mcp_validate<W>(cli: &Cli, args: &McpValidateArgs, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    let report = mcp_validate_report(args);
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &mcp_validate_human(&report))
+        }
+        output::Renderer::Toon => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": report,
+            });
+            write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&json.to_string()) + "\n"),
+            )
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": report,
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn mcp_validate_report(args: &McpValidateArgs) -> serde_json::Value {
+    let manifest_json = output::render_mcp_manifest_json();
+    let schema_source = args
+        .manifest_schema
+        .as_ref()
+        .map_or_else(|| "embedded".to_owned(), |path| path.display().to_string());
+    let schema_text = match args.manifest_schema.as_ref() {
+        Some(path) => match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => {
+                return serde_json::json!({
+                    "command": "mcp validate",
+                    "manifestSchema": output::MCP_MANIFEST_SCHEMA_V1,
+                    "schemaSource": schema_source,
+                    "status": "invalid",
+                    "valid": false,
+                    "adapterFeatureEnabled": cfg!(feature = "mcp"),
+                    "capabilityGap": default_mcp_capability_gap(),
+                    "checks": [],
+                    "validationErrors": [format!("schema_read_failed: {error}")],
+                });
+            }
+        },
+        None => include_str!("../../docs/schemas/ee.mcp.manifest.v1.json").to_owned(),
+    };
+
+    let mut checks = Vec::new();
+    let mut errors = Vec::new();
+    let schema = parse_json_check("schema_json_parse", &schema_text, &mut checks, &mut errors);
+    let manifest = parse_json_check(
+        "manifest_json_parse",
+        &manifest_json,
+        &mut checks,
+        &mut errors,
+    );
+
+    if let Some(schema) = schema.as_ref() {
+        let schema_id_matches_manifest = schema.get("title").and_then(serde_json::Value::as_str)
+            == Some(output::MCP_MANIFEST_SCHEMA_V1)
+            && schema
+                .get("$id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| id.ends_with("/ee.mcp.manifest.v1.json"));
+        push_check(
+            "schema_id_matches_manifest",
+            schema_id_matches_manifest,
+            &mut checks,
+            &mut errors,
+        );
+    }
+
+    let adapter_feature_enabled = manifest
+        .as_ref()
+        .and_then(|value| value.pointer("/data/adapter/featureEnabled"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(cfg!(feature = "mcp"));
+
+    if let Some(manifest) = manifest.as_ref() {
+        push_check(
+            "manifest_response_success",
+            manifest.get("success").and_then(serde_json::Value::as_bool) == Some(true),
+            &mut checks,
+            &mut errors,
+        );
+        push_check(
+            "manifest_data_schema_matches",
+            manifest
+                .pointer("/data/schema")
+                .and_then(serde_json::Value::as_str)
+                == Some(output::MCP_MANIFEST_SCHEMA_V1),
+            &mut checks,
+            &mut errors,
+        );
+        push_check(
+            "manifest_schema_registry_source",
+            manifest
+                .pointer("/data/registry/schemaSource")
+                .and_then(serde_json::Value::as_str)
+                == Some("public_schemas"),
+            &mut checks,
+            &mut errors,
+        );
+        let schemas_include_manifest = manifest
+            .pointer("/data/schemas")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|schemas| {
+                schemas.iter().any(|schema| {
+                    schema.get("id").and_then(serde_json::Value::as_str)
+                        == Some(output::MCP_MANIFEST_SCHEMA_V1)
+                })
+            });
+        push_check(
+            "manifest_schema_list_includes_self",
+            schemas_include_manifest,
+            &mut checks,
+            &mut errors,
+        );
+
+        if !adapter_feature_enabled {
+            push_check(
+                "default_build_uses_capability_gap",
+                manifest
+                    .pointer("/data/capabilityGap/code")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("mcp_feature_disabled"),
+                &mut checks,
+                &mut errors,
+            );
+            let degraded_empty = manifest
+                .pointer("/data/degraded")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(Vec::is_empty);
+            push_check(
+                "default_build_keeps_degraded_empty",
+                degraded_empty,
+                &mut checks,
+                &mut errors,
+            );
+        }
+    }
+
+    if let (Some(manifest), Some(schema)) = (manifest.as_ref(), schema.as_ref()) {
+        match validate_json_schema_subset(manifest, schema, schema, "$") {
+            Ok(()) => push_check(
+                "manifest_matches_json_schema",
+                true,
+                &mut checks,
+                &mut errors,
+            ),
+            Err(error) => {
+                checks.push(serde_json::json!({
+                    "name": "manifest_matches_json_schema",
+                    "valid": false,
+                    "detail": error,
+                }));
+                errors.push("manifest_matches_json_schema".to_owned());
+            }
+        }
+    }
+
+    let valid = errors.is_empty();
+    serde_json::json!({
+        "command": "mcp validate",
+        "manifestSchema": output::MCP_MANIFEST_SCHEMA_V1,
+        "schemaSource": schema_source,
+        "status": if valid { "valid" } else { "invalid" },
+        "valid": valid,
+        "adapterFeatureEnabled": adapter_feature_enabled,
+        "capabilityGap": if adapter_feature_enabled {
+            serde_json::Value::Null
+        } else {
+            default_mcp_capability_gap()
+        },
+        "checks": checks,
+        "validationErrors": errors,
+    })
+}
+
+fn parse_json_check(
+    name: &str,
+    text: &str,
+    checks: &mut Vec<serde_json::Value>,
+    errors: &mut Vec<String>,
+) -> Option<serde_json::Value> {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(value) => {
+            checks.push(serde_json::json!({"name": name, "valid": true}));
+            Some(value)
+        }
+        Err(error) => {
+            checks.push(serde_json::json!({"name": name, "valid": false}));
+            errors.push(format!("{name}: {error}"));
+            None
+        }
+    }
+}
+
+fn validate_json_schema_subset(
+    value: &serde_json::Value,
+    schema: &serde_json::Value,
+    root_schema: &serde_json::Value,
+    path: &str,
+) -> Result<(), String> {
+    if let Some(reference) = schema.get("$ref").and_then(serde_json::Value::as_str) {
+        let target = resolve_local_schema_ref(root_schema, reference)?;
+        return validate_json_schema_subset(value, target, root_schema, path);
+    }
+
+    if let Some(options) = schema.get("oneOf").and_then(serde_json::Value::as_array) {
+        if options.iter().any(|candidate| {
+            validate_json_schema_subset(value, candidate, root_schema, path).is_ok()
+        }) {
+            return Ok(());
+        }
+        return Err(format!("{path} did not match any oneOf branch"));
+    }
+
+    if let Some(expected) = schema.get("const") {
+        if value != expected {
+            return Err(format!("{path} expected const {expected}, got {value}"));
+        }
+    }
+
+    let expected_types = schema_json_types(schema);
+    if !expected_types.is_empty() {
+        if !expected_types
+            .iter()
+            .any(|expected_type| schema_json_type_matches(value, expected_type))
+        {
+            return Err(format!(
+                "{path} expected type {:?}, got {}",
+                expected_types,
+                schema_json_type_name(value)
+            ));
+        }
+        if value.is_null() {
+            return Ok(());
+        }
+    }
+
+    if let Some(object) = value.as_object() {
+        if let Some(required) = schema.get("required").and_then(serde_json::Value::as_array) {
+            for field in required {
+                let field = field
+                    .as_str()
+                    .ok_or_else(|| format!("{path} schema required entry is not a string"))?;
+                if !object.contains_key(field) {
+                    return Err(format!("{path} missing required field {field}"));
+                }
+            }
+        }
+
+        let properties = schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object);
+        for (key, child) in object {
+            let child_path = format!("{path}.{key}");
+            if let Some(property_schema) = properties.and_then(|props| props.get(key)) {
+                validate_json_schema_subset(child, property_schema, root_schema, &child_path)?;
+                continue;
+            }
+            match schema.get("additionalProperties") {
+                Some(serde_json::Value::Bool(false)) => {
+                    return Err(format!("{path} contains unexpected field {key}"));
+                }
+                Some(serde_json::Value::Object(_)) => {
+                    validate_json_schema_subset(
+                        child,
+                        &schema["additionalProperties"],
+                        root_schema,
+                        &child_path,
+                    )?;
+                }
+                Some(serde_json::Value::Bool(true)) | None => {}
+                Some(other) => {
+                    return Err(format!("{path} unsupported additionalProperties: {other}"));
+                }
+            }
+        }
+    }
+
+    if let Some(items) = value.as_array() {
+        if let Some(item_schema) = schema.get("items") {
+            for (index, item) in items.iter().enumerate() {
+                validate_json_schema_subset(
+                    item,
+                    item_schema,
+                    root_schema,
+                    &format!("{path}[{index}]"),
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_local_schema_ref<'a>(
+    root: &'a serde_json::Value,
+    reference: &str,
+) -> Result<&'a serde_json::Value, String> {
+    let pointer = reference
+        .strip_prefix('#')
+        .ok_or_else(|| format!("only local JSON Schema refs are supported, got {reference}"))?;
+    root.pointer(pointer)
+        .ok_or_else(|| format!("schema reference {reference} did not resolve"))
+}
+
+fn schema_json_types(schema: &serde_json::Value) -> Vec<&str> {
+    match schema.get("type") {
+        Some(serde_json::Value::String(kind)) => vec![kind.as_str()],
+        Some(serde_json::Value::Array(kinds)) => {
+            kinds.iter().filter_map(serde_json::Value::as_str).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn schema_json_type_matches(value: &serde_json::Value, expected: &str) -> bool {
+    match expected {
+        "null" => value.is_null(),
+        "boolean" => value.is_boolean(),
+        "number" => value.is_number(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "string" => value.is_string(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        _ => false,
+    }
+}
+
+fn schema_json_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(number)
+            if number.as_i64().is_some() || number.as_u64().is_some() =>
+        {
+            "integer"
+        }
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+fn push_check(
+    name: &str,
+    valid: bool,
+    checks: &mut Vec<serde_json::Value>,
+    errors: &mut Vec<String>,
+) {
+    checks.push(serde_json::json!({"name": name, "valid": valid}));
+    if !valid {
+        errors.push(name.to_owned());
+    }
+}
+
+fn default_mcp_capability_gap() -> serde_json::Value {
+    serde_json::json!({
+        "code": "mcp_feature_disabled",
+        "severity": "low",
+        "message": "MCP stdio adapter feature is not enabled in this build.",
+        "repair": "Build ee with the mcp feature enabled, or use the CLI surfaces directly.",
+        "feature": "mcp",
+        "capabilitiesCommand": "ee capabilities --json",
+    })
+}
+
+fn mcp_validate_human(report: &serde_json::Value) -> String {
+    let status = report
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let schema = report
+        .get("manifestSchema")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(output::MCP_MANIFEST_SCHEMA_V1);
+    let source = report
+        .get("schemaSource")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("embedded");
+    let adapter = if report
+        .get("adapterFeatureEnabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    let mut output = format!(
+        "ee mcp validate\n\nStatus: {status}\nManifest schema: {schema}\nSchema source: {source}\nAdapter feature: {adapter}\n"
+    );
+    if let Some(errors) = report
+        .get("validationErrors")
+        .and_then(serde_json::Value::as_array)
+        .filter(|errors| !errors.is_empty())
+    {
+        output.push_str("\nValidation errors:\n");
+        for error in errors {
+            if let Some(error) = error.as_str() {
+                output.push_str(&format!("  - {error}\n"));
+            }
+        }
+    }
+    output
 }
 
 fn handle_eval_list<W, E>(
@@ -34792,6 +35228,7 @@ impl NormalizedInvocation {
                 Command::History(_) => "history".to_string(),
                 Command::Mcp(mcp) => match mcp {
                     McpCommand::Manifest => "mcp manifest".to_string(),
+                    McpCommand::Validate(_) => "mcp validate".to_string(),
                 },
                 Command::Model(model) => match model {
                     ModelCommand::Status(_) => "model status".to_string(),
