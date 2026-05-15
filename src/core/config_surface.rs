@@ -724,23 +724,31 @@ mod tests {
     #[test]
     fn graph_set_rejects_invalid_feature_flag_bool() -> TestResult {
         let temp = workspace()?;
-        let error = match set_config(
-            &options(temp.path()),
-            "graph.feature.ppr.enabled",
-            "yes",
-            false,
-        ) {
-            Ok(report) => {
-                return Err(format!(
-                    "invalid graph feature flag unexpectedly succeeded: {report:?}"
-                ));
-            }
-            Err(error) => error.to_string(),
-        };
-        if error.contains("`true` or `false`") {
-            Ok(())
-        } else {
-            Err(format!("unexpected error: {error}"))
+        let flag_keys = graph_config_keys()
+            .iter()
+            .copied()
+            .filter(|key| key.starts_with("graph.feature.") && key.ends_with(".enabled"))
+            .collect::<Vec<_>>();
+
+        if flag_keys.len() != 10 {
+            return Err(format!(
+                "expected 10 graph feature flags, got {flag_keys:?}"
+            ));
         }
+
+        for key in flag_keys {
+            let error = match set_config(&options(temp.path()), key, "yes", false) {
+                Ok(report) => {
+                    return Err(format!(
+                        "invalid graph feature flag {key} unexpectedly succeeded: {report:?}"
+                    ));
+                }
+                Err(error) => error.to_string(),
+            };
+            if !error.contains("`true` or `false`") {
+                return Err(format!("{key}: unexpected error: {error}"));
+            }
+        }
+        Ok(())
     }
 }

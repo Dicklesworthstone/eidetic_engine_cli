@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.db.inspect.v1.json",
+  "title": "ee.db.inspect.v1",
+  "description": "Read-only database inspection response envelope for ee db status, inspect, check, and check-integrity.",
+  "type": "object",
+  "required": ["schema", "success", "data", "degraded"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v1"},
+    "success": {"type": "boolean"},
+    "data": {
+      "type": "object",
+      "required": ["command", "report"],
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "string",
+          "enum": ["db status", "db inspect", "db check", "db check-integrity", "db migrations"]
+        },
+        "report": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      }
+    },
+    "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}}
+  },
+  "field_presets": {
+    "minimal": ["command"],
+    "summary": ["command", "report.databasePath", "report.exists", "report.error", "degraded"],
+    "standard": ["command", "report", "degraded"],
+    "full": ["*"]
+  },
+  "examples": [
+    {
+      "schema": "ee.response.v1",
+      "success": true,
+      "data": {
+        "command": "db status",
+        "report": {
+          "databasePath": "/workspace/.ee/ee.db",
+          "exists": true,
+          "fileSizeBytes": 4096,
+          "walPath": "/workspace/.ee/ee.db-wal",
+          "walFileExists": false,
+          "walSizeBytes": null,
+          "shmFileExists": false,
+          "journalMode": "wal",
+          "pageSizeBytes": 4096,
+          "pageCount": 1,
+          "schemaVersion": 32,
+          "latestCompiledSchemaVersion": 32,
+          "needsMigration": false,
+          "appliedMigrationCount": 32,
+          "pendingMigrationVersions": [],
+          "tableCount": 8,
+          "tableRowCounts": null,
+          "error": null
+        }
+      },
+      "degraded": []
+    },
+    {
+      "schema": "ee.response.v1",
+      "success": true,
+      "data": {
+        "command": "db inspect",
+        "report": {
+          "databasePath": "/workspace/.ee/ee.db",
+          "table": "workspaces",
+          "exists": true,
+          "limit": 1,
+          "tableRowCount": 1,
+          "returnedRowCount": 1,
+          "availableTables": ["workspaces"],
+          "columns": ["id", "root_path"],
+          "rows": [
+            {
+              "source_uri": null,
+              "values": {
+                "id": "ws_01",
+                "root_path": "/workspace"
+              }
+            }
+          ],
+          "error": null
+        }
+      },
+      "degraded": []
+    },
+    {
+      "schema": "ee.response.v1",
+      "success": true,
+      "data": {
+        "command": "db check-integrity",
+        "report": {
+          "databasePath": "/workspace/.ee/ee.db",
+          "checkType": "integrity_check",
+          "passed": true,
+          "integrityPassed": true,
+          "integrityIssues": null,
+          "foreignKeyPassed": true,
+          "foreignKeyViolations": null,
+          "message": "integrity_check passed"
+        }
+      },
+      "degraded": []
+    }
+  ],
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

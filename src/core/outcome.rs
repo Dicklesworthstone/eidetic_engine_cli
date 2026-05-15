@@ -272,6 +272,19 @@ pub const OUTCOME_QUARANTINE_LIST_SCHEMA_V1: &str = "ee.outcome.quarantine.list.
 /// Stable schema for `ee outcome quarantine release/reject` response data.
 pub const OUTCOME_QUARANTINE_REVIEW_SCHEMA_V1: &str = "ee.outcome.quarantine.review.v1";
 
+fn trace_sprt_quarantine(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
+    tracing::info!(
+        workspace_id = "outcome",
+        request_id = "sprt_quarantine_feedback",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-3usjw.47"),
+        surface = "sprt_quarantine",
+        phase,
+        elapsed_ms,
+        degraded_codes = ?degraded_codes,
+        "SPRT quarantine checkpoint"
+    );
+}
+
 /// Status returned by the `ee outcome` feedback recording use case.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutcomeRecordStatus {
@@ -624,6 +637,8 @@ impl OutcomeRecordReport {
 pub fn record_outcome(
     options: &OutcomeRecordOptions<'_>,
 ) -> Result<OutcomeRecordReport, DomainError> {
+    trace_sprt_quarantine("input", 0, &[]);
+
     let target_type = require_allowed(
         "target type",
         &options.target_type,
@@ -703,6 +718,7 @@ pub fn record_outcome(
 
     if options.dry_run {
         let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
+        trace_sprt_quarantine("dependency_check", 0, &[]);
         let quarantine = harmful_quarantine_preview(
             &connection,
             &target.workspace_id,
@@ -711,6 +727,7 @@ pub fn record_outcome(
             options.harmful_per_source_per_hour,
             options.harmful_burst_window_seconds,
         )?;
+        trace_sprt_quarantine("response", 0, &[]);
         return Ok(OutcomeRecordReport {
             version: env!("CARGO_PKG_VERSION"),
             status: OutcomeRecordStatus::DryRun,
@@ -742,6 +759,7 @@ pub fn record_outcome(
     if let Some(existing) = get_existing_event(&connection, &event_id)? {
         if feedback_event_matches(&existing, &feedback_input) {
             let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
+            trace_sprt_quarantine("response", 0, &[]);
             return Ok(OutcomeRecordReport {
                 version: env!("CARGO_PKG_VERSION"),
                 status: OutcomeRecordStatus::AlreadyRecorded,
@@ -770,6 +788,7 @@ pub fn record_outcome(
         });
     }
 
+    trace_sprt_quarantine("dependency_check", 0, &[]);
     if let Some(quarantine) = harmful_quarantine_preview(
         &connection,
         &target.workspace_id,
@@ -781,6 +800,7 @@ pub fn record_outcome(
         let quarantine_id = generate_feedback_quarantine_id();
         let raw_event_hash = raw_feedback_event_hash(&event_id, &feedback_input)?;
         let reason = quarantine.reason.clone();
+        trace_sprt_quarantine("persistence", 0, &[]);
         let audit_id = insert_feedback_quarantine_audited(
             &connection,
             &quarantine_id,
@@ -803,6 +823,7 @@ pub fn record_outcome(
             options.actor.as_deref(),
         )?;
         let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
+        trace_sprt_quarantine("response", 0, &[]);
         return Ok(OutcomeRecordReport {
             version: env!("CARGO_PKG_VERSION"),
             status: OutcomeRecordStatus::Quarantined,
@@ -829,6 +850,7 @@ pub fn record_outcome(
         });
     }
 
+    trace_sprt_quarantine("persistence", 0, &[]);
     let audit_id = connection
         .insert_feedback_event_audited(
             &event_id,
@@ -936,6 +958,7 @@ pub fn record_outcome(
 
     let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
 
+    trace_sprt_quarantine("response", 0, &[]);
     Ok(OutcomeRecordReport {
         version: env!("CARGO_PKG_VERSION"),
         status: OutcomeRecordStatus::Recorded,

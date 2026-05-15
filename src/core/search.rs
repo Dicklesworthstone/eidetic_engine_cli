@@ -1447,6 +1447,8 @@ fn search_hit_pack_item(index: usize, hit: &SearchHit) -> Option<PackDraftItem> 
         utility: metadata_f32(metadata, SEARCH_ANALYSIS_UTILITY_KEY)
             .and_then(|value| UnitScore::parse(value.clamp(0.0, 1.0)).ok())
             .unwrap_or_else(UnitScore::neutral),
+        proximity_to_seed: None,
+        score_breakdown: None,
         provenance,
         why: hit.why(),
         diversity_key: tags.first().map(|tag| {

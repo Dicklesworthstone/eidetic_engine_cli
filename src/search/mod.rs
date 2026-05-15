@@ -24,6 +24,30 @@ pub use scoring::{
 pub const SUBSYSTEM: &str = "search";
 pub const CANONICAL_DOCUMENT_SCHEMA: &str = SEARCH_DOCUMENT_SCHEMA_V1;
 
+/// Emit a standard tracing checkpoint for the radix-ULID tie-breaker surface.
+///
+/// The actual radix sorter lands under the owning `bd-3usjw.50` implementation
+/// bead; this helper keeps the search callsite's Part II tracing contract ready
+/// without changing current ranking behavior.
+pub fn trace_radix_ulid_sort_checkpoint(
+    phase: &'static str,
+    elapsed_ms: u64,
+    candidate_count: usize,
+    degraded_codes: &[&str],
+) {
+    tracing::info!(
+        workspace_id = "search",
+        request_id = "radix_ulid_sort_request",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-3usjw.50"),
+        surface = "radix_ulid_sort",
+        phase,
+        elapsed_ms,
+        candidate_count,
+        degraded_codes = ?degraded_codes,
+        "radix ULID sort checkpoint"
+    );
+}
+
 /// Source type for canonical search documents.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DocumentSource {

@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
+use fnx_classes::Graph;
+use fnx_runtime::CompatibilityMode;
 use serde::Serialize;
 
 use crate::curate::{
@@ -21,9 +23,14 @@ use crate::db::{
     CreateCurationCandidateInput, CreateProceduralRuleInput, CreateProcedureEventInput,
     CreateProcedureInput, CreateSearchIndexJobInput, CurationCandidateReviewUpdate, DbConnection,
     MemoryLevelTransitionAuditInput, SearchIndexJobType, StoredCurationCandidate,
-    StoredCurationTtlPolicy, StoredEvidenceSpan, StoredMemory, StoredSession, audit_actions,
-    default_curation_ttl_policy_id_for_review_state, generate_audit_id,
+    StoredCurationTtlPolicy, StoredEvidenceSpan, StoredMemory, StoredMemoryLink, StoredSession,
+    audit_actions, default_curation_ttl_policy_id_for_review_state, generate_audit_id,
 };
+use crate::graph::decay::{
+    StructuralDecayMultiplier, compute_structural_decay_adjustment,
+    compute_structural_decay_connectivity,
+};
+use crate::models::degradation::GRAPH_CURATE_DISCONNECTED_GRAPH_CODE;
 use crate::models::{
     CandidateId, DomainError, MemoryId, ProducerMetadata, REVIEW_SESSION_SCHEMA_V1, RuleId,
     WorkspaceId,
@@ -179,6 +186,8 @@ pub struct CurateDispositionOptions<'a> {
     pub actor: Option<&'a str>,
     /// Apply deterministic transitions. Defaults to false for dry-run behavior.
     pub apply: bool,
+    /// Whether graph structure can accelerate or protect age-based TTL disposition.
+    pub structural_decay: bool,
     /// Optional frozen clock for tests and deterministic replay.
     pub now_rfc3339: Option<&'a str>,
 }
@@ -370,6 +379,8 @@ pub struct CurateDispositionReport {
     pub summary: CurateDispositionSummary,
     pub policies: Vec<CurateTtlPolicySummary>,
     pub decisions: Vec<CurateDispositionDecision>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub structural_adjustments: Vec<CurateStructuralDecayAdjustment>,
     pub degraded: Vec<CurateCandidatesDegradation>,
     pub next_action: String,
 }
@@ -1089,6 +1100,21 @@ pub struct CurateDispositionDecision {
     pub audit: Option<CurateDispositionAuditPlan>,
     pub errors: Vec<CurateValidationIssue>,
     pub warnings: Vec<CurateValidationIssue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurateStructuralDecayAdjustment {
+    pub candidate_id: String,
+    pub memory_id: String,
+    pub onion_layer: Option<usize>,
+    pub max_layer: usize,
+    pub is_articulation_point: bool,
+    pub base_decay: f32,
+    pub structural_multiplier: f32,
+    pub adjusted_decay: f32,
+    pub adjusted_ttl_threshold_seconds: u64,
+    pub rationale: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -2321,17 +2347,32 @@ pub fn run_curation_disposition(
         .iter()
         .map(|policy| (policy.id.as_str(), policy))
         .collect::<BTreeMap<_, _>>();
-
     let mut degraded = Vec::new();
+    let structural_adjustments = if options.structural_decay {
+        curate_structural_decay_adjustments(
+            &connection,
+            &candidates,
+            &policy_map,
+            &now,
+            &mut degraded,
+        )?
+    } else {
+        BTreeMap::new()
+    };
+
     let mut decisions = Vec::new();
+    let disposition_context = CurateDispositionContext {
+        policies: &policy_map,
+        now: &now,
+        apply: options.apply,
+        actor: &actor,
+        connection: &connection,
+    };
     for candidate in &candidates {
         let decision = evaluate_candidate_for_disposition(
             candidate,
-            &policy_map,
-            &now,
-            options.apply,
-            &actor,
-            &connection,
+            &disposition_context,
+            structural_adjustments.get(&candidate.id),
             &mut degraded,
         )?;
         decisions.push(decision);
@@ -2370,6 +2411,7 @@ pub fn run_curation_disposition(
         summary,
         policies: policies.iter().map(policy_summary).collect(),
         decisions,
+        structural_adjustments: structural_adjustments.into_values().collect(),
         degraded,
         next_action,
     })
@@ -3843,15 +3885,164 @@ fn next_action_for_review_transition(
     }
 }
 
-fn evaluate_candidate_for_disposition(
-    stored: &StoredCurationCandidate,
+fn curate_structural_decay_adjustments(
+    connection: &DbConnection,
+    candidates: &[StoredCurationCandidate],
     policies: &BTreeMap<&str, &StoredCurationTtlPolicy>,
     now: &DateTime<Utc>,
+    degraded: &mut Vec<CurateCandidatesDegradation>,
+) -> Result<BTreeMap<String, CurateStructuralDecayAdjustment>, DomainError> {
+    let memory_ids = candidates
+        .iter()
+        .map(|candidate| candidate.target_memory_id.clone())
+        .collect::<BTreeSet<_>>();
+    let links = connection
+        .list_all_memory_links(None)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list memory links for structural decay: {error}"),
+            repair: Some("ee graph project --json".to_owned()),
+        })?;
+    let graph = curate_structural_decay_graph(&memory_ids, &links);
+    push_structural_decay_connectivity_degradation(&graph, degraded);
+    let mut adjustments = BTreeMap::new();
+
+    for candidate in candidates {
+        let review_state = normalized_review_state(candidate);
+        let policy_id = candidate
+            .ttl_policy_id
+            .as_deref()
+            .unwrap_or_else(|| default_curation_ttl_policy_id_for_review_state(&review_state));
+        let Some(policy) = policies.get(policy_id).copied() else {
+            continue;
+        };
+        let entered_raw = candidate
+            .state_entered_at
+            .as_deref()
+            .or(candidate.reviewed_at.as_deref())
+            .or(candidate.applied_at.as_deref())
+            .unwrap_or(candidate.created_at.as_str());
+        let state_entered = DateTime::parse_from_rfc3339(entered_raw)
+            .map(|timestamp| timestamp.with_timezone(&Utc))
+            .unwrap_or(*now);
+        let elapsed_seconds = now
+            .signed_duration_since(state_entered)
+            .num_seconds()
+            .max(0);
+        let base_decay = if policy.threshold_seconds == 0 {
+            1.0
+        } else {
+            (elapsed_seconds as f64 / policy.threshold_seconds as f64).clamp(0.0, 1.0) as f32
+        };
+        let structural = compute_structural_decay_adjustment(&graph, &candidate.target_memory_id);
+        let adjustment = curate_structural_decay_adjustment(
+            &candidate.id,
+            &candidate.target_memory_id,
+            policy.threshold_seconds,
+            base_decay,
+            structural,
+        );
+        adjustments.insert(candidate.id.clone(), adjustment);
+    }
+
+    Ok(adjustments)
+}
+
+fn push_structural_decay_connectivity_degradation(
+    graph: &Graph,
+    degraded: &mut Vec<CurateCandidatesDegradation>,
+) {
+    let connectivity = compute_structural_decay_connectivity(graph);
+    if connectivity.component_count <= 1 {
+        return;
+    }
+
+    degraded.push(CurateCandidatesDegradation {
+        code: GRAPH_CURATE_DISCONNECTED_GRAPH_CODE.to_owned(),
+        severity: "warning".to_owned(),
+        message: format!(
+            "Structural curation graph has {} connected components; structural decay adjustments may be local to disconnected components.",
+            connectivity.component_count
+        ),
+        repair: "Run `ee graph snapshot refresh --workspace .`, then `ee health --robot-insights --json`.".to_owned(),
+    });
+}
+
+fn curate_structural_decay_graph(
+    memory_ids: &BTreeSet<String>,
+    links: &[StoredMemoryLink],
+) -> Graph {
+    let mut graph_memory_ids = memory_ids.clone();
+    for link in links {
+        if memory_ids.contains(&link.src_memory_id) || memory_ids.contains(&link.dst_memory_id) {
+            graph_memory_ids.insert(link.src_memory_id.clone());
+            graph_memory_ids.insert(link.dst_memory_id.clone());
+        }
+    }
+
+    let mut graph = Graph::new(CompatibilityMode::Strict);
+    for memory_id in &graph_memory_ids {
+        graph.add_node(memory_id);
+    }
+    for link in links {
+        if !graph_memory_ids.contains(&link.src_memory_id)
+            || !graph_memory_ids.contains(&link.dst_memory_id)
+        {
+            continue;
+        }
+        graph.add_node(&link.src_memory_id);
+        graph.add_node(&link.dst_memory_id);
+        let _ = graph
+            .extend_edges_unrecorded([(link.src_memory_id.as_str(), link.dst_memory_id.as_str())]);
+    }
+    graph
+}
+
+fn curate_structural_decay_adjustment(
+    candidate_id: &str,
+    memory_id: &str,
+    base_threshold_seconds: u64,
+    base_decay: f32,
+    structural: StructuralDecayMultiplier,
+) -> CurateStructuralDecayAdjustment {
+    let structural_multiplier = (structural.structural_multiplier as f32).clamp(0.000_001, 1000.0);
+    let adjusted_decay = (base_decay * structural_multiplier).clamp(0.0, 1.0);
+    let adjusted_ttl_threshold_seconds = ((base_threshold_seconds as f64)
+        / f64::from(structural_multiplier))
+    .ceil()
+    .clamp(1.0, u64::MAX as f64) as u64;
+    CurateStructuralDecayAdjustment {
+        candidate_id: candidate_id.to_owned(),
+        memory_id: memory_id.to_owned(),
+        onion_layer: structural.onion_layer,
+        max_layer: structural.max_layer,
+        is_articulation_point: structural.is_articulation_point,
+        base_decay,
+        structural_multiplier,
+        adjusted_decay,
+        adjusted_ttl_threshold_seconds,
+        rationale: structural.rationale,
+    }
+}
+
+struct CurateDispositionContext<'ctx, 'policy> {
+    policies: &'ctx BTreeMap<&'policy str, &'policy StoredCurationTtlPolicy>,
+    now: &'ctx DateTime<Utc>,
     apply: bool,
-    actor: &str,
-    connection: &DbConnection,
+    actor: &'ctx str,
+    connection: &'ctx DbConnection,
+}
+
+fn evaluate_candidate_for_disposition(
+    stored: &StoredCurationCandidate,
+    context: &CurateDispositionContext<'_, '_>,
+    structural_adjustment: Option<&CurateStructuralDecayAdjustment>,
     degraded: &mut Vec<CurateCandidatesDegradation>,
 ) -> Result<CurateDispositionDecision, DomainError> {
+    let policies = context.policies;
+    let now = context.now;
+    let apply = context.apply;
+    let actor = context.actor;
+    let connection = context.connection;
     let review_state = normalized_review_state(stored);
     let policy_id = stored
         .ttl_policy_id
@@ -3899,7 +4090,10 @@ fn evaluate_candidate_for_disposition(
         }
     };
 
-    let threshold = duration_from_seconds(policy.threshold_seconds, "threshold_seconds")?;
+    let threshold_seconds = structural_adjustment.map_or(policy.threshold_seconds, |adjustment| {
+        adjustment.adjusted_ttl_threshold_seconds
+    });
+    let threshold = duration_from_seconds(threshold_seconds, "threshold_seconds")?;
     let due_at = state_entered + threshold;
     let elapsed = now.signed_duration_since(state_entered).num_seconds();
     let evidence_count = u32::from(stored.source_id.is_some());
@@ -3923,7 +4117,7 @@ fn evaluate_candidate_for_disposition(
             state_entered_at: Some(entered_raw.to_owned()),
             due_at: Some(due_at.to_rfc3339()),
             ttl_elapsed_seconds: Some(elapsed),
-            ttl_threshold_seconds: policy.threshold_seconds,
+            ttl_threshold_seconds: threshold_seconds,
             evidence_count,
             distinct_session_count,
             auto_promote_enabled: policy.auto_promote_enabled,
@@ -3946,7 +4140,7 @@ fn evaluate_candidate_for_disposition(
             state_entered_at: Some(entered_raw.to_owned()),
             due_at: Some(due_at.to_rfc3339()),
             ttl_elapsed_seconds: Some(elapsed),
-            ttl_threshold_seconds: policy.threshold_seconds,
+            ttl_threshold_seconds: threshold_seconds,
             evidence_count,
             distinct_session_count,
             auto_promote_enabled: policy.auto_promote_enabled,
@@ -4079,7 +4273,7 @@ fn evaluate_candidate_for_disposition(
         state_entered_at: Some(entered_raw.to_owned()),
         due_at: Some(due_at.to_rfc3339()),
         ttl_elapsed_seconds: Some(elapsed),
-        ttl_threshold_seconds: policy.threshold_seconds,
+        ttl_threshold_seconds: threshold_seconds,
         evidence_count,
         distinct_session_count,
         auto_promote_enabled: policy.auto_promote_enabled,
@@ -5910,21 +6104,31 @@ fn curate_usage_error(message: String, repair: &str) -> DomainError {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::path::Path;
 
     use super::{
-        CurateCandidatesOptions, CurateReviewAction, CurateReviewOptions, ReviewSessionCandidate,
-        ReviewSessionOptions, ReviewSessionReport, apply_curation_candidate,
-        candidate_summary_from_stored, list_curation_candidates, review_curation_candidate,
-        review_session_proposals, stable_workspace_id, validate_curation_candidate,
+        CurateCandidatesOptions, CurateDispositionOptions, CurateReviewAction, CurateReviewOptions,
+        ReviewSessionCandidate, ReviewSessionOptions, ReviewSessionReport,
+        apply_curation_candidate, candidate_summary_from_stored, list_curation_candidates,
+        review_curation_candidate, review_session_proposals, run_curation_disposition,
+        stable_workspace_id, validate_curation_candidate,
     };
     use crate::db::{
         CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateFeedbackEventInput,
-        CreateMemoryInput, CreateSessionInput, CreateWorkspaceInput, DbConnection,
-        StoredCurationCandidate, audit_actions,
+        CreateMemoryInput, CreateMemoryLinkInput, CreateSessionInput, CreateWorkspaceInput,
+        DbConnection, MemoryLinkRelation, MemoryLinkSource, StoredCurationCandidate, audit_actions,
     };
+    use crate::models::degradation::GRAPH_CURATE_DISCONNECTED_GRAPH_CODE;
     use crate::models::{CandidateId, EvidenceId, MemoryId, SessionId};
 
     type TestResult = Result<(), String>;
+
+    fn test_workspace_id(workspace_path: &Path) -> String {
+        let canonical = workspace_path
+            .canonicalize()
+            .unwrap_or_else(|_| workspace_path.to_path_buf());
+        stable_workspace_id(&canonical)
+    }
 
     #[test]
     fn duration_from_seconds_rejects_values_outside_chrono_range() -> TestResult {
@@ -6306,10 +6510,10 @@ mod tests {
 
     #[test]
     fn list_curation_candidates_filters_pending_and_paginates() -> TestResult {
-        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
-        let workspace_id = stable_workspace_id(workspace_path);
+        let workspace_id = test_workspace_id(workspace_path);
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(1)).to_string();
 
         let connection =
@@ -6414,10 +6618,10 @@ mod tests {
 
     #[test]
     fn list_curation_candidates_resolves_feedback_cluster_members_and_tombstones() -> TestResult {
-        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
-        let workspace_id = stable_workspace_id(workspace_path);
+        let workspace_id = test_workspace_id(workspace_path);
         let memory_one = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7001)).to_string();
         let memory_two = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7002)).to_string();
         let candidate_id = curate_id(0x7003);
@@ -6561,10 +6765,10 @@ mod tests {
 
     #[test]
     fn list_curation_candidates_scores_cluster_coherence_from_member_memories() -> TestResult {
-        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
-        let workspace_id = stable_workspace_id(workspace_path);
+        let workspace_id = test_workspace_id(workspace_path);
         let memory_ids = [
             MemoryId::from_uuid(uuid::Uuid::from_u128(0x7101)).to_string(),
             MemoryId::from_uuid(uuid::Uuid::from_u128(0x7102)).to_string(),
@@ -6711,10 +6915,10 @@ mod tests {
 
     #[test]
     fn list_curation_candidates_supports_sorting_and_duplicate_grouping() -> TestResult {
-        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
-        let workspace_id = stable_workspace_id(workspace_path);
+        let workspace_id = test_workspace_id(workspace_path);
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(21)).to_string();
 
         let connection =
@@ -6839,10 +7043,10 @@ mod tests {
 
     #[test]
     fn validate_curation_candidate_approves_pending_and_writes_audit() -> TestResult {
-        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
-        let workspace_id = stable_workspace_id(workspace_path);
+        let workspace_id = test_workspace_id(workspace_path);
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(11)).to_string();
         let candidate_id = curate_id(12);
         let connection = seed_candidate_database(
@@ -6893,10 +7097,10 @@ mod tests {
 
     #[test]
     fn validate_curation_candidate_dry_run_rejects_without_mutation() -> TestResult {
-        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
-        let workspace_id = stable_workspace_id(workspace_path);
+        let workspace_id = test_workspace_id(workspace_path);
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(13)).to_string();
         let candidate_id = curate_id(14);
         let connection = seed_candidate_database(
@@ -6944,7 +7148,7 @@ mod tests {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
-        let workspace_id = stable_workspace_id(workspace_path);
+        let workspace_id = test_workspace_id(workspace_path);
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(27)).to_string();
         let candidate_id = curate_id(28);
         let connection = seed_candidate_database(
@@ -7021,7 +7225,7 @@ mod tests {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
-        let workspace_id = stable_workspace_id(workspace_path);
+        let workspace_id = test_workspace_id(workspace_path);
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(15)).to_string();
         let candidate_id = curate_id(16);
         let connection = seed_candidate_database(
@@ -7098,7 +7302,7 @@ mod tests {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
-        let workspace_id = stable_workspace_id(workspace_path);
+        let workspace_id = test_workspace_id(workspace_path);
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(30)).to_string();
         let seed_id = curate_id(31);
         let spoof_id = curate_id(32);
@@ -7165,7 +7369,7 @@ mod tests {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
-        let workspace_id = stable_workspace_id(workspace_path);
+        let workspace_id = test_workspace_id(workspace_path);
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(31)).to_string();
         let candidate_id = curate_id(32);
         let raw_value = concat!("ghp", "_", "curate", "_", "apply");
@@ -7225,7 +7429,7 @@ mod tests {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
-        let workspace_id = stable_workspace_id(workspace_path);
+        let workspace_id = test_workspace_id(workspace_path);
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(17)).to_string();
         let candidate_id = curate_id(18);
         let connection = seed_candidate_database(
@@ -7273,7 +7477,7 @@ mod tests {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
-        let workspace_id = stable_workspace_id(workspace_path);
+        let workspace_id = test_workspace_id(workspace_path);
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(19)).to_string();
         let accept_id = curate_id(20);
         let reject_id = curate_id(21);
@@ -7375,7 +7579,7 @@ mod tests {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
-        let workspace_id = stable_workspace_id(workspace_path);
+        let workspace_id = test_workspace_id(workspace_path);
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(22)).to_string();
         let source_id = curate_id(23);
         let target_id = curate_id(24);
@@ -7482,7 +7686,7 @@ mod tests {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
-        let workspace_id = stable_workspace_id(workspace_path);
+        let workspace_id = test_workspace_id(workspace_path);
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(25)).to_string();
         let candidate_id = curate_id(26);
         let connection = seed_candidate_database(
@@ -7527,7 +7731,7 @@ mod tests {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
-        let workspace_id = stable_workspace_id(workspace_path);
+        let workspace_id = test_workspace_id(workspace_path);
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(27)).to_string();
         let candidate_id = curate_id(28);
         let connection = seed_candidate_database(
@@ -7594,6 +7798,371 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn curation_disposition_structural_decay_protects_bridge_candidate() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let bridge_id = MemoryId::from_uuid(uuid::Uuid::from_u128(41)).to_string();
+        let core_b_id = MemoryId::from_uuid(uuid::Uuid::from_u128(42)).to_string();
+        let core_c_id = MemoryId::from_uuid(uuid::Uuid::from_u128(43)).to_string();
+        let leaf_id = MemoryId::from_uuid(uuid::Uuid::from_u128(44)).to_string();
+        let bridge_candidate_id = curate_id(45);
+        let leaf_candidate_id = curate_id(50);
+        let connection = seed_candidate_database(
+            &database_path,
+            &workspace_id,
+            &bridge_id,
+            &bridge_candidate_id,
+            "promote",
+            Some("pending"),
+            None,
+        )?;
+        insert_test_memory(&connection, &workspace_id, &core_b_id, "Core B")?;
+        insert_test_memory(&connection, &workspace_id, &core_c_id, "Core C")?;
+        insert_test_memory(&connection, &workspace_id, &leaf_id, "Leaf")?;
+        insert_test_candidate(
+            &connection,
+            TestCandidateInput {
+                workspace_id: &workspace_id,
+                memory_id: &leaf_id,
+                candidate_id: &leaf_candidate_id,
+                source_id: "fb_11234567890123456789012345",
+                candidate_type: "promote",
+                status: Some("pending"),
+                proposed_content: None,
+            },
+        )?;
+        insert_test_link(
+            &connection,
+            "link_00000000000000000000000041",
+            &bridge_id,
+            &core_b_id,
+        )?;
+        insert_test_link(
+            &connection,
+            "link_00000000000000000000000042",
+            &core_b_id,
+            &core_c_id,
+        )?;
+        insert_test_link(
+            &connection,
+            "link_00000000000000000000000043",
+            &bridge_id,
+            &core_c_id,
+        )?;
+        insert_test_link(
+            &connection,
+            "link_00000000000000000000000044",
+            &bridge_id,
+            &leaf_id,
+        )?;
+
+        let legacy = run_curation_disposition(&CurateDispositionOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            actor: Some("MistySalmon"),
+            apply: false,
+            structural_decay: false,
+            now_rfc3339: Some("2026-05-20T00:00:02Z"),
+        })
+        .map_err(|error| error.message())?;
+        let structural = run_curation_disposition(&CurateDispositionOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            actor: Some("MistySalmon"),
+            apply: false,
+            structural_decay: true,
+            now_rfc3339: Some("2026-05-20T00:00:02Z"),
+        })
+        .map_err(|error| error.message())?;
+
+        assert!(legacy.structural_adjustments.is_empty());
+        let legacy_bridge_decision = legacy
+            .decisions
+            .iter()
+            .find(|decision| decision.candidate_id == bridge_candidate_id)
+            .ok_or_else(|| "legacy bridge decision missing".to_owned())?;
+        let legacy_leaf_decision = legacy
+            .decisions
+            .iter()
+            .find(|decision| decision.candidate_id == leaf_candidate_id)
+            .ok_or_else(|| "legacy leaf decision missing".to_owned())?;
+        let structural_bridge_decision = structural
+            .decisions
+            .iter()
+            .find(|decision| decision.candidate_id == bridge_candidate_id)
+            .ok_or_else(|| "structural bridge decision missing".to_owned())?;
+        let structural_leaf_decision = structural
+            .decisions
+            .iter()
+            .find(|decision| decision.candidate_id == leaf_candidate_id)
+            .ok_or_else(|| "structural leaf decision missing".to_owned())?;
+        assert_eq!(legacy_bridge_decision.decision, "planned");
+        assert_eq!(legacy_leaf_decision.decision, "planned");
+        assert_eq!(structural_bridge_decision.decision, "not_due");
+        assert_eq!(structural_leaf_decision.decision, "planned");
+
+        let bridge_adjustment = structural
+            .structural_adjustments
+            .iter()
+            .find(|adjustment| adjustment.memory_id == bridge_id)
+            .ok_or_else(|| "bridge adjustment missing".to_owned())?;
+        assert!(bridge_adjustment.is_articulation_point);
+        assert!(bridge_adjustment.structural_multiplier < 1.0);
+        assert!(
+            bridge_adjustment.adjusted_ttl_threshold_seconds
+                > legacy_bridge_decision.ttl_threshold_seconds
+        );
+        assert!(bridge_adjustment.adjusted_decay < bridge_adjustment.base_decay);
+
+        let leaf_adjustment = structural
+            .structural_adjustments
+            .iter()
+            .find(|adjustment| adjustment.memory_id == leaf_id)
+            .ok_or_else(|| "leaf adjustment missing".to_owned())?;
+        assert!(!leaf_adjustment.is_articulation_point);
+        assert!(leaf_adjustment.structural_multiplier > 1.0);
+        assert!(
+            leaf_adjustment.adjusted_ttl_threshold_seconds
+                < legacy_leaf_decision.ttl_threshold_seconds
+        );
+
+        let snapshot = serde_json::json!({
+            "structuralAdjustments": structural.structural_adjustments,
+        });
+        let mut settings = insta::Settings::clone_current();
+        settings.set_snapshot_path("../../tests/snapshots");
+        settings.set_prepend_module_to_snapshot(false);
+        settings.bind(|| {
+            insta::assert_json_snapshot!("curation_structural_adjustments_block", snapshot);
+        });
+        Ok(())
+    }
+
+    #[test]
+    fn curation_disposition_default_emits_structural_adjustments() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(46)).to_string();
+        let candidate_id = curate_id(47);
+        seed_candidate_database(
+            &database_path,
+            &workspace_id,
+            &memory_id,
+            &candidate_id,
+            "promote",
+            Some("pending"),
+            None,
+        )?;
+
+        let report = run_curation_disposition(&CurateDispositionOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            actor: None,
+            apply: false,
+            structural_decay: true,
+            now_rfc3339: Some("2026-05-02T00:00:02Z"),
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.structural_adjustments.len(), 1);
+        assert_eq!(report.structural_adjustments[0].memory_id, memory_id);
+        assert_eq!(report.structural_adjustments[0].structural_multiplier, 1.0);
+        Ok(())
+    }
+
+    #[test]
+    fn curation_disposition_structural_decay_reports_disconnected_graph() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let first_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(50)).to_string();
+        let second_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(51)).to_string();
+        let first_candidate_id = curate_id(52);
+        let second_candidate_id = curate_id(53);
+        let connection = seed_candidate_database(
+            &database_path,
+            &workspace_id,
+            &first_memory_id,
+            &first_candidate_id,
+            "promote",
+            Some("pending"),
+            None,
+        )?;
+        insert_test_memory(
+            &connection,
+            &workspace_id,
+            &second_memory_id,
+            "Review isolated memories before structural decay.",
+        )?;
+        insert_test_candidate(
+            &connection,
+            TestCandidateInput {
+                workspace_id: &workspace_id,
+                memory_id: &second_memory_id,
+                candidate_id: &second_candidate_id,
+                source_id: "fb_22222222222222222222222222",
+                candidate_type: "promote",
+                status: Some("pending"),
+                proposed_content: None,
+            },
+        )?;
+
+        let report = run_curation_disposition(&CurateDispositionOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            actor: None,
+            apply: false,
+            structural_decay: true,
+            now_rfc3339: Some("2026-05-02T00:00:02Z"),
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.structural_adjustments.len(), 2);
+        let degraded = report
+            .degraded
+            .iter()
+            .find(|entry| entry.code == GRAPH_CURATE_DISCONNECTED_GRAPH_CODE)
+            .ok_or_else(|| "expected disconnected-graph degradation".to_owned())?;
+        assert_eq!(degraded.severity, "warning");
+        assert!(
+            degraded.message.contains("connected components"),
+            "degradation should explain disconnected components: {}",
+            degraded.message
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn curation_disposition_no_structural_decay_keeps_legacy_report_shape() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(48)).to_string();
+        let candidate_id = curate_id(49);
+        seed_candidate_database(
+            &database_path,
+            &workspace_id,
+            &memory_id,
+            &candidate_id,
+            "promote",
+            Some("pending"),
+            None,
+        )?;
+
+        let report = run_curation_disposition(&CurateDispositionOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            actor: None,
+            apply: false,
+            structural_decay: false,
+            now_rfc3339: Some("2026-05-02T00:00:02Z"),
+        })
+        .map_err(|error| error.message())?;
+        let data = report.data_json();
+
+        assert!(report.structural_adjustments.is_empty());
+        assert!(!data.contains("structuralAdjustments"));
+        Ok(())
+    }
+
+    fn insert_test_memory(
+        connection: &DbConnection,
+        workspace_id: &str,
+        memory_id: &str,
+        content: &str,
+    ) -> Result<(), String> {
+        connection
+            .insert_memory(
+                memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: content.to_owned(),
+                    workflow_id: None,
+                    confidence: 0.7,
+                    utility: 0.6,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn insert_test_link(
+        connection: &DbConnection,
+        link_id: &str,
+        src_memory_id: &str,
+        dst_memory_id: &str,
+    ) -> Result<(), String> {
+        connection
+            .insert_memory_link(
+                link_id,
+                &CreateMemoryLinkInput {
+                    src_memory_id: src_memory_id.to_owned(),
+                    dst_memory_id: dst_memory_id.to_owned(),
+                    relation: MemoryLinkRelation::Supports,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    directed: false,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: MemoryLinkSource::Agent,
+                    created_by: Some("curate-structural-test".to_owned()),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    struct TestCandidateInput<'a> {
+        workspace_id: &'a str,
+        memory_id: &'a str,
+        candidate_id: &'a str,
+        source_id: &'a str,
+        candidate_type: &'a str,
+        status: Option<&'a str>,
+        proposed_content: Option<&'a str>,
+    }
+
+    fn insert_test_candidate(
+        connection: &DbConnection,
+        input: TestCandidateInput<'_>,
+    ) -> Result<(), String> {
+        connection
+            .insert_curation_candidate(
+                input.candidate_id,
+                &CreateCurationCandidateInput {
+                    workspace_id: input.workspace_id.to_owned(),
+                    candidate_type: input.candidate_type.to_owned(),
+                    target_memory_id: input.memory_id.to_owned(),
+                    proposed_content: input.proposed_content.map(str::to_owned),
+                    proposed_confidence: Some(0.82),
+                    proposed_trust_class: Some("agent_validated".to_owned()),
+                    source_type: "feedback_event".to_owned(),
+                    source_id: Some(input.source_id.to_owned()),
+                    reason: "Useful during release verification.".to_owned(),
+                    confidence: 0.76,
+                    status: input.status.map(str::to_owned),
+                    created_at: Some("2026-05-01T00:00:02Z".to_owned()),
+                    ttl_expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
     fn seed_candidate_database(
         database_path: &std::path::Path,
         workspace_id: &str,
@@ -7640,26 +8209,18 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())?;
-        connection
-            .insert_curation_candidate(
+        insert_test_candidate(
+            &connection,
+            TestCandidateInput {
+                workspace_id,
+                memory_id,
                 candidate_id,
-                &CreateCurationCandidateInput {
-                    workspace_id: workspace_id.to_owned(),
-                    candidate_type: candidate_type.to_owned(),
-                    target_memory_id: memory_id.to_owned(),
-                    proposed_content: proposed_content.map(str::to_owned),
-                    proposed_confidence: Some(0.82),
-                    proposed_trust_class: Some("agent_validated".to_owned()),
-                    source_type: "feedback_event".to_owned(),
-                    source_id: Some("fb_01234567890123456789012345".to_owned()),
-                    reason: "Useful during release verification.".to_owned(),
-                    confidence: 0.76,
-                    status: status.map(str::to_owned),
-                    created_at: Some("2026-05-01T00:00:02Z".to_owned()),
-                    ttl_expires_at: None,
-                },
-            )
-            .map_err(|error| error.to_string())?;
+                source_id: "fb_01234567890123456789012345",
+                candidate_type,
+                status,
+                proposed_content,
+            },
+        )?;
         Ok(connection)
     }
 
@@ -7675,7 +8236,7 @@ mod tests {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path().to_path_buf();
         let database_path = workspace_path.join("ee.db");
-        let workspace_id = stable_workspace_id(&workspace_path);
+        let workspace_id = test_workspace_id(&workspace_path);
         let session_id = SessionId::from_uuid(uuid::Uuid::from_u128(303)).to_string();
         let storage_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(101)).to_string();
         let testing_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(202)).to_string();

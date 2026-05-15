@@ -883,6 +883,10 @@ pub struct ExportMemoryRecord {
     pub importance: Option<f64>,
     pub confidence: Option<f64>,
     pub utility: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trust_class: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trust_subclass: Option<String>,
     pub created_at: String,
     pub updated_at: Option<String>,
     pub tombstoned_at: Option<String>,
@@ -915,6 +919,8 @@ pub struct ExportMemoryRecordBuilder {
     importance: Option<f64>,
     confidence: Option<f64>,
     utility: Option<f64>,
+    trust_class: Option<String>,
+    trust_subclass: Option<String>,
     created_at: Option<String>,
     updated_at: Option<String>,
     tombstoned_at: Option<String>,
@@ -976,6 +982,18 @@ impl ExportMemoryRecordBuilder {
     #[must_use]
     pub fn utility(mut self, utility: f64) -> Self {
         self.utility = Some(utility);
+        self
+    }
+
+    #[must_use]
+    pub fn trust_class(mut self, trust_class: impl Into<String>) -> Self {
+        self.trust_class = Some(trust_class.into());
+        self
+    }
+
+    #[must_use]
+    pub fn trust_subclass(mut self, trust_subclass: impl Into<String>) -> Self {
+        self.trust_subclass = Some(trust_subclass.into());
         self
     }
 
@@ -1077,6 +1095,8 @@ impl ExportMemoryRecordBuilder {
             importance: self.importance,
             confidence: self.confidence,
             utility: self.utility,
+            trust_class: self.trust_class,
+            trust_subclass: self.trust_subclass,
             created_at: required_string(ExportRecordType::Memory, "created_at", self.created_at)?,
             updated_at: self.updated_at,
             tombstoned_at: self.tombstoned_at,
@@ -2622,6 +2642,8 @@ mod tests {
             "importance": 0.8,
             "confidence": 0.9,
             "utility": 0.7,
+            "trust_class": "human_explicit",
+            "trust_subclass": "project-rule",
             "created_at": "2026-04-30T12:00:00Z",
             "tombstoned_at": "2026-05-01T12:00:00Z",
             "tombstoned_reason": "outdated release procedure",
@@ -2634,6 +2656,8 @@ mod tests {
         assert_eq!(memory.schema, EXPORT_MEMORY_SCHEMA_V1);
         assert_eq!(memory.memory_id, "mem-001");
         assert_eq!(memory.importance, Some(0.8));
+        assert_eq!(memory.trust_class.as_deref(), Some("human_explicit"));
+        assert_eq!(memory.trust_subclass.as_deref(), Some("project-rule"));
         assert_eq!(
             memory.tombstoned_at.as_deref(),
             Some("2026-05-01T12:00:00Z")

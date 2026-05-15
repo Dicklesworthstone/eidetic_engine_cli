@@ -22,7 +22,7 @@
 //! EE-006 / EE-016. Strict scope: this module must not depend on any
 //! of those landing first.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -49,6 +49,7 @@ use crate::core::search::{
 use crate::db::{
     CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, DbConnection, StoredMemory,
 };
+use crate::models::degradation::{GRAPH_PPR_EMPTY_SEED_SET_CODE, GRAPH_PPR_SNAPSHOT_STALE_CODE};
 use crate::models::{
     MemoryId, MemoryScope, MemoryScopeStats, PackId, ProvenanceUri, TrustClass, UnitScore,
     WorkspaceId, posture_for_trust_class,
@@ -58,13 +59,14 @@ use crate::pack::{
     ContextRequest, ContextRequestInput, ContextResponse, ContextResponseDegradation,
     ContextResponseSeverity, PackAssemblySlo, PackAssemblySloActuals, PackCandidate,
     PackCandidateInput, PackCoordinationSnapshot, PackItemLifecycle, PackProvenance,
-    PackResourceProfile, PackSection, PackTrustSignal, assemble_draft_with_profile_and_options,
-    estimate_tokens_default, pack_item_provenance_json,
+    PackResourceProfile, PackScoreBreakdown, PackSection, PackTrustSignal,
+    assemble_draft_with_profile_and_options, estimate_tokens_default, pack_item_provenance_json,
 };
 
 static PACK_HASH_LOG_RUN_INDEX: AtomicU64 = AtomicU64::new(0);
 static PACK_SLOT_PROCESS_GATES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
 const PACK_SLOT_RETRY_AFTER_MS: u64 = 250;
+pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
 
 #[derive(Debug)]
 struct PackSlotGuard {
@@ -399,6 +401,7 @@ pub struct ContextPackOptions {
     pub include_stale: bool,
     pub memory_scope: MemoryScope,
     pub strict_scope: bool,
+    pub ppr_weight: Option<f32>,
     pub pagination: Option<ContextPagination>,
     pub coordination_snapshot_path: Option<PathBuf>,
     pub coordination_stale_after_ms: u64,
@@ -646,6 +649,116 @@ impl std::error::Error for ContextPackError {}
 
 pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse, ContextPackError> {
     run_context_pack_with_performance(options, "context").map(|run| run.response)
+}
+
+pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut ContextResponse) {
+    let connection = match DbConnection::open_file(database_path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            response.data.pack_dna = Some(serde_json::Value::Null);
+            push_degradation(
+                &mut response.data.degraded,
+                "context_graph_snapshot_unavailable",
+                ContextResponseSeverity::Low,
+                format!("Pack DNA was requested but the memory graph could not be opened: {error}"),
+                Some("ee status --json".to_string()),
+            );
+            return;
+        }
+    };
+
+    let projection = match crate::graph::build_memory_graph(
+        &connection,
+        &crate::graph::ProjectionOptions::default(),
+    ) {
+        Ok(projection) => projection,
+        Err(error) => {
+            response.data.pack_dna = Some(serde_json::Value::Null);
+            push_degradation(
+                &mut response.data.degraded,
+                "context_graph_snapshot_unavailable",
+                ContextResponseSeverity::Low,
+                format!("Pack DNA was requested but memory graph projection failed: {error}"),
+                Some("ee graph centrality-refresh --workspace .".to_string()),
+            );
+            return;
+        }
+    };
+
+    let pack_memory_ids = response
+        .data
+        .pack
+        .items
+        .iter()
+        .map(|item| item.memory_id)
+        .collect::<Vec<_>>();
+    let query_seed_weights = response
+        .data
+        .pack
+        .items
+        .iter()
+        .filter_map(|item| {
+            let score = item.relevance.into_inner();
+            (score.is_finite() && score > 0.0).then_some((item.memory_id, f64::from(score)))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let trust_anchor_memory_ids = response
+        .data
+        .pack
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.trust.class,
+                TrustClass::HumanExplicit | TrustClass::AgentValidated
+            )
+        })
+        .map(|item| item.memory_id)
+        .collect::<Vec<_>>();
+
+    let input = crate::graph::pack_dna::PackDnaInput {
+        pack_memory_ids,
+        query_seed_weights,
+        trust_anchor_memory_ids,
+        ego_radius: crate::graph::pack_dna::DEFAULT_PACK_DNA_EGO_RADIUS,
+        ppr_neighbor_limit: crate::graph::pack_dna::DEFAULT_PACK_DNA_PPR_NEIGHBOR_LIMIT,
+    };
+    let pack_dna = match crate::graph::pack_dna::compute_pack_dna(&projection, &input) {
+        Ok(pack_dna) => pack_dna,
+        Err(error) => {
+            response.data.pack_dna = Some(serde_json::Value::Null);
+            push_degradation(
+                &mut response.data.degraded,
+                "context_graph_snapshot_unavailable",
+                ContextResponseSeverity::Low,
+                format!("Pack DNA computation failed: {error}"),
+                Some("ee graph centrality-refresh --workspace .".to_string()),
+            );
+            return;
+        }
+    };
+
+    for degradation in &pack_dna.degraded {
+        push_degradation(
+            &mut response.data.degraded,
+            &degradation.code,
+            context_severity_from_pack_dna(&degradation.severity),
+            degradation.message.clone(),
+            Some(degradation.repair.clone()),
+        );
+    }
+
+    response.data.pack_dna =
+        Some(serde_json::to_value(&pack_dna).unwrap_or(serde_json::Value::Null));
+}
+
+const fn context_severity_from_pack_dna(severity: &str) -> ContextResponseSeverity {
+    match severity.as_bytes() {
+        b"info" => ContextResponseSeverity::Info,
+        b"medium" => ContextResponseSeverity::Medium,
+        b"high" => ContextResponseSeverity::High,
+        _ => ContextResponseSeverity::Low,
+    }
 }
 
 pub fn run_context_pack_with_performance(
@@ -988,20 +1101,19 @@ pub fn run_context_pack_with_performance(
             .redaction_filtered_candidates
             .saturating_add(redaction_filtered_candidates);
     }
-    trace.candidate_resolution = candidate_metrics;
-    if trace.candidate_resolution.redaction_filtered_candidates > 0 {
+    if candidate_metrics.redaction_filtered_candidates > 0 {
         trace.filter_input_count = trace.filter_input_count.max(redaction_filter_input_count);
         trace.filtered_count = trace
             .filtered_count
-            .saturating_add(trace.candidate_resolution.redaction_filtered_candidates);
+            .saturating_add(candidate_metrics.redaction_filtered_candidates);
         push_degradation(
             &mut degraded,
             "context_redaction_filtered_results",
             ContextResponseSeverity::Low,
             format!(
                 "{} candidate memor{} excluded by redaction.allowCategories.",
-                trace.candidate_resolution.redaction_filtered_candidates,
-                if trace.candidate_resolution.redaction_filtered_candidates == 1 {
+                candidate_metrics.redaction_filtered_candidates,
+                if candidate_metrics.redaction_filtered_candidates == 1 {
                     "y was"
                 } else {
                     "ies were"
@@ -1013,6 +1125,24 @@ pub fn run_context_pack_with_performance(
             ),
         );
     }
+
+    let ppr_metrics = apply_personalized_pagerank_rerank(
+        &connection,
+        &options.workspace_path,
+        &search_report,
+        &mut candidates,
+        effective_context_ppr_weight(options.ppr_weight),
+        &mut degraded,
+    );
+    candidate_metrics.graph_boosted_candidates = candidate_metrics
+        .graph_boosted_candidates
+        .saturating_add(ppr_metrics.reranked_candidates);
+    let proximity_metrics =
+        apply_proximity_to_seed_scores(&connection, &search_report, &mut candidates, &mut degraded);
+    candidate_metrics.graph_boosted_candidates = candidate_metrics
+        .graph_boosted_candidates
+        .saturating_add(proximity_metrics.annotated_candidates);
+    trace.candidate_resolution = candidate_metrics;
 
     sort_context_candidates(&mut candidates);
 
@@ -2015,9 +2145,21 @@ fn sort_context_candidates(candidates: &mut [PackCandidate]) {
                     .into_inner()
                     .total_cmp(&left.utility.into_inner())
             })
+            .then_with(|| {
+                compare_optional_f32_desc(left.proximity_to_seed, right.proximity_to_seed)
+            })
             .then_with(|| left.section.cmp(&right.section))
             .then_with(|| left.memory_id.to_string().cmp(&right.memory_id.to_string()))
     });
+}
+
+fn compare_optional_f32_desc(left: Option<f32>, right: Option<f32>) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => right.total_cmp(&left),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
 }
 
 fn persist_pack_record(
@@ -2332,6 +2474,14 @@ fn compute_pack_hash_components(
             hasher.update(&item.estimated_tokens.to_le_bytes());
             hasher.update(&item.relevance.into_inner().to_le_bytes());
             hasher.update(&item.utility.into_inner().to_le_bytes());
+            if let Some(proximity_to_seed) = item.proximity_to_seed {
+                hasher.update(&proximity_to_seed.to_le_bytes());
+            }
+            if let Some(score_breakdown) = item.score_breakdown {
+                hasher.update(&score_breakdown.text_score.to_le_bytes());
+                hasher.update(&score_breakdown.ppr_score.to_le_bytes());
+                hasher.update(&score_breakdown.combined_score.to_le_bytes());
+            }
             hasher.update(item.why.as_bytes());
             hasher.update(item.selected_in.as_str().as_bytes());
         }
@@ -2642,12 +2792,382 @@ struct GraphHintApplicationMetrics {
     traversed_edges: usize,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct PersonalizedPageRankRerankMetrics {
+    reranked_candidates: usize,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ProximityToSeedMetrics {
+    annotated_candidates: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct GraphHintEvidence {
     seed_memory_id: String,
     depth: u32,
     relation: Option<String>,
     traversal: crate::models::QueryGraphTraversal,
+}
+
+fn apply_personalized_pagerank_rerank(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    search_report: &SearchReport,
+    candidates: &mut [PackCandidate],
+    ppr_weight: f32,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> PersonalizedPageRankRerankMetrics {
+    let ppr_weight = ppr_weight.clamp(0.0, 1.0);
+    if candidates.is_empty() || ppr_weight == 0.0 {
+        return PersonalizedPageRankRerankMetrics::default();
+    }
+
+    let workspace_ids = graph_context_workspace_ids(connection, workspace_path, degraded);
+    let Some(snapshot) = latest_valid_memory_links_snapshot(connection, &workspace_ids, degraded)
+    else {
+        return PersonalizedPageRankRerankMetrics::default();
+    };
+
+    let seed_map = personalized_pagerank_seed_map(search_report, candidates);
+    if seed_map.is_empty() {
+        push_degradation(
+            degraded,
+            GRAPH_PPR_EMPTY_SEED_SET_CODE,
+            ContextResponseSeverity::Low,
+            "PPR rerank skipped because the graph seed set was empty.",
+            Some(
+                "Broaden the query or lower the relevance floor before enabling PPR reranking."
+                    .to_string(),
+            ),
+        );
+        return PersonalizedPageRankRerankMetrics::default();
+    }
+
+    let projection = match crate::graph::build_memory_graph(
+        connection,
+        &crate::graph::ProjectionOptions::default(),
+    ) {
+        Ok(projection) => projection,
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_graph_snapshot_unavailable",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Personalized PageRank rerank skipped because memory graph projection failed: {error}"
+                ),
+                Some("ee graph centrality-refresh".to_string()),
+            );
+            return PersonalizedPageRankRerankMetrics::default();
+        }
+    };
+
+    let seed_weights = seed_map
+        .iter()
+        .map(|(memory_id, weight)| (memory_id.to_string(), *weight))
+        .collect::<BTreeMap<_, _>>();
+    let policy = crate::graph::ppr::PersonalizedPageRankPolicy::default();
+    let ppr_params = serde_json::json!({
+        "alpha": policy.alpha,
+        "maxIterations": policy.max_iterations,
+        "seedCount": seed_weights.len(),
+        "tolerance": policy.tolerance,
+    });
+    let cache_spec = crate::graph::algorithms::AlgorithmResultCacheSpec {
+        conn: connection,
+        workspace_id: &snapshot.workspace_id,
+        snapshot_id: &snapshot.id,
+        snapshot_content_hash: &snapshot.content_hash,
+        algorithm: "personalized_pagerank",
+        params: &ppr_params,
+        ttl_seconds: 300,
+    };
+    let ppr_start = Instant::now();
+    let cache_run = match crate::graph::ppr::compute_personalized_pagerank_result_cached(
+        &cache_spec,
+        &projection.graph,
+        &seed_weights,
+        policy,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_graph_snapshot_unavailable",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Personalized PageRank rerank skipped because PPR computation failed: {error}"
+                ),
+                Some("ee graph centrality-refresh".to_string()),
+            );
+            return PersonalizedPageRankRerankMetrics::default();
+        }
+    };
+    let elapsed_ms = u64::try_from(ppr_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let result = cache_run.result;
+    if !cache_run.cache_hit {
+        match crate::graph::ppr::emit_personalized_pagerank_witness(
+            &crate::graph::ppr::PersonalizedPageRankWitnessSpec {
+                conn: connection,
+                workspace_id: &snapshot.workspace_id,
+                snapshot_id: &snapshot.id,
+                snapshot_version: u64::from(snapshot.snapshot_version),
+                params: &ppr_params,
+                elapsed_ms,
+            },
+            &result,
+        ) {
+            Ok(()) => {}
+            Err(error) => {
+                tracing::debug!(
+                    algorithm = "personalized_pagerank",
+                    snapshot_id = %snapshot.id,
+                    error = %error,
+                    "context PPR witness emission failed"
+                );
+            }
+        }
+    }
+    let scores = result
+        .scores
+        .iter()
+        .filter_map(|score| {
+            MemoryId::from_str(&score.node)
+                .ok()
+                .map(|memory_id| (memory_id, score.score))
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut reranked_candidates = 0_usize;
+    for candidate in candidates {
+        let base = candidate.relevance.into_inner();
+        let ppr_score = scores
+            .get(&candidate.memory_id)
+            .copied()
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0) as f32;
+        let blended = (ppr_weight * ppr_score) + ((1.0 - ppr_weight) * base);
+        let Some(score) = unit_score(blended) else {
+            continue;
+        };
+        candidate.relevance = score;
+        candidate.score_breakdown =
+            Some(PackScoreBreakdown::ppr(base, ppr_score, score.into_inner()));
+        candidate.why = format!(
+            "{} Personalized PageRank rerank blended base={base:.4}, ppr={ppr_score:.4}, weight={:.2}, snapshot={}.",
+            candidate.why, ppr_weight, snapshot.id
+        );
+        reranked_candidates = reranked_candidates.saturating_add(1);
+    }
+
+    PersonalizedPageRankRerankMetrics {
+        reranked_candidates,
+    }
+}
+
+fn apply_proximity_to_seed_scores(
+    connection: &DbConnection,
+    search_report: &SearchReport,
+    candidates: &mut [PackCandidate],
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> ProximityToSeedMetrics {
+    if candidates.is_empty() {
+        return ProximityToSeedMetrics::default();
+    }
+
+    let seed_map = personalized_pagerank_seed_map(search_report, candidates);
+    if seed_map.is_empty() {
+        return ProximityToSeedMetrics::default();
+    }
+
+    let graph = match context_proximity_graph(connection) {
+        Ok(graph) => graph,
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_graph_snapshot_unavailable",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Proximity-to-seed scores skipped because memory graph projection failed: {error}"
+                ),
+                Some("ee graph centrality-refresh".to_string()),
+            );
+            return ProximityToSeedMetrics::default();
+        }
+    };
+
+    let tree = match crate::graph::gomory_hu::build_gomory_hu_tree(&graph) {
+        Ok(tree) => tree,
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_graph_snapshot_unavailable",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Proximity-to-seed scores skipped because Gomory-Hu projection failed: {error}"
+                ),
+                Some("ee graph centrality-refresh".to_string()),
+            );
+            return ProximityToSeedMetrics::default();
+        }
+    };
+
+    let seed_ids = seed_map.keys().copied().collect::<Vec<_>>();
+    let mut annotated_candidates = 0_usize;
+    for candidate in candidates {
+        let mut best = None;
+        let candidate_id = candidate.memory_id.to_string();
+        for seed_id in &seed_ids {
+            let seed_id = seed_id.to_string();
+            let cut = if seed_id == candidate_id {
+                Some(0.0)
+            } else {
+                crate::graph::gomory_hu::query_min_cut(&tree, &candidate_id, &seed_id)
+            };
+            if let Some(cut) = cut.filter(|cut| cut.is_finite() && *cut >= 0.0) {
+                best = Some(best.map_or(cut, |current: f64| current.max(cut)));
+            }
+        }
+        if let Some(best) = best {
+            candidate.proximity_to_seed = Some(best as f32);
+            annotated_candidates = annotated_candidates.saturating_add(1);
+        }
+    }
+
+    ProximityToSeedMetrics {
+        annotated_candidates,
+    }
+}
+
+fn context_proximity_graph(connection: &DbConnection) -> Result<fnx_classes::Graph, String> {
+    use fnx_classes::AttrMap;
+    use fnx_runtime::CgseValue;
+
+    let links = connection
+        .list_all_memory_links(None)
+        .map_err(|error| error.to_string())?;
+    let mut graph = fnx_classes::Graph::strict();
+    for link in links {
+        graph.add_node(&link.src_memory_id);
+        graph.add_node(&link.dst_memory_id);
+        let mut attrs = AttrMap::new();
+        attrs.insert(
+            "weight".to_string(),
+            CgseValue::Float(f64::from(link.weight)),
+        );
+        attrs.insert(
+            "confidence".to_string(),
+            CgseValue::Float(f64::from(link.confidence)),
+        );
+        attrs.insert(
+            "relation".to_string(),
+            CgseValue::String(link.relation.clone()),
+        );
+        graph
+            .add_edge_with_attrs(link.src_memory_id, link.dst_memory_id, attrs)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(graph)
+}
+
+fn effective_context_ppr_weight(value: Option<f32>) -> f32 {
+    match value {
+        Some(value) if value.is_finite() => value.clamp(0.0, 1.0),
+        Some(_) => DEFAULT_CONTEXT_PPR_WEIGHT,
+        None => 0.0,
+    }
+}
+
+fn latest_valid_memory_links_snapshot(
+    connection: &DbConnection,
+    workspace_ids: &BTreeSet<String>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Option<crate::db::StoredGraphSnapshot> {
+    let mut stale_snapshot = None;
+    for workspace_id in workspace_ids {
+        match connection
+            .get_latest_graph_snapshot(workspace_id, crate::db::GraphSnapshotType::MemoryLinks)
+        {
+            Ok(Some(snapshot)) if snapshot.status == crate::db::GraphSnapshotStatus::Valid => {
+                return Some(snapshot);
+            }
+            Ok(Some(snapshot)) => {
+                stale_snapshot.get_or_insert(snapshot);
+            }
+            Ok(None) => {}
+            Err(error) => push_degradation(
+                degraded,
+                "context_graph_snapshot_unavailable",
+                ContextResponseSeverity::Low,
+                format!("Graph snapshot posture could not be checked for {workspace_id}: {error}"),
+                Some("ee graph centrality-refresh".to_string()),
+            ),
+        }
+    }
+
+    if let Some(snapshot) = stale_snapshot {
+        push_degradation(
+            degraded,
+            GRAPH_PPR_SNAPSHOT_STALE_CODE,
+            ContextResponseSeverity::Medium,
+            format!(
+                "PPR rerank skipped because graph snapshot {} is {}.",
+                snapshot.id,
+                snapshot.status.as_str()
+            ),
+            Some("ee graph snapshot refresh --workspace .".to_string()),
+        );
+    } else {
+        push_degradation(
+            degraded,
+            "context_graph_snapshot_missing",
+            ContextResponseSeverity::Low,
+            "Personalized PageRank rerank skipped because no valid memory_links graph snapshot exists.",
+            Some("ee graph centrality-refresh".to_string()),
+        );
+    }
+    None
+}
+
+fn personalized_pagerank_seed_map(
+    search_report: &SearchReport,
+    candidates: &[PackCandidate],
+) -> HashMap<MemoryId, f64> {
+    let candidate_ids = candidates
+        .iter()
+        .map(|candidate| candidate.memory_id)
+        .collect::<BTreeSet<_>>();
+    let mut seed_map = HashMap::new();
+    for hit in &search_report.results {
+        let Ok(memory_id) = MemoryId::from_str(&hit.doc_id) else {
+            continue;
+        };
+        if !candidate_ids.contains(&memory_id) {
+            continue;
+        }
+        let vector_weight = positive_f32_score(hit.score);
+        let lexical_weight = hit.lexical_score.and_then(positive_f32_score);
+        let weight = match (vector_weight, lexical_weight) {
+            (Some(vector), Some(lexical)) => vector.max(lexical),
+            (Some(vector), None) => vector,
+            (None, Some(lexical)) => lexical,
+            (None, None) => continue,
+        };
+        seed_map
+            .entry(memory_id)
+            .and_modify(|current| {
+                if weight > *current {
+                    *current = weight;
+                }
+            })
+            .or_insert(weight);
+    }
+    seed_map
+}
+
+fn positive_f32_score(value: f32) -> Option<f64> {
+    (value.is_finite() && value > 0.0).then_some(f64::from(value))
 }
 
 fn apply_graph_hints(
@@ -4182,6 +4702,353 @@ mod tests {
         }
     }
 
+    struct PprContextFixture {
+        connection: DbConnection,
+        workspace_path: PathBuf,
+        seed: MemoryId,
+        neighbor: MemoryId,
+        orphan: MemoryId,
+    }
+
+    fn ppr_context_fixture(
+        snapshot_status: crate::db::GraphSnapshotStatus,
+    ) -> Result<PprContextFixture, String> {
+        use crate::db::{
+            CreateGraphSnapshotInput, CreateMemoryLinkInput, GraphSnapshotType, MemoryLinkRelation,
+            MemoryLinkSource,
+        };
+
+        let temp_root = PathBuf::from("/tmp");
+        let tempdir = tempfile::Builder::new()
+            .prefix("ee-context-ppr-")
+            .tempdir_in(&temp_root)
+            .or_else(|_| {
+                let cwd = std::env::current_dir()?;
+                tempfile::Builder::new()
+                    .prefix("ee-context-ppr-")
+                    .tempdir_in(cwd)
+            })
+            .map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.keep();
+        let workspace_id = WorkspaceId::from_uuid(uuid::Uuid::from_u128(900)).to_string();
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("context ppr fixture".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let seed = MemoryId::from_uuid(uuid::Uuid::from_u128(901));
+        let neighbor = MemoryId::from_uuid(uuid::Uuid::from_u128(902));
+        let orphan = MemoryId::from_uuid(uuid::Uuid::from_u128(903));
+        for (memory_id, content) in [
+            (seed, "Seed memory for release checks."),
+            (neighbor, "Neighbor memory linked by the graph."),
+            (orphan, "Orphan memory with no graph edge."),
+        ] {
+            connection
+                .insert_memory(
+                    &memory_id.to_string(),
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "procedural".to_string(),
+                        kind: "rule".to_string(),
+                        content: content.to_string(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.8,
+                        importance: 0.7,
+                        provenance_uri: None,
+                        trust_class: TrustClass::AgentAssertion.as_str().to_string(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        connection
+            .insert_memory_link(
+                "link_00000000000000000000000901",
+                &CreateMemoryLinkInput {
+                    src_memory_id: seed.to_string(),
+                    dst_memory_id: neighbor.to_string(),
+                    relation: MemoryLinkRelation::Supports,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    directed: true,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: MemoryLinkSource::Agent,
+                    created_by: Some("context-ppr-test".to_string()),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_graph_snapshot(
+                "gsnap_0000000000000000000000901",
+                &CreateGraphSnapshotInput {
+                    workspace_id: workspace_id.clone(),
+                    snapshot_version: 1,
+                    schema_version: "ee.graph.snapshot.v1".to_string(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 3,
+                    edge_count: 1,
+                    metrics_json: "{}".to_string(),
+                    content_hash: "blake3:context-ppr".to_string(),
+                    source_generation: 1,
+                    expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        if snapshot_status != crate::db::GraphSnapshotStatus::Valid {
+            connection
+                .update_graph_snapshot_status("gsnap_0000000000000000000000901", snapshot_status)
+                .map_err(|error| error.to_string())?;
+        }
+
+        Ok(PprContextFixture {
+            connection,
+            workspace_path,
+            seed,
+            neighbor,
+            orphan,
+        })
+    }
+
+    fn ppr_candidate(memory_id: MemoryId, relevance: f32) -> Result<PackCandidate, String> {
+        let provenance =
+            PackProvenance::new(ProvenanceUri::EeMemory(memory_id), "context ppr fixture")
+                .map_err(|error| error.to_string())?;
+        PackCandidate::new(PackCandidateInput {
+            memory_id,
+            section: PackSection::ProceduralRules,
+            content: format!("candidate {memory_id}"),
+            estimated_tokens: 8,
+            relevance: UnitScore::parse(relevance).map_err(|error| error.to_string())?,
+            utility: UnitScore::parse(0.8).map_err(|error| error.to_string())?,
+            provenance: vec![provenance],
+            why: "selected by fixture".to_string(),
+        })
+        .map_err(|error| error.to_string())
+    }
+
+    fn ppr_search_report(hits: Vec<SearchHit>) -> SearchReport {
+        SearchReport {
+            status: SearchStatus::Success,
+            query: "release graph".to_string(),
+            requested_limit: hits.len() as u32,
+            results: hits,
+            elapsed_ms: 1.0,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: crate::core::search::SearchSourceMode::Hybrid,
+            source_mode_applied: crate::core::search::SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        }
+    }
+
+    fn ppr_hit(memory_id: MemoryId, score: f32, lexical_score: Option<f32>) -> SearchHit {
+        SearchHit {
+            doc_id: memory_id.to_string(),
+            score,
+            source: if lexical_score.is_some() {
+                ScoreSource::Hybrid
+            } else {
+                ScoreSource::SemanticFast
+            },
+            fast_score: Some(score),
+            quality_score: None,
+            lexical_score,
+            rerank_score: None,
+            metadata: None,
+            explanation: None,
+        }
+    }
+
+    #[test]
+    fn context_ppr_weight_defaults_to_disabled() {
+        assert_eq!(super::effective_context_ppr_weight(None), 0.0);
+        assert_eq!(super::effective_context_ppr_weight(Some(0.75)), 0.75);
+        assert_eq!(super::effective_context_ppr_weight(Some(2.0)), 1.0);
+        assert_eq!(
+            super::effective_context_ppr_weight(Some(f32::NAN)),
+            super::DEFAULT_CONTEXT_PPR_WEIGHT
+        );
+    }
+
+    #[test]
+    fn context_ppr_rerank_fires_with_valid_snapshot() -> Result<(), String> {
+        let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        let mut candidates = vec![
+            ppr_candidate(fixture.seed, 0.80)?,
+            ppr_candidate(fixture.neighbor, 0.20)?,
+            ppr_candidate(fixture.orphan, 0.60)?,
+        ];
+        let search_report = ppr_search_report(vec![ppr_hit(fixture.seed, 0.90, Some(0.95))]);
+        let mut degraded = Vec::new();
+
+        let metrics = super::apply_personalized_pagerank_rerank(
+            &fixture.connection,
+            &fixture.workspace_path,
+            &search_report,
+            &mut candidates,
+            super::DEFAULT_CONTEXT_PPR_WEIGHT,
+            &mut degraded,
+        );
+
+        assert_eq!(metrics.reranked_candidates, 3);
+        assert!(
+            degraded.is_empty(),
+            "valid snapshot should not degrade: {degraded:?}"
+        );
+        assert!(candidates[1].relevance.into_inner() > 0.20);
+        let score_breakdown = candidates[1]
+            .score_breakdown
+            .ok_or_else(|| "reranked candidate should carry score breakdown".to_string())?;
+        assert_eq!(score_breakdown.text_score, 0.20);
+        assert_eq!(
+            score_breakdown.combined_score,
+            candidates[1].relevance.into_inner()
+        );
+        assert!(
+            candidates[1].why.contains("Personalized PageRank rerank"),
+            "rerank should annotate candidate why: {}",
+            candidates[1].why
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn context_ppr_rerank_skips_stale_snapshot() -> Result<(), String> {
+        let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Stale)?;
+        let mut candidates = vec![ppr_candidate(fixture.seed, 0.80)?];
+        let search_report = ppr_search_report(vec![ppr_hit(fixture.seed, 0.90, Some(0.95))]);
+        let mut degraded = Vec::new();
+
+        let metrics = super::apply_personalized_pagerank_rerank(
+            &fixture.connection,
+            &fixture.workspace_path,
+            &search_report,
+            &mut candidates,
+            super::DEFAULT_CONTEXT_PPR_WEIGHT,
+            &mut degraded,
+        );
+
+        assert_eq!(metrics.reranked_candidates, 0);
+        assert_eq!(candidates[0].relevance.into_inner(), 0.80);
+        assert!(
+            degraded.iter().any(
+                |entry| entry.code == crate::models::degradation::GRAPH_PPR_SNAPSHOT_STALE_CODE
+            ),
+            "stale snapshot skip should emit graph snapshot degradation: {degraded:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn context_ppr_rerank_skips_empty_seed_map() -> Result<(), String> {
+        let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        let mut candidates = vec![ppr_candidate(fixture.neighbor, 0.20)?];
+        let search_report = ppr_search_report(vec![ppr_hit(fixture.seed, 0.90, Some(0.95))]);
+        let mut degraded = Vec::new();
+
+        let metrics = super::apply_personalized_pagerank_rerank(
+            &fixture.connection,
+            &fixture.workspace_path,
+            &search_report,
+            &mut candidates,
+            super::DEFAULT_CONTEXT_PPR_WEIGHT,
+            &mut degraded,
+        );
+
+        assert_eq!(metrics.reranked_candidates, 0);
+        assert_eq!(candidates[0].relevance.into_inner(), 0.20);
+        assert!(
+            degraded.iter().any(
+                |entry| entry.code == crate::models::degradation::GRAPH_PPR_EMPTY_SEED_SET_CODE
+            ),
+            "empty seed skip should emit PPR degradation: {degraded:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn context_ppr_weight_zero_preserves_text_scores() -> Result<(), String> {
+        let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        let mut candidates = vec![
+            ppr_candidate(fixture.seed, 0.80)?,
+            ppr_candidate(fixture.neighbor, 0.20)?,
+        ];
+        let search_report = ppr_search_report(vec![ppr_hit(fixture.seed, 0.90, Some(0.95))]);
+        let mut degraded = Vec::new();
+
+        let metrics = super::apply_personalized_pagerank_rerank(
+            &fixture.connection,
+            &fixture.workspace_path,
+            &search_report,
+            &mut candidates,
+            0.0,
+            &mut degraded,
+        );
+
+        assert_eq!(metrics.reranked_candidates, 0);
+        assert_eq!(candidates[0].relevance.into_inner(), 0.80);
+        assert_eq!(candidates[1].relevance.into_inner(), 0.20);
+        assert!(candidates.iter().all(|item| item.score_breakdown.is_none()));
+        assert!(degraded.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn context_ppr_weight_one_uses_ppr_score_as_combined_score() -> Result<(), String> {
+        let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        let mut candidates = vec![
+            ppr_candidate(fixture.seed, 0.80)?,
+            ppr_candidate(fixture.neighbor, 0.20)?,
+        ];
+        let search_report = ppr_search_report(vec![ppr_hit(fixture.seed, 0.90, Some(0.95))]);
+        let mut degraded = Vec::new();
+
+        let metrics = super::apply_personalized_pagerank_rerank(
+            &fixture.connection,
+            &fixture.workspace_path,
+            &search_report,
+            &mut candidates,
+            1.0,
+            &mut degraded,
+        );
+
+        assert_eq!(metrics.reranked_candidates, 2);
+        for candidate in &candidates {
+            let score_breakdown = candidate
+                .score_breakdown
+                .ok_or_else(|| "reranked candidate should carry score breakdown".to_string())?;
+            assert_eq!(
+                score_breakdown.combined_score,
+                candidate.relevance.into_inner()
+            );
+            assert_eq!(score_breakdown.combined_score, score_breakdown.ppr_score);
+        }
+        assert!(degraded.is_empty());
+        Ok(())
+    }
+
     fn query_time(raw: &str) -> chrono::DateTime<chrono::Utc> {
         match chrono::DateTime::parse_from_rfc3339(raw) {
             Ok(timestamp) => timestamp.with_timezone(&chrono::Utc),
@@ -4702,6 +5569,7 @@ mod tests {
             include_stale: false,
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
+            ppr_weight: None,
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
@@ -4827,6 +5695,7 @@ mod tests {
             include_stale: false,
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
+            ppr_weight: None,
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
@@ -4927,6 +5796,7 @@ mod tests {
             include_stale: false,
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
+            ppr_weight: None,
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
@@ -5086,6 +5956,7 @@ mod tests {
             include_stale: false,
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
+            ppr_weight: None,
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
@@ -5568,6 +6439,8 @@ mod tests {
             estimated_tokens: 10,
             relevance: crate::models::UnitScore::parse(0.8).map_err(|error| error.to_string())?,
             utility: crate::models::UnitScore::parse(0.7).map_err(|error| error.to_string())?,
+            proximity_to_seed: None,
+            score_breakdown: None,
             provenance: vec![
                 PackProvenance::new(ProvenanceUri::EeMemory(mem_b), "source note")
                     .map_err(|error| error.to_string())?,

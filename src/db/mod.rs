@@ -106,6 +106,11 @@ pub mod audit_actions {
     pub const VERIFICATION_INGEST: &str = "verification.ingest";
     pub const VERIFICATION_RECORD: &str = VERIFICATION_INGEST;
     pub const MIGRATION_INDEX_REBUILD: &str = "migration.index_rebuild";
+    pub const PREFLIGHT_BYPASS_TOKEN_ISSUE: &str = "preflight.bypass_token.issue";
+    pub const PREFLIGHT_BYPASS_TOKEN_USE: &str = "preflight.bypass_token.use";
+    pub const PREFLIGHT_BYPASS_TOKEN_REJECT: &str = "preflight.bypass_token.reject";
+    pub const PREFLIGHT_BYPASS_TOKEN_REVOKE: &str = "preflight.bypass_token.revoke";
+    pub const PREFLIGHT_BYPASS: &str = "preflight.bypass";
 
     // ----------------------------------------------------------------------
     // Read-surface actions (G8 / bd-17c65.7.7).
@@ -3863,6 +3868,33 @@ CREATE INDEX idx_ee_wal_holds_workspace_expires
     "blake3:v048_wal_holds_2026_05_15",
 );
 
+/// V049: Store preflight bypass tokens as short-lived audited hash records.
+pub const V049_PREFLIGHT_BYPASS_TOKENS: Migration = Migration::new(
+    49,
+    "preflight_bypass_tokens",
+    r#"
+CREATE TABLE preflight_bypass_tokens (
+    token_hash TEXT PRIMARY KEY CHECK (token_hash GLOB 'blake3:*'),
+    token_hash_prefix TEXT NOT NULL CHECK (length(trim(token_hash_prefix)) >= 12),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    issued_at TEXT NOT NULL CHECK (length(trim(issued_at)) > 0),
+    expires_at TEXT NOT NULL CHECK (length(trim(expires_at)) > 0),
+    max_uses INTEGER NOT NULL CHECK (max_uses > 0),
+    used_count INTEGER NOT NULL DEFAULT 0 CHECK (used_count >= 0 AND used_count <= max_uses),
+    issuer_workspace TEXT NOT NULL CHECK (length(trim(issuer_workspace)) > 0),
+    reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+    revoked_at TEXT CHECK (revoked_at IS NULL OR length(trim(revoked_at)) > 0),
+    last_used_at TEXT CHECK (last_used_at IS NULL OR length(trim(last_used_at)) > 0)
+);
+
+CREATE INDEX idx_preflight_bypass_tokens_workspace
+    ON preflight_bypass_tokens(workspace_id, expires_at);
+CREATE INDEX idx_preflight_bypass_tokens_revoked
+    ON preflight_bypass_tokens(workspace_id, revoked_at);
+"#,
+    "blake3:v049_preflight_bypass_tokens_2026_05_15",
+);
+
 /// V042: Allow every pack omission reason emitted by the packer.
 pub const V042_PACK_OMISSION_REASONS: Migration = Migration::new(
     42,
@@ -4027,6 +4059,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V046_GRAPH_ALGORITHM_WITNESSES,
     V047_GRAPH_ALGORITHM_RESULTS,
     V048_WAL_HOLDS,
+    V049_PREFLIGHT_BYPASS_TOKENS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -10402,6 +10435,164 @@ pub fn generate_audit_id() -> String {
     format!("audit_{}", uuid::Uuid::now_v7().simple())
 }
 
+/// Input for creating a hashed preflight bypass token record.
+#[derive(Debug, Clone)]
+pub struct CreatePreflightBypassTokenInput {
+    pub workspace_id: String,
+    pub issued_at: String,
+    pub expires_at: String,
+    pub max_uses: u32,
+    pub issuer_workspace: String,
+    pub reason: String,
+}
+
+/// Stored preflight bypass token metadata. The raw token is never persisted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredPreflightBypassToken {
+    pub token_hash: String,
+    pub token_hash_prefix: String,
+    pub workspace_id: String,
+    pub issued_at: String,
+    pub expires_at: String,
+    pub max_uses: u32,
+    pub used_count: u32,
+    pub issuer_workspace: String,
+    pub reason: String,
+    pub revoked_at: Option<String>,
+    pub last_used_at: Option<String>,
+}
+
+impl DbConnection {
+    pub fn insert_preflight_bypass_token(
+        &self,
+        token_hash: &str,
+        input: &CreatePreflightBypassTokenInput,
+    ) -> Result<()> {
+        let token_hash_prefix: String = token_hash.chars().take(20).collect();
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO preflight_bypass_tokens (token_hash, token_hash_prefix, workspace_id, issued_at, expires_at, max_uses, used_count, issuer_workspace, reason, revoked_at, last_used_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, NULL, NULL)",
+            &[
+                Value::Text(token_hash.to_string()),
+                Value::Text(token_hash_prefix),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.issued_at.clone()),
+                Value::Text(input.expires_at.clone()),
+                Value::BigInt(i64::from(input.max_uses)),
+                Value::Text(input.issuer_workspace.clone()),
+                Value::Text(input.reason.clone()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_preflight_bypass_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<StoredPreflightBypassToken>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT token_hash, token_hash_prefix, workspace_id, issued_at, expires_at, max_uses, used_count, issuer_workspace, reason, revoked_at, last_used_at FROM preflight_bypass_tokens WHERE token_hash = ?1",
+            &[Value::Text(token_hash.to_string())],
+        )?;
+        rows.first()
+            .map(stored_preflight_bypass_token_from_row)
+            .transpose()
+    }
+
+    pub fn list_preflight_bypass_tokens(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredPreflightBypassToken>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT token_hash, token_hash_prefix, workspace_id, issued_at, expires_at, max_uses, used_count, issuer_workspace, reason, revoked_at, last_used_at FROM preflight_bypass_tokens WHERE workspace_id = ?1 ORDER BY issued_at DESC, token_hash_prefix ASC",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+        rows.iter()
+            .map(stored_preflight_bypass_token_from_row)
+            .collect()
+    }
+
+    pub fn increment_preflight_bypass_token_use(
+        &self,
+        token_hash: &str,
+        used_at: &str,
+    ) -> Result<()> {
+        let rows = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE preflight_bypass_tokens SET used_count = used_count + 1, last_used_at = ?2 WHERE token_hash = ?1 AND used_count < max_uses",
+            &[
+                Value::Text(token_hash.to_string()),
+                Value::Text(used_at.to_string()),
+            ],
+        )?;
+        if rows == 0 {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "preflight bypass token use update affected no rows".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn revoke_preflight_bypass_token(&self, token_hash: &str, revoked_at: &str) -> Result<()> {
+        let rows = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE preflight_bypass_tokens SET revoked_at = ?2 WHERE token_hash = ?1 AND revoked_at IS NULL",
+            &[
+                Value::Text(token_hash.to_string()),
+                Value::Text(revoked_at.to_string()),
+            ],
+        )?;
+        if rows == 0 {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "preflight bypass token revoke affected no rows".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn count_preflight_bypass_token_uses_since(
+        &self,
+        workspace_id: &str,
+        since: &str,
+    ) -> Result<u32> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT COUNT(*) FROM audit_log WHERE workspace_id = ?1 AND action = ?2 AND timestamp >= ?3",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(audit_actions::PREFLIGHT_BYPASS_TOKEN_USE.to_string()),
+                Value::Text(since.to_string()),
+            ],
+        )?;
+        rows.first()
+            .map(|row| required_u32(row, 0, DbOperation::Query, "count"))
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+}
+
+fn stored_preflight_bypass_token_from_row(row: &Row) -> Result<StoredPreflightBypassToken> {
+    Ok(StoredPreflightBypassToken {
+        token_hash: required_text(row, 0, DbOperation::Query, "token_hash")?.to_string(),
+        token_hash_prefix: required_text(row, 1, DbOperation::Query, "token_hash_prefix")?
+            .to_string(),
+        workspace_id: required_text(row, 2, DbOperation::Query, "workspace_id")?.to_string(),
+        issued_at: required_text(row, 3, DbOperation::Query, "issued_at")?.to_string(),
+        expires_at: required_text(row, 4, DbOperation::Query, "expires_at")?.to_string(),
+        max_uses: required_u32(row, 5, DbOperation::Query, "max_uses")?,
+        used_count: required_u32(row, 6, DbOperation::Query, "used_count")?,
+        issuer_workspace: required_text(row, 7, DbOperation::Query, "issuer_workspace")?
+            .to_string(),
+        reason: required_text(row, 8, DbOperation::Query, "reason")?.to_string(),
+        revoked_at: optional_text(row, 9)?.map(str::to_string),
+        last_used_at: optional_text(row, 10)?.map(str::to_string),
+    })
+}
+
 /// Input for audited memory creation (EE-070).
 #[derive(Debug, Clone)]
 pub struct AuditedMemoryInput {
@@ -13350,6 +13541,13 @@ pub struct StoredGraphSnapshot {
     pub status: GraphSnapshotStatus,
 }
 
+/// A graph snapshot row eligible for archived-row pruning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphSnapshotPruneCandidate {
+    pub snapshot: StoredGraphSnapshot,
+    pub metrics_bytes: u64,
+}
+
 /// Input for creating a new graph snapshot.
 #[derive(Debug, Clone)]
 pub struct CreateGraphSnapshotInput {
@@ -13533,6 +13731,50 @@ impl DbConnection {
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::Text(graph_type.as_str().to_string()),
+            ],
+        )
+    }
+
+    /// List archived graph snapshots that are older than the retention cutoff.
+    pub fn list_archived_graph_snapshot_prune_candidates(
+        &self,
+        workspace_id: &str,
+        graph_type: GraphSnapshotType,
+        older_than: &str,
+        limit: u32,
+    ) -> Result<Vec<GraphSnapshotPruneCandidate>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, snapshot_version, schema_version, graph_type, node_count, edge_count, metrics_json, content_hash, source_generation, created_at, expires_at, status FROM graph_snapshots WHERE workspace_id = ?1 AND graph_type = ?2 AND status = 'archived' AND created_at < ?3 ORDER BY created_at ASC, snapshot_version ASC, id ASC LIMIT ?4",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(graph_type.as_str().to_string()),
+                Value::Text(older_than.to_string()),
+                Value::from_u64_clamped(u64::from(limit)),
+            ],
+        )?;
+
+        rows.iter()
+            .map(stored_graph_snapshot_prune_candidate_from_row)
+            .collect()
+    }
+
+    /// Delete archived graph snapshots that are older than the retention cutoff.
+    pub fn prune_archived_graph_snapshots(
+        &self,
+        workspace_id: &str,
+        graph_type: GraphSnapshotType,
+        older_than: &str,
+        limit: u32,
+    ) -> Result<u64> {
+        self.execute_for(
+            DbOperation::Execute,
+            "DELETE FROM graph_snapshots WHERE id IN (SELECT id FROM graph_snapshots WHERE workspace_id = ?1 AND graph_type = ?2 AND status = 'archived' AND created_at < ?3 ORDER BY created_at ASC, snapshot_version ASC, id ASC LIMIT ?4)",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(graph_type.as_str().to_string()),
+                Value::Text(older_than.to_string()),
+                Value::from_u64_clamped(u64::from(limit)),
             ],
         )
     }
@@ -13721,6 +13963,21 @@ fn stored_graph_snapshot_from_row(row: &Row) -> Result<StoredGraphSnapshot> {
         created_at: required_text(row, 10, DbOperation::Query, "created_at")?.to_string(),
         expires_at: optional_text(row, 11)?.map(str::to_string),
         status,
+    })
+}
+
+fn stored_graph_snapshot_prune_candidate_from_row(
+    row: &Row,
+) -> Result<GraphSnapshotPruneCandidate> {
+    let snapshot = stored_graph_snapshot_from_row(row)?;
+    let metrics_bytes =
+        u64::try_from(snapshot.metrics_json.len()).map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "graph snapshot metrics_json length exceeds u64".to_string(),
+        })?;
+    Ok(GraphSnapshotPruneCandidate {
+        snapshot,
+        metrics_bytes,
     })
 }
 
@@ -14029,8 +14286,8 @@ mod tests {
         CreateArtifactInput, CreateArtifactLinkInput, CreateGraphAlgorithmResultInput,
         CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput, CreateTaskEpisodeInput,
         CreateWorkspaceInput, DatabaseConfig, DatabaseLocation, DatabaseOpenMode, DbConnection,
-        DbError, DbOperation, GraphSnapshotType, MIGRATION_TABLE_NAME, Migration, MigrationRecord,
-        MigrationTableColumn, StoredEpisodeAction, subsystem_name,
+        DbError, DbOperation, GraphSnapshotStatus, GraphSnapshotType, MIGRATION_TABLE_NAME,
+        Migration, MigrationRecord, MigrationTableColumn, StoredEpisodeAction, subsystem_name,
     };
     use crate::models::{
         EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose,
@@ -15364,6 +15621,257 @@ mod tests {
 
         connection.close()?;
         Ok(())
+    }
+
+    #[test]
+    fn graph_snapshot_prune_only_removes_old_archived_same_type_rows() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace_id = "wsp_graph_snapshot_prune000001";
+
+        connection.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: "/workspace/graph-snapshot-prune".to_string(),
+                name: Some("graph-snapshot-prune".to_string()),
+            },
+        )?;
+
+        let insert_snapshot =
+            |id: &str, snapshot_version: u32, graph_type: GraphSnapshotType| -> TestResult {
+                connection.insert_graph_snapshot(
+                    id,
+                    &CreateGraphSnapshotInput {
+                        workspace_id: workspace_id.to_string(),
+                        snapshot_version,
+                        schema_version: "ee.graph.snapshot.v1".to_string(),
+                        graph_type,
+                        node_count: snapshot_version,
+                        edge_count: snapshot_version.saturating_sub(1),
+                        metrics_json: format!(r#"{{"snapshotVersion":{snapshot_version}}}"#),
+                        content_hash: format!("blake3:graph-snapshot-prune-{snapshot_version}"),
+                        source_generation: snapshot_version,
+                        expires_at: None,
+                    },
+                )?;
+                Ok(())
+            };
+
+        let set_status_and_created_at =
+            |id: &str, status: GraphSnapshotStatus, created_at: &str| -> TestResult {
+                ensure(
+                    connection.update_graph_snapshot_status(id, status)?,
+                    "snapshot status update must affect one row",
+                )?;
+                let changed = connection.execute_for(
+                    DbOperation::Execute,
+                    "UPDATE graph_snapshots SET created_at = ?1 WHERE id = ?2",
+                    &[
+                        Value::Text(created_at.to_string()),
+                        Value::Text(id.to_string()),
+                    ],
+                )?;
+                ensure_equal(&changed, &1, "created_at update count")?;
+                Ok(())
+            };
+
+        let old_archived_id = graph_snapshot_fixture_id("prune_old_archived");
+        let fresh_archived_id = graph_snapshot_fixture_id("prune_fresh_archived");
+        let old_valid_id = graph_snapshot_fixture_id("prune_old_valid");
+        let old_stale_id = graph_snapshot_fixture_id("prune_old_stale");
+        let old_invalid_id = graph_snapshot_fixture_id("prune_old_invalid");
+        let other_type_id = graph_snapshot_fixture_id("prune_other_type");
+
+        for (id, version, graph_type) in [
+            (old_archived_id.as_str(), 1, GraphSnapshotType::MemoryLinks),
+            (
+                fresh_archived_id.as_str(),
+                2,
+                GraphSnapshotType::MemoryLinks,
+            ),
+            (old_valid_id.as_str(), 3, GraphSnapshotType::MemoryLinks),
+            (old_stale_id.as_str(), 4, GraphSnapshotType::MemoryLinks),
+            (old_invalid_id.as_str(), 5, GraphSnapshotType::MemoryLinks),
+            (other_type_id.as_str(), 6, GraphSnapshotType::CausalEvidence),
+        ] {
+            insert_snapshot(id, version, graph_type)?;
+        }
+
+        let old_created_at = "2026-05-01T00:00:00+00:00";
+        let fresh_created_at = "2026-05-10T00:00:00+00:00";
+        let cutoff = "2026-05-08T00:00:00+00:00";
+        set_status_and_created_at(
+            &old_archived_id,
+            GraphSnapshotStatus::Archived,
+            old_created_at,
+        )?;
+        set_status_and_created_at(
+            &fresh_archived_id,
+            GraphSnapshotStatus::Archived,
+            fresh_created_at,
+        )?;
+        set_status_and_created_at(&old_valid_id, GraphSnapshotStatus::Valid, old_created_at)?;
+        set_status_and_created_at(&old_stale_id, GraphSnapshotStatus::Stale, old_created_at)?;
+        set_status_and_created_at(
+            &old_invalid_id,
+            GraphSnapshotStatus::Invalid,
+            old_created_at,
+        )?;
+        set_status_and_created_at(
+            &other_type_id,
+            GraphSnapshotStatus::Archived,
+            old_created_at,
+        )?;
+
+        let candidates = connection.list_archived_graph_snapshot_prune_candidates(
+            workspace_id,
+            GraphSnapshotType::MemoryLinks,
+            cutoff,
+            10,
+        )?;
+        ensure_equal(&candidates.len(), &1, "candidate count")?;
+        ensure_equal(
+            &candidates[0].snapshot.id.as_str(),
+            &old_archived_id.as_str(),
+            "only old archived same-type snapshot is eligible",
+        )?;
+        ensure_equal(
+            &candidates[0].metrics_bytes,
+            &u64::try_from(candidates[0].snapshot.metrics_json.len())
+                .map_err(|_| TestFailure::new("metrics_json length overflow"))?,
+            "candidate metrics byte count",
+        )?;
+
+        let pruned = connection.prune_archived_graph_snapshots(
+            workspace_id,
+            GraphSnapshotType::MemoryLinks,
+            cutoff,
+            10,
+        )?;
+        ensure_equal(&pruned, &1, "pruned row count")?;
+        ensure(
+            connection.get_graph_snapshot(&old_archived_id)?.is_none(),
+            "old archived same-type snapshot must be pruned",
+        )?;
+
+        for id in [
+            &fresh_archived_id,
+            &old_valid_id,
+            &old_stale_id,
+            &old_invalid_id,
+            &other_type_id,
+        ] {
+            ensure(
+                connection.get_graph_snapshot(id)?.is_some(),
+                format!("snapshot {id} must be retained"),
+            )?;
+        }
+
+        let second_prune = connection.prune_archived_graph_snapshots(
+            workspace_id,
+            GraphSnapshotType::MemoryLinks,
+            cutoff,
+            10,
+        )?;
+        ensure_equal(&second_prune, &0, "second prune is idempotent")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn graph_snapshot_storage_footprint_5k_fixture_stays_under_budget() -> TestResult {
+        const MEMORY_COUNT: u32 = 5_000;
+        const PER_FAMILY_BUDGET_BYTES: u64 = 50 * 1024 * 1024;
+        const TOTAL_BUDGET_BYTES: u64 = 250 * 1024 * 1024;
+
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace_id = "wsp_graph_snapshot_footprint01";
+
+        connection.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: "/workspace/graph-snapshot-footprint".to_string(),
+                name: Some("graph-snapshot-footprint".to_string()),
+            },
+        )?;
+
+        for (version, graph_type, edge_factor) in [
+            (1, GraphSnapshotType::MemoryLinks, 3),
+            (2, GraphSnapshotType::CausalEvidence, 2),
+            (3, GraphSnapshotType::RevisionDag, 1),
+            (4, GraphSnapshotType::RuleProvenance, 2),
+            (5, GraphSnapshotType::ContradictionSubgraph, 1),
+        ] {
+            let edge_count = MEMORY_COUNT.saturating_mul(edge_factor);
+            let metrics_json = format!(
+                r#"{{"fixtureMemoryCount":{MEMORY_COUNT},"graphType":"{}","nodeCount":{MEMORY_COUNT},"edgeCount":{edge_count},"encoding":"summary_only","contract":"bd-bife.7.storage_footprint"}}"#,
+                graph_type.as_str()
+            );
+            ensure(
+                u64::try_from(metrics_json.len())
+                    .map_err(|_| TestFailure::new("metrics_json length overflow"))?
+                    <= PER_FAMILY_BUDGET_BYTES,
+                format!(
+                    "{} metrics_json exceeds per-family budget",
+                    graph_type.as_str()
+                ),
+            )?;
+            let snapshot_id = graph_snapshot_fixture_id(&format!("footprint_family_{version}"));
+            connection.insert_graph_snapshot(
+                &snapshot_id,
+                &CreateGraphSnapshotInput {
+                    workspace_id: workspace_id.to_string(),
+                    snapshot_version: version,
+                    schema_version: "ee.graph.snapshot.v1".to_string(),
+                    graph_type,
+                    node_count: MEMORY_COUNT,
+                    edge_count,
+                    metrics_json,
+                    content_hash: format!("blake3:graph-snapshot-footprint-{version}"),
+                    source_generation: version,
+                    expires_at: None,
+                },
+            )?;
+        }
+
+        let snapshots = connection.list_graph_snapshots(workspace_id, None, 10)?;
+        ensure_equal(&snapshots.len(), &5, "snapshot family count")?;
+        let mut total_bytes = 0_u64;
+        for snapshot in &snapshots {
+            let metrics_bytes = u64::try_from(snapshot.metrics_json.len())
+                .map_err(|_| TestFailure::new("metrics_json length overflow"))?;
+            ensure(
+                metrics_bytes <= PER_FAMILY_BUDGET_BYTES,
+                format!(
+                    "{} stored metrics_json exceeds per-family budget",
+                    snapshot.graph_type.as_str()
+                ),
+            )?;
+            total_bytes = total_bytes.saturating_add(metrics_bytes);
+        }
+        ensure(
+            total_bytes <= TOTAL_BUDGET_BYTES,
+            format!("5k graph snapshot fixture exceeds total budget: {total_bytes} bytes"),
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    fn graph_snapshot_fixture_id(seed: &str) -> String {
+        let mut suffix = seed
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric() || *character == '_')
+            .collect::<String>();
+        suffix.truncate(25);
+        while suffix.len() < 25 {
+            suffix.push('0');
+        }
+        let id = format!("gsnap_{suffix}");
+        debug_assert_eq!(id.len(), 31);
+        id
     }
 
     #[test]

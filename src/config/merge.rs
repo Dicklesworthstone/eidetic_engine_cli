@@ -1599,6 +1599,29 @@ mod tests {
         }
     }
 
+    fn ensure_graph_feature_flags_default_disabled(config: &GraphFeatureFlagsConfig) -> TestResult {
+        let flags = [
+            ("ppr", config.ppr_enabled),
+            ("pack_dna", config.pack_dna_enabled),
+            ("causal_explain", config.causal_explain_enabled),
+            ("structural_health", config.structural_health_enabled),
+            ("structural_decay", config.structural_decay_enabled),
+            ("proximity", config.proximity_enabled),
+            ("revision_dominance", config.revision_dominance_enabled),
+            ("skyline", config.skyline_enabled),
+            ("load_bearing", config.load_bearing_enabled),
+            ("hits_profiles", config.hits_profiles_enabled),
+        ];
+        for (name, value) in flags {
+            ensure_equal(
+                &value,
+                &Some(false),
+                &format!("graph feature {name} default"),
+            )?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn built_in_defaults_match_readme_contract() -> TestResult {
         let defaults =
@@ -1642,6 +1665,7 @@ mod tests {
             &Some(500),
             "graph gomory-hu sample threshold",
         )?;
+        ensure_graph_feature_flags_default_disabled(&defaults.graph.feature)?;
         ensure_equal(
             &defaults.curation.specificity_min,
             &Some(0.45),

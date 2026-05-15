@@ -4996,6 +4996,8 @@ pub struct MemoryReviseReport {
     pub reason: String,
     /// Fields that were changed.
     pub changed_fields: Vec<String>,
+    /// Optional graph-derived impact analysis for dry-run revision previews.
+    pub impact_analysis: Option<crate::graph::dominance::MemoryImpactAnalysisReport>,
     /// Error message if revision failed.
     pub error: Option<String>,
 }
@@ -5022,6 +5024,7 @@ impl MemoryReviseReport {
             revision_number: Some(revision_number),
             reason: reason.as_str().to_owned(),
             changed_fields,
+            impact_analysis: None,
             error: None,
         }
     }
@@ -5043,6 +5046,7 @@ impl MemoryReviseReport {
             revision_number: None,
             reason: reason.as_str().to_owned(),
             changed_fields,
+            impact_analysis: None,
             error: None,
         }
     }
@@ -5064,6 +5068,7 @@ impl MemoryReviseReport {
             revision_number: None,
             reason: reason.as_str().to_owned(),
             changed_fields,
+            impact_analysis: None,
             error: Some(
                 "Memory revision writes are unavailable until immutable revision storage and supersession links are implemented; rerun with --dry-run to preview changes."
                     .to_owned(),
@@ -5084,6 +5089,7 @@ impl MemoryReviseReport {
             revision_number: None,
             reason: String::new(),
             changed_fields: Vec::new(),
+            impact_analysis: None,
             error: Some("Memory not found".to_owned()),
         }
     }
@@ -5101,6 +5107,7 @@ impl MemoryReviseReport {
             revision_number: None,
             reason: String::new(),
             changed_fields: Vec::new(),
+            impact_analysis: None,
             error: Some("Cannot revise tombstoned memory".to_owned()),
         }
     }
@@ -5118,6 +5125,7 @@ impl MemoryReviseReport {
             revision_number: None,
             reason: String::new(),
             changed_fields: Vec::new(),
+            impact_analysis: None,
             error: Some(
                 "Cannot revise superseded memory; revise the current revision instead".to_owned(),
             ),
@@ -5137,6 +5145,7 @@ impl MemoryReviseReport {
             revision_number: None,
             reason: String::new(),
             changed_fields: Vec::new(),
+            impact_analysis: None,
             error: Some("No changes specified".to_owned()),
         }
     }
@@ -5154,8 +5163,19 @@ impl MemoryReviseReport {
             revision_number: None,
             reason: String::new(),
             changed_fields: Vec::new(),
+            impact_analysis: None,
             error: Some(message),
         }
+    }
+
+    /// Attach graph-derived impact analysis to a dry-run preview.
+    #[must_use]
+    pub fn with_impact_analysis(
+        mut self,
+        impact_analysis: Option<crate::graph::dominance::MemoryImpactAnalysisReport>,
+    ) -> Self {
+        self.impact_analysis = impact_analysis;
+        self
     }
 }
 
@@ -5242,7 +5262,12 @@ pub fn revise_memory(options: &ReviseMemoryOptions<'_>) -> MemoryReviseReport {
             options.original_memory_id.to_owned(),
             options.reason.clone(),
             changed_fields,
-        );
+        )
+        .with_impact_analysis(memory_revision_impact_analysis(
+            &conn,
+            &original.workspace_id,
+            options.original_memory_id,
+        ));
     }
 
     // N15.2 (bd-17c65.14.15.3): turn on the immutable-revision write path.
@@ -5376,6 +5401,21 @@ pub fn revise_memory(options: &ReviseMemoryOptions<'_>) -> MemoryReviseReport {
         changed_fields,
         false,
     )
+}
+
+fn memory_revision_impact_analysis(
+    conn: &crate::db::DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+) -> Option<crate::graph::dominance::MemoryImpactAnalysisReport> {
+    let graph = crate::graph::build_revision_dag_from_logical_ids(conn, workspace_id).ok()?;
+    let snapshot_version = conn
+        .get_latest_graph_snapshot(workspace_id, crate::db::GraphSnapshotType::RevisionDag)
+        .ok()
+        .flatten()
+        .map_or(0, |snapshot| u64::from(snapshot.snapshot_version));
+    crate::graph::dominance::compute_memory_impact_analysis(&graph, memory_id, snapshot_version)
+        .ok()
 }
 
 // =============================================================================
@@ -7910,6 +7950,25 @@ mod tests {
                 "provenance_uri".to_string(),
             ],
             "changed fields",
+        )?;
+        let impact = report
+            .impact_analysis
+            .as_ref()
+            .ok_or_else(|| "dry-run revise should include impact analysis".to_string())?;
+        ensure(
+            impact.schema,
+            crate::graph::dominance::MEMORY_IMPACT_ANALYSIS_SCHEMA_V1,
+            "impact schema",
+        )?;
+        ensure(
+            impact.memory_id.as_str(),
+            memory_id.as_str(),
+            "impact memory",
+        )?;
+        ensure(
+            impact.impact_analysis.validation_status.as_str(),
+            "unavailable",
+            "singleton impact status",
         )?;
 
         let connection = crate::db::DbConnection::open_file(&created.database_path)

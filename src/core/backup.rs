@@ -15,8 +15,10 @@ use serde_json::{Value as JsonValue, json};
 use crate::config::WORKSPACE_MARKER;
 use crate::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
 use crate::db::{
-    DatabaseConfig, DbConnection, StoredAuditEntry, StoredGraphSnapshot, StoredMemory,
-    StoredMemoryLink, StoredTaskEpisode, audit_actions,
+    CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
+    DatabaseConfig, DbConnection, GraphSnapshotType, StoredAuditEntry, StoredGraphAlgorithmResult,
+    StoredGraphAlgorithmWitness, StoredGraphSnapshot, StoredMemory, StoredMemoryLink,
+    StoredTaskEpisode, audit_actions,
 };
 use crate::models::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
@@ -42,6 +44,7 @@ pub struct BackupCreateOptions {
     pub label: Option<String>,
     pub redaction_level: RedactionLevel,
     pub include_derived: bool,
+    pub include_graph_cache: bool,
     pub dry_run: bool,
 }
 
@@ -70,6 +73,7 @@ pub struct BackupRestoreOptions {
     pub workspace_path: PathBuf,
     pub backup_path: PathBuf,
     pub side_path: PathBuf,
+    pub restore_graph_cache: bool,
     pub dry_run: bool,
 }
 
@@ -92,6 +96,8 @@ pub struct BackupCreateReport {
     pub redaction_level: RedactionLevel,
     pub export_scope: ExportScope,
     pub include_derived: bool,
+    pub include_graph_cache: bool,
+    pub graph_cache_schema_version: Option<u32>,
     pub total_records: u64,
     pub memory_count: u64,
     pub link_count: u64,
@@ -124,6 +130,8 @@ impl BackupCreateReport {
             "redactionLevel": self.redaction_level.as_str(),
             "exportScope": self.export_scope.as_str(),
             "includeDerived": self.include_derived,
+            "includeGraphCache": self.include_graph_cache,
+            "graphCache": graph_cache_summary_json(self),
             "counts": {
                 "totalRecords": self.total_records,
                 "memoryRecords": self.memory_count,
@@ -394,10 +402,13 @@ pub struct BackupRestoreReport {
     pub source_manifest_hash: String,
     pub restored_database_path: String,
     pub import_status: String,
+    pub restore_graph_cache: bool,
     pub imported_memory_count: u32,
     pub skipped_duplicate_count: u32,
+    pub restored_graph_cache_count: u32,
     pub restored_derived: Vec<BackupRestoredDerivedAssetReport>,
     pub issue_count: u32,
+    pub degraded: Vec<BackupDegradation>,
     pub next_actions: Vec<String>,
 }
 
@@ -418,12 +429,15 @@ impl BackupRestoreReport {
             "sourceManifestHash": self.source_manifest_hash,
             "restoredDatabasePath": self.restored_database_path,
             "importStatus": self.import_status,
+            "restoreGraphCache": self.restore_graph_cache,
             "counts": {
                 "memoriesImported": self.imported_memory_count,
                 "memoriesSkippedDuplicate": self.skipped_duplicate_count,
+                "graphCacheRowsRestored": self.restored_graph_cache_count,
                 "issues": self.issue_count,
             },
             "restoredDerived": self.restored_derived.iter().map(BackupRestoredDerivedAssetReport::data_json).collect::<Vec<_>>(),
+            "degraded": self.degraded.iter().map(BackupDegradation::data_json).collect::<Vec<_>>(),
             "nextActions": self.next_actions,
         })
     }
@@ -637,7 +651,11 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     let records_path = backup_path.join(RECORDS_FILE);
     let manifest_path = backup_path.join(MANIFEST_FILE);
     let created_at = Utc::now().to_rfc3339();
-    let mut degraded = backup_degradations(&workspace_path, options.include_derived);
+    let mut degraded = backup_degradations(
+        &workspace_path,
+        options.include_derived,
+        options.include_graph_cache,
+    );
     degraded.extend(redaction_pattern_degradations(
         &export_data,
         options.redaction_level,
@@ -646,6 +664,13 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         collect_derived_payloads(
             &connection,
             &workspace_path,
+            &export_data.workspace.workspace_id,
+            &created_at,
+            &mut degraded,
+        )
+    } else if options.include_graph_cache {
+        collect_graph_cache_payloads(
+            &connection,
             &export_data.workspace.workspace_id,
             &created_at,
             &mut degraded,
@@ -702,6 +727,8 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         redaction_level: options.redaction_level,
         export_scope: ExportScope::All,
         include_derived: options.include_derived,
+        include_graph_cache: options.include_graph_cache,
+        graph_cache_schema_version: connection.schema_version().ok().flatten(),
         total_records: stats.total_records,
         memory_count: stats.memory_count,
         link_count: stats.link_count,
@@ -1157,10 +1184,13 @@ pub fn restore_backup_to_side_path(
             source_manifest_hash: inspect.manifest_hash,
             restored_database_path: restored_database_path.to_string_lossy().into_owned(),
             import_status: "dry_run".to_owned(),
+            restore_graph_cache: options.restore_graph_cache,
             imported_memory_count: 0,
             skipped_duplicate_count: 0,
+            restored_graph_cache_count: 0,
             restored_derived: Vec::new(),
             issue_count: u32::try_from(verify.issues.len()).unwrap_or(u32::MAX),
+            degraded: Vec::new(),
             next_actions,
         });
     }
@@ -1181,6 +1211,7 @@ pub fn restore_backup_to_side_path(
         ),
         repair: Some("verify the backup directory and retry restore".to_owned()),
     })?;
+    let restore_degraded = restore_manifest_degradations(&manifest_bytes);
     write_new_file(&restore_manifest_path, &manifest_bytes)?;
 
     let records_bytes = fs::read(&source_records_path).map_err(|error| DomainError::Storage {
@@ -1214,6 +1245,11 @@ pub fn restore_backup_to_side_path(
             "inspect the copied records.jsonl and retry with a fresh --side-path".to_owned(),
         ),
     })?;
+    let graph_cache_restored_count = if options.restore_graph_cache {
+        restore_graph_cache_assets(&restored_database_path, &restored_derived)?
+    } else {
+        0
+    };
     let restore_issue_count = import_report
         .issues
         .len()
@@ -1237,12 +1273,44 @@ pub fn restore_backup_to_side_path(
         source_manifest_hash: inspect.manifest_hash,
         restored_database_path: restored_database_path.to_string_lossy().into_owned(),
         import_status: import_report.status.clone(),
+        restore_graph_cache: options.restore_graph_cache,
         imported_memory_count: import_report.memories_imported,
         skipped_duplicate_count: import_report.memories_skipped_duplicate,
+        restored_graph_cache_count: graph_cache_restored_count,
         restored_derived,
         issue_count: u32::try_from(restore_issue_count).unwrap_or(u32::MAX),
+        degraded: restore_degraded,
         next_actions,
     })
+}
+
+fn restore_manifest_degradations(manifest_bytes: &[u8]) -> Vec<BackupDegradation> {
+    let Ok(manifest) = serde_json::from_slice::<JsonValue>(manifest_bytes) else {
+        return Vec::new();
+    };
+    let backup_schema_version = manifest
+        .pointer("/graphCache/schemaVersion")
+        .and_then(JsonValue::as_u64)
+        .and_then(|value| u32::try_from(value).ok());
+    let Some(backup_schema_version) = backup_schema_version else {
+        return Vec::new();
+    };
+    let Some(current_schema_version) = crate::db::MIGRATIONS
+        .last()
+        .map(|migration| migration.version())
+    else {
+        return Vec::new();
+    };
+    if backup_schema_version >= current_schema_version {
+        return Vec::new();
+    }
+    vec![BackupDegradation::warning(
+        "graph_cache_schema_older_than_binary",
+        format!(
+            "backup graph cache was captured at schema version {backup_schema_version}, while this binary restores with schema version {current_schema_version}"
+        ),
+        "restore imports records through the current migrations before replaying graph-cache assets; run ee db status --workspace <side-path> --json after restore to inspect the migrated database",
+    )]
 }
 
 fn backup_artifact_path(
@@ -1288,6 +1356,14 @@ fn copy_derived_artifacts_to_restore(
 ) -> Result<Vec<BackupRestoredDerivedAssetReport>, DomainError> {
     let mut restored = Vec::new();
     for derived in &inspect.derived {
+        if derived
+            .path
+            .rsplit('/')
+            .next()
+            .is_some_and(is_appledouble_file_name)
+        {
+            continue;
+        }
         let mut issues = Vec::new();
         let Some(source_path) = safe_artifact_path(backup_path, &derived.path, &mut issues) else {
             let message = issues
@@ -1339,6 +1415,232 @@ fn copy_derived_artifacts_to_restore(
         });
     }
     Ok(restored)
+}
+
+fn restore_graph_cache_assets(
+    restored_database_path: &Path,
+    restored_derived: &[BackupRestoredDerivedAssetReport],
+) -> Result<u32, DomainError> {
+    if !restored_derived
+        .iter()
+        .any(|asset| asset.kind.starts_with("graph_"))
+    {
+        return Ok(0);
+    }
+
+    let connection = DbConnection::open(DatabaseConfig::file(restored_database_path.to_path_buf()))
+        .map_err(|error| DomainError::Import {
+            message: format!(
+                "failed opening restored database '{}' for graph cache restore: {error}",
+                restored_database_path.display()
+            ),
+            repair: Some("retry restore with a fresh --side-path".to_owned()),
+        })?;
+    let restored_workspace_id = connection
+        .list_workspaces()
+        .map_err(|error| DomainError::Import {
+            message: format!("failed reading restored workspace for graph cache restore: {error}"),
+            repair: Some(
+                "inspect restored records.jsonl and retry with a fresh --side-path".to_owned(),
+            ),
+        })?
+        .into_iter()
+        .next()
+        .map(|workspace| workspace.id)
+        .ok_or_else(|| DomainError::Import {
+            message: "restored database has no workspace row for graph cache restore".to_owned(),
+            repair: Some(
+                "inspect restored records.jsonl and retry with a fresh --side-path".to_owned(),
+            ),
+        })?;
+
+    let mut restored_rows = 0u32;
+    for asset in restored_derived
+        .iter()
+        .filter(|asset| asset.kind == "graph_snapshot")
+    {
+        let value = read_restored_derived_json(asset)?;
+        restore_graph_snapshot_asset(&connection, &restored_workspace_id, &value)?;
+        restored_rows = restored_rows.saturating_add(1);
+    }
+    for asset in restored_derived
+        .iter()
+        .filter(|asset| asset.kind == "graph_algorithm_witness")
+    {
+        let value = read_restored_derived_json(asset)?;
+        restore_graph_algorithm_witness_asset(&connection, &restored_workspace_id, &value)?;
+        restored_rows = restored_rows.saturating_add(1);
+    }
+    for asset in restored_derived
+        .iter()
+        .filter(|asset| asset.kind == "graph_algorithm_result")
+    {
+        let value = read_restored_derived_json(asset)?;
+        restore_graph_algorithm_result_asset(&connection, &restored_workspace_id, &value)?;
+        restored_rows = restored_rows.saturating_add(1);
+    }
+    Ok(restored_rows)
+}
+
+fn read_restored_derived_json(
+    asset: &BackupRestoredDerivedAssetReport,
+) -> Result<JsonValue, DomainError> {
+    let bytes = fs::read(&asset.restore_path).map_err(|error| DomainError::Import {
+        message: format!(
+            "failed reading restored derived graph asset '{}': {error}",
+            asset.restore_path
+        ),
+        repair: Some("run ee backup verify <id-or-path> --json and retry restore".to_owned()),
+    })?;
+    serde_json::from_slice(&bytes).map_err(|error| DomainError::Import {
+        message: format!(
+            "restored derived graph asset '{}' is not valid JSON: {error}",
+            asset.restore_path
+        ),
+        repair: Some("recreate the backup with ee backup create --include-derived".to_owned()),
+    })
+}
+
+fn restore_graph_snapshot_asset(
+    connection: &DbConnection,
+    restored_workspace_id: &str,
+    value: &JsonValue,
+) -> Result<(), DomainError> {
+    let snapshot = required_object(value, "snapshot")?;
+    let id = required_json_str(snapshot, "id")?;
+    let graph_type = required_json_str(snapshot, "graphType")?
+        .parse::<GraphSnapshotType>()
+        .map_err(|error| DomainError::Import {
+            message: format!("backup graph snapshot '{id}' has invalid graph type: {error}"),
+            repair: Some("recreate the backup after rebuilding graph snapshots".to_owned()),
+        })?;
+    let metrics_json = serde_json::to_string(snapshot.get("metrics").unwrap_or(&JsonValue::Null))
+        .map_err(|error| DomainError::Import {
+        message: format!("backup graph snapshot '{id}' metrics are not serializable: {error}"),
+        repair: Some("recreate the backup after rebuilding graph snapshots".to_owned()),
+    })?;
+    connection
+        .insert_graph_snapshot(
+            id,
+            &CreateGraphSnapshotInput {
+                workspace_id: restored_workspace_id.to_owned(),
+                snapshot_version: required_json_u32(snapshot, "snapshotVersion")?,
+                schema_version: required_json_str(snapshot, "schemaVersion")?.to_owned(),
+                graph_type,
+                node_count: required_json_u32(snapshot, "nodeCount")?,
+                edge_count: required_json_u32(snapshot, "edgeCount")?,
+                metrics_json,
+                content_hash: required_json_str(snapshot, "contentHash")?.to_owned(),
+                source_generation: required_json_u32(snapshot, "sourceGeneration")?,
+                expires_at: snapshot
+                    .get("expiresAt")
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_owned),
+            },
+        )
+        .map_err(|error| DomainError::Import {
+            message: format!("failed restoring graph snapshot '{id}': {error}"),
+            repair: Some("restore to a fresh --side-path and retry".to_owned()),
+        })
+}
+
+fn restore_graph_algorithm_witness_asset(
+    connection: &DbConnection,
+    restored_workspace_id: &str,
+    value: &JsonValue,
+) -> Result<(), DomainError> {
+    let witness = required_object(value, "witness")?;
+    let snapshot_id = required_json_str(witness, "snapshotId")?.to_owned();
+    connection
+        .insert_graph_algorithm_witness(&CreateGraphAlgorithmWitnessInput {
+            workspace_id: restored_workspace_id.to_owned(),
+            snapshot_id: snapshot_id.clone(),
+            algorithm: required_json_str(witness, "algorithm")?.to_owned(),
+            params_json: json_field_to_string(witness, "params")?,
+            witness_json: json_field_to_string(witness, "witness")?,
+        })
+        .map_err(|error| DomainError::Import {
+            message: format!(
+                "failed restoring graph algorithm witness for snapshot '{snapshot_id}': {error}"
+            ),
+            repair: Some("restore to a fresh --side-path and retry".to_owned()),
+        })
+}
+
+fn restore_graph_algorithm_result_asset(
+    connection: &DbConnection,
+    restored_workspace_id: &str,
+    value: &JsonValue,
+) -> Result<(), DomainError> {
+    let result = required_object(value, "result")?;
+    let snapshot_id = required_json_str(result, "snapshotId")?.to_owned();
+    connection
+        .upsert_graph_algorithm_result(&CreateGraphAlgorithmResultInput {
+            workspace_id: restored_workspace_id.to_owned(),
+            snapshot_id: snapshot_id.clone(),
+            algorithm: required_json_str(result, "algorithm")?.to_owned(),
+            params_hash: required_json_str(result, "paramsHash")?.to_owned(),
+            result_json: json_field_to_string(result, "result")?,
+            ttl_seconds: required_json_u64(result, "ttlSeconds")?,
+        })
+        .map_err(|error| DomainError::Import {
+            message: format!(
+                "failed restoring graph algorithm result for snapshot '{snapshot_id}': {error}"
+            ),
+            repair: Some("restore to a fresh --side-path and retry".to_owned()),
+        })
+}
+
+fn required_object<'a>(value: &'a JsonValue, field: &str) -> Result<&'a JsonValue, DomainError> {
+    value
+        .get(field)
+        .filter(|child| child.is_object())
+        .ok_or_else(|| DomainError::Import {
+            message: format!("backup derived graph asset missing object field '{field}'"),
+            repair: Some("recreate the backup with ee backup create --include-derived".to_owned()),
+        })
+}
+
+fn required_json_str<'a>(value: &'a JsonValue, field: &str) -> Result<&'a str, DomainError> {
+    value
+        .get(field)
+        .and_then(JsonValue::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| DomainError::Import {
+            message: format!("backup derived graph asset missing string field '{field}'"),
+            repair: Some("recreate the backup with ee backup create --include-derived".to_owned()),
+        })
+}
+
+fn required_json_u32(value: &JsonValue, field: &str) -> Result<u32, DomainError> {
+    let raw = required_json_u64(value, field)?;
+    u32::try_from(raw).map_err(|_| DomainError::Import {
+        message: format!("backup derived graph asset field '{field}' does not fit u32"),
+        repair: Some("recreate the backup after rebuilding graph snapshots".to_owned()),
+    })
+}
+
+fn required_json_u64(value: &JsonValue, field: &str) -> Result<u64, DomainError> {
+    value
+        .get(field)
+        .and_then(JsonValue::as_u64)
+        .ok_or_else(|| DomainError::Import {
+            message: format!("backup derived graph asset missing integer field '{field}'"),
+            repair: Some("recreate the backup with ee backup create --include-derived".to_owned()),
+        })
+}
+
+fn json_field_to_string(value: &JsonValue, field: &str) -> Result<String, DomainError> {
+    let Some(child) = value.get(field) else {
+        return Err(DomainError::Import {
+            message: format!("backup derived graph asset missing JSON field '{field}'"),
+            repair: Some("recreate the backup with ee backup create --include-derived".to_owned()),
+        });
+    };
+    serde_json::to_string(child).map_err(|error| DomainError::Import {
+        message: format!("backup derived graph asset field '{field}' is not serializable: {error}"),
+        repair: Some("recreate the backup with ee backup create --include-derived".to_owned()),
+    })
 }
 
 fn restore_lab_episode_file(
@@ -1891,9 +2193,13 @@ fn memory_record(
         .importance(f64::from(memory.importance))
         .confidence(f64::from(memory.confidence))
         .utility(f64::from(memory.utility))
+        .trust_class(memory.trust_class.clone())
         .created_at(memory.created_at.clone())
         .redacted(false);
     builder = builder.updated_at(memory.updated_at.clone());
+    if let Some(trust_subclass) = &memory.trust_subclass {
+        builder = builder.trust_subclass(trust_subclass.clone());
+    }
     if let Some(provenance_uri) = &memory.provenance_uri {
         builder = builder.provenance_uri(provenance_uri.clone());
     }
@@ -2022,7 +2328,7 @@ fn manifest_json(
     manifest_hash: Option<&str>,
 ) -> JsonValue {
     let mut manifest = json!({
-        "schema": if report.include_derived {
+        "schema": if report.include_derived || report.include_graph_cache {
             BACKUP_MANIFEST_SCHEMA_V2
         } else {
             BACKUP_MANIFEST_SCHEMA_V1
@@ -2038,6 +2344,8 @@ fn manifest_json(
         "databasePath": report.database_path,
         "redactionLevel": report.redaction_level.as_str(),
         "exportScope": report.export_scope.as_str(),
+        "includeGraphCache": report.include_graph_cache,
+        "graphCache": graph_cache_summary_json(report),
         "counts": {
             "totalRecords": report.total_records,
             "memoryRecords": report.memory_count,
@@ -2052,7 +2360,7 @@ fn manifest_json(
             "manifestHash": manifest_hash,
         },
     });
-    if report.include_derived {
+    if report.include_derived || report.include_graph_cache {
         manifest["derived"] = JsonValue::Array(
             report
                 .derived
@@ -2062,6 +2370,38 @@ fn manifest_json(
         );
     }
     manifest
+}
+
+fn graph_cache_summary_json(report: &BackupCreateReport) -> JsonValue {
+    let snapshot_assets = report
+        .derived
+        .iter()
+        .filter(|asset| asset.kind == "graph_snapshot")
+        .count();
+    let witness_assets = report
+        .derived
+        .iter()
+        .filter(|asset| asset.kind == "graph_algorithm_witness")
+        .count();
+    let result_assets = report
+        .derived
+        .iter()
+        .filter(|asset| asset.kind == "graph_algorithm_result")
+        .count();
+    json!({
+        "included": report.include_graph_cache,
+        "schemaVersion": report.graph_cache_schema_version,
+        "tables": [
+            "graph_snapshots",
+            "graph_algorithm_witnesses",
+            "graph_algorithm_results",
+        ],
+        "assetCounts": {
+            "graphSnapshots": snapshot_assets,
+            "graphAlgorithmWitnesses": witness_assets,
+            "graphAlgorithmResults": result_assets,
+        },
+    })
 }
 
 fn collect_derived_payloads(
@@ -2089,6 +2429,23 @@ fn collect_derived_payloads(
     );
     collect_lab_episode_file_payloads(workspace_path, captured_at, degraded, &mut payloads);
     collect_wal_holds_payload(connection, captured_at, degraded, &mut payloads);
+    payloads
+}
+
+fn collect_graph_cache_payloads(
+    connection: &DbConnection,
+    workspace_id: &str,
+    captured_at: &str,
+    degraded: &mut Vec<BackupDegradation>,
+) -> Vec<BackupDerivedPayload> {
+    let mut payloads = Vec::new();
+    collect_graph_snapshot_payloads(
+        connection,
+        workspace_id,
+        captured_at,
+        degraded,
+        &mut payloads,
+    );
     payloads
 }
 
@@ -2189,6 +2546,7 @@ fn collect_graph_snapshot_payloads(
                 "run ee db check --workspace . before retrying backup create --include-derived",
             )),
         }
+        collect_graph_algorithm_payloads(connection, &snapshot, captured_at, degraded, payloads);
     }
 }
 
@@ -2212,6 +2570,126 @@ fn graph_snapshot_json(snapshot: &StoredGraphSnapshot, captured_at: &str) -> Jso
             "status": snapshot.status.as_str(),
         }
     })
+}
+
+fn collect_graph_algorithm_payloads(
+    connection: &DbConnection,
+    snapshot: &StoredGraphSnapshot,
+    captured_at: &str,
+    degraded: &mut Vec<BackupDegradation>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) {
+    let witnesses =
+        match connection.list_graph_algorithm_witnesses(&snapshot.workspace_id, &snapshot.id, None)
+        {
+            Ok(witnesses) => witnesses,
+            Err(error) => {
+                degraded.push(BackupDegradation::warning(
+                    "graph_algorithm_witnesses_unreadable",
+                    format!(
+                        "graph algorithm witnesses could not be read from the database: {error}"
+                    ),
+                    "run ee db check --workspace . before retrying backup create --include-derived",
+                ));
+                Vec::new()
+            }
+        };
+    for (index, witness) in witnesses.iter().enumerate() {
+        match json_payload_bytes(&graph_algorithm_witness_json(witness, captured_at)) {
+            Ok(bytes) => payloads.push(derived_payload(
+                format!(
+                    "derived/graph/witnesses/{}-{:04}.json",
+                    safe_file_stem(&snapshot.id),
+                    index
+                ),
+                "graph_algorithm_witness",
+                captured_at,
+                None,
+                bytes,
+            )),
+            Err(error) => degraded.push(BackupDegradation::warning(
+                "graph_algorithm_witnesses_unreadable",
+                format!("graph algorithm witness payload could not be serialized: {error}"),
+                "run ee db check --workspace . before retrying backup create --include-derived",
+            )),
+        }
+    }
+
+    let results =
+        match connection.list_graph_algorithm_results(&snapshot.workspace_id, &snapshot.id, None) {
+            Ok(results) => results,
+            Err(error) => {
+                degraded.push(BackupDegradation::warning(
+                    "graph_algorithm_results_unreadable",
+                    format!(
+                        "graph algorithm result cache could not be read from the database: {error}"
+                    ),
+                    "run ee db check --workspace . before retrying backup create --include-derived",
+                ));
+                Vec::new()
+            }
+        };
+    for (index, result) in results.iter().enumerate() {
+        match json_payload_bytes(&graph_algorithm_result_json(result, captured_at)) {
+            Ok(bytes) => payloads.push(derived_payload(
+                format!(
+                    "derived/graph/results/{}-{:04}.json",
+                    safe_file_stem(&snapshot.id),
+                    index
+                ),
+                "graph_algorithm_result",
+                captured_at,
+                None,
+                bytes,
+            )),
+            Err(error) => degraded.push(BackupDegradation::warning(
+                "graph_algorithm_results_unreadable",
+                format!("graph algorithm result payload could not be serialized: {error}"),
+                "run ee db check --workspace . before retrying backup create --include-derived",
+            )),
+        }
+    }
+}
+
+fn graph_algorithm_witness_json(
+    witness: &StoredGraphAlgorithmWitness,
+    captured_at: &str,
+) -> JsonValue {
+    json!({
+        "schema": "ee.backup.derived.graph_algorithm_witness.v1",
+        "capturedAt": captured_at,
+        "witness": {
+            "workspaceId": &witness.workspace_id,
+            "snapshotId": &witness.snapshot_id,
+            "algorithm": &witness.algorithm,
+            "params": parse_json_or_string(&witness.params_json),
+            "witness": parse_json_or_string(&witness.witness_json),
+            "recordedAt": &witness.recorded_at,
+        }
+    })
+}
+
+fn graph_algorithm_result_json(
+    result: &StoredGraphAlgorithmResult,
+    captured_at: &str,
+) -> JsonValue {
+    json!({
+        "schema": "ee.backup.derived.graph_algorithm_result.v1",
+        "capturedAt": captured_at,
+        "result": {
+            "workspaceId": &result.workspace_id,
+            "snapshotId": &result.snapshot_id,
+            "algorithm": &result.algorithm,
+            "paramsHash": &result.params_hash,
+            "result": parse_json_or_string(&result.result_json),
+            "computedAt": &result.computed_at,
+            "ttlSeconds": result.ttl_seconds,
+        }
+    })
+}
+
+fn parse_json_or_string(value: &str) -> JsonValue {
+    serde_json::from_str(value).unwrap_or_else(|_| JsonValue::String(value.to_owned()))
 }
 
 fn collect_task_episode_payloads(
@@ -2339,6 +2817,9 @@ fn collect_lab_episode_file_dir(
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
+        if is_appledouble_file_name(file_name) {
+            continue;
+        }
         let safe_name = safe_file_stem(file_name);
         match fs::read(&path) {
             Ok(bytes) => payloads.push(derived_payload(
@@ -2359,6 +2840,10 @@ fn collect_lab_episode_file_dir(
             )),
         }
     }
+}
+
+fn is_appledouble_file_name(file_name: &str) -> bool {
+    file_name.starts_with("._")
 }
 
 fn home_lab_episode_dir() -> Option<PathBuf> {
@@ -2474,7 +2959,11 @@ fn safe_file_stem(value: &str) -> String {
     }
 }
 
-fn backup_degradations(workspace_path: &Path, include_derived: bool) -> Vec<BackupDegradation> {
+fn backup_degradations(
+    workspace_path: &Path,
+    include_derived: bool,
+    include_graph_cache: bool,
+) -> Vec<BackupDegradation> {
     let mut degraded = Vec::new();
     let index_manifest = workspace_path
         .join(WORKSPACE_MARKER)
@@ -2488,11 +2977,11 @@ fn backup_degradations(workspace_path: &Path, include_derived: bool) -> Vec<Back
             "run ee index rebuild --workspace . before creating a backup that must include derived index metadata",
         ));
     }
-    if !include_derived {
+    if !include_graph_cache {
         degraded.push(BackupDegradation::warning(
             "graph_snapshot_not_included",
-            "graph snapshots are derived assets and are not included in the EE-223 backup foundation slice",
-            "run ee graph refresh after restore, or complete EE-298 for richer backup inspection",
+            "graph snapshots and graph algorithm cache rows are not included in this backup",
+            "rerun backup create with --include-graph-cache",
         ));
     }
     degraded
@@ -2757,7 +3246,10 @@ fn normalize_path(path: &Path) -> PathBuf {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::db::{CreateAuditInput, CreateMemoryInput, CreateWorkspaceInput};
+    use crate::db::{
+        CreateAuditInput, CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput,
+        CreateGraphSnapshotInput, CreateMemoryInput, CreateWorkspaceInput, GraphSnapshotType,
+    };
     use crate::models::{MemoryId, MemoryLinkId, WorkspaceId};
     use tempfile::TempDir;
     use uuid::Uuid;
@@ -2881,6 +3373,7 @@ mod tests {
             label: Some("pre-test".to_owned()),
             redaction_level: RedactionLevel::Standard,
             include_derived: false,
+            include_graph_cache: false,
             dry_run: true,
         })
         .map_err(|error| error.message())?;
@@ -2957,12 +3450,13 @@ mod tests {
         let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
         let out = workspace.join("backups");
         let report = create_backup(&BackupCreateOptions {
-            workspace_path: workspace,
+            workspace_path: workspace.clone(),
             database_path: Some(database),
             output_dir: Some(out),
             label: Some("pre-test".to_owned()),
             redaction_level: RedactionLevel::Minimal,
             include_derived: false,
+            include_graph_cache: false,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -3008,6 +3502,7 @@ mod tests {
             label: None,
             redaction_level: RedactionLevel::Standard,
             include_derived: false,
+            include_graph_cache: false,
             dry_run: false,
         });
 
@@ -3027,12 +3522,13 @@ mod tests {
     fn generated_report_uses_stable_response_schema() -> TestResult {
         let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
         let report = create_backup(&BackupCreateOptions {
-            workspace_path: workspace,
+            workspace_path: workspace.clone(),
             database_path: Some(database),
             output_dir: None,
             label: None,
             redaction_level: RedactionLevel::Standard,
             include_derived: false,
+            include_graph_cache: false,
             dry_run: true,
         })
         .map_err(|error| error.message())?;
@@ -3061,12 +3557,13 @@ mod tests {
         let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
         let out = workspace.join("backups");
         let created = create_backup(&BackupCreateOptions {
-            workspace_path: workspace,
+            workspace_path: workspace.clone(),
             database_path: Some(database),
             output_dir: Some(out),
             label: Some("inspect".to_owned()),
             redaction_level: RedactionLevel::Standard,
             include_derived: false,
+            include_graph_cache: false,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -3111,6 +3608,7 @@ mod tests {
             label: Some("list".to_owned()),
             redaction_level: RedactionLevel::Standard,
             include_derived: false,
+            include_graph_cache: false,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -3146,6 +3644,7 @@ mod tests {
             label: Some("verify".to_owned()),
             redaction_level: RedactionLevel::Standard,
             include_derived: false,
+            include_graph_cache: false,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -3178,6 +3677,7 @@ mod tests {
             label: Some("derived".to_owned()),
             redaction_level: RedactionLevel::Standard,
             include_derived: true,
+            include_graph_cache: true,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -3233,6 +3733,223 @@ mod tests {
     }
 
     #[test]
+    fn include_graph_cache_preserves_graph_cache_assets_through_restore() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let workspace_id = connection
+            .list_workspaces()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "missing fixture workspace".to_owned())?
+            .id;
+        let snapshot_id = "gsnap_0000000000000000000000001";
+        connection
+            .insert_graph_snapshot(
+                snapshot_id,
+                &CreateGraphSnapshotInput {
+                    workspace_id: workspace_id.clone(),
+                    snapshot_version: 7,
+                    schema_version: "ee.graph.snapshot.v1".to_owned(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 3,
+                    edge_count: 2,
+                    metrics_json: json!({"pagerank": {"mem": 0.5}}).to_string(),
+                    content_hash: "blake3:graph-cache-fixture".to_owned(),
+                    source_generation: 9,
+                    expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_graph_algorithm_witness(&CreateGraphAlgorithmWitnessInput {
+                workspace_id: workspace_id.clone(),
+                snapshot_id: snapshot_id.to_owned(),
+                algorithm: "pagerank".to_owned(),
+                params_json: json!({"alpha": 0.85}).to_string(),
+                witness_json: json!({"pathDecisionHash": "blake3:witness"}).to_string(),
+            })
+            .map_err(|error| error.to_string())?;
+        connection
+            .upsert_graph_algorithm_result(&CreateGraphAlgorithmResultInput {
+                workspace_id,
+                snapshot_id: snapshot_id.to_owned(),
+                algorithm: "pagerank".to_owned(),
+                params_hash: "blake3:params".to_owned(),
+                result_json: json!({"scores": {"mem": 0.5}}).to_string(),
+                ttl_seconds: 3600,
+            })
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        let out = workspace.join("backups");
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(out),
+            label: Some("graph-cache".to_owned()),
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: true,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            created
+                .derived
+                .iter()
+                .any(|asset| asset.kind == "graph_snapshot"),
+            "backup includes graph snapshot derived asset",
+        )?;
+        ensure(
+            created
+                .derived
+                .iter()
+                .any(|asset| asset.kind == "graph_algorithm_witness"),
+            "backup includes graph algorithm witness derived asset",
+        )?;
+        ensure(
+            created
+                .derived
+                .iter()
+                .any(|asset| asset.kind == "graph_algorithm_result"),
+            "backup includes graph algorithm result derived asset",
+        )?;
+        let manifest_text =
+            fs::read_to_string(&created.manifest_path).map_err(|error| error.to_string())?;
+        let mut manifest =
+            serde_json::from_str::<JsonValue>(&manifest_text).map_err(|error| error.to_string())?;
+        ensure_equal(
+            manifest
+                .pointer("/graphCache/included")
+                .and_then(JsonValue::as_bool),
+            Some(true),
+            "manifest graph cache included",
+        )?;
+        ensure_equal(
+            manifest
+                .pointer("/graphCache/assetCounts/graphAlgorithmResults")
+                .and_then(JsonValue::as_u64),
+            Some(1),
+            "manifest graph result count",
+        )?;
+        ensure(
+            manifest
+                .pointer("/graphCache/schemaVersion")
+                .and_then(JsonValue::as_u64)
+                .is_some(),
+            "manifest records graph table schema version",
+        )?;
+        let current_schema_version = crate::db::MIGRATIONS
+            .last()
+            .map(crate::db::Migration::version)
+            .ok_or_else(|| "missing compiled DB migrations".to_owned())?;
+        let older_schema_version = current_schema_version
+            .checked_sub(1)
+            .ok_or_else(|| "compiled DB schema version cannot be downgraded for test".to_owned())?;
+        manifest["graphCache"]["schemaVersion"] = json!(older_schema_version);
+        let mut downgraded_manifest =
+            serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
+        downgraded_manifest.push(b'\n');
+        fs::write(&created.manifest_path, downgraded_manifest)
+            .map_err(|error| error.to_string())?;
+
+        let side_path = tempdir.path().join("restore-graph-cache-side-path");
+        let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace.clone(),
+            backup_path: PathBuf::from(&created.backup_path),
+            side_path,
+            restore_graph_cache: true,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            restored.restored_graph_cache_count,
+            3,
+            "restore replays graph cache rows",
+        )?;
+        ensure(
+            restored.degraded.iter().any(|degradation| {
+                degradation.code == "graph_cache_schema_older_than_binary"
+                    && degradation.severity == "warning"
+                    && degradation
+                        .message
+                        .contains(&older_schema_version.to_string())
+            }),
+            "restore warns when backup graph cache schema is older than current binary",
+        )?;
+
+        let restored_connection =
+            DbConnection::open_file(Path::new(&restored.restored_database_path))
+                .map_err(|error| error.to_string())?;
+        let restored_workspace_id = restored_connection
+            .list_workspaces()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "missing restored workspace".to_owned())?
+            .id;
+        let snapshots = restored_connection
+            .list_graph_snapshots(
+                &restored_workspace_id,
+                Some(GraphSnapshotType::MemoryLinks),
+                10,
+            )
+            .map_err(|error| error.to_string())?;
+        ensure_equal(snapshots.len(), 1, "restored graph snapshot count")?;
+        ensure_equal(
+            snapshots[0].content_hash.as_str(),
+            "blake3:graph-cache-fixture",
+            "restored graph snapshot hash",
+        )?;
+        let witnesses = restored_connection
+            .list_graph_algorithm_witnesses(&restored_workspace_id, snapshot_id, Some("pagerank"))
+            .map_err(|error| error.to_string())?;
+        ensure_equal(witnesses.len(), 1, "restored witness count")?;
+        let results = restored_connection
+            .list_graph_algorithm_results(&restored_workspace_id, snapshot_id, Some("pagerank"))
+            .map_err(|error| error.to_string())?;
+        ensure_equal(results.len(), 1, "restored result count")?;
+
+        let skip_side_path = tempdir.path().join("restore-graph-cache-skip-side-path");
+        let skipped = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace,
+            backup_path: PathBuf::from(&created.backup_path),
+            side_path: skip_side_path,
+            restore_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            skipped.restored_graph_cache_count,
+            0,
+            "skip restore does not replay graph cache rows",
+        )?;
+        let skipped_connection =
+            DbConnection::open_file(Path::new(&skipped.restored_database_path))
+                .map_err(|error| error.to_string())?;
+        let skipped_workspace_id = skipped_connection
+            .list_workspaces()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "missing skipped restored workspace".to_owned())?
+            .id;
+        let skipped_snapshots = skipped_connection
+            .list_graph_snapshots(
+                &skipped_workspace_id,
+                Some(GraphSnapshotType::MemoryLinks),
+                10,
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            skipped_snapshots.is_empty(),
+            "skip restore leaves graph cache cold",
+        )
+    }
+
+    #[test]
     fn inspect_backup_reports_derived_assets() -> TestResult {
         let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
         let out = workspace.join("backups");
@@ -3243,6 +3960,7 @@ mod tests {
             label: Some("inspect-derived".to_owned()),
             redaction_level: RedactionLevel::Standard,
             include_derived: true,
+            include_graph_cache: true,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -3278,10 +3996,25 @@ mod tests {
         let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
         connection
-            .execute_raw("CREATE TABLE ee_wal_holds (id TEXT PRIMARY KEY)")
+            .execute_raw(
+                "CREATE TABLE IF NOT EXISTS ee_wal_holds (
+                    workspace_id TEXT NOT NULL,
+                    episode_id TEXT NOT NULL,
+                    lsn TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    PRIMARY KEY (workspace_id, episode_id, lsn)
+                )",
+            )
             .map_err(|error| error.to_string())?;
         connection
-            .execute_raw("INSERT INTO ee_wal_holds (id) VALUES ('hold_fixture')")
+            .execute_raw(
+                "INSERT INTO ee_wal_holds
+                    (workspace_id, episode_id, lsn, created_at, expires_at)
+                 VALUES
+                    ('ws_backup_wal_hold', 'ep_backup_wal_hold', 'lsn-backup-fixture',
+                     '2026-01-01T00:00:00Z', '2026-12-31T00:00:00Z')",
+            )
             .map_err(|error| error.to_string())?;
         drop(connection);
 
@@ -3293,6 +4026,7 @@ mod tests {
             label: Some("wal-holds".to_owned()),
             redaction_level: RedactionLevel::Standard,
             include_derived: true,
+            include_graph_cache: true,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -3316,6 +4050,7 @@ mod tests {
             workspace_path: workspace,
             backup_path: PathBuf::from(&created.backup_path),
             side_path,
+            restore_graph_cache: true,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -3345,6 +4080,7 @@ mod tests {
             label: Some("derived-corrupt".to_owned()),
             redaction_level: RedactionLevel::Standard,
             include_derived: true,
+            include_graph_cache: true,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -3465,6 +4201,7 @@ mod tests {
             label: Some("restore".to_owned()),
             redaction_level: RedactionLevel::None,
             include_derived: false,
+            include_graph_cache: false,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -3474,6 +4211,7 @@ mod tests {
             workspace_path: workspace,
             backup_path: PathBuf::from(&created.backup_path),
             side_path: side_path.clone(),
+            restore_graph_cache: true,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -3547,6 +4285,7 @@ mod tests {
             label: Some("restore-derived".to_owned()),
             redaction_level: RedactionLevel::None,
             include_derived: true,
+            include_graph_cache: true,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -3556,6 +4295,7 @@ mod tests {
             workspace_path: workspace,
             backup_path: PathBuf::from(&created.backup_path),
             side_path: side_path.clone(),
+            restore_graph_cache: true,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -3603,6 +4343,7 @@ mod tests {
             label: Some("restore-dry-run".to_owned()),
             redaction_level: RedactionLevel::None,
             include_derived: false,
+            include_graph_cache: false,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -3612,6 +4353,7 @@ mod tests {
             workspace_path: workspace,
             backup_path: PathBuf::from(&created.backup_path),
             side_path: side_path.clone(),
+            restore_graph_cache: true,
             dry_run: true,
         })
         .map_err(|error| error.message())?;
@@ -3638,6 +4380,7 @@ mod tests {
             label: Some("restore-non-empty".to_owned()),
             redaction_level: RedactionLevel::None,
             include_derived: false,
+            include_graph_cache: false,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -3650,6 +4393,7 @@ mod tests {
             workspace_path: workspace,
             backup_path: PathBuf::from(&created.backup_path),
             side_path,
+            restore_graph_cache: true,
             dry_run: false,
         });
 
@@ -3676,6 +4420,7 @@ mod tests {
             label: Some("restore-symlink-parent".to_owned()),
             redaction_level: RedactionLevel::None,
             include_derived: false,
+            include_graph_cache: false,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -3690,6 +4435,7 @@ mod tests {
             workspace_path: workspace,
             backup_path: PathBuf::from(&created.backup_path),
             side_path,
+            restore_graph_cache: true,
             dry_run: false,
         });
 

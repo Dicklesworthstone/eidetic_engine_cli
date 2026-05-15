@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.curate.disposition.v1.json",
+  "title": "ee.curate.disposition.v1",
+  "description": "ee curate disposition response envelope. The structuralAdjustments field documents graph-derived retention changes, including articulation-point bridge protection.",
+  "type": "object",
+  "required": ["schema", "success", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v1"},
+    "success": {"type": "boolean"},
+    "fields": {"type": "string"},
+    "data": {
+      "type": "object",
+      "required": [
+        "schema",
+        "command",
+        "version",
+        "workspaceId",
+        "workspacePath",
+        "databasePath",
+        "dryRun",
+        "apply",
+        "durableMutation",
+        "summary",
+        "policies",
+        "decisions",
+        "degraded",
+        "nextAction"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.curate.disposition.v1"},
+        "command": {"type": "string", "const": "curate disposition"},
+        "version": {"type": "string"},
+        "workspaceId": {"type": "string"},
+        "workspacePath": {"type": "string"},
+        "databasePath": {"type": "string"},
+        "dryRun": {"type": "boolean"},
+        "apply": {"type": "boolean"},
+        "durableMutation": {"type": "boolean"},
+        "summary": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "policies": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "decisions": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "structuralAdjustments": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/structuralAdjustment"}
+        },
+        "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "nextAction": {"type": "string"}
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.response.v1",
+      "success": true,
+      "data": {
+        "schema": "ee.curate.disposition.v1",
+        "command": "curate disposition",
+        "version": "0.1.0",
+        "workspaceId": "wsp_01234567890123456789012345",
+        "workspacePath": "/workspace",
+        "databasePath": "/workspace/.ee/ee.db",
+        "dryRun": true,
+        "apply": false,
+        "durableMutation": false,
+        "summary": {"totalCandidates": 1, "dueCount": 0},
+        "policies": [],
+        "decisions": [],
+        "structuralAdjustments": [
+          {
+            "candidateId": "curate_01234567890123456789012345",
+            "memoryId": "mem_01234567890123456789012345",
+            "onionLayer": 2,
+            "maxLayer": 3,
+            "isArticulationPoint": true,
+            "baseDecay": 0.75,
+            "structuralMultiplier": 0.5,
+            "adjustedDecay": 0.375,
+            "adjustedTtlThresholdSeconds": 172800,
+            "rationale": "articulation_point_in_layer_2"
+          }
+        ],
+        "degraded": [],
+        "nextAction": "no action required"
+      }
+    }
+  ],
+  "field_presets": {
+    "minimal": ["schema", "command", "summary"],
+    "summary": ["schema", "command", "dryRun", "apply", "summary", "structuralAdjustments", "nextAction"],
+    "standard": ["schema", "command", "version", "workspaceId", "dryRun", "apply", "durableMutation", "summary", "policies", "decisions", "structuralAdjustments", "degraded", "nextAction"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "structuralAdjustment": {
+      "type": "object",
+      "required": [
+        "candidateId",
+        "memoryId",
+        "onionLayer",
+        "maxLayer",
+        "isArticulationPoint",
+        "baseDecay",
+        "structuralMultiplier",
+        "adjustedDecay",
+        "adjustedTtlThresholdSeconds",
+        "rationale"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "candidateId": {"type": "string"},
+        "memoryId": {"type": "string"},
+        "onionLayer": {"type": ["integer", "null"], "minimum": 0},
+        "maxLayer": {"type": "integer", "minimum": 0},
+        "isArticulationPoint": {"type": "boolean"},
+        "baseDecay": {"type": "number"},
+        "structuralMultiplier": {"type": "number", "exclusiveMinimum": 0},
+        "adjustedDecay": {"type": "number", "minimum": 0, "maximum": 1},
+        "adjustedTtlThresholdSeconds": {"type": "integer", "minimum": 1},
+        "rationale": {"type": "string"}
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

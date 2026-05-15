@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
@@ -805,6 +806,8 @@ fn prepare_memory(
     parsed: &ParsedJsonlImport,
 ) -> Result<PreparedMemory, JsonlImportIssue> {
     let import_memory_id = import_memory_id(memory, parsed)?;
+    let trust_class = trust_class_for_memory(memory, trust_class)?;
+    let trust_subclass = trust_subclass_for_memory(memory, trust_subclass);
     let level: MemoryLevel = memory.level.parse().map_err(|error| {
         JsonlImportIssue::error(
             None,
@@ -885,7 +888,7 @@ fn prepare_memory(
                 ))
             }),
             trust_class: trust_class.as_str().to_owned(),
-            trust_subclass: Some(trust_subclass.to_owned()),
+            trust_subclass,
             tags,
             valid_from: memory.valid_from.clone(),
             valid_to: memory
@@ -965,6 +968,53 @@ fn trust_class_for_header(header: Option<&ExportHeader>) -> TrustClass {
             TrustLevel::Untrusted | TrustLevel::Quarantined => TrustClass::AgentAssertion,
         },
     }
+}
+
+fn trust_class_for_memory(
+    memory: &ExportMemoryRecord,
+    fallback: TrustClass,
+) -> Result<TrustClass, JsonlImportIssue> {
+    let Some(raw) = memory.trust_class.as_deref() else {
+        return Ok(fallback);
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(JsonlImportIssue::error(
+            None,
+            "invalid_memory_trust_class",
+            format!("memory `{}` has blank trust_class", memory.memory_id),
+        ));
+    }
+    TrustClass::from_str(raw).map_err(|error| {
+        JsonlImportIssue::error(
+            None,
+            "invalid_memory_trust_class",
+            format!(
+                "memory `{}` has invalid trust_class: {error}",
+                memory.memory_id
+            ),
+        )
+    })
+}
+
+fn trust_subclass_for_memory(memory: &ExportMemoryRecord, fallback: &str) -> Option<String> {
+    let record_subclass = memory
+        .trust_subclass
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    if record_subclass.is_some() {
+        return record_subclass;
+    }
+    if memory
+        .trust_class
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return None;
+    }
+    Some(fallback.to_owned())
 }
 
 fn trust_subclass_for_header(header: Option<&ExportHeader>) -> String {
@@ -1181,6 +1231,58 @@ mod tests {
                 .any(|issue| issue.code == "invalid_memory_confidence"),
             true,
             "invalid confidence issue",
+        )
+    }
+
+    #[test]
+    fn prepare_memories_preserves_record_trust_metadata() -> TestResult {
+        let input = sample_jsonl().replace(
+            r#""utility":0.7,"created_at""#,
+            r#""utility":0.7,"trust_class":"human_explicit","trust_subclass":"project-rule","created_at""#,
+        );
+        let parsed = parse_jsonl_source(&input);
+        let prepared = prepare_memories(&parsed, "wsp_01234567890123456789012345");
+
+        ensure(prepared.has_errors(), false, "prepared has no errors")?;
+        let memory = prepared
+            .memories
+            .first()
+            .ok_or_else(|| "prepared memory missing".to_string())?;
+        ensure(
+            memory.input.trust_class.as_str(),
+            "human_explicit",
+            "record trust_class overrides header",
+        )?;
+        ensure(
+            memory.input.trust_subclass.as_deref(),
+            Some("project-rule"),
+            "record trust_subclass overrides header",
+        )
+    }
+
+    #[test]
+    fn prepare_memories_preserves_missing_record_trust_subclass() -> TestResult {
+        let input = sample_jsonl().replace(
+            r#""utility":0.7,"created_at""#,
+            r#""utility":0.7,"trust_class":"human_explicit","created_at""#,
+        );
+        let parsed = parse_jsonl_source(&input);
+        let prepared = prepare_memories(&parsed, "wsp_01234567890123456789012345");
+
+        ensure(prepared.has_errors(), false, "prepared has no errors")?;
+        let memory = prepared
+            .memories
+            .first()
+            .ok_or_else(|| "prepared memory missing".to_string())?;
+        ensure(
+            memory.input.trust_class.as_str(),
+            "human_explicit",
+            "record trust_class overrides header",
+        )?;
+        ensure(
+            memory.input.trust_subclass.as_deref(),
+            None,
+            "missing record trust_subclass stays absent",
         )
     }
 

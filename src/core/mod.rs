@@ -2,7 +2,7 @@ use std::future::Future;
 
 use crate::models::{
     ARTIFACT_SUMMARY_SCHEMA_V1, ERROR_SCHEMA_V2, INSTALL_CHECK_SCHEMA_V1, INSTALL_PLAN_SCHEMA_V1,
-    RESPONSE_SCHEMA_V1, UPDATE_PLAN_SCHEMA_V1,
+    RESPONSE_SCHEMA_V1, SINGLEFLIGHT_KEY_SCHEMA_V1, UPDATE_PLAN_SCHEMA_V1,
 };
 
 pub mod agent_detect;
@@ -43,10 +43,12 @@ pub mod memory_lifecycle;
 pub mod memory_scope;
 pub mod model;
 pub mod outcome;
+pub mod ownership_snapshot;
 pub mod perf_forensics;
 pub mod plan;
 pub mod preflight;
 pub mod preflight_guard;
+pub mod preflight_token;
 pub mod procedure;
 pub mod profile;
 pub mod quarantine;
@@ -55,6 +57,7 @@ pub mod rehearse;
 pub mod repro;
 pub mod rule;
 pub mod search;
+pub mod singleflight;
 pub mod situation;
 pub mod status;
 pub mod streams;
@@ -226,6 +229,11 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
         SupportedSchema::new("proximity", "ee.proximity.v1"),
         SupportedSchema::new("why_augmented", "ee.why.v1"),
         SupportedSchema::new("context_augmented", "ee.context.v1"),
+        SupportedSchema::new("singleflight_key", SINGLEFLIGHT_KEY_SCHEMA_V1),
+        SupportedSchema::new(
+            "preflight_bypass_token",
+            preflight_token::PREFLIGHT_BYPASS_TOKEN_SCHEMA_V1,
+        ),
         SupportedSchema::new(
             "disk_pressure_diagnostics",
             disk_pressure::DISK_PRESSURE_DIAGNOSTICS_SCHEMA_V1,
@@ -471,7 +479,7 @@ mod tests {
         let info = build_info();
         ensure_equal(
             &info.package,
-            &"ee",
+            &"eidetic-engine",
             "package name must match Cargo metadata",
         )?;
         ensure(
@@ -569,6 +577,8 @@ mod tests {
                 "proximity",
                 "why_augmented",
                 "context_augmented",
+                "singleflight_key",
+                "preflight_bypass_token",
                 "disk_pressure_diagnostics",
                 "artifact_retention_diagnostics",
                 "build_admission_diagnostics",

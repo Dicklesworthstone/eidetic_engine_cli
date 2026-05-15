@@ -8,7 +8,11 @@
 //!
 //! This makes the system explainable and auditable.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use crate::core::memory::{
     EvidenceFreshness, EvidenceFreshnessStatus, assess_memory_evidence_freshness, memory_validity,
@@ -436,6 +440,10 @@ pub struct WhyReport {
     /// not exist OR when the schema migration has not been applied
     /// against an older workspace database.
     pub bayes_posterior: Option<BayesPosteriorSummary>,
+    /// Optional causal explanation block requested by `ee why --causal-explain`.
+    pub causal_explanation: Option<serde_json::Value>,
+    /// Optional revision lineage block derived from the revision DAG.
+    pub revision_lineage: Option<serde_json::Value>,
     /// Contradiction feedback recorded against this memory (EE-263).
     pub contradictions: Vec<ContradictionMetadata>,
     /// Memory links: supports, contradicts, derived_from, etc. (EE-LINK-USAGE-001).
@@ -472,6 +480,8 @@ impl WhyReport {
             selection: Some(selection),
             lifecycle: None,
             bayes_posterior: None,
+            causal_explanation: None,
+            revision_lineage: None,
             contradictions: Vec::new(),
             links: Vec::new(),
             history: None,
@@ -504,6 +514,8 @@ impl WhyReport {
             selection: None,
             lifecycle: None,
             bayes_posterior: None,
+            causal_explanation: None,
+            revision_lineage: None,
             contradictions: Vec::new(),
             links: Vec::new(),
             history: None,
@@ -528,6 +540,8 @@ impl WhyReport {
             selection: None,
             lifecycle: None,
             bayes_posterior: None,
+            causal_explanation: None,
+            revision_lineage: None,
             contradictions: Vec::new(),
             links: Vec::new(),
             history: None,
@@ -632,6 +646,20 @@ impl WhyReport {
         self
     }
 
+    /// Attach an `ee.why.causal.v1` causal explanation block to the report.
+    #[must_use]
+    pub fn with_causal_explanation(mut self, causal_explanation: serde_json::Value) -> Self {
+        self.causal_explanation = Some(causal_explanation);
+        self
+    }
+
+    /// Attach a graph-derived revision lineage block.
+    #[must_use]
+    pub fn with_revision_lineage(mut self, revision_lineage: serde_json::Value) -> Self {
+        self.revision_lineage = Some(revision_lineage);
+        self
+    }
+
     /// Add graph-derived retrieval feature explanation to the report.
     #[must_use]
     pub fn with_graph_retrieval(mut self, graph_retrieval: GraphRetrievalExplanation) -> Self {
@@ -682,11 +710,64 @@ impl<'a> WhyOptions<'a> {
     pub const DEFAULT_CONFIDENCE_THRESHOLD: f32 = 0.5;
 }
 
+fn why_trace_elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn trace_why_math_checkpoint(
+    workspace_id: &str,
+    memory_id: &str,
+    bead_id: &'static str,
+    surface: &'static str,
+    phase: &'static str,
+    started: Instant,
+    degraded_codes: &[&str],
+) {
+    tracing::info!(
+        workspace_id = %workspace_id,
+        request_id = %memory_id,
+        bead_id,
+        surface,
+        phase,
+        elapsed_ms = why_trace_elapsed_ms(started),
+        degraded_codes = ?degraded_codes,
+        "why math surface checkpoint"
+    );
+}
+
+fn trace_why_math_surfaces(
+    workspace_id: &str,
+    memory_id: &str,
+    phase: &'static str,
+    started: Instant,
+    degraded_codes: &[&str],
+) {
+    trace_why_math_checkpoint(
+        workspace_id,
+        memory_id,
+        "bd-3usjw.44",
+        "conformal_prediction_sets",
+        phase,
+        started,
+        degraded_codes,
+    );
+    trace_why_math_checkpoint(
+        workspace_id,
+        memory_id,
+        "bd-3usjw.48",
+        "influence_function_why",
+        phase,
+        started,
+        degraded_codes,
+    );
+}
+
 /// Get a why explanation for a memory.
 ///
 /// Explains why a memory was stored, how it would be retrieved,
 /// and how it would be selected for context packs.
 pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
+    let started = Instant::now();
     let target = resolve_why_target(options.memory_id);
     let memory_id = target.document_id;
 
@@ -720,6 +801,8 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
             );
         }
     };
+
+    trace_why_math_surfaces(&memory.workspace_id, memory_id, "input", started, &[]);
 
     let tags = match conn.get_memory_tags(memory_id) {
         Ok(t) => t,
@@ -843,6 +926,13 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
                 },
             )
             .with_content(memory.content.clone());
+            trace_why_math_surfaces(
+                &memory.workspace_id,
+                memory_id,
+                "response",
+                started,
+                &["why_pack_selection_unavailable"],
+            );
             return report.with_degradation(WhyDegradation {
                 code: "why_pack_selection_unavailable",
                 severity: "low",
@@ -890,6 +980,12 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
         }
         Ok(None) | Err(_) => report,
     };
+    let report = match revision_lineage_for_why(&conn, &memory.workspace_id, memory_id) {
+        Some(revision_lineage) => report.with_revision_lineage(revision_lineage),
+        None => report,
+    };
+
+    trace_why_math_surfaces(&memory.workspace_id, memory_id, "response", started, &[]);
 
     // Bead bd-17c65.7.7 (G8): best-effort audit row so L3 has a
     // last_accessed signal for `ee why` reads, and G1 can count
@@ -906,6 +1002,106 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
     let _ = conn.insert_audit(&crate::db::generate_audit_id(), &audit_input);
 
     report
+}
+
+fn revision_lineage_for_why(
+    conn: &DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+) -> Option<serde_json::Value> {
+    let graph = crate::graph::build_revision_dag_from_logical_ids(conn, workspace_id).ok()?;
+    let snapshot_version = conn
+        .get_latest_graph_snapshot(workspace_id, crate::db::GraphSnapshotType::RevisionDag)
+        .ok()
+        .flatten()
+        .map_or(0, |snapshot| u64::from(snapshot.snapshot_version));
+    let impact = crate::graph::dominance::compute_memory_impact_analysis(
+        &graph,
+        memory_id,
+        snapshot_version,
+    )
+    .ok()?;
+    let ancestors_at_depth = revision_ancestors_at_depth(&graph, memory_id);
+    let has_revision_context = ancestors_at_depth
+        .values()
+        .map(BTreeSet::len)
+        .sum::<usize>()
+        > 1
+        || !graph.successors(memory_id).unwrap_or_default().is_empty();
+    let root_memory_id = ancestors_at_depth
+        .iter()
+        .next_back()
+        .and_then(|(_, ids)| ids.iter().next().cloned())
+        .unwrap_or_else(|| memory_id.to_owned());
+    let (immediate_dominator, dominance_frontier) = if has_revision_context {
+        let idoms = crate::graph::dominance::compute_immediate_dominators(&graph, &root_memory_id)
+            .ok()
+            .unwrap_or_default();
+        let frontiers =
+            crate::graph::dominance::compute_dominance_frontiers(&graph, &root_memory_id)
+                .ok()
+                .unwrap_or_default();
+        (
+            idoms
+                .get(memory_id)
+                .filter(|dominator| dominator.as_str() != memory_id)
+                .cloned(),
+            frontiers.get(memory_id).cloned().unwrap_or_default(),
+        )
+    } else {
+        (
+            impact.impact_analysis.immediate_dominator.clone(),
+            impact.impact_analysis.dominance_frontier.clone(),
+        )
+    };
+    let mut ancestors = serde_json::Map::new();
+    for (depth, ids) in ancestors_at_depth {
+        ancestors.insert(
+            depth.to_string(),
+            serde_json::Value::Array(ids.into_iter().map(serde_json::Value::String).collect()),
+        );
+    }
+
+    Some(serde_json::json!({
+        "sourceSchema": impact.schema,
+        "memoryId": memory_id,
+        "snapshotVersion": snapshot_version,
+        "rootMemoryId": root_memory_id,
+        "immediateDominator": immediate_dominator,
+        "dominanceFrontier": dominance_frontier,
+        "ancestorsAtDepth": ancestors,
+        "validationStatus": impact.impact_analysis.validation_status,
+        "degraded": impact.degraded,
+    }))
+}
+
+fn revision_ancestors_at_depth(
+    graph: &crate::graph::DiGraph,
+    memory_id: &str,
+) -> BTreeMap<usize, BTreeSet<String>> {
+    let mut by_depth: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    let mut frontier = BTreeSet::from([memory_id.to_owned()]);
+    let mut depth = 0usize;
+
+    while !frontier.is_empty() {
+        let mut next = BTreeSet::new();
+        for id in frontier {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            by_depth.entry(depth).or_default().insert(id.clone());
+            for predecessor in graph.predecessors(&id).unwrap_or_default() {
+                if !seen.contains(predecessor) {
+                    next.insert(predecessor.to_owned());
+                }
+            }
+        }
+        frontier = next;
+        depth = depth.saturating_add(1);
+    }
+
+    by_depth
 }
 
 fn workspace_path_for_memory(conn: &DbConnection, workspace_id: &str) -> Option<PathBuf> {
@@ -1640,9 +1836,16 @@ fn fetch_history(conn: &DbConnection, memory_id: &str) -> WhyEvidenceFetch<Memor
         }
     };
 
-    let total_count = stored_entries.len() as u32;
-    let truncated = stored_entries.len() > WHY_HISTORY_LIMIT;
-    let entries = stored_entries
+    // `ee why` records a best-effort inspection audit after assembling the
+    // report. Keep that ledger write, but exclude prior self-inspection rows
+    // from the response so repeated read calls remain deterministic.
+    let visible_entries: Vec<_> = stored_entries
+        .into_iter()
+        .filter(|entry| entry.action != crate::db::audit_actions::WHY_INSPECTED)
+        .collect();
+    let total_count = visible_entries.len() as u32;
+    let truncated = visible_entries.len() > WHY_HISTORY_LIMIT;
+    let entries = visible_entries
         .into_iter()
         .take(WHY_HISTORY_LIMIT)
         .map(|entry| MemoryHistorySummaryEntry {
@@ -1955,6 +2158,105 @@ mod tests {
             report.verification_evidence[0].verification_id.as_str(),
             evidence.verification_id.as_str(),
             "verification id",
+        )
+    }
+
+    #[test]
+    fn explain_memory_attaches_revision_lineage_for_revised_memory() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or("database path should have parent")?,
+        )
+        .map_err(|error| error.to_string())?;
+        let original_id = "mem_whyrevision000000000000001";
+        let workspace_id = "wsp_whyrevisionlineage00000000";
+        let connection =
+            crate::db::DbConnection::open_file(&database_path).map_err(|e| e.to_string())?;
+        connection.migrate().map_err(|e| e.to_string())?;
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: temp.path().display().to_string(),
+                    name: Some("why-revision-lineage".to_owned()),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        connection
+            .insert_memory(
+                original_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "Revision lineage starts here.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.7,
+                    importance: 0.6,
+                    provenance_uri: None,
+                    trust_class: "agent_assertion".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: Some("2026-05-15T00:00:00Z".to_owned()),
+                    valid_to: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        drop(connection);
+
+        let revised =
+            crate::core::memory::revise_memory(&crate::core::memory::ReviseMemoryOptions {
+                database_path: &database_path,
+                original_memory_id: original_id,
+                content: Some("Revision lineage continues here."),
+                level: None,
+                kind: None,
+                confidence: None,
+                tags: None,
+                provenance_uri: None,
+                reason: crate::core::memory::ReviseReason::Update,
+                actor: Some("StormyCove"),
+                dry_run: false,
+            });
+        let revised_id = revised
+            .new_id
+            .clone()
+            .ok_or_else(|| "revision should create a new memory id".to_string())?;
+
+        let report = explain_memory(&WhyOptions {
+            database_path: &database_path,
+            memory_id: &revised_id,
+            confidence_threshold: WhyOptions::DEFAULT_CONFIDENCE_THRESHOLD,
+        });
+
+        ensure(report.found, true, "why found revised memory")?;
+        let lineage = report
+            .revision_lineage
+            .as_ref()
+            .ok_or_else(|| "why should attach revision lineage".to_string())?;
+        ensure(
+            lineage["memoryId"].as_str(),
+            Some(revised_id.as_str()),
+            "lineage memory id",
+        )?;
+        ensure(
+            lineage["immediateDominator"].as_str(),
+            Some(original_id),
+            "lineage immediate dominator",
+        )?;
+        ensure(
+            lineage["ancestorsAtDepth"]["0"][0].as_str(),
+            Some(revised_id.as_str()),
+            "lineage depth 0",
+        )?;
+        ensure(
+            lineage["ancestorsAtDepth"]["1"][0].as_str(),
+            Some(original_id),
+            "lineage depth 1",
         )
     }
 

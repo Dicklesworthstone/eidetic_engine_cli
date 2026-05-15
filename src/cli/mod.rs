@@ -57,8 +57,8 @@ use crate::core::config_surface::{
 };
 use crate::core::context::{
     ContextPackError, ContextPackOptions, ContextPackOutputOptionOverrides,
-    ContextPackOutputOptions, ContextPackOutputProfile, run_context_pack,
-    run_context_pack_with_performance,
+    ContextPackOutputOptions, ContextPackOutputProfile, attach_pack_dna_to_context_response,
+    run_context_pack, run_context_pack_with_performance,
 };
 use crate::core::curate::{
     CurateApplyOptions, CurateApplyReport, CurateCandidatesOptions, CurateCandidatesReport,
@@ -94,7 +94,7 @@ use crate::core::handoff::{
     RotateKeyOptions as HandoffRotateKeyOptions, create_handoff, inspect_handoff, preview_handoff,
     resume_handoff, rotate_handoff_key,
 };
-use crate::core::health::HealthReport;
+use crate::core::health::{HealthReport, StructuralHealthReport};
 use crate::core::index::{
     INDEX_PUBLISH_LOCK_CONTENTION_CODE, IndexRebuildError, IndexRebuildOptions, IndexRebuildReport,
     IndexRebuildStatus, IndexReembedOptions, IndexStatusOptions, IndexVacuumOptions,
@@ -142,8 +142,16 @@ use crate::core::preflight::{
     show_preflight,
 };
 use crate::core::preflight_guard::{
-    BypassTokenInput, PreflightGuardOptions, PreflightGuardRegistry, PreflightGuardRule,
-    RuleSource, run_preflight_guard,
+    BypassTokenInput, GuardMatch, MatchResolution, PREFLIGHT_GUARD_SCHEMA_V1,
+    PreflightGuardOptions, PreflightGuardRegistry, PreflightGuardReport, PreflightGuardRule,
+    RuleSource, match_trauma_guard_memories, no_risk_memories_degradation, run_preflight_guard,
+};
+use crate::core::preflight_token::{
+    BYPASS_TOKEN_INVALID, BYPASS_TOKEN_STORAGE_ERROR, IssueBypassTokenOptions,
+    PreflightBypassTokenError, RecordPreflightBypassAuditOptions, RevokeBypassTokenOptions,
+    VerifyBypassTokenOptions, issue_bypass_token as issue_preflight_bypass_token,
+    list_bypass_tokens, record_preflight_bypass_audit, revoke_bypass_token,
+    verify_bypass_token as verify_preflight_bypass_token,
 };
 use crate::core::profile::{
     HostProfileProbeOptions, HostResourceProbeReport, OperatingProfile, ProfileConfigError,
@@ -236,7 +244,7 @@ const HELP_PRELUDE: &str = concat!(
     "  Inspect:        status, doctor, capabilities, insights, memory show, memory history\n",
     "  Memory ops:     link, tag, memory level, memory expire, memory revise, outcome\n",
     "  Curate:         curate (candidates|validate|apply), playbook, review\n",
-    "  Graph:          graph (pagerank|hits|communities|neighborhood|centrality-refresh)\n",
+    "  Graph:          graph (pagerank|hits|communities|centrality|neighborhood|centrality-refresh), proximity\n",
     "  Maintenance:    maintenance, job, index, steward, daemon\n",
     "  Import/Export:  import (cass|jsonl|eidetic-legacy), export, backup, handoff\n",
     "  Diagnostics:    diag, eval, demo, db, analyze, audit, migrate\n",
@@ -617,7 +625,7 @@ pub enum Command {
     #[command(subcommand)]
     Handoff(HandoffCommand),
     /// Quick health check with overall verdict.
-    Health,
+    Health(HealthArgs),
     /// Print command help.
     Help,
     /// Graph analytics, snapshots, and export artifacts.
@@ -677,6 +685,8 @@ pub enum Command {
     /// Compare normalized performance artifacts without mutating state.
     #[command(subcommand)]
     Perf(PerfCommand),
+    /// Report pairwise min-cut proximity between two memories.
+    Proximity(ProximityArgs),
     /// Run, show, or close preflight risk assessments.
     #[command(subcommand)]
     Preflight(PreflightCommand),
@@ -931,6 +941,16 @@ pub struct BackupCreateArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_derived: bool,
 
+    /// Include graph snapshot, witness, and result-cache assets in the backup.
+    #[arg(
+        long = "include-graph-cache",
+        default_value_t = true,
+        default_missing_value = "true",
+        num_args = 0..=1,
+        require_equals = true
+    )]
+    pub include_graph_cache: bool,
+
     /// Report the backup plan without creating files.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
@@ -986,6 +1006,10 @@ pub struct BackupRestoreArgs {
     /// Validate and report restore plan without writing files.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+
+    /// Do not replay graph snapshot, witness, or result-cache assets during restore.
+    #[arg(long = "skip-graph-cache", action = ArgAction::SetTrue)]
+    pub skip_graph_cache: bool,
 }
 
 /// CLI redaction levels for backup output.
@@ -1262,8 +1286,13 @@ pub struct DemoVerifyArgs {
 pub enum DbCommand {
     /// Report database status: schema version, row counts, WAL state.
     Status(DbStatusArgs),
+    /// Inspect rows from one database table without mutation.
+    Inspect(DbInspectArgs),
     /// Check database integrity without mutation.
     Check(DbCheckArgs),
+    /// Check database integrity without mutation.
+    #[command(name = "check-integrity")]
+    CheckIntegrity(DbCheckArgs),
     /// List pending or applied migrations.
     Migrations(DbMigrationsArgs),
 }
@@ -1318,6 +1347,22 @@ pub struct DbStatusArgs {
     /// Include WAL checkpoint status.
     #[arg(long, action = ArgAction::SetTrue)]
     pub wal: bool,
+}
+
+/// Arguments for `ee db inspect`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct DbInspectArgs {
+    /// Table to inspect. Must be an existing user table.
+    #[arg(value_name = "TABLE")]
+    pub table: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Maximum number of rows to return.
+    #[arg(long, default_value_t = 50)]
+    pub limit: u32,
 }
 
 /// Arguments for `ee db check`.
@@ -1383,6 +1428,14 @@ pub struct DaemonArgs {
     pub item_limit: Option<u64>,
 }
 
+/// Arguments for `ee health`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct HealthArgs {
+    /// Emit graph-derived structural health for robot consumers.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub robot_insights: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum DaemonCommand {
     /// Report daemon supervisor status.
@@ -1397,6 +1450,8 @@ pub struct DaemonStatusArgs {}
 pub enum MaintenanceCommand {
     /// Run a bounded maintenance job now.
     Run(MaintenanceRunArgs),
+    /// Prune archived graph snapshots using the graph snapshot lifecycle policy.
+    GraphSnapshotPrune(MaintenanceGraphSnapshotPruneArgs),
     /// Report maintenance job availability.
     Status(MaintenanceStatusArgs),
 }
@@ -1479,9 +1534,33 @@ pub struct MaintenanceRunArgs {
     #[arg(long = "include-decay", action = ArgAction::SetTrue)]
     pub include_decay: bool,
 
+    /// Use legacy uniform decay without graph structural adjustments.
+    #[arg(long = "no-structural-decay", action = ArgAction::SetTrue)]
+    pub no_structural_decay: bool,
+
     /// Override the maintenance reference time for deterministic replay.
     #[arg(long = "as-of", value_name = "RFC3339")]
     pub as_of: Option<String>,
+
+    /// Override per-job time budget in milliseconds.
+    #[arg(long, value_name = "MS")]
+    pub time_limit_ms: Option<u64>,
+
+    /// Override per-job item budget.
+    #[arg(long, value_name = "N")]
+    pub item_limit: Option<u64>,
+}
+
+/// Arguments for `ee maintenance graph-snapshot-prune`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct MaintenanceGraphSnapshotPruneArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Report planned work without mutating graph snapshot rows.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 
     /// Override per-job time budget in milliseconds.
     #[arg(long, value_name = "MS")]
@@ -1565,6 +1644,10 @@ pub struct ContextArgs {
     #[arg(long, short = 'p', default_value = "balanced")]
     pub profile: String,
 
+    /// Personalized PageRank blend weight for context ranking; values outside 0..1 are clamped.
+    #[arg(long = "ppr-weight", value_name = "WEIGHT")]
+    pub ppr_weight: Option<f32>,
+
     /// Pack output profile: lean omits bulky optional fields, standard is default, verbose adds extra metadata.
     #[arg(long = "pack-profile", value_enum, default_value_t = PackOutputProfileArg::Standard)]
     pub pack_profile: PackOutputProfileArg,
@@ -1584,6 +1667,14 @@ pub struct ContextArgs {
     /// Emit a redaction-safe query and pack performance report instead of the context pack.
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain_performance: bool,
+
+    /// Include graph-derived Pack DNA metadata in JSON output.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub explain: bool,
+
+    /// Suppress data.pack.packDna even when --explain is requested.
+    #[arg(long = "no-pack-dna", action = ArgAction::SetTrue)]
+    pub no_pack_dna: bool,
 
     /// Disable the coverage-fill pass; accepts --no-coverage-fill=false to override a lean profile.
     #[arg(long = "no-coverage-fill", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
@@ -2654,12 +2745,23 @@ pub enum GraphCommand {
     ExplainLink(GraphExplainLinkArgs),
     /// Export a graph snapshot as a deterministic artifact.
     Export(GraphExportArgs),
+    /// Manage durable graph snapshots.
+    #[command(subcommand)]
+    Snapshot(GraphSnapshotCommand),
+    /// Read persisted graph centrality scores from the latest memory-link snapshot.
+    Centrality(GraphCentralityArgs),
     /// Refresh centrality metrics (PageRank, betweenness) for memory graph.
     CentralityRefresh(GraphCentralityRefreshArgs),
     /// Enrich retrieval candidates with bounded graph-derived features.
     FeatureEnrichment(GraphFeatureEnrichmentArgs),
     /// Show the deterministic memory-link neighborhood for a memory.
     Neighborhood(GraphNeighborhoodArgs),
+}
+
+#[derive(Clone, Debug, PartialEq, Subcommand)]
+pub enum GraphSnapshotCommand {
+    /// Refresh one or more typed graph snapshots.
+    Refresh(GraphSnapshotRefreshArgs),
 }
 
 /// Shared arguments for read-only graph algorithms.
@@ -2810,6 +2912,38 @@ pub struct GraphExplainLinkArgs {
     pub link_limit: Option<u32>,
 }
 
+/// Arguments for `ee proximity`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct ProximityArgs {
+    /// First memory ID.
+    #[arg(value_name = "MEMORY_A")]
+    pub memory_a: String,
+
+    /// Second memory ID.
+    #[arg(value_name = "MEMORY_B")]
+    pub memory_b: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Minimum link weight to include (0.0 - 1.0).
+    #[arg(long, value_name = "WEIGHT")]
+    pub min_weight: Option<f32>,
+
+    /// Minimum link confidence to include (0.0 - 1.0).
+    #[arg(long, value_name = "CONFIDENCE")]
+    pub min_confidence: Option<f32>,
+
+    /// Maximum number of links to process.
+    #[arg(long, value_name = "COUNT")]
+    pub link_limit: Option<u32>,
+
+    /// Include tombstoned memory nodes in graph computation.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_tombstoned: bool,
+}
+
 /// Arguments for `ee graph export`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct GraphExportArgs {
@@ -2855,6 +2989,58 @@ pub struct GraphCentralityRefreshArgs {
     pub min_confidence: Option<f32>,
 
     /// Maximum number of links to process.
+    #[arg(long, value_name = "COUNT")]
+    pub link_limit: Option<u32>,
+}
+
+/// Arguments for `ee graph centrality`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct GraphCentralityArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Algorithm to list: pagerank, betweenness, authority, hits-hubs, or hits-authorities.
+    #[arg(long, default_value = "pagerank", value_name = "ALGORITHM")]
+    pub algorithm: String,
+
+    /// Maximum number of rows to return.
+    #[arg(long, default_value_t = 10, value_name = "COUNT")]
+    pub limit: usize,
+
+    /// Return scores for one memory ID instead of top-K.
+    #[arg(long = "memory-id", value_name = "MEMORY_ID")]
+    pub memory_id: Option<String>,
+
+    /// Exit 6 when the latest snapshot is stale.
+    #[arg(long = "require-fresh", action = ArgAction::SetTrue)]
+    pub require_fresh: bool,
+}
+
+/// Arguments for `ee graph snapshot refresh`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct GraphSnapshotRefreshArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Report the refresh plan without persisting a snapshot.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Graph to refresh: memory_links, causal, revision, rules, contradictions, or all.
+    #[arg(long, default_value = "memory_links", value_name = "GRAPH")]
+    pub graph: String,
+
+    /// Minimum link weight to include for memory_links refreshes (0.0 - 1.0).
+    #[arg(long, value_name = "WEIGHT")]
+    pub min_weight: Option<f32>,
+
+    /// Minimum link confidence to include for memory_links refreshes (0.0 - 1.0).
+    #[arg(long, value_name = "CONFIDENCE")]
+    pub min_confidence: Option<f32>,
+
+    /// Maximum number of links to process for memory_links refreshes.
     #[arg(long, value_name = "COUNT")]
     pub link_limit: Option<u32>,
 }
@@ -4037,6 +4223,17 @@ pub enum PreflightCommand {
     Show(PreflightShowArgs),
     /// Close a preflight run (mark as completed or cancelled).
     Close(PreflightCloseArgs),
+    /// Issue a short-lived one-shot bypass token after human approval.
+    #[command(name = "issue-bypass-token")]
+    IssueBypassToken(PreflightIssueBypassTokenArgs),
+    /// Revoke a previously issued bypass token.
+    #[command(name = "revoke-bypass-token")]
+    RevokeBypassToken(PreflightRevokeBypassTokenArgs),
+    /// List hashed bypass-token metadata for this workspace.
+    #[command(name = "list-bypass-tokens")]
+    ListBypassTokens(PreflightListBypassTokensArgs),
+    /// Check a command against preflight guard rules.
+    Check(PreflightGuardArgs),
     /// Check a command against preflight guard rules.
     Guard(PreflightGuardArgs),
 }
@@ -4105,12 +4302,64 @@ pub struct PreflightCloseArgs {
     pub dry_run: bool,
 }
 
+/// Arguments for `ee preflight issue-bypass-token`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct PreflightIssueBypassTokenArgs {
+    /// Human approval reason for the bypass.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: String,
+
+    /// Token lifetime in minutes (default: 10, max: 60).
+    #[arg(long, value_name = "MINUTES")]
+    pub ttl_minutes: Option<i64>,
+
+    /// Maximum successful uses before exhaustion.
+    #[arg(long, value_name = "COUNT")]
+    pub max_uses: Option<u32>,
+
+    /// Optional actor recorded in the audit row.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee preflight revoke-bypass-token`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct PreflightRevokeBypassTokenArgs {
+    /// Raw bypass token to revoke.
+    #[arg(long, value_name = "TOKEN")]
+    pub token: String,
+
+    /// Optional actor recorded in the audit row.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee preflight list-bypass-tokens`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct PreflightListBypassTokensArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
 /// Arguments for `ee preflight guard`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct PreflightGuardArgs {
-    /// Command string to check against guard rules.
+    /// Command string to check against guard rules. Use --cmd with `preflight check`.
     #[arg(value_name = "COMMAND")]
-    pub command: String,
+    pub command: Option<String>,
+
+    /// Command string to check against guard rules.
+    #[arg(long = "cmd", value_name = "COMMAND")]
+    pub cmd: Option<String>,
 
     /// Workspace path for workspace-specific rules.
     #[arg(long, value_name = "PATH")]
@@ -4119,6 +4368,14 @@ pub struct PreflightGuardArgs {
     /// Bypass token for a specific rule (format: rule_id:token).
     #[arg(long, value_name = "RULE_ID:TOKEN")]
     pub bypass: Vec<String>,
+
+    /// DB-backed one-shot override token issued by `ee preflight issue-bypass-token`.
+    #[arg(long = "override-token", value_name = "TOKEN")]
+    pub override_token: Option<String>,
+
+    /// Database path for --override-token. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Subcommands for `ee tripwire`.
@@ -5589,6 +5846,10 @@ pub struct CurateDispositionArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub apply: bool,
 
+    /// Use legacy uniform TTL disposition without graph structural adjustments.
+    #[arg(long = "no-structural-decay", action = ArgAction::SetTrue)]
+    pub no_structural_decay: bool,
+
     /// Override the current time for deterministic replay and tests.
     #[arg(long, value_name = "RFC3339")]
     pub now: Option<String>,
@@ -6075,6 +6336,10 @@ pub struct WhyArgs {
     /// Confidence threshold for selection (default 0.5).
     #[arg(long, default_value_t = 0.5)]
     pub confidence_threshold: f32,
+
+    /// Include causal ancestry and min-cost path evidence from the causal graph.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub causal_explain: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -7677,6 +7942,9 @@ where
         Some(Command::Job(ref job_cmd)) => handle_job(&cli, job_cmd, stdout),
         Some(Command::Maintenance(ref maintenance_cmd)) => match maintenance_cmd {
             MaintenanceCommand::Run(args) => handle_maintenance_run(&cli, args, stdout),
+            MaintenanceCommand::GraphSnapshotPrune(args) => {
+                handle_maintenance_graph_snapshot_prune(&cli, args, stdout)
+            }
             MaintenanceCommand::Status(args) => handle_maintenance_status(&cli, args, stdout),
         },
         Some(Command::Context(ref args)) => handle_context(&cli, args, stdout, stderr),
@@ -7687,7 +7955,9 @@ where
         }
         Some(Command::Db(ref db_cmd)) => match db_cmd {
             DbCommand::Status(args) => handle_db_status(&cli, args, stdout),
+            DbCommand::Inspect(args) => handle_db_inspect(&cli, args, stdout),
             DbCommand::Check(args) => handle_db_check(&cli, args, stdout),
+            DbCommand::CheckIntegrity(args) => handle_db_check_integrity(&cli, args, stdout),
             DbCommand::Migrations(args) => handle_db_migrations(&cli, args, stdout),
         },
         Some(Command::Migrate(ref migrate_cmd)) => match migrate_cmd {
@@ -8010,7 +8280,29 @@ where
                 }
             }
         },
-        Some(Command::Health) => {
+        Some(Command::Health(ref args)) if args.robot_insights => {
+            let report = cli.workspace.as_deref().map_or_else(
+                StructuralHealthReport::gather,
+                StructuralHealthReport::gather_for_workspace,
+            );
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &output::render_structural_health_human(&report))
+                }
+                output::Renderer::Toon => write_stdout(
+                    stdout,
+                    &(output::render_structural_health_toon(&report) + "\n"),
+                ),
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => write_stdout(
+                    stdout,
+                    &(output::render_structural_health_json(&report) + "\n"),
+                ),
+            }
+        }
+        Some(Command::Health(_)) => {
             let report = cli
                 .workspace
                 .as_deref()
@@ -8267,6 +8559,12 @@ where
         Some(Command::Graph(GraphCommand::Export(ref args))) => {
             handle_graph_export(&cli, args, stdout, stderr)
         }
+        Some(Command::Graph(GraphCommand::Snapshot(GraphSnapshotCommand::Refresh(ref args)))) => {
+            handle_graph_snapshot_refresh(&cli, args, stdout, stderr)
+        }
+        Some(Command::Graph(GraphCommand::Centrality(ref args))) => {
+            handle_graph_centrality_read(&cli, args, stdout, stderr)
+        }
         Some(Command::Graph(GraphCommand::CentralityRefresh(ref args))) => {
             handle_graph_centrality_refresh(&cli, args, stdout, stderr)
         }
@@ -8285,6 +8583,7 @@ where
         }
         Some(Command::Pack(ref args)) => handle_pack_command(&cli, args, stdout, stderr),
         Some(Command::Perf(ref perf_cmd)) => handle_perf_command(&cli, perf_cmd, stdout, stderr),
+        Some(Command::Proximity(ref args)) => handle_proximity(&cli, args, stdout, stderr),
         Some(Command::Preflight(PreflightCommand::Run(ref args))) => {
             handle_preflight_run(&cli, args, stdout, stderr)
         }
@@ -8293,6 +8592,18 @@ where
         }
         Some(Command::Preflight(PreflightCommand::Close(ref args))) => {
             handle_preflight_close(&cli, args, stdout, stderr)
+        }
+        Some(Command::Preflight(PreflightCommand::IssueBypassToken(ref args))) => {
+            handle_preflight_issue_bypass_token(&cli, args, stdout, stderr)
+        }
+        Some(Command::Preflight(PreflightCommand::RevokeBypassToken(ref args))) => {
+            handle_preflight_revoke_bypass_token(&cli, args, stdout, stderr)
+        }
+        Some(Command::Preflight(PreflightCommand::ListBypassTokens(ref args))) => {
+            handle_preflight_list_bypass_tokens(&cli, args, stdout, stderr)
+        }
+        Some(Command::Preflight(PreflightCommand::Check(ref args))) => {
+            handle_preflight_guard(&cli, args, stdout, stderr)
         }
         Some(Command::Preflight(PreflightCommand::Guard(ref args))) => {
             handle_preflight_guard(&cli, args, stdout, stderr)
@@ -10070,7 +10381,13 @@ where
     W: Write,
     E: Write,
 {
-    let report = match insights::build_insights_report(args) {
+    let workspace = cli.resolve_workspace();
+    let report = match insights::build_insights_report_with_options(
+        args,
+        insights::InsightsBuildOptions {
+            workspace: Some(&workspace),
+        },
+    ) {
         Ok(report) => report,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
@@ -10390,6 +10707,7 @@ where
         label: args.label.clone(),
         redaction_level: args.redaction.to_model(),
         include_derived: args.include_derived,
+        include_graph_cache: args.include_graph_cache,
         dry_run: args.dry_run,
     };
 
@@ -10433,6 +10751,7 @@ where
         label: args.label.clone(),
         redaction_level: args.redaction.to_model(),
         include_derived: false,
+        include_graph_cache: false,
         dry_run: args.dry_run,
     };
 
@@ -10714,6 +11033,7 @@ where
         workspace_path,
         backup_path,
         side_path: args.side_path.clone(),
+        restore_graph_cache: !args.skip_graph_cache,
         dry_run: args.dry_run,
     };
 
@@ -12956,6 +13276,264 @@ fn parse_preflight_feedback_arg(
         })
 }
 
+fn handle_preflight_issue_bypass_token<W, E>(
+    cli: &Cli,
+    args: &PreflightIssueBypassTokenArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, workspace_id, workspace) =
+        match open_preflight_token_database(cli, args.database.as_deref()) {
+            Ok(opened) => opened,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    let options = IssueBypassTokenOptions {
+        workspace_id,
+        issuer_workspace: workspace.to_string_lossy().into_owned(),
+        reason: args.reason.clone(),
+        ttl_minutes: args.ttl_minutes,
+        max_uses: args.max_uses,
+        actor: args.actor.clone(),
+        now: None,
+    };
+
+    match issue_preflight_bypass_token(&connection, &options) {
+        Ok(report) => write_preflight_token_report(
+            cli,
+            "preflight issue-bypass-token",
+            &report,
+            render_preflight_issue_bypass_token_human(&report),
+            stdout,
+        ),
+        Err(error) => {
+            let domain_error = preflight_token_error_to_domain(error);
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn handle_preflight_revoke_bypass_token<W, E>(
+    cli: &Cli,
+    args: &PreflightRevokeBypassTokenArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, workspace_id, _) =
+        match open_preflight_token_database(cli, args.database.as_deref()) {
+            Ok(opened) => opened,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    let options = RevokeBypassTokenOptions {
+        workspace_id,
+        token: args.token.clone(),
+        actor: args.actor.clone(),
+        now: None,
+    };
+
+    match revoke_bypass_token(&connection, &options) {
+        Ok(report) => write_preflight_token_report(
+            cli,
+            "preflight revoke-bypass-token",
+            &report,
+            render_preflight_revoke_bypass_token_human(&report),
+            stdout,
+        ),
+        Err(error) => {
+            let domain_error = preflight_token_error_to_domain(error);
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn handle_preflight_list_bypass_tokens<W, E>(
+    cli: &Cli,
+    args: &PreflightListBypassTokensArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, workspace_id, _) =
+        match open_preflight_token_database(cli, args.database.as_deref()) {
+            Ok(opened) => opened,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+
+    match list_bypass_tokens(&connection, &workspace_id) {
+        Ok(report) => write_preflight_token_report(
+            cli,
+            "preflight list-bypass-tokens",
+            &report,
+            render_preflight_list_bypass_tokens_human(&report),
+            stdout,
+        ),
+        Err(error) => {
+            let domain_error = preflight_token_error_to_domain(error);
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn open_preflight_token_database(
+    cli: &Cli,
+    database: Option<&Path>,
+) -> Result<(crate::db::DbConnection, String, PathBuf), DomainError> {
+    let workspace = cli.resolve_workspace();
+    let database_path = database
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+    if !database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace . --json".to_owned()),
+        });
+    }
+    let connection = crate::db::DbConnection::open_file(&database_path).map_err(|error| {
+        DomainError::Storage {
+            message: format!("Failed to open database: {error}"),
+            repair: Some("ee status --json".to_owned()),
+        }
+    })?;
+    connection.migrate().map_err(|error| DomainError::Storage {
+        message: format!("Failed to migrate database: {error}"),
+        repair: Some("ee migrate run --workspace . --json".to_owned()),
+    })?;
+
+    let workspace_path = workspace.to_string_lossy().into_owned();
+    let workspace_id = match connection
+        .get_workspace_by_path(&workspace_path)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query workspace row: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })? {
+        Some(workspace) => workspace.id,
+        None => {
+            let workspace_id = crate::core::workspace::stable_workspace_id(&workspace);
+            connection
+                .insert_workspace(
+                    &workspace_id,
+                    &crate::db::CreateWorkspaceInput {
+                        path: workspace_path,
+                        name: workspace
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned()),
+                    },
+                )
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to create workspace row: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                })?;
+            workspace_id
+        }
+    };
+
+    Ok((connection, workspace_id, workspace))
+}
+
+fn preflight_token_error_to_domain(error: PreflightBypassTokenError) -> DomainError {
+    if error.code == BYPASS_TOKEN_STORAGE_ERROR {
+        return DomainError::Storage {
+            message: error.message,
+            repair: Some(error.repair),
+        };
+    }
+    if error.code == BYPASS_TOKEN_INVALID && error.token_hash_prefix.is_none() {
+        return DomainError::UsageCodeWithDetails {
+            code: error.code,
+            message: error.message,
+            repair: Some(error.repair),
+            details_json: "{}".to_owned(),
+        };
+    }
+    DomainError::UnsatisfiedDegradedModeCode {
+        code: error.code,
+        message: error.message,
+        repair: Some(error.repair),
+    }
+}
+
+fn write_preflight_token_report<W, T>(
+    cli: &Cli,
+    command: &'static str,
+    report: &T,
+    human: String,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+    T: serde::Serialize,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human),
+        output::Renderer::Toon
+        | output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": {
+                    "command": command,
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "report": report,
+                },
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn render_preflight_issue_bypass_token_human(
+    report: &crate::core::preflight_token::BypassTokenIssueReport,
+) -> String {
+    format!(
+        "preflight bypass token issued\n  token: {}\n  token hash prefix: {}\n  expires at: {}\n  max uses: {}\n",
+        report.token, report.token_hash_prefix, report.expires_at, report.max_uses
+    )
+}
+
+fn render_preflight_revoke_bypass_token_human(
+    report: &crate::core::preflight_token::BypassTokenRevokeReport,
+) -> String {
+    format!(
+        "preflight bypass token revoked\n  token hash prefix: {}\n  revoked at: {}\n",
+        report.token_hash_prefix, report.revoked_at
+    )
+}
+
+fn render_preflight_list_bypass_tokens_human(
+    report: &crate::core::preflight_token::BypassTokenListReport,
+) -> String {
+    let mut output = format!(
+        "preflight bypass tokens for {}: {}\n",
+        report.workspace_id,
+        report.tokens.len()
+    );
+    for token in &report.tokens {
+        output.push_str(&format!(
+            "  - {} used {}/{} expires {} revoked={} reason={}\n",
+            token.token_hash_prefix,
+            token.used_count,
+            token.max_uses,
+            token.expires_at,
+            token.revoked,
+            token.reason
+        ));
+    }
+    output
+}
+
 fn handle_preflight_guard<W, E>(
     cli: &Cli,
     args: &PreflightGuardArgs,
@@ -12971,11 +13549,71 @@ where
         .clone()
         .or_else(|| cli.workspace.clone())
         .unwrap_or_else(|| PathBuf::from("."));
+    let command = match preflight_guard_command(args) {
+        Ok(command) => command,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
 
     let registry = match PreflightGuardRegistry::load(&workspace) {
         Ok(r) => r,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
+
+    if let Some(override_token) = args.override_token.as_deref() {
+        let matches = registry.match_command(&command);
+        if !matches.is_empty() {
+            let (connection, workspace_id, _) =
+                match open_preflight_token_database(cli, args.database.as_deref()) {
+                    Ok(opened) => opened,
+                    Err(error) => {
+                        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                    }
+                };
+            let options = VerifyBypassTokenOptions {
+                workspace_id: workspace_id.clone(),
+                token: override_token.to_owned(),
+                actor: None,
+                now: None,
+            };
+            if let Err(error) = verify_preflight_bypass_token(&connection, &options) {
+                let domain_error = preflight_token_error_to_domain(error);
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+            let mut report = PreflightGuardReport {
+                schema: PREFLIGHT_GUARD_SCHEMA_V1.to_owned(),
+                command,
+                matches: matches
+                    .into_iter()
+                    .map(|rule| GuardMatch {
+                        rule_id: rule.id.clone(),
+                        pattern: rule.pattern.clone(),
+                        action: rule.action,
+                        message: rule.message.clone(),
+                        source: rule.source.clone(),
+                        resolution: MatchResolution::BypassedWithToken,
+                    })
+                    .collect(),
+                matched_memories: Vec::new(),
+                degraded: Vec::new(),
+                exit_code: 0,
+                checked_at: chrono::Utc::now().to_rfc3339(),
+            };
+            attach_preflight_memory_matches(cli, args.database.as_deref(), &mut report);
+            let audit_options = RecordPreflightBypassAuditOptions {
+                workspace_id,
+                token: override_token.to_owned(),
+                actor: None,
+                command: report.command.clone(),
+                matches: report.matches.clone(),
+                matched_memories: report.matched_memories.clone(),
+            };
+            if let Err(error) = record_preflight_bypass_audit(&connection, &audit_options) {
+                let domain_error = preflight_token_error_to_domain(error);
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+            return write_preflight_guard_report(cli, &report, stdout);
+        }
+    }
 
     let bypass_tokens: Vec<BypassTokenInput> = args
         .bypass
@@ -12990,14 +13628,76 @@ where
         .collect();
 
     let options = PreflightGuardOptions {
-        command: args.command.clone(),
+        command,
         workspace,
         bypass_tokens,
         bypass_secret: read(EnvVar::PreflightBypassSecret).map(|s| s.into_bytes()),
     };
 
-    let report = run_preflight_guard(&registry, &options);
+    let mut report = run_preflight_guard(&registry, &options);
+    attach_preflight_memory_matches(cli, args.database.as_deref(), &mut report);
+    write_preflight_guard_report(cli, &report, stdout)
+}
 
+fn attach_preflight_memory_matches(
+    cli: &Cli,
+    database: Option<&Path>,
+    report: &mut PreflightGuardReport,
+) {
+    if report.matches.is_empty() {
+        return;
+    }
+    let (connection, workspace_id, _) = match open_preflight_token_database(cli, database) {
+        Ok(opened) => opened,
+        Err(error) => {
+            let mut degraded = no_risk_memories_degradation();
+            degraded.message = format!(
+                "Preflight risk-memory lookup unavailable: {}",
+                error.message()
+            );
+            report.degraded.push(degraded);
+            return;
+        }
+    };
+    let memories = match connection.list_memories(&workspace_id, None, false) {
+        Ok(memories) => memories,
+        Err(error) => {
+            let mut degraded = no_risk_memories_degradation();
+            degraded.message = format!("Failed to query preflight risk memories: {error}");
+            report.degraded.push(degraded);
+            return;
+        }
+    };
+    report.matched_memories = match_trauma_guard_memories(&report.command, &memories);
+    if report.matched_memories.is_empty() {
+        report.degraded.push(no_risk_memories_degradation());
+    }
+}
+
+fn preflight_guard_command(args: &PreflightGuardArgs) -> Result<String, DomainError> {
+    match (args.command.as_ref(), args.cmd.as_ref()) {
+        (Some(_), Some(_)) => Err(DomainError::Usage {
+            message: "pass either positional COMMAND or --cmd, not both".to_owned(),
+            repair: Some("ee preflight check --cmd '<command>' --json".to_owned()),
+        }),
+        (Some(command), None) | (None, Some(command)) if !command.trim().is_empty() => {
+            Ok(command.clone())
+        }
+        _ => Err(DomainError::Usage {
+            message: "preflight guard requires a command string".to_owned(),
+            repair: Some("ee preflight check --cmd '<command>' --json".to_owned()),
+        }),
+    }
+}
+
+fn write_preflight_guard_report<W>(
+    cli: &Cli,
+    report: &PreflightGuardReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
     if cli.wants_json() {
         let json = report.to_json();
         let _ = stdout.write_all(json.to_string().as_bytes());
@@ -18282,6 +18982,19 @@ impl<'a> From<&'a GraphExplainLinkArgs> for GraphReadOptions<'a> {
     }
 }
 
+impl<'a> From<&'a ProximityArgs> for GraphReadOptions<'a> {
+    fn from(args: &'a ProximityArgs) -> Self {
+        Self {
+            database: args.database.as_deref(),
+            min_weight: args.min_weight,
+            min_confidence: args.min_confidence,
+            link_limit: args.link_limit,
+            limit: None,
+            include_tombstoned: args.include_tombstoned,
+        }
+    }
+}
+
 fn handle_graph_pagerank<W, E>(
     cli: &Cli,
     args: &GraphAlgorithmArgs,
@@ -18387,14 +19100,24 @@ where
     {
         match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
             Ok(input) => {
-                let result = fnx_algorithms::hits_centrality_directed(&input.directed);
+                let report = match crate::graph::hits::compute_hits_report(&input.directed) {
+                    Ok(report) => report,
+                    Err(error) => {
+                        let error = DomainError::Graph {
+                            message: error.to_string(),
+                            repair: Some("ee graph snapshot refresh --workspace .".to_string()),
+                        };
+                        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                    }
+                };
                 let data = graph_metric_data(
                     "graph hits",
                     &input,
                     serde_json::json!({
-                        "hubs": graph_scores_json(&result.hubs, args.limit),
-                        "authorities": graph_scores_json(&result.authorities, args.limit),
-                        "witness": graph_witness_json(&result.witness),
+                        "reportSchema": report.schema,
+                        "hubs": graph_score_map_json(&report.scores.hubs, args.limit),
+                        "authorities": graph_score_map_json(&report.scores.authorities, args.limit),
+                        "degraded": report.degraded,
                     }),
                 );
                 write_graph_surface_data(cli, stdout, data)
@@ -18721,6 +19444,116 @@ where
             graph_feature_disabled_data("graph explain-link"),
         )
     }
+}
+
+fn handle_proximity<W, E>(
+    cli: &Cli,
+    args: &ProximityArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match validate_graph_read_options(GraphReadOptions::from(args))
+        .and_then(|()| validate_graph_memory_pair(&args.memory_a, &args.memory_b))
+    {
+        Ok(()) => {}
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+
+    #[cfg(feature = "graph")]
+    {
+        match graph_algorithm_input(cli, GraphReadOptions::from(args)).and_then(|input| {
+            crate::graph::gomory_hu::build_gomory_hu_tree(&input.undirected)
+                .map(|tree| {
+                    crate::graph::gomory_hu::query_proximity(
+                        &tree,
+                        &args.memory_a,
+                        &args.memory_b,
+                        0,
+                    )
+                })
+                .map_err(|error| DomainError::Graph {
+                    message: error.to_string(),
+                    repair: Some("ee graph centrality-refresh --workspace .".to_string()),
+                })
+        }) {
+            Ok(report) => write_proximity_report(cli, &report, stdout),
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        }
+    }
+
+    #[cfg(not(feature = "graph"))]
+    {
+        let _ = stderr;
+        let report = serde_json::json!({
+            "schema": crate::graph::gomory_hu::PROXIMITY_SCHEMA_V1,
+            "memoryA": args.memory_a,
+            "memoryB": args.memory_b,
+            "snapshotVersion": 0,
+            "minCut": null,
+            "interpretation": "graph_feature_disabled",
+            "treePath": null,
+            "degraded": [{
+                "code": "graph_feature_disabled",
+                "severity": "medium",
+                "message": "Proximity requires graph feature support.",
+                "repair": "Build or run ee with --features graph."
+            }]
+        });
+        write_stdout(stdout, &(report.to_string() + "\n"))
+    }
+}
+
+fn write_proximity_report<W>(
+    cli: &Cli,
+    report: &crate::graph::gomory_hu::ProximityReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &proximity_human_output(report))
+        }
+        output::Renderer::Toon => {
+            let json = serde_json::to_string(report).unwrap_or_else(|_| "{}".to_string());
+            write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::to_string(report).unwrap_or_else(|_| "{}".to_string());
+            write_stdout(stdout, &(json + "\n"))
+        }
+    }
+}
+
+fn proximity_human_output(report: &crate::graph::gomory_hu::ProximityReport) -> String {
+    let min_cut = report
+        .min_cut
+        .map(|value| graph_score_json_value(value).to_string())
+        .unwrap_or_else(|| "unavailable".to_string());
+    let path = report
+        .tree_path
+        .as_ref()
+        .map(|nodes| nodes.join(" -> "))
+        .unwrap_or_else(|| "unavailable".to_string());
+    let mut output = format!(
+        "Proximity between {} and {}\n\n  Interpretation: {}\n  Min cut: {}\n  Tree path: {}\n",
+        report.memory_a, report.memory_b, report.interpretation, min_cut, path
+    );
+    for degraded in &report.degraded {
+        output.push_str(&format!("\nDegraded: {}\n", degraded.message));
+        if let Some(repair) = &degraded.repair {
+            output.push_str(&format!("Next: {repair}\n"));
+        }
+    }
+    output
 }
 
 fn validate_graph_read_options(options: GraphReadOptions<'_>) -> Result<(), DomainError> {
@@ -19082,6 +19915,29 @@ fn graph_scores_json(
 }
 
 #[cfg(feature = "graph")]
+fn graph_score_map_json(
+    scores: &std::collections::BTreeMap<String, f64>,
+    limit: Option<usize>,
+) -> Vec<serde_json::Value> {
+    let mut ordered = scores.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| right.1.total_cmp(left.1).then_with(|| left.0.cmp(right.0)));
+    if let Some(limit) = limit {
+        ordered.truncate(limit);
+    }
+    ordered
+        .into_iter()
+        .enumerate()
+        .map(|(index, (memory_id, score))| {
+            serde_json::json!({
+                "rank": index + 1,
+                "memoryId": memory_id,
+                "score": graph_score_json_value(*score),
+            })
+        })
+        .collect()
+}
+
+#[cfg(feature = "graph")]
 fn graph_witness_json(witness: &fnx_algorithms::ComplexityWitness) -> serde_json::Value {
     serde_json::json!({
         "algorithm": witness.algorithm,
@@ -19297,6 +20153,533 @@ where
     }
 }
 
+fn handle_graph_snapshot_refresh<W, E>(
+    cli: &Cli,
+    args: &GraphSnapshotRefreshArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: None,
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
+        Ok(workspace_id) => workspace_id,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let graph_types = match graph_snapshot_refresh_types(&args.graph) {
+        Ok(graph_types) => graph_types,
+        Err(message) => {
+            let domain_error = DomainError::Usage {
+                message,
+                repair: Some(
+                    "Use --graph=memory_links, causal, revision, rules, contradictions, or all."
+                        .to_string(),
+                ),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let options = crate::graph::CentralityRefreshOptions {
+        dry_run: args.dry_run,
+        min_weight: args.min_weight,
+        min_confidence: args.min_confidence,
+        link_limit: args.link_limit,
+    };
+    let mut reports = Vec::with_capacity(graph_types.len());
+    for graph_type in graph_types {
+        match crate::graph::refresh_graph_snapshot_by_type(
+            &conn,
+            &workspace_id,
+            graph_type,
+            &options,
+        ) {
+            Ok(report) => reports.push((graph_type, report)),
+            Err(error) => {
+                let domain_error = DomainError::Graph {
+                    message: error.to_string(),
+                    repair: Some("ee graph snapshot refresh --dry-run".to_string()),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        }
+    }
+    let report = crate::graph::GraphSnapshotRefreshBatchReport {
+        workspace_id,
+        reports,
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": crate::graph::CENTRALITY_REFRESH_SCHEMA_V1,
+                "success": true,
+                "data": report.data_json(),
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn graph_snapshot_refresh_types(input: &str) -> Result<Vec<crate::db::GraphSnapshotType>, String> {
+    use crate::db::GraphSnapshotType;
+
+    let graph_types = match input {
+        "memory_links" => vec![GraphSnapshotType::MemoryLinks],
+        "causal" | "causal_evidence" => vec![GraphSnapshotType::CausalEvidence],
+        "revision" | "revision_dag" => vec![GraphSnapshotType::RevisionDag],
+        "rules" | "rule_provenance" => vec![GraphSnapshotType::RuleProvenance],
+        "contradictions" | "contradiction_subgraph" => {
+            vec![GraphSnapshotType::ContradictionSubgraph]
+        }
+        "all" => vec![
+            GraphSnapshotType::MemoryLinks,
+            GraphSnapshotType::CausalEvidence,
+            GraphSnapshotType::RevisionDag,
+            GraphSnapshotType::RuleProvenance,
+            GraphSnapshotType::ContradictionSubgraph,
+        ],
+        other => return Err(format!("unknown graph refresh target: {other}")),
+    };
+    Ok(graph_types)
+}
+
+fn handle_graph_centrality_read<W, E>(
+    cli: &Cli,
+    args: &GraphCentralityArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if args.limit == 0 {
+        let domain_error = DomainError::Usage {
+            message: "--limit must be greater than zero".to_string(),
+            repair: Some("Use --limit 10 or omit the flag.".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: None,
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
+        Ok(workspace_id) => workspace_id,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let report = match build_graph_centrality_read_report(&conn, &workspace_id, args) {
+        Ok(report) => report,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let exit_code = if args.require_fresh
+        && report
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "graph_snapshot_stale")
+    {
+        ProcessExitCode::UnsatisfiedDegradedMode
+    } else {
+        ProcessExitCode::Success
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &graph_centrality_read_human_output(&report));
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(graph_centrality_read_toon_output(&report) + "\n"));
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": report.degraded.iter().all(|entry| entry.severity != "medium")
+                    || report.status == "available",
+                "data": report.data_json(),
+                "degraded": graph_centrality_read_degraded_json(&report.degraded),
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"));
+        }
+    }
+    exit_code
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GraphCentralityReadAlgorithm {
+    Pagerank,
+    Betweenness,
+    Authority,
+    HitsHubs,
+    HitsAuthorities,
+    Unknown,
+}
+
+impl GraphCentralityReadAlgorithm {
+    fn parse(input: &str) -> Self {
+        match input {
+            "pagerank" | "page_rank" => Self::Pagerank,
+            "betweenness" | "betweenness_centrality" => Self::Betweenness,
+            "authority" | "authorities" => Self::Authority,
+            "hits-hubs" | "hits_hubs" | "hub" | "hubs" => Self::HitsHubs,
+            "hits-authorities" | "hits_authorities" => Self::HitsAuthorities,
+            _ => Self::Unknown,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pagerank => "pagerank",
+            Self::Betweenness => "betweenness",
+            Self::Authority => "authority",
+            Self::HitsHubs => "hits-hubs",
+            Self::HitsAuthorities => "hits-authorities",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    const fn available_in_memory_link_snapshot(self) -> bool {
+        matches!(self, Self::Pagerank | Self::Betweenness)
+    }
+}
+
+struct GraphCentralityReadDegradation {
+    code: &'static str,
+    severity: &'static str,
+    message: String,
+    repair: String,
+}
+
+struct GraphCentralityReadRow {
+    rank: usize,
+    memory_id: String,
+    score: f64,
+}
+
+struct GraphCentralityReadSnapshot {
+    id: String,
+    schema_version: String,
+    snapshot_version: u32,
+    source_generation: u32,
+    status: String,
+    content_hash: String,
+    node_count: u32,
+    edge_count: u32,
+    created_at: String,
+}
+
+struct GraphCentralityReadReport {
+    command: &'static str,
+    status: &'static str,
+    workspace_id: String,
+    algorithm: GraphCentralityReadAlgorithm,
+    limit: usize,
+    memory_id: Option<String>,
+    snapshot: Option<GraphCentralityReadSnapshot>,
+    rows: Vec<GraphCentralityReadRow>,
+    degraded: Vec<GraphCentralityReadDegradation>,
+}
+
+impl GraphCentralityReadReport {
+    fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "command": self.command,
+            "schema": "ee.graph.centrality_read.v1",
+            "version": env!("CARGO_PKG_VERSION"),
+            "status": self.status,
+            "workspaceId": self.workspace_id,
+            "graphType": crate::db::GraphSnapshotType::MemoryLinks.as_str(),
+            "algorithm": self.algorithm.as_str(),
+            "limit": self.limit,
+            "memoryId": self.memory_id,
+            "snapshot": self.snapshot.as_ref().map(graph_centrality_read_snapshot_json),
+            "rows": self.rows.iter().map(graph_centrality_read_row_json).collect::<Vec<_>>(),
+            "degraded": graph_centrality_read_degraded_json(&self.degraded),
+        })
+    }
+}
+
+fn build_graph_centrality_read_report(
+    conn: &crate::db::DbConnection,
+    workspace_id: &str,
+    args: &GraphCentralityArgs,
+) -> Result<GraphCentralityReadReport, DomainError> {
+    let algorithm = GraphCentralityReadAlgorithm::parse(args.algorithm.as_str());
+    let snapshot = conn
+        .get_latest_graph_snapshot(workspace_id, crate::db::GraphSnapshotType::MemoryLinks)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query graph snapshot: {error}"),
+            repair: Some("ee graph centrality-refresh".to_string()),
+        })?;
+    let Some(snapshot) = snapshot else {
+        return Ok(GraphCentralityReadReport {
+            command: "graph centrality",
+            status: "scores_unavailable",
+            workspace_id: workspace_id.to_string(),
+            algorithm,
+            limit: args.limit,
+            memory_id: args.memory_id.clone(),
+            snapshot: None,
+            rows: Vec::new(),
+            degraded: vec![GraphCentralityReadDegradation {
+                code: "graph_snapshot_missing",
+                severity: "low",
+                message: "No persisted graph snapshot exists for centrality reads.".to_string(),
+                repair: "ee graph centrality-refresh".to_string(),
+            }],
+        });
+    };
+
+    let mut degraded = Vec::new();
+    if snapshot.status == crate::db::GraphSnapshotStatus::Stale {
+        degraded.push(GraphCentralityReadDegradation {
+            code: "graph_snapshot_stale",
+            severity: "medium",
+            message: "Graph snapshot is stale; centrality scores may lag memory links.".to_string(),
+            repair: "ee graph centrality-refresh".to_string(),
+        });
+    }
+    if !algorithm.available_in_memory_link_snapshot() {
+        degraded.push(GraphCentralityReadDegradation {
+            code: "graph_algorithm_unavailable",
+            severity: "medium",
+            message: format!(
+                "Graph centrality algorithm `{}` has no computed scores in the latest memory-link snapshot.",
+                args.algorithm
+            ),
+            repair: format!(
+                "ee graph centrality-refresh --algorithm {}",
+                args.algorithm
+            ),
+        });
+        return Ok(GraphCentralityReadReport {
+            command: "graph centrality",
+            status: "algorithm_unavailable",
+            workspace_id: workspace_id.to_string(),
+            algorithm,
+            limit: args.limit,
+            memory_id: args.memory_id.clone(),
+            snapshot: Some(graph_centrality_read_snapshot(&snapshot)),
+            rows: Vec::new(),
+            degraded,
+        });
+    }
+
+    let centrality =
+        crate::graph::graph_snapshot_centrality_report(&snapshot).map_err(|error| {
+            DomainError::Graph {
+                message: error.to_string(),
+                repair: Some("ee graph centrality-refresh".to_string()),
+            }
+        })?;
+    let mut rows: Vec<_> = centrality
+        .scores
+        .iter()
+        .filter(|score| {
+            args.memory_id
+                .as_ref()
+                .is_none_or(|memory_id| memory_id == &score.memory_id)
+        })
+        .map(|score| GraphCentralityReadRow {
+            rank: 0,
+            memory_id: score.memory_id.clone(),
+            score: match algorithm {
+                GraphCentralityReadAlgorithm::Pagerank => score.pagerank,
+                GraphCentralityReadAlgorithm::Betweenness => score.betweenness,
+                _ => 0.0,
+            },
+        })
+        .collect();
+    rows.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+    rows.truncate(args.limit);
+    for (index, row) in rows.iter_mut().enumerate() {
+        row.rank = index + 1;
+    }
+
+    Ok(GraphCentralityReadReport {
+        command: "graph centrality",
+        status: "available",
+        workspace_id: workspace_id.to_string(),
+        algorithm,
+        limit: args.limit,
+        memory_id: args.memory_id.clone(),
+        snapshot: Some(graph_centrality_read_snapshot(&snapshot)),
+        rows,
+        degraded,
+    })
+}
+
+fn graph_centrality_read_snapshot(
+    snapshot: &crate::db::StoredGraphSnapshot,
+) -> GraphCentralityReadSnapshot {
+    GraphCentralityReadSnapshot {
+        id: snapshot.id.clone(),
+        schema_version: snapshot.schema_version.clone(),
+        snapshot_version: snapshot.snapshot_version,
+        source_generation: snapshot.source_generation,
+        status: snapshot.status.as_str().to_string(),
+        content_hash: snapshot.content_hash.clone(),
+        node_count: snapshot.node_count,
+        edge_count: snapshot.edge_count,
+        created_at: snapshot.created_at.clone(),
+    }
+}
+
+fn graph_centrality_read_snapshot_json(
+    snapshot: &GraphCentralityReadSnapshot,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": snapshot.id,
+        "schemaVersion": snapshot.schema_version,
+        "snapshotVersion": snapshot.snapshot_version,
+        "sourceGeneration": snapshot.source_generation,
+        "status": snapshot.status,
+        "contentHash": snapshot.content_hash,
+        "nodeCount": snapshot.node_count,
+        "edgeCount": snapshot.edge_count,
+        "createdAt": snapshot.created_at,
+    })
+}
+
+fn graph_centrality_read_row_json(row: &GraphCentralityReadRow) -> serde_json::Value {
+    serde_json::json!({
+        "rank": row.rank,
+        "memoryId": row.memory_id,
+        "score": graph_score_json_value(row.score),
+    })
+}
+
+fn graph_centrality_read_degraded_json(
+    degraded: &[GraphCentralityReadDegradation],
+) -> Vec<serde_json::Value> {
+    degraded
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "code": entry.code,
+                "severity": entry.severity,
+                "message": entry.message,
+                "repair": entry.repair,
+            })
+        })
+        .collect()
+}
+
+fn graph_centrality_read_human_output(report: &GraphCentralityReadReport) -> String {
+    let mut output = format!(
+        "Graph centrality ({})\n\n  Algorithm: {}\n  Rows: {}\n",
+        report.status,
+        report.algorithm.as_str(),
+        report.rows.len()
+    );
+    if let Some(snapshot) = &report.snapshot {
+        output.push_str(&format!(
+            "  Snapshot: {} (status {}, generation {})\n",
+            snapshot.id, snapshot.status, snapshot.source_generation
+        ));
+    }
+    if !report.rows.is_empty() {
+        output.push_str("\nScores:\n");
+        for row in &report.rows {
+            output.push_str(&format!(
+                "  {}. {} ({:.4})\n",
+                row.rank, row.memory_id, row.score
+            ));
+        }
+    }
+    if !report.degraded.is_empty() {
+        output.push_str("\nDegraded:\n");
+        for entry in &report.degraded {
+            output.push_str(&format!(
+                "  - {}: {}\n    Next: {}\n",
+                entry.code, entry.message, entry.repair
+            ));
+        }
+    }
+    output
+}
+
+fn graph_centrality_read_toon_output(report: &GraphCentralityReadReport) -> String {
+    format!(
+        "schema: ee.response.v1\nsuccess: {}\ndata:\n  command: graph centrality\n  status: {}\n  algorithm: {}\n  rows: {}\n  degradedCount: {}",
+        report.status == "available",
+        report.status,
+        report.algorithm.as_str(),
+        report.rows.len(),
+        report.degraded.len(),
+    )
+}
+
 fn handle_graph_feature_enrichment<W, E>(
     cli: &Cli,
     args: &GraphFeatureEnrichmentArgs,
@@ -19373,21 +20756,37 @@ where
     }
 
     let report = if args.dry_run {
-        let centrality = crate::graph::CentralityRefreshReport {
-            version: env!("CARGO_PKG_VERSION"),
-            status: crate::graph::CentralityRefreshStatus::DryRun,
-            dry_run: true,
-            node_count: 0,
-            edge_count: 0,
-            projection_ms: 0.0,
-            pagerank_ms: 0.0,
-            betweenness_ms: 0.0,
-            total_ms: 0.0,
-            scores: Vec::new(),
-            top_pagerank: Vec::new(),
-            top_betweenness: Vec::new(),
-        };
-        crate::graph::enrich_graph_features(&centrality, &enrichment_options)
+        match crate::core::singleflight::run_graph_feature_enrichment(
+            workspace.to_string_lossy().as_ref(),
+            0,
+            None,
+            "dry_run",
+            &enrichment_options,
+            || {
+                let centrality = crate::graph::CentralityRefreshReport {
+                    version: env!("CARGO_PKG_VERSION"),
+                    status: crate::graph::CentralityRefreshStatus::DryRun,
+                    dry_run: true,
+                    node_count: 0,
+                    edge_count: 0,
+                    projection_ms: 0.0,
+                    pagerank_ms: 0.0,
+                    betweenness_ms: 0.0,
+                    total_ms: 0.0,
+                    scores: Vec::new(),
+                    top_pagerank: Vec::new(),
+                    top_betweenness: Vec::new(),
+                };
+                crate::graph::enrich_graph_features(&centrality, &enrichment_options)
+            },
+        ) {
+            Ok(run) => run.value,
+            Err(error) => graph_feature_enrichment_singleflight_error_report(
+                &enrichment_options,
+                "dry_run",
+                error,
+            ),
+        }
     } else {
         let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
             Ok(workspace_id) => workspace_id,
@@ -19407,12 +20806,39 @@ where
                 return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
             }
         };
-        crate::graph::enrich_graph_features_from_graph_snapshot(
-            snapshot.as_ref(),
-            &workspace_id,
-            crate::db::GraphSnapshotType::MemoryLinks,
+        let workspace_generation = snapshot
+            .as_ref()
+            .map_or(0, |snapshot| u64::from(snapshot.source_generation));
+        let graph_generation = snapshot
+            .as_ref()
+            .map(|snapshot| u64::from(snapshot.snapshot_version));
+        let source_mode = if snapshot.is_some() {
+            "graph_snapshot"
+        } else {
+            "graph_snapshot_missing"
+        };
+        match crate::core::singleflight::run_graph_feature_enrichment(
+            workspace.to_string_lossy().as_ref(),
+            workspace_generation,
+            graph_generation,
+            source_mode,
             &enrichment_options,
-        )
+            || {
+                crate::graph::enrich_graph_features_from_graph_snapshot(
+                    snapshot.as_ref(),
+                    &workspace_id,
+                    crate::db::GraphSnapshotType::MemoryLinks,
+                    &enrichment_options,
+                )
+            },
+        ) {
+            Ok(run) => run.value,
+            Err(error) => graph_feature_enrichment_singleflight_error_report(
+                &enrichment_options,
+                source_mode,
+                error,
+            ),
+        }
     };
 
     match cli.renderer() {
@@ -19434,6 +20860,41 @@ where
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
+    }
+}
+
+fn graph_feature_enrichment_singleflight_error_report(
+    options: &crate::graph::GraphFeatureEnrichmentOptions,
+    source_mode: &'static str,
+    error: crate::core::singleflight::SingleFlightError,
+) -> crate::graph::GraphFeatureEnrichmentReport {
+    crate::graph::GraphFeatureEnrichmentReport {
+        schema: crate::graph::GRAPH_FEATURE_ENRICHMENT_SCHEMA_V1,
+        version: env!("CARGO_PKG_VERSION"),
+        status: crate::graph::GraphFeatureEnrichmentStatus::ScoresUnavailable,
+        source_status: crate::graph::CentralityRefreshStatus::EmptyGraph,
+        source: crate::graph::GraphFeatureEnrichmentSource {
+            kind: source_mode,
+            workspace_id: None,
+            graph_type: Some(
+                crate::db::GraphSnapshotType::MemoryLinks
+                    .as_str()
+                    .to_owned(),
+            ),
+            snapshot: None,
+        },
+        limited: false,
+        max_features: options.max_features,
+        max_selection_boost: options.max_selection_boost,
+        features: Vec::new(),
+        degraded: vec![crate::graph::GraphFeatureEnrichmentDegradation {
+            code: error.code(),
+            severity: error.severity(),
+            message: format!(
+                "Single-flight coalescing failed for graph feature enrichment: {error}"
+            ),
+            repair: error.repair().to_owned(),
+        }],
     }
 }
 
@@ -21095,6 +22556,10 @@ where
     };
 
     let workspace_path = cli.resolve_workspace();
+    let database_path_for_pack_dna = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
     let output_options = resolve_context_output_options(
         args.pack_profile,
         args.resource_profile,
@@ -21123,6 +22588,7 @@ where
         include_stale: args.include_stale,
         memory_scope: args.memory_scope,
         strict_scope: args.strict_scope,
+        ppr_weight: args.ppr_weight,
         pagination: None,
         coordination_snapshot_path: args.coordination_snapshot.clone(),
         coordination_stale_after_ms: args.coordination_stale_after_ms,
@@ -21142,6 +22608,9 @@ where
 
     match run_context_pack(&options) {
         Ok(mut response) => {
+            if args.explain && !args.no_pack_dna {
+                attach_pack_dna_to_context_response(&database_path_for_pack_dna, &mut response);
+            }
             if include_deprecated_alias {
                 response
                     .data
@@ -21337,15 +22806,6 @@ where
         error: None,
     };
 
-    if !report.exists {
-        report.error = Some("Database file not found".to_string());
-        return write_db_status_output(cli, &report, stdout);
-    }
-
-    if let Ok(meta) = fs::metadata(&database_path) {
-        report.file_size_bytes = Some(meta.len());
-    }
-
     let wal_path = wal_sidecar_path(&database_path);
     let shm_path = shm_sidecar_path(&database_path);
     if args.wal {
@@ -21356,6 +22816,15 @@ where
         if wal_present {
             report.wal_size_bytes = fs::metadata(&wal_path).ok().map(|m| m.len());
         }
+    }
+
+    if !report.exists {
+        report.error = Some("Database file not found".to_string());
+        return write_db_status_output(cli, &report, stdout);
+    }
+
+    if let Ok(meta) = fs::metadata(&database_path) {
+        report.file_size_bytes = Some(meta.len());
     }
 
     let conn = match crate::db::DbConnection::open_schema_only(&database_path) {
@@ -21446,7 +22915,14 @@ fn write_db_status_output<W: Write>(
     report: &DbStatusReport,
     stdout: &mut W,
 ) -> ProcessExitCode {
-    let success = report.error.is_none();
+    let degraded = db_status_degraded(report);
+    let migration_pending = db_status_has_pending_migration(report);
+    let success = report.error.is_none() && !migration_pending;
+    let exit_code = if migration_pending {
+        ProcessExitCode::MigrationRequired
+    } else {
+        ProcessExitCode::Success
+    };
     match cli.renderer() {
         output::Renderer::Json
         | output::Renderer::Jsonl
@@ -21478,12 +22954,17 @@ fn write_db_status_output<W: Write>(
                         "error": report.error,
                     }
                 },
-                "degraded": []
+                "degraded": degraded
             });
-            write_stdout(
+            let write_exit = write_stdout(
                 stdout,
                 &(serde_json::to_string(&json).unwrap_or_default() + "\n"),
-            )
+            );
+            if write_exit == ProcessExitCode::Success {
+                exit_code
+            } else {
+                write_exit
+            }
         }
         _ => {
             let mut out = String::new();
@@ -21551,9 +23032,55 @@ fn write_db_status_output<W: Write>(
             if let Some(ref e) = report.error {
                 out.push_str(&format!("Error: {e}\n"));
             }
-            write_stdout(stdout, &out)
+            if !degraded.is_empty() {
+                out.push_str("Degraded:\n");
+                for entry in degraded {
+                    out.push_str(&format!(
+                        "  - {}: {}\n",
+                        entry["code"].as_str().unwrap_or("unknown"),
+                        entry["message"].as_str().unwrap_or("")
+                    ));
+                }
+            }
+            let write_exit = write_stdout(stdout, &out);
+            if write_exit == ProcessExitCode::Success {
+                exit_code
+            } else {
+                write_exit
+            }
         }
     }
+}
+
+fn db_status_has_pending_migration(report: &DbStatusReport) -> bool {
+    report.needs_migration == Some(true)
+        || report
+            .pending_migration_versions
+            .as_ref()
+            .is_some_and(|versions| !versions.is_empty())
+}
+
+fn db_status_degraded(report: &DbStatusReport) -> Vec<serde_json::Value> {
+    let mut degraded = Vec::new();
+    if db_status_has_pending_migration(report) {
+        degraded.push(serde_json::json!({
+            "code": "db_migration_pending",
+            "severity": "medium",
+            "message": "Database has pending migrations; db inspection may be incomplete until migrations run.",
+            "repair": "ee init --workspace .",
+        }));
+    }
+    if report.wal_file_exists == Some(true)
+        && (!report.exists || report.shm_file_exists == Some(false))
+    {
+        degraded.push(serde_json::json!({
+            "code": "db_wal_stale",
+            "severity": "medium",
+            "message": "Database WAL sidecar exists without a matching SHM sidecar; WAL state may be stale.",
+            "repair": "ee init --workspace .",
+        }));
+    }
+    degraded
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -21585,6 +23112,267 @@ struct DbTableRowCount {
     error: Option<String>,
 }
 
+fn handle_db_inspect<W>(cli: &Cli, args: &DbInspectArgs, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+
+    let mut report = DbInspectReport {
+        database_path: database_path.display().to_string(),
+        table: args.table.clone(),
+        exists: database_path.exists(),
+        limit: args.limit,
+        table_row_count: None,
+        returned_row_count: 0,
+        available_tables: Vec::new(),
+        columns: Vec::new(),
+        rows: Vec::new(),
+        error: None,
+    };
+
+    if !report.exists {
+        report.error = Some("Database file not found".to_string());
+        return write_db_inspect_output(cli, &report, stdout);
+    }
+
+    let conn = match crate::db::DbConnection::open_schema_only(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            report.error = Some(format!("Failed to open database: {error}"));
+            return write_db_inspect_output(cli, &report, stdout);
+        }
+    };
+
+    let tables = match conn.list_user_tables() {
+        Ok(tables) => tables,
+        Err(error) => {
+            report.error = Some(format!("Failed to list tables: {error}"));
+            return write_db_inspect_output(cli, &report, stdout);
+        }
+    };
+    report.available_tables = tables.clone();
+
+    if !tables.iter().any(|table| table == &args.table) || !db_table_name_is_safe(&args.table) {
+        report.error = Some(format!(
+            "Table '{}' was not found in this database",
+            args.table
+        ));
+        return write_db_inspect_output(cli, &report, stdout);
+    }
+
+    report.table_row_count = match conn.count_table_rows(&args.table) {
+        Ok(count) => Some(count),
+        Err(error) => {
+            report.error = Some(format!("Failed to count table rows: {error}"));
+            return write_db_inspect_output(cli, &report, stdout);
+        }
+    };
+
+    let quoted_table = db_quote_identifier(&args.table);
+    let column_sql = format!("PRAGMA table_info({quoted_table})");
+    let column_rows = match conn.query(&column_sql, &[]) {
+        Ok(rows) => rows,
+        Err(error) => {
+            report.error = Some(format!("Failed to inspect table columns: {error}"));
+            return write_db_inspect_output(cli, &report, stdout);
+        }
+    };
+    report.columns = column_rows
+        .iter()
+        .filter_map(|row| {
+            row.get(1)
+                .and_then(sqlmodel_core::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+
+    let selected_columns = report
+        .columns
+        .iter()
+        .map(|column| db_quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rows_sql = format!("SELECT {selected_columns} FROM {quoted_table} LIMIT ?1");
+    let rows = match conn.query(
+        &rows_sql,
+        &[sqlmodel_core::Value::BigInt(i64::from(args.limit))],
+    ) {
+        Ok(rows) => rows,
+        Err(error) => {
+            report.error = Some(format!("Failed to read table rows: {error}"));
+            return write_db_inspect_output(cli, &report, stdout);
+        }
+    };
+
+    report.rows = rows.iter().map(db_inspect_row_json).collect();
+    report.returned_row_count = report.rows.len();
+    write_db_inspect_output(cli, &report, stdout)
+}
+
+fn write_db_inspect_output<W: Write>(
+    cli: &Cli,
+    report: &DbInspectReport,
+    stdout: &mut W,
+) -> ProcessExitCode {
+    let success = report.error.is_none();
+    let exit_code = if success {
+        ProcessExitCode::Success
+    } else {
+        ProcessExitCode::Storage
+    };
+
+    match cli.renderer() {
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": "ee.response.v1",
+                "success": success,
+                "data": {
+                    "command": "db inspect",
+                    "report": {
+                        "databasePath": report.database_path,
+                        "table": report.table,
+                        "exists": report.exists,
+                        "limit": report.limit,
+                        "tableRowCount": report.table_row_count,
+                        "returnedRowCount": report.returned_row_count,
+                        "availableTables": report.available_tables,
+                        "columns": report.columns,
+                        "rows": report.rows,
+                        "error": report.error,
+                    }
+                },
+                "degraded": []
+            });
+            let _ = write_stdout(
+                stdout,
+                &(serde_json::to_string(&json).unwrap_or_default() + "\n"),
+            );
+            exit_code
+        }
+        _ => {
+            let mut out = String::new();
+            out.push_str(&format!("Database: {}\n", report.database_path));
+            out.push_str(&format!("Table: {}\n", report.table));
+            out.push_str(&format!("Exists: {}\n", report.exists));
+            if let Some(count) = report.table_row_count {
+                out.push_str(&format!("Rows: {count}\n"));
+            }
+            out.push_str(&format!("Returned: {}\n", report.returned_row_count));
+            if let Some(error) = &report.error {
+                out.push_str(&format!("Error: {error}\n"));
+            }
+            let _ = write_stdout(stdout, &out);
+            exit_code
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DbInspectReport {
+    database_path: String,
+    table: String,
+    exists: bool,
+    limit: u32,
+    table_row_count: Option<i64>,
+    returned_row_count: usize,
+    available_tables: Vec<String>,
+    columns: Vec<String>,
+    rows: Vec<DbInspectRow>,
+    error: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DbInspectRow {
+    #[serde(rename = "sourceUri")]
+    source_uri: Option<String>,
+    values: BTreeMap<String, serde_json::Value>,
+}
+
+fn db_table_name_is_safe(table: &str) -> bool {
+    table
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn db_quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn db_inspect_row_json(row: &sqlmodel_core::Row) -> DbInspectRow {
+    let mut values = BTreeMap::new();
+    let mut source_uri = None;
+    for (column, value) in row.iter() {
+        let inspected = if db_inspect_column_is_sensitive(column) {
+            serde_json::Value::String("<redacted>".to_string())
+        } else {
+            db_sql_value_json(value)
+        };
+        if column == "source_uri" {
+            source_uri = value.as_str().map(str::to_owned);
+        }
+        values.insert(column.to_string(), inspected);
+    }
+
+    DbInspectRow { source_uri, values }
+}
+
+fn db_inspect_column_is_sensitive(column: &str) -> bool {
+    let name = column.to_ascii_lowercase();
+    ["secret", "token", "password", "credential", "auth", "key"]
+        .iter()
+        .any(|needle| name.contains(needle))
+}
+
+fn db_sql_value_json(value: &sqlmodel_core::Value) -> serde_json::Value {
+    match value {
+        sqlmodel_core::Value::Null | sqlmodel_core::Value::Default => serde_json::Value::Null,
+        sqlmodel_core::Value::Bool(value) => serde_json::Value::Bool(*value),
+        sqlmodel_core::Value::TinyInt(value) => serde_json::json!(*value),
+        sqlmodel_core::Value::SmallInt(value) => serde_json::json!(*value),
+        sqlmodel_core::Value::Int(value) => serde_json::json!(*value),
+        sqlmodel_core::Value::BigInt(value) => serde_json::json!(*value),
+        sqlmodel_core::Value::Float(value) => serde_json::json!(*value),
+        sqlmodel_core::Value::Double(value) => serde_json::json!(*value),
+        sqlmodel_core::Value::Decimal(value) | sqlmodel_core::Value::Text(value) => {
+            serde_json::Value::String(value.clone())
+        }
+        sqlmodel_core::Value::Bytes(value) => serde_json::json!({
+            "type": "bytes",
+            "hex": db_hex_encode(value),
+            "byteLength": value.len(),
+        }),
+        sqlmodel_core::Value::Date(value) => serde_json::json!(*value),
+        sqlmodel_core::Value::Time(value)
+        | sqlmodel_core::Value::Timestamp(value)
+        | sqlmodel_core::Value::TimestampTz(value) => serde_json::json!(*value),
+        sqlmodel_core::Value::Uuid(value) => serde_json::json!({
+            "type": "uuidBytes",
+            "hex": db_hex_encode(value),
+        }),
+        sqlmodel_core::Value::Json(value) => value.clone(),
+        sqlmodel_core::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(db_sql_value_json).collect())
+        }
+    }
+}
+
+fn db_hex_encode(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
+
 fn wal_sidecar_path(database_path: &Path) -> PathBuf {
     let mut wal = database_path.as_os_str().to_os_string();
     wal.push("-wal");
@@ -21601,13 +23389,33 @@ fn handle_db_check<W>(cli: &Cli, args: &DbCheckArgs, stdout: &mut W) -> ProcessE
 where
     W: Write,
 {
+    handle_db_check_named(cli, args, stdout, "db check", args.full)
+}
+
+fn handle_db_check_integrity<W>(cli: &Cli, args: &DbCheckArgs, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    handle_db_check_named(cli, args, stdout, "db check-integrity", true)
+}
+
+fn handle_db_check_named<W>(
+    cli: &Cli,
+    args: &DbCheckArgs,
+    stdout: &mut W,
+    command_name: &'static str,
+    full: bool,
+) -> ProcessExitCode
+where
+    W: Write,
+{
     let workspace_path = cli.resolve_workspace();
     let database_path = args
         .database
         .clone()
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
 
-    let check_type = if args.full {
+    let check_type = if full {
         "integrity_check"
     } else {
         "quick_check"
@@ -21624,7 +23432,7 @@ where
             foreign_key_violations: None,
             message: "Database file not found".to_string(),
         };
-        return write_db_check_output(cli, &report, stdout);
+        return write_db_check_output(cli, &report, stdout, command_name);
     }
 
     let conn = match crate::db::DbConnection::open_schema_only(&database_path) {
@@ -21640,11 +23448,11 @@ where
                 foreign_key_violations: None,
                 message: format!("Failed to open database: {error}"),
             };
-            return write_db_check_output(cli, &report, stdout);
+            return write_db_check_output(cli, &report, stdout, command_name);
         }
     };
 
-    let integrity = if args.full {
+    let integrity = if full {
         conn.check_integrity()
     } else {
         conn.quick_check()
@@ -21665,7 +23473,7 @@ where
         Ok(result) => result,
         Err(error) => {
             report.message = format!("Integrity check failed: {error}");
-            return write_db_check_output(cli, &report, stdout);
+            return write_db_check_output(cli, &report, stdout, command_name);
         }
     };
 
@@ -21676,7 +23484,7 @@ where
 
     let mut messages: Vec<String> = Vec::new();
 
-    if args.full {
+    if full {
         match conn.check_foreign_keys() {
             Ok(fk) => {
                 report.foreign_key_passed = Some(fk.passed);
@@ -21712,7 +23520,7 @@ where
         let count = integrity.issues.len();
         messages.insert(0, format!("{check_type} found {count} issue(s)"));
     }
-    if args.full && !fk_ok {
+    if full && !fk_ok {
         let count = report
             .foreign_key_violations
             .as_ref()
@@ -21722,13 +23530,14 @@ where
     }
     report.message = messages.join("; ");
 
-    write_db_check_output(cli, &report, stdout)
+    write_db_check_output(cli, &report, stdout, command_name)
 }
 
 fn write_db_check_output<W: Write>(
     cli: &Cli,
     report: &DbCheckReport,
     stdout: &mut W,
+    command_name: &'static str,
 ) -> ProcessExitCode {
     let exit_code = if report.passed {
         ProcessExitCode::Success
@@ -21745,7 +23554,7 @@ fn write_db_check_output<W: Write>(
                 "schema": "ee.response.v1",
                 "success": report.passed,
                 "data": {
-                    "command": "db check",
+                    "command": command_name,
                     "report": {
                         "databasePath": report.database_path,
                         "checkType": report.check_type,
@@ -22664,11 +24473,14 @@ where
                 .profile
                 .clone()
                 .unwrap_or_else(|| "balanced".to_string()),
+            ppr_weight: None,
             pack_profile: args.pack_profile.unwrap_or_default(),
             resource_profile: args.resource_profile.unwrap_or_default(),
             database: args.database.clone(),
             index_dir: args.index_dir.clone(),
             explain_performance: args.explain_performance,
+            explain: false,
+            no_pack_dna: false,
             no_coverage_fill: args.no_coverage_fill,
             no_rendered_text: args.no_rendered_text,
             no_skipped: args.no_skipped,
@@ -22811,6 +24623,7 @@ where
         include_stale: args.include_stale,
         memory_scope: MemoryScope::Swarm,
         strict_scope: false,
+        ppr_weight: None,
         pagination,
         coordination_snapshot_path: args.coordination_snapshot.clone(),
         coordination_stale_after_ms: args.coordination_stale_after_ms,
@@ -25104,7 +26917,7 @@ where
         confidence_threshold: args.confidence_threshold,
     };
 
-    let report = explain_memory(&options);
+    let mut report = explain_memory(&options);
 
     if let Some(ref error) = report.error {
         let domain_error = DomainError::Storage {
@@ -25121,6 +26934,11 @@ where
             repair: Some("ee memory list".to_string()),
         };
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    if args.causal_explain {
+        let causal_explanation = why_causal_explanation_json(&database_path, &args.memory_id);
+        report = report.with_causal_explanation(causal_explanation);
     }
 
     if cli.format == OutputFormat::Mermaid && !cli.json && !cli.robot {
@@ -25144,6 +26962,162 @@ where
             }
         }
     }
+}
+
+fn why_causal_explanation_json(database_path: &Path, memory_id: &str) -> serde_json::Value {
+    let connection = match crate::db::DbConnection::open_file(database_path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            return empty_why_causal_explanation_json(
+                memory_id,
+                "graph_causal_projection_unavailable",
+                "medium",
+                format!("Failed to open workspace database for causal explanation: {error}"),
+                Some("ee doctor --workspace . --json".to_owned()),
+            );
+        }
+    };
+    if let Err(error) = connection.migrate() {
+        return empty_why_causal_explanation_json(
+            memory_id,
+            "graph_causal_projection_unavailable",
+            "medium",
+            format!("Failed to migrate database before causal explanation: {error}"),
+            Some("ee migrate run --workspace . --json".to_owned()),
+        );
+    }
+    let memory = match connection.get_memory(memory_id) {
+        Ok(Some(memory)) => memory,
+        Ok(None) => {
+            return empty_why_causal_explanation_json(
+                memory_id,
+                crate::models::degradation::GRAPH_CAUSAL_NO_EVIDENCE_CODE,
+                "low",
+                "No memory row exists for causal explanation.".to_owned(),
+                Some("ee memory list --workspace . --json".to_owned()),
+            );
+        }
+        Err(error) => {
+            return empty_why_causal_explanation_json(
+                memory_id,
+                "graph_causal_projection_unavailable",
+                "medium",
+                format!("Failed to load memory for causal explanation: {error}"),
+                Some("ee doctor --workspace . --json".to_owned()),
+            );
+        }
+    };
+
+    let graph = match crate::graph::build_causal_evidence_graph_from_table(
+        &connection,
+        &memory.workspace_id,
+    ) {
+        Ok(graph) => graph,
+        Err(error) => {
+            return empty_why_causal_explanation_json(
+                memory_id,
+                "graph_causal_projection_unavailable",
+                "medium",
+                format!("Failed to build causal-evidence graph projection: {error}"),
+                Some(
+                    "ee graph snapshot refresh --graph causal_evidence --workspace . --json"
+                        .to_owned(),
+                ),
+            );
+        }
+    };
+
+    let ancestry = crate::graph::causal::compute_causal_ancestry(&graph, memory_id);
+    let mut degraded: Vec<serde_json::Value> = ancestry
+        .degraded
+        .iter()
+        .map(|degradation| {
+            serde_json::json!({
+                "code": &degradation.code,
+                "severity": &degradation.severity,
+                "cycleMembers": &degradation.cycle_members,
+            })
+        })
+        .collect();
+
+    let paths = crate::graph::causal::compute_min_cost_explanation(&graph, memory_id)
+        .map(|explanation| vec![why_causal_path_json(&explanation)])
+        .unwrap_or_else(|| {
+            if degraded.is_empty() {
+                degraded.push(serde_json::json!({
+                    "code": "graph_causal_explanation_unavailable",
+                    "severity": "low",
+                    "message": "No terminal causal path was available for this memory.",
+                    "repair": "record causal evidence with `ee causal trace --workspace . --json`",
+                }));
+            }
+            Vec::new()
+        });
+
+    serde_json::json!({
+        "schema": "ee.why.causal.v1",
+        "memoryId": memory_id,
+        "snapshotVersion": 0,
+        "paths": paths,
+        "minCut": serde_json::Value::Null,
+        "degraded": degraded,
+    })
+}
+
+fn why_causal_path_json(
+    explanation: &crate::graph::causal::MinCostExplanation,
+) -> serde_json::Value {
+    let total_contribution = explanation
+        .path
+        .iter()
+        .map(|step| step.contribution_score)
+        .sum::<f64>();
+    let steps: Vec<serde_json::Value> = explanation
+        .path
+        .iter()
+        .map(|step| {
+            serde_json::json!({
+                "source": &step.source,
+                "target": &step.target,
+                "contributionScore": graph_score_json_value(step.contribution_score),
+                "cost": graph_score_json_value(step.cost),
+                "evidenceCount": step.evidence_count,
+                "edgeId": &step.edge_id,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "rank": 1,
+        "sourceMemoryId": &explanation.cause_id,
+        "targetMemoryId": &explanation.failure_id,
+        "edgeCount": explanation.path.len(),
+        "totalContribution": graph_score_json_value(total_contribution),
+        "minCost": graph_score_json_value(explanation.total_cost),
+        "steps": steps,
+    })
+}
+
+fn empty_why_causal_explanation_json(
+    memory_id: &str,
+    code: &'static str,
+    severity: &'static str,
+    message: String,
+    repair: Option<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "ee.why.causal.v1",
+        "memoryId": memory_id,
+        "snapshotVersion": 0,
+        "paths": [],
+        "minCut": serde_json::Value::Null,
+        "degraded": [{
+            "code": code,
+            "severity": severity,
+            "message": message,
+            "repair": repair,
+        }],
+    })
 }
 
 fn format_why_human(report: &crate::core::why::WhyReport) -> String {
@@ -25597,7 +27571,7 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
     let verification_evidence = serde_json::to_value(&report.verification_evidence)
         .unwrap_or_else(|_| serde_json::json!([]));
 
-    let json = serde_json::json!({
+    let mut json = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V1,
         "success": true,
         "data": {
@@ -25618,6 +27592,22 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             "degraded": degraded,
         }
     });
+    if let Some(causal_explanation) = &report.causal_explanation {
+        if let Some(data) = json
+            .get_mut("data")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            data.insert("causalExplanation".to_owned(), causal_explanation.clone());
+        }
+    }
+    if let Some(revision_lineage) = &report.revision_lineage {
+        if let Some(data) = json
+            .get_mut("data")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            data.insert("revisionLineage".to_owned(), revision_lineage.clone());
+        }
+    }
 
     json.to_string()
 }
@@ -25705,6 +27695,10 @@ impl MemoryReviseReport {
 
     #[must_use]
     pub fn json_output(&self) -> String {
+        let impact_analysis = self
+            .impact_analysis
+            .as_ref()
+            .and_then(|analysis| serde_json::to_value(analysis).ok());
         let json = serde_json::json!({
             "schema": "ee.response.v1",
             "success": self.success,
@@ -25719,6 +27713,7 @@ impl MemoryReviseReport {
                 "revision_number": self.revision_number,
                 "reason": self.reason,
                 "changed_fields": self.changed_fields,
+                "impactAnalysis": impact_analysis,
                 "audit_id": null,
                 "index_job_id": null,
                 "index_status": if self.success && !self.dry_run {
@@ -26821,6 +28816,7 @@ where
         database_path: args.database.as_deref(),
         actor: args.actor.as_deref(),
         apply: args.apply,
+        structural_decay: !args.no_structural_decay,
         now_rfc3339: args.now.as_deref(),
     };
 
@@ -30611,6 +32607,7 @@ where
             database: args.database.as_ref(),
             dry_run: args.dry_run,
             include_decay: false,
+            structural_decay: true,
             as_of: None,
             time_limit_ms: args.time_limit_ms,
             item_limit: args.item_limit,
@@ -30635,7 +32632,33 @@ where
             database: args.database.as_ref(),
             dry_run: args.dry_run,
             include_decay: args.include_decay,
+            structural_decay: !args.no_structural_decay,
             as_of: args.as_of.as_deref(),
+            time_limit_ms: args.time_limit_ms,
+            item_limit: args.item_limit,
+        },
+        stdout,
+    )
+}
+
+fn handle_maintenance_graph_snapshot_prune<W>(
+    cli: &Cli,
+    args: &MaintenanceGraphSnapshotPruneArgs,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    run_maintenance_job(
+        cli,
+        MaintenanceJobRunRequest {
+            command: "maintenance graph-snapshot-prune",
+            job_type: JobType::GraphSnapshotPrune,
+            database: args.database.as_ref(),
+            dry_run: args.dry_run,
+            include_decay: false,
+            structural_decay: true,
+            as_of: None,
             time_limit_ms: args.time_limit_ms,
             item_limit: args.item_limit,
         },
@@ -30649,6 +32672,7 @@ struct MaintenanceJobRunRequest<'a> {
     database: Option<&'a PathBuf>,
     dry_run: bool,
     include_decay: bool,
+    structural_decay: bool,
     as_of: Option<&'a str>,
     time_limit_ms: Option<u64>,
     item_limit: Option<u64>,
@@ -30743,6 +32767,7 @@ where
         .with_actor("ee-maintenance")
         .with_dry_run(request.dry_run)
         .with_include_decay_actions(request.include_decay)
+        .with_structural_decay(request.structural_decay)
         .with_decay_settings(decay_settings);
     if let Some(workspace_path) = selected_workspace.as_ref() {
         runner_options = runner_options.with_workspace_path(workspace_path.clone());
@@ -31834,6 +33859,25 @@ fn render_swarm_brief_json(
                 "inProgressCount": report.beads.in_progress.len(),
                 "deferredCount": report.beads.deferred.len(),
             },
+            "rchLocalCapability": report.rch_local_capability.as_ref().map(|capability| {
+                serde_json::json!({
+                    "schema": capability.schema,
+                    "cliVersion": &capability.cli_version,
+                    "directExecAvailable": capability.direct_exec_available,
+                    "codexHook": &capability.codex_hook,
+                    "daemonStatusSocket": &capability.daemon_status_socket,
+                    "statusSocketConsistent": capability.status_socket_consistent,
+                    "dryRunWouldOffload": capability.dry_run_would_offload,
+                    "workerProbeSummary": &capability.worker_probe_summary,
+                    "queueHealth": &capability.queue_health,
+                    "remoteOnlyRequired": capability.remote_only_required,
+                    "remoteOnlySafe": capability.remote_only_safe,
+                    "degradedCodes": capability.degraded.iter().map(|degradation| {
+                        degradation.code.as_str()
+                    }).collect::<Vec<_>>(),
+                    "recovery": &capability.recovery,
+                })
+            }),
             "topRecommendations": report.recommendations.iter().take(5).map(|recommendation| {
                 serde_json::json!({
                     "id": &recommendation.id,
@@ -32269,6 +34313,7 @@ const COMMAND_NAMES: &[&str] = &[
     "plan",
     "playbook",
     "preflight",
+    "proximity",
     "profile",
     "procedure",
     "recorder",
@@ -32369,7 +34414,7 @@ const LEARN_SUBCOMMANDS: &[&str] = &[
     "summary",
 ];
 const LEARN_EXPERIMENT_SUBCOMMANDS: &[&str] = &["propose", "run"];
-const MAINTENANCE_SUBCOMMANDS: &[&str] = &["run", "status"];
+const MAINTENANCE_SUBCOMMANDS: &[&str] = &["run", "graph-snapshot-prune", "status"];
 const MEMORY_SUBCOMMANDS: &[&str] = &["expire", "list", "show", "history", "revise", "tags"];
 const MIGRATE_SUBCOMMANDS: &[&str] = &["status", "run"];
 const MCP_SUBCOMMANDS: &[&str] = &["manifest"];
@@ -32380,7 +34425,16 @@ const PERF_BUDGET_SUBCOMMANDS: &[&str] = &["check"];
 const PLAN_SUBCOMMANDS: &[&str] = &["goal", "recipe", "explain"];
 const PLAN_RECIPE_SUBCOMMANDS: &[&str] = &["list", "show"];
 const PLAYBOOK_SUBCOMMANDS: &[&str] = &["extract", "list", "export", "import"];
-const PREFLIGHT_SUBCOMMANDS: &[&str] = &["run", "show", "close"];
+const PREFLIGHT_SUBCOMMANDS: &[&str] = &[
+    "run",
+    "show",
+    "close",
+    "check",
+    "guard",
+    "issue-bypass-token",
+    "revoke-bypass-token",
+    "list-bypass-tokens",
+];
 const PROFILE_SUBCOMMANDS: &[&str] = &["config"];
 const PROFILE_CONFIG_SUBCOMMANDS: &[&str] = &["plan", "apply"];
 const PROCEDURE_SUBCOMMANDS: &[&str] = &[
@@ -32504,6 +34558,9 @@ impl NormalizedInvocation {
                 },
                 Command::Maintenance(maintenance) => match maintenance {
                     MaintenanceCommand::Run(_) => "maintenance run".to_string(),
+                    MaintenanceCommand::GraphSnapshotPrune(_) => {
+                        "maintenance graph-snapshot-prune".to_string()
+                    }
                     MaintenanceCommand::Status(_) => "maintenance status".to_string(),
                 },
                 Command::Note(_) => "note".to_string(),
@@ -32517,7 +34574,9 @@ impl NormalizedInvocation {
                 },
                 Command::Db(db) => match db {
                     DbCommand::Status(_) => "db status".to_string(),
+                    DbCommand::Inspect(_) => "db inspect".to_string(),
                     DbCommand::Check(_) => "db check".to_string(),
+                    DbCommand::CheckIntegrity(_) => "db check-integrity".to_string(),
                     DbCommand::Migrations(_) => "db migrations".to_string(),
                 },
                 Command::Migrate(migrate) => match migrate {
@@ -32593,7 +34652,7 @@ impl NormalizedInvocation {
                     HandoffCommand::Resume(_) => "handoff resume".to_string(),
                     HandoffCommand::RotateKey(_) => "handoff rotate-key".to_string(),
                 },
-                Command::Health => "health".to_string(),
+                Command::Health(_) => "health".to_string(),
                 Command::Help => "help".to_string(),
                 Command::Init(_) => "init".to_string(),
                 Command::Insights(_) => "insights".to_string(),
@@ -32617,6 +34676,10 @@ impl NormalizedInvocation {
                     GraphCommand::Path(_) => "graph path".to_string(),
                     GraphCommand::ExplainLink(_) => "graph explain-link".to_string(),
                     GraphCommand::Export(_) => "graph export".to_string(),
+                    GraphCommand::Snapshot(GraphSnapshotCommand::Refresh(_)) => {
+                        "graph snapshot refresh".to_string()
+                    }
+                    GraphCommand::Centrality(_) => "graph centrality".to_string(),
                     GraphCommand::CentralityRefresh(_) => "graph centrality-refresh".to_string(),
                     GraphCommand::FeatureEnrichment(_) => "graph feature-enrichment".to_string(),
                     GraphCommand::Neighborhood(_) => "graph neighborhood".to_string(),
@@ -32687,10 +34750,21 @@ impl NormalizedInvocation {
                         "perf budget check".to_string()
                     }
                 },
+                Command::Proximity(_) => "proximity".to_string(),
                 Command::Preflight(preflight) => match preflight {
                     PreflightCommand::Run(_) => "preflight run".to_string(),
                     PreflightCommand::Show(_) => "preflight show".to_string(),
                     PreflightCommand::Close(_) => "preflight close".to_string(),
+                    PreflightCommand::IssueBypassToken(_) => {
+                        "preflight issue-bypass-token".to_string()
+                    }
+                    PreflightCommand::RevokeBypassToken(_) => {
+                        "preflight revoke-bypass-token".to_string()
+                    }
+                    PreflightCommand::ListBypassTokens(_) => {
+                        "preflight list-bypass-tokens".to_string()
+                    }
+                    PreflightCommand::Check(_) => "preflight check".to_string(),
                     PreflightCommand::Guard(_) => "preflight guard".to_string(),
                 },
                 Command::Plan(plan) => match plan {
@@ -33404,12 +35478,12 @@ mod tests {
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction, Cli,
         Command, CurateCommand, DaemonCommand, DiagCommand, DiagQuarantineCommand, DomainError,
-        EconomyCommand, FieldsLevel, FocusCommand, GraphCommand, HandoffCommand, ImportCommand,
-        JobCommand, LearnCommand, LearnExperimentCommand, MaintenanceCommand, MemoryCommand,
-        OutcomeQuarantineCommand, OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand,
-        RuleCommand, ShadowMode, SituationCommand, SwarmBriefArgs, SwarmCommand, TaskFrameCommand,
-        TaskFrameSubgoalCommand, VerifyCommand, WorkflowCommand, decay_settings_from_config, run,
-        write_index_rebuild_error,
+        EconomyCommand, FieldsLevel, FocusCommand, GraphCommand, GraphSnapshotCommand,
+        HandoffCommand, HealthArgs, ImportCommand, JobCommand, LearnCommand,
+        LearnExperimentCommand, MaintenanceCommand, MemoryCommand, OutcomeQuarantineCommand,
+        OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand, RuleCommand, ShadowMode,
+        SituationCommand, SwarmBriefArgs, SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand,
+        VerifyCommand, WorkflowCommand, decay_settings_from_config, run, write_index_rebuild_error,
     };
     use crate::core::index::IndexRebuildError;
     use crate::core::search::{
@@ -34860,6 +36934,7 @@ mod tests {
             "--redaction",
             "paranoid",
             "--include-derived",
+            "--include-graph-cache=false",
             "--dry-run",
         ])
         .map_err(|error| format!("failed to parse backup create: {:?}", error.kind()))?;
@@ -34879,6 +36954,7 @@ mod tests {
                 )?;
                 ensure_equal(&args.redaction, &BackupRedaction::Paranoid, "redaction")?;
                 ensure_equal(&args.include_derived, &true, "include derived")?;
+                ensure_equal(&args.include_graph_cache, &false, "include graph cache")?;
                 ensure_equal(&args.dry_run, &true, "dry run")
             }
             other => Err(format!("expected backup create command, got {other:?}")),
@@ -34933,6 +37009,7 @@ mod tests {
             "--output-dir",
             "out",
             "--dry-run",
+            "--skip-graph-cache",
         ])
         .map_err(|error| format!("failed to parse backup restore: {:?}", error.kind()))?;
 
@@ -34949,6 +37026,7 @@ mod tests {
                     &Some(std::path::PathBuf::from("out")),
                     "output dir",
                 )?;
+                ensure_equal(&args.skip_graph_cache, &true, "skip graph cache")?;
                 ensure_equal(&args.dry_run, &true, "dry run")
             }
             other => Err(format!("expected backup restore command, got {other:?}")),
@@ -35206,6 +37284,31 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_graph_snapshot_refresh_targets() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "graph",
+            "snapshot",
+            "refresh",
+            "--graph",
+            "revision",
+            "--dry-run",
+        ])
+        .map(|cli| cli.command)
+        .map_err(|error| format!("failed to parse graph snapshot refresh: {:?}", error.kind()))?;
+
+        match parsed {
+            Some(Command::Graph(GraphCommand::Snapshot(GraphSnapshotCommand::Refresh(args)))) => {
+                ensure_equal(&args.graph, &"revision".to_string(), "graph target")?;
+                ensure(args.dry_run, "dry run parsed")
+            }
+            other => Err(format!(
+                "expected graph snapshot refresh command, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
     fn parser_accepts_graph_path_and_explain_link() -> TestResult {
         let path = Cli::try_parse_from(["ee", "graph", "path", "mem_src", "mem_dst"])
             .map(|cli| cli.command)
@@ -35238,6 +37341,31 @@ mod tests {
             other => Err(format!(
                 "expected graph explain-link command, got {other:?}"
             )),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_top_level_proximity() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "proximity",
+            "mem_left",
+            "mem_right",
+            "--min-weight",
+            "0.4",
+            "--include-tombstoned",
+        ])
+        .map(|cli| cli.command)
+        .map_err(|error| format!("failed to parse proximity: {:?}", error.kind()))?;
+
+        match parsed {
+            Some(Command::Proximity(args)) => {
+                ensure_equal(&args.memory_a, &"mem_left".to_string(), "memory a")?;
+                ensure_equal(&args.memory_b, &"mem_right".to_string(), "memory b")?;
+                ensure_equal(&args.min_weight, &Some(0.4_f32), "min weight")?;
+                ensure(args.include_tombstoned, "include tombstoned parsed")
+            }
+            other => Err(format!("expected proximity command, got {other:?}")),
         }
     }
 
@@ -38058,6 +40186,11 @@ mod tests {
                 ensure_equal(&args.job, &JobType::DecaySweep, "job")?;
                 ensure_equal(&args.dry_run, &true, "dry run")?;
                 ensure_equal(&args.include_decay, &false, "include decay default")?;
+                ensure_equal(
+                    &args.no_structural_decay,
+                    &false,
+                    "structural decay default",
+                )?;
                 ensure_equal(&args.as_of, &None, "as of default")?;
                 ensure_equal(&args.item_limit, &Some(10), "item limit")
             }
@@ -38072,6 +40205,7 @@ mod tests {
             "maintenance",
             "run",
             "--include-decay",
+            "--no-structural-decay",
             "--as-of",
             "2030-01-01T00:00:00Z",
             "--dry-run",
@@ -38082,6 +40216,7 @@ mod tests {
             Some(Command::Maintenance(MaintenanceCommand::Run(args))) => {
                 ensure_equal(&args.job, &JobType::DecaySweep, "job")?;
                 ensure_equal(&args.include_decay, &true, "include decay")?;
+                ensure_equal(&args.no_structural_decay, &true, "no structural decay")?;
                 ensure_equal(
                     &args.as_of,
                     &Some("2030-01-01T00:00:00Z".to_string()),
@@ -38089,6 +40224,37 @@ mod tests {
                 )
             }
             other => Err(format!("expected maintenance run command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn maintenance_graph_snapshot_prune_command_accepts_limits() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "maintenance",
+            "graph-snapshot-prune",
+            "--dry-run",
+            "--time-limit-ms",
+            "250",
+            "--item-limit",
+            "8",
+        ])
+        .map_err(|error| {
+            format!(
+                "failed to parse maintenance graph-snapshot-prune: {:?}",
+                error.kind()
+            )
+        })?;
+
+        match parsed.command {
+            Some(Command::Maintenance(MaintenanceCommand::GraphSnapshotPrune(args))) => {
+                ensure_equal(&args.dry_run, &true, "dry run")?;
+                ensure_equal(&args.time_limit_ms, &Some(250), "time limit")?;
+                ensure_equal(&args.item_limit, &Some(8), "item limit")
+            }
+            other => Err(format!(
+                "expected maintenance graph-snapshot-prune command, got {other:?}"
+            )),
         }
     }
 
@@ -38209,6 +40375,74 @@ default_half_life_days = 45
             &result["details"]["schema"],
             &serde_json::json!("ee.steward.score_decay.v1"),
             "steward handler schema",
+        )
+    }
+
+    #[test]
+    fn maintenance_graph_snapshot_prune_json_uses_steward_handler() -> TestResult {
+        let workspace = unique_temp_workspace("ee-graph-snapshot-prune-cli")?;
+
+        let (init_exit, _init_stdout, init_stderr) =
+            invoke(&["ee", "--workspace", &workspace, "init", "--json"]);
+        ensure_equal(&init_exit, &ProcessExitCode::Success, "init exit")?;
+        ensure(init_stderr.is_empty(), "init json stderr clean")?;
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "maintenance",
+            "graph-snapshot-prune",
+            "--dry-run",
+            "--json",
+        ]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "maintenance graph-snapshot-prune exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "maintenance graph-snapshot-prune stderr empty",
+        )?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &parsed["data"]["schema"],
+            &serde_json::json!("ee.maintenance.run.v1"),
+            "maintenance run schema",
+        )?;
+        ensure_equal(
+            &parsed["data"]["command"],
+            &serde_json::json!("maintenance graph-snapshot-prune"),
+            "maintenance command",
+        )?;
+        ensure_equal(
+            &parsed["data"]["requestedJob"],
+            &serde_json::json!("graph_snapshot_prune"),
+            "requested job",
+        )?;
+        let results = parsed["data"]["results"]
+            .as_array()
+            .ok_or_else(|| "results array missing".to_owned())?;
+        let result = results
+            .first()
+            .ok_or_else(|| "maintenance result missing".to_owned())?;
+        ensure_equal(
+            &result["jobType"],
+            &serde_json::json!("graph_snapshot_prune"),
+            "steward job type",
+        )?;
+        ensure_equal(
+            &result["details"]["schema"],
+            &serde_json::json!("ee.graph.snapshot_prune.v1"),
+            "graph snapshot prune details schema",
+        )?;
+        ensure_equal(
+            &result["details"]["command"],
+            &serde_json::json!("maintenance graph-snapshot-prune"),
+            "graph snapshot prune details command",
         )
     }
 
@@ -38774,7 +41008,27 @@ default_half_life_days = 45
         let parsed = Cli::try_parse_from(["ee", "health"])
             .map_err(|e| format!("failed to parse health: {:?}", e.kind()))?;
 
-        ensure_equal(&parsed.command, &Some(Command::Health), "health command")
+        ensure_equal(
+            &parsed.command,
+            &Some(Command::Health(HealthArgs {
+                robot_insights: false,
+            })),
+            "health command",
+        )
+    }
+
+    #[test]
+    fn health_robot_insights_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "health", "--robot-insights"])
+            .map_err(|e| format!("failed to parse health robot insights: {:?}", e.kind()))?;
+
+        ensure_equal(
+            &parsed.command,
+            &Some(Command::Health(HealthArgs {
+                robot_insights: true,
+            })),
+            "health robot insights command",
+        )
     }
 
     #[test]
@@ -38799,6 +41053,33 @@ default_half_life_days = 45
         ensure_contains(&stdout, "\"subsystems\":", "health has subsystems")?;
         ensure_contains(&stdout, "\"issues\":", "health has issues")?;
         ensure_contains(&stdout, "\"summary\":", "health has summary")
+    }
+
+    #[test]
+    fn health_robot_insights_json_renders_structural_schema() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "health", "--robot-insights", "--json"]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "health robot insights exit",
+        )?;
+        ensure_starts_with(
+            &stdout,
+            "{\"schema\":\"ee.health.structural.v1\"",
+            "health robot insights structural schema",
+        )?;
+        ensure_contains(&stdout, "\"kTruss\":", "health robot insights k-truss")?;
+        ensure_contains(
+            &stdout,
+            "\"contradictionClusters\":",
+            "health robot insights contradiction clusters",
+        )?;
+        ensure_contains(&stdout, "\"degraded\":", "health robot insights degraded")?;
+        ensure_ends_with(&stdout, '\n', "health robot insights trailing newline")?;
+        ensure(
+            stderr.is_empty(),
+            "health robot insights json stderr must be empty",
+        )
     }
 
     #[test]
@@ -39174,6 +41455,19 @@ default_half_life_days = 45
         match parsed.command {
             Some(Command::Context(ref args)) => {
                 ensure_equal(&args.profile, &"submodular".to_string(), "context profile")
+            }
+            _ => Err("expected Context command".to_string()),
+        }
+    }
+
+    #[test]
+    fn context_command_accepts_ppr_weight() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "context", "test", "--ppr-weight", "0.75"])
+            .map_err(|e| format!("failed to parse context with ppr-weight: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Context(ref args)) => {
+                ensure_equal(&args.ppr_weight, &Some(0.75), "context ppr weight")
             }
             _ => Err("expected Context command".to_string()),
         }
@@ -41551,6 +43845,7 @@ default_half_life_days = 45
             "--actor",
             "MistySalmon",
             "--apply",
+            "--no-structural-decay",
             "--now",
             "2030-01-01T00:00:00Z",
             "--database",
@@ -41566,6 +43861,11 @@ default_half_life_days = 45
                     "disposition actor",
                 )?;
                 ensure_equal(&args.apply, &true, "disposition apply")?;
+                ensure_equal(
+                    &args.no_structural_decay,
+                    &true,
+                    "disposition no structural decay",
+                )?;
                 ensure_equal(
                     &args.now,
                     &Some("2030-01-01T00:00:00Z".to_string()),

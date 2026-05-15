@@ -20,7 +20,7 @@ use crate::core::doctor::{
     FixPlan, FrankenDependencyHealth, FrankenHealthReport, IntegrityCanaryReport,
     IntegrityDiagnosticCheck, IntegrityDiagnosticDegradation, IntegrityDiagnosticsReport,
 };
-use crate::core::health::HealthReport;
+use crate::core::health::{HealthReport, StructuralHealthReport};
 use crate::core::memory::{
     MemoryDetails, MemoryHistoryReport, MemoryListReport, MemoryShowReport, memory_validity,
 };
@@ -2182,6 +2182,9 @@ pub fn render_context_response_json_with_options(
                     pack.field_raw("coordination", &coordination_json);
                 }
             }
+            if let Some(pack_dna) = &response.data.pack_dna {
+                pack.field_raw("packDna", &pack_dna.to_string());
+            }
             if options.include_legacy_selection_certificate {
                 pack.field_object("deprecation", |deprecation| {
                     deprecation.field_str("deprecatedField", "selectionCertificate");
@@ -2239,6 +2242,9 @@ pub fn render_context_response_json_with_options(
                 obj.field_object("scores", |scores| {
                     scores.field_raw("relevance", &score_json(item.relevance.into_inner()));
                     scores.field_raw("utility", &score_json(item.utility.into_inner()));
+                    if let Some(proximity_to_seed) = item.proximity_to_seed {
+                        scores.field_raw("proximityToSeed", &score_json(proximity_to_seed));
+                    }
                     // A1 phase 1: surface marginalGain / objectiveValue from the
                     // selection-step trace so agents don't have to cross-reference
                     // selectionAudit.steps[] by rank.
@@ -2269,6 +2275,20 @@ pub fn render_context_response_json_with_options(
                 }
                 obj.field_str("why", &item.why);
                 obj.field_str("selectedIn", item.selected_in.as_str());
+                if let Some(score_breakdown) = item.score_breakdown {
+                    obj.field_object("selection", |selection| {
+                        selection.field_object("scoreBreakdown", |breakdown| {
+                            breakdown
+                                .field_raw("textScore", &score_json(score_breakdown.text_score));
+                            breakdown
+                                .field_raw("pprScore", &score_json(score_breakdown.ppr_score));
+                            breakdown.field_raw(
+                                "combinedScore",
+                                &score_json(score_breakdown.combined_score),
+                            );
+                        });
+                    });
+                }
                 if item.lifecycle.is_some() || item.tombstoned_at.is_some() {
                     obj.field_object("lifecycle", |lifecycle| {
                         match (&item.tombstoned_at, &item.lifecycle) {
@@ -3275,6 +3295,24 @@ fn render_graph_compute_json(
         );
         graph.field_bool("liveComputeSupported", report.live_compute_supported);
         graph.field_str("fnxRuntimeVersion", report.fnx_runtime_version);
+        graph.field_object("resultCache", |cache| {
+            cache.field_str("status", report.result_cache.status);
+            cache.field_raw(
+                "cachedResultCount",
+                &report.result_cache.cached_result_count.to_string(),
+            );
+            cache.field_raw(
+                "observedComputeCount",
+                &report.result_cache.observed_compute_count.to_string(),
+            );
+            match report.result_cache.cache_hit_rate_basis_points {
+                Some(value) => cache.field_raw(
+                    "cacheHitRate",
+                    &format!("{:.4}", f64::from(value) / 10_000.0),
+                ),
+                None => cache.field_raw("cacheHitRate", "null"),
+            };
+        });
         match report.last_used_at.as_deref() {
             Some(value) => graph.field_str("lastUsedAt", value),
             None => graph.field_raw("lastUsedAt", "null"),
@@ -4788,6 +4826,44 @@ pub fn render_health_toon(report: &HealthReport) -> String {
     render_toon_from_json(&render_health_json(report))
 }
 
+/// Render the opt-in structural health surface as canonical JSON.
+#[must_use]
+pub fn render_structural_health_json(report: &StructuralHealthReport) -> String {
+    serde_json::to_string(report)
+        .unwrap_or_else(|_| "{\"schema\":\"ee.health.structural.v1\"}".to_owned())
+}
+
+/// Render the opt-in structural health surface as human-readable text.
+#[must_use]
+pub fn render_structural_health_human(report: &StructuralHealthReport) -> String {
+    let mut output = format!(
+        "ee health structural\n\nStatus: {}\nK-truss max k: {}\nSupport memories: {}\nContradiction clusters: {}\n",
+        report.summary.status,
+        report.summary.k_truss_max_k,
+        report.summary.support_subgraph_memory_count,
+        report.summary.contradiction_cluster_count,
+    );
+
+    if !report.degraded.is_empty() {
+        output.push_str("\nDegraded:\n");
+        for degraded in &report.degraded {
+            output.push_str(&format!(
+                "  [{}] {} - {}\n",
+                degraded.severity, degraded.code, degraded.message
+            ));
+        }
+    }
+
+    output.push_str("\nNext:\n  ee health --robot-insights --json\n");
+    output
+}
+
+/// Render the opt-in structural health surface as TOON.
+#[must_use]
+pub fn render_structural_health_toon(report: &StructuralHealthReport) -> String {
+    render_toon_from_json(&render_structural_health_json(report))
+}
+
 /// Render a memory show report as JSON (ee.response.v1 envelope).
 #[must_use]
 pub fn render_memory_show_json(report: &MemoryShowReport) -> String {
@@ -6186,6 +6262,20 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: graph_export_response_schema_definition,
         },
         SchemaEntry {
+            id: "ee.graph.snapshot_prune.v1",
+            version: "1",
+            description: "Graph snapshot archived-row prune report",
+            category: "graph",
+            definition: graph_snapshot_prune_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.db.inspect.v1",
+            version: "1",
+            description: "Read-only database inspection response envelope",
+            category: "ops",
+            definition: db_inspect_schema_definition,
+        },
+        SchemaEntry {
             id: MCP_MANIFEST_SCHEMA_V1,
             version: "1",
             description: "MCP adapter manifest generated from ee's public command and schema registries",
@@ -6468,35 +6558,16 @@ fn graph_export_response_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.graph.export.v1.json").to_string()
 }
 
+fn graph_snapshot_prune_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.graph.snapshot_prune.v1.json").to_string()
+}
+
+fn db_inspect_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.db.inspect.v1.json").to_string()
+}
+
 fn mcp_manifest_schema_definition() -> String {
-    serde_json::json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "$id": MCP_MANIFEST_SCHEMA_V1,
-        "type": "object",
-        "required": [
-            "command",
-            "schema",
-            "version",
-            "protocolVersion",
-            "adapter",
-            "capabilities",
-            "tools",
-            "schemas",
-            "degraded"
-        ],
-        "properties": {
-            "command": { "const": "mcp manifest" },
-            "schema": { "const": MCP_MANIFEST_SCHEMA_V1 },
-            "version": { "type": "string" },
-            "protocolVersion": { "type": "string" },
-            "adapter": { "type": "object" },
-            "capabilities": { "type": "object" },
-            "tools": { "type": "array", "items": { "type": "object" } },
-            "schemas": { "type": "array", "items": { "type": "object" } },
-            "degraded": { "type": "array", "items": { "type": "object" } }
-        }
-    })
-    .to_string()
+    include_str!("../../docs/schemas/ee.mcp.manifest.v1.json").to_string()
 }
 
 fn certificate_schema_definition() -> String {
@@ -11911,8 +11982,8 @@ mod tests {
     };
     use crate::pack::{
         ContextRequest, ContextResponse, PackAssemblySlo, PackAssemblySloActuals, PackCandidate,
-        PackCandidateInput, PackProvenance, PackResourceProfile, PackSection, PackTrustSignal,
-        TokenBudget, assemble_draft,
+        PackCandidateInput, PackProvenance, PackResourceProfile, PackScoreBreakdown, PackSection,
+        PackTrustSignal, TokenBudget, assemble_draft,
     };
 
     type TestResult = Result<(), String>;
@@ -13058,6 +13129,70 @@ mod tests {
             "item trust posture",
         )?;
         ensure_contains(&json, "\"relevance\":0.800000", "stable relevance")
+    }
+
+    #[test]
+    fn context_response_json_renders_pack_item_score_breakdown() -> TestResult {
+        let request = ContextRequest::from_query("prepare release")
+            .map_err(|error| format!("request rejected: {error:?}"))?;
+        let budget =
+            TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let candidate = PackCandidate::new(PackCandidateInput {
+            memory_id: memory_id(420),
+            section: PackSection::ProceduralRules,
+            content: "Run cargo fmt --check before release.".to_string(),
+            estimated_tokens: 10,
+            relevance: score(0.44)?,
+            utility: score(0.6)?,
+            provenance: vec![pack_provenance("file://AGENTS.md#L42")?],
+            why: "selected because release checks match the task".to_string(),
+        })
+        .map_err(|error| format!("candidate rejected: {error:?}"))?
+        .with_score_breakdown(PackScoreBreakdown::ppr(0.20, 0.80, 0.44));
+        let draft = assemble_draft(&request.query, budget, vec![candidate])
+            .map_err(|error| format!("draft rejected: {error:?}"))?;
+        let response = ContextResponse::new(request, draft, Vec::new())
+            .map_err(|error| format!("response rejected: {error:?}"))?;
+
+        let json = render_context_response_json(&response);
+
+        ensure_contains(
+            &json,
+            "\"selection\":{\"scoreBreakdown\":{\"textScore\":0.200000,\"pprScore\":0.800000,\"combinedScore\":0.440000}}",
+            "PPR score breakdown",
+        )
+    }
+
+    #[test]
+    fn context_response_json_renders_pack_item_proximity_to_seed() -> TestResult {
+        let request = ContextRequest::from_query("prepare release")
+            .map_err(|error| format!("request rejected: {error:?}"))?;
+        let budget =
+            TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let candidate = PackCandidate::new(PackCandidateInput {
+            memory_id: memory_id(421),
+            section: PackSection::ProceduralRules,
+            content: "Review tightly coupled release notes together.".to_string(),
+            estimated_tokens: 10,
+            relevance: score(0.44)?,
+            utility: score(0.6)?,
+            provenance: vec![pack_provenance("file://AGENTS.md#L43")?],
+            why: "selected because release notes share graph proximity".to_string(),
+        })
+        .map_err(|error| format!("candidate rejected: {error:?}"))?
+        .with_proximity_to_seed(0.91);
+        let draft = assemble_draft(&request.query, budget, vec![candidate])
+            .map_err(|error| format!("draft rejected: {error:?}"))?;
+        let response = ContextResponse::new(request, draft, Vec::new())
+            .map_err(|error| format!("response rejected: {error:?}"))?;
+
+        let json = render_context_response_json(&response);
+
+        ensure_contains(
+            &json,
+            "\"proximityToSeed\":0.910000",
+            "proximity-to-seed score",
+        )
     }
 
     #[test]

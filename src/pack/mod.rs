@@ -1120,6 +1120,8 @@ pub struct PackCandidate {
     pub estimated_tokens: u32,
     pub relevance: UnitScore,
     pub utility: UnitScore,
+    pub proximity_to_seed: Option<f32>,
+    pub score_breakdown: Option<PackScoreBreakdown>,
     pub provenance: Vec<PackProvenance>,
     pub why: String,
     pub diversity_key: Option<String>,
@@ -1138,6 +1140,24 @@ pub struct PackCandidateInput {
     pub utility: UnitScore,
     pub provenance: Vec<PackProvenance>,
     pub why: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PackScoreBreakdown {
+    pub text_score: f32,
+    pub ppr_score: f32,
+    pub combined_score: f32,
+}
+
+impl PackScoreBreakdown {
+    #[must_use]
+    pub fn ppr(text_score: f32, ppr_score: f32, combined_score: f32) -> Self {
+        Self {
+            text_score: text_score.clamp(0.0, 1.0),
+            ppr_score: ppr_score.clamp(0.0, 1.0),
+            combined_score: combined_score.clamp(0.0, 1.0),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1240,6 +1260,8 @@ impl PackCandidate {
             estimated_tokens,
             relevance,
             utility,
+            proximity_to_seed: None,
+            score_breakdown: None,
             provenance,
             why,
             diversity_key: None,
@@ -1254,6 +1276,20 @@ impl PackCandidate {
         let value = diversity_key.into();
         if !value.trim().is_empty() {
             self.diversity_key = Some(value.trim().to_string());
+        }
+        self
+    }
+
+    #[must_use]
+    pub const fn with_score_breakdown(mut self, score_breakdown: PackScoreBreakdown) -> Self {
+        self.score_breakdown = Some(score_breakdown);
+        self
+    }
+
+    #[must_use]
+    pub fn with_proximity_to_seed(mut self, proximity_to_seed: f32) -> Self {
+        if proximity_to_seed.is_finite() {
+            self.proximity_to_seed = Some(proximity_to_seed.max(0.0));
         }
         self
     }
@@ -2268,6 +2304,7 @@ impl ContextResponse {
                 consensus: Vec::new(),
                 conflicts: Vec::new(),
                 coordination: None,
+                pack_dna: None,
                 degraded,
             },
         })
@@ -2284,6 +2321,7 @@ pub struct ContextResponseData {
     pub consensus: Vec<ConsensusEntry>,
     pub conflicts: Vec<ConflictEntry>,
     pub coordination: Option<PackCoordinationSnapshot>,
+    pub pack_dna: Option<serde_json::Value>,
     pub degraded: Vec<ContextResponseDegradation>,
 }
 
@@ -3140,6 +3178,8 @@ pub struct PackDraftItem {
     pub estimated_tokens: u32,
     pub relevance: UnitScore,
     pub utility: UnitScore,
+    pub proximity_to_seed: Option<f32>,
+    pub score_breakdown: Option<PackScoreBreakdown>,
     pub provenance: Vec<PackProvenance>,
     pub why: String,
     pub diversity_key: Option<String>,
@@ -3181,6 +3221,8 @@ impl PackDraftItem {
             estimated_tokens,
             relevance,
             utility,
+            proximity_to_seed,
+            score_breakdown,
             provenance,
             why,
             diversity_key,
@@ -3196,6 +3238,8 @@ impl PackDraftItem {
             estimated_tokens,
             relevance,
             utility,
+            proximity_to_seed,
+            score_breakdown,
             provenance,
             why,
             diversity_key,
@@ -3224,6 +3268,8 @@ fn redact_pack_candidate(candidate: PackCandidate) -> (PackCandidate, Vec<PackIt
         estimated_tokens,
         relevance,
         utility,
+        proximity_to_seed,
+        score_breakdown,
         provenance,
         why,
         diversity_key,
@@ -3245,6 +3291,8 @@ fn redact_pack_candidate(candidate: PackCandidate) -> (PackCandidate, Vec<PackIt
             estimated_tokens,
             relevance,
             utility,
+            proximity_to_seed,
+            score_breakdown,
             provenance,
             why,
             diversity_key,

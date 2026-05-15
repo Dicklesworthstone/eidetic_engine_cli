@@ -16,12 +16,15 @@ use crate::config::{
     WorkspaceResolutionMode, WorkspaceResolutionRequest, WorkspaceResolutionSource,
     diagnose_workspace_resolution, read_env_var, resolve_workspace,
 };
+#[cfg(feature = "graph")]
+use crate::db::StoredMemoryLink;
 use crate::db::{
     CreateWorkspaceInput, DbConnection, FeedbackSourceHarmfulCount, GraphSnapshotStatus,
     GraphSnapshotType, PROVENANCE_CHAIN_HASH_VERSION, PROVENANCE_STATUS_UNVERIFIED,
     StoredAuditEntry, StoredCurationCandidate, StoredCurationTtlPolicy, StoredMemory,
     audit_actions, default_curation_ttl_policy_id_for_review_state,
 };
+use crate::models::degradation::GRAPH_SKYLINE_DEGENERATE_COMMUNITIES_CODE;
 use crate::models::posture::{
     OperationPostureReport, SubsystemPostureReport, SubsystemPostureStatus, WorkspacePostureReport,
 };
@@ -42,6 +45,7 @@ const GRAPH_SNAPSHOT_REFRESH_COMMAND: &str = "ee graph centrality-refresh --work
 const GRAPH_LIVE_COMPUTE_AVAILABLE: &str = "live_compute_available";
 #[cfg(not(feature = "graph"))]
 const GRAPH_LIVE_COMPUTE_UNAVAILABLE: &str = "live_compute_unavailable";
+const SKYLINE_MIN_COMMUNITY_COUNT: usize = 3;
 const FNX_RUNTIME_VERSION: &str = "0.1.0";
 const GRAPH_COMPUTE_ALGORITHMS: &[&str] = &[
     "pagerank",
@@ -505,7 +509,38 @@ pub struct GraphComputeReport {
     pub available_algorithms: &'static [&'static str],
     pub live_compute_supported: bool,
     pub fnx_runtime_version: &'static str,
+    pub result_cache: GraphAlgorithmResultCacheReport,
     pub last_used_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphAlgorithmResultCacheReport {
+    pub status: &'static str,
+    pub cached_result_count: u32,
+    pub observed_compute_count: u32,
+    pub cache_hit_rate_basis_points: Option<u32>,
+}
+
+impl GraphAlgorithmResultCacheReport {
+    #[must_use]
+    pub const fn not_inspected() -> Self {
+        Self {
+            status: "not_inspected",
+            cached_result_count: 0,
+            observed_compute_count: 0,
+            cache_hit_rate_basis_points: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn unavailable() -> Self {
+        Self {
+            status: "unavailable",
+            cached_result_count: 0,
+            observed_compute_count: 0,
+            cache_hit_rate_basis_points: None,
+        }
+    }
 }
 
 /// Current memory-link graph facts exposed with the snapshot artifact.
@@ -913,9 +948,11 @@ impl StatusReport {
         let (memory_health, memory_health_degradations) =
             gather_memory_health(options.workspace_path.as_deref());
         let workspace = gather_workspace_status(options.workspace_path.as_deref());
-        let graph_compute = gather_graph_compute();
+        let graph_compute = gather_graph_compute(options.workspace_path.as_deref());
         let graph_snapshot_artifact =
             gather_graph_snapshot_artifact(options.workspace_path.as_deref());
+        let skyline_community_count =
+            gather_status_skyline_community_count(options.workspace_path.as_deref());
         let derived_assets =
             gather_derived_assets(options.workspace_path.as_deref(), &graph_snapshot_artifact);
         let (curation_health, curation_degradations) =
@@ -938,6 +975,7 @@ impl StatusReport {
             options.workspace_path.as_deref(),
         );
         push_graph_capability_degradation(&mut degradations, graph_compute.status);
+        push_skyline_degenerate_communities_degradation(&mut degradations, skyline_community_count);
         push_toon_output_capability_degradation(&mut degradations, capabilities.output_toon);
 
         degradations.extend(memory_health_degradations);
@@ -1642,6 +1680,24 @@ fn push_graph_capability_degradation(
     }
 }
 
+fn push_skyline_degenerate_communities_degradation(
+    degradations: &mut Vec<DegradationReport>,
+    community_count: Option<usize>,
+) {
+    let Some(community_count) = community_count else {
+        return;
+    };
+    if community_count >= SKYLINE_MIN_COMMUNITY_COUNT {
+        return;
+    }
+    degradations.push(DegradationReport {
+        code: GRAPH_SKYLINE_DEGENERATE_COMMUNITIES_CODE,
+        severity: "info",
+        message: "Knowledge skyline communities are degenerate because fewer than three Louvain communities were found.",
+        repair: "No operator action required; treat skyline separation as informational until the workspace has more connected evidence.",
+    });
+}
+
 fn push_toon_output_capability_degradation(
     degradations: &mut Vec<DegradationReport>,
     status: CapabilityStatus,
@@ -1665,6 +1721,46 @@ fn push_toon_output_capability_degradation(
             });
         }
     }
+}
+
+fn gather_status_skyline_community_count(workspace_path: Option<&Path>) -> Option<usize> {
+    let workspace_path = workspace_path?;
+    #[cfg(feature = "graph")]
+    {
+        let database_path = workspace_path.join(".ee").join("ee.db");
+        if !database_path.exists() {
+            return None;
+        }
+        let connection = DbConnection::open_file(&database_path).ok()?;
+        let links = connection.list_all_memory_links(None).ok()?;
+        Some(status_skyline_community_count_from_links(&links))
+    }
+    #[cfg(not(feature = "graph"))]
+    {
+        let _ = workspace_path;
+        None
+    }
+}
+
+#[cfg(feature = "graph")]
+fn status_skyline_community_count_from_links(links: &[StoredMemoryLink]) -> usize {
+    if links.is_empty() {
+        return 0;
+    }
+    let graph = status_skyline_graph_from_links(links);
+    crate::graph::health::detect_louvain_communities(&graph).len()
+}
+
+#[cfg(feature = "graph")]
+fn status_skyline_graph_from_links(links: &[StoredMemoryLink]) -> fnx_classes::Graph {
+    let mut graph = fnx_classes::Graph::strict();
+    for link in links {
+        graph.add_node(&link.src_memory_id);
+        graph.add_node(&link.dst_memory_id);
+        let _ = graph
+            .extend_edges_unrecorded([(link.src_memory_id.as_str(), link.dst_memory_id.as_str())]);
+    }
+    graph
 }
 
 fn gather_workspace_status(workspace_path: Option<&Path>) -> Option<WorkspaceStatusReport> {
@@ -1712,13 +1808,14 @@ fn gather_derived_assets(
     vec![search_index, graph_snapshot]
 }
 
-fn gather_graph_compute() -> GraphComputeReport {
+fn gather_graph_compute(workspace_path: Option<&Path>) -> GraphComputeReport {
     if diag_forced_capability_gap("graph") {
         return GraphComputeReport {
             status: GraphComputeStatus::Unavailable,
             available_algorithms: &[],
             live_compute_supported: false,
             fnx_runtime_version: FNX_RUNTIME_VERSION,
+            result_cache: GraphAlgorithmResultCacheReport::not_inspected(),
             last_used_at: None,
         };
     }
@@ -1730,6 +1827,7 @@ fn gather_graph_compute() -> GraphComputeReport {
             available_algorithms: GRAPH_COMPUTE_ALGORITHMS,
             live_compute_supported: true,
             fnx_runtime_version: FNX_RUNTIME_VERSION,
+            result_cache: gather_graph_algorithm_result_cache(workspace_path),
             last_used_at: None,
         }
     }
@@ -1740,8 +1838,65 @@ fn gather_graph_compute() -> GraphComputeReport {
             available_algorithms: &[],
             live_compute_supported: false,
             fnx_runtime_version: FNX_RUNTIME_VERSION,
+            result_cache: GraphAlgorithmResultCacheReport::not_inspected(),
             last_used_at: None,
         }
+    }
+}
+
+#[cfg(feature = "graph")]
+fn gather_graph_algorithm_result_cache(
+    workspace_path: Option<&Path>,
+) -> GraphAlgorithmResultCacheReport {
+    let Some(workspace_path) = workspace_path else {
+        return GraphAlgorithmResultCacheReport::not_inspected();
+    };
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    let Ok(connection) = DbConnection::open_file(&database_path) else {
+        return GraphAlgorithmResultCacheReport::unavailable();
+    };
+
+    let mut cached_result_count = 0_u32;
+    let mut observed_compute_count = 0_u32;
+    for workspace_id in resolve_status_workspace_ids(&connection, workspace_path) {
+        let Ok(Some(snapshot)) =
+            connection.get_latest_graph_snapshot(&workspace_id, GraphSnapshotType::MemoryLinks)
+        else {
+            continue;
+        };
+        let Ok(results) =
+            connection.list_graph_algorithm_results(&workspace_id, &snapshot.id, None)
+        else {
+            return GraphAlgorithmResultCacheReport::unavailable();
+        };
+        let Ok(witnesses) =
+            connection.list_graph_algorithm_witnesses(&workspace_id, &snapshot.id, None)
+        else {
+            return GraphAlgorithmResultCacheReport::unavailable();
+        };
+        cached_result_count =
+            cached_result_count.saturating_add(u32::try_from(results.len()).unwrap_or(u32::MAX));
+        observed_compute_count = observed_compute_count
+            .saturating_add(u32::try_from(witnesses.len()).unwrap_or(u32::MAX));
+    }
+
+    let total_observed = cached_result_count.saturating_add(observed_compute_count);
+    let cache_hit_rate_basis_points = cached_result_count
+        .saturating_mul(10_000)
+        .checked_div(total_observed);
+    let status = if total_observed == 0 {
+        "empty"
+    } else if cached_result_count == 0 {
+        "cold"
+    } else {
+        "observed"
+    };
+
+    GraphAlgorithmResultCacheReport {
+        status,
+        cached_result_count,
+        observed_compute_count,
+        cache_hit_rate_basis_points,
     }
 }
 
@@ -3168,6 +3323,37 @@ mod tests {
     }
 
     #[test]
+    fn status_skyline_reports_degenerate_communities() -> TestResult {
+        let mut degradations = Vec::new();
+        push_skyline_degenerate_communities_degradation(&mut degradations, Some(2));
+
+        let skyline_deg = degradations
+            .iter()
+            .find(|degradation| degradation.code == GRAPH_SKYLINE_DEGENERATE_COMMUNITIES_CODE)
+            .ok_or_else(|| "missing skyline degenerate communities degradation".to_string())?;
+
+        ensure(skyline_deg.severity, "info", "skyline severity")?;
+        ensure(
+            skyline_deg.message.contains("degenerate"),
+            true,
+            "skyline message mentions degenerate",
+        )?;
+        ensure(
+            skyline_deg.message.contains("communities"),
+            true,
+            "skyline message mentions communities",
+        )?;
+
+        let mut sufficient = Vec::new();
+        push_skyline_degenerate_communities_degradation(&mut sufficient, Some(3));
+        ensure(
+            sufficient.is_empty(),
+            true,
+            "three communities is sufficient",
+        )
+    }
+
+    #[test]
     fn memory_health_score_components_are_conservative() -> TestResult {
         let report = MemoryHealthReport::healthy_fixture();
         let components = report
@@ -3399,7 +3585,7 @@ mod tests {
 
     #[test]
     fn graph_compute_report_separates_live_algorithm_availability() -> TestResult {
-        let report = gather_graph_compute();
+        let report = gather_graph_compute(None);
 
         ensure(
             report.status,
@@ -3415,6 +3601,11 @@ mod tests {
             report.available_algorithms.contains(&"pagerank"),
             true,
             "pagerank listed",
+        )?;
+        ensure(
+            report.result_cache.status,
+            "not_inspected",
+            "cache not inspected without workspace",
         )
     }
 

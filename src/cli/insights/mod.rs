@@ -1,10 +1,22 @@
+use std::path::{Path, PathBuf};
+
 use clap::Args;
+use fnx_algorithms::CentralityScore;
+use fnx_classes::{AttrMap, Graph};
+use fnx_runtime::CgseValue;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
+use crate::db::{DbConnection, StoredMemoryLink};
+use crate::graph::gomory_hu::{
+    GOMORY_HU_WEIGHT_ATTR, PROXIMITY_SCHEMA_V1, build_gomory_hu_tree, query_proximity,
+};
+use crate::graph::hits::{HITS_REPORT_SCHEMA_V1, HitsScores, compute_hits_report};
 use crate::models::{DomainError, RESPONSE_SCHEMA_V1};
 
 pub const INSIGHTS_SCHEMA_V1: &str = "ee.insights.v1";
+const PROXIMITY_REPORT_SCHEMA_V1: &str = PROXIMITY_SCHEMA_V1;
+const CAUSAL_BOTTLENECK_REPORT_SCHEMA_V1: &str = "ee.graph.causal_evidence_projection.v1";
 const DEFAULT_SECTION_LIMIT: usize = 10;
 const MAX_SECTION_LIMIT: usize = 100;
 const EMPTY_WORKSPACE_GENERATED_AT: &str = "1970-01-01T00:00:00Z";
@@ -96,6 +108,46 @@ pub struct InsightsDegradedSignal {
     pub repair: Option<&'static str>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct ProximityHotspotInput {
+    memory_a: String,
+    memory_b: String,
+    snapshot_version: u64,
+    min_cut: Option<f64>,
+    interpretation: String,
+    tree_path: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CausalBottleneckInput {
+    memory_id: String,
+    betweenness: f64,
+    snapshot_version: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct HitsInsightInput {
+    memory_id: String,
+    score: f64,
+    snapshot_version: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct HitsSectionSpec {
+    name: &'static str,
+    title: &'static str,
+    summary: &'static str,
+    why_it_matters: &'static str,
+    interpretation: &'static str,
+    score_field: &'static str,
+    next_commands: Vec<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InsightsBuildOptions<'a> {
+    pub workspace: Option<&'a Path>,
+}
+
 fn section_registry() -> Vec<SectionRegistryEntry> {
     vec![
         ("authorities", "authorities", authorities_section),
@@ -142,7 +194,15 @@ fn section_registry() -> Vec<SectionRegistryEntry> {
     ]
 }
 
+#[cfg(test)]
 pub fn build_insights_report(args: &InsightsArgs) -> Result<InsightsReport, DomainError> {
+    build_insights_report_with_options(args, InsightsBuildOptions::default())
+}
+
+pub fn build_insights_report_with_options(
+    args: &InsightsArgs,
+    options: InsightsBuildOptions<'_>,
+) -> Result<InsightsReport, DomainError> {
     let registry = section_registry();
     let available_sections: Vec<&'static str> = registry.iter().map(|(_, name, _)| *name).collect();
     let mode = if args.explain.is_some() {
@@ -167,7 +227,8 @@ pub fn build_insights_report(args: &InsightsArgs) -> Result<InsightsReport, Doma
                 repair: Some(format!("ee insights --section <{available}>")),
             });
         };
-        let section = paginate_section(builder(), args.offset, args.limit);
+        let section = build_registry_section(display_name, *builder, options.workspace)?;
+        let section = paginate_section(section, args.offset, args.limit);
         (
             Some((*display_name).to_owned()),
             vec![section.section],
@@ -176,7 +237,12 @@ pub fn build_insights_report(args: &InsightsArgs) -> Result<InsightsReport, Doma
     } else {
         (
             None,
-            registry.iter().map(|(_, _, builder)| builder()).collect(),
+            registry
+                .iter()
+                .map(|(_, display_name, builder)| {
+                    build_registry_section(display_name, *builder, options.workspace)
+                })
+                .collect::<Result<Vec<_>, DomainError>>()?,
             None,
         )
     };
@@ -185,6 +251,7 @@ pub fn build_insights_report(args: &InsightsArgs) -> Result<InsightsReport, Doma
     let explain_command = explain_memory_id
         .as_ref()
         .map(|memory_id| format!("ee why {memory_id} --json"));
+    let degraded_signals = degraded_signals_for_sections(&sections);
 
     Ok(InsightsReport {
         schema: INSIGHTS_SCHEMA_V1,
@@ -199,13 +266,279 @@ pub fn build_insights_report(args: &InsightsArgs) -> Result<InsightsReport, Doma
         pagination,
         available_sections,
         sections,
-        degraded_signals: vec![InsightsDegradedSignal {
+        degraded_signals,
+    })
+}
+
+fn build_registry_section(
+    display_name: &str,
+    builder: SectionBuilder,
+    workspace: Option<&Path>,
+) -> Result<InsightsSection, DomainError> {
+    match display_name {
+        "authorities" => {
+            let scores = load_hits_scores(workspace)?;
+            Ok(authorities_section_from_scores(&scores))
+        }
+        "causalBottlenecks" => {
+            let reports = load_causal_bottleneck_reports(workspace)?;
+            Ok(causal_bottlenecks_section_from_reports(&reports))
+        }
+        "hubs" => {
+            let scores = load_hits_scores(workspace)?;
+            Ok(hubs_section_from_scores(&scores))
+        }
+        "proximityHotspots" => {
+            let reports = load_proximity_hotspot_reports(workspace)?;
+            Ok(proximity_hotspots_section_from_reports(&reports))
+        }
+        _ => Ok(builder()),
+    }
+}
+
+fn degraded_signals_for_sections(sections: &[InsightsSection]) -> Vec<InsightsDegradedSignal> {
+    if sections.iter().any(|section| !section.items.is_empty()) {
+        Vec::new()
+    } else {
+        vec![InsightsDegradedSignal {
             code: "graph.workspace_empty",
             severity: "info",
             message: "No graph memories are available for insights yet.",
             repair: Some("run: ee remember --workspace . \"<memory>\" --json"),
-        }],
-    })
+        }]
+    }
+}
+
+fn load_proximity_hotspot_reports(
+    workspace: Option<&Path>,
+) -> Result<Vec<ProximityHotspotInput>, DomainError> {
+    let Some(workspace) = workspace else {
+        return Ok(Vec::new());
+    };
+    let database_path = workspace.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let connection =
+        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open workspace database: {error}"),
+            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+        })?;
+    let links = connection
+        .list_all_memory_links(None)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query memory links: {error}"),
+            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+        })?;
+
+    proximity_hotspot_reports_from_links(&links)
+}
+
+fn load_causal_bottleneck_reports(
+    workspace: Option<&Path>,
+) -> Result<Vec<CausalBottleneckInput>, DomainError> {
+    let Some(workspace) = workspace else {
+        return Ok(Vec::new());
+    };
+    let database_path = workspace.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let connection =
+        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open workspace database: {error}"),
+            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+        })?;
+    let Some(workspace_id) = insights_workspace_id(&connection, workspace)? else {
+        return Ok(Vec::new());
+    };
+    let graph = crate::graph::build_causal_evidence_graph_from_table(&connection, &workspace_id)
+        .map_err(|error| DomainError::Graph {
+            message: format!("Failed to build causal-evidence graph projection: {error}"),
+            repair: Some(
+                "Run `ee graph snapshot refresh --graph causal_evidence --workspace . --json`."
+                    .to_owned(),
+            ),
+        })?;
+    let betweenness = crate::graph::betweenness_centrality_directed(&graph);
+    Ok(causal_bottleneck_reports_from_scores(&betweenness.scores))
+}
+
+fn load_hits_scores(workspace: Option<&Path>) -> Result<HitsScores, DomainError> {
+    let Some(workspace) = workspace else {
+        return Ok(HitsScores::default());
+    };
+    let database_path = workspace.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return Ok(HitsScores::default());
+    }
+
+    let connection =
+        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open workspace database: {error}"),
+            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+        })?;
+    let projection =
+        crate::graph::build_memory_graph(&connection, &crate::graph::ProjectionOptions::default())
+            .map_err(|error| DomainError::Graph {
+                message: format!("Failed to build HITS memory-link projection: {error}"),
+                repair: Some(
+                    "Run `ee graph snapshot refresh --graph memory_links --workspace . --json`."
+                        .to_owned(),
+                ),
+            })?;
+    if projection.node_count == 0 {
+        return Ok(HitsScores::default());
+    }
+
+    compute_hits_report(&projection.graph)
+        .map(|report| report.scores)
+        .map_err(|error| DomainError::Graph {
+            message: format!("Failed to compute HITS insights: {error}"),
+            repair: Some(
+                "Run `ee graph snapshot refresh --graph memory_links --workspace . --json`."
+                    .to_owned(),
+            ),
+        })
+}
+
+fn insights_workspace_id(
+    connection: &DbConnection,
+    workspace: &Path,
+) -> Result<Option<String>, DomainError> {
+    for candidate in workspace_path_candidates(workspace) {
+        let key = candidate.to_string_lossy();
+        let row = connection
+            .get_workspace_by_path(key.as_ref())
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to query workspace row: {error}"),
+                repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+            })?;
+        if let Some(workspace) = row {
+            return Ok(Some(workspace.id));
+        }
+    }
+
+    connection
+        .list_workspaces()
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list workspace rows: {error}"),
+            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+        })
+        .map(|workspaces| workspaces.into_iter().next().map(|workspace| workspace.id))
+}
+
+fn workspace_path_candidates(workspace: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(canonical) = workspace.canonicalize() {
+        candidates.push(canonical);
+    }
+    if !candidates.iter().any(|candidate| candidate == workspace) {
+        candidates.push(workspace.to_path_buf());
+    }
+    candidates
+}
+
+fn proximity_hotspot_reports_from_links(
+    links: &[StoredMemoryLink],
+) -> Result<Vec<ProximityHotspotInput>, DomainError> {
+    if links.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let graph = proximity_graph_from_links(links)?;
+    if graph.node_count() < 2 {
+        return Ok(Vec::new());
+    }
+
+    let tree = build_gomory_hu_tree(&graph).map_err(|error| DomainError::Graph {
+        message: format!("Failed to build Gomory-Hu proximity tree: {error}"),
+        repair: Some(
+            "Run `ee graph snapshot refresh --graph memory_links --workspace . --json`.".to_owned(),
+        ),
+    })?;
+    let nodes = tree
+        .tree
+        .nodes_ordered()
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let mut reports = Vec::new();
+    for (index, left) in nodes.iter().enumerate() {
+        for right in nodes.iter().skip(index + 1) {
+            let report = query_proximity(&tree, left, right, 0);
+            reports.push(ProximityHotspotInput {
+                memory_a: report.memory_a,
+                memory_b: report.memory_b,
+                snapshot_version: report.snapshot_version,
+                min_cut: report.min_cut,
+                interpretation: report.interpretation,
+                tree_path: report.tree_path,
+            });
+        }
+    }
+    Ok(reports)
+}
+
+fn causal_bottleneck_reports_from_scores(scores: &[CentralityScore]) -> Vec<CausalBottleneckInput> {
+    scores
+        .iter()
+        .map(|score| CausalBottleneckInput {
+            memory_id: score.node.clone(),
+            betweenness: score.score,
+            snapshot_version: 0,
+        })
+        .collect()
+}
+
+fn hits_inputs_from_scores(
+    scores: &std::collections::BTreeMap<String, f64>,
+) -> Vec<HitsInsightInput> {
+    scores
+        .iter()
+        .map(|(memory_id, score)| HitsInsightInput {
+            memory_id: memory_id.clone(),
+            score: *score,
+            snapshot_version: 0,
+        })
+        .collect()
+}
+
+fn proximity_graph_from_links(links: &[StoredMemoryLink]) -> Result<Graph, DomainError> {
+    let mut graph = Graph::strict();
+    for link in links {
+        let mut attrs = AttrMap::new();
+        attrs.insert(
+            GOMORY_HU_WEIGHT_ATTR.to_owned(),
+            CgseValue::Float(f64::from(link.weight)),
+        );
+        attrs.insert(
+            "confidence".to_owned(),
+            CgseValue::Float(f64::from(link.confidence)),
+        );
+        attrs.insert(
+            "relation".to_owned(),
+            CgseValue::String(link.relation.clone()),
+        );
+        attrs.insert("source".to_owned(), CgseValue::String(link.source.clone()));
+        attrs.insert(
+            "evidence_count".to_owned(),
+            CgseValue::Int(i64::from(link.evidence_count)),
+        );
+        graph
+            .add_edge_with_attrs(
+                link.src_memory_id.clone(),
+                link.dst_memory_id.clone(),
+                attrs,
+            )
+            .map_err(|error| DomainError::Graph {
+                message: format!("Failed to build proximity graph projection: {error}"),
+                repair: Some("Validate memory link rows with `ee doctor --json`.".to_owned()),
+            })?;
+    }
+    Ok(graph)
 }
 
 fn normalize_section_name(section: &str) -> String {
@@ -287,12 +620,21 @@ pub fn render_insights_human(report: &InsightsReport) -> String {
 }
 
 fn authorities_section() -> InsightsSection {
-    placeholder_section(
-        "authorities",
-        "Authority Memories",
-        "HITS authority scores for memories that ground claims from many hubs.",
-        "Authority memories help agents distinguish grounded evidence from navigational references.",
-        vec!["ee insights --section authorities --workspace . --json"],
+    authorities_section_from_scores(&HitsScores::default())
+}
+
+fn authorities_section_from_scores(scores: &HitsScores) -> InsightsSection {
+    hits_section_from_inputs(
+        HitsSectionSpec {
+            name: "authorities",
+            title: "Authority Memories",
+            summary: "HITS authority scores for memories that ground claims from many hubs.",
+            why_it_matters: "Authority memories help agents distinguish grounded evidence from navigational references.",
+            interpretation: "authority",
+            score_field: "authorityScore",
+            next_commands: vec!["ee insights --section authorities --workspace . --json"],
+        },
+        hits_inputs_from_scores(&scores.authorities),
     )
 }
 
@@ -300,20 +642,55 @@ fn bridges_section() -> InsightsSection {
     placeholder_section(
         "bridges",
         "Bridge Memories",
-        "Articulation points and bridge-like memories that connect otherwise separate knowledge regions.",
+        "Top articulation-point memories ranked by cluster-disconnection-magnitude.",
         "Bridge memories deserve careful decay and review because removing them can disconnect useful context.",
         vec!["ee insights --section bridges --workspace . --json"],
     )
 }
 
 fn causal_bottlenecks_section() -> InsightsSection {
-    placeholder_section(
-        "causalBottlenecks",
-        "Causal Bottlenecks",
-        "High-betweenness memories in causal-evidence subgraphs.",
-        "Causal bottlenecks show which facts carry the most explanatory load for failures and repairs.",
-        vec!["ee insights --section causalBottlenecks --workspace . --json"],
-    )
+    causal_bottlenecks_section_from_reports(&[])
+}
+
+fn causal_bottlenecks_section_from_reports(reports: &[CausalBottleneckInput]) -> InsightsSection {
+    let mut reports = reports
+        .iter()
+        .filter(|report| report.betweenness.is_finite() && report.betweenness > 0.0)
+        .collect::<Vec<_>>();
+    reports.sort_by(|left, right| {
+        right
+            .betweenness
+            .partial_cmp(&left.betweenness)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+
+    let items = reports
+        .into_iter()
+        .enumerate()
+        .map(|(index, report)| {
+            serde_json::json!({
+                "rank": index + 1,
+                "memoryId": &report.memory_id,
+                "betweenness": report.betweenness,
+                "interpretation": "causal_bridge",
+                "evidence": {
+                    "schema": CAUSAL_BOTTLENECK_REPORT_SCHEMA_V1,
+                    "algorithm": "betweenness_centrality_directed",
+                    "snapshotVersion": report.snapshot_version,
+                },
+            })
+        })
+        .collect();
+
+    InsightsSection {
+        name: "causalBottlenecks",
+        title: "Causal Bottlenecks",
+        summary: "High-betweenness memories in causal-evidence subgraphs.",
+        why_it_matters: "Causal bottlenecks show which facts carry the most explanatory load for failures and repairs.",
+        items,
+        next_commands: vec!["ee insights --section causalBottlenecks --workspace . --json"],
+    }
 }
 
 fn comprehensive_rules_section() -> InsightsSection {
@@ -337,13 +714,66 @@ fn contradiction_clusters_section() -> InsightsSection {
 }
 
 fn hubs_section() -> InsightsSection {
-    placeholder_section(
-        "hubs",
-        "Hub Memories",
-        "HITS hub scores for memories that point to many authoritative facts.",
-        "Hub memories are useful navigation anchors for agents assembling a task-specific context pack.",
-        vec!["ee insights --section hubs --workspace . --json"],
+    hubs_section_from_scores(&HitsScores::default())
+}
+
+fn hubs_section_from_scores(scores: &HitsScores) -> InsightsSection {
+    hits_section_from_inputs(
+        HitsSectionSpec {
+            name: "hubs",
+            title: "Hub Memories",
+            summary: "HITS hub scores for memories that point to many authoritative facts.",
+            why_it_matters: "Hub memories are useful navigation anchors for agents assembling a task-specific context pack.",
+            interpretation: "hub",
+            score_field: "hubScore",
+            next_commands: vec!["ee insights --section hubs --workspace . --json"],
+        },
+        hits_inputs_from_scores(&scores.hubs),
     )
+}
+
+fn hits_section_from_inputs(
+    spec: HitsSectionSpec,
+    mut inputs: Vec<HitsInsightInput>,
+) -> InsightsSection {
+    inputs.retain(|input| input.score.is_finite() && input.score > 0.0);
+    inputs.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+
+    let items = inputs
+        .into_iter()
+        .enumerate()
+        .map(|(index, input)| {
+            let mut item = serde_json::json!({
+                "rank": index + 1,
+                "memoryId": input.memory_id,
+                "interpretation": spec.interpretation,
+                "evidence": {
+                    "schema": HITS_REPORT_SCHEMA_V1,
+                    "algorithm": "hits_centrality_directed",
+                    "snapshotVersion": input.snapshot_version,
+                },
+            });
+            if let JsonValue::Object(object) = &mut item {
+                object.insert(spec.score_field.to_owned(), serde_json::json!(input.score));
+            }
+            item
+        })
+        .collect();
+
+    InsightsSection {
+        name: spec.name,
+        title: spec.title,
+        summary: spec.summary,
+        why_it_matters: spec.why_it_matters,
+        items,
+        next_commands: spec.next_commands,
+    }
 }
 
 fn k_core_section() -> InsightsSection {
@@ -387,20 +817,57 @@ fn load_bearing_memories_section() -> InsightsSection {
 }
 
 fn proximity_hotspots_section() -> InsightsSection {
-    placeholder_section(
-        "proximityHotspots",
-        "Proximity Hotspots",
-        "Memory pairs with small min-cut distance in Gomory-Hu proximity projections.",
-        "Proximity hotspots surface tightly coupled facts that should be packed, reviewed, or curated together.",
-        vec!["ee insights --section proximityHotspots --workspace . --json"],
-    )
+    proximity_hotspots_section_from_reports(&[])
+}
+
+fn proximity_hotspots_section_from_reports(reports: &[ProximityHotspotInput]) -> InsightsSection {
+    let mut reports = reports
+        .iter()
+        .filter(|report| report.min_cut.is_some_and(f64::is_finite))
+        .collect::<Vec<_>>();
+    reports.sort_by(|left, right| {
+        left.min_cut
+            .partial_cmp(&right.min_cut)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.memory_a.cmp(&right.memory_a))
+            .then_with(|| left.memory_b.cmp(&right.memory_b))
+    });
+
+    let items = reports
+        .into_iter()
+        .enumerate()
+        .map(|(index, report)| {
+            serde_json::json!({
+                "rank": index + 1,
+                "memoryA": &report.memory_a,
+                "memoryB": &report.memory_b,
+                "minCut": report.min_cut,
+                "interpretation": &report.interpretation,
+                "treePath": &report.tree_path,
+                "evidence": {
+                    "schema": PROXIMITY_REPORT_SCHEMA_V1,
+                    "algorithm": "gomory_hu_tree",
+                    "snapshotVersion": report.snapshot_version,
+                },
+            })
+        })
+        .collect();
+
+    InsightsSection {
+        name: "proximityHotspots",
+        title: "Proximity Hotspots",
+        summary: "Memory pairs with small min-cut distance in Gomory-Hu proximity projections.",
+        why_it_matters: "Proximity hotspots surface tightly coupled facts that should be packed, reviewed, or curated together.",
+        items,
+        next_commands: vec!["ee insights --section proximityHotspots --workspace . --json"],
+    }
 }
 
 fn revision_frontiers_section() -> InsightsSection {
     placeholder_section(
         "revisionFrontiers",
         "Revision Frontiers",
-        "Dominance-frontier findings for logical memory revision DAGs.",
+        "Top recent revisions ranked by dominance-frontier size in logical memory revision DAGs.",
         "Revision frontiers help agents understand which edits may change downstream context behavior.",
         vec!["ee insights --section revisionFrontiers --workspace . --json"],
     )
@@ -589,5 +1056,192 @@ mod tests {
         assert!(report.sections[0].items.is_empty());
 
         Ok(())
+    }
+
+    #[test]
+    fn paginate_section_slices_items_with_offset_and_limit() -> TestResult {
+        let section = InsightsSection {
+            name: "topMemories",
+            title: "Top Memories",
+            summary: "fixture",
+            why_it_matters: "fixture",
+            items: vec![
+                serde_json::json!({"id": "mem_1"}),
+                serde_json::json!({"id": "mem_2"}),
+                serde_json::json!({"id": "mem_3"}),
+                serde_json::json!({"id": "mem_4"}),
+            ],
+            next_commands: vec![],
+        };
+
+        let page = paginate_section(section.clone(), 1, 2);
+        assert_eq!(page.pagination.limit, 2);
+        assert_eq!(page.pagination.offset, 1);
+        assert_eq!(page.pagination.returned, 2);
+        assert_eq!(page.pagination.total, 4);
+        assert_eq!(
+            page.section.items,
+            vec![
+                serde_json::json!({"id": "mem_2"}),
+                serde_json::json!({"id": "mem_3"})
+            ]
+        );
+
+        let empty_page = paginate_section(section, 10, 2);
+        assert_eq!(empty_page.pagination.limit, 2);
+        assert_eq!(empty_page.pagination.offset, 10);
+        assert_eq!(empty_page.pagination.returned, 0);
+        assert_eq!(empty_page.pagination.total, 4);
+        assert!(empty_page.section.items.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn proximity_hotspots_orders_pairs_by_min_cut_then_memory_ids() -> TestResult {
+        let reports = vec![
+            proximity_report("mem_b", "mem_c", Some(2.0), Some(vec!["mem_b", "mem_c"])),
+            proximity_report(
+                "mem_a",
+                "mem_d",
+                Some(0.5),
+                Some(vec!["mem_a", "bridge", "mem_d"]),
+            ),
+            proximity_report("mem_a", "mem_c", Some(0.5), Some(vec!["mem_a", "mem_c"])),
+            proximity_report("mem_x", "mem_y", None, None),
+        ];
+
+        let section = proximity_hotspots_section_from_reports(&reports);
+
+        assert_eq!(section.name, "proximityHotspots");
+        assert_eq!(section.items.len(), 3);
+        assert_eq!(section.items[0]["rank"], 1);
+        assert_eq!(section.items[0]["memoryA"], "mem_a");
+        assert_eq!(section.items[0]["memoryB"], "mem_c");
+        assert_eq!(section.items[0]["minCut"], 0.5);
+        assert_eq!(
+            section.items[0]["evidence"]["schema"],
+            PROXIMITY_REPORT_SCHEMA_V1
+        );
+        assert_eq!(section.items[0]["evidence"]["algorithm"], "gomory_hu_tree");
+        assert_eq!(section.items[1]["memoryA"], "mem_a");
+        assert_eq!(section.items[1]["memoryB"], "mem_d");
+        assert_eq!(section.items[2]["memoryA"], "mem_b");
+        assert_eq!(section.items[2]["memoryB"], "mem_c");
+
+        Ok(())
+    }
+
+    #[test]
+    fn causal_bottlenecks_order_by_betweenness_then_memory_id() -> TestResult {
+        let reports = vec![
+            causal_bottleneck("mem_b", 0.25),
+            causal_bottleneck("mem_a", 0.75),
+            causal_bottleneck("mem_c", 0.75),
+            causal_bottleneck("mem_zero", 0.0),
+            causal_bottleneck("mem_nan", f64::NAN),
+        ];
+
+        let section = causal_bottlenecks_section_from_reports(&reports);
+
+        assert_eq!(section.name, "causalBottlenecks");
+        assert_eq!(section.items.len(), 3);
+        assert_eq!(section.items[0]["rank"], 1);
+        assert_eq!(section.items[0]["memoryId"], "mem_a");
+        assert_eq!(section.items[0]["betweenness"], 0.75);
+        assert_eq!(
+            section.items[0]["evidence"]["schema"],
+            CAUSAL_BOTTLENECK_REPORT_SCHEMA_V1
+        );
+        assert_eq!(
+            section.items[0]["evidence"]["algorithm"],
+            "betweenness_centrality_directed"
+        );
+        assert_eq!(section.items[1]["memoryId"], "mem_c");
+        assert_eq!(section.items[2]["memoryId"], "mem_b");
+
+        Ok(())
+    }
+
+    #[test]
+    fn hubs_and_authorities_order_by_score_then_memory_id() -> TestResult {
+        let scores = HitsScores {
+            hubs: std::collections::BTreeMap::from([
+                ("mem_b".to_owned(), 0.25),
+                ("mem_a".to_owned(), 0.75),
+                ("mem_c".to_owned(), 0.75),
+                ("mem_zero".to_owned(), 0.0),
+                ("mem_nan".to_owned(), f64::NAN),
+            ]),
+            authorities: std::collections::BTreeMap::from([
+                ("mem_source".to_owned(), 0.1),
+                ("mem_authority".to_owned(), 0.9),
+            ]),
+        };
+
+        let hubs = hubs_section_from_scores(&scores);
+        assert_eq!(hubs.name, "hubs");
+        assert_eq!(hubs.items.len(), 3);
+        assert_eq!(hubs.items[0]["rank"], 1);
+        assert_eq!(hubs.items[0]["memoryId"], "mem_a");
+        assert_eq!(hubs.items[0]["hubScore"], 0.75);
+        assert_eq!(hubs.items[0]["interpretation"], "hub");
+        assert_eq!(hubs.items[0]["evidence"]["schema"], HITS_REPORT_SCHEMA_V1);
+        assert_eq!(
+            hubs.items[0]["evidence"]["algorithm"],
+            "hits_centrality_directed"
+        );
+        assert_eq!(hubs.items[1]["memoryId"], "mem_c");
+        assert_eq!(hubs.items[2]["memoryId"], "mem_b");
+
+        let authorities = authorities_section_from_scores(&scores);
+        assert_eq!(authorities.name, "authorities");
+        assert_eq!(authorities.items.len(), 2);
+        assert_eq!(authorities.items[0]["rank"], 1);
+        assert_eq!(authorities.items[0]["memoryId"], "mem_authority");
+        assert_eq!(authorities.items[0]["authorityScore"], 0.9);
+        assert_eq!(authorities.items[0]["interpretation"], "authority");
+        assert_eq!(
+            authorities.items[0]["evidence"]["schema"],
+            HITS_REPORT_SCHEMA_V1
+        );
+        assert_eq!(authorities.items[1]["memoryId"], "mem_source");
+
+        Ok(())
+    }
+
+    fn causal_bottleneck(memory_id: &str, betweenness: f64) -> CausalBottleneckInput {
+        CausalBottleneckInput {
+            memory_id: memory_id.to_owned(),
+            betweenness,
+            snapshot_version: 7,
+        }
+    }
+
+    fn proximity_report(
+        left: &str,
+        right: &str,
+        min_cut: Option<f64>,
+        tree_path: Option<Vec<&str>>,
+    ) -> ProximityHotspotInput {
+        ProximityHotspotInput {
+            memory_a: left.to_owned(),
+            memory_b: right.to_owned(),
+            snapshot_version: 42,
+            min_cut,
+            interpretation: min_cut
+                .map(|cut| {
+                    if cut < 1.0 {
+                        "weak"
+                    } else if cut < 3.0 {
+                        "moderate"
+                    } else {
+                        "strong"
+                    }
+                })
+                .unwrap_or("unavailable")
+                .to_owned(),
+            tree_path: tree_path.map(|nodes| nodes.into_iter().map(str::to_owned).collect()),
+        }
     }
 }

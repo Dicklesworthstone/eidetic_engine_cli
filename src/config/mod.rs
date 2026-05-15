@@ -57,6 +57,24 @@ pub use workspace::{
 
 pub const SUBSYSTEM: &str = "config";
 
+#[cfg(test)]
+fn trace_minhash_rank_centrality_config(
+    phase: &'static str,
+    elapsed_ms: u64,
+    degraded_codes: &[&str],
+) {
+    tracing::info!(
+        workspace_id = "config",
+        request_id = "minhash_rank_config",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-3usjw.46"),
+        surface = "minhash_rank_centrality",
+        phase,
+        elapsed_ms,
+        degraded_codes = ?degraded_codes,
+        "minhash rank centrality config checkpoint"
+    );
+}
+
 #[must_use]
 pub const fn subsystem_name() -> &'static str {
     SUBSYSTEM
@@ -76,7 +94,7 @@ pub fn workspace_output_redaction_enabled(workspace_path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::subsystem_name;
+    use super::{subsystem_name, trace_minhash_rank_centrality_config};
 
     type TestResult = Result<(), String>;
 
@@ -93,6 +111,8 @@ mod tests {
 
     #[test]
     fn subsystem_name_is_stable() -> TestResult {
+        trace_minhash_rank_centrality_config("input", 0, &[]);
+        trace_minhash_rank_centrality_config("response", 0, &[]);
         ensure_equal(&subsystem_name(), &"config", "config subsystem name")
     }
 }

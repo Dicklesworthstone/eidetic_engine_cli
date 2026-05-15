@@ -326,6 +326,7 @@ fn parse_line_fragment(input: &str, fragment: &str) -> Result<LineSpan, Provenan
     };
     if let Some((start_text, end_text)) = rest.split_once('-') {
         let start = parse_line_number(input, start_text)?;
+        let end_text = end_text.strip_prefix('L').unwrap_or(end_text);
         let end = parse_line_number(input, end_text)?;
         LineSpan::range(start, end)
     } else {
@@ -470,6 +471,24 @@ mod tests {
     #[test]
     fn cass_session_with_range_span() {
         let parsed = must_parse("cass-session://abc#L40-50");
+        match &parsed {
+            ProvenanceUri::CassSession { span, .. } => {
+                assert_eq!(
+                    *span,
+                    Some(LineSpan {
+                        start: 40,
+                        end: Some(50)
+                    })
+                );
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        assert_eq!(parsed.to_string(), "cass-session://abc#L40-50");
+    }
+
+    #[test]
+    fn cass_session_with_github_style_range_span_canonicalizes() {
+        let parsed = must_parse("cass-session://abc#L40-L50");
         match &parsed {
             ProvenanceUri::CassSession { span, .. } => {
                 assert_eq!(
