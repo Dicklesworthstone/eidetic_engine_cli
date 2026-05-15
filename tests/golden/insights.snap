@@ -1,0 +1,23 @@
+---
+surface: insights
+bead: bd-t6wd
+schema: ee.closure_surface_golden.v1
+purpose: ee insights exposes a JSON-first findings command for graph-derived workspace intelligence.
+command_surfaces:
+  - ee insights --json
+  - ee insights --section <name> --json
+  - ee insights --explain <memory_id> --json
+output_schema: ee.insights.v1
+schema_file: docs/schemas/ee.insights.v1.json
+implementation:
+  - src/cli/mod.rs
+  - src/cli/insights/mod.rs
+checks:
+  - Full bundle emits deterministic section order.
+  - Section mode supports pagination and unknown-section usage errors.
+  - Explain mode preserves the target memory id.
+  - Zero-memory workspaces return a well-formed bundle.
+verified_by:
+  - cargo test --test contracts graph_schemas_v1::insights_empty_workspace_cli_shape_matches_contract -- --nocapture
+  - cargo test --lib --test smoke --test contracts --test json_contract_snapshots insights -- --nocapture
+

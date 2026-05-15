@@ -1,0 +1,34 @@
+---
+surface: graph-subgraph-types
+bead: bd-rnfh
+schema: ee.closure_surface_golden.v1
+source: src/graph/mod.rs
+assertion: typed graph snapshots partition memory-substrate metadata into deterministic graph families
+graph_types:
+  - MemoryLinks
+  - CausalEvidence
+  - RevisionDAG
+  - RuleProvenance
+  - ContradictionSubgraph
+contracts:
+  - GraphSnapshotType includes the five operational graph families.
+  - Each typed graph refresh persists graph_type-scoped snapshot rows.
+  - Typed refreshes use graph_type-scoped advisory locks before durable source reads.
+  - Content hashes are deterministic across repeated refreshes of unchanged source rows.
+  - The public CLI accepts targeted refreshes for memory_links, causal, revision, rules, contradictions, and all.
+  - The causal refresh E2E inspects the persisted graph_snapshots row after public CLI execution.
+  - The rule provenance graph remains bipartite and distinguishes rule-side and memory-side nodes.
+  - All typed graph snapshots remain derived assets rebuildable from FrankenSQLite source tables.
+evidence:
+  - build_causal_evidence_graph_from_table
+  - build_revision_dag_from_logical_ids
+  - build_rule_provenance_bipartite_from_tables
+  - build_contradiction_subgraph_from_memory_links
+  - typed_graph_snapshot_refresh_acquires_write_lock_before_source_read
+  - typed_graph_snapshot_refresh_persists_stable_hashes_across_refreshes
+  - graph_snapshot_refresh_causal_persists_stable_snapshot_row
+verification:
+  - RCH job 332: cargo test --lib typed_graph_snapshot_refresh_acquires_write_lock_before_source_read -- --nocapture
+  - RCH job 333: cargo test --lib typed_graph_snapshot -- --nocapture
+  - RCH job 334: cargo test --test graph_determinism graph_snapshot_refresh -- --nocapture
+---

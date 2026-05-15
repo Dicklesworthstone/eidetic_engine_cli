@@ -73,3 +73,24 @@ fn testing_strategy_documents_graph_determinism_contract() -> TestResult {
     }
     Ok(())
 }
+
+#[cfg(feature = "embed-fast")]
+#[test]
+#[ignore = "non-CI coverage: real embedder graph smoke requires explicit operator opt-in"]
+fn non_ci_real_embedder_graph_policy_sentinel_is_skipped_by_default() -> TestResult {
+    let markers = real_embedder_markers();
+    for needle in ["Model2VecEmbedder", "model2vec-base"] {
+        if !markers.iter().any(|marker| marker == needle) {
+            return Err(format!(
+                "real-embedder sentinel must name `{needle}` so policy drift is visible"
+            ));
+        }
+    }
+    if std::env::var_os("EE_RUN_NON_CI_REAL_EMBEDDER_GRAPH_TEST").is_none() {
+        return Err(
+            "set EE_RUN_NON_CI_REAL_EMBEDDER_GRAPH_TEST=1 only for non-CI real-backend coverage"
+                .to_string(),
+        );
+    }
+    Ok(())
+}

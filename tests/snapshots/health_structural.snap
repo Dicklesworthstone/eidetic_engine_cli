@@ -1,0 +1,42 @@
+---
+source: tests/json_contract_snapshots.rs
+expression: value
+---
+{
+  "contradictionClusters": [
+    {
+      "clusterId": "contradictions.release-readiness",
+      "contradictionDensity": 0.33,
+      "exampleMemoryIds": [
+        "mem_old_release_rule",
+        "mem_new_release_rule"
+      ],
+      "memoryCount": 4
+    }
+  ],
+  "degraded": [],
+  "kTruss": {
+    "maxK": 5,
+    "supportSubgraphMemoryCount": 18,
+    "topMembers": [
+      {
+        "k": 5,
+        "memoryId": "mem_release_policy",
+        "triangleSupport": 9
+      },
+      {
+        "k": 4,
+        "memoryId": "mem_remote_required",
+        "triangleSupport": 6
+      }
+    ]
+  },
+  "schema": "ee.health.structural.v1",
+  "snapshotVersion": 42,
+  "summary": {
+    "contradictionClusterCount": 1,
+    "kTrussMaxK": 5,
+    "recommendedCommand": "ee curate candidates --workspace . --json",
+    "status": "degraded_recoverable"
+  }
+}

@@ -169,6 +169,10 @@ pub enum GraphError {
         operation: &'static str,
         source: String,
     },
+    AlgorithmCancelled {
+        algorithm: String,
+        reason: String,
+    },
     AlgorithmTimeout {
         algorithm: String,
         timeout_ms: u64,
@@ -226,6 +230,7 @@ impl GraphError {
             Self::Storage { .. } => "graph_storage",
             Self::Json { .. } => "graph_json",
             Self::GraphEngine { .. } => "graph_engine",
+            Self::AlgorithmCancelled { .. } => "graph_algorithm_cancelled",
             Self::AlgorithmTimeout { .. } => "graph_algorithm_timeout",
             Self::NumericOverflow { .. } => "graph_numeric_overflow",
             Self::SnapshotLockHeld { .. } => "graph_snapshot_lock_held",
@@ -244,6 +249,9 @@ impl GraphError {
             }
             Self::GraphEngine { .. } => {
                 "Validate memory link rows and rebuild the graph projection."
+            }
+            Self::AlgorithmCancelled { .. } => {
+                "Retry the graph operation after the parent request is active."
             }
             Self::AlgorithmTimeout { .. } => {
                 "Run the graph operation in background mode or reduce the graph input size."
@@ -269,6 +277,9 @@ impl fmt::Display for GraphError {
             }
             Self::GraphEngine { operation, source } => {
                 write!(f, "graph {operation} failed: {source}")
+            }
+            Self::AlgorithmCancelled { algorithm, reason } => {
+                write!(f, "graph algorithm {algorithm} was cancelled: {reason}")
             }
             Self::AlgorithmTimeout {
                 algorithm,
@@ -309,6 +320,7 @@ impl Error for GraphError {
             Self::Storage { source, .. } => Some(source.as_ref()),
             Self::Json { source, .. } => Some(source.as_ref()),
             Self::GraphEngine { .. }
+            | Self::AlgorithmCancelled { .. }
             | Self::AlgorithmTimeout { .. }
             | Self::NumericOverflow { .. }
             | Self::SnapshotLockHeld { .. }
@@ -1799,8 +1811,10 @@ pub fn compute_pagerank_with_policy(
     projection: &MemoryGraphProjection,
     policy: algorithms::PprPolicy,
 ) -> GraphResult<PageRankResult> {
+    let cx = algorithms::current_or_testing_cx();
     let graph = projection.graph.clone();
     algorithms::run_with_budget(
+        &cx,
         "pagerank",
         algorithms::DEFAULT_BACKGROUND_BUDGET,
         move || algorithms::run_pagerank_with_policy(&graph, policy),
@@ -1808,9 +1822,17 @@ pub fn compute_pagerank_with_policy(
 }
 
 /// Compute betweenness centrality on a memory graph projection.
-#[must_use]
-pub fn compute_betweenness(projection: &MemoryGraphProjection) -> BetweennessCentralityResult {
-    betweenness_centrality_directed(&projection.graph)
+pub fn compute_betweenness(
+    projection: &MemoryGraphProjection,
+) -> GraphResult<BetweennessCentralityResult> {
+    let cx = algorithms::current_or_testing_cx();
+    let graph = projection.graph.clone();
+    algorithms::run_with_budget(
+        &cx,
+        "betweenness_centrality",
+        algorithms::DEFAULT_BACKGROUND_BUDGET,
+        move || betweenness_centrality_directed(&graph),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1906,6 +1928,13 @@ pub struct GraphRefreshJobReport {
     pub centrality: CentralityRefreshReport,
     pub workspace_id: String,
     pub snapshot: Option<GraphRefreshSnapshot>,
+}
+
+/// Report from refreshing one or more graph snapshots.
+#[derive(Clone, Debug)]
+pub struct GraphSnapshotRefreshBatchReport {
+    pub workspace_id: String,
+    pub reports: Vec<(GraphSnapshotType, GraphRefreshJobReport)>,
 }
 
 impl CentralityRefreshReport {
@@ -2086,6 +2115,52 @@ impl GraphRefreshJobReport {
     }
 }
 
+impl GraphSnapshotRefreshBatchReport {
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        self.reports
+            .iter()
+            .map(|(graph_type, report)| {
+                format!("Graph: {}\n{}", graph_type.as_str(), report.human_summary())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[must_use]
+    pub fn toon_output(&self) -> String {
+        self.reports
+            .iter()
+            .map(|(graph_type, report)| {
+                format!(
+                    "GRAPH_SNAPSHOT_REFRESH|{}|{}",
+                    graph_type.as_str(),
+                    report.toon_output()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "command": "graph snapshot refresh",
+            "workspaceId": self.workspace_id,
+            "reports": self.reports.iter().map(|(graph_type, report)| {
+                let mut data = report.data_json();
+                if let Some(object) = data.as_object_mut() {
+                    object.insert(
+                        "graphType".to_owned(),
+                        serde_json::Value::String(graph_type.as_str().to_owned()),
+                    );
+                }
+                data
+            }).collect::<Vec<_>>(),
+        })
+    }
+}
+
 fn score_json(value: f64) -> serde_json::Value {
     let rounded = (value * 10_000.0).round() / 10_000.0;
     serde_json::Number::from_f64(rounded).map_or(serde_json::Value::Null, serde_json::Value::Number)
@@ -2113,12 +2188,121 @@ pub fn refresh_graph_snapshot(
     }
 }
 
+/// Refresh a specific typed graph snapshot.
+///
+/// `memory_links` preserves the existing centrality-refresh behavior. Other
+/// graph types persist deterministic topology snapshots built from their
+/// source-of-truth tables.
+pub fn refresh_graph_snapshot_by_type(
+    conn: &DbConnection,
+    workspace_id: &str,
+    graph_type: GraphSnapshotType,
+    options: &CentralityRefreshOptions,
+) -> GraphResult<GraphRefreshJobReport> {
+    if graph_type == GraphSnapshotType::MemoryLinks {
+        return refresh_graph_snapshot(conn, workspace_id, options);
+    }
+    refresh_typed_graph_snapshot(conn, workspace_id, graph_type, options)
+}
+
+fn refresh_typed_graph_snapshot(
+    conn: &DbConnection,
+    workspace_id: &str,
+    graph_type: GraphSnapshotType,
+    options: &CentralityRefreshOptions,
+) -> GraphResult<GraphRefreshJobReport> {
+    if options.dry_run {
+        return refresh_typed_graph_snapshot_with_owner(
+            conn,
+            workspace_id,
+            graph_type,
+            options,
+            None,
+        );
+    }
+
+    let write_owner = acquire_graph_snapshot_write_owner(conn, workspace_id, graph_type)?;
+    refresh_typed_graph_snapshot_with_owner(
+        conn,
+        workspace_id,
+        graph_type,
+        options,
+        Some(&write_owner),
+    )
+}
+
+fn refresh_typed_graph_snapshot_with_owner(
+    conn: &DbConnection,
+    workspace_id: &str,
+    graph_type: GraphSnapshotType,
+    options: &CentralityRefreshOptions,
+    write_owner: Option<&GraphSnapshotWriteOwner<'_>>,
+) -> GraphResult<GraphRefreshJobReport> {
+    use std::time::Instant;
+
+    let total_start = Instant::now();
+    let projection_start = Instant::now();
+    let topology = typed_graph_snapshot_topology(conn, workspace_id, graph_type)?;
+    let projection_ms = projection_start.elapsed().as_secs_f64() * 1000.0;
+    let status = if options.dry_run {
+        CentralityRefreshStatus::DryRun
+    } else if topology.node_count == 0 {
+        CentralityRefreshStatus::EmptyGraph
+    } else {
+        CentralityRefreshStatus::Refreshed
+    };
+    let centrality = CentralityRefreshReport {
+        version: env!("CARGO_PKG_VERSION"),
+        status,
+        dry_run: options.dry_run,
+        node_count: topology.node_count,
+        edge_count: topology.edge_count,
+        projection_ms,
+        pagerank_ms: 0.0,
+        betweenness_ms: 0.0,
+        total_ms: total_start.elapsed().as_secs_f64() * 1000.0,
+        scores: Vec::new(),
+        top_pagerank: Vec::new(),
+        top_betweenness: Vec::new(),
+    };
+    let mut report = GraphRefreshJobReport {
+        centrality,
+        workspace_id: workspace_id.to_owned(),
+        snapshot: None,
+    };
+
+    if report.centrality.status == CentralityRefreshStatus::Refreshed {
+        let persistence = GraphSnapshotPersistenceInput {
+            graph_type,
+            node_count: u32::try_from(topology.node_count)
+                .map_err(|_| GraphError::numeric_overflow("node count", topology.node_count))?,
+            edge_count: u32::try_from(topology.edge_count)
+                .map_err(|_| GraphError::numeric_overflow("edge count", topology.edge_count))?,
+            content_hash: graph_snapshot_content_hash(graph_type, &topology.metrics_json),
+            metrics_json: topology.metrics_json,
+            source_generation: topology.source_generation,
+        };
+        let write_owner = write_owner.ok_or_else(|| GraphError::GraphEngine {
+            operation: "persist typed graph snapshot",
+            source: "missing graph snapshot write owner".to_string(),
+        })?;
+        report.snapshot = Some(with_graph_snapshot_transaction(
+            conn,
+            "typed graph snapshot transaction",
+            || persist_graph_snapshot_in_transaction(conn, workspace_id, persistence, write_owner),
+        )?);
+    }
+
+    Ok(report)
+}
+
 fn refresh_graph_snapshot_locked(
     conn: &DbConnection,
     workspace_id: &str,
     options: &CentralityRefreshOptions,
 ) -> GraphResult<GraphRefreshJobReport> {
-    let write_owner = acquire_graph_snapshot_write_owner(conn, workspace_id)?;
+    let write_owner =
+        acquire_graph_snapshot_write_owner(conn, workspace_id, GraphSnapshotType::MemoryLinks)?;
 
     with_graph_snapshot_transaction(conn, "graph snapshot refresh transaction", || {
         refresh_graph_snapshot_in_transaction(conn, workspace_id, options, &write_owner)
@@ -2269,7 +2453,8 @@ fn persist_graph_snapshot(
     workspace_id: &str,
     input: GraphSnapshotPersistenceInput,
 ) -> GraphResult<GraphRefreshSnapshot> {
-    let write_owner = acquire_graph_snapshot_write_owner(conn, workspace_id)?;
+    let graph_type = input.graph_type;
+    let write_owner = acquire_graph_snapshot_write_owner(conn, workspace_id, graph_type)?;
 
     with_graph_snapshot_transaction(conn, "graph snapshot transaction", || {
         persist_graph_snapshot_in_transaction(conn, workspace_id, input, &write_owner)
@@ -2303,6 +2488,7 @@ fn with_graph_snapshot_transaction<T>(
 fn acquire_graph_snapshot_write_owner<'a>(
     conn: &'a DbConnection,
     workspace_id: &str,
+    graph_type: GraphSnapshotType,
 ) -> GraphResult<GraphSnapshotWriteOwner<'a>> {
     if let Err(error) = conn.ensure_advisory_locks_table() {
         return Err(GraphError::storage(
@@ -2311,7 +2497,7 @@ fn acquire_graph_snapshot_write_owner<'a>(
         ));
     }
 
-    let lock_id = AdvisoryLockId::workspace(workspace_id);
+    let lock_id = graph_snapshot_write_lock_id(workspace_id, graph_type);
     let holder_id = generate_graph_snapshot_holder_id();
     let mut last_conflict = None;
     let mut last_error = None;
@@ -2362,6 +2548,16 @@ fn acquire_graph_snapshot_write_owner<'a>(
     Err(GraphError::SnapshotLockUnavailable {
         workspace_id: workspace_id.to_owned(),
     })
+}
+
+fn graph_snapshot_write_lock_id(
+    workspace_id: &str,
+    graph_type: GraphSnapshotType,
+) -> AdvisoryLockId {
+    AdvisoryLockId::new(
+        "graph_snapshot",
+        format!("{workspace_id}:{}", graph_type.as_str()),
+    )
 }
 
 fn graph_snapshot_write_lock_backoff(attempt: usize) -> Duration {
@@ -2492,7 +2688,7 @@ fn refresh_centrality_from_links(
     let pagerank_ms = pagerank_start.elapsed().as_secs_f64() * 1000.0;
 
     let betweenness_start = Instant::now();
-    let betweenness = compute_betweenness(&projection);
+    let betweenness = compute_betweenness(&projection)?;
     let betweenness_ms = betweenness_start.elapsed().as_secs_f64() * 1000.0;
 
     let mut scores = merge_centrality_scores(&pagerank.scores, &betweenness.scores);
@@ -2629,6 +2825,135 @@ fn graph_snapshot_metrics_json(
 
     serde_json::to_string(&metrics)
         .map_err(|error| GraphError::json("serialize graph snapshot metrics", error))
+}
+
+struct TypedGraphSnapshotTopology {
+    node_count: usize,
+    edge_count: usize,
+    source_generation: u32,
+    metrics_json: String,
+}
+
+fn typed_graph_snapshot_topology(
+    conn: &DbConnection,
+    workspace_id: &str,
+    graph_type: GraphSnapshotType,
+) -> GraphResult<TypedGraphSnapshotTopology> {
+    match graph_type {
+        GraphSnapshotType::CausalEvidence => {
+            let rows = causal_evidence_graph_rows(conn, workspace_id)?;
+            let graph = build_causal_evidence_graph_from_rows(&rows)?;
+            typed_directed_graph_snapshot_topology(graph_type, &graph, rows.len())
+        }
+        GraphSnapshotType::RevisionDag => {
+            let memory_rows = revision_dag_memory_rows(conn, workspace_id)?;
+            let derived_from_rows = revision_dag_derived_from_rows(conn, workspace_id)?;
+            let graph = build_revision_dag_from_rows(&memory_rows, &derived_from_rows)?;
+            typed_directed_graph_snapshot_topology(
+                graph_type,
+                &graph,
+                memory_rows.len().saturating_add(derived_from_rows.len()),
+            )
+        }
+        GraphSnapshotType::RuleProvenance => {
+            let rows = rule_provenance_rows(conn, workspace_id)?;
+            let graph = build_rule_provenance_bipartite_from_rows(&rows)?;
+            typed_undirected_graph_snapshot_topology(graph_type, &graph, rows.len())
+        }
+        GraphSnapshotType::ContradictionSubgraph => {
+            let rows = contradiction_subgraph_rows(conn, workspace_id)?;
+            let graph = build_contradiction_subgraph_from_rows(&rows)?;
+            typed_directed_graph_snapshot_topology(graph_type, &graph, rows.len())
+        }
+        GraphSnapshotType::MemoryLinks => unreachable!("memory_links uses centrality refresh"),
+        other => Err(GraphError::GraphEngine {
+            operation: "refresh typed graph snapshot",
+            source: format!("unsupported graph snapshot type {}", other.as_str()),
+        }),
+    }
+}
+
+fn typed_directed_graph_snapshot_topology(
+    graph_type: GraphSnapshotType,
+    graph: &DiGraph,
+    source_row_count: usize,
+) -> GraphResult<TypedGraphSnapshotTopology> {
+    typed_graph_snapshot_topology_from_parts(
+        graph_type,
+        graph.nodes_ordered().into_iter().collect(),
+        graph.edges_ordered_borrowed().into_iter().collect(),
+        source_row_count,
+    )
+}
+
+fn typed_undirected_graph_snapshot_topology(
+    graph_type: GraphSnapshotType,
+    graph: &Graph,
+    source_row_count: usize,
+) -> GraphResult<TypedGraphSnapshotTopology> {
+    typed_graph_snapshot_topology_from_parts(
+        graph_type,
+        graph.nodes_ordered().into_iter().collect(),
+        graph.edges_ordered_borrowed().into_iter().collect(),
+        source_row_count,
+    )
+}
+
+fn typed_graph_snapshot_topology_from_parts(
+    graph_type: GraphSnapshotType,
+    nodes_ordered: Vec<&str>,
+    edges_ordered: Vec<(&str, &str, &AttrMap)>,
+    source_row_count: usize,
+) -> GraphResult<TypedGraphSnapshotTopology> {
+    let nodes = nodes_ordered
+        .iter()
+        .map(|node| {
+            serde_json::json!({
+                "id": node,
+                "label": node,
+            })
+        })
+        .collect::<Vec<_>>();
+    let edges = edges_ordered
+        .iter()
+        .enumerate()
+        .map(|(index, (source, target, attrs))| {
+            serde_json::json!({
+                "id": format!("{}:{index}", graph_type.as_str()),
+                "source": source,
+                "target": target,
+                "attrs": attrs
+                    .iter()
+                    .map(|(key, value)| (key.clone(), cgse_value_to_json(value)))
+                    .collect::<BTreeMap<_, _>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let metrics = serde_json::json!({
+        "schema": "ee.graph.snapshot.metrics.v1",
+        "graphType": graph_type.as_str(),
+        "graph": {
+            "nodes": nodes.clone(),
+            "edges": edges.clone(),
+        },
+        "nodes": nodes,
+        "edges": edges,
+        "centrality": {
+            "status": "not_applicable",
+            "topPagerank": [],
+            "topBetweenness": [],
+        },
+    });
+    let metrics_json = serde_json::to_string(&metrics)
+        .map_err(|error| GraphError::json("serialize typed graph snapshot metrics", error))?;
+    let source_generation = u32::try_from(source_row_count)
+        .map_err(|_| GraphError::numeric_overflow("source row count", source_row_count))?;
+    Ok(TypedGraphSnapshotTopology {
+        node_count: nodes_ordered.len(),
+        edge_count: edges_ordered.len(),
+        source_generation,
+        metrics_json,
+    })
 }
 
 fn graph_snapshot_content_hash(graph_type: GraphSnapshotType, metrics_json: &str) -> String {
@@ -3038,24 +3363,28 @@ fn unavailable_graph_feature_report(
     options: &GraphFeatureEnrichmentOptions,
     source: GraphFeatureEnrichmentSource,
 ) -> GraphFeatureEnrichmentReport {
-    let (code, message, repair) = match source_status {
+    let (code, severity, message, repair) = match source_status {
         CentralityRefreshStatus::GraphFeatureDisabled => (
             "graph_feature_disabled",
+            "medium",
             "Graph feature enrichment is unavailable because the graph feature is disabled.",
             "Rebuild with `--features graph` or use non-graph retrieval features.",
         ),
         CentralityRefreshStatus::DryRun => (
             "centrality_dry_run",
+            "low",
             "Graph centrality refresh was a dry run and did not produce scores.",
             "Run `ee graph centrality-refresh` without `--dry-run` before enrichment.",
         ),
         CentralityRefreshStatus::EmptyGraph => (
             "empty_graph",
+            "low",
             "Graph feature enrichment has no memory links to score.",
             "Create memory links or run autolink maintenance before enrichment.",
         ),
         CentralityRefreshStatus::Refreshed => (
             "centrality_scores_empty",
+            "low",
             "Graph centrality refresh produced no scores.",
             "Rebuild graph centrality after memory links are present.",
         ),
@@ -3073,7 +3402,7 @@ fn unavailable_graph_feature_report(
         features: Vec::new(),
         degraded: vec![GraphFeatureEnrichmentDegradation {
             code,
-            severity: "low",
+            severity,
             message: message.to_owned(),
             repair: repair.to_owned(),
         }],
@@ -3128,7 +3457,7 @@ fn snapshot_graph_feature_unavailable_report(
     }
 }
 
-fn graph_snapshot_centrality_report(
+pub fn graph_snapshot_centrality_report(
     snapshot: &StoredGraphSnapshot,
 ) -> GraphResult<CentralityRefreshReport> {
     let value: serde_json::Value = serde_json::from_str(&snapshot.metrics_json)
@@ -4434,7 +4763,7 @@ fn compare_neighborhood_edges(
 #[cfg(test)]
 mod tests {
     use crate::db::{
-        AdvisoryLockId, CreateCausalEvidenceInput, CreateGraphSnapshotInput, CreateMemoryInput,
+        CreateCausalEvidenceInput, CreateGraphSnapshotInput, CreateMemoryInput,
         CreateMemoryLinkInput, CreateProceduralRuleInput, CreateWorkspaceInput, DbConnection,
         DbError, DbOperation, GraphSnapshotStatus, GraphSnapshotType, MemoryLinkRelation,
         MemoryLinkSource, StoredGraphSnapshot,
@@ -5128,6 +5457,76 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn graph_algorithm_params_hash_is_stable_across_map_insertion_orders() -> TestResult {
+        let mut hash_map_params = std::collections::HashMap::new();
+        hash_map_params.insert(
+            "weights".to_string(),
+            serde_json::json!({"beta": 2, "alpha": 1}),
+        );
+        hash_map_params.insert("damping".to_string(), serde_json::json!(0.85));
+        hash_map_params.insert("includeDangling".to_string(), serde_json::json!(true));
+        hash_map_params.insert("seeds".to_string(), serde_json::json!(["mem_b", "mem_a"]));
+        let hash_map_value = serde_json::Value::Object(hash_map_params.into_iter().collect());
+
+        let jumbled_value = serde_json::json!({
+            "seeds": ["mem_b", "mem_a"],
+            "includeDangling": true,
+            "weights": {
+                "beta": 2,
+                "alpha": 1
+            },
+            "damping": 0.85
+        });
+
+        let mut sorted_params = std::collections::BTreeMap::new();
+        sorted_params.insert("damping".to_string(), serde_json::json!(0.85));
+        sorted_params.insert("includeDangling".to_string(), serde_json::json!(true));
+        sorted_params.insert("seeds".to_string(), serde_json::json!(["mem_b", "mem_a"]));
+        sorted_params.insert(
+            "weights".to_string(),
+            serde_json::json!({"alpha": 1, "beta": 2}),
+        );
+        let sorted_value = serde_json::Value::Object(sorted_params.into_iter().collect());
+
+        let hash_map_hash = graph_result(super::graph_algorithm_params_hash(
+            "pagerank",
+            "blake3:snapshot-cachehash",
+            &hash_map_value,
+        ))?;
+        let jumbled_hash = graph_result(super::graph_algorithm_params_hash(
+            "pagerank",
+            "blake3:snapshot-cachehash",
+            &jumbled_value,
+        ))?;
+        let sorted_hash = graph_result(super::graph_algorithm_params_hash(
+            "pagerank",
+            "blake3:snapshot-cachehash",
+            &sorted_value,
+        ))?;
+        let reordered_seed_hash = graph_result(super::graph_algorithm_params_hash(
+            "pagerank",
+            "blake3:snapshot-cachehash",
+            &serde_json::json!({
+                "damping": 0.85,
+                "includeDangling": true,
+                "seeds": ["mem_a", "mem_b"],
+                "weights": {
+                    "alpha": 1,
+                    "beta": 2
+                }
+            }),
+        ))?;
+
+        assert_eq!(hash_map_hash, jumbled_hash);
+        assert_eq!(jumbled_hash, sorted_hash);
+        assert_ne!(
+            sorted_hash, reordered_seed_hash,
+            "vector order remains part of the cache key for ordered params like seed sets"
+        );
+        Ok(())
+    }
+
     fn open_projection_db() -> Result<DbConnection, String> {
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
@@ -5320,6 +5719,70 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())
+    }
+
+    fn seed_typed_graph_snapshot_db(
+        graph_type: GraphSnapshotType,
+    ) -> Result<(DbConnection, usize, usize), String> {
+        match graph_type {
+            GraphSnapshotType::CausalEvidence => {
+                let connection = open_projection_db()?;
+                insert_causal_evidence(
+                    &connection,
+                    "cev_101",
+                    MEMORY_A,
+                    MEMORY_B,
+                    0.75,
+                    vec!["agent-mail://typed-refresh/causal".to_string()],
+                    "manual",
+                )?;
+                Ok((connection, 2, 1))
+            }
+            GraphSnapshotType::RevisionDag => {
+                let connection = open_revision_dag_db()?;
+                insert_revision_memory(
+                    &connection,
+                    MEMORY_A,
+                    "logical_snapshot_rule",
+                    "typed snapshot first revision",
+                    "2026-05-14T01:00:00Z",
+                )?;
+                insert_revision_memory(
+                    &connection,
+                    MEMORY_B,
+                    "logical_snapshot_rule",
+                    "typed snapshot second revision",
+                    "2026-05-14T02:00:00Z",
+                )?;
+                Ok((connection, 2, 1))
+            }
+            GraphSnapshotType::RuleProvenance => {
+                let connection = open_projection_db()?;
+                insert_test_rule(
+                    &connection,
+                    RULE_A,
+                    WORKSPACE_ID,
+                    vec![MEMORY_A.to_string(), MEMORY_B.to_string()],
+                )?;
+                Ok((connection, 3, 2))
+            }
+            GraphSnapshotType::ContradictionSubgraph => {
+                let connection = open_projection_db()?;
+                insert_link_with_relation(
+                    &connection,
+                    &numbered_link_id(990),
+                    MEMORY_A,
+                    MEMORY_B,
+                    MemoryLinkRelation::Contradicts,
+                    true,
+                )?;
+                Ok((connection, 2, 1))
+            }
+            other => Err(format!(
+                "unsupported typed snapshot fixture graph type: {}",
+                other.as_str()
+            )),
+        }
     }
 
     fn assert_rule_provenance_bipartite(graph: &super::Graph) -> TestResult {
@@ -6007,7 +6470,7 @@ mod tests {
             &super::ProjectionOptions::default(),
         ))?;
         let pagerank = graph_result(super::compute_pagerank(&projection))?;
-        let betweenness = super::compute_betweenness(&projection);
+        let betweenness = graph_result(super::compute_betweenness(&projection))?;
 
         assert_eq!(pagerank.scores.len(), projection.node_count);
         assert_eq!(betweenness.scores.len(), projection.node_count);
@@ -6358,6 +6821,33 @@ mod tests {
         );
         assert_eq!(report.degraded.len(), 1);
         assert_eq!(report.degraded[0].code, "centrality_dry_run");
+        assert!(report.features.is_empty());
+    }
+
+    #[test]
+    fn graph_feature_enrichment_disabled_matches_failure_mode_contract() {
+        let centrality = centrality_report(
+            super::CentralityRefreshStatus::GraphFeatureDisabled,
+            Vec::new(),
+        );
+
+        let report = super::enrich_graph_features(
+            &centrality,
+            &super::GraphFeatureEnrichmentOptions::default(),
+        );
+
+        assert_eq!(
+            report.status,
+            super::GraphFeatureEnrichmentStatus::ScoresUnavailable
+        );
+        assert_eq!(
+            report.source_status,
+            super::CentralityRefreshStatus::GraphFeatureDisabled
+        );
+        assert_eq!(report.degraded.len(), 1);
+        assert_eq!(report.degraded[0].code, "graph_feature_disabled");
+        assert_eq!(report.degraded[0].severity, "medium");
+        assert!(report.degraded[0].repair.contains("--features graph"));
         assert!(report.features.is_empty());
     }
 
@@ -7408,7 +7898,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
         connection
             .acquire_advisory_lock(
-                &AdvisoryLockId::workspace(WORKSPACE_ID),
+                &super::graph_snapshot_write_lock_id(WORKSPACE_ID, GraphSnapshotType::MemoryLinks),
                 "test-holder",
                 Some(super::GRAPH_SNAPSHOT_WRITE_LOCK_TTL_SECS),
                 Some("test graph snapshot lock"),
@@ -7443,14 +7933,125 @@ mod tests {
         connection.close().map_err(|error| error.to_string())
     }
 
+    #[cfg(feature = "graph")]
+    #[test]
+    fn typed_graph_snapshot_refresh_acquires_write_lock_before_source_read() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection
+            .ensure_advisory_locks_table()
+            .map_err(|error| error.to_string())?;
+        connection
+            .acquire_advisory_lock(
+                &super::graph_snapshot_write_lock_id(
+                    WORKSPACE_ID,
+                    GraphSnapshotType::CausalEvidence,
+                ),
+                "typed-test-holder",
+                Some(super::GRAPH_SNAPSHOT_WRITE_LOCK_TTL_SECS),
+                Some("test typed graph snapshot lock"),
+            )
+            .map_err(|error| error.to_string())?;
+
+        let error = match super::refresh_graph_snapshot_by_type(
+            &connection,
+            WORKSPACE_ID,
+            GraphSnapshotType::CausalEvidence,
+            &super::CentralityRefreshOptions::default(),
+        ) {
+            Ok(_) => return Err("typed refresh should stop before reading source rows".to_string()),
+            Err(error) => error,
+        };
+
+        match error {
+            super::GraphError::SnapshotLockHeld {
+                holder_id,
+                acquired_at,
+                ..
+            } => {
+                assert_eq!(holder_id, "typed-test-holder");
+                assert!(!acquired_at.is_empty());
+            }
+            other => {
+                return Err(format!(
+                    "expected typed graph snapshot lock acquisition before source read, got {other}"
+                ));
+            }
+        }
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn typed_graph_snapshot_refresh_persists_stable_hashes_across_refreshes() -> TestResult {
+        for graph_type in [
+            GraphSnapshotType::CausalEvidence,
+            GraphSnapshotType::RevisionDag,
+            GraphSnapshotType::RuleProvenance,
+            GraphSnapshotType::ContradictionSubgraph,
+        ] {
+            let (connection, expected_nodes, expected_edges) =
+                seed_typed_graph_snapshot_db(graph_type)?;
+            let mut content_hashes = Vec::new();
+
+            for expected_version in 1..=3 {
+                let report = graph_result(super::refresh_graph_snapshot_by_type(
+                    &connection,
+                    WORKSPACE_ID,
+                    graph_type,
+                    &super::CentralityRefreshOptions::default(),
+                ))?;
+                assert_eq!(
+                    report.centrality.status,
+                    super::CentralityRefreshStatus::Refreshed
+                );
+                assert_eq!(report.centrality.node_count, expected_nodes);
+                assert_eq!(report.centrality.edge_count, expected_edges);
+
+                let snapshot = report
+                    .snapshot
+                    .ok_or_else(|| format!("{} refresh should persist a snapshot", graph_type))?;
+                assert_eq!(snapshot.graph_type, graph_type);
+                assert_eq!(snapshot.snapshot_version, expected_version);
+                assert_eq!(snapshot.status, GraphSnapshotStatus::Valid);
+                assert!(snapshot.content_hash.starts_with("blake3:"));
+                content_hashes.push(snapshot.content_hash);
+            }
+
+            assert_eq!(
+                content_hashes[0], content_hashes[1],
+                "{graph_type} content hash changed on second unchanged refresh"
+            );
+            assert_eq!(
+                content_hashes[1], content_hashes[2],
+                "{graph_type} content hash changed on third unchanged refresh"
+            );
+
+            let latest = connection
+                .get_latest_graph_snapshot(WORKSPACE_ID, graph_type)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("latest {graph_type} snapshot should exist"))?;
+            assert_eq!(latest.snapshot_version, 3);
+            assert_eq!(latest.status, GraphSnapshotStatus::Valid);
+            assert_eq!(latest.content_hash, content_hashes[0]);
+            assert_eq!(latest.node_count as usize, expected_nodes);
+            assert_eq!(latest.edge_count as usize, expected_edges);
+
+            connection.close().map_err(|error| error.to_string())?;
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn graph_snapshot_write_owner_uses_expiring_lock() -> TestResult {
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
-        let lock_id = AdvisoryLockId::workspace(WORKSPACE_ID);
+        let lock_id =
+            super::graph_snapshot_write_lock_id(WORKSPACE_ID, GraphSnapshotType::MemoryLinks);
 
         let owner = graph_result(super::acquire_graph_snapshot_write_owner(
             &connection,
             WORKSPACE_ID,
+            GraphSnapshotType::MemoryLinks,
         ))?;
         let held = connection
             .is_lock_held(&lock_id)
@@ -7472,6 +8073,83 @@ mod tests {
                 .map_err(|error| error.to_string())?
                 .is_none(),
             "graph snapshot lock should release normally on Drop"
+        );
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn graph_snapshot_write_owner_scopes_locks_by_graph_type() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        let memory_links_lock =
+            super::graph_snapshot_write_lock_id(WORKSPACE_ID, GraphSnapshotType::MemoryLinks);
+        let causal_evidence_lock =
+            super::graph_snapshot_write_lock_id(WORKSPACE_ID, GraphSnapshotType::CausalEvidence);
+
+        let memory_links_owner = graph_result(super::acquire_graph_snapshot_write_owner(
+            &connection,
+            WORKSPACE_ID,
+            GraphSnapshotType::MemoryLinks,
+        ))?;
+        let causal_evidence_owner = graph_result(super::acquire_graph_snapshot_write_owner(
+            &connection,
+            WORKSPACE_ID,
+            GraphSnapshotType::CausalEvidence,
+        ))?;
+
+        let memory_links_held = connection
+            .is_lock_held(&memory_links_lock)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory_links graph snapshot lock should be held".to_owned())?;
+        let causal_evidence_held = connection
+            .is_lock_held(&causal_evidence_lock)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "causal_evidence graph snapshot lock should be held".to_owned())?;
+
+        assert_eq!(memory_links_held.holder_id, memory_links_owner.holder_id);
+        assert_eq!(
+            causal_evidence_held.holder_id,
+            causal_evidence_owner.holder_id
+        );
+        assert_ne!(
+            memory_links_lock.canonical_key(),
+            causal_evidence_lock.canonical_key()
+        );
+
+        match super::acquire_graph_snapshot_write_owner(
+            &connection,
+            WORKSPACE_ID,
+            GraphSnapshotType::MemoryLinks,
+        ) {
+            Err(super::GraphError::SnapshotLockHeld { holder_id, .. }) => {
+                assert_eq!(holder_id, memory_links_owner.holder_id);
+            }
+            Ok(_) => {
+                return Err(
+                    "same graph type should remain serialized while its lock is held".to_owned(),
+                );
+            }
+            Err(error) => {
+                return Err(format!("expected same-type lock conflict, got {error}"));
+            }
+        }
+
+        drop(causal_evidence_owner);
+        drop(memory_links_owner);
+
+        assert!(
+            connection
+                .is_lock_held(&memory_links_lock)
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            "memory_links graph snapshot lock should release on Drop"
+        );
+        assert!(
+            connection
+                .is_lock_held(&causal_evidence_lock)
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            "causal_evidence graph snapshot lock should release on Drop"
         );
 
         connection.close().map_err(|error| error.to_string())
@@ -7574,7 +8252,7 @@ mod tests {
     }
 
     fn run_concurrent_graph_snapshot_writers(writer_count: usize) -> TestResult {
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let temp = graph_snapshot_tempdir("ee-graph-snapshot-linearizability-")?;
         let database_path = temp.path().join("ee.db");
         create_snapshot_file_database(&database_path)?;
 
@@ -7661,7 +8339,8 @@ mod tests {
             expected_generations.map_err(|error| error.to_string())?
         );
 
-        let workspace_lock = AdvisoryLockId::workspace(WORKSPACE_ID);
+        let workspace_lock =
+            super::graph_snapshot_write_lock_id(WORKSPACE_ID, GraphSnapshotType::MemoryLinks);
         assert!(
             connection
                 .is_lock_held(&workspace_lock)
@@ -7671,6 +8350,18 @@ mod tests {
         );
 
         connection.close().map_err(|error| error.to_string())
+    }
+
+    fn graph_snapshot_tempdir(prefix: &str) -> Result<tempfile::TempDir, String> {
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir_in("/tmp")
+            .or_else(|_| {
+                tempfile::Builder::new()
+                    .prefix(prefix)
+                    .tempdir_in(std::env::current_dir()?)
+            })
+            .map_err(|error| error.to_string())
     }
 
     #[cfg(feature = "graph")]

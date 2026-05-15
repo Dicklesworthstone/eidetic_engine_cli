@@ -19,6 +19,43 @@
     "standard": ["schema", "snapshotVersion", "skyline", "summary", "degraded"],
     "full": ["*"]
   },
+  "examples": [
+    {
+      "schema": "ee.status.skyline.v1",
+      "snapshotVersion": 42,
+      "skyline": [
+        {
+          "communityId": "release-readiness",
+          "onionLayer": 2,
+          "memoryCount": 12,
+          "meanTrust": 0.91,
+          "meanAgeDays": 3.5,
+          "structuralHealth": "strong"
+        },
+        {
+          "communityId": "rch-topology",
+          "onionLayer": 4,
+          "memoryCount": 7,
+          "meanTrust": 0.84,
+          "meanAgeDays": 1.2,
+          "structuralHealth": "watch"
+        }
+      ],
+      "summary": {
+        "communityCount": 2,
+        "loadBearingMemoryCount": 3,
+        "staleCommunityCount": 0,
+        "highestRiskCommunityId": "rch-topology"
+      },
+      "degraded": [
+        {
+          "code": "graph_skyline_degenerate_communities",
+          "severity": "info",
+          "message": "Knowledge skyline communities are degenerate because fewer than three Louvain communities were found."
+        }
+      ]
+    }
+  ],
   "$defs": {
     "jsonObject": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
     "jsonValue": {

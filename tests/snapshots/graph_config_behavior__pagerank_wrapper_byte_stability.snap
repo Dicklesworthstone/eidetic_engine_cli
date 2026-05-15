@@ -1,0 +1,20 @@
+---
+source: tests/contracts/graph_config_behavior.rs
+expression: value
+---
+{
+  "schema": "ee.graph.config_behavior.v1",
+  "surface": "graph.pagerank.wrapper",
+  "policy": {
+    "alpha": 0.3
+  },
+  "direct": {
+    "memA": 271003,
+    "memB": 352303,
+    "memC": 376694,
+    "converged": true
+  },
+  "wrappedMatchesDirect": true,
+  "witnessAlgorithm": "pagerank_power_iteration",
+  "scoreCount": 3
+}

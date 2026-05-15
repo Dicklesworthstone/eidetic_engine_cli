@@ -1,0 +1,41 @@
+---
+source: tests/json_contract_snapshots.rs
+expression: value
+---
+{
+  "degraded": [],
+  "memoryId": "mem_release_failure",
+  "minCut": {
+    "cutMemoryIds": [
+      "mem_remote_check_blocked"
+    ],
+    "cutWeight": 0.31,
+    "sourceMemoryId": "mem_rch_topology_note",
+    "targetMemoryId": "mem_release_failure"
+  },
+  "paths": [
+    {
+      "edgeCount": 2,
+      "rank": 1,
+      "sourceMemoryId": "mem_rch_topology_note",
+      "steps": [
+        {
+          "contributionScore": 0.48,
+          "relation": "supports",
+          "source": "mem_rch_topology_note",
+          "target": "mem_remote_check_blocked"
+        },
+        {
+          "contributionScore": 0.39,
+          "relation": "caused",
+          "source": "mem_remote_check_blocked",
+          "target": "mem_release_failure"
+        }
+      ],
+      "targetMemoryId": "mem_release_failure",
+      "totalContribution": 0.87
+    }
+  ],
+  "schema": "ee.why.causal.v1",
+  "snapshotVersion": 42
+}

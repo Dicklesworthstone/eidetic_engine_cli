@@ -1,0 +1,30 @@
+{
+  "schema": "ee.pack.ppr.golden.v1",
+  "pprItemCount": 2,
+  "items": [
+    {
+      "combinedEqualsPpr": true,
+      "content": "PPR golden fixture structural reranking release neighbor memory.",
+      "pprScorePositive": true,
+      "scoreBreakdownKeys": [
+        "combinedScore",
+        "pprScore",
+        "textScore"
+      ],
+      "textScorePositive": true,
+      "whyMentionsPpr": true
+    },
+    {
+      "combinedEqualsPpr": true,
+      "content": "PPR golden fixture structural reranking release seed memory.",
+      "pprScorePositive": true,
+      "scoreBreakdownKeys": [
+        "combinedScore",
+        "pprScore",
+        "textScore"
+      ],
+      "textScorePositive": true,
+      "whyMentionsPpr": true
+    }
+  ]
+}

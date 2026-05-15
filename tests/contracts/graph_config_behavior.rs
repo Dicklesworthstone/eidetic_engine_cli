@@ -8,6 +8,7 @@ use ee::graph::algorithms::{
     PprPolicy, SamplingChoice, SamplingPolicy, run_pagerank_with_policy, run_with_sampling_policy,
 };
 use ee::graph::health::{ContradictionClusterPolicy, detect_contradiction_clusters_with_policy};
+use ee::graph::{MemoryGraphProjection, compute_pagerank_with_policy};
 use fnx_algorithms::PageRankResult;
 use fnx_classes::Graph;
 use fnx_classes::digraph::DiGraph;
@@ -125,6 +126,44 @@ alpha = 0.90
             "legacyJsonStable": true,
             "legacyDiffersFromDefault": legacy != default,
             "defaultDiffersFromStrong": default != strong,
+        }),
+    );
+    Ok(())
+}
+
+#[test]
+fn pagerank_budgeted_wrapper_is_byte_stable_with_direct_policy_output() -> TestResult {
+    let graph = build_pagerank_fixture()?;
+    let policy = PprPolicy::default();
+    let direct = run_pagerank_with_policy(&graph, policy);
+    let projection = MemoryGraphProjection {
+        graph,
+        node_count: 3,
+        edge_count: 2,
+        build_ms: 0.0,
+    };
+    let wrapped =
+        compute_pagerank_with_policy(&projection, policy).map_err(|error| error.to_string())?;
+
+    let direct_summary = pagerank_summary(&direct)?;
+    let wrapped_summary = pagerank_summary(&wrapped)?;
+    if json_bytes(&direct_summary)? != json_bytes(&wrapped_summary)? {
+        return Err("budgeted PageRank wrapper changed direct policy output".to_string());
+    }
+    if direct.witness != wrapped.witness {
+        return Err("budgeted PageRank wrapper changed direct policy witness".to_string());
+    }
+
+    assert_graph_config_snapshot(
+        "graph_config_behavior__pagerank_wrapper_byte_stability",
+        json!({
+            "schema": "ee.graph.config_behavior.v1",
+            "surface": "graph.pagerank.wrapper",
+            "policy": policy,
+            "direct": direct_summary,
+            "wrappedMatchesDirect": true,
+            "witnessAlgorithm": wrapped.witness.algorithm,
+            "scoreCount": wrapped.scores.len(),
         }),
     );
     Ok(())

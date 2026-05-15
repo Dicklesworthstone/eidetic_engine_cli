@@ -22,12 +22,13 @@
 
 use std::collections::BTreeMap;
 
+use asupersync::Cx;
 use fnx_algorithms::hits_centrality;
 use fnx_runtime::CgseValue;
 
 use crate::graph::Graph;
 use crate::graph::GraphResult;
-use crate::graph::algorithms::{DEFAULT_BACKGROUND_BUDGET, run_with_budget};
+use crate::graph::algorithms::{DEFAULT_BACKGROUND_BUDGET, current_or_testing_cx, run_with_budget};
 
 /// Node attribute key on the bipartite rule↔memory projection that
 /// tags each node with its partition (`rule` or `memory`). Mirrors the
@@ -59,8 +60,13 @@ pub struct BipartiteHits {
 /// built by `build_rule_provenance_bipartite_from_tables`, which tags
 /// every node it adds.
 pub fn compute_bipartite_hits(graph: &Graph) -> GraphResult<BipartiteHits> {
+    let cx = current_or_testing_cx();
+    compute_bipartite_hits_with_cx(&cx, graph)
+}
+
+pub fn compute_bipartite_hits_with_cx(cx: &Cx, graph: &Graph) -> GraphResult<BipartiteHits> {
     let graph = graph.clone();
-    run_with_budget("bipartite_hits", DEFAULT_BACKGROUND_BUDGET, move || {
+    run_with_budget(cx, "bipartite_hits", DEFAULT_BACKGROUND_BUDGET, move || {
         let result = hits_centrality(&graph);
         let mut authorities: BTreeMap<String, f64> = BTreeMap::new();
         let mut hubs: BTreeMap<String, f64> = BTreeMap::new();

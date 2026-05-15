@@ -1,10 +1,15 @@
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 
+use asupersync::Cx;
 use fnx_algorithms::{CentralityScore, ComplexityWitness, PageRankResult};
 use fnx_classes::digraph::DiGraph;
 
 use crate::db::DbConnection;
+use crate::graph::algorithms::{
+    AlgorithmResultCacheRun, AlgorithmResultCacheSpec, DEFAULT_FOREGROUND_BUDGET,
+    current_or_testing_cx, run_with_budget, run_with_cached_budget,
+};
 use crate::graph::{ComplexityWitnessCounters, GraphResult, emit_complexity_witness};
 use crate::models::MemoryId;
 
@@ -45,30 +50,40 @@ pub struct PersonalizedPageRankWitnessSpec<'a> {
     pub elapsed_ms: u64,
 }
 
-#[must_use]
 pub fn compute_personalized_pagerank(
     graph: &DiGraph,
     seed_map: &HashMap<MemoryId, f64>,
-) -> HashMap<MemoryId, f64> {
-    compute_personalized_pagerank_with_policy(
+) -> GraphResult<HashMap<MemoryId, f64>> {
+    let cx = current_or_testing_cx();
+    compute_personalized_pagerank_with_cx(
+        &cx,
         graph,
         seed_map,
         PersonalizedPageRankPolicy::default(),
     )
 }
 
-#[must_use]
 pub fn compute_personalized_pagerank_with_policy(
     graph: &DiGraph,
     seed_map: &HashMap<MemoryId, f64>,
     policy: PersonalizedPageRankPolicy,
-) -> HashMap<MemoryId, f64> {
+) -> GraphResult<HashMap<MemoryId, f64>> {
+    let cx = current_or_testing_cx();
+    compute_personalized_pagerank_with_cx(&cx, graph, seed_map, policy)
+}
+
+pub fn compute_personalized_pagerank_with_cx(
+    cx: &Cx,
+    graph: &DiGraph,
+    seed_map: &HashMap<MemoryId, f64>,
+    policy: PersonalizedPageRankPolicy,
+) -> GraphResult<HashMap<MemoryId, f64>> {
     let seed_weights = seed_map
         .iter()
         .map(|(memory_id, weight)| (memory_id.to_string(), *weight))
         .collect::<BTreeMap<_, _>>();
-    let result = compute_personalized_pagerank_result_with_policy(graph, &seed_weights, policy);
-    result
+    let result = compute_personalized_pagerank_result_with_cx(cx, graph, &seed_weights, policy)?;
+    Ok(result
         .scores
         .into_iter()
         .filter_map(|score| {
@@ -76,23 +91,76 @@ pub fn compute_personalized_pagerank_with_policy(
                 .ok()
                 .map(|memory_id| (memory_id, score.score))
         })
-        .collect()
+        .collect())
 }
 
-#[must_use]
 pub fn compute_personalized_pagerank_result(
     graph: &DiGraph,
     seed_map: &BTreeMap<String, f64>,
-) -> PageRankResult {
-    compute_personalized_pagerank_result_with_policy(
+) -> GraphResult<PageRankResult> {
+    let cx = current_or_testing_cx();
+    compute_personalized_pagerank_result_with_cx(
+        &cx,
         graph,
         seed_map,
         PersonalizedPageRankPolicy::default(),
     )
 }
 
-#[must_use]
 pub fn compute_personalized_pagerank_result_with_policy(
+    graph: &DiGraph,
+    seed_map: &BTreeMap<String, f64>,
+    policy: PersonalizedPageRankPolicy,
+) -> GraphResult<PageRankResult> {
+    let cx = current_or_testing_cx();
+    compute_personalized_pagerank_result_with_cx(&cx, graph, seed_map, policy)
+}
+
+pub fn compute_personalized_pagerank_result_with_cx(
+    cx: &Cx,
+    graph: &DiGraph,
+    seed_map: &BTreeMap<String, f64>,
+    policy: PersonalizedPageRankPolicy,
+) -> GraphResult<PageRankResult> {
+    let graph = graph.clone();
+    let seed_map = seed_map.clone();
+    run_with_budget(
+        cx,
+        "personalized_pagerank",
+        DEFAULT_FOREGROUND_BUDGET,
+        move || compute_personalized_pagerank_result_unbudgeted(&graph, &seed_map, policy),
+    )
+}
+
+pub fn compute_personalized_pagerank_result_cached(
+    spec: &AlgorithmResultCacheSpec<'_>,
+    graph: &DiGraph,
+    seed_map: &BTreeMap<String, f64>,
+    policy: PersonalizedPageRankPolicy,
+) -> GraphResult<AlgorithmResultCacheRun<PageRankResult>> {
+    let cx = current_or_testing_cx();
+    compute_personalized_pagerank_result_cached_with_cx(&cx, spec, graph, seed_map, policy)
+}
+
+pub fn compute_personalized_pagerank_result_cached_with_cx(
+    cx: &Cx,
+    spec: &AlgorithmResultCacheSpec<'_>,
+    graph: &DiGraph,
+    seed_map: &BTreeMap<String, f64>,
+    policy: PersonalizedPageRankPolicy,
+) -> GraphResult<AlgorithmResultCacheRun<PageRankResult>> {
+    let graph = graph.clone();
+    let seed_map = seed_map.clone();
+    run_with_cached_budget(
+        cx,
+        spec,
+        "personalized_pagerank",
+        DEFAULT_FOREGROUND_BUDGET,
+        move || compute_personalized_pagerank_result_unbudgeted(&graph, &seed_map, policy),
+    )
+}
+
+fn compute_personalized_pagerank_result_unbudgeted(
     graph: &DiGraph,
     seed_map: &BTreeMap<String, f64>,
     policy: PersonalizedPageRankPolicy,
@@ -385,6 +453,10 @@ mod tests {
     type TestResult<T = ()> = Result<T, String>;
     const WORKSPACE_ID: &str = "wsp_01234567890123456789012345";
 
+    fn graph_result<T>(result: GraphResult<T>) -> TestResult<T> {
+        result.map_err(|error| error.to_string())
+    }
+
     fn memory_id(seed: u128) -> MemoryId {
         MemoryId::from_uuid(Uuid::from_u128(seed))
     }
@@ -398,6 +470,16 @@ mod tests {
         attrs.insert("weight".to_owned(), CgseValue::Float(weight));
         attrs.insert("confidence".to_owned(), CgseValue::Float(confidence));
         attrs
+    }
+
+    fn assert_pagerank_results_equivalent(left: &PageRankResult, right: &PageRankResult) {
+        assert_eq!(left.converged, right.converged);
+        assert_eq!(left.witness, right.witness);
+        assert_eq!(left.scores.len(), right.scores.len());
+        for (left_score, right_score) in left.scores.iter().zip(&right.scores) {
+            assert_eq!(left_score.node, right_score.node);
+            assert!((left_score.score - right_score.score).abs() < 1.0e-12);
+        }
     }
 
     #[test]
@@ -422,7 +504,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
         let seeds = HashMap::from([(a, 1.0)]);
 
-        let result = compute_personalized_pagerank(&graph, &seeds);
+        let result = graph_result(compute_personalized_pagerank(&graph, &seeds))?;
 
         assert_eq!(result.len(), 3);
         assert!(result.get(&a).copied().unwrap_or(0.0) > 0.0);
@@ -453,14 +535,14 @@ mod tests {
             .map_err(|error| error.to_string())?;
         let seeds = HashMap::from([(a, 3.0), (c, 1.0)]);
 
-        let result = compute_personalized_pagerank_with_policy(
+        let result = graph_result(compute_personalized_pagerank_with_policy(
             &graph,
             &seeds,
             PersonalizedPageRankPolicy {
                 alpha: 0.0,
                 ..PersonalizedPageRankPolicy::default()
             },
-        );
+        ))?;
 
         assert!((result.get(&a).copied().unwrap_or(0.0) - 0.75).abs() < 1.0e-12);
         assert!((result.get(&c).copied().unwrap_or(0.0) - 0.25).abs() < 1.0e-12);
@@ -498,7 +580,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
         let seeds = HashMap::from([(seed, 1.0)]);
 
-        let result = compute_personalized_pagerank(&graph, &seeds);
+        let result = graph_result(compute_personalized_pagerank(&graph, &seeds))?;
 
         assert!(
             result.get(&strong).copied().unwrap_or(0.0) > result.get(&weak).copied().unwrap_or(0.0)
@@ -536,14 +618,14 @@ mod tests {
             .map_err(|error| error.to_string())?;
         let seeds = HashMap::from([(a, 2.0), (b, 1.0)]);
 
-        let first = compute_personalized_pagerank(&graph, &seeds);
-        let second = compute_personalized_pagerank(&graph, &seeds);
-        let third = compute_personalized_pagerank(&graph, &seeds);
+        let first = graph_result(compute_personalized_pagerank(&graph, &seeds))?;
+        let second = graph_result(compute_personalized_pagerank(&graph, &seeds))?;
+        let third = graph_result(compute_personalized_pagerank(&graph, &seeds))?;
         let raw_seeds = seeds
             .iter()
             .map(|(memory_id, weight)| (memory_id.to_string(), *weight))
             .collect::<BTreeMap<_, _>>();
-        let raw = compute_personalized_pagerank_result(&graph, &raw_seeds);
+        let raw = graph_result(compute_personalized_pagerank_result(&graph, &raw_seeds))?;
 
         assert_eq!(first, second);
         assert_eq!(second, third);
@@ -597,7 +679,7 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
         let seeds = BTreeMap::from([(a.to_string(), 1.0)]);
-        let result = compute_personalized_pagerank_result(&graph, &seeds);
+        let result = graph_result(compute_personalized_pagerank_result(&graph, &seeds))?;
         let params = serde_json::json!({
             "alpha": DEFAULT_PERSONALIZED_PAGERANK_ALPHA,
             "seedCount": 1
@@ -633,6 +715,94 @@ mod tests {
                 .as_str()
                 .is_some_and(|value| value.starts_with("blake3:"))
         );
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn personalized_pagerank_cached_result_reuses_snapshot_result() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let snapshot_id = "gsnap_0000000000000000000000422";
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-ppr-cache".to_owned(),
+                    name: Some("ppr cache".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_graph_snapshot(
+                snapshot_id,
+                &CreateGraphSnapshotInput {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    snapshot_version: 10,
+                    schema_version: "ee.graph.snapshot.v1".to_owned(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 2,
+                    edge_count: 1,
+                    metrics_json: r#"{"nodes":[],"edges":[]}"#.to_owned(),
+                    content_hash: "blake3:ppr-cache".to_owned(),
+                    source_generation: 10,
+                    expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut graph = DiGraph::strict();
+        let a = memory_id(51);
+        let b = memory_id(52);
+        graph
+            .add_edge_with_attrs(
+                a.to_string(),
+                b.to_string(),
+                edge_attrs("supports", 1.0, 1.0),
+            )
+            .map_err(|error| error.to_string())?;
+        let seeds = BTreeMap::from([(a.to_string(), 1.0)]);
+        let params = serde_json::json!({
+            "alpha": DEFAULT_PERSONALIZED_PAGERANK_ALPHA,
+            "maxIterations": DEFAULT_PERSONALIZED_PAGERANK_MAX_ITERATIONS,
+            "seedCount": 1,
+            "tolerance": DEFAULT_PERSONALIZED_PAGERANK_TOLERANCE
+        });
+        let spec = AlgorithmResultCacheSpec {
+            conn: &connection,
+            workspace_id: WORKSPACE_ID,
+            snapshot_id,
+            snapshot_content_hash: "blake3:ppr-cache",
+            algorithm: "personalized_pagerank",
+            params: &params,
+            ttl_seconds: 300,
+        };
+
+        let first = graph_result(compute_personalized_pagerank_result_cached(
+            &spec,
+            &graph,
+            &seeds,
+            PersonalizedPageRankPolicy::default(),
+        ))?;
+
+        let empty_graph = DiGraph::strict();
+        let second = graph_result(compute_personalized_pagerank_result_cached(
+            &spec,
+            &empty_graph,
+            &seeds,
+            PersonalizedPageRankPolicy::default(),
+        ))?;
+
+        assert!(!first.cache_hit);
+        assert!(second.cache_hit);
+        assert_eq!(first.params_hash, second.params_hash);
+        assert_pagerank_results_equivalent(&first.result, &second.result);
+
+        let rows = connection
+            .list_graph_algorithm_results(WORKSPACE_ID, snapshot_id, Some("personalized_pagerank"))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].params_hash, first.params_hash);
 
         connection.close().map_err(|error| error.to_string())
     }

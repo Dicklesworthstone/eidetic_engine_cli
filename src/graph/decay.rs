@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use fnx_algorithms::{articulation_points, onion_layers};
+use fnx_algorithms::{articulation_points, number_connected_components, onion_layers};
 use fnx_classes::Graph;
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +61,13 @@ pub struct StructuralDecayMultiplier {
     pub rationale: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StructuralDecayConnectivityReport {
+    pub component_count: usize,
+    pub is_connected: bool,
+}
+
 #[must_use]
 pub fn compute_articulation_points(graph: &Graph) -> ArticulationPointReport {
     let mut memory_ids = articulation_points(graph).nodes;
@@ -80,6 +87,15 @@ pub fn compute_onion_layers(graph: &Graph) -> OnionLayerReport {
     OnionLayerReport {
         layers_by_memory,
         max_layer,
+    }
+}
+
+#[must_use]
+pub fn compute_structural_decay_connectivity(graph: &Graph) -> StructuralDecayConnectivityReport {
+    let component_count = number_connected_components(graph).count;
+    StructuralDecayConnectivityReport {
+        component_count,
+        is_connected: component_count <= 1,
     }
 }
 
@@ -179,12 +195,83 @@ mod tests {
     }
 
     #[test]
+    fn articulation_points_cover_disconnected_components() {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        let _ = graph.extend_edges_unrecorded([("a", "b"), ("b", "c"), ("x", "y"), ("y", "z")]);
+
+        let report = compute_articulation_points(&graph);
+
+        assert_eq!(report.memory_ids, vec!["b", "y"]);
+    }
+
+    #[test]
+    fn structural_decay_connectivity_reports_disconnected_graphs() {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        let _ = graph.extend_edges_unrecorded([("a", "b"), ("x", "y")]);
+
+        let report = compute_structural_decay_connectivity(&graph);
+
+        assert_eq!(report.component_count, 2);
+        assert!(!report.is_connected);
+    }
+
+    #[test]
+    fn onion_layers_keep_core_above_leaf_shells() {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        let _ = graph.extend_edges_unrecorded([
+            ("core_a", "core_b"),
+            ("core_b", "core_c"),
+            ("core_a", "core_c"),
+            ("core_a", "leaf_a"),
+            ("core_b", "leaf_b"),
+        ]);
+
+        let report = compute_onion_layers(&graph);
+
+        assert_eq!(report.layers_by_memory.len(), 5);
+        let leaf_layers = ["leaf_a", "leaf_b"]
+            .iter()
+            .map(|memory_id| report.layers_by_memory[*memory_id])
+            .collect::<Vec<_>>();
+        let core_layers = ["core_a", "core_b", "core_c"]
+            .iter()
+            .map(|memory_id| report.layers_by_memory[*memory_id])
+            .collect::<Vec<_>>();
+        let leaf_max = leaf_layers.iter().copied().fold(usize::MIN, usize::max);
+        let core_min = core_layers.iter().copied().fold(usize::MAX, usize::min);
+        assert!(
+            core_min >= leaf_max,
+            "core layer {core_min} should not be outside leaf layer {leaf_max}"
+        );
+        let observed_max_layer = report
+            .layers_by_memory
+            .values()
+            .copied()
+            .fold(usize::MIN, usize::max);
+        assert_eq!(report.max_layer, observed_max_layer);
+    }
+
+    #[test]
     fn structural_decay_uses_baseline_for_single_shell_graphs() {
         let graph = Graph::complete_graph(CompatibilityMode::Strict, 4);
 
         let adjustment = compute_structural_decay_adjustment(&graph, "0");
 
         assert_eq!(adjustment.structural_multiplier, 1.0);
+        assert_eq!(adjustment.rationale, "structural_decay_baseline");
+    }
+
+    #[test]
+    fn structural_decay_uses_baseline_for_missing_memory() {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        let _ = graph.extend_edges_unrecorded([("a", "b"), ("b", "c")]);
+
+        let adjustment = compute_structural_decay_adjustment(&graph, "missing");
+
+        assert_eq!(adjustment.memory_id, "missing");
+        assert_eq!(adjustment.onion_layer, None);
+        assert_eq!(adjustment.structural_multiplier, 1.0);
+        assert!(!adjustment.is_articulation_point);
         assert_eq!(adjustment.rationale, "structural_decay_baseline");
     }
 

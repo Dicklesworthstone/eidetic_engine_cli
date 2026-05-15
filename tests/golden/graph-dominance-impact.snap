@@ -1,0 +1,40 @@
+{
+  "schema": "ee.memory.impact_analysis.v1",
+  "memoryId": "<left>",
+  "impactAnalysis": {
+    "immediateDominator": "<root>",
+    "dominanceFrontier": [
+      "<join>"
+    ],
+    "affectedMemoryCount": 1,
+    "validationStatus": "valid"
+  },
+  "revisionLineage": [
+    {
+      "memoryId": "<left>",
+      "logicalId": "<root>",
+      "depth": 0,
+      "relation": "self",
+      "validFrom": null
+    },
+    {
+      "memoryId": "<root>",
+      "logicalId": "<root>",
+      "depth": 1,
+      "relation": "ancestor",
+      "validFrom": null
+    }
+  ],
+  "queriedFrontier": {
+    "memoryId": "<left>",
+    "dominanceFrontierSize": 1,
+    "affectedMemoryIds": [
+      "<join>"
+    ],
+    "evidence": {
+      "algorithm": "dominance_frontiers",
+      "snapshotVersion": 0
+    }
+  },
+  "degraded": []
+}

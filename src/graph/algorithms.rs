@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, HashMap};
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use asupersync::Cx;
 use chrono::{DateTime, Utc};
 use fnx_algorithms::{PageRankResult, pagerank_with_params};
 use fnx_classes::digraph::DiGraph;
-use fnx_runtime::CgseValue;
+use fnx_runtime::{CgsePolicyEngine, CgseValue, CompatibilityMode};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -20,12 +21,21 @@ pub const DEFAULT_SAMPLE_THRESHOLD: usize = 500;
 pub const DEFAULT_SAMPLE_SIZE: usize = 100;
 pub const DEFAULT_FOREGROUND_BUDGET: Duration = Duration::from_millis(250);
 pub const DEFAULT_BACKGROUND_BUDGET: Duration = Duration::from_millis(2_000);
+pub const DEFAULT_CGSE_MODE: CompatibilityMode = CompatibilityMode::Strict;
+const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-pub fn run_with_budget<R, F>(name: &'static str, budget: Duration, f: F) -> GraphResult<R>
+#[must_use]
+pub fn current_or_testing_cx() -> Cx {
+    Cx::current().unwrap_or_else(Cx::for_testing)
+}
+
+pub fn run_with_budget<R, F>(cx: &Cx, name: &'static str, budget: Duration, f: F) -> GraphResult<R>
 where
     R: Send + 'static,
     F: FnOnce() -> R + Send + 'static,
 {
+    check_cancelled(cx, name)?;
+
     let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
         .thread_name_prefix("ee-graph-budget")
         .build()
@@ -34,26 +44,71 @@ where
             source: error.to_string(),
         })?;
 
-    let outcome = runtime.block_on(asupersync::time::timeout(
-        asupersync::time::wall_now(),
-        budget,
-        asupersync::runtime::spawn_blocking(move || std::panic::catch_unwind(AssertUnwindSafe(f))),
-    ));
+    let outcome = runtime.block_on(async {
+        let mut worker = std::pin::pin!(asupersync::runtime::spawn_blocking(move || {
+            std::panic::catch_unwind(AssertUnwindSafe(f))
+        }));
+        let started = Instant::now();
 
-    match outcome {
-        Ok(Ok(result)) => Ok(result),
-        Ok(Err(payload)) => Err(GraphError::GraphEngine {
+        loop {
+            check_cancelled(cx, name)?;
+            let Some(remaining) = budget.checked_sub(started.elapsed()) else {
+                return Err(GraphError::AlgorithmTimeout {
+                    algorithm: name.to_owned(),
+                    timeout_ms: duration_millis_saturating(budget),
+                });
+            };
+            if remaining.is_zero() {
+                return Err(GraphError::AlgorithmTimeout {
+                    algorithm: name.to_owned(),
+                    timeout_ms: duration_millis_saturating(budget),
+                });
+            }
+
+            let poll_budget = remaining.min(CANCELLATION_POLL_INTERVAL);
+            if let Ok(result) = asupersync::time::timeout(
+                asupersync::time::wall_now(),
+                poll_budget,
+                worker.as_mut(),
+            )
+            .await
+            {
+                return Ok(result);
+            }
+        }
+    });
+
+    match outcome? {
+        Ok(result) => Ok(result),
+        Err(payload) => Err(GraphError::GraphEngine {
             operation: name,
             source: format!(
                 "graph algorithm worker panicked: {}",
                 panic_payload_to_string(payload)
             ),
         }),
-        Err(_) => Err(GraphError::AlgorithmTimeout {
-            algorithm: name.to_owned(),
-            timeout_ms: duration_millis_saturating(budget),
-        }),
     }
+}
+
+pub fn run_with_cached_budget<R, F>(
+    cx: &Cx,
+    spec: &AlgorithmResultCacheSpec<'_>,
+    name: &'static str,
+    budget: Duration,
+    f: F,
+) -> GraphResult<AlgorithmResultCacheRun<R>>
+where
+    R: Clone + DeserializeOwned + Send + Serialize + 'static,
+    F: FnOnce() -> R + Send + 'static,
+{
+    run_with_result_cache(spec, || run_with_budget(cx, name, budget, f))
+}
+
+pub fn with_cgse_mode<R, F>(mode: CompatibilityMode, f: F) -> R
+where
+    F: FnOnce(CgsePolicyEngine) -> R,
+{
+    f(CgsePolicyEngine::new(mode))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -597,6 +652,20 @@ fn duration_millis_saturating(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
+fn check_cancelled(cx: &Cx, name: &'static str) -> GraphResult<()> {
+    if cx.checkpoint().is_ok() && !cx.is_cancel_requested() {
+        return Ok(());
+    }
+
+    Err(GraphError::AlgorithmCancelled {
+        algorithm: name.to_owned(),
+        reason: cx.cancel_reason().map_or_else(
+            || "cancellation requested".to_owned(),
+            |reason| reason.to_string(),
+        ),
+    })
+}
+
 fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send + 'static>) -> String {
     let payload = match payload.downcast::<String>() {
         Ok(message) => return *message,
@@ -614,7 +683,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use crate::db::{
         CreateGraphSnapshotInput, CreateWorkspaceInput, DbConnection, GraphSnapshotType,
@@ -629,7 +698,9 @@ mod tests {
 
     #[test]
     fn run_with_budget_returns_under_budget_result() -> TestResult {
+        let cx = Cx::for_testing();
         let result = graph_result(run_with_budget(
+            &cx,
             "under_budget_fixture",
             DEFAULT_FOREGROUND_BUDGET,
             || 42_u64,
@@ -641,11 +712,14 @@ mod tests {
 
     #[test]
     fn run_with_budget_times_out_over_budget_work() -> TestResult {
-        let error = run_with_budget("timeout_fixture", Duration::from_millis(10), || {
+        let cx = Cx::for_testing();
+        let error = match run_with_budget(&cx, "timeout_fixture", Duration::from_millis(10), || {
             thread::sleep(Duration::from_millis(50));
             7_u64
-        })
-        .expect_err("slow graph worker should exceed the timeout budget");
+        }) {
+            Ok(value) => return Err(format!("expected timeout error, got {value}")),
+            Err(error) => error,
+        };
 
         match error {
             GraphError::AlgorithmTimeout {
@@ -664,10 +738,16 @@ mod tests {
 
     #[test]
     fn run_with_budget_reports_worker_panic() -> TestResult {
-        let error = run_with_budget("panic_fixture", DEFAULT_FOREGROUND_BUDGET, || -> u64 {
-            panic!("graph worker exploded")
-        })
-        .expect_err("worker panic should be converted into GraphError");
+        let cx = Cx::for_testing();
+        let error = match run_with_budget(
+            &cx,
+            "panic_fixture",
+            DEFAULT_FOREGROUND_BUDGET,
+            || -> u64 { panic!("graph worker exploded") },
+        ) {
+            Ok(value) => return Err(format!("expected worker panic error, got {value}")),
+            Err(error) => error,
+        };
 
         match error {
             GraphError::GraphEngine { operation, source } => {
@@ -682,6 +762,15 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn with_cgse_mode_exposes_explicit_policy_engine() {
+        let strict = with_cgse_mode(DEFAULT_CGSE_MODE, |engine| engine.mode());
+        let hardened = with_cgse_mode(CompatibilityMode::Hardened, |engine| engine.mode());
+
+        assert_eq!(strict, CompatibilityMode::Strict);
+        assert_eq!(hardened, CompatibilityMode::Hardened);
     }
 
     #[test]
@@ -890,6 +979,155 @@ mod tests {
         assert_eq!(first.params_hash, second.params_hash);
         assert_eq!(first.result, second.result);
         assert_eq!(compute_count.load(Ordering::SeqCst), 1);
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn run_with_cached_budget_skips_worker_on_cache_hit() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_8123456789abcdef0123456789";
+        let snapshot_id = "gsnap_8123456789abcdef012345678";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: "/workspace/algorithm-cached-budget".to_owned(),
+                    name: Some("algorithm-cached-budget".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_graph_snapshot(
+                snapshot_id,
+                &CreateGraphSnapshotInput {
+                    workspace_id: workspace_id.to_owned(),
+                    snapshot_version: 1,
+                    schema_version: "ee.graph.snapshot.v1".to_owned(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 2,
+                    edge_count: 1,
+                    metrics_json: r#"{"nodes":[],"edges":[]}"#.to_owned(),
+                    content_hash: "blake3:algorithm-cached-budget-snapshot".to_owned(),
+                    source_generation: 0,
+                    expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let params = serde_json::json!({"algorithm": "pagerank", "alpha": 0.30});
+        let spec = AlgorithmResultCacheSpec {
+            conn: &connection,
+            workspace_id,
+            snapshot_id,
+            snapshot_content_hash: "blake3:algorithm-cached-budget-snapshot",
+            algorithm: "pagerank",
+            params: &params,
+            ttl_seconds: 300,
+        };
+        let compute_count = Arc::new(AtomicUsize::new(0));
+        let first_compute_count = Arc::clone(&compute_count);
+        let second_compute_count = Arc::clone(&compute_count);
+        let cx = Cx::for_testing();
+
+        let first = graph_result(run_with_cached_budget(
+            &cx,
+            &spec,
+            "pagerank",
+            DEFAULT_FOREGROUND_BUDGET,
+            move || {
+                first_compute_count.fetch_add(1, Ordering::SeqCst);
+                serde_json::json!({"scores":[["mem_a",0.75]]})
+            },
+        ))?;
+        let second = graph_result(run_with_cached_budget(
+            &cx,
+            &spec,
+            "pagerank",
+            DEFAULT_FOREGROUND_BUDGET,
+            move || -> serde_json::Value {
+                second_compute_count.fetch_add(1, Ordering::SeqCst);
+                panic!("cached budget worker should not run on cache hit");
+            },
+        ))?;
+
+        assert!(!first.cache_hit);
+        assert!(second.cache_hit);
+        assert_eq!(first.result, second.result);
+        assert_eq!(compute_count.load(Ordering::SeqCst), 1);
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn run_with_result_cache_hit_avoids_cold_compute_cost() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_9123456789abcdef0123456789";
+        let snapshot_id = "gsnap_9123456789abcdef012345678";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: "/workspace/algorithm-cache-perf".to_owned(),
+                    name: Some("algorithm-cache-perf".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_graph_snapshot(
+                snapshot_id,
+                &CreateGraphSnapshotInput {
+                    workspace_id: workspace_id.to_owned(),
+                    snapshot_version: 1,
+                    schema_version: "ee.graph.snapshot.v1".to_owned(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 2,
+                    edge_count: 1,
+                    metrics_json: r#"{"nodes":[],"edges":[]}"#.to_owned(),
+                    content_hash: "blake3:algorithm-cache-perf-snapshot".to_owned(),
+                    source_generation: 0,
+                    expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let params = serde_json::json!({"algorithm": "pagerank", "alpha": 0.30});
+        let spec = AlgorithmResultCacheSpec {
+            conn: &connection,
+            workspace_id,
+            snapshot_id,
+            snapshot_content_hash: "blake3:algorithm-cache-perf-snapshot",
+            algorithm: "pagerank",
+            params: &params,
+            ttl_seconds: 300,
+        };
+        let compute_count = AtomicUsize::new(0);
+
+        let cold_started = Instant::now();
+        let cold = graph_result(run_with_result_cache(&spec, || {
+            compute_count.fetch_add(1, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(25));
+            Ok(serde_json::json!({"scores":[["mem_a",0.75]]}))
+        }))?;
+        let cold_elapsed = cold_started.elapsed();
+
+        let warm_started = Instant::now();
+        let warm = graph_result(run_with_result_cache(&spec, || {
+            compute_count.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({"scores":[["mem_a",0.25]]}))
+        }))?;
+        let warm_elapsed = warm_started.elapsed();
+
+        assert!(!cold.cache_hit);
+        assert!(warm.cache_hit);
+        assert_eq!(cold.result, warm.result);
+        assert_eq!(compute_count.load(Ordering::SeqCst), 1);
+        assert!(
+            warm_elapsed < cold_elapsed,
+            "cache hit should avoid cold compute cost: warm={warm_elapsed:?} cold={cold_elapsed:?}"
+        );
 
         connection.close().map_err(|error| error.to_string())
     }

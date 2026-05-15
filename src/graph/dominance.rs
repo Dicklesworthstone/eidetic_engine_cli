@@ -27,13 +27,18 @@
 //! `ee.memory.impact_analysis.v1 schema + ee insights --section
 //! revisionFrontiers`) consume the maps produced here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use asupersync::Cx;
 use fnx_algorithms::{all_pairs_lowest_common_ancestor, dominance_frontiers, immediate_dominators};
+use serde::Serialize;
 
 use crate::graph::DiGraph;
 use crate::graph::GraphResult;
-use crate::graph::algorithms::{DEFAULT_BACKGROUND_BUDGET, run_with_budget};
+use crate::graph::algorithms::{DEFAULT_BACKGROUND_BUDGET, current_or_testing_cx, run_with_budget};
+use crate::models::degradation::GRAPH_DOMINANCE_NO_REVISION_CHAIN_CODE;
+
+pub const MEMORY_IMPACT_ANALYSIS_SCHEMA_V1: &str = "ee.memory.impact_analysis.v1";
 
 /// Immediate dominators keyed by node ID. The underlying fnx contract
 /// includes `start -> start`; nodes unreachable from `start` are omitted.
@@ -49,15 +54,81 @@ pub type DominanceFrontiers = BTreeMap<String, Vec<String>>;
 /// `None`.
 pub type AllPairsLca = BTreeMap<(String, String), Option<String>>;
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryImpactAnalysisReport {
+    pub schema: &'static str,
+    pub memory_id: String,
+    pub snapshot_version: u64,
+    pub revision_lineage: Vec<RevisionLineageItem>,
+    pub impact_analysis: RevisionImpactAnalysis,
+    pub frontiers: Vec<RevisionFrontierItem>,
+    pub degraded: Vec<DominanceDegradation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevisionLineageItem {
+    pub memory_id: String,
+    pub logical_id: String,
+    pub depth: usize,
+    pub relation: String,
+    pub valid_from: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevisionImpactAnalysis {
+    pub immediate_dominator: Option<String>,
+    pub dominance_frontier: Vec<String>,
+    pub affected_memory_count: usize,
+    pub validation_status: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevisionFrontierItem {
+    pub memory_id: String,
+    pub dominance_frontier_size: usize,
+    pub affected_memory_ids: Vec<String>,
+    pub evidence: RevisionFrontierEvidence,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevisionFrontierEvidence {
+    pub algorithm: &'static str,
+    pub snapshot_version: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DominanceDegradation {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    pub repair: Option<String>,
+}
+
 /// Compute immediate dominators starting from `start`. Returns an
 /// empty map when `start` is missing from the graph.
 pub fn compute_immediate_dominators(
     graph: &DiGraph,
     start: &str,
 ) -> GraphResult<ImmediateDominators> {
+    let cx = current_or_testing_cx();
+    compute_immediate_dominators_with_cx(&cx, graph, start)
+}
+
+pub fn compute_immediate_dominators_with_cx(
+    cx: &Cx,
+    graph: &DiGraph,
+    start: &str,
+) -> GraphResult<ImmediateDominators> {
     let graph = graph.clone();
     let start = start.to_owned();
     run_with_budget(
+        cx,
         "immediate_dominators",
         DEFAULT_BACKGROUND_BUDGET,
         move || {
@@ -74,9 +145,19 @@ pub fn compute_dominance_frontiers(
     graph: &DiGraph,
     start: &str,
 ) -> GraphResult<DominanceFrontiers> {
+    let cx = current_or_testing_cx();
+    compute_dominance_frontiers_with_cx(&cx, graph, start)
+}
+
+pub fn compute_dominance_frontiers_with_cx(
+    cx: &Cx,
+    graph: &DiGraph,
+    start: &str,
+) -> GraphResult<DominanceFrontiers> {
     let graph = graph.clone();
     let start = start.to_owned();
     run_with_budget(
+        cx,
         "dominance_frontiers",
         DEFAULT_BACKGROUND_BUDGET,
         move || {
@@ -97,8 +178,13 @@ pub fn compute_dominance_frontiers(
 /// right`. Pairs without a common ancestor (e.g. disconnected
 /// components) are stored with value `None`.
 pub fn compute_all_pairs_lca(graph: &DiGraph) -> GraphResult<AllPairsLca> {
+    let cx = current_or_testing_cx();
+    compute_all_pairs_lca_with_cx(&cx, graph)
+}
+
+pub fn compute_all_pairs_lca_with_cx(cx: &Cx, graph: &DiGraph) -> GraphResult<AllPairsLca> {
     let graph = graph.clone();
-    run_with_budget("all_pairs_lca", DEFAULT_BACKGROUND_BUDGET, move || {
+    run_with_budget(cx, "all_pairs_lca", DEFAULT_BACKGROUND_BUDGET, move || {
         let mut nodes: Vec<String> = graph
             .nodes_ordered()
             .into_iter()
@@ -121,6 +207,190 @@ pub fn compute_all_pairs_lca(graph: &DiGraph) -> GraphResult<AllPairsLca> {
         }
         result
     })
+}
+
+pub fn compute_memory_impact_analysis(
+    graph: &DiGraph,
+    memory_id: &str,
+    snapshot_version: u64,
+) -> GraphResult<MemoryImpactAnalysisReport> {
+    let cx = current_or_testing_cx();
+    compute_memory_impact_analysis_with_cx(&cx, graph, memory_id, snapshot_version)
+}
+
+pub fn compute_memory_impact_analysis_with_cx(
+    cx: &Cx,
+    graph: &DiGraph,
+    memory_id: &str,
+    snapshot_version: u64,
+) -> GraphResult<MemoryImpactAnalysisReport> {
+    if !has_revision_chain_context(graph, memory_id) {
+        return Ok(MemoryImpactAnalysisReport {
+            schema: MEMORY_IMPACT_ANALYSIS_SCHEMA_V1,
+            memory_id: memory_id.to_owned(),
+            snapshot_version,
+            revision_lineage: Vec::new(),
+            impact_analysis: RevisionImpactAnalysis {
+                immediate_dominator: None,
+                dominance_frontier: Vec::new(),
+                affected_memory_count: 0,
+                validation_status: "unavailable".to_owned(),
+            },
+            frontiers: Vec::new(),
+            degraded: vec![dominance_no_revision_chain_degradation(memory_id)],
+        });
+    }
+
+    let analysis_start = revision_analysis_start(graph, memory_id);
+    let idoms = compute_immediate_dominators_with_cx(cx, graph, &analysis_start)?;
+    let frontiers = compute_dominance_frontiers_with_cx(cx, graph, &analysis_start)?;
+    let dominance_frontier = frontiers.get(memory_id).cloned().unwrap_or_default();
+    let immediate_dominator = idoms
+        .get(memory_id)
+        .filter(|dominator| dominator.as_str() != memory_id)
+        .cloned();
+    let affected_memory_count = idoms
+        .keys()
+        .filter(|node| dominates_node(&idoms, memory_id, node))
+        .count();
+
+    Ok(MemoryImpactAnalysisReport {
+        schema: MEMORY_IMPACT_ANALYSIS_SCHEMA_V1,
+        memory_id: memory_id.to_owned(),
+        snapshot_version,
+        revision_lineage: revision_lineage_for_query(&idoms, &analysis_start, memory_id),
+        impact_analysis: RevisionImpactAnalysis {
+            immediate_dominator,
+            dominance_frontier: dominance_frontier.clone(),
+            affected_memory_count,
+            validation_status: "valid".to_owned(),
+        },
+        frontiers: revision_frontier_items(&frontiers, snapshot_version),
+        degraded: Vec::new(),
+    })
+}
+
+fn revision_analysis_start(graph: &DiGraph, memory_id: &str) -> String {
+    let mut seen = BTreeSet::new();
+    let mut frontier = BTreeSet::from([memory_id.to_owned()]);
+    let mut roots = BTreeSet::new();
+
+    while let Some(node) = frontier.pop_first() {
+        if !seen.insert(node.clone()) {
+            continue;
+        }
+        let predecessors = graph.predecessors(&node).unwrap_or_default();
+        if predecessors.is_empty() {
+            roots.insert(node);
+        } else {
+            frontier.extend(predecessors.into_iter().map(ToOwned::to_owned));
+        }
+    }
+
+    roots
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| memory_id.to_owned())
+}
+
+fn has_revision_chain_context(graph: &DiGraph, memory_id: &str) -> bool {
+    if !graph.has_node(memory_id) {
+        return false;
+    }
+    !graph.successors(memory_id).unwrap_or_default().is_empty()
+        || !graph.predecessors(memory_id).unwrap_or_default().is_empty()
+}
+
+fn dominance_no_revision_chain_degradation(memory_id: &str) -> DominanceDegradation {
+    DominanceDegradation {
+        code: GRAPH_DOMINANCE_NO_REVISION_CHAIN_CODE.to_owned(),
+        severity: "info".to_owned(),
+        message: format!(
+            "Memory {memory_id} has no logical_id revision chain for dominance impact analysis."
+        ),
+        repair: None,
+    }
+}
+
+fn revision_lineage_for_query(
+    idoms: &ImmediateDominators,
+    start: &str,
+    memory_id: &str,
+) -> Vec<RevisionLineageItem> {
+    if !idoms.contains_key(memory_id) {
+        return Vec::new();
+    }
+
+    let mut items = Vec::new();
+    let mut current = memory_id.to_owned();
+    let mut seen = BTreeSet::new();
+    let mut depth = 0usize;
+
+    loop {
+        if !seen.insert(current.clone()) {
+            break;
+        }
+        items.push(RevisionLineageItem {
+            memory_id: current.clone(),
+            logical_id: start.to_owned(),
+            depth,
+            relation: if depth == 0 {
+                "self".to_owned()
+            } else {
+                "ancestor".to_owned()
+            },
+            valid_from: None,
+        });
+
+        let Some(parent) = idoms.get(&current) else {
+            break;
+        };
+        if parent == &current {
+            break;
+        }
+        current = parent.clone();
+        depth = depth.saturating_add(1);
+    }
+
+    items
+}
+
+fn dominates_node(idoms: &ImmediateDominators, dominator: &str, node: &str) -> bool {
+    let mut current = node;
+    let mut seen = BTreeSet::new();
+    loop {
+        if current == dominator {
+            return true;
+        }
+        if !seen.insert(current.to_owned()) {
+            return false;
+        }
+        let Some(parent) = idoms.get(current) else {
+            return false;
+        };
+        if parent == current {
+            return false;
+        }
+        current = parent;
+    }
+}
+
+fn revision_frontier_items(
+    frontiers: &DominanceFrontiers,
+    snapshot_version: u64,
+) -> Vec<RevisionFrontierItem> {
+    frontiers
+        .iter()
+        .map(|(memory_id, frontier)| RevisionFrontierItem {
+            memory_id: memory_id.clone(),
+            dominance_frontier_size: frontier.len(),
+            affected_memory_ids: frontier.clone(),
+            evidence: RevisionFrontierEvidence {
+                algorithm: "dominance_frontiers",
+                snapshot_version,
+            },
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -283,6 +553,68 @@ mod tests {
                 "all_pairs LCA keys must be canonical ({left}, {right})"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn memory_impact_without_revision_chain_emits_dominance_sentinel() -> TestResult {
+        let mut graph = empty_digraph();
+        graph.add_node("mem_standalone");
+
+        let report = graph_result(compute_memory_impact_analysis(&graph, "mem_standalone", 11))?;
+
+        assert_eq!(report.schema, MEMORY_IMPACT_ANALYSIS_SCHEMA_V1);
+        assert_eq!(report.memory_id, "mem_standalone");
+        assert_eq!(report.snapshot_version, 11);
+        assert!(report.revision_lineage.is_empty());
+        assert_eq!(report.impact_analysis.validation_status, "unavailable");
+        assert_eq!(report.impact_analysis.affected_memory_count, 0);
+        assert!(report.frontiers.is_empty());
+        assert_eq!(report.degraded.len(), 1);
+        let degraded = &report.degraded[0];
+        assert_eq!(degraded.code, GRAPH_DOMINANCE_NO_REVISION_CHAIN_CODE);
+        assert_eq!(degraded.severity, "info");
+        assert!(degraded.message.contains("revision chain"));
+        assert!(degraded.message.contains("logical_id"));
+        assert_eq!(degraded.repair, None);
+        Ok(())
+    }
+
+    #[test]
+    fn memory_impact_branch_reports_query_frontier_from_revision_root() -> TestResult {
+        let mut graph = empty_digraph();
+        add_edge(&mut graph, "root", "left");
+        add_edge(&mut graph, "root", "right");
+        add_edge(&mut graph, "left", "join");
+        add_edge(&mut graph, "right", "join");
+
+        let report = graph_result(compute_memory_impact_analysis(&graph, "left", 17))?;
+
+        assert_eq!(report.schema, MEMORY_IMPACT_ANALYSIS_SCHEMA_V1);
+        assert_eq!(report.memory_id, "left");
+        assert_eq!(report.snapshot_version, 17);
+        assert_eq!(
+            report.impact_analysis.immediate_dominator.as_deref(),
+            Some("root")
+        );
+        assert_eq!(report.impact_analysis.dominance_frontier, vec!["join"]);
+        assert_eq!(report.impact_analysis.affected_memory_count, 1);
+        assert_eq!(
+            report
+                .revision_lineage
+                .iter()
+                .map(|item| (item.memory_id.as_str(), item.depth, item.relation.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("left", 0, "self"), ("root", 1, "ancestor")]
+        );
+
+        let left_frontier = report
+            .frontiers
+            .iter()
+            .find(|item| item.memory_id == "left")
+            .ok_or_else(|| "left frontier item should be present".to_string())?;
+        assert_eq!(left_frontier.affected_memory_ids, vec!["join"]);
+
         Ok(())
     }
 

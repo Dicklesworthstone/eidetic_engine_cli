@@ -249,6 +249,63 @@ mod tests {
     }
 
     #[test]
+    fn k_truss_report_handles_empty_graph() {
+        let graph = Graph::new(CompatibilityMode::Strict);
+
+        let report = compute_k_truss(&graph);
+
+        assert_eq!(report.max_k, 3);
+        assert!(report.member_counts.is_empty());
+        assert!(report.top_memories_at_k.is_empty());
+    }
+
+    #[test]
+    fn k_truss_report_tracks_triangle_as_k3_core() {
+        let graph = Graph::complete_graph(CompatibilityMode::Strict, 3);
+
+        let report = compute_k_truss(&graph);
+
+        assert_eq!(report.max_k, 3);
+        assert_eq!(report.member_counts.get(&3), Some(&3));
+        assert_eq!(report.top_memories_at_k.len(), 3);
+        assert!(
+            report
+                .top_memories_at_k
+                .iter()
+                .all(|memory| memory.max_k == 3)
+        );
+    }
+
+    #[test]
+    fn k_truss_report_does_not_promote_path_without_triangles() {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        let _ = graph.extend_edges_unrecorded([("a", "b"), ("b", "c"), ("c", "d"), ("d", "e")]);
+
+        let report = compute_k_truss(&graph);
+
+        assert_eq!(report.max_k, 3);
+        assert!(report.member_counts.is_empty());
+        assert!(report.top_memories_at_k.is_empty());
+    }
+
+    #[test]
+    fn k_truss_report_tracks_k5_core() {
+        let graph = Graph::complete_graph(CompatibilityMode::Strict, 5);
+
+        let report = compute_k_truss(&graph);
+
+        assert_eq!(report.max_k, 5);
+        assert_eq!(report.member_counts.get(&5), Some(&5));
+        assert_eq!(report.top_memories_at_k.len(), 5);
+        assert!(
+            report
+                .top_memories_at_k
+                .iter()
+                .all(|memory| memory.max_k == 5)
+        );
+    }
+
+    #[test]
     fn contradiction_clusters_filter_by_density_threshold() {
         let mut graph = Graph::new(CompatibilityMode::Strict);
         let _ = graph.extend_edges_unrecorded([("a", "b"), ("a", "c"), ("b", "c"), ("d", "e")]);
@@ -260,6 +317,52 @@ mod tests {
         assert_eq!(clusters[0].internal_contradictions, 3);
         assert_eq!(clusters[0].severity, ContradictionSeverity::Incoherent);
         assert_eq!(clusters[0].exemplar_memory_ids, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn contradiction_clusters_ignore_pairs_below_minimum_size() {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        let _ = graph.extend_edges_unrecorded([("a", "b")]);
+
+        let clusters = detect_contradiction_clusters_with_threshold(&graph, 0.0);
+
+        assert!(clusters.is_empty());
+    }
+
+    #[test]
+    fn contradiction_clusters_ignore_scattered_contradictions() {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        let _ = graph.extend_edges_unrecorded([("a", "b"), ("c", "d"), ("e", "f")]);
+
+        let clusters = detect_contradiction_clusters(&graph);
+
+        assert!(clusters.is_empty());
+    }
+
+    #[test]
+    fn contradiction_clusters_cap_exemplars_for_large_incoherent_cluster() {
+        let graph = Graph::complete_graph(CompatibilityMode::Strict, 5);
+
+        let clusters = detect_contradiction_clusters_with_threshold(&graph, 0.20);
+
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].size, 5);
+        assert_eq!(clusters[0].internal_contradictions, 10);
+        assert_eq!(clusters[0].density, 1.0);
+        assert_eq!(clusters[0].severity, ContradictionSeverity::Incoherent);
+        assert_eq!(clusters[0].exemplar_memory_ids.len(), 3);
+    }
+
+    #[test]
+    fn contradiction_clusters_include_density_at_threshold() {
+        let graph = Graph::complete_graph(CompatibilityMode::Strict, 5);
+
+        let clusters_at_boundary = detect_contradiction_clusters_with_threshold(&graph, 1.0);
+        let clusters_above_boundary = detect_contradiction_clusters_with_threshold(&graph, 1.01);
+
+        assert_eq!(clusters_at_boundary.len(), 1);
+        assert_eq!(clusters_at_boundary[0].density, 1.0);
+        assert_eq!(clusters_above_boundary.len(), 1);
     }
 
     #[test]

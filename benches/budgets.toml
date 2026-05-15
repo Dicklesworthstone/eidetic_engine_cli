@@ -34,6 +34,7 @@ benches = [
   "remember",
   "search",
   "context",
+  "context_with_ppr",
   "pack_size",
   "why",
   "outcome",
@@ -45,6 +46,11 @@ benches = [
   "import_cass",
   "link",
   "graph_pagerank",
+  "graph_ppr",
+  "graph_louvain",
+  "graph_ktruss",
+  "graph_gomory_hu",
+  "graph_hits",
   "curate_candidates",
 ]
 sample_size = 20
@@ -60,6 +66,7 @@ benches = [
   "remember",
   "search",
   "context",
+  "context_with_ppr",
   "pack_size",
   "why",
   "outcome",
@@ -71,6 +78,11 @@ benches = [
   "import_cass",
   "link",
   "graph_pagerank",
+  "graph_ppr",
+  "graph_louvain",
+  "graph_ktruss",
+  "graph_gomory_hu",
+  "graph_hits",
   "curate_candidates",
 ]
 sample_size = 100
@@ -92,6 +104,11 @@ description = "Hybrid lexical+semantic search over 5k memories"
 p50_ms_max = 95.0
 p99_ms_max = 240.0
 description = "Build 4k-token context pack; S4 resource-scale benchmark covers 1k/10k/100k memory fixtures"
+
+[operations.ee_context_with_ppr]
+p50_ms_max = 125.0
+p99_ms_max = 300.0
+description = "Build 4k-token context pack with PPR rerank enabled on a 1k-memory graph; p50 allows 30ms over base context"
 
 [operations.ee_context_s4_resource_scales]
 p50_ms_max = 1000.0
@@ -154,6 +171,31 @@ description = "Create memory relationship link"
 p50_ms_max = 350.0
 p99_ms_max = 2000.0
 description = "Compute PageRank over memory graph"
+
+[operations.ee_graph_ppr]
+p50_ms_max = 30.0
+p99_ms_max = 120.0
+description = "Compute personalized PageRank over 10/100/1000 memory-link graphs"
+
+[operations.ee_graph_louvain]
+p50_ms_max = 100.0
+p99_ms_max = 400.0
+description = "Compute Louvain communities over 10/100/1000 memory-link graphs"
+
+[operations.ee_graph_ktruss]
+p50_ms_max = 150.0
+p99_ms_max = 600.0
+description = "Compute k-truss structural health over 10/100/1000 memory-link graphs"
+
+[operations.ee_graph_gomory_hu]
+p50_ms_max = 5000.0
+p99_ms_max = 9000.0
+description = "Build Gomory-Hu proximity tree and run cached-style min-cut query"
+
+[operations.ee_graph_hits]
+p50_ms_max = 100.0
+p99_ms_max = 400.0
+description = "Compute HITS hub and authority scores over 10/100/1000 memory-link graphs"
 
 [operations.ee_curate_candidates]
 p50_ms_max = 50.0

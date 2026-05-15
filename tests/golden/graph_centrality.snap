@@ -1,0 +1,27 @@
+{
+  "schema": "ee.graph.centrality_read.v1",
+  "status": "available",
+  "graphType": "memory_links",
+  "algorithm": "pagerank",
+  "limit": 2,
+  "memoryId": null,
+  "snapshot": {
+    "status": "valid",
+    "sourceGeneration": 1,
+    "nodeCount": 2,
+    "edgeCount": 1
+  },
+  "rows": [
+    {
+      "rank": 1,
+      "memoryId": "<neighbor>",
+      "scoreClass": "positive"
+    },
+    {
+      "rank": 2,
+      "memoryId": "<center>",
+      "scoreClass": "positive"
+    }
+  ],
+  "degraded": []
+}

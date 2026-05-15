@@ -4,23 +4,77 @@
   "title": "ee.memory.impact_analysis.v1",
   "description": "Impact analysis for memory revision and dominance-frontier planning.",
   "type": "object",
-  "required": ["schema", "memoryId", "snapshotVersion", "revisionLineage", "frontiers", "degraded"],
+  "required": ["schema", "memoryId", "snapshotVersion", "revisionLineage", "impactAnalysis", "frontiers", "degraded"],
   "additionalProperties": false,
   "properties": {
     "schema": {"type": "string", "const": "ee.memory.impact_analysis.v1"},
     "memoryId": {"type": "string"},
-    "snapshotVersion": {"type": ["integer", "string"]},
-    "revisionLineage": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}},
-    "frontiers": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}},
-    "degraded": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}}
+    "snapshotVersion": {"type": "integer", "minimum": 0},
+    "revisionLineage": {"type": "array", "items": {"$ref": "#/$defs/revisionLineageItem"}},
+    "impactAnalysis": {"$ref": "#/$defs/impactAnalysis"},
+    "frontiers": {"type": "array", "items": {"$ref": "#/$defs/frontierItem"}},
+    "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradedSignal"}}
   },
   "field_presets": {
     "minimal": ["schema", "memoryId"],
     "summary": ["schema", "memoryId", "snapshotVersion", "degraded"],
-    "standard": ["schema", "memoryId", "snapshotVersion", "revisionLineage", "frontiers", "degraded"],
+    "standard": ["schema", "memoryId", "snapshotVersion", "revisionLineage", "impactAnalysis", "frontiers", "degraded"],
     "full": ["*"]
   },
   "$defs": {
+    "revisionLineageItem": {
+      "type": "object",
+      "required": ["memoryId", "logicalId", "depth", "relation"],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": {"type": "string"},
+        "logicalId": {"type": "string"},
+        "depth": {"type": "integer", "minimum": 0},
+        "relation": {"type": "string", "enum": ["self", "ancestor", "descendant", "derived_from"]},
+        "validFrom": {"type": ["string", "null"]}
+      }
+    },
+    "impactAnalysis": {
+      "type": "object",
+      "required": ["immediateDominator", "dominanceFrontier", "affectedMemoryCount", "validationStatus"],
+      "additionalProperties": false,
+      "properties": {
+        "immediateDominator": {"type": ["string", "null"]},
+        "dominanceFrontier": {"type": "array", "items": {"type": "string"}},
+        "affectedMemoryCount": {"type": "integer", "minimum": 0},
+        "validationStatus": {"type": "string", "enum": ["valid", "stale_snapshot", "unavailable"]}
+      }
+    },
+    "frontierItem": {
+      "type": "object",
+      "required": ["memoryId", "dominanceFrontierSize", "affectedMemoryIds", "evidence"],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": {"type": "string"},
+        "dominanceFrontierSize": {"type": "integer", "minimum": 0},
+        "affectedMemoryIds": {"type": "array", "items": {"type": "string"}},
+        "evidence": {
+          "type": "object",
+          "required": ["algorithm", "snapshotVersion"],
+          "additionalProperties": false,
+          "properties": {
+            "algorithm": {"type": "string", "const": "dominance_frontiers"},
+            "snapshotVersion": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "degradedSignal": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": {"$ref": "#/$defs/jsonValue"},
+      "properties": {
+        "code": {"type": "string"},
+        "severity": {"type": "string"},
+        "message": {"type": "string"},
+        "repair": {"type": ["string", "null"]}
+      }
+    },
     "jsonObject": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
     "jsonValue": {
       "oneOf": [

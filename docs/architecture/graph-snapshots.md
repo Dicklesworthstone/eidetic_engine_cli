@@ -102,10 +102,13 @@ Rules:
 - The TTL is 300 seconds.
 - Lock acquisition failure must surface a typed degraded code, not a panic or
   silent no-op.
+- Dry-run prune reports stay read-only and do not write advisory-lock rows;
+  durable prune acquires the prune lock and the matching refresh lock before
+  listing or deleting candidates.
 
-The current implementation uses a workspace-scoped advisory lock for
-`memory_links`; the lifecycle implementation should narrow that to the typed
-lock IDs above.
+The refresh implementation uses these per-type `graph_snapshot` lock IDs, so
+different graph families can refresh independently while same-type writers stay
+serialized.
 
 ## Memory And Disk Budgets
 
@@ -180,25 +183,115 @@ Minimum fields for prune responses:
 }
 ```
 
+## Worked Refresh Example
+
+A memory-link write can mark graph context stale until a refresh produces a new
+valid snapshot. An agent should treat the stale signal as a graph-explanation
+gap, not as a storage failure.
+
+```bash
+ee remember "RCH verification must stay remote-only." --workspace . --json
+ee memory link mem_a mem_b --relation supports --workspace . --json
+ee context "verify release" --workspace . --explain --json
+```
+
+Expected behavior:
+
+```json
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "pack": {
+      "packDna": {
+        "schema": "ee.context.pack_dna.v1",
+        "degraded": [
+          {
+            "code": "graph_snapshot_stale",
+            "repair": "ee graph snapshot refresh --workspace . --json"
+          }
+        ]
+      }
+    }
+  },
+  "degraded": []
+}
+```
+
+Agent interpretation: use the context pack, but do not cite Pack DNA as complete
+until the graph snapshot is refreshed.
+
+## Worked Prune Example
+
+Snapshot pruning is safe only for archived derived rows. Agents should start
+with dry-run mode and inspect counts before allowing a durable maintenance run:
+
+```bash
+ee maintenance graph-snapshot-prune --workspace . --dry-run --json
+```
+
+Expected dry-run shape:
+
+```json
+{
+  "schema": "ee.graph.snapshot_prune.v1",
+  "graphType": "memory_links",
+  "dryRun": true,
+  "candidateCount": 12,
+  "prunedCount": 0,
+  "candidateBytes": 4096,
+  "prunedBytes": 0
+}
+```
+
+Agent interpretation: a dry-run response is evidence for a maintenance plan,
+not permission to delete source data. The prune surface never deletes memories,
+links, evidence, revisions, packs, or source databases.
+
 ## Implementation Checklist
 
-- Add per-graph-type advisory lock IDs instead of the current workspace-wide
-  graph snapshot lock.
+- Add per-graph-type advisory lock IDs instead of a workspace-wide graph
+  snapshot lock. (Implemented for refresh writes and prune jobs.)
 - Archive older valid snapshots inside the same transaction that inserts a new
   valid snapshot.
 - Add repository helpers for listing and pruning archived snapshots by
-  workspace, graph type, status, and cutoff timestamp.
-- Add `GraphSnapshotPrune` to the maintenance job taxonomy.
+  workspace, graph type, status, and cutoff timestamp. (Implemented for
+  archived candidate listing and prune execution.)
+- Add `GraphSnapshotPrune` to the maintenance job taxonomy. (Taxonomy entry and
+  DB-backed runner surface are implemented for `memory_links`.)
 - Add the `ee maintenance graph-snapshot-prune` command or an equivalent
-  subcommand that delegates to the same job handler.
+  subcommand that delegates to the same job handler. (Dedicated CLI route is
+  implemented and delegates to the `GraphSnapshotPrune` steward job.)
 - Add `ee.graph.snapshot_prune.v1` schema documentation if the prune command
-  emits its own payload.
-- Add a focused unit test for per-type lock independence.
+  emits its own payload. (Schema artifact added for the planned payload.)
+- Add a focused unit test for per-type lock independence and prune/refresh
+  conflict behavior.
 - Add a focused unit test that a new valid snapshot archives only older valid
   snapshots of the same graph type.
 - Add a focused unit test that prune removes only archived rows older than the
   retention cutoff.
-- Add the 5k-memory storage-footprint contract test.
+- Add the 5k-memory storage-footprint contract test. (Implemented as a
+  DB-level compact metrics payload contract for the five operational families.)
+
+## Implementation Status
+
+This page is the contract for `bd-bife.7`, but the bead is not complete until
+the runtime and test evidence below exists. Keep this table in sync with tracker
+comments so agents can distinguish documented policy from implemented behavior.
+
+| Area | Current status | Remaining proof |
+| --- | --- | --- |
+| Lifecycle policy document | Documented here, including family list, status transitions, 7-day retention, locks, budgets, refresh cadence, and JSON shape. | Keep this page updated when the runtime surface changes. |
+| Same-type archival | Implemented for persisted graph snapshot writes: a new valid snapshot archives prior valid snapshots for the same workspace and graph type. | Clean remote Cargo gate after active graph-wrapper compile blockers clear. |
+| Per-type refresh locks | Implemented for refresh writes with graph-type scoped `graph_snapshot` advisory lock IDs. | Keep the focused lock-scope test green under the full remote suite. |
+| Prune repository helpers | Implemented for archived candidate listing and prune execution in `DbConnection`. | Keep the focused archived-row safety test green under the remote suite. |
+| Prune response schema | Documented as `docs/schemas/ee.graph.snapshot_prune.v1.json`; exported through the public schema registry with drift coverage. | Keep the schema aligned as graph-family and lock options expand. |
+| Prune job taxonomy | Implemented as `graph_snapshot_prune` in the maintenance job taxonomy with DB-backed candidate listing and bounded archived-row pruning for `memory_links`. | Extend options to every operational graph family when those snapshot producers are wired. |
+| Prune CLI/job surface | `ee maintenance graph-snapshot-prune --dry-run --json` delegates to the `GraphSnapshotPrune` steward job and emits `ee.graph.snapshot_prune.v1` details inside the maintenance response. Dry-runs report `lock.acquired=false`; durable runs include a concrete holder. | Add per-graph-type CLI options once non-`memory_links` families are live. |
+| Prune locking | Implemented for durable prune jobs with a per-type `graph_snapshot_prune` advisory lock plus the matching per-type `graph_snapshot` lock, so pruning conflicts with same-family refresh while different graph families remain independently lockable. | Keep the focused prune/refresh conflict test green under the remote suite. |
+| Prune safety test | Implemented as a focused DB helper test for archived same-type rows older than cutoff; CLI route has focused parser/JSON surface coverage and the steward runner has DB-backed lock/release coverage. | Extend with per-family CLI options once the non-`memory_links` snapshot producers are wired. |
+| Storage footprint contract | Implemented as a DB-level 5k-memory fixture contract that stores one compact metrics payload for each operational snapshot family and checks <= 50 MB per family / <= 250 MB total. | Replace the compact fixture with live producer output once all five family builders are wired. |
+| RCH verification | Partial historical focused passes exist for lock behavior; broad verification is currently blocked by unrelated graph-wrapper compile drift. | RCH-only focused and relevant broader gates after compile blockers clear; no local Cargo fallback. |
 
 ## Non-Goals
 

@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.graph.snapshot_prune.v1.json",
+  "title": "ee.graph.snapshot_prune.v1",
+  "description": "Dry-run or durable graph snapshot prune report for archived derived rows.",
+  "type": "object",
+  "required": [
+    "schema",
+    "command",
+    "workspaceId",
+    "graphType",
+    "dryRun",
+    "retentionDays",
+    "cutoffTimestamp",
+    "candidateCount",
+    "prunedCount",
+    "candidateBytes",
+    "prunedBytes",
+    "oldestRetainedAt",
+    "lock",
+    "degraded"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.graph.snapshot_prune.v1"},
+    "command": {"type": "string", "const": "maintenance graph-snapshot-prune"},
+    "workspaceId": {"type": "string", "minLength": 1},
+    "graphType": {"$ref": "#/$defs/graphSnapshotType"},
+    "dryRun": {"type": "boolean"},
+    "retentionDays": {"type": "integer", "minimum": 0},
+    "cutoffTimestamp": {"type": "string", "minLength": 1},
+    "candidateCount": {"type": "integer", "minimum": 0},
+    "prunedCount": {"type": "integer", "minimum": 0},
+    "candidateBytes": {"type": "integer", "minimum": 0},
+    "prunedBytes": {"type": "integer", "minimum": 0},
+    "oldestRetainedAt": {"type": ["string", "null"]},
+    "candidates": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/pruneCandidate"}
+    },
+    "lock": {"$ref": "#/$defs/pruneLock"},
+    "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}}
+  },
+  "field_presets": {
+    "minimal": ["schema", "workspaceId", "graphType", "dryRun", "candidateCount", "prunedCount"],
+    "summary": [
+      "schema",
+      "workspaceId",
+      "graphType",
+      "dryRun",
+      "retentionDays",
+      "candidateCount",
+      "prunedCount",
+      "candidateBytes",
+      "prunedBytes",
+      "degraded"
+    ],
+    "standard": ["*"],
+    "full": ["*"]
+  },
+  "examples": [
+    {
+      "schema": "ee.graph.snapshot_prune.v1",
+      "command": "maintenance graph-snapshot-prune",
+      "workspaceId": "wsp_release_readiness",
+      "graphType": "memory_links",
+      "dryRun": true,
+      "retentionDays": 7,
+      "cutoffTimestamp": "2026-05-08T00:00:00+00:00",
+      "candidateCount": 2,
+      "prunedCount": 0,
+      "candidateBytes": 4096,
+      "prunedBytes": 0,
+      "oldestRetainedAt": "2026-05-09T00:00:00+00:00",
+      "candidates": [
+        {
+          "snapshotId": "gsnap_memory_links_000000000001",
+          "snapshotVersion": 1,
+          "createdAt": "2026-05-01T00:00:00+00:00",
+          "metricsBytes": 2048,
+          "contentHash": "blake3:memory-links-old-1"
+        },
+        {
+          "snapshotId": "gsnap_memory_links_000000000002",
+          "snapshotVersion": 2,
+          "createdAt": "2026-05-02T00:00:00+00:00",
+          "metricsBytes": 2048,
+          "contentHash": "blake3:memory-links-old-2"
+        }
+      ],
+      "lock": {
+        "resourceType": "graph_snapshot_prune",
+        "resourceId": "wsp_release_readiness:memory_links",
+        "ttlSeconds": 300,
+        "acquired": true
+      },
+      "degraded": []
+    }
+  ],
+  "$defs": {
+    "graphSnapshotType": {
+      "type": "string",
+      "enum": [
+        "memory_links",
+        "session_graph",
+        "procedure_graph",
+        "evidence_graph",
+        "composite",
+        "causal_evidence",
+        "revision_dag",
+        "rule_provenance",
+        "contradiction_subgraph"
+      ]
+    },
+    "pruneCandidate": {
+      "type": "object",
+      "required": ["snapshotId", "snapshotVersion", "createdAt", "metricsBytes", "contentHash"],
+      "additionalProperties": false,
+      "properties": {
+        "snapshotId": {"type": "string", "minLength": 1},
+        "snapshotVersion": {"type": "integer", "minimum": 0},
+        "createdAt": {"type": "string", "minLength": 1},
+        "metricsBytes": {"type": "integer", "minimum": 0},
+        "contentHash": {"type": "string", "minLength": 1}
+      }
+    },
+    "pruneLock": {
+      "type": "object",
+      "required": ["resourceType", "resourceId", "ttlSeconds", "acquired"],
+      "additionalProperties": false,
+      "properties": {
+        "resourceType": {"type": "string", "const": "graph_snapshot_prune"},
+        "resourceId": {"type": "string", "minLength": 1},
+        "ttlSeconds": {"type": "integer", "minimum": 0},
+        "acquired": {"type": "boolean"},
+        "holderId": {"type": "string"}
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": true,
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
+        "message": {"type": "string", "minLength": 1},
+        "repair": {"type": "string"}
+      }
+    }
+  }
+}

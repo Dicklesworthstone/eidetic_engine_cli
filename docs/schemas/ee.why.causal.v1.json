@@ -20,6 +20,43 @@
     "standard": ["schema", "memoryId", "snapshotVersion", "paths", "minCut", "degraded"],
     "full": ["*"]
   },
+  "examples": [
+    {
+      "schema": "ee.why.causal.v1",
+      "memoryId": "mem_release_failure",
+      "snapshotVersion": 42,
+      "paths": [
+        {
+          "rank": 1,
+          "sourceMemoryId": "mem_rch_topology_note",
+          "targetMemoryId": "mem_release_failure",
+          "edgeCount": 2,
+          "totalContribution": 0.87,
+          "steps": [
+            {
+              "source": "mem_rch_topology_note",
+              "target": "mem_remote_check_blocked",
+              "relation": "supports",
+              "contributionScore": 0.48
+            },
+            {
+              "source": "mem_remote_check_blocked",
+              "target": "mem_release_failure",
+              "relation": "caused",
+              "contributionScore": 0.39
+            }
+          ]
+        }
+      ],
+      "minCut": {
+        "sourceMemoryId": "mem_rch_topology_note",
+        "targetMemoryId": "mem_release_failure",
+        "cutWeight": 0.31,
+        "cutMemoryIds": ["mem_remote_check_blocked"]
+      },
+      "degraded": []
+    }
+  ],
   "$defs": {
     "jsonObject": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
     "jsonValue": {

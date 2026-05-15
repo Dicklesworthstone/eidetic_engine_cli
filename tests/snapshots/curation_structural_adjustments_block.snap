@@ -1,0 +1,32 @@
+---
+source: src/core/curate.rs
+expression: snapshot
+---
+{
+  "structuralAdjustments": [
+    {
+      "candidateId": "curate_0000000000000000000000001D",
+      "memoryId": "mem_00000000000000000000000019",
+      "onionLayer": 2,
+      "maxLayer": 2,
+      "isArticulationPoint": true,
+      "baseDecay": 1.0,
+      "structuralMultiplier": 0.5,
+      "adjustedDecay": 0.5,
+      "adjustedTtlThresholdSeconds": 2419200,
+      "rationale": "articulation_point_in_layer_2"
+    },
+    {
+      "candidateId": "curate_0000000000000000000000001J",
+      "memoryId": "mem_0000000000000000000000001C",
+      "onionLayer": 1,
+      "maxLayer": 2,
+      "isArticulationPoint": false,
+      "baseDecay": 1.0,
+      "structuralMultiplier": 2.0,
+      "adjustedDecay": 1.0,
+      "adjustedTtlThresholdSeconds": 604800,
+      "rationale": "onion_layer_1"
+    }
+  ]
+}

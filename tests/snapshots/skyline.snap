@@ -1,0 +1,39 @@
+---
+source: tests/json_contract_snapshots.rs
+expression: value
+---
+{
+  "degraded": [
+    {
+      "code": "graph_skyline_degenerate_communities",
+      "message": "Knowledge skyline communities are degenerate because fewer than three Louvain communities were found.",
+      "severity": "info"
+    }
+  ],
+  "schema": "ee.status.skyline.v1",
+  "skyline": [
+    {
+      "communityId": "release-readiness",
+      "meanAgeDays": 3.5,
+      "meanTrust": 0.91,
+      "memoryCount": 12,
+      "onionLayer": 2,
+      "structuralHealth": "strong"
+    },
+    {
+      "communityId": "rch-topology",
+      "meanAgeDays": 1.2,
+      "meanTrust": 0.84,
+      "memoryCount": 7,
+      "onionLayer": 4,
+      "structuralHealth": "watch"
+    }
+  ],
+  "snapshotVersion": 42,
+  "summary": {
+    "communityCount": 2,
+    "highestRiskCommunityId": "rch-topology",
+    "loadBearingMemoryCount": 3,
+    "staleCommunityCount": 0
+  }
+}

@@ -1,0 +1,171 @@
+---
+source: tests/json_contract_snapshots.rs
+expression: value
+---
+{
+  "availableSections": [
+    "authorities",
+    "bridges",
+    "causalBottlenecks",
+    "comprehensiveRules",
+    "contradictionClusters",
+    "hubs",
+    "kCore",
+    "kTruss",
+    "knowledgeSkyline",
+    "loadBearingMemories",
+    "proximityHotspots",
+    "revisionFrontiers",
+    "topMemories"
+  ],
+  "command": "insights",
+  "degradedSignals": [
+    {
+      "code": "graph.workspace_empty",
+      "message": "No graph memories are available for insights yet.",
+      "repair": "run: ee remember --workspace . \"<memory>\" --json",
+      "severity": "info"
+    }
+  ],
+  "explainCommand": null,
+  "explainMemoryId": null,
+  "generatedAt": "1970-01-01T00:00:00Z",
+  "mode": "full_bundle",
+  "pagination": null,
+  "runDurationMs": 0,
+  "schema": "ee.insights.v1",
+  "sections": [
+    {
+      "items": [],
+      "name": "authorities",
+      "nextCommands": [
+        "ee insights --section authorities --workspace . --json"
+      ],
+      "summary": "HITS authority scores for memories that ground claims from many hubs.",
+      "title": "Authority Memories",
+      "whyItMatters": "Authority memories help agents distinguish grounded evidence from navigational references."
+    },
+    {
+      "items": [],
+      "name": "bridges",
+      "nextCommands": [
+        "ee insights --section bridges --workspace . --json"
+      ],
+      "summary": "Top articulation-point memories ranked by cluster-disconnection-magnitude.",
+      "title": "Bridge Memories",
+      "whyItMatters": "Bridge memories deserve careful decay and review because removing them can disconnect useful context."
+    },
+    {
+      "items": [],
+      "name": "causalBottlenecks",
+      "nextCommands": [
+        "ee insights --section causalBottlenecks --workspace . --json"
+      ],
+      "summary": "High-betweenness memories in causal-evidence subgraphs.",
+      "title": "Causal Bottlenecks",
+      "whyItMatters": "Causal bottlenecks show which facts carry the most explanatory load for failures and repairs."
+    },
+    {
+      "items": [],
+      "name": "comprehensiveRules",
+      "nextCommands": [
+        "ee curate candidates --workspace . --json"
+      ],
+      "summary": "Rule memories with broad provenance coverage and high reuse potential.",
+      "title": "Comprehensive Rules",
+      "whyItMatters": "Comprehensive rules are candidates for promotion because they generalize across repeated work."
+    },
+    {
+      "items": [],
+      "name": "contradictionClusters",
+      "nextCommands": [
+        "ee insights --section contradictionClusters --workspace . --json"
+      ],
+      "summary": "Louvain communities filtered to contradiction-heavy memory neighborhoods.",
+      "title": "Contradiction Clusters",
+      "whyItMatters": "Contradiction clusters identify parts of the memory graph that need curation before agents rely on them."
+    },
+    {
+      "items": [],
+      "name": "hubs",
+      "nextCommands": [
+        "ee insights --section hubs --workspace . --json"
+      ],
+      "summary": "HITS hub scores for memories that point to many authoritative facts.",
+      "title": "Hub Memories",
+      "whyItMatters": "Hub memories are useful navigation anchors for agents assembling a task-specific context pack."
+    },
+    {
+      "items": [],
+      "name": "kCore",
+      "nextCommands": [
+        "ee insights --section kCore --workspace . --json"
+      ],
+      "summary": "Core-number membership for densely connected memory regions.",
+      "title": "K-Core",
+      "whyItMatters": "K-core posture shows which memories sit in stable, mutually reinforcing graph neighborhoods."
+    },
+    {
+      "items": [],
+      "name": "kTruss",
+      "nextCommands": [
+        "ee insights --section kTruss --workspace . --json"
+      ],
+      "summary": "Triangle-supported structural health findings for support subgraphs.",
+      "title": "K-Truss",
+      "whyItMatters": "K-truss posture helps separate isolated support edges from stronger corroborating clusters."
+    },
+    {
+      "items": [],
+      "name": "knowledgeSkyline",
+      "nextCommands": [
+        "ee insights --section knowledgeSkyline --workspace . --json"
+      ],
+      "summary": "Composite posture across onion layer, community, age, trust, and graph health signals.",
+      "title": "Knowledge Skyline",
+      "whyItMatters": "The skyline gives agents a portfolio-level view of memory quality before relying on a workspace."
+    },
+    {
+      "items": [],
+      "name": "loadBearingMemories",
+      "nextCommands": [
+        "ee insights --section loadBearingMemories --workspace . --json"
+      ],
+      "summary": "Memories with high influence in rule-to-source provenance projections.",
+      "title": "Load-Bearing Memories",
+      "whyItMatters": "Load-bearing memories should be preserved or reviewed carefully because many rules depend on them."
+    },
+    {
+      "items": [],
+      "name": "proximityHotspots",
+      "nextCommands": [
+        "ee insights --section proximityHotspots --workspace . --json"
+      ],
+      "summary": "Memory pairs with small min-cut distance in Gomory-Hu proximity projections.",
+      "title": "Proximity Hotspots",
+      "whyItMatters": "Proximity hotspots surface tightly coupled facts that should be packed, reviewed, or curated together."
+    },
+    {
+      "items": [],
+      "name": "revisionFrontiers",
+      "nextCommands": [
+        "ee insights --section revisionFrontiers --workspace . --json"
+      ],
+      "summary": "Top recent revisions ranked by dominance-frontier size in logical memory revision DAGs.",
+      "title": "Revision Frontiers",
+      "whyItMatters": "Revision frontiers help agents understand which edits may change downstream context behavior."
+    },
+    {
+      "items": [],
+      "name": "topMemories",
+      "nextCommands": [
+        "ee insights --section topMemories --workspace . --json"
+      ],
+      "summary": "Top-ranked memories by cached graph centrality and retrieval posture.",
+      "title": "Top Memories",
+      "whyItMatters": "Top memories provide an immediate overview of the facts most likely to shape agent behavior."
+    }
+  ],
+  "selectedSection": null,
+  "snapshotVersion": 0
+}

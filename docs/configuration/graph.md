@@ -56,3 +56,67 @@ ee config get graph.ppr.alpha --workspace . --json
 ee config set graph.feature.ppr.enabled true --workspace . --json
 ee config show graph.* --workspace . --json
 ```
+
+## Worked Profiles
+
+Use a conservative context-debugging profile when the graph is new or sparse:
+
+```toml
+[graph.ppr]
+alpha = 0.0
+
+[graph.feature.ppr]
+enabled = false
+
+[graph.feature.pack_dna]
+enabled = true
+```
+
+Agent effect: `ee context --explain --json` may emit Pack DNA for debugging,
+but context ranking stays text-first. This is the safest profile when an agent
+is checking whether graph explanations are useful without changing selection
+order.
+
+Use a graph-inspection profile when the workspace has curated links and the
+agent is investigating memory topology:
+
+```toml
+[graph.ppr]
+alpha = 0.30
+
+[graph.pack_dna]
+max_items = 12
+max_edges = 34
+
+[graph.feature.ppr]
+enabled = true
+
+[graph.feature.pack_dna]
+enabled = true
+
+[graph.feature.structural_health]
+enabled = true
+
+[graph.feature.proximity]
+enabled = true
+```
+
+Agent effect: `ee insights --json`, `ee context --explain --json`, and
+`ee proximity <a> <b> --json` can all use graph-derived signals. If any graph
+family is stale or unavailable, the command must emit the relevant degraded
+entry rather than silently pretending the graph was complete.
+
+Use a curation dry-run profile before changing retention behavior:
+
+```toml
+[graph.curate]
+onion_decay_max = 3.0
+articulation_protection_multiplier = 0.5
+
+[graph.feature.structural_decay]
+enabled = true
+```
+
+Agent effect: `ee curate candidates --dry-run --json` should show how
+articulation points and onion layers change decay before any memory is
+promoted, demoted, or tombstoned.

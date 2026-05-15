@@ -1,0 +1,78 @@
+---
+source: tests/contracts/graph_additive_only.rs
+expression: graph_baseline_pre_epic
+---
+{
+  "schema": "ee.graph_baseline_pre_epic.v1",
+  "surfaces": [
+    {
+      "name": "status",
+      "command": "ee status --workspace <fixture> --json",
+      "snapshot": "json_contract_snapshots__status_json_contract.snap"
+    },
+    {
+      "name": "why",
+      "command": "ee why <memory-id> --workspace <fixture> --json",
+      "snapshot": "json_contract_snapshots__why_json_contract.snap"
+    },
+    {
+      "name": "context",
+      "command": "ee context <query> --workspace <fixture> --json",
+      "snapshot": "json_contract_snapshots__context_json_contract.snap"
+    },
+    {
+      "name": "curate",
+      "command": "ee curate candidates --workspace <fixture> --all --json",
+      "baseline": {
+        "data": {
+          "candidates": [],
+          "command": "curate candidates",
+          "databasePath": "[DATABASE]",
+          "degraded": [],
+          "durableMutation": false,
+          "filter": {
+            "groupDuplicates": false,
+            "sort": "review_state",
+            "status": null,
+            "targetMemoryId": null,
+            "type": null
+          },
+          "limit": 100,
+          "nextAction": "ee playbook extract --propose --json",
+          "offset": 0,
+          "returnedCount": 0,
+          "schema": "ee.curate.candidates.v1",
+          "totalCount": 0,
+          "truncated": false,
+          "version": "0.1.0",
+          "workspaceId": "[WORKSPACE_ID]",
+          "workspacePath": "[WORKSPACE]"
+        },
+        "schema": "ee.response.v1",
+        "success": true
+      }
+    },
+    {
+      "name": "health",
+      "command": "ee health --robot-insights --workspace <fixture> --json",
+      "baseline": {
+        "contradictionClusters": [],
+        "degraded": [],
+        "kTruss": {
+          "maxK": 0,
+          "supportSubgraphMemoryCount": 0,
+          "topMembers": []
+        },
+        "schema": "ee.health.structural.v1",
+        "snapshotVersion": 1,
+        "summary": {
+          "contradictionClusterCount": 0,
+          "kTrussMaxK": 0,
+          "recommendedCommand": "ee curate candidates --workspace . --json",
+          "status": "ok",
+          "supportSubgraphMemoryCount": 0
+        }
+      }
+    }
+  ]
+}

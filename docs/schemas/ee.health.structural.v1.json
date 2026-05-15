@@ -20,6 +20,46 @@
     "standard": ["schema", "snapshotVersion", "kTruss", "contradictionClusters", "summary", "degraded"],
     "full": ["*"]
   },
+  "examples": [
+    {
+      "schema": "ee.health.structural.v1",
+      "snapshotVersion": 42,
+      "kTruss": {
+        "maxK": 5,
+        "supportSubgraphMemoryCount": 18,
+        "topMembers": [
+          {
+            "memoryId": "mem_release_policy",
+            "k": 5,
+            "triangleSupport": 9
+          },
+          {
+            "memoryId": "mem_remote_required",
+            "k": 4,
+            "triangleSupport": 6
+          }
+        ]
+      },
+      "contradictionClusters": [
+        {
+          "clusterId": "contradictions.release-readiness",
+          "memoryCount": 4,
+          "contradictionDensity": 0.33,
+          "exampleMemoryIds": [
+            "mem_old_release_rule",
+            "mem_new_release_rule"
+          ]
+        }
+      ],
+      "summary": {
+        "status": "degraded_recoverable",
+        "kTrussMaxK": 5,
+        "contradictionClusterCount": 1,
+        "recommendedCommand": "ee curate candidates --workspace . --json"
+      },
+      "degraded": []
+    }
+  ],
   "$defs": {
     "jsonObject": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
     "jsonValue": {

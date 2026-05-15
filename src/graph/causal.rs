@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use fnx_algorithms::{min_cost_flow, transitive_closure};
+use fnx_algorithms::{find_cycle_directed, min_cost_flow, transitive_closure};
 use fnx_runtime::CgseValue;
 use serde::{Deserialize, Serialize};
+
+use crate::models::degradation::GRAPH_CAUSAL_NO_EVIDENCE_CODE;
 
 use super::{AttrMap, DiGraph};
 
@@ -18,6 +20,7 @@ const COST_EPSILON: f64 = 1.0e-9;
 pub struct CausalAncestry {
     pub failure_id: String,
     pub ancestors: Vec<CausalAncestor>,
+    pub degraded: Vec<CausalGraphDegradation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -25,6 +28,14 @@ pub struct CausalAncestry {
 pub struct CausalAncestor {
     pub memory_id: String,
     pub path_length: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CausalGraphDegradation {
+    pub code: String,
+    pub severity: String,
+    pub cycle_members: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -53,9 +64,11 @@ pub fn compute_causal_ancestry(graph: &DiGraph, failure_id: &str) -> CausalAnces
         return CausalAncestry {
             failure_id: failure_id.to_owned(),
             ancestors: Vec::new(),
+            degraded: vec![causal_no_evidence_degradation()],
         };
     }
 
+    let degraded = causal_degradations(graph, failure_id);
     let closure = transitive_closure(graph, Some(false));
     let path_lengths = shortest_path_lengths(graph, failure_id);
     let mut ancestors: Vec<_> = closure
@@ -81,6 +94,7 @@ pub fn compute_causal_ancestry(graph: &DiGraph, failure_id: &str) -> CausalAnces
     CausalAncestry {
         failure_id: failure_id.to_owned(),
         ancestors,
+        degraded,
     }
 }
 
@@ -92,11 +106,37 @@ pub fn compute_min_cost_explanation(
     if !graph.has_node(failure_id) {
         return None;
     }
+    if find_cycle_directed(graph).is_some() {
+        return None;
+    }
 
     terminal_ancestors(graph, failure_id)
         .into_iter()
         .filter_map(|candidate| flow_explanation_for_candidate(graph, failure_id, &candidate))
         .min_by(compare_explanations)
+}
+
+fn causal_degradations(graph: &DiGraph, failure_id: &str) -> Vec<CausalGraphDegradation> {
+    let mut degraded = Vec::new();
+    if graph.successors(failure_id).unwrap_or_default().is_empty() {
+        degraded.push(causal_no_evidence_degradation());
+    }
+    if let Some(cycle_members) = find_cycle_directed(graph) {
+        degraded.push(CausalGraphDegradation {
+            code: "graph.causal_cycle".to_owned(),
+            severity: "warning".to_owned(),
+            cycle_members,
+        });
+    }
+    degraded
+}
+
+fn causal_no_evidence_degradation() -> CausalGraphDegradation {
+    CausalGraphDegradation {
+        code: GRAPH_CAUSAL_NO_EVIDENCE_CODE.to_owned(),
+        severity: "low".to_owned(),
+        cycle_members: Vec::new(),
+    }
 }
 
 fn compare_explanations(
@@ -252,9 +292,9 @@ fn explanation_step(graph: &DiGraph, source: &str, target: &str) -> Option<Causa
 }
 
 fn shortest_path_lengths(graph: &DiGraph, source: &str) -> BTreeMap<String, usize> {
-    let mut lengths = BTreeMap::new();
+    let mut lengths: BTreeMap<String, usize> = BTreeMap::new();
     let mut queue = VecDeque::new();
-    lengths.insert(source.to_owned(), 0);
+    lengths.insert(source.to_owned(), 0_usize);
     queue.push_back(source.to_owned());
 
     while let Some(current) = queue.pop_front() {
@@ -312,7 +352,16 @@ mod tests {
             "edge_id".to_owned(),
             CgseValue::String(format!("{source}->{target}")),
         );
-        graph.add_edge_with_attrs(source, target, attrs).unwrap();
+        if let Err(error) = graph.add_edge_with_attrs(source, target, attrs) {
+            panic!("test causal edge should be valid: {error}");
+        }
+    }
+
+    fn require_min_cost_explanation(graph: &DiGraph, failure_id: &str) -> MinCostExplanation {
+        match compute_min_cost_explanation(graph, failure_id) {
+            Some(explanation) => explanation,
+            None => panic!("expected min-cost explanation for {failure_id}"),
+        }
     }
 
     fn path_pairs(explanation: &MinCostExplanation) -> Vec<(&str, &str)> {
@@ -331,6 +380,24 @@ mod tests {
 
         assert_eq!(ancestry.failure_id, "failure");
         assert!(ancestry.ancestors.is_empty());
+        assert_eq!(ancestry.degraded.len(), 1);
+        assert_eq!(ancestry.degraded[0].code, GRAPH_CAUSAL_NO_EVIDENCE_CODE);
+        assert_eq!(ancestry.degraded[0].severity, "low");
+        assert!(ancestry.degraded[0].cycle_members.is_empty());
+    }
+
+    #[test]
+    fn causal_ancestry_node_without_causal_edges_reports_no_evidence() {
+        let mut graph = graph();
+        graph.add_node("failure");
+
+        let ancestry = compute_causal_ancestry(&graph, "failure");
+
+        assert!(ancestry.ancestors.is_empty());
+        assert_eq!(ancestry.degraded.len(), 1);
+        assert_eq!(ancestry.degraded[0].code, GRAPH_CAUSAL_NO_EVIDENCE_CODE);
+        assert_eq!(ancestry.degraded[0].severity, "low");
+        assert!(ancestry.degraded[0].cycle_members.is_empty());
     }
 
     #[test]
@@ -341,11 +408,15 @@ mod tests {
         let ancestry = compute_causal_ancestry(&graph, "failure");
 
         assert_eq!(
-            ancestry.ancestors,
-            vec![CausalAncestor {
-                memory_id: "cause".to_owned(),
-                path_length: 1,
-            }]
+            ancestry,
+            CausalAncestry {
+                failure_id: "failure".to_owned(),
+                ancestors: vec![CausalAncestor {
+                    memory_id: "cause".to_owned(),
+                    path_length: 1,
+                }],
+                degraded: Vec::new(),
+            }
         );
     }
 
@@ -359,14 +430,47 @@ mod tests {
         let ancestry = compute_causal_ancestry(&graph, "failure");
 
         assert_eq!(
+            ancestry,
+            CausalAncestry {
+                failure_id: "failure".to_owned(),
+                ancestors: vec![
+                    CausalAncestor {
+                        memory_id: "cause_a".to_owned(),
+                        path_length: 1,
+                    },
+                    CausalAncestor {
+                        memory_id: "cause_b".to_owned(),
+                        path_length: 1,
+                    },
+                    CausalAncestor {
+                        memory_id: "root".to_owned(),
+                        path_length: 2,
+                    },
+                ],
+                degraded: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn causal_ancestry_diamond_deduplicates_shared_root() {
+        let mut graph = graph();
+        add_causal_edge(&mut graph, "failure", "left", 0.8);
+        add_causal_edge(&mut graph, "failure", "right", 0.7);
+        add_causal_edge(&mut graph, "left", "root", 0.9);
+        add_causal_edge(&mut graph, "right", "root", 0.6);
+
+        let ancestry = compute_causal_ancestry(&graph, "failure");
+
+        assert_eq!(
             ancestry.ancestors,
             vec![
                 CausalAncestor {
-                    memory_id: "cause_a".to_owned(),
+                    memory_id: "left".to_owned(),
                     path_length: 1,
                 },
                 CausalAncestor {
-                    memory_id: "cause_b".to_owned(),
+                    memory_id: "right".to_owned(),
                     path_length: 1,
                 },
                 CausalAncestor {
@@ -375,6 +479,41 @@ mod tests {
                 },
             ]
         );
+        assert!(ancestry.degraded.is_empty());
+    }
+
+    #[test]
+    fn causal_cycle_is_reported_and_blocks_min_cost_flow() {
+        let mut graph = graph();
+        add_causal_edge(&mut graph, "failure", "cause", 0.8);
+        add_causal_edge(&mut graph, "cause", "failure", 0.7);
+
+        let ancestry = compute_causal_ancestry(&graph, "failure");
+
+        assert_eq!(ancestry.degraded.len(), 1);
+        assert_eq!(ancestry.degraded[0].code, "graph.causal_cycle");
+        assert_eq!(ancestry.degraded[0].severity, "warning");
+        assert_eq!(
+            ancestry.degraded[0]
+                .cycle_members
+                .first()
+                .map(String::as_str),
+            Some("failure")
+        );
+        assert_eq!(
+            ancestry.degraded[0]
+                .cycle_members
+                .last()
+                .map(String::as_str),
+            Some("failure")
+        );
+        assert!(
+            ancestry.degraded[0]
+                .cycle_members
+                .iter()
+                .any(|node| node == "cause")
+        );
+        assert!(compute_min_cost_explanation(&graph, "failure").is_none());
     }
 
     #[test]
@@ -382,7 +521,7 @@ mod tests {
         let mut graph = graph();
         add_causal_edge(&mut graph, "failure", "cause", 0.8);
 
-        let explanation = compute_min_cost_explanation(&graph, "failure").unwrap();
+        let explanation = require_min_cost_explanation(&graph, "failure");
 
         assert_eq!(explanation.cause_id, "cause");
         assert!((explanation.total_cost - 0.2).abs() < COST_EPSILON);
@@ -401,7 +540,7 @@ mod tests {
         add_causal_edge(&mut graph, "failure", "credible_mid", 0.95);
         add_causal_edge(&mut graph, "credible_mid", "root_cause", 0.95);
 
-        let explanation = compute_min_cost_explanation(&graph, "failure").unwrap();
+        let explanation = require_min_cost_explanation(&graph, "failure");
 
         assert_eq!(explanation.cause_id, "root_cause");
         assert!((explanation.total_cost - 0.1).abs() < COST_EPSILON);
@@ -419,7 +558,7 @@ mod tests {
         add_causal_edge(&mut graph, "left", "root", 0.85);
         add_causal_edge(&mut graph, "right", "root", 0.99);
 
-        let explanation = compute_min_cost_explanation(&graph, "failure").unwrap();
+        let explanation = require_min_cost_explanation(&graph, "failure");
 
         assert_eq!(explanation.cause_id, "root");
         assert_eq!(

@@ -124,9 +124,9 @@ GraphAccretion feature rollout is controlled by config keys, not Cargo feature
 flags, once the binary contains the implementation. Cargo features still govern
 compiled dependencies, but runtime rollout uses graph config.
 
-Planned keys:
+Registered keys:
 
-| Feature | Config key | Initial default | Enabled default |
+| Feature | Config key | Built-in default | Enabled phase |
 | --- | --- | --- | --- |
 | Personalized PageRank | `graph.feature.ppr.enabled` | `false` | Phase gamma |
 | Pack DNA | `graph.feature.pack_dna.enabled` | `false` | Phase delta |
@@ -139,6 +139,11 @@ Planned keys:
 | Load-bearing provenance | `graph.feature.load_bearing.enabled` | `false` | Phase epsilon |
 | HITS profiles | `graph.feature.hits_profiles.enabled` | `false` | Phase epsilon |
 
+The built-in defaults above match `built_in_config()` and
+`docs/configuration/graph.md`: runtime graph features default off until a
+workspace explicitly opts in. This keeps partially landed surfaces honest by
+forcing disabled-mode evidence instead of placeholder graph data.
+
 Disabled behavior:
 
 - The field required by a public schema remains present when practical.
@@ -146,6 +151,31 @@ Disabled behavior:
   message, and repair/config hint.
 - Disabled output must be deterministic and small enough for agent parsing.
 - A feature flag must not silently remove a documented command section.
+
+## Disabled-Feature Acceptance Matrix
+
+Each runtime rollout flag has two jobs: suppress the graph-derived behavior for
+its owning surface, and emit `graph_feature_disabled` in the response that would
+otherwise have used that behavior. These checks are separate from Cargo
+feature-gating. A binary can include the code while a workspace config keeps the
+feature disabled.
+
+| Config key | Owning user-facing surface | Disabled-mode expectation | Proof artifact |
+| --- | --- | --- | --- |
+| `graph.feature.ppr.enabled` | `ee context` pack ranking | PPR fields remain deterministic but contribute no rank boost; response records `graph_feature_disabled` for PPR ranking. | Context integration test with flag `false` and `true` over the same seeded workspace. |
+| `graph.feature.pack_dna.enabled` | `ee context --explain` / Pack DNA block | Pack DNA block is absent or explicitly degraded according to `ee.context.pack_dna.v1`; no stale Pack DNA values are emitted. | Pack DNA smoke/golden pair covering disabled and enabled output. |
+| `graph.feature.causal_explain.enabled` | `ee why --causal-explain` and `ee insights --section causalBottlenecks` | Causal sections stay present as empty/degraded contract objects and emit `graph_feature_disabled`. | Why/insights integration test with a seeded causal fixture. |
+| `graph.feature.structural_health.enabled` | `ee health --json` structural graph block | Structural health fields stay stable and report disabled rather than silently falling back to ordinary health. | Health contract test over the structural fixture with the flag disabled. |
+| `graph.feature.structural_decay.enabled` | `ee curate` structural decay adjustments | Curation output omits graph decay adjustments and emits a disabled degraded entry tied to the adjustment block. | Curate unit/golden test over an onion-layer fixture. |
+| `graph.feature.proximity.enabled` | `ee proximity` and context `proximityToSeed` | `ee proximity` returns a disabled/degraded response; context candidates do not receive proximity boosts. | Proximity CLI test plus context-pack comparison. |
+| `graph.feature.revision_dominance.enabled` | `ee memory revise --dry-run` and `ee why` revision lineage | Impact/lineage blocks are empty or disabled-degraded, never populated from stale dominance data. | Revision-chain integration test with disabled flag. |
+| `graph.feature.skyline.enabled` | `ee status` / `ee insights --section skyline` | Skyline summary remains schema-valid and reports disabled instead of placeholder scores. | Status/insights snapshot with disabled flag. |
+| `graph.feature.load_bearing.enabled` | Rule-provenance / load-bearing insights | Load-bearing scores are suppressed and the section emits `graph_feature_disabled`. | Bipartite fixture integration or insight-section contract test. |
+| `graph.feature.hits_profiles.enabled` | HITS query profiles and graph HITS output | Profile boosts are suppressed; HITS profile surface emits `graph_feature_disabled` while base HITS remains honest about graph availability. | HITS profile integration test and wrapper unit coverage. |
+
+Closeout for `bd-bife.8` requires at least one executable proof per row. If a
+downstream G-feature bead has not landed the owning surface yet, that row stays
+open and the test belongs with that downstream bead.
 
 ## Remaining Work For `bd-bife.8`
 
@@ -156,6 +186,6 @@ alone. Remaining acceptance work:
 
 - Implement disabled-feature behavior for every affected surface.
 - Add tests proving disabled features suppress output and emit degraded
-  sentinels.
+  sentinels, using the matrix above as the row-level checklist.
 - Run the required Cargo gates remotely through RCH after the topology blocker
   is resolved.

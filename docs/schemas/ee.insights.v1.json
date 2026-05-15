@@ -31,6 +31,58 @@
     "sections": {"type": "array", "items": {"$ref": "#/$defs/section"}},
     "degradedSignals": {"type": "array", "items": {"$ref": "#/$defs/degradedSignal"}}
   },
+  "examples": [
+    {
+      "schema": "ee.insights.v1",
+      "command": "insights",
+      "mode": "full_bundle",
+      "snapshotVersion": 0,
+      "generatedAt": "1970-01-01T00:00:00Z",
+      "runDurationMs": 0,
+      "selectedSection": null,
+      "explainMemoryId": null,
+      "explainCommand": null,
+      "pagination": null,
+      "availableSections": [
+        "authorities",
+        "bridges",
+        "causalBottlenecks",
+        "comprehensiveRules",
+        "contradictionClusters",
+        "hubs",
+        "kCore",
+        "kTruss",
+        "knowledgeSkyline",
+        "loadBearingMemories",
+        "proximityHotspots",
+        "revisionFrontiers",
+        "topMemories"
+      ],
+      "sections": [
+        {"name": "authorities", "title": "Authority Memories", "summary": "HITS authority scores for memories that ground claims from many hubs.", "whyItMatters": "Authority memories help agents distinguish grounded evidence from navigational references.", "items": [], "nextCommands": ["ee insights --section authorities --workspace . --json"]},
+        {"name": "bridges", "title": "Bridge Memories", "summary": "Top articulation-point memories ranked by cluster-disconnection-magnitude.", "whyItMatters": "Bridge memories deserve careful decay and review because removing them can disconnect useful context.", "items": [], "nextCommands": ["ee insights --section bridges --workspace . --json"]},
+        {"name": "causalBottlenecks", "title": "Causal Bottlenecks", "summary": "High-betweenness memories in causal-evidence subgraphs.", "whyItMatters": "Causal bottlenecks show which facts carry the most explanatory load for failures and repairs.", "items": [], "nextCommands": ["ee insights --section causalBottlenecks --workspace . --json"]},
+        {"name": "comprehensiveRules", "title": "Comprehensive Rules", "summary": "Rule memories with broad provenance coverage and high reuse potential.", "whyItMatters": "Comprehensive rules are candidates for promotion because they generalize across repeated work.", "items": [], "nextCommands": ["ee curate candidates --workspace . --json"]},
+        {"name": "contradictionClusters", "title": "Contradiction Clusters", "summary": "Louvain communities filtered to contradiction-heavy memory neighborhoods.", "whyItMatters": "Contradiction clusters identify parts of the memory graph that need curation before agents rely on them.", "items": [], "nextCommands": ["ee insights --section contradictionClusters --workspace . --json"]},
+        {"name": "hubs", "title": "Hub Memories", "summary": "HITS hub scores for memories that point to many authoritative facts.", "whyItMatters": "Hub memories are useful navigation anchors for agents assembling a task-specific context pack.", "items": [], "nextCommands": ["ee insights --section hubs --workspace . --json"]},
+        {"name": "kCore", "title": "K-Core", "summary": "Core-number membership for densely connected memory regions.", "whyItMatters": "K-core posture shows which memories sit in stable, mutually reinforcing graph neighborhoods.", "items": [], "nextCommands": ["ee insights --section kCore --workspace . --json"]},
+        {"name": "kTruss", "title": "K-Truss", "summary": "Triangle-supported structural health findings for support subgraphs.", "whyItMatters": "K-truss posture helps separate isolated support edges from stronger corroborating clusters.", "items": [], "nextCommands": ["ee insights --section kTruss --workspace . --json"]},
+        {"name": "knowledgeSkyline", "title": "Knowledge Skyline", "summary": "Composite posture across onion layer, community, age, trust, and graph health signals.", "whyItMatters": "The skyline gives agents a portfolio-level view of memory quality before relying on a workspace.", "items": [], "nextCommands": ["ee insights --section knowledgeSkyline --workspace . --json"]},
+        {"name": "loadBearingMemories", "title": "Load-Bearing Memories", "summary": "Memories with high influence in rule-to-source provenance projections.", "whyItMatters": "Load-bearing memories should be preserved or reviewed carefully because many rules depend on them.", "items": [], "nextCommands": ["ee insights --section loadBearingMemories --workspace . --json"]},
+        {"name": "proximityHotspots", "title": "Proximity Hotspots", "summary": "Memory pairs with small min-cut distance in Gomory-Hu proximity projections.", "whyItMatters": "Proximity hotspots surface tightly coupled facts that should be packed, reviewed, or curated together.", "items": [], "nextCommands": ["ee insights --section proximityHotspots --workspace . --json"]},
+        {"name": "revisionFrontiers", "title": "Revision Frontiers", "summary": "Top recent revisions ranked by dominance-frontier size in logical memory revision DAGs.", "whyItMatters": "Revision frontiers help agents understand which edits may change downstream context behavior.", "items": [], "nextCommands": ["ee insights --section revisionFrontiers --workspace . --json"]},
+        {"name": "topMemories", "title": "Top Memories", "summary": "Top-ranked memories by cached graph centrality and retrieval posture.", "whyItMatters": "Top memories provide an immediate overview of the facts most likely to shape agent behavior.", "items": [], "nextCommands": ["ee insights --section topMemories --workspace . --json"]}
+      ],
+      "degradedSignals": [
+        {
+          "code": "graph.workspace_empty",
+          "severity": "info",
+          "message": "No graph memories are available for insights yet.",
+          "repair": "run: ee remember --workspace . \"<memory>\" --json"
+        }
+      ]
+    }
+  ],
   "field_presets": {
     "minimal": ["schema", "snapshotVersion"],
     "summary": ["schema", "mode", "snapshotVersion", "runDurationMs", "degradedSignals"],
@@ -43,6 +95,78 @@
       "type": "object",
       "required": ["name", "title", "summary", "whyItMatters", "items", "nextCommands"],
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {"name": {"const": "authorities"}},
+            "required": ["name"]
+          },
+          "then": {
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/authorityItem"}
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"name": {"const": "bridges"}},
+            "required": ["name"]
+          },
+          "then": {
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/bridgeItem"}
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"name": {"const": "hubs"}},
+            "required": ["name"]
+          },
+          "then": {
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/hubItem"}
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"name": {"const": "revisionFrontiers"}},
+            "required": ["name"]
+          },
+          "then": {
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/revisionFrontierItem"}
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"name": {"const": "proximityHotspots"}},
+            "required": ["name"]
+          },
+          "then": {
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/proximityHotspotItem"}
+              }
+            }
+          }
+        }
+      ],
       "properties": {
         "name": {"type": "string"},
         "title": {"type": "string"},
@@ -50,6 +174,153 @@
         "whyItMatters": {"type": "string"},
         "items": {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
         "nextCommands": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "authorityItem": {
+      "type": "object",
+      "required": [
+        "rank",
+        "memoryId",
+        "authorityScore",
+        "interpretation",
+        "evidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "rank": {"type": "integer", "minimum": 1},
+        "memoryId": {"type": "string"},
+        "authorityScore": {"type": "number", "minimum": 0},
+        "interpretation": {"type": "string", "const": "authority"},
+        "evidence": {
+          "type": "object",
+          "required": ["schema", "algorithm", "snapshotVersion"],
+          "additionalProperties": false,
+          "properties": {
+            "schema": {"type": "string", "const": "ee.graph.hits.v1"},
+            "algorithm": {"type": "string", "const": "hits_centrality_directed"},
+            "snapshotVersion": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "bridgeItem": {
+      "type": "object",
+      "required": [
+        "rank",
+        "memoryId",
+        "articulationPoint",
+        "clusterDisconnectionMagnitude",
+        "disconnectedComponents",
+        "affectedMemoryCount",
+        "largestComponentSize",
+        "evidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "rank": {"type": "integer", "minimum": 1},
+        "memoryId": {"type": "string"},
+        "articulationPoint": {"type": "string"},
+        "clusterDisconnectionMagnitude": {"type": "number", "minimum": 0},
+        "disconnectedComponents": {"type": "integer", "minimum": 0},
+        "affectedMemoryCount": {"type": "integer", "minimum": 0},
+        "largestComponentSize": {"type": "integer", "minimum": 0},
+        "evidence": {
+          "type": "object",
+          "required": ["algorithm", "snapshotVersion"],
+          "additionalProperties": false,
+          "properties": {
+            "algorithm": {"type": "string", "const": "articulation_points"},
+            "snapshotVersion": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "hubItem": {
+      "type": "object",
+      "required": [
+        "rank",
+        "memoryId",
+        "hubScore",
+        "interpretation",
+        "evidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "rank": {"type": "integer", "minimum": 1},
+        "memoryId": {"type": "string"},
+        "hubScore": {"type": "number", "minimum": 0},
+        "interpretation": {"type": "string", "const": "hub"},
+        "evidence": {
+          "type": "object",
+          "required": ["schema", "algorithm", "snapshotVersion"],
+          "additionalProperties": false,
+          "properties": {
+            "schema": {"type": "string", "const": "ee.graph.hits.v1"},
+            "algorithm": {"type": "string", "const": "hits_centrality_directed"},
+            "snapshotVersion": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "revisionFrontierItem": {
+      "type": "object",
+      "required": [
+        "rank",
+        "memoryId",
+        "logicalId",
+        "dominanceFrontierSize",
+        "affectedMemoryCount",
+        "recentRevisionAt",
+        "evidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "rank": {"type": "integer", "minimum": 1},
+        "memoryId": {"type": "string"},
+        "logicalId": {"type": "string"},
+        "dominanceFrontierSize": {"type": "integer", "minimum": 0},
+        "affectedMemoryCount": {"type": "integer", "minimum": 0},
+        "recentRevisionAt": {"type": ["string", "null"]},
+        "evidence": {
+          "type": "object",
+          "required": ["algorithm", "snapshotVersion"],
+          "additionalProperties": false,
+          "properties": {
+            "algorithm": {"type": "string", "const": "dominance_frontiers"},
+            "snapshotVersion": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "proximityHotspotItem": {
+      "type": "object",
+      "required": [
+        "rank",
+        "memoryA",
+        "memoryB",
+        "minCut",
+        "interpretation",
+        "treePath",
+        "evidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "rank": {"type": "integer", "minimum": 1},
+        "memoryA": {"type": "string"},
+        "memoryB": {"type": "string"},
+        "minCut": {"type": "number", "minimum": 0},
+        "interpretation": {"type": "string", "enum": ["weak", "moderate", "strong", "self"]},
+        "treePath": {"type": ["array", "null"], "items": {"type": "string"}},
+        "evidence": {
+          "type": "object",
+          "required": ["schema", "algorithm", "snapshotVersion"],
+          "additionalProperties": false,
+          "properties": {
+            "schema": {"type": "string", "const": "ee.proximity.v1"},
+            "algorithm": {"type": "string", "const": "gomory_hu_tree"},
+            "snapshotVersion": {"type": "integer", "minimum": 0}
+          }
+        }
       }
     },
     "degradedSignal": {

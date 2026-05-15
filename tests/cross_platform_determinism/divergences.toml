@@ -1,0 +1,8 @@
+# Cross-platform graph determinism divergences.
+#
+# The default contract is strict: every supported target triple must match the
+# pinned hash table in tests/cross_platform_determinism.rs. Add a reviewed entry
+# here only when a platform-specific graph hash drift is intentional and
+# documented with a reason plus affected target.
+
+divergences = []

@@ -1,0 +1,49 @@
+---
+source: tests/json_contract_snapshots.rs
+expression: value
+---
+{
+  "communityOfMass": {
+    "communityId": "release-readiness",
+    "mass": 0.72,
+    "topMemoryIds": [
+      "mem_release_policy",
+      "mem_rch_remote_required"
+    ]
+  },
+  "degraded": [],
+  "egoSubgraph": {
+    "edges": [
+      {
+        "relation": "supports",
+        "source": "mem_release_policy",
+        "target": "mem_rch_remote_required",
+        "weight": 0.91
+      }
+    ],
+    "nodes": [
+      {
+        "id": "mem_release_policy",
+        "kind": "memory"
+      },
+      {
+        "id": "mem_rch_remote_required",
+        "kind": "memory"
+      }
+    ]
+  },
+  "pprNeighbors": [
+    {
+      "memoryId": "mem_rch_remote_required",
+      "rank": 1,
+      "score": 0.41
+    }
+  ],
+  "schema": "ee.context.pack_dna.v1",
+  "snapshotVersion": 42,
+  "voronoiDominator": {
+    "distance": 0.0,
+    "memoryId": "mem_release_policy",
+    "reason": "selected item dominates the local evidence neighborhood"
+  }
+}
