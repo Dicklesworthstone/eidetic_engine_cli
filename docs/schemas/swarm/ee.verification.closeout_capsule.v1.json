@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.verification.closeout_capsule.v1.json",
+  "title": "ee.verification.closeout_capsule.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "requestedSurface",
+    "beadId",
+    "commandSummary",
+    "sourceHash",
+    "commandHash",
+    "executionSubstrate",
+    "workerHost",
+    "result",
+    "passedCount",
+    "failedCount",
+    "artifactManifestHash",
+    "retainedLogReference",
+    "caveats",
+    "reusableUntil",
+    "sourceMustMatch",
+    "failureModeCodes",
+    "supportBundleMetadata"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ee.verification.closeout_capsule.v1" },
+    "requestedSurface": {
+      "type": "string",
+      "enum": ["beads_comment", "agent_mail", "support_bundle"]
+    },
+    "beadId": { "type": ["string", "null"] },
+    "commandSummary": { "type": "string", "minLength": 1 },
+    "sourceHash": { "type": ["string", "null"] },
+    "commandHash": { "type": "string", "minLength": 1 },
+    "executionSubstrate": { "type": "string", "minLength": 1 },
+    "workerHost": { "type": ["string", "null"] },
+    "result": {
+      "type": "string",
+      "enum": ["passed", "failed", "in_flight"]
+    },
+    "passedCount": { "type": ["integer", "null"], "minimum": 0 },
+    "failedCount": { "type": ["integer", "null"], "minimum": 0 },
+    "artifactManifestHash": { "type": ["string", "null"] },
+    "retainedLogReference": { "type": ["string", "null"] },
+    "caveats": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "reusableUntil": { "type": ["string", "null"] },
+    "sourceMustMatch": { "type": "boolean" },
+    "failureModeCodes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "evidence_incomplete",
+          "local_cargo_disallowed",
+          "no_artifact_manifest",
+          "source_hash_mismatch"
+        ]
+      }
+    },
+    "supportBundleMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "stdoutHash",
+        "stderrExcerptHash",
+        "provenance",
+        "rawOutputIncluded",
+        "localPathsRedacted"
+      ],
+      "properties": {
+        "runId": { "type": "string", "minLength": 1 },
+        "stdoutHash": { "type": ["string", "null"] },
+        "stderrExcerptHash": { "type": ["string", "null"] },
+        "provenance": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source", "eventKind", "line"],
+            "properties": {
+              "source": { "type": "string" },
+              "eventKind": { "type": "string" },
+              "line": { "type": ["integer", "null"], "minimum": 1 }
+            }
+          }
+        },
+        "rawOutputIncluded": { "type": "boolean", "const": false },
+        "localPathsRedacted": { "type": "boolean", "const": true }
+      }
+    }
+  }
+}

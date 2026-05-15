@@ -25,6 +25,7 @@ pub mod algorithms;
 pub mod bipartite_provenance;
 pub mod causal;
 pub mod decay;
+pub mod dominance;
 pub mod gomory_hu;
 pub mod health;
 pub mod hits;
