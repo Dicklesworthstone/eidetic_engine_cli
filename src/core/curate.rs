@@ -5,6 +5,8 @@
 //! separate explicit commands.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -13,6 +15,7 @@ use fnx_classes::Graph;
 use fnx_runtime::CompatibilityMode;
 use serde::Serialize;
 
+use crate::config::{ConfigFile, GRAPH_FEATURE_STRUCTURAL_DECAY_ENABLED_KEY};
 use crate::curate::{
     CandidateInput, CandidateSource, CandidateStatus, CandidateType, CandidateValidationError,
     ReviewQueueState, validate_candidate, validate_candidate_trust_evidence,
@@ -2348,7 +2351,15 @@ pub fn run_curation_disposition(
         .map(|policy| (policy.id.as_str(), policy))
         .collect::<BTreeMap<_, _>>();
     let mut degraded = Vec::new();
-    let structural_adjustments = if options.structural_decay {
+    let runtime_structural_decay_enabled = if options.structural_decay {
+        structural_decay_feature_enabled(&prepared.workspace_path)?
+    } else {
+        false
+    };
+    if options.structural_decay && !runtime_structural_decay_enabled {
+        push_structural_decay_feature_disabled_degradation(&mut degraded);
+    }
+    let structural_adjustments = if options.structural_decay && runtime_structural_decay_enabled {
         curate_structural_decay_adjustments(
             &connection,
             &candidates,
@@ -2415,6 +2426,46 @@ pub fn run_curation_disposition(
         degraded,
         next_action,
     })
+}
+
+fn structural_decay_feature_enabled(workspace_path: &Path) -> Result<bool, DomainError> {
+    let path = workspace_path.join(".ee").join("config.toml");
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(DomainError::Configuration {
+                message: format!(
+                    "Failed to read workspace curation config {}: {error}",
+                    path.display()
+                ),
+                repair: Some("Fix or remove .ee/config.toml.".to_owned()),
+            });
+        }
+    };
+    let config = ConfigFile::parse(&contents).map_err(|error| DomainError::Configuration {
+        message: format!(
+            "Failed to parse workspace curation config {}: {error}",
+            path.display()
+        ),
+        repair: Some("Fix [graph.feature.structural_decay] in .ee/config.toml.".to_owned()),
+    })?;
+    Ok(config
+        .graph
+        .feature
+        .structural_decay_enabled
+        .unwrap_or(false))
+}
+
+fn push_structural_decay_feature_disabled_degradation(
+    degraded: &mut Vec<CurateCandidatesDegradation>,
+) {
+    degraded.push(CurateCandidatesDegradation {
+        code: "graph_feature_disabled".to_owned(),
+        severity: "medium".to_owned(),
+        message: "Structural curation decay is disabled by runtime graph feature flag.".to_owned(),
+        repair: format!("ee config set {GRAPH_FEATURE_STRUCTURAL_DECAY_ENABLED_KEY} true"),
+    });
 }
 
 /// Retire a curation candidate from the active review set with an audited record.
@@ -6104,6 +6155,7 @@ fn curate_usage_error(message: String, repair: &str) -> DomainError {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::fs;
     use std::path::Path;
 
     use super::{
@@ -6122,6 +6174,16 @@ mod tests {
     use crate::models::{CandidateId, EvidenceId, MemoryId, SessionId};
 
     type TestResult = Result<(), String>;
+
+    fn enable_structural_decay_feature(workspace_path: &Path) -> TestResult {
+        let config_dir = workspace_path.join(".ee");
+        fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        fs::write(
+            config_dir.join("config.toml"),
+            "[graph.feature.structural_decay]\nenabled = true\n",
+        )
+        .map_err(|error| error.to_string())
+    }
 
     fn test_workspace_id(workspace_path: &Path) -> String {
         let canonical = workspace_path
@@ -7858,6 +7920,7 @@ mod tests {
             &bridge_id,
             &leaf_id,
         )?;
+        enable_structural_decay_feature(workspace_path)?;
 
         let legacy = run_curation_disposition(&CurateDispositionOptions {
             workspace_path,
@@ -7942,13 +8005,48 @@ mod tests {
     }
 
     #[test]
-    fn curation_disposition_default_emits_structural_adjustments() -> TestResult {
+    fn curation_disposition_enabled_feature_emits_structural_adjustments() -> TestResult {
         let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
         let workspace_id = test_workspace_id(workspace_path);
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(46)).to_string();
         let candidate_id = curate_id(47);
+        seed_candidate_database(
+            &database_path,
+            &workspace_id,
+            &memory_id,
+            &candidate_id,
+            "promote",
+            Some("pending"),
+            None,
+        )?;
+        enable_structural_decay_feature(workspace_path)?;
+
+        let report = run_curation_disposition(&CurateDispositionOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            actor: None,
+            apply: false,
+            structural_decay: true,
+            now_rfc3339: Some("2026-05-02T00:00:02Z"),
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.structural_adjustments.len(), 1);
+        assert_eq!(report.structural_adjustments[0].memory_id, memory_id);
+        assert_eq!(report.structural_adjustments[0].structural_multiplier, 1.0);
+        Ok(())
+    }
+
+    #[test]
+    fn curation_disposition_disabled_feature_suppresses_structural_adjustments() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(54)).to_string();
+        let candidate_id = curate_id(55);
         seed_candidate_database(
             &database_path,
             &workspace_id,
@@ -7968,10 +8066,21 @@ mod tests {
             now_rfc3339: Some("2026-05-02T00:00:02Z"),
         })
         .map_err(|error| error.message())?;
+        let data = report.data_json();
 
-        assert_eq!(report.structural_adjustments.len(), 1);
-        assert_eq!(report.structural_adjustments[0].memory_id, memory_id);
-        assert_eq!(report.structural_adjustments[0].structural_multiplier, 1.0);
+        assert!(report.structural_adjustments.is_empty());
+        assert!(!data.contains("structuralAdjustments"));
+        let degraded = report
+            .degraded
+            .iter()
+            .find(|entry| entry.code == "graph_feature_disabled")
+            .ok_or_else(|| "expected graph_feature_disabled degradation".to_owned())?;
+        assert_eq!(degraded.severity, "medium");
+        assert!(
+            degraded
+                .repair
+                .contains("graph.feature.structural_decay.enabled")
+        );
         Ok(())
     }
 
@@ -8012,6 +8121,7 @@ mod tests {
                 proposed_content: None,
             },
         )?;
+        enable_structural_decay_feature(workspace_path)?;
 
         let report = run_curation_disposition(&CurateDispositionOptions {
             workspace_path,

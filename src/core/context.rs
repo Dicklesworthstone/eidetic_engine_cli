@@ -23,7 +23,8 @@
 //! of those landing first.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,7 +37,7 @@ use rustix::fs::{FlockOperation, flock};
 #[cfg(unix)]
 use rustix::io::Errno;
 
-use crate::config::WorkspaceLocation;
+use crate::config::{ConfigFile, GRAPH_FEATURE_PPR_ENABLED_KEY, WorkspaceLocation};
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
 use crate::core::memory_scope::MemoryScopeContext;
@@ -2822,6 +2823,23 @@ fn apply_personalized_pagerank_rerank(
     if candidates.is_empty() || ppr_weight == 0.0 {
         return PersonalizedPageRankRerankMetrics::default();
     }
+    match context_ppr_feature_enabled(workspace_path) {
+        Ok(true) => {}
+        Ok(false) => {
+            push_ppr_feature_disabled_degradation(degraded);
+            return PersonalizedPageRankRerankMetrics::default();
+        }
+        Err(message) => {
+            push_degradation(
+                degraded,
+                "context_config_unavailable",
+                ContextResponseSeverity::Medium,
+                message,
+                Some("Fix or remove .ee/config.toml.".to_string()),
+            );
+            return PersonalizedPageRankRerankMetrics::default();
+        }
+    }
 
     let workspace_ids = graph_context_workspace_ids(connection, workspace_path, degraded);
     let Some(snapshot) = latest_valid_memory_links_snapshot(connection, &workspace_ids, degraded)
@@ -2964,6 +2982,39 @@ fn apply_personalized_pagerank_rerank(
     PersonalizedPageRankRerankMetrics {
         reranked_candidates,
     }
+}
+
+fn context_ppr_feature_enabled(workspace_path: &Path) -> Result<bool, String> {
+    let config_path = workspace_path.join(".ee").join("config.toml");
+    let contents = match fs::read_to_string(&config_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "Personalized PageRank rerank skipped because workspace config {} could not be read: {error}",
+                config_path.display()
+            ));
+        }
+    };
+    let config = ConfigFile::parse(&contents).map_err(|error| {
+        format!(
+            "Personalized PageRank rerank skipped because workspace config {} could not be parsed: {error}",
+            config_path.display()
+        )
+    })?;
+    Ok(config.graph.feature.ppr_enabled.unwrap_or(false))
+}
+
+fn push_ppr_feature_disabled_degradation(degraded: &mut Vec<ContextResponseDegradation>) {
+    push_degradation(
+        degraded,
+        "graph_feature_disabled",
+        ContextResponseSeverity::Medium,
+        format!("Personalized PageRank rerank is disabled by {GRAPH_FEATURE_PPR_ENABLED_KEY}."),
+        Some(format!(
+            "ee config set {GRAPH_FEATURE_PPR_ENABLED_KEY} true"
+        )),
+    );
 }
 
 fn apply_proximity_to_seed_scores(
@@ -4881,6 +4932,16 @@ mod tests {
         }
     }
 
+    fn enable_context_ppr_feature(workspace_path: &Path) -> Result<(), String> {
+        let config_dir = workspace_path.join(".ee");
+        std::fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[graph.feature.ppr]\nenabled = true\n",
+        )
+        .map_err(|error| error.to_string())
+    }
+
     #[test]
     fn context_ppr_weight_defaults_to_disabled() {
         assert_eq!(super::effective_context_ppr_weight(None), 0.0);
@@ -4895,6 +4956,7 @@ mod tests {
     #[test]
     fn context_ppr_rerank_fires_with_valid_snapshot() -> Result<(), String> {
         let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        enable_context_ppr_feature(&fixture.workspace_path)?;
         let mut candidates = vec![
             ppr_candidate(fixture.seed, 0.80)?,
             ppr_candidate(fixture.neighbor, 0.20)?,
@@ -4935,8 +4997,45 @@ mod tests {
     }
 
     #[test]
+    fn context_ppr_feature_disabled_preserves_text_scores() -> Result<(), String> {
+        let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        let mut candidates = vec![
+            ppr_candidate(fixture.seed, 0.80)?,
+            ppr_candidate(fixture.neighbor, 0.20)?,
+        ];
+        let search_report = ppr_search_report(vec![ppr_hit(fixture.seed, 0.90, Some(0.95))]);
+        let mut degraded = Vec::new();
+
+        let metrics = super::apply_personalized_pagerank_rerank(
+            &fixture.connection,
+            &fixture.workspace_path,
+            &search_report,
+            &mut candidates,
+            super::DEFAULT_CONTEXT_PPR_WEIGHT,
+            &mut degraded,
+        );
+
+        assert_eq!(metrics.reranked_candidates, 0);
+        assert_eq!(candidates[0].relevance.into_inner(), 0.80);
+        assert_eq!(candidates[1].relevance.into_inner(), 0.20);
+        assert!(candidates.iter().all(|item| item.score_breakdown.is_none()));
+        let disabled = degraded
+            .iter()
+            .find(|entry| entry.code == "graph_feature_disabled")
+            .ok_or_else(|| "expected graph_feature_disabled degradation".to_string())?;
+        assert_eq!(disabled.severity, ContextResponseSeverity::Medium);
+        assert!(disabled.message.contains("graph.feature.ppr.enabled"));
+        assert_eq!(
+            disabled.repair.as_deref(),
+            Some("ee config set graph.feature.ppr.enabled true")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn context_ppr_rerank_skips_stale_snapshot() -> Result<(), String> {
         let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Stale)?;
+        enable_context_ppr_feature(&fixture.workspace_path)?;
         let mut candidates = vec![ppr_candidate(fixture.seed, 0.80)?];
         let search_report = ppr_search_report(vec![ppr_hit(fixture.seed, 0.90, Some(0.95))]);
         let mut degraded = Vec::new();
@@ -4964,6 +5063,7 @@ mod tests {
     #[test]
     fn context_ppr_rerank_skips_empty_seed_map() -> Result<(), String> {
         let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        enable_context_ppr_feature(&fixture.workspace_path)?;
         let mut candidates = vec![ppr_candidate(fixture.neighbor, 0.20)?];
         let search_report = ppr_search_report(vec![ppr_hit(fixture.seed, 0.90, Some(0.95))]);
         let mut degraded = Vec::new();
@@ -5018,6 +5118,7 @@ mod tests {
     #[test]
     fn context_ppr_weight_one_uses_ppr_score_as_combined_score() -> Result<(), String> {
         let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        enable_context_ppr_feature(&fixture.workspace_path)?;
         let mut candidates = vec![
             ppr_candidate(fixture.seed, 0.80)?,
             ppr_candidate(fixture.neighbor, 0.20)?,
