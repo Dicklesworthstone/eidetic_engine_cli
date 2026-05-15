@@ -1,6 +1,6 @@
 # Publish Checklist
 
-Pre-release checklist for publishing `ee` to crates.io.
+Pre-release checklist for publishing the `eidetic-engine` package to crates.io.
 
 ## Prerequisites
 
@@ -17,15 +17,22 @@ Before publishing, ensure:
    - [ ] `fnx-*` crates published to crates.io (or feature-gated behind `graph`)
    - [ ] `franken-agent-detection` published to crates.io (or feature-gated)
    - [ ] `toon` (`tru`) published to crates.io
+   - [ ] `scripts/audit_install_pipeline.sh` reports `dependency_resolution.dep_resolution_ready = true`
+
+   The audit's `dependency_resolution.required_crates[]` is the current
+   machine-readable checklist for this gate. It includes direct path
+   dependencies from `Cargo.toml` plus the transitive franken-stack crates that
+   must be available for the selected default/feature profile.
 
 3. **Crate name ownership resolved**
-   - [ ] `cargo owner --list ee` works with a logged-in crates.io token
-   - [ ] `ee` is owned by the project account, or a replacement crate name is chosen
-   - [ ] `scripts/audit_install_pipeline.sh` reports `crates_io.repository` as `https://github.com/Dicklesworthstone/eidetic_engine_cli`
+   - [ ] `cargo owner --list eidetic-engine` works with a logged-in crates.io token
+   - [x] Replacement package name chosen: `eidetic-engine`
+   - [ ] `scripts/audit_install_pipeline.sh` reports `crates_io.crate_name` as `eidetic-engine` and `crates_io.repository` as `https://github.com/Dicklesworthstone/eidetic_engine_cli`
 
    As of the 2026-05-13 audit, crates.io has `ee` at `0.0.0` owned by `ewpratten`
    and pointing at `https://github.com/ewpratten/ee`; the project cannot publish
-   `ee` until ownership is transferred or the crate name changes.
+   the package as `ee`. The selected publish package is now `eidetic-engine`;
+   `[[bin]] name = "ee"` keeps the installed command name unchanged.
 
 4. **Metadata complete**
    - [x] `description` set
@@ -76,6 +83,6 @@ The following are enforced by CI:
 
 ## Post-Publish
 
-1. Verify on crates.io: https://crates.io/crates/ee
-2. Test install: `cargo install ee`
+1. Verify on crates.io: https://crates.io/crates/eidetic-engine
+2. Test install: `cargo install eidetic-engine`
 3. Run `ee --version` and `ee doctor`

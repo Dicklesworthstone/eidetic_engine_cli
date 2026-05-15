@@ -5,7 +5,7 @@
 #
 #   - curl-pipe install.sh + Sigstore-verified bundle
 #   - brew install Dicklesworthstone/tap/ee
-#   - cargo install ee from crates.io
+#   - cargo install eidetic-engine from crates.io
 #
 # Emits `ee.audit.install_pipeline.v1` JSON to
 # `tests/audit_artifacts/install_pipeline_<UTC>.json`. CI consumers
@@ -22,6 +22,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CRATES_IO_PACKAGE_NAME="eidetic-engine"
 TIMESTAMP="$(date -u +%Y-%m-%dT%H%M%SZ)"
 OUTPUT_DIR="$REPO_ROOT/tests/audit_artifacts"
 OUTPUT="${1:-$OUTPUT_DIR/install_pipeline_${TIMESTAMP}.json}"
@@ -62,7 +63,7 @@ gh_releases() {
     fi
 }
 
-# --- Probe 2: crates.io for the `ee` crate ------------------------
+# --- Probe 2: crates.io for the selected package -------------------
 crates_io_inventory() {
     if ! command -v curl >/dev/null 2>&1; then
         echo 'curl_missing'
@@ -70,7 +71,7 @@ crates_io_inventory() {
     fi
     local response
     if response="$(curl -fsSL --max-time 10 \
-        'https://crates.io/api/v1/crates/ee' 2>&1)"; then
+        "https://crates.io/api/v1/crates/${CRATES_IO_PACKAGE_NAME}" 2>&1)"; then
         printf '%s' "$response"
     else
         echo 'crates_io_unreachable'
@@ -92,7 +93,100 @@ brew_tap_inventory() {
     fi
 }
 
-# --- Probe 4: parse release.yml for the asset matrix ---------------
+# --- Probe 4: crates.io dependency resolution ----------------------
+dependency_resolution_inventory() {
+    if ! command -v curl >/dev/null 2>&1; then
+        jq -n '{
+            probe_status: "curl_missing",
+            dep_resolution_ready: null,
+            unresolved_count: null,
+            required_crates: []
+        }'
+        return
+    fi
+
+    local results='[]'
+    local crate_name version role source strategy response status repository latest_version item
+    while IFS='|' read -r crate_name version role source strategy; do
+        [ -n "$crate_name" ] || continue
+        status='unreachable'
+        repository=''
+        latest_version=''
+        if response="$(curl -fsSL --max-time 10 \
+            "https://crates.io/api/v1/crates/${crate_name}" 2>/dev/null)"; then
+            repository="$(printf '%s' "$response" | jq -r '.crate.repository // ""')"
+            latest_version="$(printf '%s' "$response" | jq -r '.crate.newest_version // ""')"
+            if printf '%s' "$response" | jq -e --arg version "$version" \
+                '.versions[]? | select(.num == $version and (.yanked | not))' >/dev/null 2>&1; then
+                status='version_available'
+            else
+                status='crate_exists_version_missing'
+            fi
+        fi
+        item="$(jq -n \
+            --arg crate_name "$crate_name" \
+            --arg version "$version" \
+            --arg role "$role" \
+            --arg source "$source" \
+            --arg strategy "$strategy" \
+            --arg status "$status" \
+            --arg repository "$repository" \
+            --arg latest_version "$latest_version" \
+            '{
+                crate_name: $crate_name,
+                required_version: $version,
+                role: $role,
+                source: $source,
+                strategy: $strategy,
+                status: $status,
+                latest_version: $latest_version,
+                repository: $repository
+            }')"
+        results="$(jq -c --argjson item "$item" '. + [$item]' <<<"$results")"
+    done <<'EOF'
+asupersync|0.3.1|direct|Cargo.toml dependencies|must_be_published
+franken-agent-detection|0.1.3|direct|Cargo.toml dependencies|must_be_published
+frankensearch|0.3.0|direct|Cargo.toml dependencies|must_be_published
+fnx-algorithms|0.1.0|direct|Cargo.toml dependencies|graph_feature_or_publish
+fnx-classes|0.1.0|direct|Cargo.toml dependencies|graph_feature_or_publish
+fnx-runtime|0.1.0|direct|Cargo.toml dependencies|graph_feature_or_publish
+sqlmodel-core|0.2.2|direct|Cargo.toml dependencies|must_be_published
+sqlmodel-frankensqlite|0.2.2|direct|Cargo.toml dependencies|must_be_published
+tru|0.2.2|direct|Cargo.toml dependencies|must_be_published
+fsqlite|0.1.2|transitive|sqlmodel-frankensqlite dependency|must_be_published
+fsqlite-core|0.1.2|transitive|sqlmodel-frankensqlite dependency|must_be_published
+fsqlite-error|0.1.2|transitive|sqlmodel-frankensqlite dependency|must_be_published
+fsqlite-types|0.1.2|transitive|sqlmodel-frankensqlite dependency|must_be_published
+fsqlite-func|0.1.2|transitive|frankensqlite feature surface|must_be_published
+fsqlite-ext-fts5|0.1.2|transitive|frankensqlite feature surface|must_be_published
+fsqlite-ext-json|0.1.2|transitive|frankensqlite feature surface|must_be_published
+fsqlite-ast|0.1.2|transitive|frankensqlite feature surface|must_be_published
+fsqlite-btree|0.1.2|transitive|frankensqlite feature surface|must_be_published
+fsqlite-pager|0.1.2|transitive|frankensqlite feature surface|must_be_published
+fsqlite-parser|0.1.2|transitive|frankensqlite feature surface|must_be_published
+fsqlite-planner|0.1.2|transitive|frankensqlite feature surface|must_be_published
+fsqlite-vdbe|0.1.2|transitive|frankensqlite feature surface|must_be_published
+fsqlite-vfs|0.1.2|transitive|frankensqlite feature surface|must_be_published
+fsqlite-wal|0.1.2|transitive|frankensqlite feature surface|must_be_published
+fsqlite-mvcc|0.1.2|transitive|frankensqlite feature surface|must_be_published
+fsqlite-observability|0.1.2|transitive|frankensqlite feature surface|must_be_published
+frankensearch-core|0.2.0|transitive|frankensearch 0.3.0 workspace dependency|must_be_published
+frankensearch-embed|0.2.0|transitive|frankensearch 0.3.0 workspace dependency|must_be_published
+frankensearch-index|0.2.0|transitive|frankensearch 0.3.0 workspace dependency|must_be_published
+fnx-cgse|0.1.0|transitive|franken_networkx feature surface|graph_feature_or_publish
+fnx-convert|0.1.0|transitive|franken_networkx feature surface|graph_feature_or_publish
+EOF
+
+    jq -n --argjson crates "$results" '{
+        probe_status: "ok",
+        dep_resolution_ready: (all($crates[]; .status == "version_available")),
+        unresolved_count: ([$crates[] | select(.status != "version_available")] | length),
+        required_count: ($crates | length),
+        required_crates: $crates
+    }'
+}
+
+# --- Probe 5: parse release.yml for the asset matrix ---------------
 release_workflow_assets() {
     local yml="$REPO_ROOT/.github/workflows/release.yml"
     if [ ! -f "$yml" ]; then
@@ -347,7 +441,7 @@ readme_installation_status() {
     if grep -qF '| Homebrew tap | planned; tap formula not published yet | `bd-2gill.2` |' "$readme" 2>/dev/null; then
         homebrew_planned=true
     fi
-    if grep -qF '| crates.io | planned; `ee` currently points to another owner/repository | `bd-2gill.1` |' "$readme" 2>/dev/null; then
+    if grep -qF '| crates.io | planned; package name selected as `eidetic-engine`; binary remains `ee` | `bd-3usjw.10` |' "$readme" 2>/dev/null; then
         cargo_planned=true
     fi
     if grep -qF '| Source build | available now | this README |' "$readme" 2>/dev/null; then
@@ -630,7 +724,7 @@ ci_workflow_inventory() {
         homebrew_smoke_present=true
     fi
     if grep -qF 'export CARGO_HOME="$RUNNER_TEMP/clean-cargo-home"' "$ci" 2>/dev/null \
-        && grep -qF 'cargo install ee' "$ci" 2>/dev/null; then
+        && grep -qF 'cargo install eidetic-engine' "$ci" 2>/dev/null; then
         cargo_smoke_present=true
     fi
     if grep -qF 'EE_EXPECTED_VERSION="${EE_RELEASE_TAG#v}"' "$ci" 2>/dev/null \
@@ -700,6 +794,7 @@ ci_workflow_inventory() {
 GH_RAW="$(gh_releases)"
 CRATES_RAW="$(crates_io_inventory)"
 TAP_RAW="$(brew_tap_inventory)"
+DEPENDENCY_RESOLUTION_JSON="$(dependency_resolution_inventory)"
 RELEASE_YML_JSON="$(release_workflow_assets)"
 README_JSON="$(readme_installation_status)"
 INSTALLER_JSON="$(installer_asset_contract)"
@@ -733,7 +828,7 @@ crates_status() {
                 owners_json='null'
                 local owners_response
                 if owners_response="$(curl -fsSL --max-time 10 \
-                    'https://crates.io/api/v1/crates/ee/owners' 2>/dev/null)" \
+                    "https://crates.io/api/v1/crates/${CRATES_IO_PACKAGE_NAME}/owners" 2>/dev/null)" \
                     && printf '%s' "$owners_response" | jq -e '.users' >/dev/null 2>&1; then
                     owners_json="$(printf '%s' "$owners_response" \
                         | jq -c '[.users[]? | {id, login, name}]')"
@@ -745,9 +840,11 @@ crates_status() {
                     --arg documentation "$documentation" \
                     --arg created_at "$created_at" \
                     --arg updated_at "$updated_at" \
+                    --arg crate_name "$CRATES_IO_PACKAGE_NAME" \
                     --argjson owners "$owners_json" \
                     '{
                         probe_status: "ok",
+                        crate_name: $crate_name,
                         name_claimed: true,
                         latest_version: $version,
                         repository: $repository,
@@ -758,7 +855,8 @@ crates_status() {
                         owners: $owners
                     }'
             else
-                jq -n '{probe_status: "ok", name_claimed: false, error_body: input | tojson}' <<<"$CRATES_RAW"
+                jq -n --arg crate_name "$CRATES_IO_PACKAGE_NAME" \
+                    '{probe_status: "ok", crate_name: $crate_name, name_claimed: false, error_body: input | tojson}' <<<"$CRATES_RAW"
             fi
             ;;
     esac
@@ -834,16 +932,21 @@ TAP_JSON="$(tap_status)"
 RELEASE_ASSETS_JSON="$(release_assets_status)"
 
 # Decide path. PATH-A requires all install surfaces to point at the
-# same current release. A claimed-but-foreign `ee` crate, stale tap
+# same current release. A claimed-but-foreign crate, stale tap
 # formula, or crates.io version mismatch is still PATH-B.
 DECIDE_PATH="path_b_pre_release"
 DECIDE_REASON_JSON="$(jq -n \
     --argjson gh "$GH_JSON" \
     --argjson crates "$CRATES_JSON" \
     --argjson tap "$TAP_JSON" \
+    --argjson dependency_resolution "$DEPENDENCY_RESOLUTION_JSON" \
     --argjson release_assets "$RELEASE_ASSETS_JSON" \
     --arg project_repo "https://github.com/Dicklesworthstone/eidetic_engine_cli" \
+    --arg crate_name "$CRATES_IO_PACKAGE_NAME" \
     '{
+        crates_package_name: $crate_name,
+        dep_resolution_ready: ($dependency_resolution.dep_resolution_ready // false),
+        unresolved_dependency_count: ($dependency_resolution.unresolved_count // null),
         release_tag: (($gh.releases // [])[0].tagName // ""),
         release_version: ((($gh.releases // [])[0].tagName // "") | sub("^v"; "")),
         gh_releases: ($gh.releases // null) | (. != null and (length > 0)),
@@ -870,6 +973,7 @@ DECIDE_REASON_JSON="$(jq -n \
 if [ "$(printf '%s' "$DECIDE_REASON_JSON" | jq -r '.gh_releases')" = "true" ] \
     && [ "$(printf '%s' "$DECIDE_REASON_JSON" | jq -r '.latest_release_published')" = "true" ] \
     && [ "$(printf '%s' "$DECIDE_REASON_JSON" | jq -r '.release_assets_complete')" = "true" ] \
+    && [ "$(printf '%s' "$DECIDE_REASON_JSON" | jq -r '.dep_resolution_ready')" = "true" ] \
     && [ "$(printf '%s' "$DECIDE_REASON_JSON" | jq -r '.crates_name_claimed')" = "true" ] \
     && [ "$(printf '%s' "$DECIDE_REASON_JSON" | jq -r '.crates_points_at_project')" = "true" ] \
     && [ "$(printf '%s' "$DECIDE_REASON_JSON" | jq -r '.crates_version_matches_release')" = "true" ] \
@@ -889,6 +993,7 @@ jq -n \
     --argjson crates "$CRATES_JSON" \
     --argjson tap "$TAP_JSON" \
     --argjson release_assets "$RELEASE_ASSETS_JSON" \
+    --argjson dependency_resolution "$DEPENDENCY_RESOLUTION_JSON" \
     --argjson release_workflow "$RELEASE_YML_JSON" \
     --argjson readme_installation "$README_JSON" \
     --argjson installer_assets "$INSTALLER_JSON" \
@@ -902,6 +1007,7 @@ jq -n \
         github_releases: $gh,
         github_release_assets: $release_assets,
         crates_io: $crates,
+        dependency_resolution: $dependency_resolution,
         homebrew_tap: $tap,
         release_workflow: $release_workflow,
         readme_installation: $readme_installation,
@@ -911,10 +1017,11 @@ jq -n \
             if $decided_path == "path_a_post_release" then
                 ["Run install.sh on clean Docker images (ubuntu:24.04, debian:bookworm-slim)",
                  "Run brew install Dicklesworthstone/tap/ee on macOS",
-                 "Run cargo install ee in a clean ~/.cargo",
+                 "Run cargo install eidetic-engine in a clean ~/.cargo",
                  "Verify each artifact with cosign verify-blob against the sigstore bundle"]
             else
-                ["File bd-2gill.A: Claim ee crate name on crates.io and publish initial release",
+                ["File bd-3usjw.11: Resolve dependency_resolution.required_crates before cargo publish",
+                 "File bd-3usjw.10: Publish eidetic-engine package with bin name ee",
                  "File bd-2gill.B: Publish Dicklesworthstone/homebrew-tap with Formula/ee.rb pinned to v0.1.0",
                  "File bd-2gill.C: Ship v0.1.0 GitHub release with full asset set (ee-{target}.tar.xz + .sha256 + sigstore.json + install.sh + install.ps1)",
                  "Wire each followup as parent-child child of bd-2gill, label install-pipeline-followup"]

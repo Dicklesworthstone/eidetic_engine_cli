@@ -1,0 +1,39 @@
+# Hardware classes used to interpret ee.perf.v1 and ee.perf.baseline.v1 artifacts.
+#
+# Performance numbers are only comparable inside one hardware class. CI and
+# release tooling should reject artifacts that are not pinned here or do not
+# declare their class directly.
+
+[classes.mac-m3-pro]
+label = "2024 MacBook Pro M3"
+architecture = "aarch64-apple-darwin"
+cpu = "Apple M3 Pro"
+memory_gib = 36
+storage = "internal_nvme"
+canonical = true
+notes = "Canonical README performance table baseline."
+
+[[classes.mac-m3-pro.baselines]]
+schema = "ee.perf.baseline.v1"
+file = "benches/baselines/perf_v0_2.json"
+profile = "nightly"
+workload = "25 projects, 14k memories, 8k imported CASS sessions, ~120k indexed documents"
+canonical = true
+
+[classes.github-ubuntu-latest]
+label = "GitHub Actions ubuntu-latest"
+architecture = "x86_64-unknown-linux-gnu"
+cpu = "GitHub-hosted runner"
+memory_gib = 16
+storage = "ephemeral_ssd"
+canonical = false
+notes = "CI smoke/regression class; do not overwrite README Mac baseline numbers with this class."
+
+[classes.local-256gb-linux]
+label = "Local 256GB+/64-core Linux host"
+architecture = "x86_64-unknown-linux-gnu"
+cpu = "64+ logical cores"
+memory_gib = 256
+storage = "local_nvme"
+canonical = false
+notes = "Exploratory stress-profile class for large swarm/resource-utilization runs."

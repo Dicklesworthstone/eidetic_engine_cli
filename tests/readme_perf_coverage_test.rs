@@ -107,13 +107,15 @@ fn parse_perf_table() -> TestResult<Vec<PerfClaim>> {
         if cells.len() < 3 {
             return Err(format!("malformed README performance row: `{line}`"));
         }
+        let p50_cell = if cells.len() >= 4 { cells[2] } else { cells[1] };
+        let p99_cell = if cells.len() >= 4 { cells[3] } else { cells[2] };
 
         let row_index = claims.len();
         claims.push(PerfClaim {
             row_index,
             operation: strip_cell_markup(cells[0]),
-            p50_ms: parse_latency_ms(cells[1])?,
-            p99_ms: parse_latency_ms(cells[2])?,
+            p50_ms: parse_latency_ms(p50_cell)?,
+            p99_ms: parse_latency_ms(p99_cell)?,
             advisory: line.contains("(advisory, not gated)") || line.contains("<!-- advisory:"),
         });
     }

@@ -242,7 +242,7 @@ The current audit (`scripts/audit_install_pipeline.sh`) reports:
 |---|---|---|
 | GitHub release installer | planned; no release assets published yet | `bd-2gill.3` |
 | Homebrew tap | planned; tap formula not published yet | `bd-2gill.2` |
-| crates.io | planned; `ee` currently points to another owner/repository | `bd-2gill.1` |
+| crates.io | planned; package name selected as `eidetic-engine`; binary remains `ee` | `bd-3usjw.10` |
 | Source build | available now | this README |
 
 ### Release installer (planned)
@@ -276,12 +276,12 @@ brew install Dicklesworthstone/tap/ee
 
 ### Cargo
 
-Planned after crate ownership is resolved. As of the 2026-05-13 audit,
-`crates.io/crates/ee` points at `https://github.com/ewpratten/ee`, not this
-project; see `bd-2gill.1`.
+Planned as the `eidetic-engine` package, which installs the `ee` binary. The
+short crate name `ee` remains unavailable because `crates.io/crates/ee` points
+at `https://github.com/ewpratten/ee`, not this project; see `bd-3usjw.10`.
 
 ```bash
-cargo install ee
+cargo install eidetic-engine
 ```
 
 ### From source
@@ -917,20 +917,24 @@ Backups include the durable DB/JSONL source of truth, the curation audit log, an
 
 ## Performance
 
-Measured on a 2024 MacBook Pro M3 against a workspace with 25 projects, 14k memories, 8k imported CASS sessions, ~120k indexed documents:
+Canonical hardware class: `mac-m3-pro` (`benches/baselines/hardware_classes.toml`).
+Measured on a 2024 MacBook Pro M3 against a workspace with 25 projects, 14k memories, 8k imported CASS sessions, ~120k indexed documents. CI and release tooling must not overwrite these rows with artifacts from a different hardware class.
 
-| Operation | p50 | p99 |
-|---|---:|---:|
-| `ee remember` (single record) | 8 ms | 22 ms |
-| `ee search "<q>"` (hybrid) | 38 ms | 110 ms |
-| `ee context "<task>"` (markdown, 4k tokens) | 95 ms | 240 ms |
-| `ee why <id>` | 25 ms | 100 ms |
-| `ee init --workspace <dir>` (clean) | 100 ms | 250 ms |
-| `ee audit timeline --limit 1000` | 35 ms | 100 ms |
-| `ee import cass --limit 50` (cold) | 4.1 s | 11 s |
-| `ee graph centrality-refresh` (PageRank, 5k links) | 350 ms | 2.0 s |
-| `ee index rebuild` (full) | 18 s | 41 s |
-| 4 concurrent audited memory writers | 120 ms | 350 ms |
+<!-- perf:begin hardware-class=mac-m3-pro baseline=benches/baselines/perf_v0_2.json -->
+| Operation | Hardware class | p50 | p99 |
+|---|---|---:|---:|
+| `ee remember` (single record) | `mac-m3-pro` | 8 ms | 22 ms |
+| `ee search "<q>"` (hybrid) | `mac-m3-pro` | 38 ms | 110 ms |
+| `ee context "<task>"` (markdown, 4k tokens) | `mac-m3-pro` | 95 ms | 240 ms |
+| `ee why <id>` | `mac-m3-pro` | 25 ms | 100 ms |
+| `ee init --workspace <dir>` (clean) | `mac-m3-pro` | 100 ms | 250 ms |
+| `ee audit timeline --limit 1000` | `mac-m3-pro` | 35 ms | 100 ms |
+| `ee import cass --limit 50` (cold) | `mac-m3-pro` | 4.1 s | 11 s |
+| `ee graph centrality-refresh` (PageRank, 5k links) | `mac-m3-pro` | 350 ms | 2.0 s |
+| `ee index rebuild` (full) | `mac-m3-pro` | 18 s | 41 s |
+| 4 concurrent audited memory writers | `mac-m3-pro` | 120 ms | 350 ms |
+Last synced: 2026-05-13T12:52:12Z from sha256:84433f76b5ae84ba96bb3546a75d432175c2fd0f1c477dff03cb59a31b7ab7e6
+<!-- perf:end -->
 
 Benchmark profiles are explicit so agents and CI can pick the right cost tier:
 
