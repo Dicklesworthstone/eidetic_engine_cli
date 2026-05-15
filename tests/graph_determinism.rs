@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use ee::config::GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY;
 use ee::db::{
     CreateCausalEvidenceInput, CreateMemoryLinkInput, DatabaseConfig, DbConnection,
     GraphSnapshotStatus, GraphSnapshotType, MemoryLinkRelation, MemoryLinkSource,
@@ -237,7 +238,7 @@ struct CausalWhyFixture {
     root_id: String,
 }
 
-fn seed_causal_why_workspace() -> Result<CausalWhyFixture, String> {
+fn seed_causal_why_workspace(causal_explain_enabled: bool) -> Result<CausalWhyFixture, String> {
     let workspace = unique_workspace("why-causal")?;
     let workspace_arg = workspace
         .to_str()
@@ -250,6 +251,13 @@ fn seed_causal_why_workspace() -> Result<CausalWhyFixture, String> {
             "ee init must succeed; stderr: {}",
             String::from_utf8_lossy(&init.stderr)
         ));
+    }
+    if causal_explain_enabled {
+        fs::write(
+            workspace.join(".ee").join("config.toml"),
+            "[graph.feature.causal_explain]\nenabled = true\n",
+        )
+        .map_err(|error| error.to_string())?;
     }
 
     let failure_id = remember(&workspace_arg, "causal why determinism failure memory")?;
@@ -594,7 +602,7 @@ fn graph_snapshot_refresh_causal_persists_stable_snapshot_row() -> TestResult {
 
 #[test]
 fn why_causal_explain_output_is_deterministic() -> TestResult {
-    let fixture = seed_causal_why_workspace()?;
+    let fixture = seed_causal_why_workspace(true)?;
 
     let first = run_why_causal_explain(&fixture.workspace, &fixture.failure_id)?;
     let second = run_why_causal_explain(&fixture.workspace, &fixture.failure_id)?;
@@ -726,6 +734,81 @@ fn why_causal_explain_output_is_deterministic() -> TestResult {
         return Err(format!(
             "causal explanation should not be degraded: {}",
             causal["degraded"]
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn why_causal_explain_disabled_by_feature_flag() -> TestResult {
+    let fixture = seed_causal_why_workspace(false)?;
+
+    let output = run_why_causal_explain(&fixture.workspace, &fixture.failure_id)?;
+    let parsed: Value = serde_json::from_str(&output).map_err(|e| e.to_string())?;
+    let causal = parsed
+        .pointer("/data/causalExplanation")
+        .ok_or_else(|| "why output missing data.causalExplanation".to_string())?;
+    if causal["schema"] != Value::String("ee.why.causal.v1".to_string()) {
+        return Err(format!(
+            "unexpected disabled causal explanation schema: {}",
+            causal["schema"]
+        ));
+    }
+    if causal["memoryId"] != Value::String(fixture.failure_id.clone()) {
+        return Err(format!(
+            "disabled causal explanation memoryId mismatch: {}",
+            causal["memoryId"]
+        ));
+    }
+    let paths = causal["paths"]
+        .as_array()
+        .ok_or_else(|| "disabled causalExplanation.paths must be an array".to_string())?;
+    if !paths.is_empty() {
+        return Err(format!(
+            "disabled causal explanation must not expose stale paths: {}",
+            causal["paths"]
+        ));
+    }
+    let degraded = causal["degraded"]
+        .as_array()
+        .ok_or_else(|| "disabled causalExplanation.degraded must be an array".to_string())?;
+    if degraded.len() != 1 {
+        return Err(format!(
+            "disabled causal explanation should emit one degraded entry, got {}",
+            degraded.len()
+        ));
+    }
+    if degraded[0]["code"] != Value::String("graph_feature_disabled".to_string()) {
+        return Err(format!(
+            "disabled causal explanation code mismatch: {}",
+            degraded[0]["code"]
+        ));
+    }
+    if degraded[0]["severity"] != Value::String("medium".to_string()) {
+        return Err(format!(
+            "disabled causal explanation severity mismatch: {}",
+            degraded[0]["severity"]
+        ));
+    }
+    if degraded[0]["message"]
+        != Value::String(format!(
+            "Causal explanation is disabled by {GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY}."
+        ))
+    {
+        return Err(format!(
+            "disabled causal explanation message mismatch: {}",
+            degraded[0]["message"]
+        ));
+    }
+    if degraded[0]["repair"]
+        != Value::String(format!(
+            "ee config set {GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY} true"
+        ))
+    {
+        return Err(format!(
+            "disabled causal explanation repair mismatch: {}",
+            degraded[0]["repair"]
         ));
     }
 

@@ -19,7 +19,8 @@ use crate::cass::{
 };
 use crate::config::env_registry::{EnvVar, read, read_os};
 use crate::config::{
-    GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY,
+    GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY, GRAPH_FEATURE_PROXIMITY_ENABLED_KEY,
+    GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY,
 };
 use crate::core::VersionReport;
 use crate::core::agent_detect::{
@@ -14745,6 +14746,10 @@ fn proximity_feature_enabled(cli: &Cli) -> Result<bool, ConfigSurfaceError> {
     runtime_config_bool_enabled(cli, GRAPH_FEATURE_PROXIMITY_ENABLED_KEY)
 }
 
+fn causal_explain_feature_enabled(cli: &Cli) -> Result<bool, ConfigSurfaceError> {
+    runtime_config_bool_enabled(cli, GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY)
+}
+
 fn handle_config_command<W, E>(
     cli: &Cli,
     command: &ConfigCommand,
@@ -27787,7 +27792,14 @@ where
     }
 
     if args.causal_explain {
-        let causal_explanation = why_causal_explanation_json(&database_path, &args.memory_id);
+        let causal_explanation = match causal_explain_feature_enabled(cli) {
+            Ok(true) => why_causal_explanation_json(&database_path, &args.memory_id),
+            Ok(false) => why_causal_explanation_feature_disabled_json(&args.memory_id),
+            Err(error) => {
+                let domain_error = config_surface_error_to_domain(error);
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        };
         report = report.with_causal_explanation(causal_explanation);
     }
 
@@ -27912,6 +27924,18 @@ fn why_causal_explanation_json(database_path: &Path, memory_id: &str) -> serde_j
         "minCut": serde_json::Value::Null,
         "degraded": degraded,
     })
+}
+
+fn why_causal_explanation_feature_disabled_json(memory_id: &str) -> serde_json::Value {
+    empty_why_causal_explanation_json(
+        memory_id,
+        "graph_feature_disabled",
+        "medium",
+        format!("Causal explanation is disabled by {GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY}."),
+        Some(format!(
+            "ee config set {GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY} true"
+        )),
+    )
 }
 
 fn why_causal_path_json(
