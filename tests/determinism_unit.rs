@@ -1,5 +1,5 @@
-//! J7 — In-process determinism harness for tie-breaking and pack-hash
-//! reproduction (bd-17c65.10.7).
+//! J7 — In-process determinism harness for tie-breaking, pack-hash,
+//! and DB inspection response reproduction (bd-17c65.10.7).
 //!
 //! Companion to `scripts/e2e_overhaul/determinism.sh`. The bash script
 //! exercises six surfaces end-to-end across three child invocations;
@@ -14,6 +14,9 @@
 //! * **Pack-hash reproducibility.** Two `ee context` invocations
 //!   against the same workspace + query + budget + profile must
 //!   produce identical `data.pack.hash` values.
+//! * **DB JSON reproducibility.** Repeated `ee db status` and
+//!   `ee db check-integrity` invocations against the same initialized
+//!   workspace must emit byte-identical JSON.
 //!
 //! The test spawns `ee` as a child process so state leaks (per-process
 //! caches, in-memory RNGs, wall-clock fields embedded in responses)
@@ -235,6 +238,81 @@ fn context_pack_hash_reproduces_across_three_invocations() -> TestResult {
     ensure(
         h2 == h3,
         format!("pack hash run2 != run3: {h2:?} vs {h3:?}"),
+    )?;
+    Ok(())
+}
+
+fn run_ee_stdout(args: &[&str], context: &str) -> Result<String, String> {
+    let output = run_ee(args)?;
+    if !output.status.success() {
+        return Err(format!(
+            "{context} failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| format!("{context}: stdout not UTF-8: {error}"))
+}
+
+#[test]
+fn db_status_json_reproduces_across_three_invocations() -> TestResult {
+    let workspace = tmp_workspace("db_status")?;
+    init_workspace(&workspace)?;
+    let workspace_arg = workspace.to_str().unwrap();
+
+    let run_status = || {
+        run_ee_stdout(
+            &["--workspace", workspace_arg, "db", "status", "--json"],
+            "db status",
+        )
+    };
+
+    let run1 = run_status()?;
+    let run2 = run_status()?;
+    let run3 = run_status()?;
+
+    ensure(
+        run1 == run2,
+        format!("db status run1 != run2:\nrun1={run1}\nrun2={run2}"),
+    )?;
+    ensure(
+        run2 == run3,
+        format!("db status run2 != run3:\nrun2={run2}\nrun3={run3}"),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn db_check_integrity_json_reproduces_across_three_invocations() -> TestResult {
+    let workspace = tmp_workspace("db_check_integrity")?;
+    init_workspace(&workspace)?;
+    let workspace_arg = workspace.to_str().unwrap();
+
+    let run_check = || {
+        run_ee_stdout(
+            &[
+                "--workspace",
+                workspace_arg,
+                "db",
+                "check-integrity",
+                "--json",
+            ],
+            "db check-integrity",
+        )
+    };
+
+    let run1 = run_check()?;
+    let run2 = run_check()?;
+    let run3 = run_check()?;
+
+    ensure(
+        run1 == run2,
+        format!("db check-integrity run1 != run2:\nrun1={run1}\nrun2={run2}"),
+    )?;
+    ensure(
+        run2 == run3,
+        format!("db check-integrity run2 != run3:\nrun2={run2}\nrun3={run3}"),
     )?;
     Ok(())
 }
