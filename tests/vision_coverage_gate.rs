@@ -222,7 +222,10 @@ fn vision_coverage_canonicalizes_known_command_aliases() -> TestResult {
     string_array_omits(&report, "/missing_surfaces", "memory link")?;
     string_array_contains(&report, "/implemented_surfaces", "memory tags")?;
     string_array_omits(&report, "/missing_surfaces", "memory tags")?;
-    string_array_contains(&report, "/missing_surfaces", "completion")
+    string_array_contains(&report, "/implemented_surfaces", "swarm brief")?;
+    string_array_omits(&report, "/missing_surfaces", "swarm")?;
+    string_array_contains(&report, "/implemented_surfaces", "completion")?;
+    string_array_omits(&report, "/missing_surfaces", "completion")
 }
 
 #[test]
