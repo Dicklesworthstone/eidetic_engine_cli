@@ -18,6 +18,7 @@ pub mod causal;
 pub mod certificate;
 pub mod check;
 pub mod claims;
+pub mod completion_audit;
 pub mod config_surface;
 pub mod context;
 pub mod curate;

@@ -133,6 +133,11 @@ pub const HANDOFF_SCHEMAS: &[SchemaEntry] = &[
         "ee.handoff.resume.v1",
         SchemaCategory::Handoff,
     ),
+    SchemaEntry::new(
+        "completion_audit_checklist",
+        "ee.completion_audit.checklist.v1",
+        SchemaCategory::Handoff,
+    ),
 ];
 
 /// Context and search schemas.

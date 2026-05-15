@@ -12,6 +12,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ee::cass::import::{CassImportReport, ImportSessionStatus, ImportedCassSession};
+use ee::core::completion_audit::{
+    COMPLETION_AUDIT_CHECKLIST_SCHEMA_V1, extract_completion_checklist,
+};
 use ee::core::curate::{
     CURATE_CANDIDATES_SCHEMA_V1, CurateCandidatesFilter, CurateCandidatesReport,
 };
@@ -48,6 +51,10 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
         "ee.graph.snapshot_prune.v1.json",
     ),
     ("ee.db.inspect.v1", "ee.db.inspect.v1.json"),
+    (
+        COMPLETION_AUDIT_CHECKLIST_SCHEMA_V1,
+        "ee.completion_audit.checklist.v1.json",
+    ),
     ("ee.mcp.manifest.v1", "ee.mcp.manifest.v1.json"),
 ];
 
@@ -399,6 +406,14 @@ fn canonical_response_fixtures_match_docs_schemas() -> TestResult {
             "ee.mcp.manifest.v1",
             serde_json::from_str(&render_mcp_manifest_json())
                 .map_err(|error| format!("mcp manifest sample invalid JSON: {error}"))?,
+        ),
+        (
+            COMPLETION_AUDIT_CHECKLIST_SCHEMA_V1,
+            serde_json::to_value(extract_completion_checklist(
+                "schema-test-objective",
+                "Read AGENTS.md, coordinate with Agent Mail, and verify with `cargo fmt --check` through RCH.",
+            ))
+            .map_err(|error| format!("completion audit sample invalid JSON: {error}"))?,
         ),
     ];
 

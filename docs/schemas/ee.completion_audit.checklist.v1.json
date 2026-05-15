@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.completion_audit.checklist.v1.json",
+  "title": "ee.completion_audit.checklist.v1",
+  "description": "Deterministic checklist extracted from a user objective, bead acceptance text, or handoff prompt before evidence lookup.",
+  "type": "object",
+  "required": [
+    "schema",
+    "source",
+    "objectiveHash",
+    "objectiveText",
+    "requirements",
+    "unknownClauses",
+    "summary"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.completion_audit.checklist.v1"
+    },
+    "source": {
+      "type": "object",
+      "required": ["label", "kind"],
+      "properties": {
+        "label": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "const": "objective_text"}
+      },
+      "additionalProperties": false
+    },
+    "objectiveHash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{24}$"
+    },
+    "objectiveText": {
+      "type": "string"
+    },
+    "requirements": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/requirement"}
+    },
+    "unknownClauses": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/unknownClause"}
+    },
+    "summary": {
+      "type": "object",
+      "required": ["requirementCount", "unknownCount", "hasUnknowns", "sourceBytes"],
+      "properties": {
+        "requirementCount": {"type": "integer", "minimum": 0},
+        "unknownCount": {"type": "integer", "minimum": 0},
+        "hasUnknowns": {"type": "boolean"},
+        "sourceBytes": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "requirementKind": {
+      "type": "string",
+      "enum": [
+        "documentation_read",
+        "code_investigation",
+        "coordination",
+        "tracker",
+        "verification",
+        "command",
+        "file_artifact",
+        "skill_application",
+        "completion_audit",
+        "permission_gate",
+        "unknown"
+      ]
+    },
+    "sourceSpan": {
+      "type": "object",
+      "required": ["label", "start", "end", "text"],
+      "properties": {
+        "label": {"type": "string", "minLength": 1},
+        "start": {"type": "integer", "minimum": 0},
+        "end": {"type": "integer", "minimum": 0},
+        "text": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "evidenceExpectation": {
+      "type": "object",
+      "required": ["kind", "target", "strength"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "target": {"type": "string", "minLength": 1},
+        "strength": {
+          "type": "string",
+          "enum": ["direct", "supporting", "weak"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "verificationExpectation": {
+      "type": "object",
+      "required": ["kind", "target", "required"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "target": {"type": "string", "minLength": 1},
+        "required": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "requirement": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "summary",
+        "evidenceExpectations",
+        "verificationExpectations",
+        "sourceSpans"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^req_[0-9]{3}$"},
+        "kind": {"$ref": "#/$defs/requirementKind"},
+        "summary": {"type": "string", "minLength": 1},
+        "evidenceExpectations": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/evidenceExpectation"}
+        },
+        "verificationExpectations": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/verificationExpectation"}
+        },
+        "sourceSpans": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/sourceSpan"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "unknownClause": {
+      "type": "object",
+      "required": ["id", "reason", "sourceSpan"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^unk_[0-9]{3}$"},
+        "reason": {"type": "string", "minLength": 1},
+        "sourceSpan": {"$ref": "#/$defs/sourceSpan"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

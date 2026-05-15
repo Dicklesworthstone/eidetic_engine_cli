@@ -6276,6 +6276,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: db_inspect_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::completion_audit::COMPLETION_AUDIT_CHECKLIST_SCHEMA_V1,
+            version: "1",
+            description: "Objective-to-artifact completion audit checklist",
+            category: "handoff",
+            definition: completion_audit_checklist_schema_definition,
+        },
+        SchemaEntry {
             id: MCP_MANIFEST_SCHEMA_V1,
             version: "1",
             description: "MCP adapter manifest generated from ee's public command and schema registries",
@@ -6564,6 +6571,10 @@ fn graph_snapshot_prune_schema_definition() -> String {
 
 fn db_inspect_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.db.inspect.v1.json").to_string()
+}
+
+fn completion_audit_checklist_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.completion_audit.checklist.v1.json").to_string()
 }
 
 fn mcp_manifest_schema_definition() -> String {
