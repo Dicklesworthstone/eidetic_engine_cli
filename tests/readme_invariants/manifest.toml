@@ -1,0 +1,227 @@
+schema = "ee.readme_invariants.v1"
+
+[scrubber]
+# Each regex documents a deliberate false-positive filter for
+# tests/readme_invariant_harness.rs. Read each as: "this README line
+# triggers the invariant scanner but is descriptive prose, command-
+# table syntax, or a recovery instruction — not a load-bearing
+# invariant."
+#
+# Patterns use TOML literal strings (single quotes) so a single
+# backslash maps directly to a regex escape.
+denylist_regexes = [
+  '(?i)must (be|have) been',
+  '(?i)you may need',
+  '^Every fresh agent session walks in blank',
+  '^`ee` is a single-binary Rust CLI',
+  '^Every returned memory answers six questions',
+  '^- \*\*How fresh\?\*\* Recency decay term\.$',
+  '^install paths below are planned surfaces',
+  '^The current audit \(`scripts/audit_install_pipeline\.sh`\) reports',
+  '^`ee doctor` checks',
+  '^Use full output when a harness needs every source array',
+  '^\d+\. Inspect recommendations, blocked beads',
+  '^\d+\. Reserve edit surfaces through Agent Mail',
+  '^performance forensics diagnose host behavior',
+  '`"shipped": false` as documentation for a future surface',
+  '^memories across retrieval or packing changes\. The report is a deterministic',
+  '\(`semantic` -> `episodic`\), and decay/tombstone maintenance',
+  '`procedural` -> `semantic`\. Every successful',
+  '^transition writes a `memory\.level_transition` audit row',
+  '^Every memory carries: `id`, `level`, `kind`',
+  '^`ee` consumes `coding_agent_session_search`',
+  '^Backups include the durable DB/JSONL source of truth',
+  '^Measured on a 2024 MacBook Pro M3',
+  '^# Exploratory large-machine run',
+  '^Budgets are currently advisory while deterministic scale fixtures stabilize\.$',
+  '^coverage test keeps every row in the table above',
+  '^- \*\*Not a chat UI\.\*\*',
+  '^- \*\*Not a permanent archive\.\*\*',
+  '^- \*\*The CLI is primary; MCP sits on top of it',
+  '^On a typical multi-project developer machine',
+  '^\[`docs/adr/`\]\(docs/adr/\)\. Every major subsystem has an ADR',
+]
+
+[[invariant]]
+id = "rfm-001-no-silent-mutation-audit"
+readme_section = "Design Philosophy"
+readme_line_anchor = 192
+sentence_hash = "blake3:0c8920c5e3f6c5219ab74334c3ab54da27e2c6a4e6538760c37b022443d1ba48"
+classification = "invariant"
+verify = { type = "test", path = "tests/contracts/audit_event_coverage.rs" }
+
+[[invariant]]
+id = "rfm-002-asupersync-cancellation-contract"
+readme_section = "Architecture"
+readme_line_anchor = 723
+sentence_hash = "blake3:373e2d7b3532f3f87c2db117c0442e64685b00dd481eff87e1d11084686901a5"
+classification = "invariant"
+verify = { type = "defer_bead", id = "bd-3usjw.62", defer_until = "2026-08-13" }
+
+[[invariant]]
+id = "rfm-003-concurrent-writer-performance-row"
+readme_section = "Performance"
+readme_line_anchor = 935
+sentence_hash = "blake3:b9bdf07e2ed0c10b141a3f35a7530f674158aa9f04a4ad00d8b9fad997277b62"
+classification = "quantitative"
+verify = { type = "test", path = "tests/readme_perf_sync.rs" }
+
+[[invariant]]
+id = "rfm-004-no-silent-memory-rewrite-faq"
+readme_section = "FAQ"
+readme_line_anchor = 1088
+sentence_hash = "blake3:cc497f768084ccbf702302d4b862d92e584bad8d9cf2ae3808655ed97dac3dac"
+classification = "promise"
+verify = { type = "test", path = "tests/contracts/audit_event_coverage.rs" }
+
+[[invariant]]
+id = "rfm-005-frankensearch-model-delegation"
+readme_section = "Design Philosophy"
+readme_line_anchor = 146
+sentence_hash = "blake3:ea1813c91f6a60221b6fe15c78f9e681d455e5ad77bdb32e1961b4514ff82793"
+classification = "invariant"
+verify = { type = "defer_bead", id = "bd-3usjw.62", defer_until = "2026-08-13" }
+
+[[invariant]]
+id = "rfm-006-harness-loop-non-control"
+readme_section = "Design Philosophy"
+readme_line_anchor = 150
+sentence_hash = "blake3:8b603c155e60489ed20e92bd6ecc58c252c149458da3318d4cfbdac088271497"
+classification = "invariant"
+verify = { type = "defer_bead", id = "bd-3usjw.62", defer_until = "2026-08-13" }
+
+[[invariant]]
+id = "rfm-007-cli-first-one-shot"
+readme_section = "Design Philosophy"
+readme_line_anchor = 154
+sentence_hash = "blake3:64059079a4cedb3f9ac0a94acfffb0b513609e25db09b7eba739bcaa5258397b"
+classification = "promise"
+verify = { type = "test", path = "tests/smoke.rs" }
+
+[[invariant]]
+id = "rfm-008-deterministic-byte-stable-json"
+readme_section = "Design Philosophy"
+readme_line_anchor = 158
+sentence_hash = "blake3:565a444df0f5c785833f39e4231cffa67d9fb576f389b9999acf567c999e126d"
+classification = "invariant"
+verify = { type = "test", path = "tests/determinism_unit.rs" }
+
+[[invariant]]
+id = "rfm-009-degradation-surfaces"
+readme_section = "Design Philosophy"
+readme_line_anchor = 184
+sentence_hash = "blake3:66d74e8bfb8094fc71fccf252c920842a52c91147cc7f3a4417f1b0bebbcfcf8"
+classification = "invariant"
+verify = { type = "test", path = "tests/contracts/no_silent_fallback.rs" }
+
+[[invariant]]
+id = "rfm-010-stable-json-output"
+readme_section = "Hard Requirements"
+readme_line_anchor = 228
+sentence_hash = "blake3:3d9473797c8e77803a31ffffacba27c7e40186863c92ef476a8960b819c3421c"
+classification = "invariant"
+verify = { type = "test", path = "tests/contracts/schema_drift.rs" }
+
+[[invariant]]
+id = "rfm-011-generated-context-provenance"
+readme_section = "Hard Requirements"
+readme_line_anchor = 229
+sentence_hash = "blake3:690dbbd8001edd684096fc8da34318fa11e6e5fb82ec709579ec7a8459a7fe2f"
+classification = "invariant"
+verify = { type = "test", path = "tests/contracts/repro_packs.rs" }
+
+[[invariant]]
+id = "rfm-012-forbidden-dependency-audit-gate"
+readme_section = "Development & Verification"
+readme_line_anchor = 348
+sentence_hash = "blake3:277c260f91b485f5a7868eb99ed6b50a861e199816a0acff179e6ba6de8c6933"
+classification = "constraint"
+verify = { type = "test", path = "tests/forbidden_deps.rs" }
+
+[[invariant]]
+id = "rfm-013-swarm-brief-readonly-write-side"
+readme_section = "Swarm brief workflow"
+readme_line_anchor = 480
+sentence_hash = "blake3:ac52155d63e39cb46e3ae62baefd75f774357e801506df558be3239beb1d6c8b"
+classification = "promise"
+verify = { type = "test", path = "tests/swarm_schema_lifecycle.rs" }
+
+[[invariant]]
+id = "rfm-014-swarm-brief-readonly-mail-build-edit"
+readme_section = "Swarm brief workflow"
+readme_line_anchor = 481
+sentence_hash = "blake3:b0af280214216e68649833bdf166b0aea328831f25a7bd5ceca466a1b71b9f66"
+classification = "promise"
+verify = { type = "test", path = "tests/swarm_schema_lifecycle.rs" }
+
+[[invariant]]
+id = "rfm-015-swarm-brief-readonly-store-git-schedule"
+readme_section = "Swarm brief workflow"
+readme_line_anchor = 482
+sentence_hash = "blake3:d3927881bc4f25ea6144805263c8ebd542a80e84698097a731a52036199cf372"
+classification = "promise"
+verify = { type = "test", path = "tests/swarm_schema_lifecycle.rs" }
+
+[[invariant]]
+id = "rfm-016-schema-x-ee-status-marker"
+readme_section = "Swarm schema contracts"
+readme_line_anchor = 501
+sentence_hash = "blake3:99b1f388c6ee2d74e246666c8a135b4383b32bfb36f236eac8ac5443ba2fed3b"
+classification = "invariant"
+verify = { type = "test", path = "tests/contracts/schema_drift.rs" }
+
+[[invariant]]
+id = "rfm-017-source-of-truth-derived-assets"
+readme_section = "Architecture"
+readme_line_anchor = 719
+sentence_hash = "blake3:0cd1c6fd5565f696b91a5f01127930c6ccb1943b0447c88c403081073ce2791e"
+classification = "invariant"
+verify = { type = "defer_bead", id = "bd-3usjw.62", defer_until = "2026-08-13" }
+
+[[invariant]]
+id = "rfm-018-strict-dependency-direction"
+readme_section = "Architecture"
+readme_line_anchor = 721
+sentence_hash = "blake3:f89e8c39222c1bfc3a4ece47fc4ac261202508a6d77beebf0a6e97e12cd06563"
+classification = "invariant"
+verify = { type = "test", path = "tests/forbidden_deps.rs" }
+
+[[invariant]]
+id = "rfm-019-secret-redaction-never-on-disk"
+readme_section = "Privacy & Trust"
+readme_line_anchor = 865
+sentence_hash = "blake3:5b49f4981b0e04d2232cd20f5f12d66dbc9e5dcfb09e305d945752e31451b85f"
+classification = "promise"
+verify = { type = "test", path = "tests/redaction_fuzz.rs" }
+
+[[invariant]]
+id = "rfm-020-prompt-injection-quarantine"
+readme_section = "Privacy & Trust"
+readme_line_anchor = 890
+sentence_hash = "blake3:82dc911f82daacc04e1bd7b34a7f5f44cc13c69bdd0c9707b9ed345ec2871950"
+classification = "promise"
+verify = { type = "test", path = "tests/bayesian_trust_class_transitions_unit.rs" }
+
+[[invariant]]
+id = "rfm-021-migration-atomicity"
+readme_section = "Troubleshooting"
+readme_line_anchor = 1017
+sentence_hash = "blake3:541c2ad36bc0f007d05cec74cf3a8187487eba463ef28a0706b5b08604dcc3df"
+classification = "promise"
+verify = { type = "test", path = "tests/e2e_migration_boundary.rs" }
+
+[[invariant]]
+id = "rfm-022-tokio-forbidden-ci-audit"
+readme_section = "FAQ"
+readme_line_anchor = 1064
+sentence_hash = "blake3:2e498161dfcffd18f603f9839f366494f4bd887bf162d2cd6b74d9bbed78a371"
+classification = "constraint"
+verify = { type = "test", path = "tests/forbidden_deps.rs" }
+
+[[invariant]]
+id = "rfm-023-indexes-derived-from-db"
+readme_section = "FAQ"
+readme_line_anchor = 1076
+sentence_hash = "blake3:5a77dd01c5678024833ce701ea9d22408cc6e82b8734fc4029c93c1af6acad36"
+classification = "promise"
+verify = { type = "defer_bead", id = "bd-3usjw.62", defer_until = "2026-08-13" }
