@@ -13,8 +13,8 @@ use std::process::{Command, Output};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ee::db::{
-    CreateCausalEvidenceInput, CreateMemoryLinkInput, DbConnection, MemoryLinkRelation,
-    MemoryLinkSource,
+    CreateCausalEvidenceInput, CreateMemoryLinkInput, DbConnection, GraphSnapshotStatus,
+    GraphSnapshotType, MemoryLinkRelation, MemoryLinkSource,
 };
 use serde_json::{Value, json};
 
@@ -479,6 +479,26 @@ fn refresh_graph_centrality_snapshot(workspace_arg: &str) -> TestResult {
 }
 
 #[cfg(feature = "graph")]
+fn mark_latest_centrality_snapshot_stale(workspace: &PathBuf, workspace_arg: &str) -> TestResult {
+    let database_path = workspace.join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+    let workspace = connection
+        .get_workspace_by_path(workspace_arg)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("workspace not found for path {workspace_arg}"))?;
+    let snapshot = connection
+        .get_latest_graph_snapshot(&workspace.id, GraphSnapshotType::MemoryLinks)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "expected a persisted memory-link graph snapshot".to_string())?;
+    ensure(
+        connection
+            .update_graph_snapshot_status(&snapshot.id, GraphSnapshotStatus::Stale)
+            .map_err(|error| error.to_string())?,
+        "latest graph snapshot should be marked stale",
+    )
+}
+
+#[cfg(feature = "graph")]
 fn graph_centrality_read_golden_view(
     data: &Value,
     center: &str,
@@ -515,6 +535,9 @@ fn graph_centrality_read_golden_view(
         "status": data["status"].clone(),
         "graphType": data["graphType"].clone(),
         "algorithm": data["algorithm"].clone(),
+        "snapshotHash": "<snapshot-hash>",
+        "computedAt": "<rfc3339>",
+        "algorithmVersion": data["algorithmVersion"].clone(),
         "limit": data["limit"].clone(),
         "memoryId": data["memoryId"].clone(),
         "snapshot": {
@@ -593,6 +616,23 @@ fn graph_centrality_read_json_toon_and_golden_are_stable() -> TestResult {
     ensure(
         data["algorithm"] == Value::String("pagerank".to_string()),
         "default graph centrality algorithm should be pagerank",
+    )?;
+    let computed_at = data["computedAt"]
+        .as_str()
+        .ok_or_else(|| "graph centrality should expose computedAt provenance".to_string())?;
+    ensure(
+        chrono::DateTime::parse_from_rfc3339(computed_at).is_ok(),
+        "computedAt should be an RFC3339 UTC timestamp",
+    )?;
+    ensure(
+        data["algorithmVersion"] == Value::String("fnx-algorithms@0.1.0".to_string()),
+        "graph centrality should expose the fnx algorithm version",
+    )?;
+    ensure(
+        data["snapshotHash"]
+            .as_str()
+            .is_some_and(|hash| !hash.is_empty()),
+        "graph centrality should expose the source snapshot hash",
     )?;
     ensure(
         data["snapshot"]["status"] == Value::String("valid".to_string()),
@@ -732,6 +772,49 @@ fn graph_centrality_read_reports_unavailable_algorithm() -> TestResult {
         degraded[0]["repair"]
             == Value::String("ee graph centrality-refresh --algorithm authority".to_string()),
         "unavailable centrality algorithm should include the targeted repair",
+    )
+}
+
+#[cfg(feature = "graph")]
+#[test]
+fn graph_centrality_read_require_fresh_exits_six_when_snapshot_is_stale() -> TestResult {
+    let (workspace, workspace_arg, _center, _neighbor, _link_id) = seed_workspace_with_link()?;
+    refresh_graph_centrality_snapshot(&workspace_arg)?;
+    mark_latest_centrality_snapshot_stale(&workspace, &workspace_arg)?;
+
+    let output = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "graph",
+        "centrality",
+        "--require-fresh",
+    ])?;
+    ensure_eq(
+        output.status.code(),
+        Some(6),
+        "require-fresh stale graph centrality exit code",
+    )?;
+    ensure(
+        output.stderr.is_empty(),
+        format!(
+            "require-fresh graph centrality stderr must stay empty; got: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    let parsed: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("graph centrality stdout must be JSON: {error}"))?;
+    ensure(
+        parsed["data"]["status"] == Value::String("available".to_string()),
+        "stale snapshot should still return available scores",
+    )?;
+    ensure(
+        parsed["degraded"].as_array().is_some_and(|degraded| {
+            degraded
+                .iter()
+                .any(|entry| entry["code"] == Value::String("graph_snapshot_stale".to_string()))
+        }),
+        "require-fresh stale graph centrality should emit graph_snapshot_stale",
     )
 }
 

@@ -3,6 +3,9 @@
   "status": "available",
   "graphType": "memory_links",
   "algorithm": "pagerank",
+  "snapshotHash": "<snapshot-hash>",
+  "computedAt": "<rfc3339>",
+  "algorithmVersion": "fnx-algorithms@0.1.0",
   "limit": 2,
   "memoryId": null,
   "snapshot": {

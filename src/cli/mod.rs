@@ -18,6 +18,9 @@ use crate::cass::{
     parse_import_since_duration,
 };
 use crate::config::env_registry::{EnvVar, read, read_os};
+use crate::config::{
+    GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY,
+};
 use crate::core::VersionReport;
 use crate::core::agent_detect::{
     AgentDetectOptions, AgentSourcesOptions, AgentStatusOptions, build_agent_sources_report,
@@ -8281,10 +8284,17 @@ where
             }
         },
         Some(Command::Health(ref args)) if args.robot_insights => {
-            let report = cli.workspace.as_deref().map_or_else(
-                StructuralHealthReport::gather,
-                StructuralHealthReport::gather_for_workspace,
-            );
+            let report = match structural_health_feature_enabled(&cli) {
+                Ok(true) => cli.workspace.as_deref().map_or_else(
+                    StructuralHealthReport::gather,
+                    StructuralHealthReport::gather_for_workspace,
+                ),
+                Ok(false) => StructuralHealthReport::disabled_by_feature_flag(),
+                Err(error) => {
+                    let domain_error = config_surface_error_to_domain(error);
+                    return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                }
+            };
             match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
                     write_stdout(stdout, &output::render_structural_health_human(&report))
@@ -14262,6 +14272,24 @@ fn append_perf_next_commands(out: &mut String, next_commands: &[String]) {
     }
 }
 
+fn runtime_config_bool_enabled(cli: &Cli, key: &str) -> Result<bool, ConfigSurfaceError> {
+    let workspace_root =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let options = ConfigSurfaceOptions {
+        workspace_root,
+        config_path: None,
+    };
+    get_config(&options, key).map(|report| report.value == "true")
+}
+
+fn structural_health_feature_enabled(cli: &Cli) -> Result<bool, ConfigSurfaceError> {
+    runtime_config_bool_enabled(cli, GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY)
+}
+
+fn proximity_feature_enabled(cli: &Cli) -> Result<bool, ConfigSurfaceError> {
+    runtime_config_bool_enabled(cli, GRAPH_FEATURE_PROXIMITY_ENABLED_KEY)
+}
+
 fn handle_config_command<W, E>(
     cli: &Cli,
     command: &ConfigCommand,
@@ -19463,6 +19491,18 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 
+    match proximity_feature_enabled(cli) {
+        Ok(true) => {}
+        Ok(false) => {
+            let report = proximity_feature_disabled_report(args);
+            return write_proximity_report(cli, &report, stdout);
+        }
+        Err(error) => {
+            let domain_error = config_surface_error_to_domain(error);
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    }
+
     #[cfg(feature = "graph")]
     {
         match graph_algorithm_input(cli, GraphReadOptions::from(args)).and_then(|input| {
@@ -19504,6 +19544,26 @@ where
             }]
         });
         write_stdout(stdout, &(report.to_string() + "\n"))
+    }
+}
+
+fn proximity_feature_disabled_report(
+    args: &ProximityArgs,
+) -> crate::graph::gomory_hu::ProximityReport {
+    crate::graph::gomory_hu::ProximityReport {
+        schema: crate::graph::gomory_hu::PROXIMITY_SCHEMA_V1,
+        memory_a: args.memory_a.clone(),
+        memory_b: args.memory_b.clone(),
+        snapshot_version: 0,
+        min_cut: None,
+        interpretation: "graph_feature_disabled".to_string(),
+        tree_path: None,
+        degraded: vec![crate::graph::gomory_hu::ProximityDegradation {
+            code: "graph_feature_disabled".to_string(),
+            severity: "medium".to_string(),
+            message: "Proximity is disabled by graph.feature.proximity.enabled.".to_string(),
+            repair: Some("ee config set graph.feature.proximity.enabled true".to_string()),
+        }],
     }
 }
 
@@ -20408,6 +20468,8 @@ impl GraphCentralityReadAlgorithm {
     }
 }
 
+const GRAPH_CENTRALITY_READ_ALGORITHM_VERSION: &str = "fnx-algorithms@0.1.0";
+
 struct GraphCentralityReadDegradation {
     code: &'static str,
     severity: &'static str,
@@ -20455,6 +20517,9 @@ impl GraphCentralityReadReport {
             "workspaceId": self.workspace_id,
             "graphType": crate::db::GraphSnapshotType::MemoryLinks.as_str(),
             "algorithm": self.algorithm.as_str(),
+            "snapshotHash": self.snapshot.as_ref().map(|snapshot| snapshot.content_hash.as_str()),
+            "computedAt": self.snapshot.as_ref().map(|snapshot| snapshot.created_at.as_str()),
+            "algorithmVersion": GRAPH_CENTRALITY_READ_ALGORITHM_VERSION,
             "limit": self.limit,
             "memoryId": self.memory_id,
             "snapshot": self.snapshot.as_ref().map(graph_centrality_read_snapshot_json),
@@ -35478,7 +35543,8 @@ mod tests {
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction, Cli,
         Command, CurateCommand, DaemonCommand, DiagCommand, DiagQuarantineCommand, DomainError,
-        EconomyCommand, FieldsLevel, FocusCommand, GraphCommand, GraphSnapshotCommand,
+        EconomyCommand, FieldsLevel, FocusCommand, GRAPH_FEATURE_PROXIMITY_ENABLED_KEY,
+        GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY, GraphCommand, GraphSnapshotCommand,
         HandoffCommand, HealthArgs, ImportCommand, JobCommand, LearnCommand,
         LearnExperimentCommand, MaintenanceCommand, MemoryCommand, OutcomeQuarantineCommand,
         OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand, RuleCommand, ShadowMode,
@@ -41079,6 +41145,137 @@ default_half_life_days = 45
         ensure(
             stderr.is_empty(),
             "health robot insights json stderr must be empty",
+        )
+    }
+
+    #[test]
+    fn health_robot_insights_respects_structural_health_feature_flag() -> TestResult {
+        let workspace = init_cli_workspace("ee-health-structural-flag")?;
+        let disabled_args = [
+            "ee",
+            "--workspace",
+            workspace.as_str(),
+            "health",
+            "--robot-insights",
+            "--json",
+        ];
+        let (disabled_exit, disabled_stdout, disabled_stderr) = invoke(&disabled_args);
+        ensure_equal(
+            &disabled_exit,
+            &ProcessExitCode::Success,
+            "disabled structural health exit",
+        )?;
+        ensure(
+            disabled_stderr.is_empty(),
+            "disabled structural health stderr must be empty",
+        )?;
+        let disabled_json: serde_json::Value =
+            serde_json::from_str(&disabled_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &disabled_json["summary"]["status"],
+            &serde_json::json!("degraded_required"),
+            "disabled structural health status",
+        )?;
+        ensure_equal(
+            &disabled_json["degraded"][0]["code"],
+            &serde_json::json!("graph_feature_disabled"),
+            "disabled structural health code",
+        )?;
+
+        let (set_exit, _set_stdout, set_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            workspace.as_str(),
+            "--json",
+            "config",
+            "set",
+            GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY,
+            "true",
+        ]);
+        ensure_equal(
+            &set_exit,
+            &ProcessExitCode::Success,
+            "enable structural health flag",
+        )?;
+        ensure(
+            set_stderr.is_empty(),
+            "enable structural health stderr must be empty",
+        )?;
+
+        let (enabled_exit, enabled_stdout, enabled_stderr) = invoke(&disabled_args);
+        ensure_equal(
+            &enabled_exit,
+            &ProcessExitCode::Success,
+            "enabled structural health exit",
+        )?;
+        ensure(
+            enabled_stderr.is_empty(),
+            "enabled structural health stderr must be empty",
+        )?;
+        ensure(
+            !enabled_stdout.contains("\"graph_feature_disabled\""),
+            "enabled structural health must not emit disabled sentinel",
+        )?;
+        ensure_contains(
+            &enabled_stdout,
+            "\"schema\":\"ee.health.structural.v1\"",
+            "enabled structural health schema",
+        )
+    }
+
+    #[test]
+    fn proximity_respects_runtime_feature_flag() -> TestResult {
+        let workspace = init_cli_workspace("ee-proximity-feature-flag")?;
+        let args = [
+            "ee",
+            "--workspace",
+            workspace.as_str(),
+            "proximity",
+            "memory-a",
+            "memory-b",
+            "--json",
+        ];
+        let (exit, stdout, stderr) = invoke(&args);
+        ensure_equal(&exit, &ProcessExitCode::Success, "disabled proximity exit")?;
+        ensure(stderr.is_empty(), "disabled proximity stderr must be empty")?;
+        let json: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &json["schema"],
+            &serde_json::json!("ee.proximity.v1"),
+            "disabled proximity schema",
+        )?;
+        ensure_equal(
+            &json["memoryA"],
+            &serde_json::json!("memory-a"),
+            "disabled proximity left endpoint",
+        )?;
+        ensure_equal(
+            &json["memoryB"],
+            &serde_json::json!("memory-b"),
+            "disabled proximity right endpoint",
+        )?;
+        ensure_equal(
+            &json["interpretation"],
+            &serde_json::json!("graph_feature_disabled"),
+            "disabled proximity interpretation",
+        )?;
+        ensure_equal(
+            &json["degraded"][0]["code"],
+            &serde_json::json!("graph_feature_disabled"),
+            "disabled proximity degraded code",
+        )?;
+        ensure_equal(
+            &json["degraded"][0]["severity"],
+            &serde_json::json!("medium"),
+            "disabled proximity severity",
+        )?;
+        ensure_equal(
+            &json["degraded"][0]["repair"],
+            &serde_json::json!(format!(
+                "ee config set {GRAPH_FEATURE_PROXIMITY_ENABLED_KEY} true"
+            )),
+            "disabled proximity repair",
         )
     }
 
