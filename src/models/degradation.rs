@@ -282,6 +282,30 @@ pub const GRAPH_METRICS_UNAVAILABLE: DegradationCode = DegradationCode {
     repair: Some("ee graph centrality-refresh"),
 };
 
+/// Response degraded code for stale PPR graph input snapshots.
+pub const GRAPH_PPR_SNAPSHOT_STALE_CODE: &str = "graph_ppr_snapshot_stale";
+/// Response degraded code for PPR reranking without retrieval seeds.
+pub const GRAPH_PPR_EMPTY_SEED_SET_CODE: &str = "graph_ppr_empty_seed_set";
+/// Response degraded code for Pack DNA without a trust-anchor dominator.
+pub const GRAPH_PACK_DNA_NO_DOMINATOR_CODE: &str = "graph_pack_dna_no_dominator";
+/// Response degraded code for causal explanation requests without evidence.
+pub const GRAPH_CAUSAL_NO_EVIDENCE_CODE: &str = "graph_causal_no_evidence";
+/// Response degraded code for structural health with no contradiction edges.
+pub const GRAPH_HEALTH_NO_CONTRADICTIONS_CODE: &str = "graph_health_no_contradictions";
+/// Response degraded code for curate graph analysis on disconnected graphs.
+pub const GRAPH_CURATE_DISCONNECTED_GRAPH_CODE: &str = "graph_curate_disconnected_graph";
+/// Response degraded code for proximity queries across disconnected components.
+pub const GRAPH_PROXIMITY_UNREACHABLE_CODE: &str = "graph_proximity_unreachable";
+/// Response degraded code for dominance analysis without a revision chain.
+pub const GRAPH_DOMINANCE_NO_REVISION_CHAIN_CODE: &str = "graph_dominance_no_revision_chain";
+/// Response degraded code for skyline analysis with degenerate communities.
+pub const GRAPH_SKYLINE_DEGENERATE_COMMUNITIES_CODE: &str = "graph_skyline_degenerate_communities";
+/// Response degraded code for HITS algorithm convergence failure.
+pub const GRAPH_HITS_CONVERGENCE_FAILURE_CODE: &str = "graph_hits_convergence_failure";
+
+/// Response degraded code for conformal calibration with too little evidence.
+pub const CONFORMAL_CALIBRATION_INSUFFICIENT_CODE: &str = "conformal_calibration_insufficient";
+
 // Pack degradations (D400 - D499)
 pub const TOKEN_BUDGET_EXCEEDED: DegradationCode = DegradationCode {
     id: "D400",
@@ -356,6 +380,9 @@ pub const NETWORK_UNAVAILABLE: DegradationCode = DegradationCode {
     repair: None,
 };
 
+/// Response degraded code for stale or partial Agent Mail archive evidence.
+pub const AGENT_MAIL_ARCHIVE_DEGRADED_CODE: &str = "agent_mail_archive_degraded";
+
 // Science degradations (D800 - D899)
 pub const SCIENCE_BACKEND_UNAVAILABLE: DegradationCode = DegradationCode {
     id: "D800",
@@ -386,6 +413,11 @@ pub const SCIENCE_BUDGET_EXCEEDED: DegradationCode = DegradationCode {
     auto_recoverable: false,
     repair: None,
 };
+
+/// Response degraded code for missing latency evidence in perf diagnostics.
+pub const PERF_LATENCY_EVIDENCE_MISSING_CODE: &str = "perf_latency_evidence_missing";
+/// Response degraded code for partial latency evidence in perf diagnostics.
+pub const PERF_LATENCY_EVIDENCE_PARTIAL_CODE: &str = "perf_latency_evidence_partial";
 
 /// All registered degradation codes for enumeration.
 pub const ALL_DEGRADATION_CODES: &[DegradationCode] = &[

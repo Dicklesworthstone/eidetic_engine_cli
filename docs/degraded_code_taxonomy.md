@@ -297,7 +297,7 @@ A degraded entry's `code` is classified into one of three buckets:
 | `replay_fidelity` | info | bd-17c65.14.15.5 (N15.4) |
 | `stable_unit` | info | bd-17c65.14.3 (N3) — replay verification |
 
-#### Graph snapshot (4 — response_time variants of graph_unavailable)
+#### Graph snapshot (5 — response_time variants of graph_unavailable)
 | Code | Severity | Bead |
 |------|----------|------|
 | `graph_snapshot_missing` | medium | bd-17c65.5.3 (E3) |
@@ -305,6 +305,20 @@ A degraded entry's `code` is classified into one of three buckets:
 | `graph_snapshot_scores_unavailable` | low | bd-17c65.5.3 (E3) |
 | `graph_snapshot_topology_unavailable` | low | bd-17c65.5.3 (E3) |
 | `graph_snapshot_unusable` | high | bd-17c65.5.3 (E3) |
+
+#### Graph accretion sentinels (10 — response_time variants of graph_unavailable)
+| Code | Severity | Bead |
+|------|----------|------|
+| `graph_ppr_snapshot_stale` | medium | bd-bife.6 |
+| `graph_ppr_empty_seed_set` | low | bd-bife.6 |
+| `graph_pack_dna_no_dominator` | low | bd-bife.6 |
+| `graph_causal_no_evidence` | low | bd-bife.6 |
+| `graph_health_no_contradictions` | info | bd-bife.6 |
+| `graph_curate_disconnected_graph` | warning | bd-bife.6 |
+| `graph_proximity_unreachable` | info | bd-bife.6 |
+| `graph_dominance_no_revision_chain` | info | bd-bife.6 |
+| `graph_skyline_degenerate_communities` | info | bd-bife.6 |
+| `graph_hits_convergence_failure` | warning | bd-bife.6 |
 
 #### Integrity / schema (15)
 | Code | Severity | Bead |

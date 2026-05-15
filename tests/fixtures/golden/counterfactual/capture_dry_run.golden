@@ -22,6 +22,7 @@
   "redaction_classes": [],
   "memories_captured": 0,
   "actions_captured": 0,
+  "wal_retention_kind": "best_effort",
   "episode_hash": null,
   "stored": false,
   "dry_run": true,

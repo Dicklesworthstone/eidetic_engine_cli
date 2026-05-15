@@ -35,6 +35,8 @@ pub const LAB_RECONSTRUCT_SCHEMA_V1: &str = "ee.lab.reconstruct.v1";
 const FROZEN_EPISODE_SCHEMA_V1: &str = "ee.lab.frozen_episode.v1";
 const LAB_REPLAY_UNAVAILABLE_CODE: &str = "lab_replay_unavailable";
 const HYPOTHESIS_RECORD_ID_PREFIX: &str = "hyprec_";
+pub const WAL_RETENTION_KIND_HOLD: &str = "hold";
+pub const WAL_RETENTION_KIND_BEST_EFFORT: &str = "best_effort";
 
 /// Options for capturing a task episode.
 #[derive(Clone, Debug)]
@@ -83,6 +85,7 @@ pub struct CaptureReport {
     pub redaction_classes: Vec<String>,
     pub memories_captured: usize,
     pub actions_captured: usize,
+    pub wal_retention_kind: String,
     pub episode_hash: Option<String>,
     pub stored: bool,
     pub dry_run: bool,
@@ -107,6 +110,7 @@ impl CaptureReport {
             redaction_classes: Vec::new(),
             memories_captured: 0,
             actions_captured: 0,
+            wal_retention_kind: WAL_RETENTION_KIND_BEST_EFFORT.to_string(),
             episode_hash: None,
             stored: false,
             dry_run: false,
@@ -506,6 +510,8 @@ struct FrozenEpisodeArtifact {
     evidence_ids: Vec<String>,
     memories_captured: usize,
     actions_captured: usize,
+    #[serde(default = "default_wal_retention_kind")]
+    wal_retention_kind: String,
     episode_hash: String,
     captured_at: String,
 }
@@ -525,10 +531,15 @@ impl FrozenEpisodeArtifact {
             evidence_ids: report.evidence_ids.clone(),
             memories_captured: report.memories_captured,
             actions_captured: report.actions_captured,
+            wal_retention_kind: report.wal_retention_kind.clone(),
             episode_hash,
             captured_at: report.captured_at.clone(),
         }
     }
+}
+
+fn default_wal_retention_kind() -> String {
+    WAL_RETENTION_KIND_BEST_EFFORT.to_string()
 }
 
 /// Capture a task episode.

@@ -158,6 +158,16 @@ in the same commit, keeping the catalog complete by construction.
 | `graph_snapshot_stale` | graph export, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
 | `graph_snapshot_unusable` | graph export, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
 | `graph_snapshot_topology_unavailable` | graph export | medium | bd-17c65.10.6 (J6) |
+| `graph_ppr_snapshot_stale` | context | medium | bd-bife.6 |
+| `graph_ppr_empty_seed_set` | context | low | bd-bife.6 |
+| `graph_pack_dna_no_dominator` | context | low | bd-bife.6 |
+| `graph_causal_no_evidence` | why | low | bd-bife.6 |
+| `graph_health_no_contradictions` | health, insights | info | bd-bife.6 |
+| `graph_curate_disconnected_graph` | curate | warning | bd-bife.6 |
+| `graph_proximity_unreachable` | proximity | info | bd-bife.6 |
+| `graph_dominance_no_revision_chain` | memory revise | info | bd-bife.6 |
+| `graph_skyline_degenerate_communities` | status, insights | info | bd-bife.6 |
+| `graph_hits_convergence_failure` | context, why | warning | bd-bife.6 |
 | `maintenance_job_history_write_failed` | job run | high | bd-17c65.10.6 (J6) |
 | `maintenance_job_since_invalid` | job list | medium | bd-17c65.10.6 (J6) |
 | `maintenance_job_history_read_failed` | job list, job show | medium | bd-17c65.10.6 (J6) |
