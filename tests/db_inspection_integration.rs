@@ -671,6 +671,37 @@ fn db_check_integrity_alias_runs_full_integrity_contract() {
     assert_eq!(report["checkType"], Value::String("integrity_check".into()));
     assert_eq!(report["integrityPassed"], Value::Bool(true));
     assert_eq!(report["foreignKeyPassed"], Value::Bool(true));
+    assert_eq!(report["auditRecorded"], Value::Bool(true));
+    assert_eq!(
+        report["auditAction"],
+        Value::String("db.check_integrity".into())
+    );
+
+    let conn = ee::db::DbConnection::open_schema_only(dir.join(".ee").join("ee.db"))
+        .expect("open database for audit inspection");
+    let entries = conn
+        .list_audit_by_action("db.check_integrity", Some(10))
+        .expect("list check-integrity audit rows");
+    assert_eq!(entries.len(), 1, "expected one check-integrity audit row");
+    let entry = &entries[0];
+    assert_eq!(entry.actor.as_deref(), Some("ee db check-integrity"));
+    assert_eq!(entry.surface, "db");
+    let details: Value = serde_json::from_str(
+        entry
+            .details
+            .as_deref()
+            .expect("audit row must include details"),
+    )
+    .expect("audit details JSON");
+    assert_eq!(
+        details["command"],
+        Value::String("db check-integrity".into())
+    );
+    assert_eq!(
+        details["checkType"],
+        Value::String("integrity_check".into())
+    );
+    assert_eq!(details["passed"], Value::Bool(true));
 }
 
 #[test]

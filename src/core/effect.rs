@@ -1324,6 +1324,12 @@ impl EffectManifest {
     fn append_only_write_commands() -> Vec<CommandEffect> {
         vec![
             CommandEffect::append_only_write(
+                "db check-integrity",
+                vec!["audit_log"],
+                "audit row id",
+                "Run full database integrity verification and append an audit row",
+            ),
+            CommandEffect::append_only_write(
                 "artifact register",
                 vec!["artifacts", "artifact_links", "audit_log"],
                 "content hash",

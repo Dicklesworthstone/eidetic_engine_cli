@@ -24192,6 +24192,7 @@ where
     } else {
         "quick_check"
     };
+    let records_audit = command_name == "db check-integrity";
 
     if !database_path.exists() {
         let report = DbCheckReport {
@@ -24202,12 +24203,19 @@ where
             integrity_issues: None,
             foreign_key_passed: None,
             foreign_key_violations: None,
+            audit_recorded: None,
+            audit_action: None,
+            audit_error: None,
             message: "Database file not found".to_string(),
         };
         return write_db_check_output(cli, &report, stdout, command_name);
     }
 
-    let conn = match crate::db::DbConnection::open_schema_only(&database_path) {
+    let conn = match if records_audit {
+        crate::db::DbConnection::open_file(&database_path)
+    } else {
+        crate::db::DbConnection::open_schema_only(&database_path)
+    } {
         Ok(conn) => conn,
         Err(error) => {
             let report = DbCheckReport {
@@ -24218,6 +24226,9 @@ where
                 integrity_issues: None,
                 foreign_key_passed: None,
                 foreign_key_violations: None,
+                audit_recorded: None,
+                audit_action: None,
+                audit_error: None,
                 message: format!("Failed to open database: {error}"),
             };
             return write_db_check_output(cli, &report, stdout, command_name);
@@ -24238,6 +24249,9 @@ where
         integrity_issues: None,
         foreign_key_passed: None,
         foreign_key_violations: None,
+        audit_recorded: None,
+        audit_action: None,
+        audit_error: None,
         message: String::new(),
     };
 
@@ -24302,7 +24316,59 @@ where
     }
     report.message = messages.join("; ");
 
+    if records_audit {
+        report.audit_action = Some(DB_CHECK_INTEGRITY_AUDIT_ACTION.to_string());
+        match insert_db_check_integrity_audit(&conn, &workspace_path, &report) {
+            Ok(()) => report.audit_recorded = Some(true),
+            Err(error) => {
+                report.audit_recorded = Some(false);
+                report.audit_error = Some(error);
+                report.message.push_str("; audit row insert failed");
+                report.passed = false;
+            }
+        }
+    }
+
     write_db_check_output(cli, &report, stdout, command_name)
+}
+
+const DB_CHECK_INTEGRITY_AUDIT_ACTION: &str = "db.check_integrity";
+
+fn insert_db_check_integrity_audit(
+    conn: &crate::db::DbConnection,
+    workspace_path: &Path,
+    report: &DbCheckReport,
+) -> Result<(), String> {
+    let details = serde_json::json!({
+        "command": "db check-integrity",
+        "databasePath": report.database_path,
+        "checkType": report.check_type,
+        "passed": report.passed,
+        "integrityPassed": report.integrity_passed,
+        "integrityIssueCount": report.integrity_issues.as_ref().map(Vec::len).unwrap_or(0),
+        "foreignKeyPassed": report.foreign_key_passed,
+        "foreignKeyViolationCount": report
+            .foreign_key_violations
+            .as_ref()
+            .map(Vec::len)
+            .unwrap_or(0),
+        "message": report.message,
+    });
+    let details_json = serde_json::to_string(&details)
+        .map_err(|error| format!("Failed to serialize audit details: {error}"))?;
+    let audit_id = crate::db::generate_audit_id();
+    conn.insert_audit(
+        &audit_id,
+        &crate::db::CreateAuditInput {
+            workspace_id: migration_audit_workspace_id(conn, workspace_path),
+            actor: Some("ee db check-integrity".to_string()),
+            action: DB_CHECK_INTEGRITY_AUDIT_ACTION.to_string(),
+            target_type: None,
+            target_id: None,
+            details: Some(details_json),
+        },
+    )
+    .map_err(|error| format!("Failed to record integrity audit row: {error}"))
 }
 
 fn write_db_check_output<W: Write>(
@@ -24335,6 +24401,9 @@ fn write_db_check_output<W: Write>(
                         "integrityIssues": report.integrity_issues,
                         "foreignKeyPassed": report.foreign_key_passed,
                         "foreignKeyViolations": report.foreign_key_violations,
+                        "auditRecorded": report.audit_recorded,
+                        "auditAction": report.audit_action,
+                        "auditError": report.audit_error,
                         "message": report.message,
                     }
                 },
@@ -24368,6 +24437,12 @@ fn write_db_check_output<W: Write>(
                     ));
                 }
             }
+            if let Some(recorded) = report.audit_recorded {
+                out.push_str(&format!("Audit recorded: {recorded}\n"));
+            }
+            if let Some(error) = &report.audit_error {
+                out.push_str(&format!("Audit error: {error}\n"));
+            }
             let _ = write_stdout(stdout, &out);
             exit_code
         }
@@ -24383,6 +24458,9 @@ struct DbCheckReport {
     integrity_issues: Option<Vec<String>>,
     foreign_key_passed: Option<bool>,
     foreign_key_violations: Option<Vec<serde_json::Value>>,
+    audit_recorded: Option<bool>,
+    audit_action: Option<String>,
+    audit_error: Option<String>,
     message: String,
 }
 
