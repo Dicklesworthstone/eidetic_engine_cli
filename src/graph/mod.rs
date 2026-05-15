@@ -22,8 +22,12 @@ use fnx_runtime::{CgseValue, CompatibilityMode};
 use sqlmodel_core::{Row, Value};
 
 pub mod algorithms;
+pub mod causal;
 pub mod decay;
+pub mod gomory_hu;
 pub mod health;
+pub mod hits;
+pub mod pack_dna;
 pub mod ppr;
 
 pub const SUBSYSTEM: &str = "graph";
@@ -1784,18 +1788,21 @@ fn add_projection_edge(
 }
 
 /// Compute PageRank centrality on a memory graph projection.
-#[must_use]
-pub fn compute_pagerank(projection: &MemoryGraphProjection) -> PageRankResult {
+pub fn compute_pagerank(projection: &MemoryGraphProjection) -> GraphResult<PageRankResult> {
     compute_pagerank_with_policy(projection, algorithms::PprPolicy::default())
 }
 
 /// Compute PageRank centrality with explicit graph runtime policy.
-#[must_use]
 pub fn compute_pagerank_with_policy(
     projection: &MemoryGraphProjection,
     policy: algorithms::PprPolicy,
-) -> PageRankResult {
-    algorithms::run_pagerank_with_policy(&projection.graph, policy)
+) -> GraphResult<PageRankResult> {
+    let graph = projection.graph.clone();
+    algorithms::run_with_budget(
+        "pagerank",
+        algorithms::DEFAULT_BACKGROUND_BUDGET,
+        move || algorithms::run_pagerank_with_policy(&graph, policy),
+    )
 }
 
 /// Compute betweenness centrality on a memory graph projection.
@@ -2134,13 +2141,55 @@ fn refresh_graph_snapshot_in_transaction(
     }
 
     let persistence = graph_snapshot_persistence_input(&report.centrality, &links)?;
-    report.snapshot = Some(persist_graph_snapshot_in_transaction(
+    let snapshot =
+        persist_graph_snapshot_in_transaction(conn, workspace_id, persistence, write_owner)?;
+
+    emit_centrality_refresh_witnesses(conn, workspace_id, &snapshot, &report.centrality)?;
+    report.snapshot = Some(snapshot);
+    Ok(report)
+}
+
+fn emit_centrality_refresh_witnesses(
+    conn: &DbConnection,
+    workspace_id: &str,
+    snapshot: &GraphRefreshSnapshot,
+    centrality: &CentralityRefreshReport,
+) -> GraphResult<()> {
+    if centrality.status != CentralityRefreshStatus::Refreshed {
+        return Ok(());
+    }
+
+    let pagerank_params = serde_json::json!({
+        "alpha": algorithms::DEFAULT_PPR_ALPHA,
+        "maxIterations": algorithms::DEFAULT_PAGERANK_MAX_ITERATIONS,
+        "tolerance": algorithms::DEFAULT_PAGERANK_TOLERANCE,
+    });
+    let decision_path_hash =
+        graph_algorithm_params_hash("pagerank", &snapshot.content_hash, &pagerank_params)?;
+
+    emit_complexity_witness(
         conn,
         workspace_id,
-        persistence,
-        write_owner,
-    )?);
-    Ok(report)
+        &snapshot.id,
+        "pagerank",
+        u64::from(snapshot.snapshot_version),
+        &pagerank_params,
+        &ComplexityWitnessCounters {
+            elapsed_ms: float_millis_to_u64_saturating(centrality.pagerank_ms),
+            sampling_choice: "exact".to_owned(),
+            decision_path_hash,
+        },
+    )
+}
+
+fn float_millis_to_u64_saturating(value: f64) -> u64 {
+    if !value.is_finite() || value <= 0.0 {
+        return 0;
+    }
+    if value >= u64::MAX as f64 {
+        return u64::MAX;
+    }
+    value.round() as u64
 }
 
 fn graph_snapshot_persistence_input(
@@ -2437,7 +2486,7 @@ fn refresh_centrality_from_links(
     }
 
     let pagerank_start = Instant::now();
-    let pagerank = compute_pagerank(&projection);
+    let pagerank = compute_pagerank(&projection)?;
     let pagerank_ms = pagerank_start.elapsed().as_secs_f64() * 1000.0;
 
     let betweenness_start = Instant::now();
@@ -5955,7 +6004,7 @@ mod tests {
             &connection,
             &super::ProjectionOptions::default(),
         ))?;
-        let pagerank = super::compute_pagerank(&projection);
+        let pagerank = graph_result(super::compute_pagerank(&projection))?;
         let betweenness = super::compute_betweenness(&projection);
 
         assert_eq!(pagerank.scores.len(), projection.node_count);
@@ -5998,14 +6047,14 @@ mod tests {
             &connection,
             &super::ProjectionOptions::default(),
         ))?;
-        let default = super::compute_pagerank_with_policy(
+        let default = graph_result(super::compute_pagerank_with_policy(
             &projection,
             super::algorithms::PprPolicy::from_optional_config(None),
-        );
-        let overridden = super::compute_pagerank_with_policy(
+        ))?;
+        let overridden = graph_result(super::compute_pagerank_with_policy(
             &projection,
             super::algorithms::PprPolicy::from_optional_config(Some(0.90)),
-        );
+        ))?;
         let default_b_score = default
             .scores
             .iter()
@@ -7328,6 +7377,22 @@ mod tests {
                 && node["pagerank"].as_f64().is_some()
                 && node["betweenness"].as_f64().is_some()
         }));
+
+        let witnesses = connection
+            .list_graph_algorithm_witnesses(WORKSPACE_ID, &snapshot.id, Some("pagerank"))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(witnesses.len(), 1);
+        let witness: serde_json::Value = serde_json::from_str(&witnesses[0].witness_json)
+            .map_err(|error| format!("PageRank witness JSON should parse: {error}"))?;
+        assert_eq!(witness["schema"], super::GRAPH_ALGORITHM_WITNESS_SCHEMA_V1);
+        assert_eq!(witness["algorithm"], "pagerank");
+        assert_eq!(witness["snapshot_version"], 1);
+        assert_eq!(witness["sampling_choice"], "exact");
+        assert!(
+            witness["decision_path_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("blake3:"))
+        );
 
         connection.close().map_err(|error| error.to_string())
     }
