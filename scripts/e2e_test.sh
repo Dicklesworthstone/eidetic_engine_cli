@@ -18,7 +18,7 @@
 #   3 — required tool missing or build failed
 #
 # Environment:
-#   EE_BINARY      Override path to ee binary (default: target/debug/ee)
+#   EE_BINARY      Override path to ee binary (default: Cargo target/debug/ee)
 #   EE_KEEP_TEMP   Deprecated; temp workspace is always preserved
 #   EE_VERBOSE     If set, show command output during tests
 
@@ -38,11 +38,9 @@ if [[ -d "${DEFAULT_AGENT_BUILD_ROOT}" ]]; then
     export TMPDIR="${EE_AGENT_TMPDIR:-${DEFAULT_AGENT_BUILD_ROOT}/tmp}"
 fi
 
-if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
-    EE_BINARY="${EE_BINARY:-${CARGO_TARGET_DIR%/}/debug/ee}"
-else
-    EE_BINARY="${EE_BINARY:-${REPO_ROOT}/target/debug/ee}"
-fi
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+source "${REPO_ROOT}/scripts/lib/ee_binary_resolution.sh"
+EE_BINARY="$(ee_resolve_binary debug)"
 
 # Test workspace (created fresh per run)
 TEST_WORKSPACE=""
@@ -435,7 +433,7 @@ Available scenarios:
 $(printf '  %s\n' "${SCENARIOS[@]}")
 
 Environment variables:
-  EE_BINARY      Path to ee binary (default: target/debug/ee)
+  EE_BINARY      Path to ee binary (default: Cargo target/debug/ee)
   EE_KEEP_TEMP   Deprecated; temp workspace is always preserved
   EE_VERBOSE     If set, show command output during tests
 

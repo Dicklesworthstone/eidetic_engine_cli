@@ -17,6 +17,7 @@ set -euo pipefail
 #   2. Closure Linter          - prevent abstention-as-implementation closure
 #   3. Snapshot Proposal Guard - block unreviewed tracked insta proposals
 #   4. Untracked Work Audit    - advisory Beads FILE SURFACE coverage for dirty paths
+#   4.5. Bridge Staleness      - advisory signal when CLOSE_THE_GAP_PLAN needs refresh
 #   5. Vision Coverage         - report documented implemented/stubbed/missing surfaces
 #   6. Unit/Contract/Golden    - cargo test --workspace --lib --bins --tests --examples
 #   6. Basic E2E               - scripts/e2e_test.sh
@@ -34,6 +35,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DEFAULT_AGENT_BUILD_ROOT="/Volumes/USBNVME16TB/temp_agent_space"
 BEADS_LOCK_WAIT_SECONDS="${EE_BEADS_LOCK_WAIT_SECONDS:-30}"
 BEADS_LOCK_SKIP_CODE=75
+VERIFY_BUDGET_FILE="${EE_VERIFY_BUDGET_FILE:-${SCRIPT_DIR}/verify-budget.toml}"
+VERIFY_BUDGET_FAIL_CODE=6
 
 for arg in "$@"; do
     case "$arg" in
@@ -202,6 +205,108 @@ capture_test_trace_artifacts() {
     fi
 }
 
+stage_budget_value() {
+    local stage_name="$1"
+    local field="$2"
+
+    [ -f "$VERIFY_BUDGET_FILE" ] || return 1
+
+    awk -v target="$stage_name" -v field="$field" '
+        /^\[\[stage\]\]/ {
+            in_stage = 1
+            matched = 0
+            next
+        }
+        in_stage && /^name[[:space:]]*=/ {
+            value = $0
+            sub(/^[^=]*=[[:space:]]*/, "", value)
+            gsub(/^"|"$/, "", value)
+            matched = (value == target)
+            next
+        }
+        in_stage && matched && $0 ~ ("^" field "[[:space:]]*=") {
+            value = $0
+            sub(/^[^=]*=[[:space:]]*/, "", value)
+            gsub(/#.*/, "", value)
+            gsub(/[[:space:]]+$/, "", value)
+            gsub(/^"|"$/, "", value)
+            print value
+            found = 1
+            exit
+        }
+        END {
+            if (!found) {
+                exit 1
+            }
+        }
+    ' "$VERIFY_BUDGET_FILE"
+}
+
+stage_budget_thresholds() {
+    local stage_name="$1"
+    local p50
+    local regression_factor
+
+    p50="$(stage_budget_value "$stage_name" expected_seconds_p50)" || return 1
+    regression_factor="$(stage_budget_value "$stage_name" regression_factor)" || return 1
+
+    awk -v p50="$p50" -v regression_factor="$regression_factor" '
+        BEGIN {
+            advisory = int((p50 * regression_factor) + 0.999999)
+            fail = int((p50 * 3) + 0.999999)
+            printf "%d %d %d", p50, advisory, fail
+        }
+    '
+}
+
+stage_budget_summary() {
+    local stage_name="$1"
+    local duration="$2"
+    local thresholds
+
+    thresholds="$(stage_budget_thresholds "$stage_name")" || {
+        printf "budget=untracked"
+        return 0
+    }
+
+    local p50
+    local advisory
+    local fail
+    read -r p50 advisory fail <<< "$thresholds"
+
+    if [ "$duration" -gt "$fail" ]; then
+        printf "budget=fail elapsed=%ss p50=%ss advisory=%ss fail=%ss" "$duration" "$p50" "$advisory" "$fail"
+    elif [ "$duration" -gt "$advisory" ]; then
+        printf "budget=advisory elapsed=%ss p50=%ss advisory=%ss fail=%ss" "$duration" "$p50" "$advisory" "$fail"
+    else
+        printf "budget=ok elapsed=%ss p50=%ss advisory=%ss fail=%ss" "$duration" "$p50" "$advisory" "$fail"
+    fi
+}
+
+enforce_stage_budget() {
+    local stage_name="$1"
+    local duration="$2"
+    local thresholds
+
+    thresholds="$(stage_budget_thresholds "$stage_name")" || return 0
+
+    local p50
+    local advisory
+    local fail
+    read -r p50 advisory fail <<< "$thresholds"
+
+    if [ "$duration" -gt "$fail" ]; then
+        echo "error: verification stage exceeded hard budget: $stage_name" >&2
+        echo "       elapsed=${duration}s p50=${p50}s hard_fail=${fail}s" >&2
+        echo "       update scripts/verify-budget.toml only after validating the regression is expected" >&2
+        return "$VERIFY_BUDGET_FAIL_CODE"
+    fi
+
+    if [ "$duration" -gt "$advisory" ]; then
+        echo "[!] BUDGET: $stage_name exceeded advisory budget (${duration}s > ${advisory}s; p50=${p50}s)" >&2
+    fi
+}
+
 run_stage() {
     local name="$1"
     local cmd="$2"
@@ -217,8 +322,10 @@ run_stage() {
         local end_time
         end_time=$(date +%s)
         local duration=$((end_time - start_time))
-        echo "[+] PASS: $name (${duration}s)"
-        STAGE_RESULTS="${STAGE_RESULTS}PASS ${name} (${duration}s)\n"
+        local budget_summary
+        budget_summary="$(stage_budget_summary "$name" "$duration")"
+        echo "[+] PASS: $name (${duration}s; ${budget_summary})"
+        STAGE_RESULTS="${STAGE_RESULTS}PASS ${name} (${duration}s; ${budget_summary})\n"
         capture_test_trace_artifacts "$name"
 
         # Capture artifact paths from E2E output
@@ -228,6 +335,7 @@ run_stage() {
             ARTIFACT_DIRS="${ARTIFACT_DIRS}  ${name}: ${artifacts}\n"
         fi
         rm -f "$output_file"
+        enforce_stage_budget "$name" "$duration"
         echo ""
     else
         local exit_code=$?
@@ -235,9 +343,12 @@ run_stage() {
         end_time=$(date +%s)
         local duration=$((end_time - start_time))
         if [ "$exit_code" -eq "$BEADS_LOCK_SKIP_CODE" ]; then
-            echo "[!] SKIP: $name (${duration}s)"
-            STAGE_RESULTS="${STAGE_RESULTS}SKIP ${name} (${duration}s)\n"
+            local budget_summary
+            budget_summary="$(stage_budget_summary "$name" "$duration")"
+            echo "[!] SKIP: $name (${duration}s; ${budget_summary})"
+            STAGE_RESULTS="${STAGE_RESULTS}SKIP ${name} (${duration}s; ${budget_summary})\n"
             rm -f "$output_file"
+            enforce_stage_budget "$name" "$duration"
             echo ""
             return 0
         fi
@@ -287,6 +398,11 @@ run_stage "Snapshot Proposal Guard" "snapshot_proposal_guard"
 # Gate 3.5: Advisory dirty-work ownership coverage. This remains advisory while
 # multi-agent sessions routinely carry unrelated in-flight changes.
 run_stage "Untracked Work Audit (advisory)" "with_beads_read_locks ./scripts/untracked-work-audit.sh"
+
+# Gate 3.6: Advisory bridge-plan staleness. This always exits 0 and writes
+# .bridge-staleness-report.json so the trailing verify summary includes whether
+# Part II appears stale enough to plan the next bridge.
+run_stage "Bridge Staleness Advisory" "with_beads_read_locks ./scripts/bridge-staleness.sh --quiet"
 
 # Gate 4: Strategic Vision Coverage
 run_stage "Vision Coverage" "with_beads_read_locks sh ./scripts/vision-coverage.sh --json"

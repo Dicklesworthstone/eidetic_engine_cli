@@ -174,6 +174,30 @@ run_json_surface_3x() {
     fi
 }
 
+seed_graph_determinism_memory() {
+    local content="$1"
+    ee_with_timeout remember "$content" \
+        --workspace "$EPIC_WORKSPACE" --level semantic --kind note --json 2>/dev/null \
+        | jq -r '.data.memory.id // .data.public_id // .data.memory_id // .data.id // empty' 2>/dev/null
+}
+
+seed_graph_determinism_causal_edge() {
+    local edge_id="$1"
+    local failure_id="$2"
+    local cause_id="$3"
+    local contribution_score="$4"
+    local computed_at="$5"
+    ee_with_timeout diag causal-edge \
+        --edge-id "$edge_id" \
+        --failure-id "$failure_id" \
+        --candidate-cause-id "$cause_id" \
+        --contribution-score "$contribution_score" \
+        --computed-at "$computed_at" \
+        --evidence-uri "agent-mail://bd-qnfw.4/$edge_id" \
+        --workspace "$EPIC_WORKSPACE" \
+        --json >/dev/null 2>/dev/null
+}
+
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then
     return 0
 fi
@@ -202,6 +226,20 @@ MEM_B=$(ee_with_timeout remember "Graph determinism destination memory." \
 ANY_MEM="${MEM_A:-$MEM_B}"
 e2e_log_note "graph_determinism_seed mem_a=${MEM_A:-?} mem_b=${MEM_B:-?}"
 
+CAUSAL_FAILURE=$(seed_graph_determinism_memory "Graph determinism causal failure memory." || true)
+CAUSAL_BRIDGE=$(seed_graph_determinism_memory "Graph determinism causal bridge memory." || true)
+CAUSAL_ROOT=$(seed_graph_determinism_memory "Graph determinism causal root memory." || true)
+if [ -n "${CAUSAL_FAILURE:-}" ] && [ -n "${CAUSAL_BRIDGE:-}" ] && [ -n "${CAUSAL_ROOT:-}" ] \
+    && seed_graph_determinism_causal_edge "cev_graph_determinism_bridge" \
+        "$CAUSAL_FAILURE" "$CAUSAL_BRIDGE" "0.82" "2026-05-15T12:30:00Z" \
+    && seed_graph_determinism_causal_edge "cev_graph_determinism_root" \
+        "$CAUSAL_BRIDGE" "$CAUSAL_ROOT" "0.91" "2026-05-15T12:31:00Z"; then
+    e2e_log_note "graph_determinism_causal_seed failure=${CAUSAL_FAILURE} bridge=${CAUSAL_BRIDGE} root=${CAUSAL_ROOT}"
+else
+    e2e_log_note "graph_determinism_causal_seed_unavailable"
+    CAUSAL_FAILURE=""
+fi
+
 # Required future GraphAccretion surfaces named by bd-8jvg.1.
 run_json_surface_3x future "insights_full" "bd-t6wd.1" \
     "ee insights full JSON surface is not implemented yet." \
@@ -218,9 +256,9 @@ run_json_surface_3x future "context_explain" "bd-t6wd.2" \
 run_json_surface_3x future "status_skyline" "bd-t6wd.2" \
     "ee status --skyline JSON surface is not implemented yet." \
     status --skyline --json
-run_json_surface_3x future "health_contradiction_clusters" "bd-t6wd.2" \
-    "ee health --contradiction-clusters JSON surface is not implemented yet." \
-    health --contradiction-clusters --json
+run_json_surface_3x required "health_robot_insights" "bd-zx2v.4" \
+    "ee health --robot-insights JSON surface should be deterministic." \
+    health --robot-insights --json
 
 # Shipped graph-adjacent surfaces that give the harness real coverage today.
 run_json_surface_3x required "context_explain_performance" "bd-17c65" \
@@ -233,6 +271,14 @@ if [ -n "${ANY_MEM:-}" ]; then
 else
     todo_assert "graph_determinism_why_seed_available" "bd-8jvg.1" \
         "Unable to seed a memory for ee why graph determinism coverage."
+fi
+if [ -n "${CAUSAL_FAILURE:-}" ]; then
+    run_json_surface_3x required "why_causal_explain" "bd-qnfw.4" \
+        "ee why --causal-explain JSON output should be deterministic for a seeded three-memory causal chain." \
+        why "$CAUSAL_FAILURE" --causal-explain --json
+else
+    todo_assert "graph_determinism_why_causal_seed_available" "bd-qnfw.4" \
+        "Unable to seed causal evidence for ee why --causal-explain determinism coverage."
 fi
 run_json_surface_3x required "graph_centrality_refresh_dry_run" "bd-rnfh.1" \
     "ee graph centrality-refresh --dry-run JSON surface should be present." \

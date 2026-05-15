@@ -6,8 +6,8 @@
 # C1 + C3 fixes accept meta-policy phrases and dot/colon tags while still
 # rejecting real value-shape secrets.
 #
-# Shipped (real assertions):  C1, C2, C3, C4, B10
-# Not yet shipped (todo):     C5
+# Shipped (real assertions):  C1, C2, C3, C4, C5, B10
+# Not yet shipped (todo):     none
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -229,6 +229,21 @@ done
 GITLEAKS_COUNT=$(wc -l < "$GITLEAKS_CORPUS" | tr -d ' ')
 TRUFFLEHOG_COUNT=$(wc -l < "$TRUFFLEHOG_CORPUS" | tr -d ' ')
 FALSE_POSITIVE_COUNT=$(wc -l < "$FALSE_POSITIVE_CORPUS" | tr -d ' ')
-e2e_log_assert_eq "$([ "$GITLEAKS_COUNT" -ge 50 ]; echo $?)" "0" "c5_gitleaks_subset_min_50"
-e2e_log_assert_eq "$([ "$TRUFFLEHOG_COUNT" -ge 50 ]; echo $?)" "0" "c5_trufflehog_subset_min_50"
-e2e_log_assert_eq "$([ "$FALSE_POSITIVE_COUNT" -ge 100 ]; echo $?)" "0" "c5_false_positive_subset_min_100"
+
+if [ "$GITLEAKS_COUNT" -ge 50 ]; then
+    e2e_log_assert_eq "0" "0" "c5_gitleaks_subset_min_50"
+else
+    e2e_log_assert_eq "1" "0" "c5_gitleaks_subset_min_50"
+fi
+
+if [ "$TRUFFLEHOG_COUNT" -ge 50 ]; then
+    e2e_log_assert_eq "0" "0" "c5_trufflehog_subset_min_50"
+else
+    e2e_log_assert_eq "1" "0" "c5_trufflehog_subset_min_50"
+fi
+
+if [ "$FALSE_POSITIVE_COUNT" -ge 100 ]; then
+    e2e_log_assert_eq "0" "0" "c5_false_positive_subset_min_100"
+else
+    e2e_log_assert_eq "1" "0" "c5_false_positive_subset_min_100"
+fi

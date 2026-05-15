@@ -39,6 +39,14 @@ clippy_out_dump
 exit_code_test_out
 recent_commits.txt
 
+# Volatile Beads SQLite sidecars and temp files. Keep .beads/issues.jsonl
+# visible for tests and coordination, but do not let transient DB files make
+# RCH fall back to local execution when they vanish during rsync.
+.beads/*db-shm
+.beads/*db-wal
+.beads/*db-journal
+.beads/.*.db.*
+
 # Agent session reports (multi-pane orchestration artifacts)
 GEMINI_PANE*.md
 GEMINI_PANE_REPORT.md

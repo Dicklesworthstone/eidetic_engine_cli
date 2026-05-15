@@ -2,7 +2,7 @@
 # J3 — shared helpers for per-epic e2e scripts under scripts/e2e_overhaul/.
 #
 # Sources J1's e2e_logger.sh and exposes:
-#   - EE_BINARY            path to the ee binary (default: target/release/ee)
+#   - EE_BINARY            path to the ee binary (default: Cargo target/release/ee)
 #   - REPO_ROOT            absolute repo root
 #   - CORPUS_SEED          path to J2's corpus_2026_05_10_seed.sh
 #   - epic_setup           shared setup: tmp workspace + init + trap
@@ -28,11 +28,9 @@ if [ -d "${DEFAULT_AGENT_BUILD_ROOT}" ]; then
     export TMPDIR="${EE_AGENT_TMPDIR:-${DEFAULT_AGENT_BUILD_ROOT}/tmp}"
 fi
 
-if [ -n "${CARGO_TARGET_DIR:-}" ]; then
-    EE_BINARY="${EE_BINARY:-${CARGO_TARGET_DIR%/}/release/ee}"
-else
-    EE_BINARY="${EE_BINARY:-$REPO_ROOT/target/release/ee}"
-fi
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+source "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+EE_BINARY="$(ee_resolve_binary release)"
 export EE_BINARY
 
 CORPUS_SEED="$REPO_ROOT/tests/fixtures/corpus/corpus_2026_05_10_seed.sh"

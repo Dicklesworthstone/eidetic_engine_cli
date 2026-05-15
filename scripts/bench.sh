@@ -98,14 +98,14 @@ case "$PROFILE" in
         RELEASE_BLOCKING=false
         ;;
     nightly)
-        BENCHMARKS="remember search context pack_size why outcome status workspace_init audit_query index_rebuild concurrent_writes import_cass link graph_pagerank curate_candidates"
+        BENCHMARKS="remember search context pack_size why outcome status workspace_init audit_query index_rebuild concurrent_writes import_cass link graph_pagerank graph_ppr graph_louvain graph_ktruss graph_gomory_hu graph_hits curate_candidates"
         BENCH_ARGS="--warm-up-time 0.5 --measurement-time 2 --sample-size 20"
         PROFILE_CLASS="nightly_ci"
         WORKLOAD_TIER="medium"
         RELEASE_BLOCKING=false
         ;;
     stress)
-        BENCHMARKS="remember search context pack_size why outcome status workspace_init audit_query index_rebuild concurrent_writes import_cass link graph_pagerank curate_candidates"
+        BENCHMARKS="remember search context pack_size why outcome status workspace_init audit_query index_rebuild concurrent_writes import_cass link graph_pagerank graph_ppr graph_louvain graph_ktruss graph_gomory_hu graph_hits curate_candidates"
         BENCH_ARGS=""
         PROFILE_CLASS="local_256gb"
         WORKLOAD_TIER="stress"
@@ -390,9 +390,28 @@ run_status_smoke() {
 
 run_criterion_bench() {
     bench="$1"
+    compare_only=false
+    if [ "$CHECK_REGRESSION" = "true" ]; then
+        case "$bench" in
+            graph_*) compare_only=true ;;
+        esac
+    fi
     # BENCH_ARGS intentionally expands into separate Criterion CLI arguments.
     # shellcheck disable=SC2086
-    if output=$(cargo bench --bench "$bench" -- $BENCH_ARGS 2>&1); then
+    if [ "$compare_only" = "true" ]; then
+        if output=$(EE_BENCH_COMPARE_ONLY=1 cargo bench --bench "$bench" -- $BENCH_ARGS 2>&1); then
+            status=0
+        else
+            status=$?
+        fi
+    else
+        if output=$(cargo bench --bench "$bench" -- $BENCH_ARGS 2>&1); then
+            status=0
+        else
+            status=$?
+        fi
+    fi
+    if [ "$status" -eq 0 ]; then
         printf '%s\n' "$output" >&2
         parsed=$(parse_time_value "$output" || true)
         if [ -n "$parsed" ]; then
@@ -402,7 +421,11 @@ run_criterion_bench() {
         else
             p50_ms=null
         fi
-        append_result "ee_$bench" "measured" "$p50_ms" null null null null
+        if [ "$compare_only" = "true" ]; then
+            append_result "ee_$bench" "budget_checked" "$p50_ms" null null null null
+        else
+            append_result "ee_$bench" "measured" "$p50_ms" null null null null
+        fi
         echo "[+] $bench: p50=${p50_ms}ms" >&2
     else
         printf '%s\n' "$output" >&2

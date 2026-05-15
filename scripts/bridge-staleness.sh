@@ -71,8 +71,13 @@ plan_present=false
 plan_age_days=0
 if [ -f "$PLAN_PATH" ]; then
   plan_present=true
-  if mtime_epoch=$(stat -f %m "$PLAN_PATH" 2>/dev/null); then :; else
-    mtime_epoch=$(stat -c %Y "$PLAN_PATH" 2>/dev/null || echo 0)
+  mtime_epoch=""
+  if mtime_candidate=$(stat -f %m "$PLAN_PATH" 2>/dev/null) && [[ "$mtime_candidate" =~ ^[0-9]+$ ]]; then
+    mtime_epoch="$mtime_candidate"
+  elif mtime_candidate=$(stat -c %Y "$PLAN_PATH" 2>/dev/null) && [[ "$mtime_candidate" =~ ^[0-9]+$ ]]; then
+    mtime_epoch="$mtime_candidate"
+  else
+    mtime_epoch="$now_epoch"
   fi
   plan_age_days=$(( (now_epoch - mtime_epoch) / 86400 ))
 fi

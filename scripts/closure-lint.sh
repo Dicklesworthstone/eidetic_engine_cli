@@ -5,6 +5,7 @@
 # - implements-surface:* beads cannot close with abstention language
 # - implements-surface:* beads cannot close while *_UNAVAILABLE_CODE exists
 # - implements-surface:* beads must have a golden snapshot
+# - math-ambition beads cannot close without explicit rejection-threshold evidence
 # - honesty-only beads must have an open implements-surface sibling, unless a
 #   matching implementation sibling is already closed and no sentinel remains
 #
@@ -26,11 +27,14 @@ BEADS_SYNC_LOCK="$BEADS_DIR/.sync.lock"
 BEADS_LOCK_WAIT_SECONDS="${EE_BEADS_LOCK_WAIT_SECONDS:-30}"
 CLI_MOD="src/cli/mod.rs"
 REPORT_FILE=".closure-lint-report.json"
+QUALITY_REPORT_FILE=".closure-quality-report.json"
 GOLDEN_DIR="tests/golden"
 SCHEMA_DIR="docs/schemas"
 SNAPSHOT_DIR="tests/snapshots"
 TEST_TRACING_HELPER="tests/support/test_tracing.rs"
 TEST_TRACING_LOG_DIR="tests/golden/logs"
+FAILURE_MODE_FIXTURE_DIR="tests/fixtures/failure_modes"
+MATH_AMBITION_REJECTION_LOG="docs/spikes/math_ambition_rejection_log.md"
 
 # Abstention patterns that indicate stub/placeholder closures
 DEFER_V2_REGEX='defer.*v2|deferred until v2|v1 honesty stub'
@@ -154,6 +158,45 @@ add_violation() {
     fi
 }
 
+add_failure_mode_fixture_violation() {
+    local bead_id="$1"
+    local surface="$2"
+    local fixture_path="$3"
+    local emitted_code="$4"
+    local severity="$5"
+    local reason="$6"
+
+    VIOLATION_COUNT=$((VIOLATION_COUNT + 1))
+    local object
+    object=$(jq -cn \
+        --arg bead "$bead_id" \
+        --arg label "implements-surface" \
+        --arg surface "$surface" \
+        --arg reason "$reason" \
+        --arg bead_id "$bead_id" \
+        --arg missing_fixture_path "$fixture_path" \
+        --arg emitted_code "$emitted_code" \
+        --arg severity "$severity" \
+        '{
+            bead:$bead,
+            label:$label,
+            surface:$surface,
+            reason:$reason,
+            bead_id:$bead_id,
+            missing_fixture_path:$missing_fixture_path,
+            emitted_code:$emitted_code,
+            severity:$severity
+        }')
+    VIOLATIONS="${VIOLATIONS}${object}
+"
+
+    if [ "$JSON_OUTPUT" = true ]; then
+        :
+    else
+        echo "  x $bead_id [implements-surface] surface=$surface: $reason"
+    fi
+}
+
 write_report() {
     local status="$1"
     if [ -n "$VIOLATIONS" ]; then
@@ -162,6 +205,97 @@ write_report() {
     else
         jq -cn --arg status "$status" '{violations:[],count:0,status:$status}' > "$REPORT_FILE"
     fi
+}
+
+write_closure_quality_report() {
+    local generated_at
+    generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    jq -s \
+        --arg generated_at "$generated_at" \
+        --argjson premature_days 14 \
+        --argjson trend_days 90 '
+        def normalized_epoch($value):
+            ($value // "")
+            | sub("\\.[0-9]+Z$"; "Z")
+            | try fromdateiso8601 catch null;
+
+        ($generated_at | fromdateiso8601) as $generated_epoch
+        | [ .[] | select((.status // "") == "closed") ] as $closed_beads
+        | [
+            $closed_beads[]
+            | . as $bead
+            | normalized_epoch($bead.closed_at // $bead.updated_at // "") as $closed_epoch
+            | normalized_epoch($bead.created_at // "") as $created_epoch
+            | select($closed_epoch != null)
+            | [
+                ($bead.comments // [])[]?
+                | select((.text // "") | test("^Reopened:"; "i"))
+                | normalized_epoch(.created_at // "") as $reopened_epoch
+                | (
+                    if $reopened_epoch >= $closed_epoch then
+                        {epoch: $closed_epoch, label: "closed_at"}
+                    else
+                        {epoch: ($created_epoch // $closed_epoch), label: "created_at_fallback"}
+                    end
+                  ) as $basis
+                | select($reopened_epoch != null and $basis.epoch != null and $reopened_epoch >= $basis.epoch)
+                | {
+                    comment_id: (.id // null),
+                    reopened_at: (.created_at // ""),
+                    time_basis: $basis.label,
+                    reason: (.text // ""),
+                    time_to_reopen_days: ((($reopened_epoch - $basis.epoch) / 86400) | floor)
+                  }
+              ]
+            | sort_by(.time_to_reopen_days, .reopened_at)
+            | .[0]? as $reopen
+            | select($reopen != null)
+            | {
+                bead_id: $bead.id,
+                title: ($bead.title // ""),
+                closed_at: ($bead.closed_at // ""),
+                reopened_at: $reopen.reopened_at,
+                time_to_reopen_days: $reopen.time_to_reopen_days,
+                quality_signal: (
+                    if $reopen.time_to_reopen_days <= $premature_days then
+                        "premature_closure"
+                    else
+                        "reopened_after_window"
+                    end
+                ),
+                time_basis: $reopen.time_basis,
+                reopen_comment_id: $reopen.comment_id,
+                reopen_reason: $reopen.reason
+              }
+          ] as $signals
+        | ($signals | map(select(.quality_signal == "premature_closure"))) as $premature
+        | (
+            $premature
+            | map(select((normalized_epoch(.reopened_at) // 0) >= ($generated_epoch - ($trend_days * 86400))))
+          ) as $recent_premature
+        | {
+            schema: "ee.closure_quality_report.v1",
+            generatedAt: $generated_at,
+            advisory: true,
+            thresholds: {
+                prematureClosureDays: $premature_days,
+                trendWindowDays: $trend_days
+            },
+            summary: {
+                closedBeadsAudited: ($closed_beads | length),
+                reopenedBeads: ($signals | length),
+                prematureClosures: ($premature | length),
+                recentPrematureClosures: ($recent_premature | length)
+            },
+            trend: {
+                window: "last_quarter",
+                windowDays: $trend_days,
+                prematureClosures: ($recent_premature | length)
+            },
+            signals: $signals
+        }
+    ' "$BEADS_FILE" > "$QUALITY_REPORT_FILE"
 }
 
 implementation_surfaces_for_bead() {
@@ -275,6 +409,112 @@ bead_declared_rust_file_surfaces() {
         grep -E '^tests/.*\.rs$' || true
 }
 
+bead_declared_file_surfaces() {
+    local bead_id="$1"
+    jq -r --arg bead_id "$bead_id" '
+        select(.id == $bead_id)
+        | (.description // "")
+    ' "$BEADS_FILE" 2>/dev/null |
+        sed -n 's/^FILE SURFACE:[[:space:]]*//p' |
+        tr ',' '\n' |
+        sed -E 's/^[[:space:]]*//; s/[[:space:]].*$//; s/^`//; s/`$//' |
+        grep -E '^[A-Za-z0-9_./*?+-]+$' || true
+}
+
+bead_referenced_test_paths() {
+    local bead_id="$1"
+
+    jq -r --arg bead_id "$bead_id" '
+        select(.id == $bead_id)
+        | [(.description // ""), (.notes // "")] | join("\n")
+    ' "$BEADS_FILE" 2>/dev/null |
+        tr '`"'"'"'[]{}<>' '\n' |
+        grep -Eo 'tests/[A-Za-z0-9_./*?+-]+' |
+        sed -E 's/[).,:;]+$//; s#/$##' |
+        sort -u || true
+}
+
+test_reference_matches() {
+    local reference="$1"
+    local match
+
+    case "$reference" in
+        *'*'*|*'?'*)
+            for match in $reference; do
+                [ "$match" != "$reference" ] || continue
+                [ -e "$match" ] && printf '%s\n' "$match"
+            done
+            ;;
+        *)
+            [ -e "$reference" ] && printf '%s\n' "$reference"
+            ;;
+    esac
+}
+
+rust_test_file_has_assertion() {
+    local test_file="$1"
+
+    grep -Eq 'assert(!|_eq!|_ne!|_matches!|_json_snapshot!)|prop_assert|proptest!|expect\(|ensure\(|ensure_eq\(' "$test_file"
+}
+
+rust_test_file_has_only_ignored_tests() {
+    local test_file="$1"
+    local test_count
+    local ignore_count
+
+    test_count=$(grep -c '#\[test\]' "$test_file" || true)
+    ignore_count=$(grep -c '#\[ignore\]' "$test_file" || true)
+    [ "$test_count" -gt 0 ] && [ "$ignore_count" -ge "$test_count" ]
+}
+
+check_referenced_rust_test_file() {
+    local bead_id="$1"
+    local surface="$2"
+    local test_file="$3"
+
+    grep -q '#\[test\]' "$test_file" || return 0
+    if rust_test_file_has_only_ignored_tests "$test_file"; then
+        add_violation "$bead_id" "implements-surface" "$surface" "$test_file has no non-ignored test"
+    elif ! rust_test_file_has_assertion "$test_file"; then
+        add_violation "$bead_id" "implements-surface" "$surface" "$test_file lacks assertion-style coverage"
+    fi
+}
+
+check_referenced_test_paths() {
+    local bead_id="$1"
+    local surface="$2"
+    local reference
+    local matches
+    local match
+    local checked_any
+
+    for reference in $(bead_referenced_test_paths "$bead_id"); do
+        matches=$(test_reference_matches "$reference" || true)
+        if [ -z "$matches" ]; then
+            add_violation "$bead_id" "implements-surface" "$surface" "referenced test path missing: $reference"
+            continue
+        fi
+
+        checked_any=false
+        for match in $matches; do
+            case "$match" in
+                *.rs)
+                    checked_any=true
+                    check_referenced_rust_test_file "$bead_id" "$surface" "$match"
+                    ;;
+            esac
+        done
+
+        if [ "$checked_any" = false ] && [ -f "$reference" ]; then
+            case "$reference" in
+                *.rs)
+                    check_referenced_rust_test_file "$bead_id" "$surface" "$reference"
+                    ;;
+            esac
+        fi
+    done
+}
+
 rust_test_surface_requires_tracing() {
     case "$1" in
         *e2e*.rs|*E2E*.rs) return 0 ;;
@@ -317,6 +557,73 @@ check_bd3usjw_e2e_test_tracing() {
         if grep -q '#\[test\]' "$test_file" &&
             ! grep -q 'init_test_tracing' "$test_file"; then
             add_violation "$bead_id" "implements-surface" "$surface" "$test_file does not call init_test_tracing"
+        fi
+    done
+}
+
+bead_degradation_requirement_codes() {
+    local bead_id="$1"
+
+    jq -r --arg bead_id "$bead_id" '
+        select(.id == $bead_id)
+        | [(.description // ""), (.notes // ""), (.close_reason // "")]
+        | join("\n")
+    ' "$BEADS_FILE" 2>/dev/null |
+        awk '
+            /DEGRADATION REQUIREMENT/ {
+                in_section = 1
+                print
+                next
+            }
+            in_section && /^[[:space:]]*(BACKGROUND|WHAT|ACCEPTANCE|FILE SURFACE|TRACING|TEST REQUIREMENT|COST OF OMISSION|PARENT EPIC|DEPENDENCIES)[[:space:]:]/ {
+                in_section = 0
+            }
+            in_section {
+                print
+            }
+        ' |
+        grep -Eo 'code[[:space:]]*=[[:space:]]*`?[A-Za-z0-9_.-]+' |
+        sed -E 's/^code[[:space:]]*=[[:space:]]*`?//' |
+        sort -u || true
+}
+
+bead_declares_file_surface_path() {
+    local bead_id="$1"
+    local expected_path="$2"
+
+    bead_declared_file_surfaces "$bead_id" |
+        grep -Fx "$expected_path" >/dev/null 2>&1
+}
+
+check_failure_mode_fixture_obligation() {
+    local bead_id="$1"
+    local surface="$2"
+    local code
+    local fixture_path
+
+    bead_is_bd3usjw_family "$bead_id" || return 0
+
+    for code in $(bead_degradation_requirement_codes "$bead_id"); do
+        fixture_path="$FAILURE_MODE_FIXTURE_DIR/$code.json"
+        if [ ! -f "$fixture_path" ]; then
+            add_failure_mode_fixture_violation \
+                "$bead_id" \
+                "$surface" \
+                "$fixture_path" \
+                "$code" \
+                "high" \
+                "emitted degraded code missing fixture: $fixture_path"
+            continue
+        fi
+
+        if ! bead_declares_file_surface_path "$bead_id" "$fixture_path"; then
+            add_failure_mode_fixture_violation \
+                "$bead_id" \
+                "$surface" \
+                "$fixture_path" \
+                "$code" \
+                "medium" \
+                "emitted degraded code fixture missing from FILE SURFACE: $fixture_path"
         fi
     done
 }
@@ -531,6 +838,41 @@ honesty_surfaces_for_bead() {
     ' "$BEADS_FILE" 2>/dev/null || true
 }
 
+bead_has_rejection_criteria() {
+    local bead_id="$1"
+    jq -r --arg bead_id "$bead_id" '
+        select(.id == $bead_id)
+        | [(.description // ""), (.notes // ""), (.close_reason // "")] | join("\n")
+    ' "$BEADS_FILE" 2>/dev/null |
+        grep -q 'REJECTION CRITERIA'
+}
+
+close_reason_has_rejection_threshold_evidence() {
+    local close_reason="$1"
+
+    printf "%s\n" "$close_reason" | grep -q 'rejection_threshold_passed:' || return 1
+    printf "%s\n" "$close_reason" | grep -q 'measured_value:' || return 1
+    printf "%s\n" "$close_reason" | grep -q 'expected_value:' || return 1
+    printf "%s\n" "$close_reason" | grep -q 'decision:' || return 1
+}
+
+check_math_ambition_closure() {
+    local bead_id="$1"
+    local close_reason="$2"
+
+    if ! bead_has_rejection_criteria "$bead_id"; then
+        add_violation "$bead_id" "math-ambition" "rejection_criteria" "closed math-ambition bead lacks REJECTION CRITERIA"
+    fi
+
+    if [ ! -f "$MATH_AMBITION_REJECTION_LOG" ]; then
+        add_violation "$bead_id" "math-ambition" "rejection_criteria" "missing $MATH_AMBITION_REJECTION_LOG"
+    fi
+
+    if ! close_reason_has_rejection_threshold_evidence "$close_reason"; then
+        add_violation "$bead_id" "math-ambition" "rejection_criteria" "close_reason must include rejection_threshold_passed, measured_value, expected_value, and decision fields"
+    fi
+}
+
 if [ "$JSON_OUTPUT" != true ]; then
     echo "=== Closure Linter ==="
     echo ""
@@ -541,6 +883,7 @@ relevant_closed_bead_ids() {
         select(.status == "closed")
         | select(
             ((.labels // []) | index("honesty-only"))
+            or ((.labels // []) | index("math-ambition"))
             or ((.labels // []) | any(startswith("implements-surface:")))
             or ((.title // "") | test("\\[implements-surface:"))
           )
@@ -576,6 +919,7 @@ else
             | select(.status == "closed")
             | select(
                 ((.labels // []) | index("honesty-only"))
+                or ((.labels // []) | index("math-ambition"))
                 or ((.labels // []) | any(startswith("implements-surface:")))
                 or ((.title // "") | test("\\[implements-surface:"))
               )
@@ -610,6 +954,8 @@ check_graph_schema_docs() {
 
 check_graph_schema_docs
 
+write_closure_quality_report
+
 if [ -z "$BEAD_IDS" ] && [ "$VIOLATION_COUNT" -eq 0 ]; then
     if [ "$JSON_OUTPUT" != true ]; then
         if [ "$AUDIT_MODE" = true ]; then
@@ -631,6 +977,10 @@ for bead_id in $BEAD_IDS; do
     close_reason=$(jq -r "select(.id == \"$bead_id\") | .close_reason // \"\"" "$BEADS_FILE" 2>/dev/null || echo "")
 
     [ -z "$labels" ] && continue
+
+    if echo "$labels" | grep -qE '\bmath-ambition\b'; then
+        check_math_ambition_closure "$bead_id" "$close_reason"
+    fi
 
     implementation_surfaces=$(implementation_surfaces_for_bead "$bead_id")
     if [ -n "$implementation_surfaces" ]; then
@@ -664,6 +1014,14 @@ for bead_id in $BEAD_IDS; do
             # structured test tracing contract before their bead can close.
             check_test_tracing_surface_contract "$bead_id" "$surface"
             check_bd3usjw_e2e_test_tracing "$bead_id" "$surface"
+
+            # Rule 5: Closed implementation beads that cite test paths must
+            # point at real tests, and Rust tests must contain assertions.
+            check_referenced_test_paths "$bead_id" "$surface"
+
+            # Rule 6: Closed Part II implementation beads that declare
+            # degraded codes must ship and cite their J6 failure-mode fixture.
+            check_failure_mode_fixture_obligation "$bead_id" "$surface"
         done
     fi
 

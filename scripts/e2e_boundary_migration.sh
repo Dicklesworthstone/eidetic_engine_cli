@@ -12,7 +12,7 @@
 #   ./scripts/e2e_boundary_migration.sh --self-test
 #
 # Environment:
-#   EE_BINARY                 Path to ee binary. Default: target/debug/ee.
+#   EE_BINARY                 Path to ee binary. Default: Cargo target/debug/ee.
 #   EE_E2E_ARTIFACT_ROOT      Artifact output root.
 #   EE_BOUNDARY_STRICT_GOLDEN Fail on golden mismatch when a golden is listed.
 #   EE_VERBOSE                Print per-command progress.
@@ -29,11 +29,9 @@ if [[ -d "${DEFAULT_AGENT_BUILD_ROOT}" ]]; then
     export TMPDIR="${EE_AGENT_TMPDIR:-${DEFAULT_AGENT_BUILD_ROOT}/tmp}"
 fi
 
-if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
-    EE_BINARY="${EE_BINARY:-${CARGO_TARGET_DIR%/}/debug/ee}"
-else
-    EE_BINARY="${EE_BINARY:-${REPO_ROOT}/target/debug/ee}"
-fi
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+source "${REPO_ROOT}/scripts/lib/ee_binary_resolution.sh"
+EE_BINARY="$(ee_resolve_binary debug)"
 CORPUS_PATH="${REPO_ROOT}/tests/fixtures/boundary_corpus/corpus.json"
 RUN_ID="${EE_E2E_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then

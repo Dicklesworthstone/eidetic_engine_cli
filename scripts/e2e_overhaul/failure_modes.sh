@@ -257,6 +257,34 @@ workspace_with_quarantine_table_read_errors() {
         --json >/dev/null 2>&1 || return 1
 }
 
+write_fake_br_for_beads_tracker_stale() {
+    local bin_dir="${1:?bin dir required}"
+    mkdir -p "$bin_dir"
+    cat > "$bin_dir/br" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "sync --status --json --no-auto-import --allow-stale")
+    printf '{"jsonl_newer":true,"db_newer":false,"last_import_time":"2026-05-14T05:20:52Z"}\n'
+    ;;
+  "ready --json")
+    printf '[{"id":"bd-ready","title":"Ready fixture","status":"open","priority":1}]\n'
+    ;;
+  "blocked --json"|"list --status in_progress --json"|"list --status deferred --json")
+    printf '[]\n'
+    ;;
+  "dep cycles --json")
+    printf '{"cycles":[],"count":0}\n'
+    ;;
+  *)
+    printf 'unexpected fake br invocation: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+SH
+    chmod +x "$bin_dir/br"
+}
+
 insert_j6_index_publish_lock() {
     local lock_workspace="${1:-$EPIC_WORKSPACE}"
     ee_global diag advisory-lock \
@@ -1296,6 +1324,15 @@ run_fixture_scenario() {
             ;;
         beads_unavailable)
             SCENARIO_OUTPUT=$(PATH=/usr/bin:/bin ee_global swarm brief \
+                --sources beads \
+                --workspace "$REPO_ROOT" \
+                --json 2>/dev/null || true)
+            ;;
+        beads_tracker_stale)
+            local fake_br_bin
+            fake_br_bin="$EPIC_WORKSPACE/j6-fake-br-bin"
+            write_fake_br_for_beads_tracker_stale "$fake_br_bin"
+            SCENARIO_OUTPUT=$(PATH="$fake_br_bin:/usr/bin:/bin" ee_global swarm brief \
                 --sources beads \
                 --workspace "$REPO_ROOT" \
                 --json 2>/dev/null || true)

@@ -1,0 +1,75 @@
+# Per-stage budgets for scripts/verify.sh.
+#
+# expected_seconds_p50 is the expected median on a mid-tier dev machine.
+# regression_factor = 1.5 emits an advisory when elapsed time exceeds p50 * 1.5.
+# scripts/verify.sh fails the run when elapsed time exceeds p50 * 3.
+#
+# Non-benchmark p50 values sum to 600s, matching the 10-minute target for the
+# full readiness gate. Benchmarks are optional behind --include-bench.
+total_expected_seconds = 600
+total_regression_factor = 1.5
+
+[[stage]]
+name = "Forbidden Dependencies"
+expected_seconds_p50 = 20
+regression_factor = 1.5
+
+[[stage]]
+name = "Closure Linter"
+expected_seconds_p50 = 20
+regression_factor = 1.5
+
+[[stage]]
+name = "Verification Drift Guard"
+expected_seconds_p50 = 10
+regression_factor = 1.5
+
+[[stage]]
+name = "Snapshot Proposal Guard"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Untracked Work Audit (advisory)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Vision Coverage"
+expected_seconds_p50 = 20
+regression_factor = 1.5
+
+[[stage]]
+name = "Unit, Contract, and Golden Tests"
+expected_seconds_p50 = 180
+regression_factor = 1.5
+
+[[stage]]
+name = "Basic E2E Scripts"
+expected_seconds_p50 = 90
+regression_factor = 1.5
+
+[[stage]]
+name = "Overhaul Integration E2E (J4)"
+expected_seconds_p50 = 45
+regression_factor = 1.5
+
+[[stage]]
+name = "Graph Determinism E2E (F4.a)"
+expected_seconds_p50 = 45
+regression_factor = 1.5
+
+[[stage]]
+name = "Advanced E2E Scripts"
+expected_seconds_p50 = 90
+regression_factor = 1.5
+
+[[stage]]
+name = "Boundary Migration Scripts"
+expected_seconds_p50 = 70
+regression_factor = 1.5
+
+[[stage]]
+name = "Performance Benchmarks"
+expected_seconds_p50 = 120
+regression_factor = 1.5

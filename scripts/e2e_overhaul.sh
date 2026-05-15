@@ -13,7 +13,7 @@
 #   scripts/e2e_overhaul.sh --json-summary-to <path> # also write summary here
 #
 # Env:
-#   EE_BINARY            path to ee binary (default: target/release/ee)
+#   EE_BINARY            path to ee binary (default: Cargo target/release/ee)
 #   VERIFY_OVERHAUL      if "0" the driver is a no-op (used by verify.sh to
 #                        gate the suite while implementation beads are still
 #                        in flight; default: "1")
@@ -43,11 +43,9 @@ if [ -d "${DEFAULT_AGENT_BUILD_ROOT}" ]; then
     export TMPDIR="${EE_AGENT_TMPDIR:-${DEFAULT_AGENT_BUILD_ROOT}/tmp}"
 fi
 
-if [ -n "${CARGO_TARGET_DIR:-}" ]; then
-    EE_BINARY="${EE_BINARY:-${CARGO_TARGET_DIR%/}/release/ee}"
-else
-    EE_BINARY="${EE_BINARY:-$REPO_ROOT/target/release/ee}"
-fi
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+source "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+EE_BINARY="$(ee_resolve_binary release)"
 
 # ---------------------------------------------------------------------------
 # Epic registry. Letter → script-basename. Iterate in this order regardless
@@ -117,7 +115,7 @@ Options:
   -h, --help                  Show this help.
 
 Env:
-  EE_BINARY        Path to the ee binary (default: target/release/ee).
+  EE_BINARY        Path to the ee binary (default: Cargo target/release/ee).
   VERIFY_OVERHAUL  Set to 0 to make this script a no-op (used by verify.sh).
 EOF
 }

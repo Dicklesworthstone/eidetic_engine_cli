@@ -34,6 +34,64 @@ FORBIDDEN=(
     reqwest
 )
 
+usage() {
+    echo "usage: $0 [--self-test]" >&2
+}
+
+scan_metadata() {
+    FORBIDDEN_LIST="${FORBIDDEN_LIST}" python3 -c '
+import json
+import os
+import sys
+
+data = json.load(sys.stdin)
+forbidden = {line.strip() for line in os.environ["FORBIDDEN_LIST"].splitlines() if line.strip()}
+hits = sorted({pkg["name"] for pkg in data.get("packages", []) if pkg.get("name") in forbidden})
+for name in hits:
+    print(name)
+'
+}
+
+FORBIDDEN_LIST=$(printf '%s\n' "${FORBIDDEN[@]}")
+
+if [[ $# -gt 1 ]]; then
+    usage
+    exit 1
+fi
+
+if [[ "${1:-}" == "--self-test" ]]; then
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "error: python3 is required but was not found on PATH" >&2
+        exit 3
+    fi
+
+    synthetic='{"packages":[{"name":"eidetic-engine"},{"name":"tokio"},{"name":"serde"}]}'
+    if ! hits=$(printf '%s\n' "${synthetic}" | scan_metadata); then
+        echo "error: synthetic forbidden-dependency scan failed" >&2
+        exit 3
+    fi
+    if [[ "${hits}" != "tokio" ]]; then
+        echo "error: self-test expected tokio hit, got: ${hits:-<none>}" >&2
+        exit 2
+    fi
+
+    clean='{"packages":[{"name":"eidetic-engine"},{"name":"serde"}]}'
+    if ! hits=$(printf '%s\n' "${clean}" | scan_metadata); then
+        echo "error: synthetic clean dependency scan failed" >&2
+        exit 3
+    fi
+    if [[ -n "${hits}" ]]; then
+        echo "error: self-test expected clean tree, got: ${hits}" >&2
+        exit 2
+    fi
+
+    echo "ok: forbidden dependency scanner self-test passed"
+    exit 0
+elif [[ -n "${1:-}" ]]; then
+    usage
+    exit 1
+fi
+
 if ! command -v cargo >/dev/null 2>&1; then
     echo "error: cargo is required but was not found on PATH" >&2
     exit 3
@@ -52,21 +110,8 @@ if [[ ! -f "${MANIFEST}" ]]; then
     exit 1
 fi
 
-FORBIDDEN_LIST=$(printf '%s\n' "${FORBIDDEN[@]}")
-
 if ! HITS=$(cargo metadata --format-version=1 --manifest-path "${MANIFEST}" |
-    FORBIDDEN_LIST="${FORBIDDEN_LIST}" python3 -c '
-import json
-import os
-import sys
-
-data = json.load(sys.stdin)
-forbidden = {line.strip() for line in os.environ["FORBIDDEN_LIST"].splitlines() if line.strip()}
-hits = sorted({pkg["name"] for pkg in data.get("packages", []) if pkg.get("name") in forbidden})
-for name in hits:
-    print(name)
-'
-); then
+    scan_metadata); then
     echo "error: cargo metadata or dependency scan failed" >&2
     exit 3
 fi
