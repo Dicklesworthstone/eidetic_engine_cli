@@ -14,6 +14,7 @@ use std::{
     time::Instant,
 };
 
+use crate::config::GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY;
 use crate::core::memory::{
     EvidenceFreshness, EvidenceFreshnessStatus, assess_memory_evidence_freshness, memory_validity,
 };
@@ -980,9 +981,13 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
         }
         Ok(None) | Err(_) => report,
     };
-    let report = match revision_lineage_for_why(&conn, &memory.workspace_id, memory_id) {
-        Some(revision_lineage) => report.with_revision_lineage(revision_lineage),
-        None => report,
+    let report = if revision_dominance_feature_enabled(options.database_path) {
+        match revision_lineage_for_why(&conn, &memory.workspace_id, memory_id) {
+            Some(revision_lineage) => report.with_revision_lineage(revision_lineage),
+            None => report,
+        }
+    } else {
+        report.with_revision_lineage(revision_lineage_feature_disabled(memory_id))
     };
 
     trace_why_math_surfaces(&memory.workspace_id, memory_id, "response", started, &[]);
@@ -1002,6 +1007,51 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
     let _ = conn.insert_audit(&crate::db::generate_audit_id(), &audit_input);
 
     report
+}
+
+fn revision_dominance_feature_enabled(database_path: &Path) -> bool {
+    let Some(workspace_root) = workspace_root_from_database_path(database_path) else {
+        return false;
+    };
+    let options = crate::core::config_surface::ConfigSurfaceOptions {
+        workspace_root,
+        config_path: None,
+    };
+    crate::core::config_surface::get_config(&options, GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY)
+        .map(|report| report.value == "true")
+        .unwrap_or(false)
+}
+
+fn workspace_root_from_database_path(database_path: &Path) -> Option<PathBuf> {
+    if database_path.file_name()?.to_str()? != "ee.db" {
+        return None;
+    }
+    let ee_dir = database_path.parent()?;
+    if ee_dir.file_name()?.to_str()? != ".ee" {
+        return None;
+    }
+    ee_dir.parent().map(Path::to_path_buf)
+}
+
+fn revision_lineage_feature_disabled(memory_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "sourceSchema": crate::graph::dominance::MEMORY_IMPACT_ANALYSIS_SCHEMA_V1,
+        "memoryId": memory_id,
+        "snapshotVersion": 0,
+        "rootMemoryId": serde_json::Value::Null,
+        "immediateDominator": serde_json::Value::Null,
+        "dominanceFrontier": [],
+        "ancestorsAtDepth": {},
+        "validationStatus": "disabled",
+        "degraded": [{
+            "code": "graph_feature_disabled",
+            "severity": "medium",
+            "message": format!(
+                "Revision dominance is disabled by {GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY}."
+            ),
+            "repair": format!("ee config set {GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY} true"),
+        }],
+    })
 }
 
 fn revision_lineage_for_why(
@@ -2171,6 +2221,11 @@ mod tests {
                 .ok_or("database path should have parent")?,
         )
         .map_err(|error| error.to_string())?;
+        std::fs::write(
+            temp.path().join(".ee").join("config.toml"),
+            "[graph.feature.revision_dominance]\nenabled = true\n",
+        )
+        .map_err(|error| error.to_string())?;
         let original_id = "mem_whyrevision000000000000001";
         let workspace_id = "wsp_whyrevisionlineage00000000";
         let connection =
@@ -2257,6 +2312,81 @@ mod tests {
             lineage["ancestorsAtDepth"]["1"][0].as_str(),
             Some(original_id),
             "lineage depth 1",
+        )
+    }
+
+    #[test]
+    fn explain_memory_reports_disabled_revision_lineage_by_default() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or("database path should have parent")?,
+        )
+        .map_err(|error| error.to_string())?;
+        let memory_id = "mem_whydisabledrevision0000001";
+        let workspace_id = "wsp_whydisabledrevision0000000";
+        let connection =
+            crate::db::DbConnection::open_file(&database_path).map_err(|e| e.to_string())?;
+        connection.migrate().map_err(|e| e.to_string())?;
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: temp.path().display().to_string(),
+                    name: Some("why-disabled-revision-lineage".to_owned()),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        connection
+            .insert_memory(
+                memory_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "Revision dominance should be feature-gated.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.7,
+                    importance: 0.6,
+                    provenance_uri: None,
+                    trust_class: "agent_assertion".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: Some("2026-05-15T00:00:00Z".to_owned()),
+                    valid_to: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        drop(connection);
+
+        let report = explain_memory(&WhyOptions {
+            database_path: &database_path,
+            memory_id,
+            confidence_threshold: WhyOptions::DEFAULT_CONFIDENCE_THRESHOLD,
+        });
+
+        ensure(report.found, true, "why found memory")?;
+        let lineage = report
+            .revision_lineage
+            .as_ref()
+            .ok_or_else(|| "disabled gate should attach a lineage sentinel".to_string())?;
+        ensure(
+            lineage["validationStatus"].as_str(),
+            Some("disabled"),
+            "disabled validation status",
+        )?;
+        ensure(
+            lineage["degraded"][0]["code"].as_str(),
+            Some("graph_feature_disabled"),
+            "disabled degraded code",
+        )?;
+        ensure(
+            lineage["degraded"][0]["repair"].as_str(),
+            Some("ee config set graph.feature.revision_dominance.enabled true"),
+            "disabled repair",
         )
     }
 

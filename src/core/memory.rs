@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 
+use super::config_surface::{ConfigSurfaceOptions, get_config};
 use super::index::{
     DEFAULT_INDEX_SUBDIR, IndexProcessingJobReport, process_index_job_for_connection,
 };
@@ -21,7 +22,7 @@ use super::memory_lifecycle::{
     LEVEL_TRANSITION_TOMBSTONED_REJECTED_CODE, MemoryLifecycleState, transition_for,
 };
 use super::search::{SearchOptions, SearchStatus, run_search};
-use crate::config::ConfigFile;
+use crate::config::{ConfigFile, GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY};
 use crate::curate::cluster_coherence::{ClusterCoherenceConfig, EmbeddingPoint, agglomerate};
 use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
@@ -5267,6 +5268,7 @@ pub fn revise_memory(options: &ReviseMemoryOptions<'_>) -> MemoryReviseReport {
             &conn,
             &original.workspace_id,
             options.original_memory_id,
+            options.database_path,
         ));
     }
 
@@ -5407,7 +5409,11 @@ fn memory_revision_impact_analysis(
     conn: &crate::db::DbConnection,
     workspace_id: &str,
     memory_id: &str,
+    database_path: &Path,
 ) -> Option<crate::graph::dominance::MemoryImpactAnalysisReport> {
+    if !revision_dominance_feature_enabled(database_path) {
+        return Some(revision_dominance_disabled_impact_analysis(memory_id));
+    }
     let graph = crate::graph::build_revision_dag_from_logical_ids(conn, workspace_id).ok()?;
     let snapshot_version = conn
         .get_latest_graph_snapshot(workspace_id, crate::db::GraphSnapshotType::RevisionDag)
@@ -5416,6 +5422,58 @@ fn memory_revision_impact_analysis(
         .map_or(0, |snapshot| u64::from(snapshot.snapshot_version));
     crate::graph::dominance::compute_memory_impact_analysis(&graph, memory_id, snapshot_version)
         .ok()
+}
+
+fn revision_dominance_feature_enabled(database_path: &Path) -> bool {
+    let Some(workspace_root) = workspace_root_from_database_path(database_path) else {
+        return false;
+    };
+    let options = ConfigSurfaceOptions {
+        workspace_root,
+        config_path: None,
+    };
+    get_config(&options, GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY)
+        .map(|report| report.value == "true")
+        .unwrap_or(false)
+}
+
+fn workspace_root_from_database_path(database_path: &Path) -> Option<PathBuf> {
+    if database_path.file_name()?.to_str()? != "ee.db" {
+        return None;
+    }
+    let ee_dir = database_path.parent()?;
+    if ee_dir.file_name()?.to_str()? != ".ee" {
+        return None;
+    }
+    ee_dir.parent().map(Path::to_path_buf)
+}
+
+fn revision_dominance_disabled_impact_analysis(
+    memory_id: &str,
+) -> crate::graph::dominance::MemoryImpactAnalysisReport {
+    crate::graph::dominance::MemoryImpactAnalysisReport {
+        schema: crate::graph::dominance::MEMORY_IMPACT_ANALYSIS_SCHEMA_V1,
+        memory_id: memory_id.to_owned(),
+        snapshot_version: 0,
+        revision_lineage: Vec::new(),
+        impact_analysis: crate::graph::dominance::RevisionImpactAnalysis {
+            immediate_dominator: None,
+            dominance_frontier: Vec::new(),
+            affected_memory_count: 0,
+            validation_status: "disabled".to_owned(),
+        },
+        frontiers: Vec::new(),
+        degraded: vec![crate::graph::dominance::DominanceDegradation {
+            code: "graph_feature_disabled".to_owned(),
+            severity: "medium".to_owned(),
+            message: format!(
+                "Revision dominance is disabled by {GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY}."
+            ),
+            repair: Some(format!(
+                "ee config set {GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY} true"
+            )),
+        }],
+    }
 }
 
 // =============================================================================
@@ -5871,6 +5929,14 @@ mod tests {
         .map_err(|error| error.message())?;
 
         Ok((temp, created))
+    }
+
+    fn enable_revision_dominance(workspace: &Path) -> TestResult {
+        std::fs::write(
+            workspace.join(".ee").join("config.toml"),
+            "[graph.feature.revision_dominance]\nenabled = true\n",
+        )
+        .map_err(|error| error.to_string())
     }
 
     #[test]
@@ -7919,8 +7985,8 @@ mod tests {
 
     #[test]
     fn revise_memory_dry_run_preview_preserves_database() -> TestResult {
-        let (_temp, created) =
-            remember_revisable_memory("Store release checks as durable memory.")?;
+        let (temp, created) = remember_revisable_memory("Store release checks as durable memory.")?;
+        enable_revision_dominance(temp.path())?;
         let memory_id = created.memory_id.to_string();
 
         let report = revise_memory(&ReviseMemoryOptions {
@@ -7983,6 +8049,48 @@ mod tests {
             "original content unchanged",
         )?;
         ensure(original.confidence, 0.9, "original confidence unchanged")
+    }
+
+    #[test]
+    fn revise_memory_dry_run_gates_revision_dominance_by_default() -> TestResult {
+        let (_temp, created) =
+            remember_revisable_memory("Keep disabled revision analysis honest.")?;
+        let memory_id = created.memory_id.to_string();
+
+        let report = revise_memory(&ReviseMemoryOptions {
+            database_path: &created.database_path,
+            original_memory_id: &memory_id,
+            content: Some("Keep disabled revision dominance analysis honest."),
+            level: None,
+            kind: None,
+            confidence: None,
+            tags: None,
+            provenance_uri: None,
+            reason: ReviseReason::Update,
+            actor: Some("StormyCove"),
+            dry_run: true,
+        });
+
+        ensure(report.success, true, "success")?;
+        let impact = report
+            .impact_analysis
+            .as_ref()
+            .ok_or_else(|| "disabled gate should return an explicit impact block".to_string())?;
+        ensure(
+            impact.impact_analysis.validation_status.as_str(),
+            "disabled",
+            "disabled validation status",
+        )?;
+        ensure(
+            impact.degraded[0].code.as_str(),
+            "graph_feature_disabled",
+            "disabled degraded code",
+        )?;
+        ensure(
+            impact.degraded[0].repair.as_deref(),
+            Some("ee config set graph.feature.revision_dominance.enabled true"),
+            "disabled repair",
+        )
     }
 
     #[test]
