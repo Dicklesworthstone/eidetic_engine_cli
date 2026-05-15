@@ -137,9 +137,11 @@ A degraded entry's `code` is classified into one of three buckets:
 | `cargo_target_not_external` | warning | bd-1zb7k.11.4 (P4) |
 | `tmpdir_not_external` | warning | bd-1zb7k.11.4 (P4) |
 
-#### Storage and runtime state (8)
+#### Storage and runtime state (11)
 | Code | Severity | Bead |
 |------|----------|------|
+| `db_migration_pending` | medium | bd-3usjw.1 (db inspect) |
+| `db_wal_stale` | medium | bd-3usjw.1 (db inspect) |
 | `search_not_inspected` | low | bd-17c65.10.6 (J6) |
 | `search_not_ready` | medium | bd-17c65.10.6 (J6) |
 | `search_waiting_for_storage` | medium | bd-17c65.10.6 (J6) |
@@ -194,7 +196,7 @@ A degraded entry's `code` is classified into one of three buckets:
 | `why_pack_selection_unavailable` | low | bd-17c65.10.6 (J6) |
 | `why_result_target_unsupported_source` | medium | bd-17c65.10.6 (J6) |
 
-#### Preflight + quarantine (9)
+#### Preflight + quarantine (11)
 | Code | Severity | Bead |
 |------|----------|------|
 | `bypass_rate_limit_exceeded` | high | bd-3usjw.6.1 |
@@ -202,8 +204,10 @@ A degraded entry's `code` is classified into one of three buckets:
 | `bypass_token_expired` | medium | bd-3usjw.6.1 |
 | `bypass_token_invalid` | high | bd-3usjw.6.1 |
 | `bypass_token_revoked` | high | bd-3usjw.6.1 |
+| `no_risk_memories` | info | bd-3usjw.6 |
 | `preflight_evidence_stale` | warning | bd-17c65.10.6 (J6) |
 | `preflight_evidence_unavailable` | medium | bd-17c65.10.6 (J6) |
+| `preflight_patterns_unavailable` | medium | bd-3usjw.6 |
 | `quarantine_database_missing` | medium | bd-17c65.10.6 (J6) |
 | `quarantine_workspace_unavailable` | medium | bd-17c65.10.6 (J6) |
 
