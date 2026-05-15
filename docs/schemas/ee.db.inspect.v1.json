@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.db.inspect.v1.json",
   "title": "ee.db.inspect.v1",
-  "description": "Read-only database inspection response envelope for ee db status, inspect, check, and check-integrity.",
+  "description": "Read-only database inspection response envelope for ee db status, inspect, check, check-integrity, reindex, and migrations.",
   "type": "object",
   "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": false,
@@ -16,7 +16,7 @@
       "properties": {
         "command": {
           "type": "string",
-          "enum": ["db status", "db inspect", "db check", "db check-integrity", "db migrations"]
+          "enum": ["db status", "db inspect", "db check", "db check-integrity", "db reindex", "db migrations"]
         },
         "report": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
       }
@@ -100,6 +100,45 @@
           "foreignKeyPassed": true,
           "foreignKeyViolations": null,
           "message": "integrity_check passed"
+        }
+      },
+      "degraded": []
+    },
+    {
+      "schema": "ee.response.v1",
+      "success": true,
+      "data": {
+        "command": "db reindex",
+        "report": {
+          "databasePath": "/workspace/.ee/ee.db",
+          "indexDir": "/workspace/.ee/index",
+          "dryRun": true,
+          "previewOnly": true,
+          "mutationAllowed": false,
+          "exists": true,
+          "indexHealth": "missing",
+          "dbGeneration": null,
+          "indexGeneration": null,
+          "lastRebuildAt": null,
+          "needsRebuild": true,
+          "pendingActionCount": 1,
+          "pendingActions": [
+            {
+              "kind": "full_rebuild",
+              "reason": "derived search index is missing",
+              "command": "ee index rebuild --workspace . --json",
+              "mutationAllowed": false,
+              "writesDerivedAssets": true,
+              "indexFamilies": ["frankensearch", "fts5", "json"]
+            }
+          ],
+          "documentCounts": {
+            "memories": 1,
+            "sessions": 0,
+            "artifacts": 0,
+            "total": 1
+          },
+          "error": null
         }
       },
       "degraded": []

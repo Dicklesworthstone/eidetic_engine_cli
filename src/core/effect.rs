@@ -1006,6 +1006,7 @@ impl EffectManifest {
             CommandEffect::read_only("completion", "Generate shell completion scripts"),
             CommandEffect::read_only("db status", "Report database status"),
             CommandEffect::read_only("db check", "Check database integrity"),
+            CommandEffect::read_only("db reindex", "Preview database-derived index rebuild work"),
             CommandEffect::read_only("db migrations", "List database migrations"),
             CommandEffect::read_only("curate candidates", "List curation candidates"),
             CommandEffect::read_only("curate validate", "Validate curation candidate"),

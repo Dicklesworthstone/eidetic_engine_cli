@@ -1296,6 +1296,8 @@ pub enum DbCommand {
     /// Check database integrity without mutation.
     #[command(name = "check-integrity")]
     CheckIntegrity(DbCheckArgs),
+    /// Preview pending database-derived index rebuild work without mutation.
+    Reindex(DbReindexArgs),
     /// List pending or applied migrations.
     Migrations(DbMigrationsArgs),
 }
@@ -1378,6 +1380,22 @@ pub struct DbCheckArgs {
     /// Run PRAGMA integrity_check instead of quick_check.
     #[arg(long, action = ArgAction::SetTrue)]
     pub full: bool,
+}
+
+/// Arguments for `ee db reindex`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct DbReindexArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Index output directory. Defaults to <workspace>/.ee/index/.
+    #[arg(long, value_name = "PATH")]
+    pub index_dir: Option<PathBuf>,
+
+    /// Report the rebuild plan without writing derived indexes.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 }
 
 /// Arguments for `ee db migrations`.
@@ -7970,6 +7988,7 @@ where
             DbCommand::Inspect(args) => handle_db_inspect(&cli, args, stdout),
             DbCommand::Check(args) => handle_db_check(&cli, args, stdout),
             DbCommand::CheckIntegrity(args) => handle_db_check_integrity(&cli, args, stdout),
+            DbCommand::Reindex(args) => handle_db_reindex(&cli, args, stdout),
             DbCommand::Migrations(args) => handle_db_migrations(&cli, args, stdout),
         },
         Some(Command::Migrate(ref migrate_cmd)) => match migrate_cmd {
@@ -23900,6 +23919,258 @@ where
     handle_db_check_named(cli, args, stdout, "db check-integrity", true)
 }
 
+fn handle_db_reindex<W>(cli: &Cli, args: &DbReindexArgs, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    let index_dir = args
+        .index_dir
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("index"));
+
+    let mut report = DbReindexReport {
+        database_path: database_path.display().to_string(),
+        index_dir: index_dir.display().to_string(),
+        dry_run: args.dry_run,
+        preview_only: true,
+        mutation_allowed: false,
+        exists: database_path.exists(),
+        index_health: "unknown".to_string(),
+        db_generation: None,
+        index_generation: None,
+        last_rebuild_at: None,
+        needs_rebuild: false,
+        pending_action_count: 0,
+        pending_actions: Vec::new(),
+        document_counts: DbReindexDocumentCounts::default(),
+        error: None,
+    };
+
+    if !report.exists {
+        report.error = Some("Database file not found".to_string());
+        return write_db_reindex_output(cli, &report, stdout);
+    }
+
+    match get_index_status(&IndexStatusOptions {
+        workspace_path: workspace_path.clone(),
+        database_path: Some(database_path.clone()),
+        index_dir: Some(index_dir.clone()),
+    }) {
+        Ok(status) => {
+            report.index_health = status.health.as_str().to_string();
+            report.db_generation = status.db_generation;
+            report.index_generation = status.index_generation;
+            report.last_rebuild_at = status.last_rebuild_at;
+            report.needs_rebuild = status.health != crate::core::index::IndexHealth::Ready;
+            if report.needs_rebuild {
+                report
+                    .pending_actions
+                    .push(db_reindex_pending_action(status.health));
+            }
+        }
+        Err(error) => {
+            report.error = Some(format!("Failed to inspect index status: {error}"));
+        }
+    }
+
+    if report.error.is_none() {
+        match db_reindex_document_counts(&database_path) {
+            Ok(counts) => report.document_counts = counts,
+            Err(error) => report.error = Some(error),
+        }
+    }
+    if report.error.is_none() && args.dry_run && report.pending_actions.is_empty() {
+        report.needs_rebuild = true;
+        report.pending_actions.push(db_reindex_pending_action(
+            crate::core::index::IndexHealth::Ready,
+        ));
+    }
+    report.pending_action_count = report.pending_actions.len();
+
+    write_db_reindex_output(cli, &report, stdout)
+}
+
+fn db_reindex_pending_action(health: crate::core::index::IndexHealth) -> DbReindexPendingAction {
+    DbReindexPendingAction {
+        kind: "full_rebuild".to_string(),
+        reason: match health {
+            crate::core::index::IndexHealth::Ready => {
+                "dry-run preview of a full derived search index rebuild".to_string()
+            }
+            crate::core::index::IndexHealth::Stale => {
+                "database generation is newer than the derived search index".to_string()
+            }
+            crate::core::index::IndexHealth::Missing => {
+                "derived search index is missing".to_string()
+            }
+            crate::core::index::IndexHealth::Corrupt => {
+                "derived search index metadata is corrupt".to_string()
+            }
+        },
+        command: "ee index rebuild --workspace . --json".to_string(),
+        mutation_allowed: false,
+        writes_derived_assets: true,
+        index_families: vec![
+            "frankensearch".to_string(),
+            "fts5".to_string(),
+            "json".to_string(),
+        ],
+    }
+}
+
+fn db_reindex_document_counts(database_path: &Path) -> Result<DbReindexDocumentCounts, String> {
+    let conn = crate::db::DbConnection::open_schema_only(database_path)
+        .map_err(|error| format!("Failed to open database: {error}"))?;
+    let tables = conn
+        .list_user_tables()
+        .map_err(|error| format!("Failed to list tables: {error}"))?;
+    let count = |table: &str| -> Result<u32, String> {
+        if !tables.iter().any(|candidate| candidate == table) {
+            return Ok(0);
+        }
+        let rows = conn
+            .count_table_rows(table)
+            .map_err(|error| format!("Failed to count {table}: {error}"))?;
+        u32::try_from(rows.max(0)).map_err(|_| format!("{table} row count exceeds u32"))
+    };
+    let memories = count("memories")?;
+    let sessions = count("sessions")?;
+    let artifacts = count("artifacts")?;
+    Ok(DbReindexDocumentCounts {
+        memories,
+        sessions,
+        artifacts,
+        total: memories.saturating_add(sessions).saturating_add(artifacts),
+    })
+}
+
+fn write_db_reindex_output<W: Write>(
+    cli: &Cli,
+    report: &DbReindexReport,
+    stdout: &mut W,
+) -> ProcessExitCode {
+    let success = report.error.is_none();
+    let exit_code = if success {
+        ProcessExitCode::Success
+    } else {
+        ProcessExitCode::Storage
+    };
+
+    match cli.renderer() {
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": "ee.response.v1",
+                "success": success,
+                "data": {
+                    "command": "db reindex",
+                    "report": {
+                        "databasePath": report.database_path,
+                        "indexDir": report.index_dir,
+                        "dryRun": report.dry_run,
+                        "previewOnly": report.preview_only,
+                        "mutationAllowed": report.mutation_allowed,
+                        "exists": report.exists,
+                        "indexHealth": report.index_health,
+                        "dbGeneration": report.db_generation,
+                        "indexGeneration": report.index_generation,
+                        "lastRebuildAt": report.last_rebuild_at,
+                        "needsRebuild": report.needs_rebuild,
+                        "pendingActionCount": report.pending_action_count,
+                        "pendingActions": report.pending_actions,
+                        "documentCounts": report.document_counts,
+                        "error": report.error,
+                    }
+                },
+                "degraded": []
+            });
+            let _ = write_stdout(
+                stdout,
+                &(serde_json::to_string(&json).unwrap_or_default() + "\n"),
+            );
+            exit_code
+        }
+        _ => {
+            let mut out = String::new();
+            out.push_str("Database reindex preview\n");
+            out.push_str(&format!("Database: {}\n", report.database_path));
+            out.push_str(&format!("Index directory: {}\n", report.index_dir));
+            out.push_str(&format!("Dry run requested: {}\n", report.dry_run));
+            out.push_str("Mutation allowed: false\n");
+            out.push_str(&format!("Index health: {}\n", report.index_health));
+            out.push_str(&format!("Needs rebuild: {}\n", report.needs_rebuild));
+            out.push_str(&format!(
+                "Documents: {} memories, {} sessions, {} artifacts ({} total)\n",
+                report.document_counts.memories,
+                report.document_counts.sessions,
+                report.document_counts.artifacts,
+                report.document_counts.total
+            ));
+            if !report.pending_actions.is_empty() {
+                out.push_str("Pending actions:\n");
+                for action in &report.pending_actions {
+                    out.push_str(&format!(
+                        "  - {}: {} ({})\n",
+                        action.kind, action.reason, action.command
+                    ));
+                }
+            }
+            if let Some(error) = &report.error {
+                out.push_str(&format!("Error: {error}\n"));
+            }
+            let _ = write_stdout(stdout, &out);
+            exit_code
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DbReindexReport {
+    database_path: String,
+    index_dir: String,
+    dry_run: bool,
+    preview_only: bool,
+    mutation_allowed: bool,
+    exists: bool,
+    index_health: String,
+    db_generation: Option<u64>,
+    index_generation: Option<u64>,
+    last_rebuild_at: Option<String>,
+    needs_rebuild: bool,
+    pending_action_count: usize,
+    pending_actions: Vec<DbReindexPendingAction>,
+    document_counts: DbReindexDocumentCounts,
+    error: Option<String>,
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+struct DbReindexDocumentCounts {
+    memories: u32,
+    sessions: u32,
+    artifacts: u32,
+    total: u32,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DbReindexPendingAction {
+    kind: String,
+    reason: String,
+    command: String,
+    #[serde(rename = "mutationAllowed")]
+    mutation_allowed: bool,
+    #[serde(rename = "writesDerivedAssets")]
+    writes_derived_assets: bool,
+    #[serde(rename = "indexFamilies")]
+    index_families: Vec<String>,
+}
+
 fn handle_db_check_named<W>(
     cli: &Cli,
     args: &DbCheckArgs,
@@ -35078,6 +35349,7 @@ impl NormalizedInvocation {
                     DbCommand::Inspect(_) => "db inspect".to_string(),
                     DbCommand::Check(_) => "db check".to_string(),
                     DbCommand::CheckIntegrity(_) => "db check-integrity".to_string(),
+                    DbCommand::Reindex(_) => "db reindex".to_string(),
                     DbCommand::Migrations(_) => "db migrations".to_string(),
                 },
                 Command::Migrate(migrate) => match migrate {

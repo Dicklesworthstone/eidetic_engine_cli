@@ -374,6 +374,119 @@ fn db_status_reports_stale_wal_sidecar() {
 }
 
 #[test]
+fn db_reindex_dry_run_reports_pending_derived_index_work() {
+    let dir = scenario_dir("reindex_dry_run");
+    init_workspace(&dir);
+
+    let (remember_exit, remember_stdout) = run_cli(vec![
+        OsString::from("ee"),
+        OsString::from("remember"),
+        OsString::from("--workspace"),
+        OsString::from(&dir),
+        OsString::from("--level"),
+        OsString::from("procedural"),
+        OsString::from("--kind"),
+        OsString::from("rule"),
+        OsString::from("Run cargo fmt before release."),
+        OsString::from("--json"),
+    ]);
+    assert_eq!(
+        remember_exit,
+        ee::models::ProcessExitCode::Success,
+        "stdout={remember_stdout}"
+    );
+
+    let (exit, stdout) = run_cli(vec![
+        OsString::from("ee"),
+        OsString::from("db"),
+        OsString::from("reindex"),
+        OsString::from("--workspace"),
+        OsString::from(&dir),
+        OsString::from("--dry-run"),
+        OsString::from("--json"),
+    ]);
+    assert_eq!(
+        exit,
+        ee::models::ProcessExitCode::Success,
+        "stdout={stdout}"
+    );
+    let parsed = parse_response(&stdout);
+    assert_eq!(
+        parsed["data"]["command"],
+        Value::String("db reindex".into())
+    );
+    let report = parsed["data"]["report"].clone();
+    assert_eq!(report["dryRun"], Value::Bool(true));
+    assert_eq!(report["previewOnly"], Value::Bool(true));
+    assert_eq!(report["mutationAllowed"], Value::Bool(false));
+    assert_eq!(report["exists"], Value::Bool(true));
+    assert_eq!(report["error"], Value::Null);
+    assert!(
+        report["documentCounts"]["memories"].as_u64().unwrap_or(0) >= 1,
+        "expected at least one memory document in {report}"
+    );
+    assert!(
+        report["documentCounts"]["total"].as_u64().unwrap_or(0) >= 1,
+        "expected at least one indexable document in {report}"
+    );
+    assert_eq!(report["needsRebuild"], Value::Bool(true));
+    assert!(
+        report["pendingActions"]
+            .as_array()
+            .is_some_and(|actions| actions.iter().any(|action| {
+                action["kind"] == Value::String("full_rebuild".into())
+                    && action["mutationAllowed"] == Value::Bool(false)
+                    && action["indexFamilies"].as_array().is_some_and(|families| {
+                        families
+                            .iter()
+                            .any(|family| family.as_str() == Some("fts5"))
+                    })
+                    && action["indexFamilies"].as_array().is_some_and(|families| {
+                        families
+                            .iter()
+                            .any(|family| family.as_str() == Some("json"))
+                    })
+            })),
+        "expected read-only full_rebuild action covering fts5/json in {report}"
+    );
+}
+
+#[test]
+fn db_reindex_dry_run_reports_missing_database_without_writing() {
+    let dir = scenario_dir("reindex_missing");
+    fs::create_dir_all(&dir).unwrap();
+    let database = dir.join("missing.db");
+
+    let (exit, stdout) = run_cli(vec![
+        OsString::from("ee"),
+        OsString::from("db"),
+        OsString::from("reindex"),
+        OsString::from("--database"),
+        OsString::from(&database),
+        OsString::from("--dry-run"),
+        OsString::from("--json"),
+    ]);
+    assert_eq!(exit, ee::models::ProcessExitCode::Storage);
+    let parsed = parse_response(&stdout);
+    assert_eq!(parsed["success"], Value::Bool(false));
+    assert_eq!(
+        parsed["data"]["command"],
+        Value::String("db reindex".into())
+    );
+    let report = parsed["data"]["report"].clone();
+    assert_eq!(report["exists"], Value::Bool(false));
+    assert_eq!(report["mutationAllowed"], Value::Bool(false));
+    assert!(
+        report["error"].as_str().unwrap_or("").contains("not found"),
+        "expected file-not-found error in {report}"
+    );
+    assert!(
+        !database.exists(),
+        "db reindex dry-run must not create a missing database"
+    );
+}
+
+#[test]
 fn db_inspect_returns_limited_rows_from_allowlisted_table() {
     let dir = scenario_dir("inspect_workspaces");
     init_workspace(&dir);

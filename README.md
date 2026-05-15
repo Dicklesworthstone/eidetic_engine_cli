@@ -633,7 +633,7 @@ service, mail sender, Beads mutator, or agent loop.
 | Command | Purpose |
 |---|---|
 | `ee workspace resolve` / `list` / `alias <name>` | Identity, monorepo subscopes, and aliases |
-| `ee db status` / `inspect <table>` / `check-integrity` | Inspect FrankenSQLite schema, table rows, and integrity without bypassing `ee` |
+| `ee db status` / `inspect <table>` / `check-integrity` / `reindex --dry-run` | Inspect FrankenSQLite schema, table rows, integrity, and derived-index rebuild plans without bypassing `ee` |
 | `ee model status` / `list` | Inspect embedding model registry posture |
 | `ee schema list` / `export <schema-id>` | Inspect stable machine-output schemas |
 
