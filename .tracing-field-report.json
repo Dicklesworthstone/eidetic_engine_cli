@@ -1,0 +1,1 @@
+{"auditedBeads":46,"requiredFields":["workspace_id","request_id","bead_id","surface","phase","elapsed_ms","degraded_codes"],"schema":"ee.tracing_field_report.v1","standardPhases":["dependency_check","dispatch","input","persistence","response"],"status":"pass","violationCount":0,"violations":[]}

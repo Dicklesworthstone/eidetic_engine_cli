@@ -1,6 +1,6 @@
 {
   "schema": "ee.vision_coverage.v1",
-  "generated_at": "2026-05-14T19:21:51Z",
+  "generated_at": "2026-05-15T15:45:49Z",
   "status": "warn",
   "release_tag_commit": false,
   "sources": {
@@ -12,13 +12,13 @@
     "beads": ".beads/issues.jsonl"
   },
   "surfaces": {
-    "total_documented": 66,
-    "implemented": 61,
+    "total_documented": 69,
+    "implemented": 64,
     "stubbed": 0,
     "missing": 5,
     "with_open_implements_bead": 0
   },
-  "gap_percentage": 7.58,
+  "gap_percentage": 7.25,
   "implemented_surfaces": [
     "analyze science-status",
     "backup create",
@@ -45,6 +45,7 @@
     "graph feature-enrichment",
     "graph neighborhood",
     "graph path",
+    "health",
     "import cass",
     "import eidetic-legacy",
     "import jsonl",
@@ -52,6 +53,7 @@
     "index status",
     "index vacuum",
     "init",
+    "insights",
     "memory expire",
     "memory history",
     "memory level",
@@ -66,6 +68,7 @@
     "playbook extract",
     "playbook import",
     "playbook list",
+    "proximity",
     "remember",
     "review session",
     "review workspace",
@@ -119,6 +122,7 @@
     "graph feature-enrichment",
     "graph neighborhood",
     "graph path",
+    "health",
     "import cass",
     "import eidetic-legacy",
     "import jsonl",
@@ -126,6 +130,7 @@
     "index status",
     "index vacuum",
     "init",
+    "insights",
     "mcp",
     "memory expire",
     "memory history",
@@ -141,6 +146,7 @@
     "playbook extract",
     "playbook import",
     "playbook list",
+    "proximity",
     "remember",
     "review session",
     "review workspace",

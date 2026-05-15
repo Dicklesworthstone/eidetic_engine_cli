@@ -97,6 +97,7 @@ uuid = { version = "1", features = ["v7"] }
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 insta = { version = "1.47.2", features = ["json"] }
+fnx-generators = "0.1.0"
 proptest = { version = "1.9.0", default-features = false, features = ["std"] }
 pulldown-cmark = { version = "0.13.3", default-features = false, features = ["html"] }
 static_assertions = { version = "1.1.0" }
@@ -119,6 +120,10 @@ harness = false
 
 [[bench]]
 name = "context"
+harness = false
+
+[[bench]]
+name = "context_with_ppr"
 harness = false
 
 [[bench]]
@@ -155,6 +160,26 @@ harness = false
 
 [[bench]]
 name = "graph_pagerank"
+harness = false
+
+[[bench]]
+name = "graph_ppr"
+harness = false
+
+[[bench]]
+name = "graph_louvain"
+harness = false
+
+[[bench]]
+name = "graph_ktruss"
+harness = false
+
+[[bench]]
+name = "graph_gomory_hu"
+harness = false
+
+[[bench]]
+name = "graph_hits"
 harness = false
 
 [[bench]]

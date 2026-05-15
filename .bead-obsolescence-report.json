@@ -1,0 +1,718 @@
+{
+  "schema": "ee.bead.obsolescence.v1",
+  "generatedAt": "2026-05-15T09:48:50Z",
+  "dataHash": "a9908d3fbf7e27de38d9a1da0a51087bc9a913f86c1340262e53a9a5569b4b27",
+  "outputPath": ".bead-obsolescence-report.json",
+  "inputs": {
+    "beadsJsonlPresent": true,
+    "staleDaysThreshold": 1,
+    "criticalPathSource": "bv_robot_insights",
+    "criticalPathIssueCount": 71,
+    "bvDataHash": "68a9c57d58520ffc"
+  },
+  "summary": {
+    "openBeadCount": 201,
+    "staleOpenBeadCount": 24,
+    "candidateCount": 18
+  },
+  "candidates": [
+    {
+      "id": "bd-17c65.1",
+      "title": "Pack format densification: collapse redundant structures, replace tautological why with actionable reason",
+      "priority": 1,
+      "issueType": "epic",
+      "parent": "bd-17c65",
+      "parentStatus": "open",
+      "labels": [
+        "agent-ux-overhaul",
+        "pack-format",
+        "vision-coverage"
+      ],
+      "daysSinceUpdate": 2,
+      "lastCommentAgeDays": null,
+      "inProgressSiblingCount": 0,
+      "inProgressSiblingIds": [],
+      "criticalPath": false,
+      "proposedAction": {
+        "kind": "priority_demote",
+        "reason": "stale item remains attached to a live parent but has no recent activity",
+        "command": "br update bd-17c65.1 --priority 2"
+      },
+      "guardrails": [
+        "advisory_only",
+        "requires_human_confirmation_for_close",
+        "do_not_delete_files"
+      ]
+    },
+    {
+      "id": "bd-17c65.10",
+      "title": "Test infrastructure & verification harness: shared logging, fixtures, e2e drivers, regression benchmarks",
+      "priority": 1,
+      "issueType": "epic",
+      "parent": "bd-17c65",
+      "parentStatus": "open",
+      "labels": [
+        "agent-ux-overhaul",
+        "test-infrastructure",
+        "vision-coverage"
+      ],
+      "daysSinceUpdate": 2,
+      "lastCommentAgeDays": null,
+      "inProgressSiblingCount": 0,
+      "inProgressSiblingIds": [],
+      "criticalPath": false,
+      "proposedAction": {
+        "kind": "priority_demote",
+        "reason": "stale item remains attached to a live parent but has no recent activity",
+        "command": "br update bd-17c65.10 --priority 2"
+      },
+      "guardrails": [
+        "advisory_only",
+        "requires_human_confirmation_for_close",
+        "do_not_delete_files"
+      ]
+    },
+    {
+      "id": "bd-17c65.11",
+      "title": "Documentation updates: AGENTS.md patterns, JSON schemas, degraded codes catalog, env var registry, migration guide",
+      "priority": 2,
+      "issueType": "epic",
+      "parent": "bd-17c65",
+      "parentStatus": "open",
+      "labels": [
+        "agent-ux-overhaul",
+        "documentation",
+        "vision-coverage"
+      ],
+      "daysSinceUpdate": 2,
+      "lastCommentAgeDays": null,
+      "inProgressSiblingCount": 0,
+      "inProgressSiblingIds": [],
+      "criticalPath": false,
+      "proposedAction": {
+        "kind": "priority_demote",
+        "reason": "stale item remains attached to a live parent but has no recent activity",
+        "command": "br update bd-17c65.11 --priority 3"
+      },
+      "guardrails": [
+        "advisory_only",
+        "requires_human_confirmation_for_close",
+        "do_not_delete_files"
+      ]
+    },
+    {
+      "id": "bd-17c65.12",
+      "title": "Cross-cutting integrity: workspace schema migration, concurrency, backup round-trip, trust decay",
+      "priority": 2,
+      "issueType": "epic",
+      "parent": "bd-17c65",
+      "parentStatus": "open",
+      "labels": [
+        "agent-ux-overhaul",
+        "cross-cutting-integrity",
+        "vision-coverage"
+      ],
+      "daysSinceUpdate": 2,
+      "lastCommentAgeDays": null,
+      "inProgressSiblingCount": 0,
+      "inProgressSiblingIds": [],
+      "criticalPath": false,
+      "proposedAction": {
+        "kind": "priority_demote",
+        "reason": "stale item remains attached to a live parent but has no recent activity",
+        "command": "br update bd-17c65.12 --priority 3"
+      },
+      "guardrails": [
+        "advisory_only",
+        "requires_human_confirmation_for_close",
+        "do_not_delete_files"
+      ]
+    },
+    {
+      "id": "bd-17c65.13",
+      "title": "Agent handoff / continuity capsule overhaul (ee handoff preview/create/inspect/resume)",
+      "priority": 2,
+      "issueType": "epic",
+      "parent": "bd-17c65",
+      "parentStatus": "open",
+      "labels": [
+        "agent-ux-overhaul",
+        "handoff",
+        "vision-coverage"
+      ],
+      "daysSinceUpdate": 2,
+      "lastCommentAgeDays": null,
+      "inProgressSiblingCount": 0,
+      "inProgressSiblingIds": [],
+      "criticalPath": false,
+      "proposedAction": {
+        "kind": "priority_demote",
+        "reason": "stale item remains attached to a live parent but has no recent activity",
+        "command": "br update bd-17c65.13 --priority 3"
+      },
+      "guardrails": [
+        "advisory_only",
+        "requires_human_confirmation_for_close",
+        "do_not_delete_files"
+      ]
+    },
+    {
+      "id": "bd-17c65.14",
+      "title": "N: Ambition rounds — alien-artifact-grade upgrades beyond surface honesty (15 children)",
+      "priority": 2,
+      "issueType": "epic",
+      "parent": "bd-17c65",
+      "parentStatus": "open",
+      "labels": [
+        "agent-ux-overhaul",
+        "alien-artifact",
+        "ambition-rounds",
+        "reality-check-2026-05-12"
+      ],
+      "daysSinceUpdate": 2,
+      "lastCommentAgeDays": null,
+      "inProgressSiblingCount": 0,
+      "inProgressSiblingIds": [],
+      "criticalPath": false,
+      "proposedAction": {
+        "kind": "priority_demote",
+        "reason": "stale item remains attached to a live parent but has no recent activity",
+        "command": "br update bd-17c65.14 --priority 3"
+      },
+      "guardrails": [
+        "advisory_only",
+        "requires_human_confirmation_for_close",
+        "do_not_delete_files"
+      ]
+    },
+    {
+      "id": "bd-17c65.14.10",
+      "title": "N10: SIMD BM25 lexical scoring on hot path (AVX2 / NEON; deterministic)",
+      "priority": 4,
+      "issueType": "feature",
+      "parent": "bd-17c65.14",
+      "parentStatus": "open",
+      "labels": [
+        "agent-ux-overhaul",
+        "alien-artifact",
+        "ambition-rounds",
+        "bm25",
+        "performance",
+        "reality-check-2026-05-12",
+        "simd"
+      ],
+      "daysSinceUpdate": 2,
+      "lastCommentAgeDays": null,
+      "inProgressSiblingCount": 0,
+      "inProgressSiblingIds": [],
+      "criticalPath": false,
+      "proposedAction": {
+        "kind": "close_as_obsolete_with_user_confirmation",
+        "reason": "stale lowest-priority item with no recent activity",
+        "command": "br close bd-17c65.14.10 --reason <human-confirmed-obsolete-reason>"
+      },
+      "guardrails": [
+        "advisory_only",
+        "requires_human_confirmation_for_close",
+        "do_not_delete_files"
+      ]
+    },
+    {
+      "id": "bd-17c65.14.12",
+      "title": "N12: Anti-patterns from failed outcomes as first-class procedural rules (auto-proposal pipeline)",
+      "priority": 3,
+      "issueType": "feature",
+      "parent": "bd-17c65.14",
+      "parentStatus": "open",
+      "labels": [
+        "agent-ux-overhaul",
+        "alien-artifact",
+        "ambition-rounds",
+        "anti-patterns",
+        "procedural-memory",
+        "reality-check-2026-05-12"
+      ],
+      "daysSinceUpdate": 2,
+      "lastCommentAgeDays": null,
+      "inProgressSiblingCount": 0,
+      "inProgressSiblingIds": [],
+      "criticalPath": false,
+      "proposedAction": {
+        "kind": "priority_demote",
+        "reason": "stale item remains attached to a live parent but has no recent activity",
+        "command": "br update bd-17c65.14.12 --priority 4"
+      },
+      "guardrails": [
+        "advisory_only",
+        "requires_human_confirmation_for_close",
+        "do_not_delete_files"
+      ]
+    },
+    {
+      "id": "bd-17c65.14.13",
+      "title": "N13: CUSUM regime-change detection for daemon scheduling (event-driven maintenance)",
+      "priority": 4,
+      "issueType": "feature",
+      "parent": "bd-17c65.14",
+      "parentStatus": "open",
+      "labels": [
+        "agent-ux-overhaul",
+        "alien-artifact",
+        "ambition-rounds",
+        "cusum",
+        "daemon",
+        "reality-check-2026-05-12",
+        "regime-detection",
+        "steward"
+      ],
+      "daysSinceUpdate": 2,
+      "lastCommentAgeDays": null,
+      "inProgressSiblingCount": 0,
+      "inProgressSiblingIds": [],
+      "criticalPath": false,
+      "proposedAction": {
+        "kind": "close_as_obsolete_with_user_confirmation",
+        "reason": "stale lowest-priority item with no recent activity",
+        "command": "br close bd-17c65.14.13 --reason <human-confirmed-obsolete-reason>"
+      },
+      "guardrails": [
+        "advisory_only",
+        "requires_human_confirmation_for_close",
+        "do_not_delete_files"
+      ]
+    },
+    {
+      "id": "bd-17c65.14.14",
+      "title": "N14: Information-theoretic dedup — mutual-information clusters over paraphrase pairs",
+      "priority": 4,
+      "issueType": "feature",
+      "parent": "bd-17c65.14",
+      "parentStatus": "open",
+      "labels": [
+        "agent-ux-overhaul",
+        "alien-artifact",
+        "ambition-rounds",
+        "dedup",
+        "information-theory",
+        "reality-check-2026-05-12",
+        "search-honesty"
+      ],
+      "daysSinceUpdate": 2,
+      "lastCommentAgeDays": null,
+      "inProgressSiblingCount": 0,
+      "inProgressSiblingIds": [],
+      "criticalPath": false,
+      "proposedAction": {
+        "kind": "close_as_obsolete_with_user_confirmation",
+        "reason": "stale lowest-priority item with no recent activity",
+        "command": "br close bd-17c65.14.14 --reason <human-confirmed-obsolete-reason>"
+      },
+      "guardrails": [
+        "advisory_only",
+        "requires_human_confirmation_for_close",
+        "do_not_delete_files"
+      ]
+    },
+    {
+      "id": "bd-17c65.14.4.4",
+      "title": "N4.4: Clippy lint catching ambient randomness in #[determinism::required] paths",
+      "priority": 3,
+      "issueType": "feature",
+      "parent": "bd-17c65.14.4",
+      "parentStatus": "open",
+      "labels": [
+        "agent-ux-overhaul",
+        "alien-artifact",
+        "ambition-rounds",
+        "clippy-lint",
+        "reality-check-2026-05-12",
+        "type-safety",
+        "typed-determinism"
+      ],
+      "daysSinceUpdate": 2,
+      "lastCommentAgeDays": null,
+      "inProgressSiblingCount": 0,
+      "inProgressSiblingIds": [],
+      "criticalPath": false,
+      "proposedAction": {
+        "kind": "priority_demote",
+        "reason": "stale item remains attached to a live parent but has no recent activity",
+        "command": "br update bd-17c65.14.4.4 --priority 4"
+      },
+      "guardrails": [
+        "advisory_only",
+        "requires_human_confirmation_for_close",
+        "do_not_delete_files"
+      ]
+    },
+    {
+      "id": "bd-17c65.14.6",
+      "title": "N6: Persistent homology on memory-link graph for principled curation clusters",
+      "priority": 3,
+      "issueType": "feature",
+      "parent": "bd-17c65.14",
+      "parentStatus": "open",
+      "labels": [
+        "agent-ux-overhaul",
+        "alien-artifact",
+        "ambition-rounds",
+        "curation",
+        "fnx-algorithms",
+        "graph",
+        "reality-check-2026-05-12",
+        "topology"
+      ],
+      "daysSinceUpdate": 2,
+      "lastCommentAgeDays": null,
+      "inProgressSiblingCount": 0,
+      "inProgressSiblingIds": [],
+      "criticalPath": false,
+      "proposedAction": {
+        "kind": "priority_demote",
+        "reason": "stale item remains attached to a live parent but has no recent activity",
+        "command": "br update bd-17c65.14.6 --priority 4"
+      },
+      "guardrails": [
+        "advisory_only",
+        "requires_human_confirmation_for_close",
+        "do_not_delete_files"
+      ]
+    },
+    {
+      "id": "bd-17c65.14.8",
+      "title": "N8: Lazy-loaded cross-encoder reranker on top-K (deterministic, quantized, cached)",
+      "priority": 3,
+      "issueType": "feature",
+      "parent": "bd-17c65.14",
+      "parentStatus": "open",
+      "labels": [
+        "agent-ux-overhaul",
+        "alien-artifact",
+        "ambition-rounds",
+        "frankensearch",
+        "reality-check-2026-05-12",
+        "rerank",
+        "search-quality"
+      ],
+      "daysSinceUpdate": 2,
+      "lastCommentAgeDays": null,
+      "inProgressSiblingCount": 0,
+      "inProgressSiblingIds": [],
+      "criticalPath": false,
+      "proposedAction": {
+        "kind": "priority_demote",
+        "reason": "stale item remains attached to a live parent but has no recent activity",
+        "command": "br update bd-17c65.14.8 --priority 4"
+      },
+      "guardrails": [
+        "advisory_only",
+        "requires_human_confirmation_for_close",
+        "do_not_delete_files"
+      ]
+    },
+    {
+      "id": "bd-17c65.4",
+      "title": "Schema consistency: canonical content field, JSON/Markdown parity, response envelope drift audit",
+      "priority": 1,
+      "issueType": "epic",
+      "parent": "bd-17c65",
+      "parentStatus": "open",
+      "labels": [
+        "agent-ux-overhaul",
+        "schema-consistency",
+        "vision-coverage"
+      ],
+      "daysSinceUpdate": 2,
+      "lastCommentAgeDays": null,
+      "inProgressSiblingCount": 0,
+      "inProgressSiblingIds": [],
+      "criticalPath": false,
+      "proposedAction": {
+        "kind": "priority_demote",
+        "reason": "stale item remains attached to a live parent but has no recent activity",
+        "command": "br update bd-17c65.4 --priority 2"
+      },
+      "guardrails": [
+        "advisory_only",
+        "requires_human_confirmation_for_close",
+        "do_not_delete_files"
+      ]
+    },
+    {
+      "id": "bd-17c65.5",
+      "title": "Diagnostics honesty: three-state posture, conditional banner emission, doctor/import discovery parity",
+      "priority": 1,
+      "issueType": "epic",
+      "parent": "bd-17c65",
+      "parentStatus": "open",
+      "labels": [
+        "agent-ux-overhaul",
+        "diagnostics-honesty",
+        "vision-coverage"
+      ],
+      "daysSinceUpdate": 2,
+      "lastCommentAgeDays": null,
+      "inProgressSiblingCount": 0,
+      "inProgressSiblingIds": [],
+      "criticalPath": false,
+      "proposedAction": {
+        "kind": "priority_demote",
+        "reason": "stale item remains attached to a live parent but has no recent activity",
+        "command": "br update bd-17c65.5 --priority 2"
+      },
+      "guardrails": [
+        "advisory_only",
+        "requires_human_confirmation_for_close",
+        "do_not_delete_files"
+      ]
+    },
+    {
+      "id": "bd-17c65.6",
+      "title": "Discoverability: structured recovery actions in errors, top-level aliases, capability honesty",
+      "priority": 2,
+      "issueType": "epic",
+      "parent": "bd-17c65",
+      "parentStatus": "open",
+      "labels": [
+        "agent-ux-overhaul",
+        "discoverability",
+        "vision-coverage"
+      ],
+      "daysSinceUpdate": 2,
+      "lastCommentAgeDays": null,
+      "inProgressSiblingCount": 0,
+      "inProgressSiblingIds": [],
+      "criticalPath": false,
+      "proposedAction": {
+        "kind": "priority_demote",
+        "reason": "stale item remains attached to a live parent but has no recent activity",
+        "command": "br update bd-17c65.6 --priority 3"
+      },
+      "guardrails": [
+        "advisory_only",
+        "requires_human_confirmation_for_close",
+        "do_not_delete_files"
+      ]
+    },
+    {
+      "id": "bd-17c65.7",
+      "title": "Learn/Curate implementation: stubs to real or honest-unimplemented",
+      "priority": 1,
+      "issueType": "epic",
+      "parent": "bd-17c65",
+      "parentStatus": "open",
+      "labels": [
+        "agent-ux-overhaul",
+        "learn-curate",
+        "vision-coverage"
+      ],
+      "daysSinceUpdate": 2,
+      "lastCommentAgeDays": null,
+      "inProgressSiblingCount": 0,
+      "inProgressSiblingIds": [],
+      "criticalPath": false,
+      "proposedAction": {
+        "kind": "priority_demote",
+        "reason": "stale item remains attached to a live parent but has no recent activity",
+        "command": "br update bd-17c65.7 --priority 2"
+      },
+      "guardrails": [
+        "advisory_only",
+        "requires_human_confirmation_for_close",
+        "do_not_delete_files"
+      ]
+    },
+    {
+      "id": "bd-2gill.2",
+      "title": "bd-2gill.B: Publish Dicklesworthstone/homebrew-tap with Formula/ee.rb pinned to a real release",
+      "priority": 3,
+      "issueType": "chore",
+      "parent": "bd-2gill",
+      "parentStatus": "closed",
+      "labels": [
+        "install-pipeline-followup",
+        "reality-check-2026-05-12",
+        "release-pipeline"
+      ],
+      "daysSinceUpdate": 2,
+      "lastCommentAgeDays": null,
+      "inProgressSiblingCount": 0,
+      "inProgressSiblingIds": [],
+      "criticalPath": false,
+      "proposedAction": {
+        "kind": "retarget_to_current_epic",
+        "reason": "stale item is not attached to a live parent epic",
+        "command": "br update bd-2gill.2 --parent <current-epic-id>"
+      },
+      "guardrails": [
+        "advisory_only",
+        "requires_human_confirmation_for_close",
+        "do_not_delete_files"
+      ]
+    }
+  ],
+  "bvRobotInsightsAdvisoryRows": [
+    {
+      "source": "bead_obsolescence_pass",
+      "issue_id": "bd-17c65.1",
+      "severity": "low",
+      "title": "Pack format densification: collapse redundant structures, replace tautological why with actionable reason",
+      "days_since_update": 2,
+      "proposed_action": "priority_demote",
+      "reason": "stale item remains attached to a live parent but has no recent activity"
+    },
+    {
+      "source": "bead_obsolescence_pass",
+      "issue_id": "bd-17c65.10",
+      "severity": "low",
+      "title": "Test infrastructure & verification harness: shared logging, fixtures, e2e drivers, regression benchmarks",
+      "days_since_update": 2,
+      "proposed_action": "priority_demote",
+      "reason": "stale item remains attached to a live parent but has no recent activity"
+    },
+    {
+      "source": "bead_obsolescence_pass",
+      "issue_id": "bd-17c65.11",
+      "severity": "low",
+      "title": "Documentation updates: AGENTS.md patterns, JSON schemas, degraded codes catalog, env var registry, migration guide",
+      "days_since_update": 2,
+      "proposed_action": "priority_demote",
+      "reason": "stale item remains attached to a live parent but has no recent activity"
+    },
+    {
+      "source": "bead_obsolescence_pass",
+      "issue_id": "bd-17c65.12",
+      "severity": "low",
+      "title": "Cross-cutting integrity: workspace schema migration, concurrency, backup round-trip, trust decay",
+      "days_since_update": 2,
+      "proposed_action": "priority_demote",
+      "reason": "stale item remains attached to a live parent but has no recent activity"
+    },
+    {
+      "source": "bead_obsolescence_pass",
+      "issue_id": "bd-17c65.13",
+      "severity": "low",
+      "title": "Agent handoff / continuity capsule overhaul (ee handoff preview/create/inspect/resume)",
+      "days_since_update": 2,
+      "proposed_action": "priority_demote",
+      "reason": "stale item remains attached to a live parent but has no recent activity"
+    },
+    {
+      "source": "bead_obsolescence_pass",
+      "issue_id": "bd-17c65.14",
+      "severity": "low",
+      "title": "N: Ambition rounds — alien-artifact-grade upgrades beyond surface honesty (15 children)",
+      "days_since_update": 2,
+      "proposed_action": "priority_demote",
+      "reason": "stale item remains attached to a live parent but has no recent activity"
+    },
+    {
+      "source": "bead_obsolescence_pass",
+      "issue_id": "bd-17c65.14.10",
+      "severity": "low",
+      "title": "N10: SIMD BM25 lexical scoring on hot path (AVX2 / NEON; deterministic)",
+      "days_since_update": 2,
+      "proposed_action": "close_as_obsolete_with_user_confirmation",
+      "reason": "stale lowest-priority item with no recent activity"
+    },
+    {
+      "source": "bead_obsolescence_pass",
+      "issue_id": "bd-17c65.14.12",
+      "severity": "low",
+      "title": "N12: Anti-patterns from failed outcomes as first-class procedural rules (auto-proposal pipeline)",
+      "days_since_update": 2,
+      "proposed_action": "priority_demote",
+      "reason": "stale item remains attached to a live parent but has no recent activity"
+    },
+    {
+      "source": "bead_obsolescence_pass",
+      "issue_id": "bd-17c65.14.13",
+      "severity": "low",
+      "title": "N13: CUSUM regime-change detection for daemon scheduling (event-driven maintenance)",
+      "days_since_update": 2,
+      "proposed_action": "close_as_obsolete_with_user_confirmation",
+      "reason": "stale lowest-priority item with no recent activity"
+    },
+    {
+      "source": "bead_obsolescence_pass",
+      "issue_id": "bd-17c65.14.14",
+      "severity": "low",
+      "title": "N14: Information-theoretic dedup — mutual-information clusters over paraphrase pairs",
+      "days_since_update": 2,
+      "proposed_action": "close_as_obsolete_with_user_confirmation",
+      "reason": "stale lowest-priority item with no recent activity"
+    },
+    {
+      "source": "bead_obsolescence_pass",
+      "issue_id": "bd-17c65.14.4.4",
+      "severity": "low",
+      "title": "N4.4: Clippy lint catching ambient randomness in #[determinism::required] paths",
+      "days_since_update": 2,
+      "proposed_action": "priority_demote",
+      "reason": "stale item remains attached to a live parent but has no recent activity"
+    },
+    {
+      "source": "bead_obsolescence_pass",
+      "issue_id": "bd-17c65.14.6",
+      "severity": "low",
+      "title": "N6: Persistent homology on memory-link graph for principled curation clusters",
+      "days_since_update": 2,
+      "proposed_action": "priority_demote",
+      "reason": "stale item remains attached to a live parent but has no recent activity"
+    },
+    {
+      "source": "bead_obsolescence_pass",
+      "issue_id": "bd-17c65.14.8",
+      "severity": "low",
+      "title": "N8: Lazy-loaded cross-encoder reranker on top-K (deterministic, quantized, cached)",
+      "days_since_update": 2,
+      "proposed_action": "priority_demote",
+      "reason": "stale item remains attached to a live parent but has no recent activity"
+    },
+    {
+      "source": "bead_obsolescence_pass",
+      "issue_id": "bd-17c65.4",
+      "severity": "low",
+      "title": "Schema consistency: canonical content field, JSON/Markdown parity, response envelope drift audit",
+      "days_since_update": 2,
+      "proposed_action": "priority_demote",
+      "reason": "stale item remains attached to a live parent but has no recent activity"
+    },
+    {
+      "source": "bead_obsolescence_pass",
+      "issue_id": "bd-17c65.5",
+      "severity": "low",
+      "title": "Diagnostics honesty: three-state posture, conditional banner emission, doctor/import discovery parity",
+      "days_since_update": 2,
+      "proposed_action": "priority_demote",
+      "reason": "stale item remains attached to a live parent but has no recent activity"
+    },
+    {
+      "source": "bead_obsolescence_pass",
+      "issue_id": "bd-17c65.6",
+      "severity": "low",
+      "title": "Discoverability: structured recovery actions in errors, top-level aliases, capability honesty",
+      "days_since_update": 2,
+      "proposed_action": "priority_demote",
+      "reason": "stale item remains attached to a live parent but has no recent activity"
+    },
+    {
+      "source": "bead_obsolescence_pass",
+      "issue_id": "bd-17c65.7",
+      "severity": "low",
+      "title": "Learn/Curate implementation: stubs to real or honest-unimplemented",
+      "days_since_update": 2,
+      "proposed_action": "priority_demote",
+      "reason": "stale item remains attached to a live parent but has no recent activity"
+    },
+    {
+      "source": "bead_obsolescence_pass",
+      "issue_id": "bd-2gill.2",
+      "severity": "low",
+      "title": "bd-2gill.B: Publish Dicklesworthstone/homebrew-tap with Formula/ee.rb pinned to a real release",
+      "days_since_update": 2,
+      "proposed_action": "retarget_to_current_epic",
+      "reason": "stale item is not attached to a live parent epic"
+    }
+  ]
+}

@@ -1,0 +1,374 @@
+{
+  "schema": "ee.closure_quality_report.v1",
+  "generatedAt": "2026-05-15T15:45:01Z",
+  "advisory": true,
+  "thresholds": {
+    "prematureClosureDays": 14,
+    "trendWindowDays": 90
+  },
+  "summary": {
+    "closedBeadsAudited": 1796,
+    "reopenedBeads": 32,
+    "prematureClosures": 32,
+    "recentPrematureClosures": 32
+  },
+  "trend": {
+    "window": "last_quarter",
+    "windowDays": 90,
+    "prematureClosures": 32
+  },
+  "signals": [
+    {
+      "bead_id": "bd-15po",
+      "title": "[rch] Add project sync hygiene for generated artifacts and retrieval stalls",
+      "closed_at": "2026-05-07T14:07:48.826987543Z",
+      "reopened_at": "2026-05-07T13:42:40Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 31,
+      "reopen_reason": "Reopened: Reopened by LavenderGate on 2026-05-07: RCH artifact retrieval still stalls after successful remote cargo work. Repro command: rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_eidetic_preflight_core cargo test -p ee --test contracts preflight_tripwires. Remote test reported 9/9 passed and began retrieving .rch-target artifacts, then produced no output for several minutes. This contradicts the closeout claim that retrieval stalls were resolved and remains relevant to eidetic_engine_cli-6wj5 full verification. I terminated the stuck local wrapper/rsync PIDs after recording the remote success; future attempts should prefer rch queue/cancel per the 15po guidance."
+    },
+    {
+      "bead_id": "bd-1mwpu",
+      "title": "[implements-surface:preflight] Real ee preflight evidence-matched warnings",
+      "closed_at": "2026-05-07T14:07:49.298847627Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 620,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-1q3xf",
+      "title": "[implements-surface:plan-decisioning] Real ee plan recommend with recipe store and explainability",
+      "closed_at": "2026-05-07T01:06:33.541790834Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 633,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-1v8lk",
+      "title": "[clippy] Clear current repo clippy debt behind -D warnings",
+      "closed_at": "2026-05-07T12:00:47.681163246Z",
+      "reopened_at": "2026-05-07T12:00:39Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 674,
+      "reopen_reason": "Reopened: Refresh close reason after follow-up removed stale dead_code allow and added explicit test-allow justifications."
+    },
+    {
+      "bead_id": "bd-2a9pp",
+      "title": "[implements-surface:learn] Real ee learn agenda/uncertainty/summary/propose pipeline",
+      "closed_at": "2026-05-07T00:32:16.336789093Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 810,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-2btck",
+      "title": "[implements-surface:procedure] Real ee procedure store with maturity progression and feedback hooks",
+      "closed_at": "2026-05-07T06:07:44.821197637Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 811,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-2mad",
+      "title": "[implements-surface:tripwire-deeper] Real tripwire event-payload eval and harm-feedback promotion",
+      "closed_at": "2026-05-07T12:54:13.622204226Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1025,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-2xakl",
+      "title": "[implements-surface:tripwire-deeper] Real tripwire event-payload eval and harm-feedback promotion",
+      "closed_at": "2026-05-07T12:54:13.622204226Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1053,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-2xl8v",
+      "title": "[implements-surface:situation] Real ee situation classify/compare/link with persisted edges",
+      "closed_at": "2026-05-07T00:39:32.447480983Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1058,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-318ju",
+      "title": "[vision-coverage][curation-workflow] Implement retire, tombstone, workspace review, and workflow create surfaces",
+      "closed_at": "2026-05-10T20:23:40.294882404Z",
+      "reopened_at": "2026-05-10T18:48:54Z",
+      "time_to_reopen_days": 1,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1071,
+      "reopen_reason": "Reopened: Closure-lint violation: implements-surface labels cannot close with abstention language. Stubs returning UnsatisfiedDegradedMode do not qualify as implementation."
+    },
+    {
+      "bead_id": "bd-31fg7",
+      "title": "[implements-surface:review] Real ee review session --propose with evidence aggregation",
+      "closed_at": "2026-05-07T00:24:01.509544333Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1073,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-3qxzr",
+      "title": "[implements-surface:diag-quarantine] Real ee diag quarantine with persisted trust state",
+      "closed_at": "2026-05-07T01:05:56.322143627Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1122,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-49cvw",
+      "title": "[implements-surface:handoff] Real ee handoff preview/create/resume with persisted capsules",
+      "closed_at": "2026-05-07T00:41:12.625390163Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1336,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-5arc",
+      "title": "[implements-surface:preflight] Real ee preflight evidence-matched warnings",
+      "closed_at": "2026-05-07T14:07:49.298847627Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1385,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-ci34n",
+      "title": "[implements-surface:eval] Real ee eval run/list with deterministic fixtures and golden reports",
+      "closed_at": "2026-05-07T00:34:11.093824123Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1611,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-f1up",
+      "title": "[vision-coverage][curation-workflow] Implement retire, tombstone, workspace review, and workflow create surfaces",
+      "closed_at": "2026-05-10T20:23:40.294882404Z",
+      "reopened_at": "2026-05-10T18:48:54Z",
+      "time_to_reopen_days": 1,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1648,
+      "reopen_reason": "Reopened: Closure-lint violation: implements-surface labels cannot close with abstention language. Stubs returning UnsatisfiedDegradedMode do not qualify as implementation."
+    },
+    {
+      "bead_id": "bd-gy4f",
+      "title": "[implements-surface:diag-quarantine] Real ee diag quarantine with persisted trust state",
+      "closed_at": "2026-05-07T01:05:56.322143627Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1683,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-h0h1",
+      "title": "[implements-surface:handoff] Real ee handoff preview/create/resume with persisted capsules",
+      "closed_at": "2026-05-07T00:41:12.625390163Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1684,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-hssh",
+      "title": "[implements-surface:procedure] Real ee procedure store with maturity progression and feedback hooks",
+      "closed_at": "2026-05-07T06:07:44.821197637Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1700,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-i1q8p",
+      "title": "[implements-surface:recorder-store] Real ee recorder event store with append-only persistence",
+      "closed_at": "2026-05-07T01:43:29.039596301Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1705,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-ibw4",
+      "title": "[implements-surface:recorder-store] Real ee recorder event store with append-only persistence",
+      "closed_at": "2026-05-07T01:43:29.039596301Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1714,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-inrw",
+      "title": "[clippy] Clear current repo clippy debt behind -D warnings",
+      "closed_at": "2026-05-07T12:00:47.681163246Z",
+      "reopened_at": "2026-05-07T12:00:39Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1733,
+      "reopen_reason": "Reopened: Refresh close reason after follow-up removed stale dead_code allow and added explicit test-allow justifications."
+    },
+    {
+      "bead_id": "bd-is96",
+      "title": "[HIGH] recorder_events / audit_log have no append-only DB triggers — only post-hoc hash-chain detection",
+      "closed_at": "2026-05-06T18:52:04.310014599Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1739,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-jfd9",
+      "title": "[implements-surface:plan-decisioning] Real ee plan recommend with recipe store and explainability",
+      "closed_at": "2026-05-07T01:06:33.541790834Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1746,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-lvnsm",
+      "title": "[implements-surface:certificate] Real ee certificate verify with manifest hashing and signatures",
+      "closed_at": "2026-05-07T00:42:25.602257913Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1855,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-oofg",
+      "title": "[implements-surface:situation] Real ee situation classify/compare/link with persisted edges",
+      "closed_at": "2026-05-07T00:39:32.447480983Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1915,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-p7jz3",
+      "title": "[rch] Add project sync hygiene for generated artifacts and retrieval stalls",
+      "closed_at": "2026-05-07T14:07:48.826987543Z",
+      "reopened_at": "2026-05-07T13:42:40Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1931,
+      "reopen_reason": "Reopened: Reopened by LavenderGate on 2026-05-07: RCH artifact retrieval still stalls after successful remote cargo work. Repro command: rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_eidetic_preflight_core cargo test -p ee --test contracts preflight_tripwires. Remote test reported 9/9 passed and began retrieving .rch-target artifacts, then produced no output for several minutes. This contradicts the closeout claim that retrieval stalls were resolved and remains relevant to eidetic_engine_cli-6wj5 full verification. I terminated the stuck local wrapper/rsync PIDs after recording the remote success; future attempts should prefer rch queue/cancel per the 15po guidance."
+    },
+    {
+      "bead_id": "bd-q4av",
+      "title": "[implements-surface:learn] Real ee learn agenda/uncertainty/summary/propose pipeline",
+      "closed_at": "2026-05-07T00:32:16.336789093Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1954,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-r1np",
+      "title": "[implements-surface:eval] Real ee eval run/list with deterministic fixtures and golden reports",
+      "closed_at": "2026-05-07T00:34:11.093824123Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 1973,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-trceq",
+      "title": "[HIGH] recorder_events / audit_log have no append-only DB triggers — only post-hoc hash-chain detection",
+      "closed_at": "2026-05-06T18:52:04.310014599Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 2051,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-xvre",
+      "title": "[implements-surface:certificate] Real ee certificate verify with manifest hashing and signatures",
+      "closed_at": "2026-05-07T00:42:25.602257913Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 2119,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-zj46",
+      "title": "[implements-surface:review] Real ee review session --propose with evidence aggregation",
+      "closed_at": "2026-05-07T00:24:01.509544333Z",
+      "reopened_at": "2026-05-06T18:42:23Z",
+      "time_to_reopen_days": 0,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 2167,
+      "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    }
+  ]
+}

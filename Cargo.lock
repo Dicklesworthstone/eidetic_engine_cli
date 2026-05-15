@@ -497,13 +497,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "chacha20"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f8d983286843e49675a4b7a2d174efe136dc93a18d69130dd18198a6c167601"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "chacha20poly1305"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10cd79432192d1c0f4e1a0fef9527696cc039165d729fb41b3f4f4f354c2dc35"
 dependencies = [
  "aead",
- "chacha20",
+ "chacha20 0.9.1",
  "cipher",
  "poly1305",
  "zeroize",
@@ -1109,6 +1120,7 @@ dependencies = [
  "criterion",
  "fnx-algorithms",
  "fnx-classes",
+ "fnx-generators",
  "fnx-runtime",
  "franken-agent-detection",
  "frankensearch",
@@ -1284,6 +1296,16 @@ dependencies = [
  "fnx-runtime",
  "indexmap",
  "serde",
+]
+
+[[package]]
+name = "fnx-generators"
+version = "0.1.0"
+dependencies = [
+ "fnx-classes",
+ "fnx-runtime",
+ "mt19937",
+ "rand 0.10.1",
 ]
 
 [[package]]
@@ -3651,6 +3673,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
+dependencies = [
+ "chacha20 0.10.0",
+ "getrandom 0.4.2",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "rand_chacha"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5428,10 +5461,6 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "fnx-dispatch"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "fnx-generators"
 version = "0.1.0"
 
 [[patch.unused]]

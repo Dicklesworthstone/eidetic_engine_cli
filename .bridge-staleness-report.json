@@ -1,12 +1,12 @@
 {
   "schema": "ee.bridge.staleness.v1",
-  "generatedAt": "2026-05-15T09:03:51Z",
-  "dataHash": "31f9cdc1ac6a54ab61ca0275f853591430d9e385419e1c329865179fcc9169a9",
+  "generatedAt": "2026-05-15T15:45:48Z",
+  "dataHash": "de6454076f253d123b5b2cf6d2b28ef8fe660ad33cdb7f55ee59a1b75e00d7b0",
   "inputs": {
     "planPresent": true,
     "planAgeDays": 0,
     "visionCoverageReportPresent": true,
-    "partIIOpenCount": 47,
+    "partIIOpenCount": 42,
     "partIIInProgressCount": 2,
     "partIIMaxStaleDays": 0
   },

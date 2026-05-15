@@ -1,12 +1,1 @@
-{
-  "violations": [
-    {
-      "bead": "bd-3usjw.8",
-      "label": "implements-surface",
-      "surface": "perf_table_sync",
-      "reason": "missing tests/golden/perf_table_sync.snap"
-    }
-  ],
-  "count": 1,
-  "status": "fail"
-}
+{"violations":[],"count":0,"status":"pass"}
