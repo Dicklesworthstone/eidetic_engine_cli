@@ -2488,6 +2488,10 @@ mod tests {
                 .is_some_and(|hash| hash.starts_with("blake3:")),
             "swarm brief summary must hash the underlying brief"
         );
+        assert!(
+            swarm_summary.pointer("/fileSurfaceRiskSummary").is_some(),
+            "swarm brief summary must include the compact ownership-risk section"
+        );
 
         Ok(())
     }

@@ -1,0 +1,235 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.swarm.brief.v1.json",
+  "title": "ee.swarm.brief.v1",
+  "description": "Read-only coordination posture report emitted by ee swarm brief.",
+  "type": "object",
+  "required": [
+    "schema",
+    "workspace",
+    "redactionStatus",
+    "sources",
+    "dirtyFiles",
+    "recentCommits",
+    "beads",
+    "fileReservations",
+    "fileSurfaceRisks",
+    "inbox",
+    "threads",
+    "resourcePressure",
+    "hostProfile",
+    "agentInventory",
+    "recommendations",
+    "degraded"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "ee.swarm.brief.v1"},
+    "workspace": {"type": "string"},
+    "redactionStatus": {"const": "paths_counts_subjects_only_no_content"},
+    "sources": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/sourceSnapshot"}
+    },
+    "dirtyFiles": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/dirtyFile"}
+    },
+    "recentCommits": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "beads": {"type": "object"},
+    "bv": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "object"}
+      ]
+    },
+    "fileReservations": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/fileReservation"}
+    },
+    "fileSurfaceRisks": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/fileSurfaceRisk"}
+    },
+    "inbox": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "threads": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "resourcePressure": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "rchLocalCapability": {"type": "object"},
+    "hostProfile": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "object"}
+      ]
+    },
+    "agentInventory": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "object"}
+      ]
+    },
+    "recommendations": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/recommendation"}
+    },
+    "degraded": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/degradation"}
+    }
+  },
+  "definitions": {
+    "stringArray": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "sourceSnapshot": {
+      "type": "object",
+      "required": ["source", "status", "freshness", "degraded"],
+      "additionalProperties": true,
+      "properties": {
+        "source": {"type": "string"},
+        "status": {"type": "string"},
+        "freshness": {"type": "object"},
+        "degraded": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/degradation"}
+        }
+      }
+    },
+    "dirtyFile": {
+      "type": "object",
+      "required": ["path", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string"},
+        "status": {"type": "string"}
+      }
+    },
+    "fileReservation": {
+      "type": "object",
+      "required": ["pathPattern", "holder", "exclusive", "expiresAt"],
+      "additionalProperties": false,
+      "properties": {
+        "pathPattern": {"type": "string"},
+        "holder": {"type": "string"},
+        "exclusive": {"type": "boolean"},
+        "expiresAt": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string"}
+          ]
+        }
+      }
+    },
+    "fileSurfaceRisk": {
+      "type": "object",
+      "required": [
+        "pathPattern",
+        "gitStatusBuckets",
+        "reservationHolders",
+        "relatedBeadIds",
+        "severity",
+        "score",
+        "riskFactors",
+        "evidence",
+        "suggestedCommands"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "pathPattern": {"type": "string"},
+        "gitStatusBuckets": {"$ref": "#/definitions/stringArray"},
+        "reservationHolders": {"$ref": "#/definitions/stringArray"},
+        "relatedBeadIds": {"$ref": "#/definitions/stringArray"},
+        "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+        "score": {"type": "integer", "minimum": 0},
+        "riskFactors": {"$ref": "#/definitions/stringArray"},
+        "evidence": {"$ref": "#/definitions/stringArray"},
+        "suggestedCommands": {"$ref": "#/definitions/stringArray"}
+      }
+    },
+    "recommendation": {
+      "type": "object",
+      "required": ["id", "kind", "severity", "confidence", "reasonCodes", "evidence", "suggestedCommands", "mustNotDo"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "kind": {"type": "string"},
+        "severity": {"type": "string"},
+        "confidence": {"type": "string"},
+        "reasonCodes": {"$ref": "#/definitions/stringArray"},
+        "evidence": {"$ref": "#/definitions/stringArray"},
+        "suggestedCommands": {"$ref": "#/definitions/stringArray"},
+        "mustNotDo": {"$ref": "#/definitions/stringArray"}
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["source", "code", "severity", "message", "repair"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {"type": "string"},
+        "code": {"type": "string"},
+        "severity": {"type": "string"},
+        "message": {"type": "string"},
+        "repair": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string"}
+          ]
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.swarm.brief.v1",
+      "workspace": "[REDACTED:path]",
+      "redactionStatus": "paths_counts_subjects_only_no_content",
+      "sources": [],
+      "dirtyFiles": [{"path": "src/core/swarm_brief.rs", "status": "M"}],
+      "recentCommits": [],
+      "beads": {"ready": [], "blocked": [], "inProgress": [], "deferred": []},
+      "bv": null,
+      "fileReservations": [{"pathPattern": "src/core/swarm_brief.rs", "holder": "OtherAgent", "exclusive": true, "expiresAt": "2026-05-15T16:00:00Z"}],
+      "fileSurfaceRisks": [
+        {
+          "pathPattern": "src/core/swarm_brief.rs",
+          "gitStatusBuckets": ["M"],
+          "reservationHolders": ["OtherAgent"],
+          "relatedBeadIds": ["bd-1zb7k.16.4"],
+          "severity": "medium",
+          "score": 67,
+          "riskFactors": ["dirty_worktree_path", "active_exclusive_reservation"],
+          "evidence": ["git_status:M:src/core/swarm_brief.rs", "agent_mail_reservation:OtherAgent:src/core/swarm_brief.rs"],
+          "suggestedCommands": ["message OtherAgent before editing src/core/swarm_brief.rs"]
+        }
+      ],
+      "inbox": [],
+      "threads": [],
+      "resourcePressure": [],
+      "hostProfile": null,
+      "agentInventory": null,
+      "recommendations": [],
+      "degraded": []
+    }
+  ],
+  "x-ee-status": {
+    "shipped": false,
+    "tracking_bead": "bd-1zb7k.16.4",
+    "available_in_build": false,
+    "feature_flag": null,
+    "expected_version": "0.3.0"
+  },
+  "x-ee-doc": "docs/swarm/swarm_brief.md"
+}

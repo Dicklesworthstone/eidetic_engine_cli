@@ -1,0 +1,67 @@
+{
+  "schema": "ee.verification.broker_replay_fixture.v1",
+  "fixtureId": "broker_replay_duplicate_build_prevention_v1",
+  "fixtureHash": "blake3:broker-replay-fixture-v1",
+  "traceId": "trace-broker-replay-20260515",
+  "fixedClock": "2026-05-15T11:45:00Z",
+  "records": [
+    {
+      "schema": "ee.verification.run.v1",
+      "runId": "vrun_agent_a_all_targets_blocker",
+      "beadId": "bd-bife.4",
+      "agentName": "AgentA",
+      "sourceHash": "blake3:tree-before-fix",
+      "commandHash": "blake3:all-targets-command",
+      "commandArgvHash": "blake3:all-targets-argv",
+      "cargoTargetDirHashOrClass": "class:external_cargo_target",
+      "executionSubstrate": "rch",
+      "workerHost": "css",
+      "startedAt": "2026-05-15T11:00:00Z",
+      "finishedAt": "2026-05-15T11:03:00Z",
+      "exitCode": 101,
+      "stdoutHash": null,
+      "stderrExcerptHash": "blake3:first-failure-redacted",
+      "artifactManifestHash": "blake3:agent-a-artifact-manifest",
+      "retainedLogPathHash": "blake3:agent-a-retained-log-path",
+      "provenance": [{"source": "j1_jsonl", "eventKind": "artifact_manifest", "line": 4}]
+    }
+  ],
+  "steps": [
+    {
+      "stepId": "agent_b_focused_probe_same_tree",
+      "agentName": "AgentB",
+      "request": {
+        "beadId": "bd-bife.4",
+        "sourceHash": "blake3:tree-before-fix",
+        "commandHash": "blake3:focused-command",
+        "commandClass": "cargo_test",
+        "normalizedArgvHash": "blake3:focused-argv",
+        "executionSubstrate": "rch",
+        "envFingerprintClass": "class:external_cargo_target",
+        "targetProfile": "debug"
+      },
+      "expectedStatus": "known_blocker",
+      "expectedSuggestedAction": "inspect_known_blocker",
+      "expectedMatchedRunId": "vrun_agent_a_all_targets_blocker",
+      "expectedFirstFailureDiagnosis": "same_source_prior_nonzero_exit"
+    },
+    {
+      "stepId": "agent_c_all_targets_after_file_change",
+      "agentName": "AgentC",
+      "request": {
+        "beadId": "bd-bife.4",
+        "sourceHash": "blake3:tree-after-fix",
+        "commandHash": "blake3:all-targets-command",
+        "commandClass": "cargo_check",
+        "normalizedArgvHash": "blake3:all-targets-argv",
+        "executionSubstrate": "rch",
+        "envFingerprintClass": "class:external_cargo_target",
+        "targetProfile": "debug"
+      },
+      "expectedStatus": "stale",
+      "expectedSuggestedAction": "rerun_current_source",
+      "expectedMatchedRunId": "vrun_agent_a_all_targets_blocker",
+      "expectedFirstFailureDiagnosis": "source_changed_existing_command"
+    }
+  ]
+}

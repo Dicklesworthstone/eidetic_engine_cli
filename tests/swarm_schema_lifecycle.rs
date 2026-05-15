@@ -52,11 +52,25 @@ const SCHEMA_CASES: &[SchemaCase] = &[
         shipped: true,
     },
     SchemaCase {
+        id: "ee.verification.broker_view.v1",
+        file_name: "ee.verification.broker_view.v1.json",
+        doc_path: "docs/swarm/verification_broker_view.md",
+        tracking_bead: "bd-6boyo.1",
+        shipped: false,
+    },
+    SchemaCase {
         id: "ee.coordination_snapshot.v1",
         file_name: "ee.coordination_snapshot.v1.json",
         doc_path: "docs/swarm/coordination_snapshot.md",
         tracking_bead: "bd-1zb7k.4",
         shipped: true,
+    },
+    SchemaCase {
+        id: "ee.coordination_fallback_evidence.v1",
+        file_name: "ee.coordination_fallback_evidence.v1.json",
+        doc_path: "docs/swarm/coordination_fallback_evidence.md",
+        tracking_bead: "bd-1zb7k.13.2",
+        shipped: false,
     },
     SchemaCase {
         id: "ee.resource.profile.v1",
@@ -101,6 +115,20 @@ const SCHEMA_CASES: &[SchemaCase] = &[
         shipped: false,
     },
     SchemaCase {
+        id: "ee.swarm.brief.v1",
+        file_name: "ee.swarm.brief.v1.json",
+        doc_path: "docs/swarm/swarm_brief.md",
+        tracking_bead: "bd-1zb7k.16.4",
+        shipped: false,
+    },
+    SchemaCase {
+        id: "ee.support_bundle.swarm_brief_summary.v1",
+        file_name: "ee.support_bundle.swarm_brief_summary.v1.json",
+        doc_path: "docs/swarm/support_bundle_swarm_brief_summary.md",
+        tracking_bead: "bd-1zb7k.16.4",
+        shipped: false,
+    },
+    SchemaCase {
         id: "ee.swarm.recommendation.v1",
         file_name: "ee.swarm.recommendation.v1.json",
         doc_path: "docs/swarm/swarm_recommendation.md",
@@ -136,10 +164,22 @@ const DRIFT_CASES: &[DriftCase] = &[
         fixture_manifest_key: "ee.verification.evidence.v1",
     },
     DriftCase {
+        schema_id: "ee.verification.broker_view.v1",
+        command: "planned ee verify broker lookup --json",
+        json_path: ".data.broker",
+        fixture_manifest_key: "ee.verification.broker_view.v1",
+    },
+    DriftCase {
         schema_id: "ee.coordination_snapshot.v1",
         command: "ee context --coordination-snapshot snapshot.json --json",
         json_path: ".data.pack.coordination",
         fixture_manifest_key: "ee.coordination_snapshot.v1",
+    },
+    DriftCase {
+        schema_id: "ee.coordination_fallback_evidence.v1",
+        command: "ee coordination evidence ingest --stdin --json",
+        json_path: ".data.evidence",
+        fixture_manifest_key: "ee.coordination_fallback_evidence.v1",
     },
     DriftCase {
         schema_id: "ee.resource.profile.v1",
@@ -176,6 +216,18 @@ const DRIFT_CASES: &[DriftCase] = &[
         command: "planned handoff capsule output",
         json_path: ".examples[\"ee.handoff.memory_set_fingerprint.v1\"]",
         fixture_manifest_key: "ee.handoff.memory_set_fingerprint.v1",
+    },
+    DriftCase {
+        schema_id: "ee.swarm.brief.v1",
+        command: "ee swarm brief --json",
+        json_path: ".data",
+        fixture_manifest_key: "ee.swarm.brief.v1",
+    },
+    DriftCase {
+        schema_id: "ee.support_bundle.swarm_brief_summary.v1",
+        command: "ee support-bundle create --redacted --json",
+        json_path: "swarm_brief_summary.json",
+        fixture_manifest_key: "ee.support_bundle.swarm_brief_summary.v1",
     },
     DriftCase {
         schema_id: "ee.swarm.recommendation.v1",
@@ -386,6 +438,57 @@ fn swarm_schema_examples_have_fixture_rows() -> TestResult {
 }
 
 #[test]
+fn coordination_fallback_examples_cover_statuses_and_redaction_contract() -> TestResult {
+    let case = SCHEMA_CASES
+        .iter()
+        .copied()
+        .find(|case| case.id == "ee.coordination_fallback_evidence.v1")
+        .ok_or_else(|| "coordination fallback schema case missing".to_owned())?;
+    let schema = schema_doc(case)?;
+    let examples = schema
+        .get("examples")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "coordination fallback schema missing examples".to_owned())?;
+
+    let mut statuses = BTreeSet::new();
+    let mut content_hashes = BTreeSet::new();
+    for (index, example) in examples.iter().enumerate() {
+        let context = format!("coordination fallback example {index}");
+        statuses.insert(string_field(example, "/status", &context)?.to_owned());
+        let content_hash = string_field(example, "/summary/contentHash", &context)?;
+        if !content_hashes.insert(content_hash.to_owned()) {
+            return Err(format!("{context} reuses content hash {content_hash}"));
+        }
+        if !bool_field(example, "/summary/redacted", &context)? {
+            return Err(format!("{context} summary must be redacted"));
+        }
+        if bool_field(example, "/redaction/rawInboxIncluded", &context)?
+            || bool_field(example, "/redaction/rawLogIncluded", &context)?
+        {
+            return Err(format!("{context} must not include raw inboxes or logs"));
+        }
+        if !bool_field(example, "/redaction/secretScanApplied", &context)? {
+            return Err(format!("{context} must apply secret scanning"));
+        }
+        if string_field(example, "/redaction/pathPolicy", &context)? != "labels_only" {
+            return Err(format!("{context} must keep path policy labels_only"));
+        }
+    }
+
+    let expected = ["blocked", "stale", "unavailable", "unknown"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if statuses != expected {
+        return Err(format!(
+            "coordination fallback examples must cover required non-available statuses\nactual: {statuses:?}\nexpected: {expected:?}"
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
 fn swarm_schema_availability_matches_bead_state() -> TestResult {
     let issue_states = latest_issue_states()?;
     for case in SCHEMA_CASES {
@@ -458,6 +561,168 @@ fn swarm_schema_drift_rows_cover_catalog() -> TestResult {
             "swarm schema drift case covered"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn swarm_brief_golden_ownership_risks_match_schema_contract() -> TestResult {
+    let golden = read_json(
+        &repo_root()
+            .join("tests")
+            .join("fixtures")
+            .join("golden")
+            .join("swarm")
+            .join("brief_contract_matrix.json.golden"),
+    )?;
+    if string_field(
+        &golden,
+        "/payloadSchema",
+        "tests/fixtures/golden/swarm/brief_contract_matrix.json.golden",
+    )? != "ee.swarm.brief.v1"
+    {
+        return Err("swarm brief golden payloadSchema must be ee.swarm.brief.v1".into());
+    }
+
+    let cases = golden
+        .get("cases")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "swarm brief golden missing cases array".to_string())?;
+    let mut ownership_case_count = 0_usize;
+    for case in cases {
+        let case_name = case
+            .get("case")
+            .and_then(Value::as_str)
+            .unwrap_or("<unknown>");
+        if case
+            .get("schema")
+            .and_then(Value::as_str)
+            .is_some_and(|schema| schema != "ee.swarm.brief.v1")
+        {
+            return Err(format!("{case_name} uses a non-swarm-brief schema"));
+        }
+        let risks = case
+            .get("fileSurfaceRisks")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("{case_name} missing fileSurfaceRisks array"))?;
+        for (index, risk) in risks.iter().enumerate() {
+            ownership_case_count += 1;
+            let context = format!("{case_name}.fileSurfaceRisks[{index}]");
+            for field in [
+                "pathPattern",
+                "gitStatusBuckets",
+                "reservationHolders",
+                "relatedBeadIds",
+                "severity",
+                "score",
+                "riskFactors",
+                "evidence",
+                "suggestedCommands",
+            ] {
+                if risk.get(field).is_none() {
+                    return Err(format!("{context} missing {field}"));
+                }
+            }
+        }
+    }
+
+    if ownership_case_count == 0 {
+        return Err("swarm brief golden must cover at least one file surface risk".into());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn ownership_posture_fixture_catalog_covers_required_cases() -> TestResult {
+    let fixture = read_json(
+        &repo_root()
+            .join("tests")
+            .join("fixtures")
+            .join("swarm")
+            .join("ownership_posture_cases.json"),
+    )?;
+    if string_field(&fixture, "/schema", "ownership_posture_cases.json")?
+        != "ee.swarm.ownership_posture_cases.v1"
+    {
+        return Err("ownership posture fixture catalog schema drifted".into());
+    }
+
+    let payload_schemas = fixture
+        .get("payloadSchemas")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "ownership posture fixture missing payloadSchemas".to_string())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "ee.swarm.brief.v1",
+        "ee.support_bundle.swarm_brief_summary.v1",
+    ] {
+        if !payload_schemas.contains(required) {
+            return Err(format!(
+                "ownership posture fixture missing payload schema {required}"
+            ));
+        }
+    }
+
+    let cases = fixture
+        .get("cases")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "ownership posture fixture missing cases".to_string())?;
+    let categories = cases
+        .iter()
+        .filter_map(|case| case.get("category").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    for required in ["healthy", "degraded_source", "unattributed_blocker"] {
+        if !categories.contains(required) {
+            return Err(format!(
+                "ownership posture fixture missing required category {required}"
+            ));
+        }
+    }
+
+    let rendered = serde_json::to_string(&fixture)
+        .map_err(|error| format!("serialize ownership posture fixture: {error}"))?;
+    for forbidden in [
+        "ghp_",
+        "raw secret body",
+        "BEGIN PRIVATE KEY",
+        "DATABASE_URL=",
+    ] {
+        if rendered.contains(forbidden) {
+            return Err(format!(
+                "ownership posture fixture leaked forbidden marker {forbidden}"
+            ));
+        }
+    }
+
+    for case in cases {
+        let id = case
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("<unknown>");
+        if string_field(case, "/fullOutput/schema", id)? != "ee.swarm.brief.v1" {
+            return Err(format!("{id} fullOutput must use ee.swarm.brief.v1"));
+        }
+        if string_field(case, "/compactSummary/schema", id)?
+            != "ee.support_bundle.swarm_brief_summary.v1"
+        {
+            return Err(format!(
+                "{id} compactSummary must use ee.support_bundle.swarm_brief_summary.v1"
+            ));
+        }
+        for pointer in [
+            "/compactSummary/redaction/rawMailBodiesIncluded",
+            "/compactSummary/redaction/rawQueryTextIncluded",
+            "/compactSummary/redaction/rawProvenanceTextIncluded",
+            "/compactSummary/redaction/fullFileListingsIncluded",
+        ] {
+            if bool_field(case, pointer, id)? {
+                return Err(format!("{id} must keep {pointer} false"));
+            }
+        }
+    }
+
     Ok(())
 }
 

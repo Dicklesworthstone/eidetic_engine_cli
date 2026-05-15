@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.verification.reuse_advisory.v1.json",
+  "title": "ee.verification.reuse_advisory.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "beadId",
+    "status",
+    "requestedSourceHash",
+    "requestedCommandHash",
+    "requestedExecutionSubstrate",
+    "featureProfileHash",
+    "workspaceGeneration",
+    "strictnessFlags",
+    "matchedRunId",
+    "matchedAgentName",
+    "matchedFinishedAt",
+    "reason",
+    "repairActions"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ee.verification.reuse_advisory.v1" },
+    "beadId": { "type": ["string", "null"] },
+    "status": {
+      "type": "string",
+      "enum": [
+        "reusable_pass",
+        "reusable_fail",
+        "in_flight",
+        "stale_source",
+        "mismatched_command",
+        "missing_evidence",
+        "rerun_required"
+      ]
+    },
+    "requestedSourceHash": { "type": ["string", "null"] },
+    "requestedCommandHash": { "type": "string" },
+    "requestedExecutionSubstrate": { "type": "string" },
+    "featureProfileHash": { "type": ["string", "null"] },
+    "workspaceGeneration": { "type": ["integer", "null"], "minimum": 0 },
+    "strictnessFlags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "matchedRunId": { "type": ["string", "null"] },
+    "matchedAgentName": { "type": ["string", "null"] },
+    "matchedFinishedAt": { "type": ["string", "null"] },
+    "reason": { "type": "string", "minLength": 1 },
+    "repairActions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["priority", "kind", "command", "message"],
+        "properties": {
+          "priority": { "type": "integer", "minimum": 1 },
+          "kind": { "type": "string", "minLength": 1 },
+          "command": { "type": ["string", "null"] },
+          "message": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

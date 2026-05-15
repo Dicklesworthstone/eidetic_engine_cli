@@ -5,6 +5,7 @@
 
 #![allow(clippy::expect_used)]
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -18,6 +19,10 @@ fn project_root() -> &'static Path {
 
 fn verify_script_path() -> PathBuf {
     project_root().join("scripts/verify.sh")
+}
+
+fn verify_budget_path() -> PathBuf {
+    project_root().join("scripts/verify-budget.toml")
 }
 
 fn output_excerpt(output: &Output) -> String {
@@ -83,6 +88,64 @@ snapshot_proposal_guard
         .expect("run snapshot proposal guard")
 }
 
+fn verify_stage_names(script: &str) -> BTreeSet<String> {
+    script
+        .lines()
+        .filter_map(|line| {
+            let marker = "run_stage \"";
+            let start = line.find(marker)? + marker.len();
+            let rest = &line[start..];
+            let end = rest.find('"')?;
+            Some(rest[..end].to_string())
+        })
+        .collect()
+}
+
+fn budget_stage_blocks(manifest: &str) -> Vec<Vec<&str>> {
+    let mut blocks = Vec::new();
+    let mut current = Vec::new();
+
+    for line in manifest.lines() {
+        if line.trim() == "[[stage]]" {
+            if !current.is_empty() {
+                blocks.push(current);
+                current = Vec::new();
+            }
+            continue;
+        }
+        if !current.is_empty() || line.trim_start().starts_with("name = ") {
+            current.push(line);
+        }
+    }
+
+    if !current.is_empty() {
+        blocks.push(current);
+    }
+
+    blocks
+}
+
+fn budget_stage_names(manifest: &str) -> BTreeSet<String> {
+    budget_stage_blocks(manifest)
+        .into_iter()
+        .filter_map(|block| {
+            block.iter().find_map(|line| {
+                let trimmed = line.trim();
+                let value = trimmed.strip_prefix("name = ")?;
+                Some(value.trim_matches('"').to_string())
+            })
+        })
+        .collect()
+}
+
+fn budget_stage_p50(block: &[&str]) -> Option<u64> {
+    block.iter().find_map(|line| {
+        let trimmed = line.trim();
+        let value = trimmed.strip_prefix("expected_seconds_p50 = ")?;
+        value.parse().ok()
+    })
+}
+
 #[test]
 fn drift_guard_script_exists_and_is_executable() {
     let script_path = project_root().join("scripts/verification-drift-guard.sh");
@@ -101,6 +164,87 @@ fn drift_guard_script_exists_and_is_executable() {
             "verification-drift-guard.sh should be executable"
         );
     }
+}
+
+#[test]
+fn verify_budget_manifest_declares_every_verify_stage() {
+    let verify_script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    let budget_manifest =
+        fs::read_to_string(verify_budget_path()).expect("read verify-budget.toml");
+
+    let script_stages = verify_stage_names(&verify_script);
+    let budget_stages = budget_stage_names(&budget_manifest);
+
+    assert_eq!(
+        script_stages, budget_stages,
+        "verify-budget.toml must declare exactly the run_stage names from verify.sh"
+    );
+}
+
+#[test]
+fn verify_budget_manifest_has_p50_and_regression_factor_for_every_stage() {
+    let budget_manifest =
+        fs::read_to_string(verify_budget_path()).expect("read verify-budget.toml");
+    let blocks = budget_stage_blocks(&budget_manifest);
+
+    assert!(
+        !blocks.is_empty(),
+        "verify-budget.toml should declare at least one [[stage]]"
+    );
+
+    let mut non_benchmark_p50_total = 0;
+    for block in &blocks {
+        let name = block
+            .iter()
+            .find_map(|line| line.trim().strip_prefix("name = "))
+            .map(|value| value.trim_matches('"'))
+            .expect("stage should have a name");
+        let p50 = budget_stage_p50(block).expect("stage should have expected_seconds_p50");
+        let factor = block
+            .iter()
+            .find(|line| line.trim() == "regression_factor = 1.5")
+            .unwrap_or_else(|| panic!("stage {name} should use regression_factor = 1.5"));
+
+        assert!(
+            !factor.trim().is_empty(),
+            "stage {name} should keep an explicit regression factor"
+        );
+
+        if name != "Performance Benchmarks" {
+            non_benchmark_p50_total += p50;
+        }
+    }
+
+    assert_eq!(
+        non_benchmark_p50_total, 600,
+        "non-benchmark p50 budgets should sum to the 10-minute verify target"
+    );
+    assert!(
+        budget_manifest.contains("total_expected_seconds = 600"),
+        "manifest should document the total 10-minute verification budget"
+    );
+}
+
+#[test]
+fn verify_sh_reports_and_enforces_stage_budgets() {
+    let verify_script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+
+    assert!(
+        verify_script.contains("VERIFY_BUDGET_FILE"),
+        "verify.sh should load scripts/verify-budget.toml"
+    );
+    assert!(
+        verify_script.contains("stage_budget_summary"),
+        "verify.sh should report elapsed time against each stage budget"
+    );
+    assert!(
+        verify_script.contains("budget=advisory"),
+        "verify.sh should classify advisory budget regressions"
+    );
+    assert!(
+        verify_script.contains("exceeded hard budget"),
+        "verify.sh should fail when a stage exceeds the hard budget"
+    );
 }
 
 #[test]

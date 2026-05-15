@@ -141,3 +141,54 @@ fn closure_guidance_table_drives_remote_required_cargo_evidence() -> TestResult 
     }
     Ok(())
 }
+
+#[test]
+fn closure_guidance_rejects_topology_blocked_evidence_until_remote_pass_supersedes_it() -> TestResult
+{
+    let requirement = VerificationGateRequirement::new("cargo test", Some("cargo test"), true);
+    let blocked = cargo_test_record(ClosureCase {
+        name: "topology_blocked",
+        status: VerificationStatus::Blocked,
+        remote_evidence: true,
+        fallback_detected: false,
+        expected_can_close: false,
+        expected_reason_fragment: Some("blocked"),
+    })?;
+    let pass = cargo_test_record(ClosureCase {
+        name: "remote_pass_after_topology_fix",
+        status: VerificationStatus::Passed,
+        remote_evidence: true,
+        fallback_detected: false,
+        expected_can_close: true,
+        expected_reason_fragment: None,
+    })?;
+
+    let blocked_guidance = verification_closure_guidance(
+        Some("bd-rch-topology"),
+        std::slice::from_ref(&requirement),
+        std::slice::from_ref(&blocked),
+    );
+    if blocked_guidance.can_close {
+        return Err("topology-blocked remote-required evidence must not allow closure".to_owned());
+    }
+    let blocked_reason = blocked_guidance
+        .rejected_reasons
+        .first()
+        .ok_or_else(|| "blocked evidence should produce a rejection reason".to_owned())?;
+    if !blocked_reason.contains("blocked") {
+        return Err(format!(
+            "blocked topology evidence should explain blocked status, got {blocked_reason:?}"
+        ));
+    }
+
+    let superseded_guidance =
+        verification_closure_guidance(Some("bd-rch-topology"), &[requirement], &[blocked, pass]);
+    if !superseded_guidance.can_close {
+        return Err(format!(
+            "later authoritative remote pass should supersede topology-blocked attempt, got {:?}",
+            superseded_guidance.rejected_reasons
+        ));
+    }
+
+    Ok(())
+}

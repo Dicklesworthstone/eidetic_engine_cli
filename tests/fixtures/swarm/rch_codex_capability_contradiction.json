@@ -1,0 +1,69 @@
+{
+  "schema": "ee.rch.local_capability.fixture.v1",
+  "scenarioId": "rch_codex_capability_contradiction",
+  "remoteOnlyRequired": true,
+  "captures": {
+    "helpJson": {
+      "commands": [
+        {"name": "init"},
+        {"name": "daemon"},
+        {"name": "workers"},
+        {"name": "status"},
+        {"name": "check"},
+        {"name": "hook"}
+      ]
+    },
+    "hookStatus": {
+      "data": {
+        "agents": [
+          {"agent": "ClaudeCode", "status": "Installed"},
+          {"agent": "CodexCli", "status": "Not installed"}
+        ]
+      }
+    },
+    "status": {
+      "data": {
+        "daemon": {
+          "version": "0.1.3",
+          "socket_path": "/Users/redacted/Library/Caches/rch/rch.sock",
+          "workers_healthy": 3,
+          "slots_available": 0
+        },
+        "workers": [
+          {"id": "css", "status": "healthy"},
+          {"id": "csd", "status": "healthy"},
+          {"id": "trj", "status": "healthy"}
+        ]
+      }
+    },
+    "config": {
+      "data": {
+        "general": {
+          "socket_path": "/Users/redacted/Library/Caches/rch/rch.sock"
+        }
+      }
+    },
+    "workerProbe": {
+      "data": {
+        "healthy": 0,
+        "failed": 3,
+        "workers": [
+          {"id": "css", "status": "failed", "errorCode": "ssh_connect_failed"},
+          {"id": "csd", "status": "failed", "errorCode": "ssh_connect_failed"},
+          {"id": "trj", "status": "failed", "errorCode": "ssh_connect_failed"}
+        ]
+      }
+    }
+  },
+  "expected": {
+    "remoteOnlySafe": false,
+    "degradedCodes": [
+      "rch_remote_required_fallback_prevented",
+      "rch_worker_topology_blocked"
+    ],
+    "recovery": [
+      "do_not_run_plain_cargo_from_this_shell",
+      "repair_rch_worker_probe_failures"
+    ]
+  }
+}

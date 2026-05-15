@@ -1,0 +1,49 @@
+{
+  "schema": "ee.coordination_fallback_evidence.v1",
+  "evidenceId": "coord_fallback_00000000000000000001",
+  "capturedAt": "2026-05-15T11:21:00Z",
+  "status": "blocked",
+  "source": {
+    "kind": "rch",
+    "sourceId": "rch-workers"
+  },
+  "reasonCode": "rch_worker_topology_blocked",
+  "summary": {
+    "text": "Remote-required Cargo verification could not start because every configured RCH worker failed SSH probe; no local Cargo fallback was used.",
+    "contentHash": "blake3:7f5a79840ff5e4fa1dc9d54ec78f4f0557c2a73ad53b228f6b31fd6383365f85",
+    "redacted": true
+  },
+  "links": {
+    "beadIds": ["bd-1zb7k.13.2"],
+    "verificationIds": [],
+    "supportBundleIds": []
+  },
+  "fallbackAction": {
+    "kind": "beads_comment",
+    "summary": "Record the blocked RCH posture and continue with static-only work until remote workers recover.",
+    "command": "br comment bd-1zb7k.13.2 \"RCH remote verification blocked; static evidence only\"",
+    "manualStep": null
+  },
+  "redaction": {
+    "rawInboxIncluded": false,
+    "rawLogIncluded": false,
+    "secretScanApplied": true,
+    "pathPolicy": "labels_only"
+  },
+  "producer": {
+    "schema": "ee.producer.metadata.v1",
+    "sourceSystem": "coordination_fallback",
+    "identity": {
+      "status": "unknown",
+      "agentName": null,
+      "harness": null,
+      "model": null
+    },
+    "run": {
+      "runId": "coord-fallback-20260515",
+      "sessionId": null,
+      "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"
+    },
+    "observedAt": "2026-05-15T11:21:00Z"
+  }
+}

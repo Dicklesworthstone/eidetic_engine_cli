@@ -1,0 +1,202 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.coordination_fallback_evidence.v1.json",
+  "title": "ee.coordination_fallback_evidence.v1",
+  "description": "Redaction-safe evidence record for coordination substrate fallback incidents.",
+  "type": "object",
+  "required": [
+    "schema",
+    "evidenceId",
+    "capturedAt",
+    "status",
+    "source",
+    "reasonCode",
+    "summary",
+    "links",
+    "fallbackAction",
+    "redaction",
+    "producer"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.coordination_fallback_evidence.v1"},
+    "evidenceId": {"type": "string"},
+    "capturedAt": {"type": ["string", "null"], "format": "date-time"},
+    "status": {"type": "string", "enum": ["available", "unavailable", "stale", "blocked", "unknown"]},
+    "source": {
+      "type": "object",
+      "required": ["kind", "sourceId"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"type": "string", "enum": ["agent_mail", "beads", "file_reservation", "rch", "bv", "git", "other"]},
+        "sourceId": {"type": "string"}
+      }
+    },
+    "reasonCode": {"type": "string"},
+    "summary": {
+      "type": "object",
+      "required": ["text", "contentHash", "redacted"],
+      "additionalProperties": false,
+      "properties": {
+        "text": {"type": "string"},
+        "contentHash": {"type": "string"},
+        "redacted": {"type": "boolean"}
+      }
+    },
+    "links": {
+      "type": "object",
+      "required": ["beadIds", "verificationIds", "supportBundleIds"],
+      "additionalProperties": false,
+      "properties": {
+        "beadIds": {"type": "array", "items": {"type": "string"}},
+        "verificationIds": {"type": "array", "items": {"type": "string"}},
+        "supportBundleIds": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "fallbackAction": {
+      "type": "object",
+      "required": ["kind", "summary", "command", "manualStep"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"type": "string", "enum": ["record_only", "beads_comment", "support_bundle", "retry_later", "manual_coordination"]},
+        "summary": {"type": "string"},
+        "command": {"type": ["string", "null"]},
+        "manualStep": {"type": ["string", "null"]}
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "required": ["rawInboxIncluded", "rawLogIncluded", "secretScanApplied", "pathPolicy"],
+      "additionalProperties": false,
+      "properties": {
+        "rawInboxIncluded": {"type": "boolean"},
+        "rawLogIncluded": {"type": "boolean"},
+        "secretScanApplied": {"type": "boolean"},
+        "pathPolicy": {"type": "string", "enum": ["none", "redact_home", "hash_paths", "labels_only"]}
+      }
+    },
+    "producer": {"$ref": "ee.producer.metadata.v1.json"}
+  },
+  "examples": [
+    {
+      "schema": "ee.coordination_fallback_evidence.v1",
+      "evidenceId": "coord_fallback_00000000000000000001",
+      "capturedAt": "2026-05-15T11:21:00Z",
+      "status": "blocked",
+      "source": {"kind": "rch", "sourceId": "rch-workers"},
+      "reasonCode": "rch_worker_topology_blocked",
+      "summary": {
+        "text": "Remote-required Cargo verification could not start because every configured RCH worker failed SSH probe; no local Cargo fallback was used.",
+        "contentHash": "blake3:7f5a79840ff5e4fa1dc9d54ec78f4f0557c2a73ad53b228f6b31fd6383365f85",
+        "redacted": true
+      },
+      "links": {"beadIds": ["bd-1zb7k.13.2"], "verificationIds": [], "supportBundleIds": []},
+      "fallbackAction": {
+        "kind": "beads_comment",
+        "summary": "Record the blocked RCH posture and continue with static-only work until remote workers recover.",
+        "command": "br comment bd-1zb7k.13.2 \"RCH remote verification blocked; static evidence only\"",
+        "manualStep": null
+      },
+      "redaction": {"rawInboxIncluded": false, "rawLogIncluded": false, "secretScanApplied": true, "pathPolicy": "labels_only"},
+      "producer": {
+        "schema": "ee.producer.metadata.v1",
+        "sourceSystem": "coordination_fallback",
+        "identity": {"status": "unknown", "agentName": null, "harness": null, "model": null},
+        "run": {"runId": "coord-fallback-20260515", "sessionId": null, "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"},
+        "observedAt": "2026-05-15T11:21:00Z"
+      }
+    },
+    {
+      "schema": "ee.coordination_fallback_evidence.v1",
+      "evidenceId": "coord_fallback_00000000000000000002",
+      "capturedAt": "2026-05-15T11:22:00Z",
+      "status": "unavailable",
+      "source": {"kind": "agent_mail", "sourceId": "mcp-agent-mail"},
+      "reasonCode": "agent_mail_transport_unavailable",
+      "summary": {
+        "text": "Agent Mail transport was unavailable, so the agent recorded a redacted coordination summary without raw inbox bodies.",
+        "contentHash": "blake3:58abf603e63a48d96ff120ac6f5e6618029f212d95f1b8c818d85d9e40d51bb7",
+        "redacted": true
+      },
+      "links": {"beadIds": ["bd-1zb7k.13.2"], "verificationIds": [], "supportBundleIds": []},
+      "fallbackAction": {
+        "kind": "record_only",
+        "summary": "Preserve the unavailable coordination-substrate evidence for later support bundle inclusion.",
+        "command": null,
+        "manualStep": null
+      },
+      "redaction": {"rawInboxIncluded": false, "rawLogIncluded": false, "secretScanApplied": true, "pathPolicy": "labels_only"},
+      "producer": {
+        "schema": "ee.producer.metadata.v1",
+        "sourceSystem": "coordination_fallback",
+        "identity": {"status": "unknown", "agentName": null, "harness": null, "model": null},
+        "run": {"runId": "coord-fallback-20260515-unavailable", "sessionId": null, "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"},
+        "observedAt": "2026-05-15T11:22:00Z"
+      }
+    },
+    {
+      "schema": "ee.coordination_fallback_evidence.v1",
+      "evidenceId": "coord_fallback_00000000000000000003",
+      "capturedAt": "2026-05-15T11:23:00Z",
+      "status": "stale",
+      "source": {"kind": "beads", "sourceId": "beads-jsonl"},
+      "reasonCode": "beads_tracker_stale",
+      "summary": {
+        "text": "Beads tracker state appeared stale relative to live agent messages, so the agent treated the tracker as advisory only.",
+        "contentHash": "blake3:e5021c3c0f730b3d515d36a30e83d311893f1c13a16f4b7a922aa76318c1e5d2",
+        "redacted": true
+      },
+      "links": {"beadIds": ["bd-1zb7k.13.2"], "verificationIds": [], "supportBundleIds": []},
+      "fallbackAction": {
+        "kind": "retry_later",
+        "summary": "Retry tracker write after refreshing coordination state.",
+        "command": null,
+        "manualStep": "Refresh Beads and Agent Mail before treating the tracker as authoritative."
+      },
+      "redaction": {"rawInboxIncluded": false, "rawLogIncluded": false, "secretScanApplied": true, "pathPolicy": "labels_only"},
+      "producer": {
+        "schema": "ee.producer.metadata.v1",
+        "sourceSystem": "coordination_fallback",
+        "identity": {"status": "unknown", "agentName": null, "harness": null, "model": null},
+        "run": {"runId": "coord-fallback-20260515-stale", "sessionId": null, "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"},
+        "observedAt": "2026-05-15T11:23:00Z"
+      }
+    },
+    {
+      "schema": "ee.coordination_fallback_evidence.v1",
+      "evidenceId": "coord_fallback_00000000000000000004",
+      "capturedAt": "2026-05-15T11:24:00Z",
+      "status": "unknown",
+      "source": {"kind": "file_reservation", "sourceId": "reservation-cache"},
+      "reasonCode": "file_reservation_owner_unknown",
+      "summary": {
+        "text": "File reservation ownership could not be confirmed, so the agent avoided writes and left a redacted handoff.",
+        "contentHash": "blake3:a4cd66068c64fa7420f53b52cb1d6a7f5ef0bc7b4d27613565d2415dd080a88e",
+        "redacted": true
+      },
+      "links": {"beadIds": ["bd-1zb7k.13.2"], "verificationIds": [], "supportBundleIds": []},
+      "fallbackAction": {
+        "kind": "manual_coordination",
+        "summary": "Ask the active agent to confirm ownership before editing shared files.",
+        "command": null,
+        "manualStep": "Send a targeted Agent Mail message to the suspected owner."
+      },
+      "redaction": {"rawInboxIncluded": false, "rawLogIncluded": false, "secretScanApplied": true, "pathPolicy": "labels_only"},
+      "producer": {
+        "schema": "ee.producer.metadata.v1",
+        "sourceSystem": "coordination_fallback",
+        "identity": {"status": "unknown", "agentName": null, "harness": null, "model": null},
+        "run": {"runId": "coord-fallback-20260515-unknown", "sessionId": null, "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"},
+        "observedAt": "2026-05-15T11:24:00Z"
+      }
+    }
+  ],
+  "x-ee-status": {
+    "shipped": false,
+    "tracking_bead": "bd-1zb7k.13.2",
+    "available_in_build": false,
+    "feature_flag": null,
+    "expected_version": "0.3.0"
+  },
+  "x-ee-doc": "docs/swarm/coordination_fallback_evidence.md"
+}

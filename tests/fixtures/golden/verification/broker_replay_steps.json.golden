@@ -1,0 +1,51 @@
+[
+  {
+    "agentName": "AgentB",
+    "commandFingerprint": {
+      "commandClass": "cargo_test",
+      "commandHash": "blake3:focused-command",
+      "normalizedArgvHash": "blake3:focused-argv"
+    },
+    "degradedSources": [],
+    "evidenceArtifactHash": "blake3:agent-a-artifact-manifest",
+    "firstFailureDiagnosis": "same_source_prior_nonzero_exit",
+    "firstFailureSummaryRef": {
+      "artifactManifestHash": "blake3:agent-a-artifact-manifest",
+      "rawOutputIncluded": false,
+      "retainedLogPathHash": "blake3:agent-a-retained-log-path",
+      "stderrExcerptHash": "blake3:first-failure-redacted"
+    },
+    "fixtureHash": "blake3:broker-replay-fixture-v1",
+    "fixtureId": "broker_replay_duplicate_build_prevention_v1",
+    "fixedClock": "2026-05-15T11:45:00Z",
+    "kind": "verification_broker_replay_step",
+    "matchedRunId": "vrun_agent_a_all_targets_blocker",
+    "reuseDecision": "known_blocker",
+    "schema": "ee.test_event.v1",
+    "stepId": "agent_b_focused_probe_same_tree",
+    "suggestedAction": "inspect_known_blocker",
+    "traceId": "trace-broker-replay-20260515"
+  },
+  {
+    "agentName": "AgentC",
+    "commandFingerprint": {
+      "commandClass": "cargo_check",
+      "commandHash": "blake3:all-targets-command",
+      "normalizedArgvHash": "blake3:all-targets-argv"
+    },
+    "degradedSources": [],
+    "evidenceArtifactHash": null,
+    "firstFailureDiagnosis": "source_changed_existing_command",
+    "firstFailureSummaryRef": null,
+    "fixtureHash": "blake3:broker-replay-fixture-v1",
+    "fixtureId": "broker_replay_duplicate_build_prevention_v1",
+    "fixedClock": "2026-05-15T11:45:00Z",
+    "kind": "verification_broker_replay_step",
+    "matchedRunId": "vrun_agent_a_all_targets_blocker",
+    "reuseDecision": "stale",
+    "schema": "ee.test_event.v1",
+    "stepId": "agent_c_all_targets_after_file_change",
+    "suggestedAction": "rerun_current_source",
+    "traceId": "trace-broker-replay-20260515"
+  }
+]

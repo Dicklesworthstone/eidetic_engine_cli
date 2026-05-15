@@ -1,0 +1,174 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.support_bundle.swarm_brief_summary.v1.json",
+  "title": "ee.support_bundle.swarm_brief_summary.v1",
+  "description": "Redacted support-bundle summary derived from ee.swarm.brief.v1.",
+  "type": "object",
+  "required": [
+    "schema",
+    "sourceSchema",
+    "source",
+    "status",
+    "redactionStatus",
+    "reportHash",
+    "workspaceHash",
+    "limits",
+    "counts",
+    "bv",
+    "sourceStatusCounts",
+    "sourceStatuses",
+    "resourcePressurePosture",
+    "degradedCodes",
+    "fileSurfaceRiskSummary",
+    "topRecommendations",
+    "provenance",
+    "redaction"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "ee.support_bundle.swarm_brief_summary.v1"},
+    "sourceSchema": {"const": "ee.swarm.brief.v1"},
+    "source": {"const": "read_only_swarm_brief_report"},
+    "status": {"type": "string"},
+    "redactionStatus": {"const": "counts_hashes_codes_ids_only_no_mail_body_no_raw_queries_no_file_listings"},
+    "reportHash": {"type": "string", "pattern": "^blake3:"},
+    "workspaceHash": {"type": "string", "pattern": "^blake3:"},
+    "limits": {"type": "object"},
+    "counts": {"type": "object"},
+    "bv": {"type": "object"},
+    "sourceStatusCounts": {"type": "object"},
+    "sourceStatuses": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "resourcePressurePosture": {"type": "string"},
+    "degradedCodes": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "fileSurfaceRiskSummary": {"$ref": "#/definitions/fileSurfaceRiskSummary"},
+    "topRecommendations": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "provenance": {"type": "object"},
+    "redaction": {"$ref": "#/definitions/redaction"}
+  },
+  "definitions": {
+    "stringArray": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "fileSurfaceRiskSummary": {
+      "type": "object",
+      "required": ["countsBySeverity", "countsByReservationHolder", "countsByGitStatus", "topRisks"],
+      "additionalProperties": false,
+      "properties": {
+        "countsBySeverity": {"type": "object"},
+        "countsByReservationHolder": {"type": "object"},
+        "countsByGitStatus": {"type": "object"},
+        "topRisks": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/topRisk"}
+        }
+      }
+    },
+    "topRisk": {
+      "type": "object",
+      "required": [
+        "pathHash",
+        "severity",
+        "score",
+        "riskFactors",
+        "reservationHolders",
+        "relatedBeadIds",
+        "suggestedCommandHashes",
+        "rawPathIncluded",
+        "rawCommandsIncluded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "pathHash": {"type": "string", "pattern": "^blake3:"},
+        "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+        "score": {"type": "integer", "minimum": 0},
+        "riskFactors": {"$ref": "#/definitions/stringArray"},
+        "reservationHolders": {"$ref": "#/definitions/stringArray"},
+        "relatedBeadIds": {"$ref": "#/definitions/stringArray"},
+        "suggestedCommandHashes": {"$ref": "#/definitions/stringArray"},
+        "rawPathIncluded": {"const": false},
+        "rawCommandsIncluded": {"const": false}
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "required": [
+        "rawMailBodiesIncluded",
+        "rawQueryTextIncluded",
+        "rawProvenanceTextIncluded",
+        "fullFileListingsIncluded",
+        "recommendationEvidenceIncluded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "rawMailBodiesIncluded": {"const": false},
+        "rawQueryTextIncluded": {"const": false},
+        "rawProvenanceTextIncluded": {"const": false},
+        "fullFileListingsIncluded": {"const": false},
+        "recommendationEvidenceIncluded": {"const": "hashes_only"}
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.support_bundle.swarm_brief_summary.v1",
+      "sourceSchema": "ee.swarm.brief.v1",
+      "source": "read_only_swarm_brief_report",
+      "status": "available",
+      "redactionStatus": "counts_hashes_codes_ids_only_no_mail_body_no_raw_queries_no_file_listings",
+      "reportHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+      "workspaceHash": "blake3:2222222222222222222222222222222222222222222222222222222222222222",
+      "limits": {"maxRecommendations": 5},
+      "counts": {"fileSurfaceRiskCount": 1, "activeReservationCount": 1, "dirtyFileCount": 1},
+      "bv": {"topPickIds": []},
+      "sourceStatusCounts": {"ready": 1},
+      "sourceStatuses": [],
+      "resourcePressurePosture": "low",
+      "degradedCodes": [],
+      "fileSurfaceRiskSummary": {
+        "countsBySeverity": {"medium": 1},
+        "countsByReservationHolder": {"OtherAgent": 1},
+        "countsByGitStatus": {"M": 1},
+        "topRisks": [
+          {
+            "pathHash": "blake3:3333333333333333333333333333333333333333333333333333333333333333",
+            "severity": "medium",
+            "score": 67,
+            "riskFactors": ["dirty_worktree_path", "active_exclusive_reservation"],
+            "reservationHolders": ["OtherAgent"],
+            "relatedBeadIds": ["bd-1zb7k.16.4"],
+            "suggestedCommandHashes": ["blake3:4444444444444444444444444444444444444444444444444444444444444444"],
+            "rawPathIncluded": false,
+            "rawCommandsIncluded": false
+          }
+        ]
+      },
+      "topRecommendations": [],
+      "provenance": {"underlyingReportHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111", "sideEffectFree": true, "sourceProvenance": []},
+      "redaction": {
+        "rawMailBodiesIncluded": false,
+        "rawQueryTextIncluded": false,
+        "rawProvenanceTextIncluded": false,
+        "fullFileListingsIncluded": false,
+        "recommendationEvidenceIncluded": "hashes_only"
+      }
+    }
+  ],
+  "x-ee-status": {
+    "shipped": false,
+    "tracking_bead": "bd-1zb7k.16.4",
+    "available_in_build": false,
+    "feature_flag": null,
+    "expected_version": "0.3.0"
+  },
+  "x-ee-doc": "docs/swarm/support_bundle_swarm_brief_summary.md"
+}

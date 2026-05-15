@@ -1,0 +1,121 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.verification.broker_view.v1.json",
+  "title": "ee.verification.broker_view.v1",
+  "description": "Redaction-safe operator view over existing verification run ledger records.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "beadId",
+    "status",
+    "matchedRunId",
+    "commandClass",
+    "commandHash",
+    "normalizedArgvHash",
+    "sourceTreeFingerprintClass",
+    "envFingerprintClass",
+    "targetProfile",
+    "executionSubstrate",
+    "rch",
+    "exitCode",
+    "finishedAt",
+    "compatibilityReasonCodes",
+    "staleReasonCodes",
+    "firstFailureSummaryRef",
+    "suggestedAction"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ee.verification.broker_view.v1" },
+    "beadId": { "type": ["string", "null"] },
+    "status": {
+      "type": "string",
+      "enum": [
+        "reusable",
+        "stale",
+        "incompatible",
+        "in_progress",
+        "known_blocker",
+        "unavailable"
+      ]
+    },
+    "matchedRunId": { "type": ["string", "null"] },
+    "commandClass": { "type": "string", "minLength": 1 },
+    "commandHash": { "type": "string", "minLength": 1 },
+    "normalizedArgvHash": { "type": "string", "minLength": 1 },
+    "sourceTreeFingerprintClass": { "type": "string", "minLength": 1 },
+    "envFingerprintClass": { "type": "string", "minLength": 1 },
+    "targetProfile": { "type": ["string", "null"] },
+    "executionSubstrate": { "type": "string", "minLength": 1 },
+    "rch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requiredRemote", "workerHost", "jobId"],
+      "properties": {
+        "requiredRemote": { "type": "boolean" },
+        "workerHost": { "type": ["string", "null"] },
+        "jobId": { "type": ["string", "null"] }
+      }
+    },
+    "exitCode": { "type": ["integer", "null"] },
+    "finishedAt": { "type": ["string", "null"] },
+    "compatibilityReasonCodes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "staleReasonCodes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "firstFailureSummaryRef": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": [
+        "stderrExcerptHash",
+        "artifactManifestHash",
+        "retainedLogPathHash",
+        "rawOutputIncluded"
+      ],
+      "properties": {
+        "stderrExcerptHash": { "type": ["string", "null"] },
+        "artifactManifestHash": { "type": ["string", "null"] },
+        "retainedLogPathHash": { "type": ["string", "null"] },
+        "rawOutputIncluded": { "type": "boolean", "const": false }
+      }
+    },
+    "suggestedAction": { "type": "string", "minLength": 1 }
+  },
+  "x-ee-status": {
+    "shipped": false,
+    "available_in_build": false,
+    "tracking_bead": "bd-6boyo.1"
+  },
+  "x-ee-doc": "docs/swarm/verification_broker_view.md",
+  "examples": [
+    {
+      "schema": "ee.verification.broker_view.v1",
+      "beadId": "bd-example",
+      "status": "reusable",
+      "matchedRunId": "vrun_rch_00000000000000000001",
+      "commandClass": "cargo_test",
+      "commandHash": "blake3:rch-command",
+      "normalizedArgvHash": "blake3:broker-argv",
+      "sourceTreeFingerprintClass": "blake3:source",
+      "envFingerprintClass": "class:external_cargo_target",
+      "targetProfile": "debug",
+      "executionSubstrate": "rch",
+      "rch": {"requiredRemote": true, "workerHost": "css", "jobId": null},
+      "exitCode": 0,
+      "finishedAt": "2026-05-15T05:00:42Z",
+      "compatibilityReasonCodes": [
+        "command_match",
+        "env_class_match",
+        "source_match",
+        "substrate_match"
+      ],
+      "staleReasonCodes": [],
+      "firstFailureSummaryRef": null,
+      "suggestedAction": "cite_existing_run"
+    }
+  ]
+}

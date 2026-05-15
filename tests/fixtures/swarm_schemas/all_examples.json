@@ -37,6 +37,26 @@
       "artifacts": [],
       "producer": {"schema": "ee.producer.metadata.v1", "sourceSystem": "verification", "identity": {"status": "unknown", "agentName": null, "harness": null, "model": null}, "run": {"runId": "verify-run-20260513", "sessionId": null, "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"}, "observedAt": "2026-05-13T00:00:00Z"}
     },
+    "ee.verification.broker_view.v1": {
+      "schema": "ee.verification.broker_view.v1",
+      "beadId": "bd-example",
+      "status": "reusable",
+      "matchedRunId": "vrun_rch_00000000000000000001",
+      "commandClass": "cargo_test",
+      "commandHash": "blake3:rch-command",
+      "normalizedArgvHash": "blake3:broker-argv",
+      "sourceTreeFingerprintClass": "blake3:source",
+      "envFingerprintClass": "class:external_cargo_target",
+      "targetProfile": "debug",
+      "executionSubstrate": "rch",
+      "rch": {"requiredRemote": true, "workerHost": "css", "jobId": null},
+      "exitCode": 0,
+      "finishedAt": "2026-05-15T05:00:42Z",
+      "compatibilityReasonCodes": ["command_match", "env_class_match", "source_match", "substrate_match"],
+      "staleReasonCodes": [],
+      "firstFailureSummaryRef": null,
+      "suggestedAction": "cite_existing_run"
+    },
     "ee.coordination_snapshot.v1": {
       "schema": "ee.coordination_snapshot.v1",
       "capturedAt": "2026-05-13T14:00:00Z",
@@ -56,6 +76,34 @@
           "degraded": []
         }
       ]
+    },
+    "ee.coordination_fallback_evidence.v1": {
+      "schema": "ee.coordination_fallback_evidence.v1",
+      "evidenceId": "coord_fallback_00000000000000000001",
+      "capturedAt": "2026-05-15T11:21:00Z",
+      "status": "blocked",
+      "source": {"kind": "rch", "sourceId": "rch-workers"},
+      "reasonCode": "rch_worker_topology_blocked",
+      "summary": {
+        "text": "Remote-required Cargo verification could not start because every configured RCH worker failed SSH probe; no local Cargo fallback was used.",
+        "contentHash": "blake3:7f5a79840ff5e4fa1dc9d54ec78f4f0557c2a73ad53b228f6b31fd6383365f85",
+        "redacted": true
+      },
+      "links": {"beadIds": ["bd-1zb7k.13.2"], "verificationIds": [], "supportBundleIds": []},
+      "fallbackAction": {
+        "kind": "beads_comment",
+        "summary": "Record the blocked RCH posture and continue with static-only work until remote workers recover.",
+        "command": "br comment bd-1zb7k.13.2 \"RCH remote verification blocked; static evidence only\"",
+        "manualStep": null
+      },
+      "redaction": {"rawInboxIncluded": false, "rawLogIncluded": false, "secretScanApplied": true, "pathPolicy": "labels_only"},
+      "producer": {
+        "schema": "ee.producer.metadata.v1",
+        "sourceSystem": "coordination_fallback",
+        "identity": {"status": "unknown", "agentName": null, "harness": null, "model": null},
+        "run": {"runId": "coord-fallback-20260515", "sessionId": null, "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"},
+        "observedAt": "2026-05-15T11:21:00Z"
+      }
     },
     "ee.resource.profile.v1": {
       "schema": "ee.resource.profile.v1",
@@ -159,6 +207,80 @@
       "memoryIds": ["mem_00000000000000000000010001", "mem_00000000000000000000010002"],
       "packHash": "pack_00000000000000000000010001",
       "createdAt": "2026-05-13T14:00:00Z"
+    },
+    "ee.swarm.brief.v1": {
+      "schema": "ee.swarm.brief.v1",
+      "workspace": "[REDACTED:path]",
+      "redactionStatus": "paths_counts_subjects_only_no_content",
+      "sources": [],
+      "dirtyFiles": [{"path": "src/core/swarm_brief.rs", "status": "M"}],
+      "recentCommits": [],
+      "beads": {"ready": [], "blocked": [], "inProgress": [], "deferred": []},
+      "bv": null,
+      "fileReservations": [{"pathPattern": "src/core/swarm_brief.rs", "holder": "OtherAgent", "exclusive": true, "expiresAt": "2026-05-15T16:00:00Z"}],
+      "fileSurfaceRisks": [
+        {
+          "pathPattern": "src/core/swarm_brief.rs",
+          "gitStatusBuckets": ["M"],
+          "reservationHolders": ["OtherAgent"],
+          "relatedBeadIds": ["bd-1zb7k.16.4"],
+          "severity": "medium",
+          "score": 67,
+          "riskFactors": ["dirty_worktree_path", "active_exclusive_reservation"],
+          "evidence": ["git_status:M:src/core/swarm_brief.rs", "agent_mail_reservation:OtherAgent:src/core/swarm_brief.rs"],
+          "suggestedCommands": ["message OtherAgent before editing src/core/swarm_brief.rs"]
+        }
+      ],
+      "inbox": [],
+      "threads": [],
+      "resourcePressure": [],
+      "hostProfile": null,
+      "agentInventory": null,
+      "recommendations": [],
+      "degraded": []
+    },
+    "ee.support_bundle.swarm_brief_summary.v1": {
+      "schema": "ee.support_bundle.swarm_brief_summary.v1",
+      "sourceSchema": "ee.swarm.brief.v1",
+      "source": "read_only_swarm_brief_report",
+      "status": "available",
+      "redactionStatus": "counts_hashes_codes_ids_only_no_mail_body_no_raw_queries_no_file_listings",
+      "reportHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+      "workspaceHash": "blake3:2222222222222222222222222222222222222222222222222222222222222222",
+      "limits": {"maxRecommendations": 5},
+      "counts": {"fileSurfaceRiskCount": 1, "activeReservationCount": 1, "dirtyFileCount": 1},
+      "bv": {"topPickIds": []},
+      "sourceStatusCounts": {"ready": 1},
+      "sourceStatuses": [],
+      "resourcePressurePosture": "low",
+      "degradedCodes": [],
+      "fileSurfaceRiskSummary": {
+        "countsBySeverity": {"medium": 1},
+        "countsByReservationHolder": {"OtherAgent": 1},
+        "countsByGitStatus": {"M": 1},
+        "topRisks": [
+          {
+            "pathHash": "blake3:3333333333333333333333333333333333333333333333333333333333333333",
+            "severity": "medium",
+            "score": 67,
+            "riskFactors": ["dirty_worktree_path", "active_exclusive_reservation"],
+            "reservationHolders": ["OtherAgent"],
+            "relatedBeadIds": ["bd-1zb7k.16.4"],
+            "suggestedCommandHashes": ["blake3:4444444444444444444444444444444444444444444444444444444444444444"],
+            "rawPathIncluded": false,
+            "rawCommandsIncluded": false
+          }
+        ]
+      },
+      "topRecommendations": [],
+      "provenance": {"underlyingReportHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111", "sideEffectFree": true, "sourceProvenance": []},
+      "redaction": {
+        "rawMailBodiesIncluded": false,
+        "rawQueryTextIncluded": false,
+        "rawProvenanceTextIncluded": false,
+        "fullFileListingsIncluded": false,
+        "recommendationEvidenceIncluded": "hashes_only"
+      }
     },
     "ee.swarm.recommendation.v1": {
       "id": "swarm_brief_agent_mail_unavailable",

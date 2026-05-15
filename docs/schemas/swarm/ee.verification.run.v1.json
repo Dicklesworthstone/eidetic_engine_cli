@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.verification.run.v1.json",
+  "title": "ee.verification.run.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "runId",
+    "beadId",
+    "agentName",
+    "sourceHash",
+    "commandHash",
+    "commandArgvHash",
+    "cargoTargetDirHashOrClass",
+    "executionSubstrate",
+    "workerHost",
+    "startedAt",
+    "finishedAt",
+    "exitCode",
+    "stdoutHash",
+    "stderrExcerptHash",
+    "artifactManifestHash",
+    "retainedLogPathHash",
+    "provenance"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ee.verification.run.v1" },
+    "runId": { "type": "string", "pattern": "^vrun_[A-Za-z0-9_:-]+$" },
+    "beadId": { "type": ["string", "null"] },
+    "agentName": { "type": ["string", "null"] },
+    "sourceHash": { "type": ["string", "null"] },
+    "commandHash": { "type": "string" },
+    "commandArgvHash": { "type": "string" },
+    "cargoTargetDirHashOrClass": { "type": ["string", "null"] },
+    "executionSubstrate": { "type": "string" },
+    "workerHost": { "type": ["string", "null"] },
+    "startedAt": { "type": ["string", "null"] },
+    "finishedAt": { "type": ["string", "null"] },
+    "exitCode": { "type": ["integer", "null"] },
+    "stdoutHash": { "type": ["string", "null"] },
+    "stderrExcerptHash": { "type": ["string", "null"] },
+    "artifactManifestHash": { "type": ["string", "null"] },
+    "retainedLogPathHash": { "type": ["string", "null"] },
+    "provenance": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "eventKind", "line"],
+        "properties": {
+          "source": { "type": "string" },
+          "eventKind": { "type": "string" },
+          "line": { "type": ["integer", "null"], "minimum": 1 }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,164 @@
+{
+  "schema": "ee.swarm.ownership_posture_cases.v1",
+  "payloadSchemas": [
+    "ee.swarm.brief.v1",
+    "ee.support_bundle.swarm_brief_summary.v1"
+  ],
+  "redactionPolicy": {
+    "allowed": [
+      "path_patterns",
+      "reservation_subjects",
+      "counts",
+      "bead_ids",
+      "status_buckets",
+      "risk_codes",
+      "path_hashes",
+      "command_hashes"
+    ],
+    "forbidden": [
+      "mail_bodies",
+      "raw_logs",
+      "raw_memory_content",
+      "env_dumps",
+      "file_contents",
+      "secret_like_tokens"
+    ]
+  },
+  "cases": [
+    {
+      "id": "healthy_clean_checkout",
+      "category": "healthy",
+      "description": "All coordination sources are available and no dirty, reserved, or bead-linked file surface needs intervention.",
+      "fullOutput": {
+        "schema": "ee.swarm.brief.v1",
+        "redactionStatus": "paths_counts_subjects_only_no_content",
+        "sourceStatuses": {"git": "ready", "agent_mail": "ready", "beads": "ready"},
+        "fileSurfaceRisks": [],
+        "degraded": []
+      },
+      "compactSummary": {
+        "schema": "ee.support_bundle.swarm_brief_summary.v1",
+        "redactionStatus": "counts_hashes_codes_ids_only_no_mail_body_no_raw_queries_no_file_listings",
+        "counts": {"fileSurfaceRiskCount": 0, "activeConflictCount": 0},
+        "fileSurfaceRiskSummary": {
+          "countsBySeverity": {},
+          "countsByReservationHolder": {},
+          "countsByGitStatus": {},
+          "topRisks": []
+        },
+        "redaction": {
+          "rawMailBodiesIncluded": false,
+          "rawQueryTextIncluded": false,
+          "rawProvenanceTextIncluded": false,
+          "fullFileListingsIncluded": false
+        }
+      }
+    },
+    {
+      "id": "agent_mail_degraded_dirty_overlap",
+      "category": "degraded_source",
+      "description": "Agent Mail is unavailable, but git and Beads still expose a dirty path that overlaps ready work.",
+      "fullOutput": {
+        "schema": "ee.swarm.brief.v1",
+        "redactionStatus": "paths_counts_subjects_only_no_content",
+        "sourceStatuses": {"git": "ready", "agent_mail": "unavailable", "beads": "ready"},
+        "fileSurfaceRisks": [
+          {
+            "pathPattern": "src/core/swarm_brief.rs",
+            "gitStatusBuckets": ["M"],
+            "reservationHolders": [],
+            "relatedBeadIds": ["bd-1zb7k.16.4"],
+            "severity": "medium",
+            "score": 52,
+            "riskFactors": ["dirty_worktree_path", "dirty_bead_overlap"],
+            "evidence": ["git_status:M:src/core/swarm_brief.rs", "bead:bd-1zb7k.16.4:ready"],
+            "suggestedCommands": ["git status --short -- src/core/swarm_brief.rs", "br show bd-1zb7k.16.4 --json"]
+          }
+        ],
+        "degraded": [{"code": "agent_mail_unavailable", "severity": "warning"}]
+      },
+      "compactSummary": {
+        "schema": "ee.support_bundle.swarm_brief_summary.v1",
+        "redactionStatus": "counts_hashes_codes_ids_only_no_mail_body_no_raw_queries_no_file_listings",
+        "counts": {"fileSurfaceRiskCount": 1, "activeConflictCount": 0},
+        "fileSurfaceRiskSummary": {
+          "countsBySeverity": {"medium": 1},
+          "countsByReservationHolder": {},
+          "countsByGitStatus": {"M": 1},
+          "topRisks": [
+            {
+              "pathHash": "blake3:3333333333333333333333333333333333333333333333333333333333333333",
+              "severity": "medium",
+              "score": 52,
+              "riskFactors": ["dirty_worktree_path", "dirty_bead_overlap"],
+              "reservationHolders": [],
+              "relatedBeadIds": ["bd-1zb7k.16.4"],
+              "suggestedCommandHashes": ["blake3:4444444444444444444444444444444444444444444444444444444444444444"],
+              "rawPathIncluded": false,
+              "rawCommandsIncluded": false
+            }
+          ]
+        },
+        "redaction": {
+          "rawMailBodiesIncluded": false,
+          "rawQueryTextIncluded": false,
+          "rawProvenanceTextIncluded": false,
+          "fullFileListingsIncluded": false
+        }
+      }
+    },
+    {
+      "id": "unattributed_compile_blocker",
+      "category": "unattributed_blocker",
+      "description": "A compile-blocking path is dirty but has no active reservation holder or related Bead ID.",
+      "fullOutput": {
+        "schema": "ee.swarm.brief.v1",
+        "redactionStatus": "paths_counts_subjects_only_no_content",
+        "sourceStatuses": {"git": "ready", "agent_mail": "ready", "beads": "ready"},
+        "fileSurfaceRisks": [
+          {
+            "pathPattern": "src/cli/mod.rs",
+            "gitStatusBuckets": ["M"],
+            "reservationHolders": [],
+            "relatedBeadIds": [],
+            "severity": "medium",
+            "score": 25,
+            "riskFactors": ["dirty_worktree_path"],
+            "evidence": ["git_status:M:src/cli/mod.rs"],
+            "suggestedCommands": ["git status --short -- src/cli/mod.rs", "search Agent Mail and Beads before editing this surface"]
+          }
+        ],
+        "degraded": []
+      },
+      "compactSummary": {
+        "schema": "ee.support_bundle.swarm_brief_summary.v1",
+        "redactionStatus": "counts_hashes_codes_ids_only_no_mail_body_no_raw_queries_no_file_listings",
+        "counts": {"fileSurfaceRiskCount": 1, "activeConflictCount": 0},
+        "fileSurfaceRiskSummary": {
+          "countsBySeverity": {"medium": 1},
+          "countsByReservationHolder": {},
+          "countsByGitStatus": {"M": 1},
+          "topRisks": [
+            {
+              "pathHash": "blake3:5555555555555555555555555555555555555555555555555555555555555555",
+              "severity": "medium",
+              "score": 25,
+              "riskFactors": ["dirty_worktree_path"],
+              "reservationHolders": [],
+              "relatedBeadIds": [],
+              "suggestedCommandHashes": ["blake3:6666666666666666666666666666666666666666666666666666666666666666"],
+              "rawPathIncluded": false,
+              "rawCommandsIncluded": false
+            }
+          ]
+        },
+        "redaction": {
+          "rawMailBodiesIncluded": false,
+          "rawQueryTextIncluded": false,
+          "rawProvenanceTextIncluded": false,
+          "fullFileListingsIncluded": false
+        }
+      }
+    }
+  ]
+}

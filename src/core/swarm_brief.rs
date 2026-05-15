@@ -31,6 +31,9 @@ const AGENT_MAIL_UNAVAILABLE_CODE: &str = "agent_mail_unavailable";
 const RCH_UNAVAILABLE_CODE: &str = "rch_unavailable";
 const RCH_WORKER_TOPOLOGY_BLOCKED_CODE: &str = "rch_worker_topology_blocked";
 const RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE: &str = "rch_remote_required_fallback_prevented";
+const RCH_POSTURE_REMOTE_READY: &str = "remote_ready";
+const RCH_POSTURE_NO_REMOTE_WORKERS: &str = "no_remote_workers";
+const RCH_POSTURE_WORKER_UNREACHABLE: &str = "worker_unreachable";
 const AGENT_STATUS_UNAVAILABLE_CODE: &str = "agent_status_unavailable";
 const MAX_SWARM_BRIEF_SUMMARY_RECOMMENDATIONS: usize = 5;
 
@@ -107,6 +110,8 @@ pub struct SwarmBriefReport {
     pub inbox: Vec<SwarmBriefInboxSummary>,
     pub threads: Vec<SwarmBriefThreadSummary>,
     pub resource_pressure: Vec<SwarmBriefResourcePressureHint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rch_local_capability: Option<RchLocalCapabilityReport>,
     pub host_profile: Option<SwarmBriefHostProfileSummary>,
     pub agent_inventory: Option<SwarmBriefAgentInventorySummary>,
     pub recommendations: Vec<SwarmBriefRecommendation>,
@@ -130,6 +135,7 @@ impl SwarmBriefReport {
             inbox: Vec::new(),
             threads: Vec::new(),
             resource_pressure: Vec::new(),
+            rch_local_capability: None,
             host_profile: None,
             agent_inventory: None,
             recommendations: Vec::new(),
@@ -467,10 +473,14 @@ pub struct SwarmBriefFileReservation {
 #[serde(rename_all = "camelCase")]
 pub struct SwarmBriefFileSurfaceRisk {
     pub path_pattern: String,
+    pub git_status_buckets: Vec<String>,
+    pub reservation_holders: Vec<String>,
+    pub related_bead_ids: Vec<String>,
     pub severity: String,
     pub score: u16,
     pub risk_factors: Vec<String>,
     pub evidence: Vec<String>,
+    pub suggested_commands: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -525,6 +535,49 @@ pub struct SwarmBriefAgentInventorySummary {
     pub status: String,
     pub detected_count: usize,
     pub total_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RchCodexHookCapability {
+    pub installed: bool,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RchWorkerProbeSummary {
+    pub healthy_count: u64,
+    pub failed_count: u64,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RchQueueHealth {
+    pub queued_count: u64,
+    pub active_count: u64,
+    pub slots_available: Option<u64>,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RchLocalCapabilityReport {
+    pub schema: &'static str,
+    pub cli_version: Option<String>,
+    pub direct_exec_available: bool,
+    pub codex_hook: RchCodexHookCapability,
+    pub daemon_status_socket: Option<String>,
+    pub status_socket_consistent: Option<bool>,
+    pub dry_run_would_offload: Option<bool>,
+    pub worker_probe_summary: RchWorkerProbeSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_health: Option<RchQueueHealth>,
+    pub remote_only_required: bool,
+    pub remote_only_safe: bool,
+    pub degraded: Vec<SwarmBriefDegradation>,
+    pub recovery: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -681,7 +734,10 @@ pub enum SwarmBriefContribution {
         inbox: Vec<SwarmBriefInboxSummary>,
         threads: Vec<SwarmBriefThreadSummary>,
     },
-    Rch(Vec<SwarmBriefResourcePressureHint>),
+    Rch {
+        resource_pressure: Vec<SwarmBriefResourcePressureHint>,
+        local_capability: Option<RchLocalCapabilityReport>,
+    },
     HostProfile(SwarmBriefHostProfileSummary),
     AgentInventory(SwarmBriefAgentInventorySummary),
 }
@@ -902,18 +958,19 @@ fn collect_beads_freshness<R: SwarmBriefCommandRunner>(
     ];
     match runner.run("br", &args, &options.workspace, options.command_timeout_ms) {
         Ok(output) => match parse_beads_sync_status_json(&output.stdout) {
-            Ok(status) if status.jsonl_newer && !status.db_newer => {
+            Ok(status) if status.jsonl_newer || status.db_newer => {
                 *freshness = SwarmBriefSourceFreshness {
-                    observed_at: status.last_import_time,
+                    observed_at: status.last_import_time.clone(),
                     age_seconds: None,
                     stale_after_seconds: None,
                     state: "stale",
                 };
+                let (message, repair) = beads_tracker_stale_message_and_repair(&status);
                 vec![SwarmBriefDegradation::warning(
                     SwarmBriefSourceKind::Beads,
                     BEADS_TRACKER_STALE_CODE,
-                    "Beads JSONL is newer than the local database; bucket reads may lag coordination history.",
-                    Some("br sync --import-only".to_string()),
+                    message,
+                    Some(repair.to_string()),
                 )]
             }
             Ok(_) => Vec::new(),
@@ -929,6 +986,27 @@ fn collect_beads_freshness<R: SwarmBriefCommandRunner>(
             BEADS_UNAVAILABLE_CODE,
             "br sync --status --json --no-auto-import --allow-stale",
         )],
+    }
+}
+
+fn beads_tracker_stale_message_and_repair(
+    status: &BeadsSyncStatus,
+) -> (&'static str, &'static str) {
+    if status.jsonl_newer && status.db_newer {
+        (
+            "Beads database and JSONL both report unmerged changes; tracker freshness is ambiguous.",
+            "br sync --status --json --no-auto-import --allow-stale",
+        )
+    } else if status.db_newer {
+        (
+            "Beads database is newer than JSONL; exported tracker files may lag coordination history.",
+            "br sync --flush-only",
+        )
+    } else {
+        (
+            "Beads JSONL is newer than the local database; bucket reads may lag coordination history.",
+            "br sync --import-only",
+        )
     }
 }
 
@@ -1128,10 +1206,16 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for RchSourceAdapter<'_
             };
         }
 
-        match self
+        let status = self
             .runner
-            .run("rch", &args, &options.workspace, options.command_timeout_ms)
-        {
+            .run("rch", &args, &options.workspace, options.command_timeout_ms);
+        let capability = collect_rch_local_capability_snapshot(
+            self.runner,
+            options,
+            status.as_ref().ok().map(|output| output.stdout.as_str()),
+        );
+
+        match status {
             Ok(output) => match parse_rch_status_json(&output.stdout) {
                 Ok(hints) => {
                     let item_count = hints.len();
@@ -1141,7 +1225,10 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for RchSourceAdapter<'_
                             provenance,
                             item_count,
                         ),
-                        contribution: SwarmBriefContribution::Rch(hints),
+                        contribution: SwarmBriefContribution::Rch {
+                            resource_pressure: hints,
+                            local_capability: capability,
+                        },
                     }
                 }
                 Err(message) => {
@@ -1157,7 +1244,10 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for RchSourceAdapter<'_
                             provenance,
                             degradation,
                         ),
-                        contribution: SwarmBriefContribution::None,
+                        contribution: SwarmBriefContribution::Rch {
+                            resource_pressure: Vec::new(),
+                            local_capability: capability,
+                        },
                     }
                 }
             },
@@ -1169,7 +1259,10 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for RchSourceAdapter<'_
                         provenance,
                         degradation,
                     ),
-                    contribution: SwarmBriefContribution::None,
+                    contribution: SwarmBriefContribution::Rch {
+                        resource_pressure: Vec::new(),
+                        local_capability: capability,
+                    },
                 }
             }
         }
@@ -1402,7 +1495,15 @@ fn apply_source_output(report: &mut SwarmBriefReport, output: SwarmBriefSourceOu
             report.inbox.extend(inbox);
             report.threads.extend(threads);
         }
-        SwarmBriefContribution::Rch(hints) => report.resource_pressure.extend(hints),
+        SwarmBriefContribution::Rch {
+            resource_pressure,
+            local_capability,
+        } => {
+            report.resource_pressure.extend(resource_pressure);
+            if let Some(capability) = local_capability {
+                attach_rch_local_capability(report, capability);
+            }
+        }
         SwarmBriefContribution::HostProfile(summary) => {
             report.host_profile = Some(summary);
         }
@@ -1410,6 +1511,48 @@ fn apply_source_output(report: &mut SwarmBriefReport, output: SwarmBriefSourceOu
             report.agent_inventory = Some(summary);
         }
     }
+}
+
+pub fn attach_rch_local_capability(
+    report: &mut SwarmBriefReport,
+    capability: RchLocalCapabilityReport,
+) {
+    let degraded = capability.degraded.clone();
+    let status = if capability.remote_only_safe {
+        SwarmBriefSourceStatus::Ready
+    } else {
+        SwarmBriefSourceStatus::Degraded
+    };
+
+    match report
+        .sources
+        .iter_mut()
+        .find(|snapshot| snapshot.source == SwarmBriefSourceKind::Rch)
+    {
+        Some(snapshot) => {
+            snapshot.item_count = snapshot.item_count.saturating_add(1);
+            snapshot.degraded.extend(degraded.clone());
+            snapshot.degraded.sort();
+            snapshot.degraded.dedup();
+            if !capability.remote_only_safe && snapshot.status == SwarmBriefSourceStatus::Ready {
+                snapshot.status = SwarmBriefSourceStatus::Degraded;
+            }
+        }
+        None => {
+            report.sources.push(SwarmBriefSourceSnapshot {
+                source: SwarmBriefSourceKind::Rch,
+                status,
+                freshness: SwarmBriefSourceFreshness::current(),
+                provenance: SwarmBriefSourceProvenance::local_probe(),
+                item_count: 1,
+                degraded: degraded.clone(),
+            });
+        }
+    }
+    report.degraded.extend(degraded);
+    report.degraded.sort();
+    report.degraded.dedup();
+    report.rch_local_capability = Some(capability);
 }
 
 /// Derive deterministic, read-only advisory records from collected sources.
@@ -1504,6 +1647,7 @@ pub fn summarize_swarm_brief_report(report: &SwarmBriefReport) -> Value {
         "sourceStatuses": swarm_brief_source_status_summaries(report),
         "resourcePressurePosture": swarm_brief_resource_pressure_posture(report),
         "degradedCodes": degraded_codes,
+        "fileSurfaceRiskSummary": swarm_brief_file_surface_risk_summary(report),
         "topRecommendations": swarm_brief_summary_recommendations(report),
         "provenance": {
             "underlyingReportHash": report_hash,
@@ -1683,6 +1827,52 @@ fn swarm_brief_resource_pressure_posture(report: &SwarmBriefReport) -> &'static 
     "low"
 }
 
+fn swarm_brief_file_surface_risk_summary(report: &SwarmBriefReport) -> Value {
+    let mut counts_by_severity = BTreeMap::<String, usize>::new();
+    let mut counts_by_holder = BTreeMap::<String, usize>::new();
+    let mut counts_by_git_status = BTreeMap::<String, usize>::new();
+    for risk in &report.file_surface_risks {
+        *counts_by_severity.entry(risk.severity.clone()).or_default() += 1;
+        for holder in &risk.reservation_holders {
+            *counts_by_holder.entry(holder.clone()).or_default() += 1;
+        }
+        for status in &risk.git_status_buckets {
+            *counts_by_git_status.entry(status.clone()).or_default() += 1;
+        }
+    }
+
+    let mut top_risks = report.file_surface_risks.iter().collect::<Vec<_>>();
+    top_risks.sort_by(|left, right| {
+        recommendation_severity_rank(&right.severity)
+            .cmp(&recommendation_severity_rank(&left.severity))
+            .then_with(|| right.score.cmp(&left.score))
+            .then_with(|| left.path_pattern.cmp(&right.path_pattern))
+    });
+
+    json!({
+        "countsBySeverity": counts_by_severity,
+        "countsByReservationHolder": counts_by_holder,
+        "countsByGitStatus": counts_by_git_status,
+        "topRisks": top_risks
+            .into_iter()
+            .take(MAX_SWARM_BRIEF_SUMMARY_RECOMMENDATIONS)
+            .map(|risk| {
+                json!({
+                    "pathHash": blake3_summary_hash(&risk.path_pattern),
+                    "severity": risk.severity.clone(),
+                    "score": risk.score,
+                    "riskFactors": risk.risk_factors.clone(),
+                    "reservationHolders": risk.reservation_holders.clone(),
+                    "relatedBeadIds": risk.related_bead_ids.clone(),
+                    "suggestedCommandHashes": risk.suggested_commands.iter().map(|value| blake3_summary_hash(value)).collect::<Vec<_>>(),
+                    "rawPathIncluded": false,
+                    "rawCommandsIncluded": false,
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
 fn swarm_brief_summary_recommendations(report: &SwarmBriefReport) -> Vec<Value> {
     let mut recommendations = report.recommendations.iter().collect::<Vec<_>>();
     recommendations.sort_by(|left, right| {
@@ -1765,11 +1955,17 @@ struct SurfaceObservation {
     factor: String,
     evidence: String,
     score: u16,
+    git_status_bucket: Option<String>,
+    reservation_holder: Option<String>,
+    related_bead_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct SurfaceRiskBuilder {
     score: u16,
+    git_status_buckets: BTreeSet<String>,
+    reservation_holders: BTreeSet<String>,
+    related_bead_ids: BTreeSet<String>,
     risk_factors: BTreeSet<String>,
     evidence: BTreeSet<String>,
 }
@@ -1781,13 +1977,38 @@ impl SurfaceRiskBuilder {
         self.evidence.insert(redact_brief_text(&evidence.into()));
     }
 
+    fn add_observation(&mut self, observation: &SurfaceObservation) {
+        if let Some(status) = &observation.git_status_bucket {
+            self.git_status_buckets.insert(redact_brief_text(status));
+        }
+        if let Some(holder) = &observation.reservation_holder {
+            self.reservation_holders.insert(redact_brief_text(holder));
+        }
+        if let Some(bead_id) = &observation.related_bead_id {
+            self.related_bead_ids.insert(redact_brief_text(bead_id));
+        }
+    }
+
     fn build(self, path_pattern: String) -> SwarmBriefFileSurfaceRisk {
+        let git_status_buckets = self.git_status_buckets.into_iter().collect::<Vec<_>>();
+        let reservation_holders = self.reservation_holders.into_iter().collect::<Vec<_>>();
+        let related_bead_ids = self.related_bead_ids.into_iter().collect::<Vec<_>>();
+        let suggested_commands = suggested_file_surface_commands(
+            &path_pattern,
+            &git_status_buckets,
+            &reservation_holders,
+            &related_bead_ids,
+        );
         SwarmBriefFileSurfaceRisk {
             path_pattern,
+            git_status_buckets,
+            reservation_holders,
+            related_bead_ids,
             severity: severity_for_score(self.score).to_string(),
             score: self.score,
             risk_factors: self.risk_factors.into_iter().collect(),
             evidence: self.evidence.into_iter().collect(),
+            suggested_commands,
         }
     }
 }
@@ -1797,11 +2018,13 @@ fn score_file_surface_risks(report: &SwarmBriefReport) -> Vec<SwarmBriefFileSurf
     let mut risks = BTreeMap::<String, SurfaceRiskBuilder>::new();
 
     for observation in &observations {
-        risks.entry(observation.pattern.clone()).or_default().add(
+        let risk = risks.entry(observation.pattern.clone()).or_default();
+        risk.add(
             observation.factor.clone(),
             observation.evidence.clone(),
             observation.score,
         );
+        risk.add_observation(observation);
     }
 
     for (index, left) in observations.iter().enumerate() {
@@ -1815,10 +2038,10 @@ fn score_file_surface_risks(report: &SwarmBriefReport) -> Vec<SwarmBriefFileSurf
                     observation_label(left),
                     observation_label(right)
                 );
-                risks
-                    .entry(pattern)
-                    .or_default()
-                    .add(factor, evidence, score);
+                let risk = risks.entry(pattern).or_default();
+                risk.add(factor, evidence, score);
+                risk.add_observation(left);
+                risk.add_observation(right);
             }
         }
     }
@@ -1847,6 +2070,9 @@ fn collect_surface_observations(report: &SwarmBriefReport) -> Vec<SurfaceObserva
             factor: "dirty_worktree_path".to_string(),
             evidence: format!("git_status:{}:{}", file.status, file.path),
             score: 25,
+            git_status_bucket: Some(file.status.clone()),
+            reservation_holder: None,
+            related_bead_id: None,
         });
     }
 
@@ -1865,6 +2091,9 @@ fn collect_surface_observations(report: &SwarmBriefReport) -> Vec<SurfaceObserva
                 reservation.holder, reservation.path_pattern
             ),
             score: if reservation.exclusive { 35 } else { 20 },
+            git_status_bucket: None,
+            reservation_holder: Some(reservation.holder.clone()),
+            related_bead_id: None,
         });
     }
 
@@ -1876,6 +2105,9 @@ fn collect_surface_observations(report: &SwarmBriefReport) -> Vec<SurfaceObserva
                 factor: format!("{}_bead_likely_surface", bead.source_bucket),
                 evidence: format!("bead:{}:{}:{}", bead.id, bead.source_bucket, bead.title),
                 score: 12,
+                git_status_bucket: None,
+                reservation_holder: None,
+                related_bead_id: Some(bead.id.clone()),
             });
         }
     }
@@ -1888,6 +2120,9 @@ fn collect_surface_observations(report: &SwarmBriefReport) -> Vec<SurfaceObserva
                 factor: "recent_commit_likely_surface".to_string(),
                 evidence: format!("git_commit:{}:{}", commit.hash, commit.subject),
                 score: 5,
+                git_status_bucket: None,
+                reservation_holder: None,
+                related_bead_id: None,
             });
         }
     }
@@ -1899,6 +2134,31 @@ fn collect_surface_observations(report: &SwarmBriefReport) -> Vec<SurfaceObserva
             .then_with(|| left.evidence.cmp(&right.evidence))
     });
     observations
+}
+
+fn suggested_file_surface_commands(
+    path_pattern: &str,
+    git_status_buckets: &[String],
+    reservation_holders: &[String],
+    related_bead_ids: &[String],
+) -> Vec<String> {
+    let mut commands = BTreeSet::new();
+    if !git_status_buckets.is_empty() {
+        commands.insert(format!("git status --short -- {path_pattern}"));
+    }
+    if !reservation_holders.is_empty() {
+        commands.insert(format!(
+            "message {} before editing {path_pattern}",
+            reservation_holders.join(",")
+        ));
+    }
+    for bead_id in related_bead_ids.iter().take(3) {
+        commands.insert(format!("br show {bead_id} --json"));
+    }
+    if reservation_holders.is_empty() && related_bead_ids.is_empty() {
+        commands.insert("search Agent Mail and Beads before editing this surface".to_string());
+    }
+    commands.into_iter().collect()
 }
 
 fn overlap_risk_factors(
@@ -2017,6 +2277,7 @@ fn degraded_capability_recommendations(report: &SwarmBriefReport) -> Vec<SwarmBr
         }
 
         for degradation in degradations {
+            let must_not_do = degraded_recommendation_must_not_do(source, &degradation.code);
             recommendations.push(SwarmBriefRecommendation {
                 id: format!("rec.degraded.{}.{}", source.as_str(), degradation.code),
                 kind: "degraded_capability".to_string(),
@@ -2040,14 +2301,32 @@ fn degraded_capability_recommendations(report: &SwarmBriefReport) -> Vec<SwarmBr
                         .clone()
                         .unwrap_or_else(|| default_source_repair(source).to_string()),
                 ],
-                must_not_do: vec![format!(
-                    "Do not treat degraded {} data as complete evidence.",
-                    source.as_str()
-                )],
+                must_not_do,
             });
         }
     }
     recommendations
+}
+
+fn degraded_recommendation_must_not_do(source: SwarmBriefSourceKind, code: &str) -> Vec<String> {
+    let mut must_not_do = vec![format!(
+        "Do not treat degraded {} data as complete evidence.",
+        source.as_str()
+    )];
+    if source == SwarmBriefSourceKind::Rch && code == RCH_WORKER_TOPOLOGY_BLOCKED_CODE {
+        must_not_do.push(
+            "Do not close beads requiring remote Cargo evidence from a topology-blocked RCH attempt; obtain an alternate remote pass or record the blocked posture."
+                .to_string(),
+        );
+    } else if source == SwarmBriefSourceKind::Rch
+        && code == RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE
+    {
+        must_not_do.push(
+            "Do not unset RCH_REQUIRE_REMOTE or count local Cargo output without explicit user approval."
+                .to_string(),
+        );
+    }
+    must_not_do
 }
 
 fn resource_pressure_recommendations(report: &SwarmBriefReport) -> Vec<SwarmBriefRecommendation> {
@@ -2874,9 +3153,35 @@ fn parse_thread_summary(item: &Value) -> Option<SwarmBriefThreadSummary> {
 pub fn parse_rch_status_json(input: &str) -> Result<Vec<SwarmBriefResourcePressureHint>, String> {
     let value = serde_json::from_str::<Value>(input)
         .map_err(|error| format!("RCH status JSON could not be parsed: {error}"))?;
-    let queue_depth = numeric_field(&value, &["queue_depth", "queueDepth", "queued"]);
-    let active_builds = numeric_field(&value, &["active_builds", "activeBuilds", "running"]);
+    let queue_depth = numeric_field_any(&value, &["queue_depth", "queueDepth", "queued"]);
+    let active_builds = numeric_field_any(&value, &["active_builds", "activeBuilds", "running"]);
     let mut hints = Vec::new();
+    if let Some(posture) = rch_remote_posture(&value) {
+        let level = if posture == RCH_POSTURE_REMOTE_READY {
+            "low"
+        } else {
+            "high"
+        };
+        hints.push(SwarmBriefResourcePressureHint {
+            source: SwarmBriefSourceKind::Rch,
+            level: level.to_string(),
+            message: format!("rch remote posture: {posture}"),
+        });
+    }
+    if let Some(worker) = rch_selected_worker(&value) {
+        hints.push(SwarmBriefResourcePressureHint {
+            source: SwarmBriefSourceKind::Rch,
+            level: "low".to_string(),
+            message: format!("rch selected worker: {}", redact_brief_text(&worker)),
+        });
+    }
+    if let Some(topology_roots) = rch_topology_root_summary(&value) {
+        hints.push(SwarmBriefResourcePressureHint {
+            source: SwarmBriefSourceKind::Rch,
+            level: "low".to_string(),
+            message: format!("rch topology roots: {topology_roots}"),
+        });
+    }
     if let Some(queue_depth) = queue_depth {
         let level = if queue_depth > 4 {
             "high"
@@ -2909,11 +3214,455 @@ pub fn parse_rch_status_json(input: &str) -> Result<Vec<SwarmBriefResourcePressu
         hints.push(SwarmBriefResourcePressureHint {
             source: SwarmBriefSourceKind::Rch,
             level: "unknown".to_string(),
-            message: "rch status did not expose queue or active build counts".to_string(),
+            message:
+                "rch status did not expose remote posture, topology, queue, or active build counts"
+                    .to_string(),
         });
     }
     hints.sort();
     Ok(hints)
+}
+
+fn collect_rch_local_capability_snapshot<R: SwarmBriefCommandRunner>(
+    runner: &R,
+    options: &SwarmBriefCollectOptions,
+    status_stdout: Option<&str>,
+) -> Option<RchLocalCapabilityReport> {
+    let help = run_rch_json_capture(runner, options, &["--help-json"]);
+    let hook_status = run_rch_json_capture(
+        runner,
+        options,
+        &["agents", "status", "codex-cli", "--json"],
+    );
+    let status = status_stdout
+        .and_then(|stdout| serde_json::from_str::<Value>(stdout).ok())
+        .or_else(|| run_rch_json_capture(runner, options, &["status", "--json"]));
+    let queue = run_rch_json_capture(runner, options, &["queue", "--json"]);
+    let config = run_rch_json_capture(runner, options, &["config", "show", "--json"]);
+    let worker_probe =
+        run_rch_json_capture(runner, options, &["workers", "probe", "--all", "--json"]);
+    let diagnose = run_rch_json_capture(
+        runner,
+        options,
+        &["diagnose", "--dry-run", "--json", "cargo", "check", "--lib"],
+    );
+
+    let snapshot = json!({
+        "schema": "ee.rch.local_capability.capture.v1",
+        "remoteOnlyRequired": true,
+        "captures": {
+            "helpJson": help.unwrap_or(Value::Null),
+            "hookStatus": hook_status.unwrap_or(Value::Null),
+            "status": status.unwrap_or(Value::Null),
+            "queue": queue.unwrap_or(Value::Null),
+            "config": config.unwrap_or(Value::Null),
+            "workerProbe": worker_probe.unwrap_or(Value::Null),
+            "diagnose": diagnose.unwrap_or(Value::Null),
+        }
+    });
+    parse_rch_local_capability_snapshot(&snapshot.to_string()).ok()
+}
+
+fn run_rch_json_capture<R: SwarmBriefCommandRunner>(
+    runner: &R,
+    options: &SwarmBriefCollectOptions,
+    args: &[&str],
+) -> Option<Value> {
+    runner
+        .run("rch", args, &options.workspace, options.command_timeout_ms)
+        .ok()
+        .and_then(|output| serde_json::from_str::<Value>(&output.stdout).ok())
+}
+
+pub fn parse_rch_local_capability_snapshot(
+    input: &str,
+) -> Result<RchLocalCapabilityReport, String> {
+    let value = serde_json::from_str::<Value>(input)
+        .map_err(|error| format!("RCH local capability snapshot could not be parsed: {error}"))?;
+    let captures = value.get("captures").unwrap_or(&value);
+    let help = captures.get("helpJson").or_else(|| captures.get("help"));
+    let hook_status = captures
+        .get("hookStatus")
+        .or_else(|| captures.get("agentsStatus"));
+    let status = captures.get("status").unwrap_or(captures);
+    let config = captures.get("config");
+    let worker_probe = captures
+        .get("workerProbe")
+        .or_else(|| captures.get("workersProbe"));
+    let queue = captures
+        .get("queue")
+        .or_else(|| captures.get("queueStatus"));
+    let diagnose = captures.get("diagnose");
+
+    let cli_version = help
+        .and_then(|help| string_field_any(help, &["version"]))
+        .or_else(|| string_field_any(status, &["version"]))
+        .or_else(|| {
+            status
+                .pointer("/data/daemon/version")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            status
+                .pointer("/data/daemon/daemon/version")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| string_field(&value, &["cliVersion", "cli_version"]));
+    let direct_exec_available = help.is_some_and(rch_help_exposes_exec_command);
+    let codex_hook = rch_codex_hook_capability(hook_status);
+    let daemon_status_socket_raw = status
+        .pointer("/data/daemon/socket_path")
+        .or_else(|| status.pointer("/data/daemon/socketPath"))
+        .or_else(|| status.pointer("/data/daemon/daemon/socket_path"))
+        .or_else(|| status.pointer("/data/daemon/daemon/socketPath"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let config_socket = config
+        .and_then(|config| config.pointer("/data/general/socket_path"))
+        .or_else(|| config.and_then(|config| config.pointer("/data/general/socketPath")))
+        .or_else(|| config.and_then(|config| config.pointer("/general/socket_path")))
+        .or_else(|| config.and_then(|config| config.pointer("/general/socketPath")))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let status_socket_consistent = daemon_status_socket_raw
+        .as_ref()
+        .zip(config_socket.as_ref())
+        .map(|(left, right)| left == right);
+    let daemon_status_socket = daemon_status_socket_raw
+        .as_deref()
+        .map(redact_rch_root_label);
+    let worker_probe_summary = rch_worker_probe_summary(worker_probe, status);
+    let queue_health = queue
+        .and_then(rch_queue_health)
+        .or_else(|| rch_queue_health(status));
+    let dry_run_would_offload = diagnose.and_then(rch_diagnose_would_offload);
+    let remote_only_required = value
+        .get("remoteOnlyRequired")
+        .or_else(|| value.get("remote_only_required"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    let route_available = direct_exec_available || codex_hook.installed;
+    let workers_probe_ready = worker_probe_summary.status == "ready";
+    let queue_start_stalled = queue_health
+        .as_ref()
+        .is_some_and(|health| health.status == "start_stalled");
+    let remote_only_safe = route_available
+        && workers_probe_ready
+        && !queue_start_stalled
+        && dry_run_would_offload.unwrap_or(true)
+        && status_socket_consistent.unwrap_or(true)
+        && (!remote_only_required || route_available);
+    let mut degraded = Vec::new();
+    let mut recovery = Vec::new();
+
+    if remote_only_required && !route_available {
+        degraded.push(SwarmBriefDegradation::warning(
+            SwarmBriefSourceKind::Rch,
+            RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE,
+            "Remote-only Cargo is required, but this shell has neither `rch exec` nor an installed Codex RCH hook.",
+            Some("Use a harness with an installed RCH hook, upgrade RCH to expose `rch exec`, or record static-only evidence.".to_string()),
+        ));
+        recovery.push("do_not_run_plain_cargo_from_this_shell".to_string());
+    }
+    if worker_probe_summary.failed_count > 0 && worker_probe_summary.healthy_count == 0 {
+        degraded.push(SwarmBriefDegradation::warning(
+            SwarmBriefSourceKind::Rch,
+            RCH_WORKER_TOPOLOGY_BLOCKED_CODE,
+            "RCH status and worker probe evidence disagree or all probed workers failed; remote-only verification must fail closed.",
+            Some("Run `rch workers probe --all --json` and repair worker SSH/path topology before Cargo verification.".to_string()),
+        ));
+        recovery.push("repair_rch_worker_probe_failures".to_string());
+    }
+    if worker_probe_summary.status == "unknown" {
+        degraded.push(SwarmBriefDegradation::warning(
+            SwarmBriefSourceKind::Rch,
+            RCH_UNAVAILABLE_CODE,
+            "RCH worker probe did not prove any healthy remote worker; remote-only verification must fail closed.",
+            Some("Run `rch workers probe --all --json` before Cargo verification.".to_string()),
+        ));
+        recovery.push("prove_rch_worker_probe_health".to_string());
+    }
+    if dry_run_would_offload == Some(false) {
+        degraded.push(SwarmBriefDegradation::warning(
+            SwarmBriefSourceKind::Rch,
+            RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE,
+            "RCH dry-run diagnosis would not offload a sample Cargo check command; remote-only verification must fail closed.",
+            Some("Run `rch diagnose --dry-run --json cargo check --lib` and repair the reported classification or daemon condition.".to_string()),
+        ));
+        recovery.push("repair_rch_dry_run_offload_classification".to_string());
+    }
+    if status_socket_consistent == Some(false) {
+        degraded.push(SwarmBriefDegradation::warning(
+            SwarmBriefSourceKind::Rch,
+            RCH_UNAVAILABLE_CODE,
+            "RCH daemon socket from status does not match configured socket path.",
+            Some("Restart the RCH daemon or reconcile the configured socket path.".to_string()),
+        ));
+        recovery.push("reconcile_rch_socket_path".to_string());
+    }
+    if queue_start_stalled {
+        degraded.push(SwarmBriefDegradation::warning(
+            SwarmBriefSourceKind::Rch,
+            RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE,
+            "RCH has queued remote builds that should be startable, but no active build is running; remote-only verification must fail closed before the client can time out toward local fallback.",
+            Some("Inspect `rch queue --json`, avoid launching more Cargo jobs, and repair or restart RCH scheduling before remote-required verification.".to_string()),
+        ));
+        recovery.push("repair_rch_queue_scheduler_before_remote_cargo".to_string());
+    }
+    if recovery.is_empty() {
+        recovery.push("remote_only_cargo_allowed_from_this_shell".to_string());
+    }
+    recovery.sort();
+    recovery.dedup();
+    degraded.sort();
+
+    Ok(RchLocalCapabilityReport {
+        schema: "ee.rch.local_capability.v1",
+        cli_version,
+        direct_exec_available,
+        codex_hook,
+        daemon_status_socket,
+        status_socket_consistent,
+        dry_run_would_offload,
+        worker_probe_summary,
+        queue_health,
+        remote_only_required,
+        remote_only_safe,
+        degraded,
+        recovery,
+    })
+}
+
+fn rch_help_exposes_exec_command(help: &Value) -> bool {
+    rch_command_tree_has(help, "exec")
+}
+
+fn rch_command_tree_has(value: &Value, target: &str) -> bool {
+    if value.as_str().is_some_and(|name| name == target)
+        || value
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| name == target)
+    {
+        return true;
+    }
+
+    ["commands", "subcommands", "data", "root"]
+        .iter()
+        .any(|key| match value.get(*key) {
+            Some(Value::Array(items)) => {
+                items.iter().any(|item| rch_command_tree_has(item, target))
+            }
+            Some(nested) => rch_command_tree_has(nested, target),
+            None => false,
+        })
+}
+
+fn rch_codex_hook_capability(value: Option<&Value>) -> RchCodexHookCapability {
+    let status = value
+        .and_then(|value| {
+            value
+                .pointer("/data/agents")
+                .and_then(Value::as_array)
+                .or_else(|| value.pointer("/agents").and_then(Value::as_array))
+        })
+        .and_then(|agents| {
+            agents.iter().find_map(|agent| {
+                let name = agent
+                    .get("agent")
+                    .or_else(|| agent.get("kind"))
+                    .or_else(|| agent.get("name"))
+                    .and_then(Value::as_str)?;
+                (name.eq_ignore_ascii_case("CodexCli")
+                    || name.eq_ignore_ascii_case("codex-cli")
+                    || name.eq_ignore_ascii_case("Codex CLI"))
+                .then(|| {
+                    agent
+                        .get("status")
+                        .or_else(|| agent.get("hook_status"))
+                        .or_else(|| agent.get("hookStatus"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string()
+                })
+            })
+        })
+        .or_else(|| {
+            value.and_then(|value| {
+                let data = value.get("data").unwrap_or(value);
+                let name = data
+                    .get("kind")
+                    .or_else(|| data.get("agent"))
+                    .or_else(|| data.get("name"))
+                    .and_then(Value::as_str)?;
+                (name.eq_ignore_ascii_case("CodexCli")
+                    || name.eq_ignore_ascii_case("codex-cli")
+                    || name.eq_ignore_ascii_case("Codex CLI"))
+                .then(|| {
+                    data.get("hook_status")
+                        .or_else(|| data.get("hookStatus"))
+                        .or_else(|| data.get("status"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string()
+                })
+            })
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let installed = status.eq_ignore_ascii_case("installed");
+    RchCodexHookCapability { installed, status }
+}
+
+fn rch_worker_probe_summary(probe: Option<&Value>, status: &Value) -> RchWorkerProbeSummary {
+    let healthy_count = probe
+        .and_then(|probe| numeric_field_any(probe, &["healthy", "healthyCount", "workersHealthy"]))
+        .or_else(|| {
+            probe.and_then(|probe| {
+                numeric_field_any(&probe["data"]["summary"], &["healthy", "healthyCount"])
+            })
+        })
+        .or_else(|| numeric_field_any(status, &["workers_healthy", "workersHealthy"]))
+        .or_else(|| {
+            numeric_field_any(
+                &status["data"]["daemon"]["daemon"],
+                &["workers_healthy", "workersHealthy"],
+            )
+        })
+        .unwrap_or(0);
+    let failed_count = probe
+        .and_then(|probe| numeric_field_any(probe, &["failed", "failedCount", "workersFailed"]))
+        .or_else(|| {
+            probe.and_then(|probe| {
+                numeric_field_any(&probe["data"]["summary"], &["failed", "failedCount"])
+            })
+        })
+        .or_else(|| {
+            probe.and_then(|probe| {
+                numeric_field_any(&probe["data"]["summary"], &["unhealthy", "unhealthyCount"])
+            })
+        })
+        .or_else(|| {
+            probe
+                .and_then(|probe| probe.pointer("/data/workers").and_then(Value::as_array))
+                .or_else(|| {
+                    probe.and_then(|probe| probe.pointer("/data/results").and_then(Value::as_array))
+                })
+                .or_else(|| {
+                    probe.and_then(|probe| probe.pointer("/workers").and_then(Value::as_array))
+                })
+                .map(|workers| {
+                    workers
+                        .iter()
+                        .filter(|worker| !rch_worker_is_ready(worker))
+                        .count() as u64
+                })
+        })
+        .unwrap_or(0);
+    let status_label = if healthy_count > 0 && failed_count == 0 {
+        "ready"
+    } else if healthy_count > 0 {
+        "degraded"
+    } else if failed_count > 0 {
+        "blocked"
+    } else {
+        "unknown"
+    };
+
+    RchWorkerProbeSummary {
+        healthy_count,
+        failed_count,
+        status: status_label.to_string(),
+    }
+}
+
+fn rch_queue_health(status: &Value) -> Option<RchQueueHealth> {
+    let queued_count = rch_build_count(status, "queued_builds", "queuedBuilds")
+        .or_else(|| numeric_field_any(status, &["queue_depth", "queueDepth"]))?;
+    let active_count =
+        rch_build_count(status, "active_builds", "activeBuilds").unwrap_or_else(|| {
+            numeric_field_any(status, &["active_builds", "activeBuilds", "running"]).unwrap_or(0)
+        });
+    let slots_available = rch_slots_available(status);
+    let first_slots_needed = rch_first_queued_slots_needed(status);
+    let startable_now = queued_count > 0
+        && active_count == 0
+        && slots_available
+            .zip(first_slots_needed)
+            .is_some_and(|(available, needed)| available >= needed);
+    let status_label = if startable_now {
+        "start_stalled"
+    } else if queued_count > 0 {
+        "queued"
+    } else {
+        "clear"
+    };
+
+    Some(RchQueueHealth {
+        queued_count,
+        active_count,
+        slots_available,
+        status: status_label.to_string(),
+    })
+}
+
+fn rch_build_count(status: &Value, snake_key: &str, camel_key: &str) -> Option<u64> {
+    rch_build_array(status, snake_key, camel_key)
+        .map(|items| items.len() as u64)
+        .or_else(|| numeric_field_any(status, &[snake_key, camel_key]))
+}
+
+fn rch_build_array<'a>(
+    status: &'a Value,
+    snake_key: &str,
+    camel_key: &str,
+) -> Option<&'a Vec<Value>> {
+    status
+        .get(snake_key)
+        .or_else(|| status.get(camel_key))
+        .or_else(|| status.get("data").and_then(|data| data.get(snake_key)))
+        .or_else(|| status.get("data").and_then(|data| data.get(camel_key)))
+        .or_else(|| {
+            status
+                .pointer("/data/daemon")
+                .and_then(|daemon| daemon.get(snake_key))
+        })
+        .or_else(|| {
+            status
+                .pointer("/data/daemon")
+                .and_then(|daemon| daemon.get(camel_key))
+        })
+        .and_then(Value::as_array)
+}
+
+fn rch_slots_available(status: &Value) -> Option<u64> {
+    numeric_field_any(status, &["slots_available", "slotsAvailable"]).or_else(|| {
+        numeric_field_any(
+            &status["data"]["daemon"]["daemon"],
+            &["slots_available", "slotsAvailable"],
+        )
+    })
+}
+
+fn rch_first_queued_slots_needed(status: &Value) -> Option<u64> {
+    rch_build_array(status, "queued_builds", "queuedBuilds").and_then(|items| {
+        items
+            .first()
+            .and_then(|item| numeric_field_any(item, &["slots_needed", "slotsNeeded", "slots"]))
+    })
+}
+
+fn rch_diagnose_would_offload(value: &Value) -> Option<bool> {
+    value
+        .pointer("/data/dry_run/would_offload")
+        .or_else(|| value.pointer("/data/dryRun/wouldOffload"))
+        .or_else(|| value.pointer("/dry_run/would_offload"))
+        .or_else(|| value.pointer("/dryRun/wouldOffload"))
+        .or_else(|| value.pointer("/data/decision/would_intercept"))
+        .or_else(|| value.pointer("/data/decision/wouldIntercept"))
+        .and_then(Value::as_bool)
 }
 
 fn rch_command_error_to_degradation(error: &SwarmBriefCommandError) -> SwarmBriefDegradation {
@@ -2922,20 +3671,33 @@ fn rch_command_error_to_degradation(error: &SwarmBriefCommandError) -> SwarmBrie
         SwarmBriefCommandError::Failed { stderr, .. } => stderr.as_str(),
         SwarmBriefCommandError::TimedOut { .. } | SwarmBriefCommandError::InvalidUtf8(_) => "",
     };
-    let (code, repair) = if is_rch_worker_topology_blocked(message) {
-        (
+    if is_rch_worker_topology_blocked(message) {
+        SwarmBriefDegradation::warning(
+            SwarmBriefSourceKind::Rch,
             RCH_WORKER_TOPOLOGY_BLOCKED_CODE,
-            "Inspect RCH worker path mapping; remote workers are visible but this workspace cannot be mapped.",
+            summarize_rch_topology_blocked_message(message),
+            Some(
+                "Inspect RCH worker path mapping; remote workers are visible but this workspace cannot be mapped."
+                    .to_string(),
+            ),
         )
     } else if is_rch_remote_required_fallback_prevented(message) {
-        (
+        SwarmBriefDegradation::warning(
+            SwarmBriefSourceKind::Rch,
             RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE,
-            "Fix remote worker availability or unset the remote-required guard only with explicit approval.",
+            "RCH_REQUIRE_REMOTE prevented local fallback, so this Cargo gate has no valid remote evidence.",
+            Some(
+                "Fix remote worker availability or unset the remote-required guard only with explicit approval."
+                    .to_string(),
+            ),
         )
     } else {
-        (RCH_UNAVAILABLE_CODE, "rch status --json")
-    };
-    error.to_degradation(SwarmBriefSourceKind::Rch, code, repair)
+        error.to_degradation(
+            SwarmBriefSourceKind::Rch,
+            RCH_UNAVAILABLE_CODE,
+            "rch status --json",
+        )
+    }
 }
 
 fn is_rch_worker_topology_blocked(message: &str) -> bool {
@@ -2949,6 +3711,175 @@ fn is_rch_remote_required_fallback_prevented(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("rch_require_remote")
         || (lower.contains("remote") && lower.contains("required") && lower.contains("fallback"))
+}
+
+fn rch_remote_posture(value: &Value) -> Option<&'static str> {
+    let status = string_field_any(
+        value,
+        &[
+            "status",
+            "state",
+            "posture",
+            "remoteStatus",
+            "remote_status",
+        ],
+    )
+    .map(|status| status.to_ascii_lowercase());
+    if let Some(status) = status.as_deref() {
+        if status.contains("ready") || status.contains("healthy") {
+            return Some(RCH_POSTURE_REMOTE_READY);
+        }
+        if status.contains("local_only")
+            || status.contains("no_remote")
+            || status.contains("all_workers_offline")
+        {
+            return Some(RCH_POSTURE_NO_REMOTE_WORKERS);
+        }
+        if status.contains("unreachable")
+            || status.contains("offline")
+            || status.contains("unhealthy")
+            || status.contains("blocked")
+        {
+            return Some(RCH_POSTURE_WORKER_UNREACHABLE);
+        }
+    }
+
+    if let Some(healthy) = numeric_field_any(
+        value,
+        &[
+            "workers_healthy",
+            "workersHealthy",
+            "healthyWorkers",
+            "remoteWorkersHealthy",
+        ],
+    ) {
+        return Some(if healthy > 0 {
+            RCH_POSTURE_REMOTE_READY
+        } else {
+            RCH_POSTURE_NO_REMOTE_WORKERS
+        });
+    }
+
+    let workers = rch_workers(value)?;
+    if workers.is_empty() {
+        Some(RCH_POSTURE_NO_REMOTE_WORKERS)
+    } else if workers.iter().any(rch_worker_is_ready) {
+        Some(RCH_POSTURE_REMOTE_READY)
+    } else if workers.iter().all(rch_worker_is_unreachable) {
+        Some(RCH_POSTURE_WORKER_UNREACHABLE)
+    } else {
+        Some(RCH_POSTURE_NO_REMOTE_WORKERS)
+    }
+}
+
+fn rch_workers(value: &Value) -> Option<&Vec<Value>> {
+    value
+        .get("workers")
+        .and_then(Value::as_array)
+        .or_else(|| value.get("data")?.get("workers").and_then(Value::as_array))
+}
+
+fn rch_worker_is_ready(worker: &Value) -> bool {
+    string_field(worker, &["status", "state", "health"])
+        .map(|status| {
+            let status = status.to_ascii_lowercase();
+            status.contains("ready") || status.contains("healthy") || status.contains("online")
+        })
+        .unwrap_or(false)
+}
+
+fn rch_worker_is_unreachable(worker: &Value) -> bool {
+    string_field(worker, &["status", "state", "health"])
+        .map(|status| {
+            let status = status.to_ascii_lowercase();
+            status.contains("unreachable")
+                || status.contains("offline")
+                || status.contains("unhealthy")
+                || status.contains("down")
+        })
+        .unwrap_or(false)
+}
+
+fn rch_selected_worker(value: &Value) -> Option<String> {
+    string_field_any(
+        value,
+        &[
+            "selected_worker",
+            "selectedWorker",
+            "worker_id",
+            "workerId",
+            "worker",
+        ],
+    )
+}
+
+fn rch_topology_root_summary(value: &Value) -> Option<String> {
+    let canonical = string_field_any(
+        value,
+        &[
+            "canonical_project_root",
+            "canonicalProjectRoot",
+            "canonical_root",
+            "canonicalRoot",
+        ],
+    );
+    let alias = string_field_any(
+        value,
+        &[
+            "alias_project_root",
+            "aliasProjectRoot",
+            "alias_root",
+            "aliasRoot",
+        ],
+    );
+    let mut parts = Vec::new();
+    if let Some(canonical) = canonical {
+        parts.push(format!(
+            "canonical={}",
+            redact_rch_root_label(canonical.as_str())
+        ));
+    }
+    if let Some(alias) = alias {
+        parts.push(format!("alias={}", redact_rch_root_label(alias.as_str())));
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+fn redact_rch_root_label(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    let label = Path::new(trimmed)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| {
+            !value.is_empty()
+                && value
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+        })
+        .unwrap_or("redacted");
+    format!("<path:{label}>")
+}
+
+fn summarize_rch_topology_blocked_message(message: &str) -> String {
+    let worker = extract_rch_worker_from_message(message)
+        .map(|worker| format!("; selected worker: {worker}"))
+        .unwrap_or_default();
+    format!(
+        "RCH-E327 worker topology blocked remote-required verification{worker}; root metadata redacted; remote workers may be visible but this workspace cannot be mapped."
+    )
+}
+
+fn extract_rch_worker_from_message(message: &str) -> Option<String> {
+    message
+        .split(|ch: char| ch.is_ascii_whitespace() || matches!(ch, ',' | ';'))
+        .find_map(|token| token.strip_prefix("worker="))
+        .map(|worker| {
+            worker
+                .chars()
+                .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+                .collect::<String>()
+        })
+        .filter(|worker| !worker.is_empty())
 }
 
 fn value_array(value: &Value) -> Option<&Vec<Value>> {
@@ -2969,9 +3900,19 @@ fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
     })
 }
 
+fn string_field_any(value: &Value, keys: &[&str]) -> Option<String> {
+    string_field(value, keys)
+        .or_else(|| value.get("data").and_then(|data| string_field(data, keys)))
+}
+
 fn numeric_field(value: &Value, keys: &[&str]) -> Option<u64> {
     keys.iter()
         .find_map(|key| value.get(*key).and_then(Value::as_u64))
+}
+
+fn numeric_field_any(value: &Value, keys: &[&str]) -> Option<u64> {
+    numeric_field(value, keys)
+        .or_else(|| value.get("data").and_then(|data| numeric_field(data, keys)))
 }
 
 fn redact_brief_text(input: &str) -> String {
@@ -2999,6 +3940,7 @@ fn redact_path_label_with_home(path: &Path, home: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::collections::BTreeMap;
 
     use super::*;
@@ -3006,6 +3948,7 @@ mod tests {
     #[derive(Default)]
     struct FakeRunner {
         outputs: BTreeMap<String, Result<SwarmBriefCommandOutput, SwarmBriefCommandError>>,
+        calls: RefCell<Vec<String>>,
     }
 
     impl FakeRunner {
@@ -3029,6 +3972,10 @@ mod tests {
             self.outputs.insert(command_key(program, args), Err(error));
             self
         }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.borrow().clone()
+        }
     }
 
     impl SwarmBriefCommandRunner for FakeRunner {
@@ -3039,6 +3986,7 @@ mod tests {
             _cwd: &Path,
             _timeout_ms: u64,
         ) -> Result<SwarmBriefCommandOutput, SwarmBriefCommandError> {
+            self.calls.borrow_mut().push(command_key(program, args));
             self.outputs
                 .get(&command_key(program, args))
                 .cloned()
@@ -3151,6 +4099,17 @@ mod tests {
                 .and_then(Value::as_array)
                 .is_some_and(|hashes| !hashes.is_empty()),
             "summary must expose recommendation evidence as hashes"
+        );
+        assert_eq!(
+            summary.pointer("/fileSurfaceRiskSummary/topRisks/0/rawPathIncluded"),
+            Some(&json!(false))
+        );
+        assert!(
+            summary
+                .pointer("/fileSurfaceRiskSummary/topRisks/0/pathHash")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "summary must hash high-risk file paths instead of listing them"
         );
     }
 
@@ -3292,6 +4251,16 @@ mod tests {
             risk.risk_factors
                 .contains(&"bead_reservation_overlap".to_string())
         );
+        assert_eq!(risk.reservation_holders, vec!["OtherAgent".to_string()]);
+        assert!(
+            risk.related_bead_ids
+                .contains(&"eidetic_engine_cli-u7r5".to_string())
+        );
+        assert!(
+            risk.suggested_commands
+                .iter()
+                .any(|command| command.contains("message OtherAgent before editing"))
+        );
         let rec = recommendation(&report, "rec.candidate.eidetic_engine_cli-u7r5");
         assert_eq!(rec.kind, "candidate_blocked_by_surface_conflict");
         assert!(
@@ -3325,10 +4294,53 @@ mod tests {
             risk.risk_factors
                 .contains(&"dirty_bead_overlap".to_string())
         );
+        assert_eq!(risk.git_status_buckets, vec!["M".to_string()]);
+        assert!(
+            risk.suggested_commands
+                .iter()
+                .any(|command| command.starts_with("git status --short -- "))
+        );
         let rec = recommendation(&report, "rec.candidate.eidetic_engine_cli-u7r5");
         assert!(
             rec.reason_codes
                 .contains(&"candidate_blocked_by_surface_conflict".to_string())
+        );
+    }
+
+    #[test]
+    fn summary_counts_file_surface_ownership_risks_without_listing_paths() {
+        let mut report = report_with_ready_sources();
+        report.dirty_files.push(SwarmBriefDirtyFile {
+            path: "src/core/swarm_brief.rs".to_string(),
+            status: "M".to_string(),
+        });
+        report.file_reservations.push(SwarmBriefFileReservation {
+            path_pattern: "src/core/swarm_brief.rs".to_string(),
+            holder: "OtherAgent".to_string(),
+            exclusive: true,
+            expires_at: Some("2026-05-09T08:00:00Z".to_string()),
+        });
+
+        apply_swarm_brief_advice(&mut report);
+        report.finalize();
+
+        let summary = summarize_swarm_brief_report(&report);
+        let rendered = stable_summary_json(&summary);
+        assert_eq!(
+            summary.pointer("/fileSurfaceRiskSummary/countsByReservationHolder/OtherAgent"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            summary.pointer("/fileSurfaceRiskSummary/countsByGitStatus/M"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            summary.pointer("/fileSurfaceRiskSummary/topRisks/0/reservationHolders/0"),
+            Some(&json!("OtherAgent"))
+        );
+        assert!(
+            !rendered.contains("src/core/swarm_brief.rs"),
+            "support-bundle summary must not include raw file listings"
         );
     }
 
@@ -3670,6 +4682,51 @@ mod tests {
     }
 
     #[test]
+    fn beads_sync_status_db_newer_marks_export_pending_not_unavailable() {
+        let options = SwarmBriefCollectOptions::for_workspace(".");
+        let runner = FakeRunner::default()
+            .with_output(
+                "br",
+                &[
+                    "sync",
+                    "--status",
+                    "--json",
+                    "--no-auto-import",
+                    "--allow-stale",
+                ],
+                r#"{"jsonl_newer":false,"db_newer":true,"last_import_time":"2026-05-14T05:20:52Z"}"#,
+            )
+            .with_output(
+                "br",
+                &["ready", "--json"],
+                r#"[{"id":"bd-ready","title":"Ready work","status":"open"}]"#,
+            )
+            .with_output("br", &["blocked", "--json"], "[]")
+            .with_output("br", &["list", "--status", "in_progress", "--json"], "[]")
+            .with_output("br", &["list", "--status", "deferred", "--json"], "[]")
+            .with_output("br", &["dep", "cycles", "--json"], r#"{"cycles":[],"count":0}"#);
+
+        let output = BeadsSourceAdapter { runner: &runner }.collect(&options);
+
+        assert_eq!(output.snapshot.status, SwarmBriefSourceStatus::Degraded);
+        assert_eq!(output.snapshot.freshness.state, "stale");
+        let Some(degradation) = output
+            .snapshot
+            .degraded
+            .iter()
+            .find(|item| item.code == BEADS_TRACKER_STALE_CODE)
+        else {
+            panic!("beads tracker stale degradation");
+        };
+        assert!(degradation.message.contains("database is newer than JSONL"));
+        assert_eq!(degradation.repair.as_deref(), Some("br sync --flush-only"));
+        match output.contribution {
+            SwarmBriefContribution::Beads(summary) => assert_eq!(summary.ready.len(), 1),
+            other => panic!("expected Beads contribution, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn beads_sync_status_failure_preserves_bucket_results_with_degraded_freshness() {
         let options = SwarmBriefCollectOptions::for_workspace(".");
         let runner = FakeRunner::default()
@@ -3837,16 +4894,421 @@ mod tests {
     }
 
     #[test]
+    fn rch_parser_reports_worker_posture_and_redacted_topology_metadata() {
+        let hints = require_ok(
+            parse_rch_status_json(
+                r#"{
+                    "status":"ready",
+                    "workersHealthy":3,
+                    "selectedWorker":"css",
+                    "canonicalProjectRoot":"/Users/jemanuel/projects",
+                    "aliasProjectRoot":"/data/projects",
+                    "queueDepth":0,
+                    "activeBuilds":0
+                }"#,
+            ),
+            "valid rch JSON",
+        );
+        let messages = hints
+            .iter()
+            .map(|hint| hint.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(messages.contains("rch remote posture: remote_ready"));
+        assert!(messages.contains("rch selected worker: css"));
+        assert!(
+            messages
+                .contains("rch topology roots: canonical=<path:projects>, alias=<path:projects>")
+        );
+        assert!(!messages.contains("/Users/jemanuel"));
+        assert!(!messages.contains("/data/projects"));
+    }
+
+    #[test]
+    fn rch_parser_distinguishes_no_workers_and_unreachable_workers() {
+        let no_workers = require_ok(
+            parse_rch_status_json(r#"{"workersHealthy":0}"#),
+            "no workers rch JSON",
+        );
+        assert!(no_workers.iter().any(|hint| {
+            hint.message == "rch remote posture: no_remote_workers" && hint.level == "high"
+        }));
+
+        let unreachable = require_ok(
+            parse_rch_status_json(
+                r#"{"workers":[{"id":"css","status":"unreachable"},{"id":"gpu","status":"offline"}]}"#,
+            ),
+            "unreachable workers rch JSON",
+        );
+        assert!(unreachable.iter().any(|hint| {
+            hint.message == "rch remote posture: worker_unreachable" && hint.level == "high"
+        }));
+    }
+
+    #[test]
+    fn rch_local_capability_parses_current_rch_json_shapes() {
+        let report = require_ok(
+            parse_rch_local_capability_snapshot(
+                r#"{
+                    "schema":"ee.rch.local_capability.capture.v1",
+                    "remoteOnlyRequired":true,
+                    "captures":{
+                        "helpJson":{
+                            "version":"1.0.24",
+                            "subcommands":[{"name":"status"},{"name":"exec"}]
+                        },
+                        "hookStatus":{
+                            "data":{
+                                "agents":[
+                                    {
+                                        "kind":"CodexCli",
+                                        "name":"Codex CLI",
+                                        "hook_status":"Not installed"
+                                    }
+                                ]
+                            }
+                        },
+                        "status":{
+                            "data":{
+                                "daemon":{
+                                    "daemon":{
+                                        "version":"0.1.3",
+                                        "socket_path":"/Users/jemanuel/Library/Caches/rch/rch.sock",
+                                        "workers_healthy":3
+                                    }
+                                }
+                            }
+                        },
+                        "config":{
+                            "data":{
+                                "general":{
+                                    "socket_path":"/Users/jemanuel/Library/Caches/rch/rch.sock"
+                                }
+                            }
+                        },
+                        "workerProbe":{
+                            "data":{
+                                "summary":{"healthy":3,"failed":0},
+                                "results":[{"id":"css","status":"ok"}]
+                            }
+                        },
+                        "diagnose":{
+                            "data":{
+                                "dry_run":{"would_offload":true}
+                            }
+                        }
+                    }
+                }"#,
+            ),
+            "current rch JSON shapes",
+        );
+
+        assert_eq!(report.cli_version.as_deref(), Some("1.0.24"));
+        assert!(report.direct_exec_available);
+        assert!(!report.codex_hook.installed);
+        assert_eq!(report.codex_hook.status, "Not installed");
+        assert_eq!(
+            report.daemon_status_socket.as_deref(),
+            Some("<path:rch.sock>")
+        );
+        assert_eq!(report.status_socket_consistent, Some(true));
+        assert_eq!(report.dry_run_would_offload, Some(true));
+        assert_eq!(report.worker_probe_summary.healthy_count, 3);
+        assert_eq!(report.worker_probe_summary.status, "ready");
+        assert!(report.remote_only_safe);
+        assert!(report.degraded.is_empty());
+    }
+
+    #[test]
+    fn rch_local_capability_fixture_fails_closed_for_codex_without_remote_route() {
+        let fixture =
+            include_str!("../../tests/fixtures/swarm/rch_codex_capability_contradiction.json");
+        let report = require_ok(
+            parse_rch_local_capability_snapshot(fixture),
+            "valid rch capability fixture",
+        );
+        let expected: Value = require_some(
+            require_ok(serde_json::from_str::<Value>(fixture), "fixture JSON")
+                .pointer("/expected")
+                .cloned(),
+            "expected block",
+        );
+        let codes = report
+            .degraded
+            .iter()
+            .map(|degradation| degradation.code.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert!(!report.direct_exec_available);
+        assert!(!report.codex_hook.installed);
+        assert_eq!(report.codex_hook.status, "Not installed");
+        assert_eq!(report.worker_probe_summary.status, "blocked");
+        assert_eq!(
+            report.daemon_status_socket.as_deref(),
+            Some("<path:rch.sock>")
+        );
+        assert_eq!(
+            report.remote_only_safe,
+            require_some(
+                expected["remoteOnlySafe"].as_bool(),
+                "expected remoteOnlySafe"
+            )
+        );
+        for code in require_some(
+            expected["degradedCodes"].as_array(),
+            "expected degradedCodes",
+        ) {
+            let code = require_some(code.as_str(), "expected degraded code");
+            assert!(
+                codes.contains(code),
+                "missing expected degraded code {code}"
+            );
+        }
+        for recovery in require_some(expected["recovery"].as_array(), "expected recovery") {
+            let recovery = require_some(recovery.as_str(), "expected recovery action");
+            assert!(
+                report.recovery.contains(&recovery.to_string()),
+                "missing expected recovery action {recovery}"
+            );
+        }
+    }
+
+    #[test]
+    fn rch_local_capability_allows_remote_only_when_exec_and_workers_are_ready() {
+        let report = require_ok(
+            parse_rch_local_capability_snapshot(
+                r#"{
+                    "schema":"ee.rch.local_capability.fixture.v1",
+                    "remoteOnlyRequired":true,
+                    "captures":{
+                        "helpJson":{"commands":[{"name":"status"},{"name":"exec"}]},
+                        "hookStatus":{"data":{"agents":[{"agent":"CodexCli","status":"Not installed"}]}},
+                        "status":{"data":{"daemon":{"version":"0.2.0","socket_path":"/tmp/rch.sock","workers_healthy":1}}},
+                        "config":{"data":{"general":{"socket_path":"/tmp/rch.sock"}}},
+                        "workerProbe":{"data":{"healthy":1,"failed":0}},
+                        "diagnose":{"data":{"dry_run":{"would_offload":true}}}
+                    }
+                }"#,
+            ),
+            "valid safe rch capability fixture",
+        );
+
+        assert!(report.direct_exec_available);
+        assert!(!report.codex_hook.installed);
+        assert_eq!(report.worker_probe_summary.status, "ready");
+        assert_eq!(report.status_socket_consistent, Some(true));
+        assert_eq!(report.dry_run_would_offload, Some(true));
+        assert!(report.remote_only_safe);
+        assert!(report.degraded.is_empty());
+        assert_eq!(
+            report.recovery,
+            vec!["remote_only_cargo_allowed_from_this_shell".to_string()]
+        );
+    }
+
+    #[test]
+    fn rch_local_capability_fails_closed_for_startable_queued_builds() {
+        let report = require_ok(
+            parse_rch_local_capability_snapshot(
+                r#"{
+                    "schema":"ee.rch.local_capability.fixture.v1",
+                    "remoteOnlyRequired":true,
+                    "captures":{
+                        "helpJson":{"commands":[{"name":"status"},{"name":"exec"}]},
+                        "hookStatus":{"data":{"agents":[{"agent":"CodexCli","status":"Not installed"}]}},
+                        "status":{
+                            "data":{
+                                "daemon":{
+                                    "daemon":{
+                                        "version":"0.1.3",
+                                        "socket_path":"/tmp/rch.sock",
+                                        "workers_healthy":3,
+                                        "slots_available":8
+                                    },
+                                    "active_builds":[],
+                                    "queued_builds":[
+                                        {
+                                            "id":200,
+                                            "command":"env TMPDIR=/tmp cargo test --test cancellation_graph -- --nocapture",
+                                            "slots_needed":8,
+                                            "estimated_start":"2026-05-15T13:18:07Z"
+                                        }
+                                    ]
+                                }
+                            }
+                        },
+                        "config":{"data":{"general":{"socket_path":"/tmp/rch.sock"}}},
+                        "workerProbe":{"data":{"summary":{"healthy":3,"failed":0}}},
+                        "diagnose":{"data":{"dry_run":{"would_offload":true}}}
+                    }
+                }"#,
+            ),
+            "queued-start RCH capability fixture",
+        );
+        let queue = require_some(report.queue_health.as_ref(), "queue health");
+
+        assert_eq!(queue.queued_count, 1);
+        assert_eq!(queue.active_count, 0);
+        assert_eq!(queue.slots_available, Some(8));
+        assert_eq!(queue.status, "start_stalled");
+        assert!(!report.remote_only_safe);
+        assert!(report.degraded.iter().any(|degradation| {
+            degradation.code == RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE
+                && degradation.message.contains("queued remote builds")
+        }));
+        assert!(
+            report
+                .recovery
+                .contains(&"repair_rch_queue_scheduler_before_remote_cargo".to_string())
+        );
+    }
+
+    #[test]
+    fn collector_attaches_live_rch_capability_without_invoking_cargo() {
+        let mut options = SwarmBriefCollectOptions::for_workspace(".");
+        options.enabled_sources = [SwarmBriefSourceKind::Rch].into_iter().collect();
+        options.include_rch = true;
+        let runner = FakeRunner::default()
+            .with_output(
+                "rch",
+                &["status", "--json"],
+                r#"{
+                    "data":{
+                        "posture":"remote_ready",
+                        "daemon":{
+                            "daemon":{
+                                "version":"0.1.3",
+                                "socket_path":"/tmp/rch.sock",
+                                "workers_healthy":2
+                            }
+                        }
+                    }
+                }"#,
+            )
+            .with_output(
+                "rch",
+                &["--help-json"],
+                r#"{"version":"1.0.24","subcommands":[{"name":"exec"},{"name":"status"}]}"#,
+            )
+            .with_output(
+                "rch",
+                &["queue", "--json"],
+                r#"{"data":{"active_builds":[],"queued_builds":[],"slots_available":2}}"#,
+            )
+            .with_output(
+                "rch",
+                &["agents", "status", "codex-cli", "--json"],
+                r#"{"data":{"kind":"CodexCli","hook_status":"Not installed"}}"#,
+            )
+            .with_output(
+                "rch",
+                &["config", "show", "--json"],
+                r#"{"data":{"general":{"socket_path":"/tmp/rch.sock"}}}"#,
+            )
+            .with_output(
+                "rch",
+                &["workers", "probe", "--all", "--json"],
+                r#"{"data":{"summary":{"healthy":2,"failed":0},"results":[{"id":"csd","status":"ok"}]}}"#,
+            )
+            .with_output(
+                "rch",
+                &["diagnose", "--dry-run", "--json", "cargo", "check", "--lib"],
+                r#"{"data":{"dry_run":{"would_offload":true}}}"#,
+            );
+
+        let report = collect_swarm_brief(&options, &runner);
+
+        let capability = require_some(report.rch_local_capability.as_ref(), "rch local capability");
+        assert!(capability.direct_exec_available);
+        assert_eq!(capability.dry_run_would_offload, Some(true));
+        assert!(capability.remote_only_safe);
+        assert_eq!(
+            source_status(&report, SwarmBriefSourceKind::Rch),
+            Some(SwarmBriefSourceStatus::Ready)
+        );
+        assert!(
+            runner
+                .calls()
+                .iter()
+                .all(|call| !call.starts_with("cargo "))
+        );
+    }
+
+    #[test]
+    fn rch_local_capability_attaches_to_swarm_brief_fail_closed_advice() {
+        let fixture =
+            include_str!("../../tests/fixtures/swarm/rch_codex_capability_contradiction.json");
+        let capability = require_ok(
+            parse_rch_local_capability_snapshot(fixture),
+            "valid rch capability fixture",
+        );
+        let mut report = report_with_ready_sources();
+
+        attach_rch_local_capability(&mut report, capability);
+        apply_swarm_brief_advice(&mut report);
+        report.finalize();
+
+        let local = require_some(
+            report.rch_local_capability.as_ref(),
+            "rch local capability block",
+        );
+        assert!(!local.remote_only_safe);
+        assert_eq!(
+            source_status(&report, SwarmBriefSourceKind::Rch),
+            Some(SwarmBriefSourceStatus::Degraded)
+        );
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|degradation| degradation.code == RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE)
+        );
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|degradation| degradation.code == RCH_WORKER_TOPOLOGY_BLOCKED_CODE)
+        );
+
+        let remote_required = recommendation(
+            &report,
+            "rec.degraded.rch.rch_remote_required_fallback_prevented",
+        );
+        assert!(
+            remote_required
+                .must_not_do
+                .iter()
+                .any(|item| item.contains("Do not unset RCH_REQUIRE_REMOTE"))
+        );
+
+        let worker_topology =
+            recommendation(&report, "rec.degraded.rch.rch_worker_topology_blocked");
+        assert!(
+            worker_topology
+                .must_not_do
+                .iter()
+                .any(|item| item.contains("topology-blocked RCH attempt"))
+        );
+    }
+
+    #[test]
     fn rch_command_error_maps_e327_to_worker_topology_blocked() {
         let error = SwarmBriefCommandError::Failed {
             status: Some(1),
-            stderr: "RCH-E327: worker path topology could not map /Users/project to /data/project"
-                .to_string(),
+            stderr:
+                "RCH-E327: worker=css path topology could not map /Users/project to /data/project"
+                    .to_string(),
         };
         let degradation = rch_command_error_to_degradation(&error);
 
         assert_eq!(degradation.code, RCH_WORKER_TOPOLOGY_BLOCKED_CODE);
         assert_eq!(degradation.source, SwarmBriefSourceKind::Rch);
+        assert!(degradation.message.contains("RCH-E327"));
+        assert!(degradation.message.contains("selected worker: css"));
+        assert!(degradation.message.contains("root metadata redacted"));
+        assert!(!degradation.message.contains("/Users/project"));
+        assert!(!degradation.message.contains("/data/project"));
         assert!(
             degradation
                 .repair
@@ -3869,6 +5331,35 @@ mod tests {
             RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE
         );
         assert_eq!(degradation.source, SwarmBriefSourceKind::Rch);
+        assert!(degradation.message.contains("no valid remote evidence"));
+    }
+
+    #[test]
+    fn advisor_blocks_rch_topology_degradation_from_closure_evidence() {
+        let mut report = report_with_ready_sources();
+        let Some(rch_snapshot) = report
+            .sources
+            .iter_mut()
+            .find(|snapshot| snapshot.source == SwarmBriefSourceKind::Rch)
+        else {
+            panic!("rch source");
+        };
+        rch_snapshot.status = SwarmBriefSourceStatus::Unavailable;
+        rch_snapshot.degraded = vec![SwarmBriefDegradation::warning(
+            SwarmBriefSourceKind::Rch,
+            RCH_WORKER_TOPOLOGY_BLOCKED_CODE,
+            "RCH-E327 worker topology blocked remote-required verification; root metadata redacted.",
+            Some("rch status --json".to_string()),
+        )];
+
+        apply_swarm_brief_advice(&mut report);
+
+        let rec = recommendation(&report, "rec.degraded.rch.rch_worker_topology_blocked");
+        assert!(
+            rec.must_not_do.iter().any(|item| {
+                item.contains("Do not close beads requiring remote Cargo evidence")
+            })
+        );
     }
 
     #[test]

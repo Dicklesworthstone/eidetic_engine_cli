@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
@@ -1413,6 +1413,30 @@ fn random_secret() -> Result<[u8; 32], DomainError> {
     Ok(secret)
 }
 
+#[cfg(unix)]
+fn write_private_secret(path: &Path, secret: &[u8; 32]) -> Result<(), DomainError> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to write handoff HMAC key: {error}"),
+            repair: Some(format!("Check permissions for {}", path.display())),
+        })?;
+    file.write_all(secret)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to write handoff HMAC key: {error}"),
+            repair: Some(format!("Check permissions for {}", path.display())),
+        })?;
+    set_private_file_mode(path)
+}
+
+#[cfg(not(unix))]
 fn write_private_secret(path: &Path, secret: &[u8; 32]) -> Result<(), DomainError> {
     fs::write(path, secret).map_err(|error| DomainError::Storage {
         message: format!("Failed to write handoff HMAC key: {error}"),
