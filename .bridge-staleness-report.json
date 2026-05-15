@@ -1,0 +1,14 @@
+{
+  "schema": "ee.bridge.staleness.v1",
+  "generatedAt": "2026-05-15T09:03:51Z",
+  "dataHash": "31f9cdc1ac6a54ab61ca0275f853591430d9e385419e1c329865179fcc9169a9",
+  "inputs": {
+    "planPresent": true,
+    "planAgeDays": 0,
+    "visionCoverageReportPresent": true,
+    "partIIOpenCount": 47,
+    "partIIInProgressCount": 2,
+    "partIIMaxStaleDays": 0
+  },
+  "signals": []
+}
