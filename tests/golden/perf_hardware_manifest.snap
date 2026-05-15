@@ -1,0 +1,23 @@
+---
+source: benches/baselines/hardware_classes.toml, scripts/sync_perf_table.sh, README.md
+assertion: performance baselines are pinned to declared hardware classes before README sync
+surface: perf_hardware_manifest
+bead: bd-3usjw.27
+contracts:
+  - benches/baselines/hardware_classes.toml declares named hardware classes
+  - mac-m3-pro is the canonical README baseline class
+  - CI and stress hardware classes are non-canonical and cannot silently replace Mac baseline numbers
+  - scripts/sync_perf_table.sh accepts ee.perf.v1 and ee.perf.baseline.v1 artifacts
+  - sync_perf_table rejects artifacts that are not pinned to a declared hardware class
+  - README performance table shows the hardware class for every row
+evidence:
+  - benches/baselines/hardware_classes.toml
+  - scripts/sync_perf_table.sh
+  - README.md performance section
+  - tests/readme_perf_sync.rs
+static_checks:
+  - bash -n scripts/sync_perf_table.sh
+  - scripts/sync_perf_table.sh --input benches/baselines/perf_v0_2.json --readme README.md --check
+  - unpinned perf artifact exits non-zero before README sync
+residual_risk:
+  - benchmark freshness is enforced by the perf-sync tests and future hardware-class benchmark artifacts

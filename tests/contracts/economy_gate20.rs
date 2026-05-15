@@ -132,7 +132,7 @@ fn add_feedback(fixture: &EconomyDbFixture, id: &str, target_id: &str, signal: &
                 source_id: Some(format!("src_{id}")),
                 reason: Some("economy contract fixture feedback".to_owned()),
                 evidence_json: Some("{\"schema\":\"fixture.economy.feedback.v1\"}".to_owned()),
-                session_id: Some("session_economy_contract".to_owned()),
+                session_id: None,
             },
         )
         .map_err(|error| error.to_string())

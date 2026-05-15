@@ -1,0 +1,21 @@
+---
+source: scripts/extract_bead_file_surfaces.sh, .beads/issues.jsonl
+assertion: bead descriptions expose claimable file surfaces for Agent Mail reservations
+surface: bead_file_surface_extractor
+bead: bd-3usjw.34
+contracts:
+  - extractor reads anchored FILE SURFACE lines from Beads descriptions
+  - default scope is the bd-3usjw Part II bead family
+  - --strict fails when an implements-surface bead lacks an anchored FILE SURFACE annotation
+  - --bead emits a single bead_id plus paths array for Agent Mail reservation tooling
+  - output is deterministic JSON produced through br list --json and jq
+evidence:
+  - scripts/extract_bead_file_surfaces.sh
+  - bd-3usjw.* FILE SURFACE annotations in .beads/issues.jsonl
+static_checks:
+  - bash -n scripts/extract_bead_file_surfaces.sh
+  - scripts/extract_bead_file_surfaces.sh --strict
+  - scripts/extract_bead_file_surfaces.sh --bead bd-3usjw.34
+  - br dep cycles --json
+residual_risk:
+  - extractor depends on Beads description hygiene; --strict is the guard that keeps new implements-surface beads honest
