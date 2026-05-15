@@ -18,6 +18,10 @@ pub const VERIFICATION_RUN_SCHEMA_V1: &str = "ee.verification.run.v1";
 pub const VERIFICATION_REUSE_ADVISORY_SCHEMA_V1: &str = "ee.verification.reuse_advisory.v1";
 pub const VERIFICATION_BROKER_VIEW_SCHEMA_V1: &str = "ee.verification.broker_view.v1";
 pub const VERIFICATION_CLOSEOUT_CAPSULE_SCHEMA_V1: &str = "ee.verification.closeout_capsule.v1";
+pub const VERIFICATION_COMPILE_BLOCKER_CACHE_SCHEMA_V1: &str =
+    "ee.verification.compile_blocker_cache.v1";
+pub const VERIFICATION_COMPILE_BLOCKER_LOOKUP_SCHEMA_V1: &str =
+    "ee.verification.compile_blocker_lookup.v1";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -399,6 +403,82 @@ pub struct VerificationBrokerView {
     pub suggested_action: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompileBlockerCacheStatus {
+    Current,
+    StaleSourceTree,
+    StaleSourceFile,
+}
+
+impl CompileBlockerCacheStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::StaleSourceTree => "stale_source_tree",
+            Self::StaleSourceFile => "stale_source_file",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CompileBlockerCacheInput<'a> {
+    pub record: &'a VerificationRunRecord,
+    pub command_class: &'a str,
+    pub first_source_path: &'a str,
+    pub source_file_hash: Option<&'a str>,
+    pub rust_error_code: Option<&'a str>,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+    pub short_message: &'a str,
+    pub owner_candidates: Vec<&'a str>,
+    pub reservation_holder: Option<&'a str>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompileBlockerCacheEntry {
+    pub schema: String,
+    pub cache_key: String,
+    pub run_id: String,
+    pub bead_id: Option<String>,
+    pub agent_name: Option<String>,
+    pub source_tree_fingerprint: Option<String>,
+    pub command_class: String,
+    pub command_hash: String,
+    pub normalized_argv_hash: String,
+    pub execution_substrate: String,
+    pub worker_host: Option<String>,
+    pub first_source_path: String,
+    pub source_file_hash: Option<String>,
+    pub rust_error_code: Option<String>,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+    pub short_message: String,
+    pub owner_candidates: Vec<String>,
+    pub reservation_holder: Option<String>,
+    pub first_failure_summary_ref: VerificationFirstFailureSummaryRef,
+}
+
+#[derive(Clone, Debug)]
+pub struct CompileBlockerLookupRequest<'a> {
+    pub current_source_tree_fingerprint: Option<&'a str>,
+    pub current_source_file_hash: Option<&'a str>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompileBlockerLookup {
+    pub schema: String,
+    pub cache_key: String,
+    pub status: CompileBlockerCacheStatus,
+    pub stale_reason_codes: Vec<String>,
+    pub suggested_action: String,
+    pub coordination_target: Option<String>,
+    pub entry: CompileBlockerCacheEntry,
+}
+
 #[derive(Clone, Debug)]
 pub struct VerificationCloseoutCapsuleRequest<'a> {
     pub requested_surface: &'a str,
@@ -575,6 +655,106 @@ impl VerificationRunRecord {
             retained_log_path_hash: input.retained_log_path.map(hash_str),
             provenance: input.provenance,
         }
+    }
+}
+
+#[must_use]
+pub fn compile_blocker_cache_entry(
+    input: CompileBlockerCacheInput<'_>,
+) -> Option<CompileBlockerCacheEntry> {
+    let record = input.record;
+    if !record.exit_code.is_some_and(|code| code != 0) {
+        return None;
+    }
+
+    let command_class = normalized_non_empty(Some(input.command_class))
+        .unwrap_or_else(|| "unknown_command".to_owned());
+    let first_source_path = redaction_safe_source_path(input.first_source_path);
+    let owner_candidates = sorted_owner_candidates(&input.owner_candidates);
+    let reservation_holder = normalized_non_empty(input.reservation_holder);
+    let short_message = compact_short_message(input.short_message);
+
+    Some(CompileBlockerCacheEntry {
+        schema: VERIFICATION_COMPILE_BLOCKER_CACHE_SCHEMA_V1.to_owned(),
+        cache_key: compile_blocker_cache_key(
+            record.source_hash.as_deref(),
+            &command_class,
+            &first_source_path,
+        ),
+        run_id: record.run_id.clone(),
+        bead_id: record.bead_id.clone(),
+        agent_name: record.agent_name.clone(),
+        source_tree_fingerprint: record.source_hash.clone(),
+        command_class,
+        command_hash: record.command_hash.clone(),
+        normalized_argv_hash: record.command_argv_hash.clone(),
+        execution_substrate: record.execution_substrate.clone(),
+        worker_host: record.worker_host.clone(),
+        first_source_path,
+        source_file_hash: normalized_non_empty(input.source_file_hash),
+        rust_error_code: normalized_non_empty(input.rust_error_code),
+        line: input.line,
+        column: input.column,
+        short_message,
+        owner_candidates,
+        reservation_holder,
+        first_failure_summary_ref: VerificationFirstFailureSummaryRef {
+            stderr_excerpt_hash: record.stderr_excerpt_hash.clone(),
+            artifact_manifest_hash: record.artifact_manifest_hash.clone(),
+            retained_log_path_hash: record.retained_log_path_hash.clone(),
+            raw_output_included: false,
+        },
+    })
+}
+
+#[must_use]
+pub fn compile_blocker_lookup(
+    entry: CompileBlockerCacheEntry,
+    request: CompileBlockerLookupRequest<'_>,
+) -> CompileBlockerLookup {
+    let requested_source = normalized_non_empty(request.current_source_tree_fingerprint);
+    let requested_file_hash = normalized_non_empty(request.current_source_file_hash);
+    let mut stale_reason_codes = Vec::new();
+
+    if requested_source.is_some()
+        && entry.source_tree_fingerprint.is_some()
+        && requested_source != entry.source_tree_fingerprint
+    {
+        stale_reason_codes.push("source_tree_fingerprint_changed".to_owned());
+    }
+    if requested_file_hash.is_some()
+        && entry.source_file_hash.is_some()
+        && requested_file_hash != entry.source_file_hash
+    {
+        stale_reason_codes.push("source_file_hash_changed".to_owned());
+    }
+    stale_reason_codes.sort();
+    stale_reason_codes.dedup();
+
+    let status = if stale_reason_codes
+        .iter()
+        .any(|code| code == "source_tree_fingerprint_changed")
+    {
+        CompileBlockerCacheStatus::StaleSourceTree
+    } else if stale_reason_codes
+        .iter()
+        .any(|code| code == "source_file_hash_changed")
+    {
+        CompileBlockerCacheStatus::StaleSourceFile
+    } else {
+        CompileBlockerCacheStatus::Current
+    };
+    let coordination_target = coordination_target(&entry);
+    let suggested_action = compile_blocker_suggested_action(status, &entry, &coordination_target);
+
+    CompileBlockerLookup {
+        schema: VERIFICATION_COMPILE_BLOCKER_LOOKUP_SCHEMA_V1.to_owned(),
+        cache_key: entry.cache_key.clone(),
+        status,
+        stale_reason_codes,
+        suggested_action,
+        coordination_target,
+        entry,
     }
 }
 
@@ -1291,6 +1471,74 @@ fn sorted_owned_codes(codes: Vec<&str>) -> Vec<String> {
     codes.sort();
     codes.dedup();
     codes
+}
+
+fn sorted_owner_candidates(candidates: &[&str]) -> Vec<String> {
+    let mut candidates = candidates
+        .iter()
+        .filter_map(|candidate| normalized_non_empty(Some(candidate)))
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+fn compact_short_message(message: &str) -> String {
+    let one_line = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    one_line.chars().take(200).collect()
+}
+
+fn redaction_safe_source_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return "unknown".to_owned();
+    }
+    if trimmed.starts_with('/') || trimmed.contains('\\') {
+        return format!("path_hash:{}", hash_str(trimmed));
+    }
+    trimmed.trim_start_matches("./").to_owned()
+}
+
+fn compile_blocker_cache_key(
+    source_tree_fingerprint: Option<&str>,
+    command_class: &str,
+    first_source_path: &str,
+) -> String {
+    hash_json_array(&[
+        source_tree_fingerprint.unwrap_or("class:unknown_source"),
+        command_class,
+        first_source_path,
+    ])
+}
+
+fn coordination_target(entry: &CompileBlockerCacheEntry) -> Option<String> {
+    entry
+        .reservation_holder
+        .clone()
+        .or_else(|| entry.owner_candidates.first().cloned())
+        .or_else(|| entry.agent_name.clone())
+}
+
+fn compile_blocker_suggested_action(
+    status: CompileBlockerCacheStatus,
+    entry: &CompileBlockerCacheEntry,
+    coordination_target: &Option<String>,
+) -> String {
+    match status {
+        CompileBlockerCacheStatus::StaleSourceTree | CompileBlockerCacheStatus::StaleSourceFile => {
+            "rerun_current_source".to_owned()
+        }
+        CompileBlockerCacheStatus::Current => coordination_target.as_ref().map_or_else(
+            || "claim_unowned_blocker".to_owned(),
+            |target| {
+                if entry.reservation_holder.as_ref() == Some(target) {
+                    "message_reservation_holder".to_owned()
+                } else {
+                    "message_owner_candidate".to_owned()
+                }
+            },
+        ),
+    }
 }
 
 fn broker_failure_ref(

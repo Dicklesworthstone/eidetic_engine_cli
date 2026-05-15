@@ -5,12 +5,15 @@ use std::fs;
 use std::path::PathBuf;
 
 use ee::models::{
+    CompileBlockerCacheInput, CompileBlockerCacheStatus, CompileBlockerLookupRequest,
     VERIFICATION_BROKER_VIEW_SCHEMA_V1, VERIFICATION_CLOSEOUT_CAPSULE_SCHEMA_V1,
+    VERIFICATION_COMPILE_BLOCKER_CACHE_SCHEMA_V1, VERIFICATION_COMPILE_BLOCKER_LOOKUP_SCHEMA_V1,
     VERIFICATION_EVIDENCE_SCHEMA_V1, VERIFICATION_REUSE_ADVISORY_SCHEMA_V1,
     VERIFICATION_RUN_SCHEMA_V1, VerificationBrokerStatus, VerificationBrokerView,
     VerificationCloseoutCapsule, VerificationCloseoutCapsuleRequest, VerificationEvidenceRecord,
     VerificationReuseRequest, VerificationReuseStatus, VerificationRunImportError,
-    VerificationStatus, sample_verification_broker_views, sample_verification_closeout_capsules,
+    VerificationStatus, compile_blocker_cache_entry, compile_blocker_lookup,
+    sample_verification_broker_views, sample_verification_closeout_capsules,
     sample_verification_evidence_records, sample_verification_reuse_advisories,
     sample_verification_run_records, verification_closeout_capsule, verification_reuse_advisory,
     verification_run_records_from_j1_jsonl,
@@ -203,6 +206,149 @@ fn verification_broker_views_validate_against_declared_schema() -> TestResult {
             &value,
             &format!("sample_verification_broker_views[{index}]"),
         )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn compile_blocker_cache_entry_is_redaction_safe_and_actionable() -> TestResult {
+    let records = compile_blocker_records();
+    let failed = records
+        .iter()
+        .find(|record| record.run_id == "vrun_compile_blocker")
+        .ok_or_else(|| "missing compile blocker fixture".to_owned())?;
+
+    let entry = compile_blocker_cache_entry(CompileBlockerCacheInput {
+        record: failed,
+        command_class: "cargo_test",
+        first_source_path: "src/core/context.rs",
+        source_file_hash: Some("blake3:file-context-v1"),
+        rust_error_code: Some("E0063"),
+        line: Some(42),
+        column: Some(17),
+        short_message: "missing field `foo` in initializer",
+        owner_candidates: vec!["StormyCove", "StormyCove", "RubyLeopard"],
+        reservation_holder: Some("StormyCove"),
+    })
+    .ok_or_else(|| "failed verification run should produce a cache entry".to_owned())?;
+
+    assert_eq!(entry.schema, VERIFICATION_COMPILE_BLOCKER_CACHE_SCHEMA_V1);
+    assert!(entry.cache_key.starts_with("blake3:"));
+    assert_eq!(
+        entry.source_tree_fingerprint.as_deref(),
+        Some("blake3:tree-v1")
+    );
+    assert_eq!(entry.command_class, "cargo_test");
+    assert_eq!(entry.first_source_path, "src/core/context.rs");
+    assert_eq!(entry.rust_error_code.as_deref(), Some("E0063"));
+    assert_eq!(entry.line, Some(42));
+    assert_eq!(entry.column, Some(17));
+    assert_eq!(entry.owner_candidates, ["RubyLeopard", "StormyCove"]);
+    assert_eq!(entry.reservation_holder.as_deref(), Some("StormyCove"));
+    assert!(!entry.first_failure_summary_ref.raw_output_included);
+
+    let encoded = serde_json::to_string(&entry).map_err(|error| error.to_string())?;
+    assert!(!encoded.contains("/Volumes/USBNVME16TB"));
+    assert!(!encoded.contains("/tmp/"));
+    assert!(!encoded.contains("raw stderr bytes"));
+    assert!(!encoded.contains("error: could not compile"));
+
+    let lookup = compile_blocker_lookup(
+        entry,
+        CompileBlockerLookupRequest {
+            current_source_tree_fingerprint: Some("blake3:tree-v1"),
+            current_source_file_hash: Some("blake3:file-context-v1"),
+        },
+    );
+    assert_eq!(lookup.schema, VERIFICATION_COMPILE_BLOCKER_LOOKUP_SCHEMA_V1);
+    assert_eq!(lookup.status, CompileBlockerCacheStatus::Current);
+    assert_eq!(lookup.stale_reason_codes, Vec::<String>::new());
+    assert_eq!(lookup.suggested_action, "message_reservation_holder");
+    assert_eq!(lookup.coordination_target.as_deref(), Some("StormyCove"));
+    Ok(())
+}
+
+#[test]
+fn compile_blocker_cache_marks_tree_or_file_changes_stale() -> TestResult {
+    let records = compile_blocker_records();
+    let failed = records
+        .iter()
+        .find(|record| record.run_id == "vrun_compile_blocker")
+        .ok_or_else(|| "missing compile blocker fixture".to_owned())?;
+    let entry = compile_blocker_cache_entry(CompileBlockerCacheInput {
+        record: failed,
+        command_class: "cargo_test",
+        first_source_path: "/Users/jemanuel/projects/eidetic_engine_cli/src/core/context.rs",
+        source_file_hash: Some("blake3:file-context-v1"),
+        rust_error_code: Some("E0063"),
+        line: Some(42),
+        column: Some(17),
+        short_message: "missing field `foo` in initializer",
+        owner_candidates: Vec::new(),
+        reservation_holder: None,
+    })
+    .ok_or_else(|| "failed verification run should produce a cache entry".to_owned())?;
+
+    assert!(entry.first_source_path.starts_with("path_hash:blake3:"));
+
+    let source_stale = compile_blocker_lookup(
+        entry.clone(),
+        CompileBlockerLookupRequest {
+            current_source_tree_fingerprint: Some("blake3:tree-v2"),
+            current_source_file_hash: Some("blake3:file-context-v1"),
+        },
+    );
+    assert_eq!(
+        source_stale.status,
+        CompileBlockerCacheStatus::StaleSourceTree
+    );
+    assert_eq!(source_stale.suggested_action, "rerun_current_source");
+    assert!(
+        source_stale
+            .stale_reason_codes
+            .contains(&"source_tree_fingerprint_changed".to_owned())
+    );
+
+    let file_stale = compile_blocker_lookup(
+        entry,
+        CompileBlockerLookupRequest {
+            current_source_tree_fingerprint: Some("blake3:tree-v1"),
+            current_source_file_hash: Some("blake3:file-context-v2"),
+        },
+    );
+    assert_eq!(
+        file_stale.status,
+        CompileBlockerCacheStatus::StaleSourceFile
+    );
+    assert_eq!(file_stale.suggested_action, "rerun_current_source");
+    assert!(
+        file_stale
+            .stale_reason_codes
+            .contains(&"source_file_hash_changed".to_owned())
+    );
+    Ok(())
+}
+
+#[test]
+fn compile_blocker_cache_ignores_passing_or_in_flight_runs() -> TestResult {
+    for record in sample_verification_run_records() {
+        let entry = compile_blocker_cache_entry(CompileBlockerCacheInput {
+            record: &record,
+            command_class: "cargo_test",
+            first_source_path: "src/lib.rs",
+            source_file_hash: Some("blake3:file"),
+            rust_error_code: None,
+            line: None,
+            column: None,
+            short_message: "not a compile blocker",
+            owner_candidates: Vec::new(),
+            reservation_holder: None,
+        });
+        assert!(
+            entry.is_none(),
+            "non-failing run {} should not cache a compile blocker",
+            record.run_id
+        );
     }
     Ok(())
 }
@@ -617,4 +763,55 @@ fn reuse_request<'a>(
         workspace_generation: Some(42),
         strictness_flags: vec!["RCH_REQUIRE_REMOTE=1"],
     }
+}
+
+fn compile_blocker_records() -> Vec<ee::models::VerificationRunRecord> {
+    let mut records = sample_verification_run_records();
+    records.push(ee::models::VerificationRunRecord::from_input(
+        ee::models::VerificationRunInput {
+            run_id: Some("vrun_compile_blocker"),
+            bead_id: Some("bd-6boyo.3"),
+            agent_name: Some("DarkDuck"),
+            source_hash: Some("blake3:tree-v1"),
+            command_hash: Some("blake3:cargo-test-command"),
+            command_argv: &["cargo", "test", "--lib"],
+            cargo_target_dir: Some("/Volumes/USBNVME16TB/temp_agent_space/rch-target"),
+            execution_substrate: "rch",
+            worker_host: Some("css"),
+            started_at: Some("2026-05-15T21:00:00Z"),
+            finished_at: Some("2026-05-15T21:05:00Z"),
+            exit_code: Some(101),
+            stdout_hash: Some("blake3:stdout"),
+            stderr_excerpt: Some("error: could not compile `ee`; raw stderr bytes elided"),
+            artifact_manifest_hash: Some("blake3:manifest"),
+            retained_log_path: Some("/tmp/rch-failure.log"),
+            provenance: vec![ee::models::VerificationRunProvenance {
+                source: "j1_jsonl".to_owned(),
+                event_kind: "artifact_manifest".to_owned(),
+                line: Some(2),
+            }],
+        },
+    ));
+    records.push(ee::models::VerificationRunRecord::from_input(
+        ee::models::VerificationRunInput {
+            run_id: Some("vrun_in_flight_no_blocker"),
+            bead_id: Some("bd-6boyo.3"),
+            agent_name: Some("DarkDuck"),
+            source_hash: Some("blake3:tree-v1"),
+            command_hash: Some("blake3:cargo-test-command"),
+            command_argv: &["cargo", "test", "--lib"],
+            cargo_target_dir: Some("/Volumes/USBNVME16TB/temp_agent_space/rch-target"),
+            execution_substrate: "rch",
+            worker_host: Some("css"),
+            started_at: Some("2026-05-15T21:06:00Z"),
+            finished_at: None,
+            exit_code: None,
+            stdout_hash: None,
+            stderr_excerpt: None,
+            artifact_manifest_hash: Some("blake3:manifest-in-flight"),
+            retained_log_path: Some("/tmp/rch-in-flight.log"),
+            provenance: Vec::new(),
+        },
+    ));
+    records
 }

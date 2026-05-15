@@ -274,23 +274,26 @@ pub use situation::{
 pub use timing::{DiagnosticTiming, TimingCapture, TimingPhase};
 pub use trust::{ParseTrustClassError, TrustClass};
 pub use verification::{
-    VERIFICATION_BROKER_VIEW_SCHEMA_V1, VERIFICATION_CLOSEOUT_CAPSULE_SCHEMA_V1,
-    VERIFICATION_CLOSURE_GUIDANCE_SCHEMA_V1, VERIFICATION_EVIDENCE_SCHEMA_V1,
-    VERIFICATION_REUSE_ADVISORY_SCHEMA_V1, VERIFICATION_RUN_SCHEMA_V1, VerificationArtifactRef,
-    VerificationBrokerRchMetadata, VerificationBrokerStatus, VerificationBrokerView,
-    VerificationBrokerViewRequest, VerificationCloseoutCapsule, VerificationCloseoutCapsuleRequest,
+    CompileBlockerCacheEntry, CompileBlockerCacheInput, CompileBlockerCacheStatus,
+    CompileBlockerLookup, CompileBlockerLookupRequest, VERIFICATION_BROKER_VIEW_SCHEMA_V1,
+    VERIFICATION_CLOSEOUT_CAPSULE_SCHEMA_V1, VERIFICATION_CLOSURE_GUIDANCE_SCHEMA_V1,
+    VERIFICATION_COMPILE_BLOCKER_CACHE_SCHEMA_V1, VERIFICATION_COMPILE_BLOCKER_LOOKUP_SCHEMA_V1,
+    VERIFICATION_EVIDENCE_SCHEMA_V1, VERIFICATION_REUSE_ADVISORY_SCHEMA_V1,
+    VERIFICATION_RUN_SCHEMA_V1, VerificationArtifactRef, VerificationBrokerRchMetadata,
+    VerificationBrokerStatus, VerificationBrokerView, VerificationBrokerViewRequest,
+    VerificationCloseoutCapsule, VerificationCloseoutCapsuleRequest,
     VerificationCloseoutSupportBundleMetadata, VerificationClosureGuidance,
     VerificationEnvironment, VerificationEvidenceInput, VerificationEvidenceRecord,
     VerificationFirstFailureSummaryRef, VerificationGateAssessment, VerificationGateRequirement,
     VerificationOffload, VerificationOutputSummary, VerificationReuseAdvisory,
     VerificationReuseRepairAction, VerificationReuseRequest, VerificationReuseStatus,
     VerificationRunImportError, VerificationRunInput, VerificationRunProvenance,
-    VerificationRunRecord, VerificationStatus, command_hash, rch_cargo_closure_requirements,
-    sample_verification_broker_views, sample_verification_closeout_capsules,
-    sample_verification_evidence_records, sample_verification_reuse_advisories,
-    sample_verification_run_records, verification_broker_view, verification_closeout_capsule,
-    verification_closure_guidance, verification_reuse_advisory,
-    verification_run_records_from_j1_jsonl,
+    VerificationRunRecord, VerificationStatus, command_hash, compile_blocker_cache_entry,
+    compile_blocker_lookup, rch_cargo_closure_requirements, sample_verification_broker_views,
+    sample_verification_closeout_capsules, sample_verification_evidence_records,
+    sample_verification_reuse_advisories, sample_verification_run_records,
+    verification_broker_view, verification_closeout_capsule, verification_closure_guidance,
+    verification_reuse_advisory, verification_run_records_from_j1_jsonl,
 };
 pub use why_tag::{ParseWhyTagError, WhyTag};
 
