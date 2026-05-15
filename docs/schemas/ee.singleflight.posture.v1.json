@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.singleflight.posture.v1.json",
+  "title": "ee.singleflight.posture.v1",
+  "description": "Redaction-safe status posture for configured in-process single-flight surfaces.",
+  "type": "object",
+  "required": [
+    "schema",
+    "status",
+    "configuredSurfaceCount",
+    "activeLeaderCount",
+    "leaderStartCount",
+    "followerWaitCount",
+    "followerTimeoutCount",
+    "leaderFailureCount",
+    "reusedResultCount",
+    "surfaces"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "type": "string", "const": "ee.singleflight.posture.v1" },
+    "status": { "$ref": "#/$defs/status" },
+    "configuredSurfaceCount": { "type": "integer", "minimum": 0 },
+    "activeLeaderCount": { "type": "integer", "minimum": 0 },
+    "leaderStartCount": { "type": "integer", "minimum": 0 },
+    "followerWaitCount": { "type": "integer", "minimum": 0 },
+    "followerTimeoutCount": { "type": "integer", "minimum": 0 },
+    "leaderFailureCount": { "type": "integer", "minimum": 0 },
+    "reusedResultCount": { "type": "integer", "minimum": 0 },
+    "surfaces": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/surfacePosture" }
+    }
+  },
+  "field_presets": {
+    "minimal": ["schema", "status"],
+    "summary": [
+      "schema",
+      "status",
+      "configuredSurfaceCount",
+      "activeLeaderCount",
+      "followerWaitCount",
+      "followerTimeoutCount",
+      "leaderFailureCount"
+    ],
+    "standard": [
+      "schema",
+      "status",
+      "configuredSurfaceCount",
+      "activeLeaderCount",
+      "leaderStartCount",
+      "followerWaitCount",
+      "followerTimeoutCount",
+      "leaderFailureCount",
+      "reusedResultCount",
+      "surfaces"
+    ],
+    "full": ["*"]
+  },
+  "examples": [
+    {
+      "schema": "ee.singleflight.posture.v1",
+      "status": "idle",
+      "configuredSurfaceCount": 1,
+      "activeLeaderCount": 0,
+      "leaderStartCount": 2,
+      "followerWaitCount": 5,
+      "followerTimeoutCount": 0,
+      "leaderFailureCount": 0,
+      "reusedResultCount": 5,
+      "surfaces": [
+        {
+          "surface": "graph_feature_enrichment",
+          "status": "idle",
+          "configured": true,
+          "activeLeaderCount": 0,
+          "leaderStartCount": 2,
+          "completedLeaderCount": 2,
+          "followerJoinCount": 5,
+          "followerTimeoutCount": 0,
+          "leaderFailureCount": 0,
+          "reusedResultCount": 5,
+          "statePoisonedCount": 0,
+          "followerTimeoutMs": 250,
+          "suggestedAction": "no action; single-flight is available for duplicate read-heavy work"
+        }
+      ]
+    }
+  ],
+  "$defs": {
+    "status": {
+      "type": "string",
+      "enum": ["idle", "active", "observed_failures", "state_poisoned", "unconfigured"]
+    },
+    "surfacePosture": {
+      "type": "object",
+      "required": [
+        "surface",
+        "status",
+        "configured",
+        "activeLeaderCount",
+        "leaderStartCount",
+        "completedLeaderCount",
+        "followerJoinCount",
+        "followerTimeoutCount",
+        "leaderFailureCount",
+        "reusedResultCount",
+        "statePoisonedCount",
+        "followerTimeoutMs",
+        "suggestedAction"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "surface": {
+          "type": "string",
+          "enum": ["context", "search", "graph_snapshot", "graph_feature_enrichment"]
+        },
+        "status": { "$ref": "#/$defs/status" },
+        "configured": { "type": "boolean" },
+        "activeLeaderCount": { "type": "integer", "minimum": 0 },
+        "leaderStartCount": { "type": "integer", "minimum": 0 },
+        "completedLeaderCount": { "type": "integer", "minimum": 0 },
+        "followerJoinCount": { "type": "integer", "minimum": 0 },
+        "followerTimeoutCount": { "type": "integer", "minimum": 0 },
+        "leaderFailureCount": { "type": "integer", "minimum": 0 },
+        "reusedResultCount": { "type": "integer", "minimum": 0 },
+        "statePoisonedCount": { "type": "integer", "minimum": 0 },
+        "followerTimeoutMs": { "type": "integer", "minimum": 0 },
+        "suggestedAction": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const SINGLEFLIGHT_KEY_SCHEMA_V1: &str = "ee.singleflight.key.v1";
+pub const SINGLEFLIGHT_POSTURE_SCHEMA_V1: &str = "ee.singleflight.posture.v1";
 pub const SINGLEFLIGHT_KEY_CANONICAL_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -106,6 +107,157 @@ pub struct SingleFlightKey {
     pub redaction_level: Option<String>,
     pub explain: bool,
     pub verbose: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleFlightSurfacePosture {
+    pub surface: SingleFlightSurface,
+    pub status: String,
+    pub configured: bool,
+    pub active_leader_count: u32,
+    pub leader_start_count: u64,
+    pub completed_leader_count: u64,
+    pub follower_join_count: u64,
+    pub follower_timeout_count: u64,
+    pub leader_failure_count: u64,
+    pub reused_result_count: u64,
+    pub state_poisoned_count: u64,
+    pub follower_timeout_ms: u64,
+    pub suggested_action: String,
+}
+
+impl SingleFlightSurfacePosture {
+    #[must_use]
+    pub fn new(
+        surface: SingleFlightSurface,
+        configured: bool,
+        active_leader_count: u32,
+        counters: SingleFlightSurfaceCounters,
+        follower_timeout_ms: u64,
+    ) -> Self {
+        let status = if counters.state_poisoned_count > 0 {
+            "state_poisoned"
+        } else if counters.follower_timeout_count > 0 || counters.leader_failure_count > 0 {
+            "observed_failures"
+        } else if active_leader_count > 0 {
+            "active"
+        } else if configured {
+            "idle"
+        } else {
+            "unconfigured"
+        };
+        let suggested_action = match status {
+            "state_poisoned" => {
+                "restart the process to clear poisoned in-memory single-flight state"
+            }
+            "observed_failures" => "inspect degraded entries before rerunning duplicate work",
+            "active" => "wait for the active leader or lower request pressure",
+            "idle" => "no action; single-flight is available for duplicate read-heavy work",
+            _ => "enable a configured single-flight surface before expecting coalescing",
+        };
+
+        Self {
+            surface,
+            status: status.to_owned(),
+            configured,
+            active_leader_count,
+            leader_start_count: counters.leader_start_count,
+            completed_leader_count: counters.completed_leader_count,
+            follower_join_count: counters.follower_join_count,
+            follower_timeout_count: counters.follower_timeout_count,
+            leader_failure_count: counters.leader_failure_count,
+            reused_result_count: counters.reused_result_count,
+            state_poisoned_count: counters.state_poisoned_count,
+            follower_timeout_ms,
+            suggested_action: suggested_action.to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleFlightSurfaceCounters {
+    pub leader_start_count: u64,
+    pub completed_leader_count: u64,
+    pub follower_join_count: u64,
+    pub follower_timeout_count: u64,
+    pub leader_failure_count: u64,
+    pub reused_result_count: u64,
+    pub state_poisoned_count: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleFlightPostureReport {
+    pub schema: String,
+    pub status: String,
+    pub configured_surface_count: u32,
+    pub active_leader_count: u32,
+    pub leader_start_count: u64,
+    pub follower_wait_count: u64,
+    pub follower_timeout_count: u64,
+    pub leader_failure_count: u64,
+    pub reused_result_count: u64,
+    pub surfaces: Vec<SingleFlightSurfacePosture>,
+}
+
+impl SingleFlightPostureReport {
+    #[must_use]
+    pub fn from_surfaces(surfaces: Vec<SingleFlightSurfacePosture>) -> Self {
+        let configured_surface_count =
+            u32::try_from(surfaces.iter().filter(|surface| surface.configured).count())
+                .unwrap_or(u32::MAX);
+        let active_leader_count = surfaces
+            .iter()
+            .map(|surface| surface.active_leader_count)
+            .fold(0_u32, u32::saturating_add);
+        let follower_wait_count = surfaces
+            .iter()
+            .map(|surface| surface.follower_join_count)
+            .fold(0_u64, u64::saturating_add);
+        let leader_start_count = surfaces
+            .iter()
+            .map(|surface| surface.leader_start_count)
+            .fold(0_u64, u64::saturating_add);
+        let follower_timeout_count = surfaces
+            .iter()
+            .map(|surface| surface.follower_timeout_count)
+            .fold(0_u64, u64::saturating_add);
+        let leader_failure_count = surfaces
+            .iter()
+            .map(|surface| surface.leader_failure_count)
+            .fold(0_u64, u64::saturating_add);
+        let reused_result_count = surfaces
+            .iter()
+            .map(|surface| surface.reused_result_count)
+            .fold(0_u64, u64::saturating_add);
+        let status = if surfaces
+            .iter()
+            .any(|surface| surface.status == "state_poisoned")
+        {
+            "state_poisoned"
+        } else if follower_timeout_count > 0 || leader_failure_count > 0 {
+            "observed_failures"
+        } else if active_leader_count > 0 {
+            "active"
+        } else {
+            "idle"
+        };
+
+        Self {
+            schema: SINGLEFLIGHT_POSTURE_SCHEMA_V1.to_owned(),
+            status: status.to_owned(),
+            configured_surface_count,
+            active_leader_count,
+            leader_start_count,
+            follower_wait_count,
+            follower_timeout_count,
+            leader_failure_count,
+            reused_result_count,
+            surfaces,
+        }
+    }
 }
 
 impl SingleFlightKey {

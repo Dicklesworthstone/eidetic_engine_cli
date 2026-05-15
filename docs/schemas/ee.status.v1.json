@@ -16,11 +16,15 @@
         "command",
         "version",
         "workspace",
+        "posture",
         "capabilities",
         "runtime",
         "memoryHealth",
         "curationHealth",
         "feedbackHealth",
+        "singleFlight",
+        "graphCompute",
+        "graphSnapshotArtifact",
         "derivedAssets",
         "agentInventory",
         "degraded"
@@ -30,11 +34,15 @@
         "command": {"type": "string", "const": "status"},
         "version": {"type": "string"},
         "workspace": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "posture": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "capabilities": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "runtime": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "memoryHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "curationHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "feedbackHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "singleFlight": {"$ref": "ee.singleflight.posture.v1.json"},
+        "graphCompute": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "graphSnapshotArtifact": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "derivedAssets": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
         "agentInventory": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}}
@@ -43,8 +51,8 @@
   },
   "field_presets": {
     "minimal": ["command", "version", "workspace"],
-    "summary": ["command", "version", "workspace", "capabilities"],
-    "standard": ["command", "version", "workspace", "capabilities", "runtime", "memoryHealth", "curationHealth", "feedbackHealth", "derivedAssets", "agentInventory", "degraded"],
+    "summary": ["command", "version", "workspace", "posture", "singleFlight", "capabilities"],
+    "standard": ["command", "version", "workspace", "posture", "capabilities", "runtime", "memoryHealth", "curationHealth", "feedbackHealth", "singleFlight", "graphCompute", "graphSnapshotArtifact", "derivedAssets", "agentInventory", "degraded"],
     "full": ["*"]
   },
   "$defs": {

@@ -8,11 +8,14 @@
 use std::collections::HashMap;
 use std::sync::{
     Arc, Condvar, Mutex, OnceLock,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 
-use crate::models::{SingleFlightKey, SingleFlightKeyInput, SingleFlightSurface};
+use crate::models::{
+    SingleFlightKey, SingleFlightKeyInput, SingleFlightPostureReport, SingleFlightSurface,
+    SingleFlightSurfaceCounters, SingleFlightSurfacePosture,
+};
 
 pub const SINGLEFLIGHT_FOLLOWER_TIMEOUT_CODE: &str = "singleflight_follower_timeout";
 pub const SINGLEFLIGHT_LEADER_FAILED_CODE: &str = "singleflight_leader_failed";
@@ -118,12 +121,14 @@ impl std::error::Error for SingleFlightError {}
 #[derive(Debug)]
 pub struct SingleFlightGroup<T> {
     entries: Mutex<HashMap<String, Arc<SingleFlightEntry<T>>>>,
+    counters: SingleFlightCounters,
 }
 
 impl<T> Default for SingleFlightGroup<T> {
     fn default() -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
+            counters: SingleFlightCounters::default(),
         }
     }
 }
@@ -153,6 +158,7 @@ where
             let result = operation();
             self.complete_leader(&key_hash, &entry, result)
         } else {
+            self.counters.follower_joins.fetch_add(1, Ordering::SeqCst);
             entry.followers.fetch_add(1, Ordering::SeqCst);
             self.wait_for_leader(&key_hash, &entry, follower_timeout)
         }
@@ -166,6 +172,28 @@ where
                 key_hash: "<group>".to_owned(),
             })?;
         Ok(entries.len())
+    }
+
+    pub fn posture(
+        &self,
+        surface: SingleFlightSurface,
+        configured: bool,
+        follower_timeout: Duration,
+    ) -> SingleFlightSurfacePosture {
+        let active_leader_count = match self.active_len() {
+            Ok(count) => capped_u32(count),
+            Err(_) => {
+                self.counters.state_poisoned.fetch_add(1, Ordering::SeqCst);
+                0
+            }
+        };
+        SingleFlightSurfacePosture::new(
+            surface,
+            configured,
+            active_leader_count,
+            self.counters.snapshot(),
+            duration_ms(follower_timeout),
+        )
     }
 
     fn entry_for(
@@ -184,6 +212,7 @@ where
 
         let entry = Arc::new(SingleFlightEntry::default());
         entries.insert(key_hash.to_owned(), Arc::clone(&entry));
+        self.counters.leader_starts.fetch_add(1, Ordering::SeqCst);
         Ok((entry, true))
     }
 
@@ -206,16 +235,24 @@ where
         self.remove_entry(key_hash, entry)?;
 
         match result {
-            Ok(value) => Ok(SingleFlightRun {
-                value,
-                role: SingleFlightRole::Leader,
-                shared: entry.followers.load(Ordering::SeqCst) > 0,
-            }),
-            Err(message) => Err(SingleFlightError::LeaderFailed {
-                key_hash: key_hash.to_owned(),
-                role: SingleFlightRole::Leader,
-                message,
-            }),
+            Ok(value) => {
+                self.counters
+                    .completed_leaders
+                    .fetch_add(1, Ordering::SeqCst);
+                Ok(SingleFlightRun {
+                    value,
+                    role: SingleFlightRole::Leader,
+                    shared: entry.followers.load(Ordering::SeqCst) > 0,
+                })
+            }
+            Err(message) => {
+                self.counters.leader_failures.fetch_add(1, Ordering::SeqCst);
+                Err(SingleFlightError::LeaderFailed {
+                    key_hash: key_hash.to_owned(),
+                    role: SingleFlightRole::Leader,
+                    message,
+                })
+            }
         }
     }
 
@@ -245,6 +282,9 @@ where
                     let remaining = match deadline.checked_duration_since(Instant::now()) {
                         Some(remaining) if !remaining.is_zero() => remaining,
                         _ => {
+                            self.counters
+                                .follower_timeouts
+                                .fetch_add(1, Ordering::SeqCst);
                             return Err(SingleFlightError::FollowerTimeout {
                                 key_hash: key_hash.to_owned(),
                                 timeout_ms: duration_ms(follower_timeout),
@@ -259,6 +299,9 @@ where
                         })?;
                     state = next_state;
                     if wait.timed_out() && matches!(*state, SingleFlightState::Pending) {
+                        self.counters
+                            .follower_timeouts
+                            .fetch_add(1, Ordering::SeqCst);
                         return Err(SingleFlightError::FollowerTimeout {
                             key_hash: key_hash.to_owned(),
                             timeout_ms: duration_ms(follower_timeout),
@@ -266,6 +309,7 @@ where
                     }
                 }
                 SingleFlightState::Completed(Ok(value)) => {
+                    self.counters.reused_results.fetch_add(1, Ordering::SeqCst);
                     return Ok(SingleFlightRun {
                         value: value.clone(),
                         role: SingleFlightRole::Follower,
@@ -304,6 +348,55 @@ where
     }
 }
 
+#[derive(Debug, Default)]
+struct SingleFlightCounters {
+    leader_starts: AtomicU64,
+    completed_leaders: AtomicU64,
+    follower_joins: AtomicU64,
+    follower_timeouts: AtomicU64,
+    leader_failures: AtomicU64,
+    reused_results: AtomicU64,
+    state_poisoned: AtomicU64,
+}
+
+impl SingleFlightCounters {
+    fn snapshot(&self) -> SingleFlightSurfaceCounters {
+        SingleFlightSurfaceCounters {
+            leader_start_count: self.leader_starts.load(Ordering::SeqCst),
+            completed_leader_count: self.completed_leaders.load(Ordering::SeqCst),
+            follower_join_count: self.follower_joins.load(Ordering::SeqCst),
+            follower_timeout_count: self.follower_timeouts.load(Ordering::SeqCst),
+            leader_failure_count: self.leader_failures.load(Ordering::SeqCst),
+            reused_result_count: self.reused_results.load(Ordering::SeqCst),
+            state_poisoned_count: self.state_poisoned.load(Ordering::SeqCst),
+        }
+    }
+}
+
+#[must_use]
+pub fn singleflight_posture_report() -> SingleFlightPostureReport {
+    let graph_feature_enrichment = GRAPH_FEATURE_ENRICHMENT_GROUP.get().map_or_else(
+        || {
+            SingleFlightSurfacePosture::new(
+                SingleFlightSurface::GraphFeatureEnrichment,
+                true,
+                0,
+                SingleFlightSurfaceCounters::default(),
+                duration_ms(GRAPH_FEATURE_ENRICHMENT_FOLLOWER_TIMEOUT),
+            )
+        },
+        |group| {
+            group.posture(
+                SingleFlightSurface::GraphFeatureEnrichment,
+                true,
+                GRAPH_FEATURE_ENRICHMENT_FOLLOWER_TIMEOUT,
+            )
+        },
+    );
+
+    SingleFlightPostureReport::from_surfaces(vec![graph_feature_enrichment])
+}
+
 pub fn run_graph_feature_enrichment<F>(
     workspace_identity: &str,
     workspace_generation: u64,
@@ -316,50 +409,58 @@ where
     F: FnOnce() -> crate::graph::GraphFeatureEnrichmentReport,
 {
     run_graph_feature_enrichment_with_group(
-        GRAPH_FEATURE_ENRICHMENT_GROUP.get_or_init(SingleFlightGroup::new),
-        GRAPH_FEATURE_ENRICHMENT_FOLLOWER_TIMEOUT,
-        workspace_identity,
-        workspace_generation,
-        graph_generation,
-        source_mode,
-        options,
+        GraphFeatureEnrichmentSingleFlightInput {
+            group: GRAPH_FEATURE_ENRICHMENT_GROUP.get_or_init(SingleFlightGroup::new),
+            follower_timeout: GRAPH_FEATURE_ENRICHMENT_FOLLOWER_TIMEOUT,
+            workspace_identity,
+            workspace_generation,
+            graph_generation,
+            source_mode,
+            options,
+        },
         operation,
     )
 }
 
-fn run_graph_feature_enrichment_with_group<F>(
-    group: &SingleFlightGroup<crate::graph::GraphFeatureEnrichmentReport>,
+struct GraphFeatureEnrichmentSingleFlightInput<'a> {
+    group: &'a SingleFlightGroup<crate::graph::GraphFeatureEnrichmentReport>,
     follower_timeout: Duration,
-    workspace_identity: &str,
+    workspace_identity: &'a str,
     workspace_generation: u64,
     graph_generation: Option<u64>,
-    source_mode: &str,
-    options: &crate::graph::GraphFeatureEnrichmentOptions,
+    source_mode: &'a str,
+    options: &'a crate::graph::GraphFeatureEnrichmentOptions,
+}
+
+fn run_graph_feature_enrichment_with_group<F>(
+    input: GraphFeatureEnrichmentSingleFlightInput<'_>,
     operation: F,
 ) -> Result<SingleFlightRun<crate::graph::GraphFeatureEnrichmentReport>, SingleFlightError>
 where
     F: FnOnce() -> crate::graph::GraphFeatureEnrichmentReport,
 {
-    let max_features = options.max_features.to_string();
-    let min_combined_score = stable_f64_option(options.min_combined_score);
-    let max_selection_boost = stable_f64_option(options.max_selection_boost);
+    let max_features = input.options.max_features.to_string();
+    let min_combined_score = stable_f64_option(input.options.min_combined_score);
+    let max_selection_boost = stable_f64_option(input.options.max_selection_boost);
     let option_pairs = [
-        ("source_mode", source_mode),
+        ("source_mode", input.source_mode),
         ("max_features", max_features.as_str()),
         ("min_combined_score_bits", min_combined_score.as_str()),
         ("max_selection_boost_bits", max_selection_boost.as_str()),
     ];
     let mut key_input = SingleFlightKeyInput::new(
         SingleFlightSurface::GraphFeatureEnrichment,
-        workspace_identity,
-        workspace_generation,
+        input.workspace_identity,
+        input.workspace_generation,
         crate::graph::GRAPH_FEATURE_ENRICHMENT_SCHEMA_V1,
     );
-    key_input.graph_generation = graph_generation;
+    key_input.graph_generation = input.graph_generation;
     key_input.option_pairs = &option_pairs;
     let key = SingleFlightKey::from_input(&key_input);
 
-    group.run(&key, follower_timeout, || Ok(operation()))
+    input
+        .group
+        .run(&key, input.follower_timeout, || Ok(operation()))
 }
 
 fn stable_f64_option(value: f64) -> String {
@@ -390,10 +491,11 @@ enum SingleFlightState<T> {
 }
 
 fn duration_ms(duration: Duration) -> u64 {
-    match u64::try_from(duration.as_millis()) {
-        Ok(value) => value,
-        Err(_) => u64::MAX,
-    }
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn capped_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
@@ -464,6 +566,17 @@ mod tests {
         assert_eq!(leader_count, 1);
         assert_eq!(follower_count, 5);
         assert_eq!(group.active_len().map_err(|error| format!("{error:?}"))?, 0);
+        let posture = group.posture(
+            SingleFlightSurface::Context,
+            true,
+            Duration::from_millis(250),
+        );
+        assert_eq!(posture.status, "idle");
+        assert_eq!(posture.active_leader_count, 0);
+        assert_eq!(posture.leader_start_count, 1);
+        assert_eq!(posture.completed_leader_count, 1);
+        assert_eq!(posture.follower_join_count, 5);
+        assert_eq!(posture.reused_result_count, 5);
         Ok(())
     }
 
@@ -540,6 +653,10 @@ mod tests {
         assert_eq!(leader_run.value, "leader-finished");
         assert_eq!(leader_run.role, SingleFlightRole::Leader);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let posture = group.posture(SingleFlightSurface::Search, true, Duration::from_millis(10));
+        assert_eq!(posture.status, "observed_failures");
+        assert_eq!(posture.follower_timeout_count, 1);
+        assert_eq!(posture.completed_leader_count, 1);
         Ok(())
     }
 
@@ -598,6 +715,13 @@ mod tests {
             }
             other => return Err(format!("unexpected leader error: {other:?}")),
         }
+        let posture = group.posture(
+            SingleFlightSurface::GraphFeatureEnrichment,
+            true,
+            Duration::from_secs(5),
+        );
+        assert_eq!(posture.status, "observed_failures");
+        assert_eq!(posture.leader_failure_count, 1);
         Ok(())
     }
 
@@ -618,13 +742,15 @@ mod tests {
             let options = options.clone();
             handles.push(thread::spawn(move || {
                 run_graph_feature_enrichment_with_group(
-                    &group,
-                    Duration::from_secs(2),
-                    "/workspace/eidetic_engine_cli",
-                    12,
-                    Some(7),
-                    "graph_snapshot",
-                    &options,
+                    GraphFeatureEnrichmentSingleFlightInput {
+                        group: &group,
+                        follower_timeout: Duration::from_secs(2),
+                        workspace_identity: "/workspace/eidetic_engine_cli",
+                        workspace_generation: 12,
+                        graph_generation: Some(7),
+                        source_mode: "graph_snapshot",
+                        options: &options,
+                    },
                     || {
                         executions.fetch_add(1, Ordering::SeqCst);
                         leader_started.wait();

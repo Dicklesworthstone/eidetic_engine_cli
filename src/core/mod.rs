@@ -2,7 +2,8 @@ use std::future::Future;
 
 use crate::models::{
     ARTIFACT_SUMMARY_SCHEMA_V1, ERROR_SCHEMA_V2, INSTALL_CHECK_SCHEMA_V1, INSTALL_PLAN_SCHEMA_V1,
-    RESPONSE_SCHEMA_V1, SINGLEFLIGHT_KEY_SCHEMA_V1, UPDATE_PLAN_SCHEMA_V1,
+    RESPONSE_SCHEMA_V1, SINGLEFLIGHT_KEY_SCHEMA_V1, SINGLEFLIGHT_POSTURE_SCHEMA_V1,
+    UPDATE_PLAN_SCHEMA_V1,
 };
 
 pub mod agent_detect;
@@ -231,6 +232,7 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
         SupportedSchema::new("why_augmented", "ee.why.v1"),
         SupportedSchema::new("context_augmented", "ee.context.v1"),
         SupportedSchema::new("singleflight_key", SINGLEFLIGHT_KEY_SCHEMA_V1),
+        SupportedSchema::new("singleflight_posture", SINGLEFLIGHT_POSTURE_SCHEMA_V1),
         SupportedSchema::new(
             "preflight_bypass_token",
             preflight_token::PREFLIGHT_BYPASS_TOKEN_SCHEMA_V1,
@@ -579,6 +581,7 @@ mod tests {
                 "why_augmented",
                 "context_augmented",
                 "singleflight_key",
+                "singleflight_posture",
                 "preflight_bypass_token",
                 "disk_pressure_diagnostics",
                 "artifact_retention_diagnostics",

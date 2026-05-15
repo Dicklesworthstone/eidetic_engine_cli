@@ -25,7 +25,10 @@ use ee::core::status::{
 use ee::models::posture::{
     OperationPostureReport, SubsystemPostureReport, SubsystemPostureStatus, WorkspacePostureReport,
 };
-use ee::models::{CapabilityStatus, error_codes};
+use ee::models::{
+    CapabilityStatus, SingleFlightPostureReport, SingleFlightSurface, SingleFlightSurfaceCounters,
+    SingleFlightSurfacePosture, error_codes,
+};
 use ee::output::{render_doctor_json, render_status_json};
 use serde_json::{Value, json};
 
@@ -1121,6 +1124,8 @@ fn fixture_status_posture(
             SubsystemPostureReport::new("curate", SubsystemPostureStatus::Ok).with_checks_passed(1),
             SubsystemPostureReport::new("feedback", SubsystemPostureStatus::Ok)
                 .with_checks_passed(1),
+            SubsystemPostureReport::new("singleflight", SubsystemPostureStatus::Ok)
+                .with_checks_passed(1),
             SubsystemPostureReport::new("maintenance", SubsystemPostureStatus::Ok)
                 .with_checks_passed(1),
             SubsystemPostureReport::new("agent_detection", SubsystemPostureStatus::Ok)
@@ -1134,10 +1139,21 @@ fn fixture_status_posture(
             "graph_compute",
             "curate",
             "feedback",
+            "singleflight",
             "maintenance",
             "agent_detection",
         ]),
     )
+}
+
+fn fixture_singleflight_posture() -> SingleFlightPostureReport {
+    SingleFlightPostureReport::from_surfaces(vec![SingleFlightSurfacePosture::new(
+        SingleFlightSurface::GraphFeatureEnrichment,
+        true,
+        0,
+        SingleFlightSurfaceCounters::default(),
+        250,
+    )])
 }
 
 fn status_missing_db_report() -> StatusReport {
@@ -1161,6 +1177,7 @@ fn status_missing_db_report() -> StatusReport {
         memory_health: unavailable_memory_health(),
         curation_health: CurationHealthReport::unavailable(),
         feedback_health: unavailable_feedback_health(),
+        singleflight_posture: fixture_singleflight_posture(),
         graph_compute: graph_compute_available(),
         graph_snapshot_artifact: graph_snapshot_empty_report(),
         derived_assets: vec![
@@ -1223,6 +1240,7 @@ fn status_pending_migration_report() -> StatusReport {
         memory_health: unavailable_memory_health(),
         curation_health: CurationHealthReport::unavailable(),
         feedback_health: unavailable_feedback_health(),
+        singleflight_posture: fixture_singleflight_posture(),
         graph_compute: graph_compute_available(),
         graph_snapshot_artifact: graph_snapshot_empty_report(),
         derived_assets: vec![
@@ -1285,6 +1303,7 @@ fn status_stale_index_lexical_only_report() -> StatusReport {
         memory_health: healthy_memory_health(),
         curation_health: CurationHealthReport::not_inspected(),
         feedback_health: healthy_feedback_health(),
+        singleflight_posture: fixture_singleflight_posture(),
         graph_compute: graph_compute_available(),
         graph_snapshot_artifact: graph_snapshot_empty_report(),
         derived_assets: vec![
@@ -1333,6 +1352,7 @@ fn status_search_unimplemented_report() -> StatusReport {
         memory_health: healthy_memory_health(),
         curation_health: CurationHealthReport::not_inspected(),
         feedback_health: healthy_feedback_health(),
+        singleflight_posture: fixture_singleflight_posture(),
         graph_compute: graph_compute_available(),
         graph_snapshot_artifact: graph_snapshot_empty_report(),
         derived_assets: vec![

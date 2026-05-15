@@ -2993,6 +2993,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
         render_memory_health_json(d, &report.memory_health);
         render_curation_health_json(d, &report.curation_health);
         render_feedback_health_json(d, &report.feedback_health);
+        render_singleflight_posture_json(d, &report.singleflight_posture);
         render_graph_compute_json(d, &report.graph_compute);
         render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
         render_derived_assets_json(d, &report.derived_assets, true);
@@ -3035,6 +3036,65 @@ fn render_status_posture_json(
             obj.field_u32("checksPassed", subsystem.checks_passed);
             field_optional_str(obj, "reason", subsystem.reason);
             field_optional_str(obj, "fallback", subsystem.fallback);
+        });
+    });
+}
+
+fn render_singleflight_posture_json(
+    parent: &mut JsonBuilder,
+    report: &crate::models::SingleFlightPostureReport,
+) {
+    parent.field_object("singleFlight", |sf| {
+        sf.field_str("schema", &report.schema);
+        sf.field_str("status", &report.status);
+        sf.field_u32("configuredSurfaceCount", report.configured_surface_count);
+        sf.field_u32("activeLeaderCount", report.active_leader_count);
+        sf.field_raw("leaderStartCount", &report.leader_start_count.to_string());
+        sf.field_raw("followerWaitCount", &report.follower_wait_count.to_string());
+        sf.field_raw(
+            "followerTimeoutCount",
+            &report.follower_timeout_count.to_string(),
+        );
+        sf.field_raw(
+            "leaderFailureCount",
+            &report.leader_failure_count.to_string(),
+        );
+        sf.field_raw("reusedResultCount", &report.reused_result_count.to_string());
+        sf.field_array_of_objects("surfaces", &report.surfaces, |obj, surface| {
+            obj.field_str("surface", surface.surface.as_str());
+            obj.field_str("status", &surface.status);
+            obj.field_bool("configured", surface.configured);
+            obj.field_u32("activeLeaderCount", surface.active_leader_count);
+            obj.field_raw("leaderStartCount", &surface.leader_start_count.to_string());
+            obj.field_raw(
+                "completedLeaderCount",
+                &surface.completed_leader_count.to_string(),
+            );
+            obj.field_raw(
+                "followerJoinCount",
+                &surface.follower_join_count.to_string(),
+            );
+            obj.field_raw(
+                "followerTimeoutCount",
+                &surface.follower_timeout_count.to_string(),
+            );
+            obj.field_raw(
+                "leaderFailureCount",
+                &surface.leader_failure_count.to_string(),
+            );
+            obj.field_raw(
+                "reusedResultCount",
+                &surface.reused_result_count.to_string(),
+            );
+            obj.field_raw(
+                "statePoisonedCount",
+                &surface.state_poisoned_count.to_string(),
+            );
+            obj.field_raw(
+                "followerTimeoutMs",
+                &surface.follower_timeout_ms.to_string(),
+            );
+            obj.field_str("suggestedAction", &surface.suggested_action);
         });
     });
 }
@@ -6213,6 +6273,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: status_response_schema_definition,
         },
         SchemaEntry {
+            id: crate::models::SINGLEFLIGHT_POSTURE_SCHEMA_V1,
+            version: "1",
+            description: "Redaction-safe single-flight posture embedded in status reports",
+            category: "ops",
+            definition: singleflight_posture_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.doctor.v1",
             version: "1",
             description: "Doctor diagnostics response envelope",
@@ -6535,6 +6602,10 @@ fn memory_list_schema_definition() -> String {
 
 fn status_response_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.status.v1.json").to_string()
+}
+
+fn singleflight_posture_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.singleflight.posture.v1.json").to_string()
 }
 
 fn doctor_response_schema_definition() -> String {
@@ -8454,6 +8525,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
 
         if profile.include_summary_metrics() {
             render_status_posture_json(d, &report.posture);
+            render_singleflight_posture_json(d, &report.singleflight_posture);
             d.field_object("capabilities", |c| {
                 c.field_str("runtime", report.capabilities.runtime.as_str());
                 c.field_str("storage", report.capabilities.storage.as_str());
@@ -14445,6 +14517,10 @@ mod tests {
             .get("data")
             .and_then(serde_json::Value::as_object)
             .ok_or_else(|| "status summary has data object".to_string())?;
+        ensure(
+            data.contains_key("singleFlight"),
+            "has singleFlight posture",
+        )?;
         ensure(!data.contains_key("runtime"), "no runtime object")?;
         ensure(!data.contains_key("degraded"), "no degraded array")
     }
@@ -14458,6 +14534,12 @@ mod tests {
         ensure_contains(&json, "\"fields\":\"standard\"", "fields indicator")?;
         ensure_contains(&json, "\"capabilities\":", "has capabilities")?;
         ensure_contains(&json, "\"runtime\":", "has runtime")?;
+        ensure_contains(&json, "\"singleFlight\":", "has singleFlight")?;
+        ensure_contains(
+            &json,
+            "\"schema\":\"ee.singleflight.posture.v1\"",
+            "has singleFlight schema",
+        )?;
         ensure_contains(&json, "\"degraded\":", "has degraded")?;
         // Standard degraded entries keep repair guidance because agents rely on
         // the default JSON profile for recovery planning.

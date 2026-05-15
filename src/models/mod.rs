@@ -259,8 +259,10 @@ pub use schema::{
     validate_schema_match,
 };
 pub use singleflight::{
-    SINGLEFLIGHT_KEY_CANONICAL_VERSION, SINGLEFLIGHT_KEY_SCHEMA_V1, SingleFlightKey,
-    SingleFlightKeyInput, SingleFlightSurface, query_shape_hash, sample_singleflight_keys,
+    SINGLEFLIGHT_KEY_CANONICAL_VERSION, SINGLEFLIGHT_KEY_SCHEMA_V1, SINGLEFLIGHT_POSTURE_SCHEMA_V1,
+    SingleFlightKey, SingleFlightKeyInput, SingleFlightPostureReport, SingleFlightSurface,
+    SingleFlightSurfaceCounters, SingleFlightSurfacePosture, query_shape_hash,
+    sample_singleflight_keys,
 };
 pub use situation::{
     FEATURE_EVIDENCE_SCHEMA_V1, FeatureEvidence, ParseSituationValueError,

@@ -5,8 +5,9 @@ use std::path::PathBuf;
 
 use ee::core::supported_schemas;
 use ee::models::{
-    KNOWN_SCHEMAS, SINGLEFLIGHT_KEY_CANONICAL_VERSION, SINGLEFLIGHT_KEY_SCHEMA_V1, SingleFlightKey,
-    SingleFlightKeyInput, SingleFlightSurface, sample_singleflight_keys,
+    KNOWN_SCHEMAS, SINGLEFLIGHT_KEY_CANONICAL_VERSION, SINGLEFLIGHT_KEY_SCHEMA_V1,
+    SINGLEFLIGHT_POSTURE_SCHEMA_V1, SingleFlightKey, SingleFlightKeyInput, SingleFlightSurface,
+    sample_singleflight_keys,
 };
 use serde_json::Value;
 
@@ -55,6 +56,43 @@ fn singleflight_key_schema_is_documented_and_registered() -> TestResult {
         .collect::<Vec<_>>();
     if !supported.contains(&SINGLEFLIGHT_KEY_SCHEMA_V1) {
         return Err("supported_schemas() missing ee.singleflight.key.v1".to_owned());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn singleflight_posture_schema_is_documented_and_registered() -> TestResult {
+    let schema = read_json("docs/schemas/ee.singleflight.posture.v1.json")?;
+
+    ensure_json_str(
+        &schema,
+        "/$schema",
+        "https://json-schema.org/draft/2020-12/schema",
+    )?;
+    ensure_json_str(
+        &schema,
+        "/$id",
+        "https://eidetic-engine/schemas/ee.singleflight.posture.v1.json",
+    )?;
+    ensure_json_str(&schema, "/title", SINGLEFLIGHT_POSTURE_SCHEMA_V1)?;
+    ensure_json_bool(&schema, "/additionalProperties", false)?;
+    ensure_json_str(
+        &schema,
+        "/properties/schema/const",
+        SINGLEFLIGHT_POSTURE_SCHEMA_V1,
+    )?;
+
+    if !KNOWN_SCHEMAS.contains(&SINGLEFLIGHT_POSTURE_SCHEMA_V1) {
+        return Err("KNOWN_SCHEMAS missing ee.singleflight.posture.v1".to_owned());
+    }
+
+    let supported = supported_schemas()
+        .into_iter()
+        .map(|schema| schema.schema)
+        .collect::<Vec<_>>();
+    if !supported.contains(&SINGLEFLIGHT_POSTURE_SCHEMA_V1) {
+        return Err("supported_schemas() missing ee.singleflight.posture.v1".to_owned());
     }
 
     Ok(())

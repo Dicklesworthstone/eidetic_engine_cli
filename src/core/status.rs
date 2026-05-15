@@ -28,7 +28,7 @@ use crate::models::degradation::GRAPH_SKYLINE_DEGENERATE_COMMUNITIES_CODE;
 use crate::models::posture::{
     OperationPostureReport, SubsystemPostureReport, SubsystemPostureStatus, WorkspacePostureReport,
 };
-use crate::models::{CapabilityStatus, MemoryId};
+use crate::models::{CapabilityStatus, MemoryId, SingleFlightPostureReport};
 use crate::policy::{MEMORY_DECAY_SOURCE, MemoryDecayThresholds, evaluate_memory_decay};
 
 use super::agent_detect::AgentInventoryReport;
@@ -913,6 +913,7 @@ pub struct StatusReport {
     pub memory_health: MemoryHealthReport,
     pub curation_health: CurationHealthReport,
     pub feedback_health: FeedbackHealthReport,
+    pub singleflight_posture: SingleFlightPostureReport,
     pub graph_compute: GraphComputeReport,
     pub graph_snapshot_artifact: GraphSnapshotArtifactReport,
     pub derived_assets: Vec<DerivedAssetReport>,
@@ -959,6 +960,7 @@ impl StatusReport {
             gather_curation_health(options.workspace_path.as_deref());
         let (feedback_health, feedback_degradations) =
             gather_feedback_health(options.workspace_path.as_deref());
+        let singleflight_posture = super::singleflight::singleflight_posture_report();
         let agent_inventory = AgentInventoryReport::not_inspected();
 
         let mut degradations = Vec::new();
@@ -988,6 +990,7 @@ impl StatusReport {
             &memory_health,
             &curation_health,
             &feedback_health,
+            &singleflight_posture,
             &graph_compute,
             &derived_assets,
             &degradations,
@@ -1002,6 +1005,7 @@ impl StatusReport {
             memory_health,
             curation_health,
             feedback_health,
+            singleflight_posture,
             graph_compute,
             graph_snapshot_artifact,
             derived_assets,
@@ -1018,6 +1022,7 @@ fn status_posture_report(
     memory_health: &MemoryHealthReport,
     curation_health: &CurationHealthReport,
     feedback_health: &FeedbackHealthReport,
+    singleflight_posture: &SingleFlightPostureReport,
     graph_compute: &GraphComputeReport,
     derived_assets: &[DerivedAssetReport],
     degradations: &[DegradationReport],
@@ -1080,6 +1085,12 @@ fn status_posture_report(
             feedback_posture_fallback(feedback_health.status, storage_status),
         ),
         posture_row(
+            "singleflight",
+            singleflight_posture_status(singleflight_posture),
+            singleflight_posture_reason(singleflight_posture),
+            singleflight_posture_fallback(singleflight_posture),
+        ),
+        posture_row(
             "maintenance",
             maintenance_posture_status(derived_assets),
             maintenance_posture_reason(derived_assets),
@@ -1102,6 +1113,7 @@ fn status_posture_report(
             "graph_compute",
             "curate",
             "feedback",
+            "singleflight",
             "maintenance",
             "agent_detection",
         ],
@@ -1507,6 +1519,43 @@ const fn feedback_posture_fallback(
             Some("ee doctor --json")
         }
         SubsystemPostureStatus::Unimplemented => Some("use a binary built with feedback support"),
+    }
+}
+
+fn singleflight_posture_status(report: &SingleFlightPostureReport) -> SubsystemPostureStatus {
+    match report.status.as_str() {
+        "state_poisoned" | "observed_failures" => SubsystemPostureStatus::DegradedRecoverable,
+        "active" | "idle" => SubsystemPostureStatus::Ok,
+        _ => SubsystemPostureStatus::Initializing,
+    }
+}
+
+fn singleflight_posture_reason(report: &SingleFlightPostureReport) -> Option<&'static str> {
+    match singleflight_posture_status(report) {
+        SubsystemPostureStatus::Ok => None,
+        SubsystemPostureStatus::Initializing => Some("singleflight_surface_unconfigured"),
+        SubsystemPostureStatus::DegradedRecoverable => Some("singleflight_observed_failures"),
+        SubsystemPostureStatus::DegradedRequired => Some("singleflight_repair_required"),
+        SubsystemPostureStatus::Blocked => Some("singleflight_blocked"),
+        SubsystemPostureStatus::Unimplemented => Some("singleflight_unimplemented"),
+    }
+}
+
+fn singleflight_posture_fallback(report: &SingleFlightPostureReport) -> Option<&'static str> {
+    match singleflight_posture_status(report) {
+        SubsystemPostureStatus::Ok => None,
+        SubsystemPostureStatus::Initializing => {
+            Some("rerun a read-heavy command with matching keys")
+        }
+        SubsystemPostureStatus::DegradedRecoverable => {
+            Some("inspect status singleFlight counts before rerunning duplicate work")
+        }
+        SubsystemPostureStatus::DegradedRequired | SubsystemPostureStatus::Blocked => {
+            Some("ee doctor --json")
+        }
+        SubsystemPostureStatus::Unimplemented => {
+            Some("enable a single-flight surface before expecting coalescing")
+        }
     }
 }
 
