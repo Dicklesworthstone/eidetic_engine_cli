@@ -1,5 +1,5 @@
 [package]
-name = "ee"
+name = "eidetic-engine"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
@@ -7,7 +7,7 @@ license = "MIT"
 description = "Durable, local-first, explainable memory for coding agents."
 repository = "https://github.com/Dicklesworthstone/eidetic_engine_cli"
 homepage = "https://github.com/Dicklesworthstone/eidetic_engine_cli"
-documentation = "https://docs.rs/ee"
+documentation = "https://docs.rs/eidetic-engine"
 readme = "README.md"
 keywords = ["memory", "agents", "cli", "local-first", "search"]
 categories = ["command-line-utilities", "database", "development-tools"]
@@ -46,7 +46,7 @@ lexical-bm25 = ["frankensearch/lexical"]
 # Active. Gates ~42 cfg-gated functions under src/graph/mod.rs. Default-on.
 graph = []
 # Active. Gates `pub mod mcp;` at src/lib.rs:23 (the full 2.6k-LOC MCP adapter).
-# Opt-in via `cargo install ee --features mcp` per README.
+# Opt-in via `cargo install eidetic-engine --features mcp` per README.
 mcp = []
 # Reserved (status: reserved). No cfg-gates in src/ today. Reserved for the
 # future localhost HTTP/SSE adapter described in AGENTS.md §Module Layout.

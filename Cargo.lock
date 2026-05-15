@@ -1097,7 +1097,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ee"
+name = "eidetic-engine"
 version = "0.1.0"
 dependencies = [
  "asupersync",
