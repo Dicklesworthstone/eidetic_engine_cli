@@ -3835,6 +3835,34 @@ ON graph_algorithm_results(workspace_id, computed_at);
     "blake3:v047_graph_algorithm_results_2026_05_14",
 );
 
+/// V048: Persist lab capture WAL retention holds for replay verifiability.
+///
+/// N15.3 distinguishes episodes whose captured snapshot is held from
+/// best-effort captures that may become unreplayable after checkpointing. The
+/// table is intentionally independent from advisory locks: rows are an audit
+/// ledger keyed by workspace/episode/LSN and aged out by maintenance, not a
+/// mutual-exclusion primitive.
+pub const V048_WAL_HOLDS: Migration = Migration::new(
+    48,
+    "wal_holds",
+    r#"
+CREATE TABLE ee_wal_holds (
+    workspace_id TEXT NOT NULL CHECK (length(trim(workspace_id)) > 0),
+    episode_id TEXT NOT NULL CHECK (length(trim(episode_id)) > 0),
+    lsn TEXT NOT NULL CHECK (length(trim(lsn)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    expires_at TEXT NOT NULL CHECK (length(trim(expires_at)) > 0),
+    PRIMARY KEY (workspace_id, episode_id, lsn)
+);
+
+CREATE INDEX idx_ee_wal_holds_episode
+    ON ee_wal_holds(episode_id);
+CREATE INDEX idx_ee_wal_holds_workspace_expires
+    ON ee_wal_holds(workspace_id, expires_at);
+"#,
+    "blake3:v048_wal_holds_2026_05_15",
+);
+
 /// V042: Allow every pack omission reason emitted by the packer.
 pub const V042_PACK_OMISSION_REASONS: Migration = Migration::new(
     42,
@@ -3998,6 +4026,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V045_GRAPH_SNAPSHOT_TYPED_SUBGRAPHS,
     V046_GRAPH_ALGORITHM_WITNESSES,
     V047_GRAPH_ALGORITHM_RESULTS,
+    V048_WAL_HOLDS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -7996,6 +8025,38 @@ impl DbConnection {
 
         if !include_tombstoned {
             sql.push_str(" AND tombstoned_at IS NULL AND valid_to IS NULL");
+        }
+
+        sql.push_str(" ORDER BY id ASC");
+
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        rows.iter().map(stored_memory_from_row).collect()
+    }
+
+    /// List memories that retrieval surfaces may index or filter at query time.
+    ///
+    /// This intentionally does not filter on `valid_to`: bounded validity
+    /// windows and expired memories must remain retrievable so search/context
+    /// can apply `--as-of`, `--include-expired`, and `--include-future`
+    /// consistently.
+    pub fn list_memories_for_retrieval(
+        &self,
+        workspace_id: &str,
+        level: Option<&str>,
+        include_tombstoned: bool,
+    ) -> Result<Vec<StoredMemory>> {
+        let mut sql = String::from(
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1",
+        );
+        let mut params: Vec<Value> = vec![Value::Text(workspace_id.to_string())];
+
+        if let Some(lvl) = level {
+            sql.push_str(" AND level = ?2");
+            params.push(Value::Text(lvl.to_string()));
+        }
+
+        if !include_tombstoned {
+            sql.push_str(" AND tombstoned_at IS NULL");
         }
 
         sql.push_str(" ORDER BY id ASC");
@@ -13460,6 +13521,22 @@ impl DbConnection {
         Ok(rows > 0)
     }
 
+    /// Archive valid graph snapshots for a workspace and graph type.
+    pub fn archive_valid_graph_snapshots(
+        &self,
+        workspace_id: &str,
+        graph_type: GraphSnapshotType,
+    ) -> Result<u64> {
+        self.execute_for(
+            DbOperation::Execute,
+            "UPDATE graph_snapshots SET status = 'archived' WHERE workspace_id = ?1 AND graph_type = ?2 AND status = 'valid'",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(graph_type.as_str().to_string()),
+            ],
+        )
+    }
+
     /// Insert a graph algorithm witness row.
     pub fn insert_graph_algorithm_witness(
         &self,
@@ -17759,6 +17836,23 @@ mod tests {
                 .iter()
                 .any(|memory| memory.id == "mem_00000000000000000000000030"),
             "history-inclusive list includes superseded memory",
+        )?;
+
+        let retrieval = connection.list_memories_for_retrieval(
+            "wsp_01234567890123456789012345",
+            None,
+            false,
+        )?;
+        ensure_equal(
+            &retrieval.len(),
+            &3,
+            "retrieval list keeps bounded and expired validity rows",
+        )?;
+        ensure(
+            retrieval
+                .iter()
+                .any(|memory| memory.id == "mem_00000000000000000000000030"),
+            "retrieval list includes validity-window rows for query-time filtering",
         )?;
 
         connection.close()?;

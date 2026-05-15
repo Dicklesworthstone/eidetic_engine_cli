@@ -711,7 +711,7 @@ pub fn rebuild_index(
 
     let workspace_id = get_default_workspace_id(&db)?;
 
-    let memories = db.list_memories(&workspace_id, None, false)?;
+    let memories = db.list_memories_for_retrieval(&workspace_id, None, false)?;
     let sessions = db.list_sessions(&workspace_id)?;
     let artifacts = db.list_artifacts(&workspace_id, None)?;
 
@@ -832,7 +832,7 @@ pub fn reembed_index(
     let db = DbConnection::open_file(&database_path)?;
     let workspace_id = get_default_workspace_id(&db)?;
 
-    let memories = db.list_memories(&workspace_id, None, false)?;
+    let memories = db.list_memories_for_retrieval(&workspace_id, None, false)?;
     let sessions = db.list_sessions(&workspace_id)?;
     let artifacts = db.list_artifacts(&workspace_id, None)?;
     let embedding = reembed_embedding_summary(&db, &workspace_id)?;
@@ -1227,7 +1227,7 @@ fn collect_workspace_indexable_documents(
     db: &DbConnection,
     workspace_id: &str,
 ) -> Result<(u32, u32, u32, Vec<crate::search::IndexableDocument>), IndexRebuildError> {
-    let memories = db.list_memories(workspace_id, None, false)?;
+    let memories = db.list_memories_for_retrieval(workspace_id, None, false)?;
     let sessions = db.list_sessions(workspace_id)?;
     let artifacts = db.list_artifacts(workspace_id, None)?;
     let memory_docs: Vec<CanonicalSearchDocument> =

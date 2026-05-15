@@ -6159,6 +6159,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: capabilities_response_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::profile::HOST_PROFILE_PROBE_SCHEMA_V1,
+            version: "1",
+            description: "Read-only host resource, path, and RCH topology profile",
+            category: "ops",
+            definition: host_profile_schema_definition,
+        },
+        SchemaEntry {
             id: crate::models::IMPORT_CASS_SCHEMA_V1,
             version: "1",
             description: "CASS import response envelope",
@@ -6447,6 +6454,10 @@ fn doctor_response_schema_definition() -> String {
 
 fn capabilities_response_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.capabilities.v1.json").to_string()
+}
+
+fn host_profile_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.host_profile.v1.json").to_string()
 }
 
 fn import_cass_response_schema_definition() -> String {
@@ -9809,6 +9820,7 @@ pub fn render_lab_capture_json(report: &CaptureReport) -> String {
             "stored": report.stored,
             "memories_captured": report.memories_captured,
             "actions_captured": report.actions_captured,
+            "wal_retention_kind": report.wal_retention_kind,
             "dry_run": report.dry_run,
             "captured_at": report.captured_at,
         }
@@ -9831,6 +9843,7 @@ pub fn render_lab_capture_human(report: &CaptureReport) -> String {
     }
     lines.push(format!("  Memories: {}", report.memories_captured));
     lines.push(format!("  Actions: {}", report.actions_captured));
+    lines.push(format!("  WAL retention: {}", report.wal_retention_kind));
     lines.push(format!("  Captured at: {}", report.captured_at));
     lines.join("\n")
 }
@@ -9839,10 +9852,11 @@ pub fn render_lab_capture_human(report: &CaptureReport) -> String {
 #[must_use]
 pub fn render_lab_capture_toon(report: &CaptureReport) -> String {
     format!(
-        "LAB_CAPTURE|{}|{}|{}|{}",
+        "LAB_CAPTURE|{}|{}|{}|{}|{}",
         report.episode_id,
         report.memories_captured,
         report.actions_captured,
+        report.wal_retention_kind,
         if report.dry_run {
             "dry_run"
         } else {

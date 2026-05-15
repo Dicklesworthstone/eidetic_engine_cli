@@ -3519,7 +3519,7 @@ mod tests {
     fn repo_tempdir() -> Result<tempfile::TempDir, String> {
         tempfile::Builder::new()
             .prefix("ee-handoff-test-")
-            .tempdir_in(std::env::current_dir().map_err(|error| error.to_string())?)
+            .tempdir()
             .map_err(|error| error.to_string())
     }
 

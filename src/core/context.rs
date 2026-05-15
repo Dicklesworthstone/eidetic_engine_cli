@@ -1656,7 +1656,7 @@ fn fallback_memories_for_workspace(
     let mut malformed_filtered = 0usize;
     let mut total_seen = 0usize;
     for workspace_id in context_workspace_ids(connection, workspace_path, degraded) {
-        match connection.list_memories(&workspace_id, None, include_tombstoned) {
+        match connection.list_memories_for_retrieval(&workspace_id, None, include_tombstoned) {
             Ok(rows) => {
                 for memory in rows {
                     total_seen = total_seen.saturating_add(1);
@@ -5000,15 +5000,59 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())?;
-        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(44)).to_string();
+        let current_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(43)).to_string();
+        let expired_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(44)).to_string();
+        let future_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(45)).to_string();
         connection
             .insert_memory(
-                &memory_id,
+                &current_memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Validity window marker zeta current release rule.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.95,
+                    utility: 0.80,
+                    importance: 0.70,
+                    provenance_uri: None,
+                    trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                    trust_subclass: Some("test".to_owned()),
+                    tags: vec!["release".to_owned()],
+                    valid_from: Some("2020-01-01T00:00:00Z".to_owned()),
+                    valid_to: Some("2099-01-01T00:00:00Z".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                &expired_memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Validity window marker zeta expired release rule.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.95,
+                    utility: 0.80,
+                    importance: 0.70,
+                    provenance_uri: None,
+                    trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                    trust_subclass: Some("test".to_owned()),
+                    tags: vec!["release".to_owned()],
+                    valid_from: Some("2020-01-01T00:00:00Z".to_owned()),
+                    valid_to: Some("2021-01-01T00:00:00Z".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                &future_memory_id,
                 &CreateMemoryInput {
                     workspace_id,
                     level: "procedural".to_owned(),
                     kind: "rule".to_owned(),
-                    content: "Future rollout rule requires release freeze signoff.".to_owned(),
+                    content: "Validity window marker zeta future release rule.".to_owned(),
                     workflow_id: None,
                     confidence: 0.95,
                     utility: 0.80,
@@ -5028,7 +5072,7 @@ mod tests {
             workspace_path: workspace,
             database_path: Some(db_path),
             index_dir: Some(empty_index_dir),
-            query: "future rollout freeze signoff".to_owned(),
+            query: "validity window marker zeta release rule".to_owned(),
             speed: crate::search::SpeedMode::Default,
             filters: crate::models::QueryFilters::default(),
             profile: Some(ContextPackProfile::Balanced),
@@ -5036,7 +5080,7 @@ mod tests {
             candidate_pool: Some(10),
             max_results: None,
             include_tombstoned: false,
-            as_of: Some(query_time("2099-05-13T00:00:00Z")),
+            as_of: Some(query_time("2098-01-01T00:00:00Z")),
             include_expired: false,
             include_future: false,
             include_stale: false,
@@ -5051,7 +5095,30 @@ mod tests {
         let default_response = super::run_context_pack(&base_options)
             .map_err(|error| format!("default validity context pack failed: {error:?}"))?;
         assert!(
-            default_response.data.pack.items.is_empty(),
+            default_response
+                .data
+                .pack
+                .items
+                .iter()
+                .any(|item| item.memory_id.to_string() == current_memory_id),
+            "context should include bounded current memory before valid_to"
+        );
+        assert!(
+            !default_response
+                .data
+                .pack
+                .items
+                .iter()
+                .any(|item| item.memory_id.to_string() == expired_memory_id),
+            "context should exclude expired memory by default"
+        );
+        assert!(
+            !default_response
+                .data
+                .pack
+                .items
+                .iter()
+                .any(|item| item.memory_id.to_string() == future_memory_id),
             "context should exclude not-yet-valid memory before valid_from"
         );
 
@@ -5064,7 +5131,7 @@ mod tests {
             .pack
             .items
             .iter()
-            .find(|item| item.memory_id.to_string() == memory_id)
+            .find(|item| item.memory_id.to_string() == future_memory_id)
             .ok_or_else(|| "include_future should keep not-yet-valid memory".to_owned())?;
         assert_eq!(
             included_item
@@ -5072,6 +5139,25 @@ mod tests {
                 .as_ref()
                 .map(|lifecycle| lifecycle.validity_status.as_str()),
             Some("future")
+        );
+
+        let mut include_expired_options = base_options.clone();
+        include_expired_options.include_expired = true;
+        let include_expired_response = super::run_context_pack(&include_expired_options)
+            .map_err(|error| format!("include expired context pack failed: {error:?}"))?;
+        let included_expired_item = include_expired_response
+            .data
+            .pack
+            .items
+            .iter()
+            .find(|item| item.memory_id.to_string() == expired_memory_id)
+            .ok_or_else(|| "include_expired should keep expired memory".to_owned())?;
+        assert_eq!(
+            included_expired_item
+                .lifecycle
+                .as_ref()
+                .map(|lifecycle| lifecycle.validity_status.as_str()),
+            Some("expired")
         );
 
         let mut replay_options = base_options;
@@ -5084,7 +5170,7 @@ mod tests {
                 .pack
                 .items
                 .iter()
-                .any(|item| item.memory_id.to_string() == memory_id),
+                .any(|item| item.memory_id.to_string() == future_memory_id),
             "as_of after valid_from should include the memory"
         );
         Ok(())

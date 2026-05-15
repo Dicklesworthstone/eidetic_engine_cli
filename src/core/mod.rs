@@ -196,7 +196,7 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
         SupportedSchema::new("version_provenance", VERSION_PROVENANCE_SCHEMA_V1),
         SupportedSchema::new("install_check", INSTALL_CHECK_SCHEMA_V1),
         SupportedSchema::new("install_plan", INSTALL_PLAN_SCHEMA_V1),
-        SupportedSchema::new("host_profile_probe", profile::HOST_PROFILE_PROBE_SCHEMA_V1),
+        SupportedSchema::new("host_profile", profile::HOST_PROFILE_PROBE_SCHEMA_V1),
         SupportedSchema::new(
             "profile_config_plan",
             profile::PROFILE_CONFIG_PLAN_SCHEMA_V1,
@@ -548,7 +548,7 @@ mod tests {
                 "version_provenance",
                 "install_check",
                 "install_plan",
-                "host_profile_probe",
+                "host_profile",
                 "profile_config_plan",
                 "config_get",
                 "config_set",

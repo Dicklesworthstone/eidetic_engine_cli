@@ -146,8 +146,9 @@ use crate::core::preflight_guard::{
     RuleSource, run_preflight_guard,
 };
 use crate::core::profile::{
-    OperatingProfile, ProfileConfigError, ProfileConfigOptions, ProfileConfigReport,
-    VerificationRecipe, apply_profile_config, plan_profile_config,
+    HostProfileProbeOptions, HostResourceProbeReport, OperatingProfile, ProfileConfigError,
+    ProfileConfigOptions, ProfileConfigReport, VerificationRecipe, apply_profile_config,
+    plan_profile_config,
 };
 use crate::core::rehearse::{
     CommandSpec, RehearsalProfile, RehearseInspectOptions, RehearsePlanOptions,
@@ -1993,6 +1994,8 @@ pub enum DiagCommand {
     DiskPressure(DiagDiskPressureArgs),
     /// Report graph module readiness, capabilities, and metrics.
     Graph,
+    /// Report redacted host topology and resource profile inputs.
+    HostProfile(DiagHostProfileArgs),
     /// Seed deterministic graph snapshot diagnostic state.
     GraphSnapshot(DiagGraphSnapshotArgs),
     /// Verify database, provenance-chain, and canary-memory integrity.
@@ -2145,6 +2148,14 @@ pub struct DiagDiskPressureArgs {
     /// Maximum entries to inspect per directory during bounded measurement.
     #[arg(long, default_value_t = 4000, value_name = "N")]
     pub consumer_entry_limit: usize,
+}
+
+/// Arguments for `ee diag host-profile`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagHostProfileArgs {
+    /// Include absolute host paths in path probes. Defaults to redacted labels only.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub full_paths: bool,
 }
 
 /// Arguments for `ee diag artifacts`.
@@ -7719,6 +7730,7 @@ where
             }
             DiagCommand::DiskPressure(args) => handle_diag_disk_pressure(&cli, args, stdout),
             DiagCommand::Graph => handle_diag_graph(&cli, stdout),
+            DiagCommand::HostProfile(args) => handle_diag_host_profile(&cli, args, stdout),
             DiagCommand::GraphSnapshot(args) => {
                 handle_diag_graph_snapshot(&cli, args, stdout, stderr)
             }
@@ -15844,6 +15856,53 @@ where
                 out.push_str(&format!(
                     "\n{}: {}\nNext: {}\n",
                     guidance.severity, guidance.message, guidance.repair
+                ));
+            }
+            write_stdout(stdout, &out)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&workspace_response_json(&report)) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(workspace_response_json(&report) + "\n"))
+        }
+    }
+}
+
+fn handle_diag_host_profile<W>(
+    cli: &Cli,
+    args: &DiagHostProfileArgs,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let (workspace_path, _workspace_source) = resolve_workspace_for_cli(cli.workspace.as_deref());
+    let report = HostResourceProbeReport::gather_for_workspace_with_options(
+        &workspace_path,
+        &HostProfileProbeOptions {
+            include_paths: args.full_paths,
+        },
+    );
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let mut out = format!(
+                "host profile diagnostics\n\ncomplete: {}\npaths: {}\ntools: {}\nrch: {} ({})\n",
+                report.complete,
+                report.paths.len(),
+                report.tools.len(),
+                report.topology.rch.status,
+                report.topology.rch.posture,
+            );
+            for degradation in &report.degraded {
+                out.push_str(&format!(
+                    "\n{}: {}\nNext: {}\n",
+                    degradation.severity, degradation.message, degradation.repair
                 ));
             }
             write_stdout(stdout, &out)
@@ -32489,6 +32548,7 @@ impl NormalizedInvocation {
                     DiagCommand::Dependencies => "diag dependencies".to_string(),
                     DiagCommand::DiskPressure(_) => "diag disk-pressure".to_string(),
                     DiagCommand::Graph => "diag graph".to_string(),
+                    DiagCommand::HostProfile(_) => "diag host-profile".to_string(),
                     DiagCommand::GraphSnapshot(_) => "diag graph-snapshot".to_string(),
                     DiagCommand::Integrity(_) => "diag integrity".to_string(),
                     DiagCommand::MemoryValidity(_) => "diag memory-validity".to_string(),
@@ -37499,6 +37559,19 @@ mod tests {
     }
 
     #[test]
+    fn diag_host_profile_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "diag", "host-profile", "--full-paths"])
+            .map_err(|e| format!("failed to parse diag host-profile: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::HostProfile(args))) => {
+                ensure_equal(&args.full_paths, &true, "full paths")
+            }
+            _ => Err("expected diag host-profile command".to_string()),
+        }
+    }
+
+    #[test]
     fn diag_artifacts_command_parses() -> TestResult {
         let parsed = Cli::try_parse_from([
             "ee",
@@ -38569,6 +38642,36 @@ default_half_life_days = 45
             "cargo target root is inspected",
         )?;
         ensure(stderr.is_empty(), "diag disk-pressure json stderr empty")
+    }
+
+    #[test]
+    fn diag_host_profile_json_reports_redacted_topology() -> TestResult {
+        let (exit, stdout, stderr) =
+            invoke(&["ee", "diag", "host-profile", "--workspace", ".", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "diag host-profile exit")?;
+        ensure_contains(
+            &stdout,
+            "\"schema\":\"ee.host_profile.v1\"",
+            "host profile schema",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"sideEffectFree\":true",
+            "host profile is read-only",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"redaction\":\"label_only_paths_presence_only_env\"",
+            "redaction posture",
+        )?;
+        ensure_contains(&stdout, "\"topology\":", "topology present")?;
+        ensure_contains(&stdout, "\"rch\":", "rch topology present")?;
+        ensure_contains(&stdout, "\"paths\":[", "path probes present")?;
+        ensure(
+            !stdout.contains("\"path\":"),
+            "default host profile omits raw paths",
+        )?;
+        ensure(stderr.is_empty(), "diag host-profile json stderr empty")
     }
 
     #[test]
