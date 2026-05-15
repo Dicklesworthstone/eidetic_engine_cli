@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_causal_no_evidence",
+  "introduced_by": {
+    "bead": "bd-bife.6",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "why"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "A causal explanation is requested for a memory whose causal_evidence subgraph has no rows.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Failure note without causal evidence.' --workspace . --level episodic --kind failure --json"
+    ],
+    "invocation": "ee why <memory-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_causal_no_evidence",
+    "severity": "low",
+    "message_contains": [
+      "causal evidence",
+      "no rows"
+    ],
+    "repair_contains": "ee outcome",
+    "repair_string": "Record causal evidence with `ee outcome --causal-link ...`."
+  }
+}

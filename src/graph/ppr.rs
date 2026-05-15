@@ -1,0 +1,639 @@
+use std::collections::{BTreeMap, HashMap};
+use std::str::FromStr;
+
+use fnx_algorithms::{CentralityScore, ComplexityWitness, PageRankResult};
+use fnx_classes::digraph::DiGraph;
+
+use crate::db::DbConnection;
+use crate::graph::{ComplexityWitnessCounters, GraphResult, emit_complexity_witness};
+use crate::models::MemoryId;
+
+pub const DEFAULT_PERSONALIZED_PAGERANK_ALPHA: f64 = 0.85;
+pub const DEFAULT_PERSONALIZED_PAGERANK_MAX_ITERATIONS: usize = 50;
+pub const DEFAULT_PERSONALIZED_PAGERANK_TOLERANCE: f64 = 1.0e-6;
+
+const RELATION_WEIGHT_SUPPORTS: f64 = 1.0;
+const RELATION_WEIGHT_DERIVED_FROM: f64 = 0.8;
+const RELATION_WEIGHT_RELATED: f64 = 0.6;
+const RELATION_WEIGHT_CO_TAG: f64 = 0.4;
+const RELATION_WEIGHT_CO_MENTION: f64 = 0.3;
+const RELATION_WEIGHT_ZERO: f64 = 0.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PersonalizedPageRankPolicy {
+    pub alpha: f64,
+    pub max_iterations: usize,
+    pub tolerance: f64,
+}
+
+impl Default for PersonalizedPageRankPolicy {
+    fn default() -> Self {
+        Self {
+            alpha: DEFAULT_PERSONALIZED_PAGERANK_ALPHA,
+            max_iterations: DEFAULT_PERSONALIZED_PAGERANK_MAX_ITERATIONS,
+            tolerance: DEFAULT_PERSONALIZED_PAGERANK_TOLERANCE,
+        }
+    }
+}
+
+pub struct PersonalizedPageRankWitnessSpec<'a> {
+    pub conn: &'a DbConnection,
+    pub workspace_id: &'a str,
+    pub snapshot_id: &'a str,
+    pub snapshot_version: u64,
+    pub params: &'a serde_json::Value,
+    pub elapsed_ms: u64,
+}
+
+#[must_use]
+pub fn compute_personalized_pagerank(
+    graph: &DiGraph,
+    seed_map: &HashMap<MemoryId, f64>,
+) -> HashMap<MemoryId, f64> {
+    compute_personalized_pagerank_with_policy(
+        graph,
+        seed_map,
+        PersonalizedPageRankPolicy::default(),
+    )
+}
+
+#[must_use]
+pub fn compute_personalized_pagerank_with_policy(
+    graph: &DiGraph,
+    seed_map: &HashMap<MemoryId, f64>,
+    policy: PersonalizedPageRankPolicy,
+) -> HashMap<MemoryId, f64> {
+    let seed_weights = seed_map
+        .iter()
+        .map(|(memory_id, weight)| (memory_id.to_string(), *weight))
+        .collect::<BTreeMap<_, _>>();
+    let result = compute_personalized_pagerank_result_with_policy(graph, &seed_weights, policy);
+    result
+        .scores
+        .into_iter()
+        .filter_map(|score| {
+            MemoryId::from_str(&score.node)
+                .ok()
+                .map(|memory_id| (memory_id, score.score))
+        })
+        .collect()
+}
+
+#[must_use]
+pub fn compute_personalized_pagerank_result(
+    graph: &DiGraph,
+    seed_map: &BTreeMap<String, f64>,
+) -> PageRankResult {
+    compute_personalized_pagerank_result_with_policy(
+        graph,
+        seed_map,
+        PersonalizedPageRankPolicy::default(),
+    )
+}
+
+#[must_use]
+pub fn compute_personalized_pagerank_result_with_policy(
+    graph: &DiGraph,
+    seed_map: &BTreeMap<String, f64>,
+    policy: PersonalizedPageRankPolicy,
+) -> PageRankResult {
+    let mut nodes = graph.nodes_ordered();
+    nodes.sort_unstable();
+    let node_count = nodes.len();
+    if node_count == 0 {
+        return personalized_pagerank_result(Vec::new(), true, 0, 0);
+    }
+
+    let personalization = normalized_seed_weights(graph, seed_map);
+    if personalization.is_empty() {
+        let scores = nodes
+            .iter()
+            .map(|node| CentralityScore {
+                node: (*node).to_owned(),
+                score: 0.0,
+            })
+            .collect();
+        return personalized_pagerank_result(scores, true, 0, 0);
+    }
+
+    let node_index = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (*node, index))
+        .collect::<BTreeMap<&str, usize>>();
+    let outgoing = weighted_outgoing_edges(graph, &nodes, &node_index);
+    let edges_per_iteration = outgoing.iter().map(Vec::len).sum::<usize>();
+    let mut ranks = nodes
+        .iter()
+        .map(|node| personalization.get(*node).copied().unwrap_or(0.0))
+        .collect::<Vec<_>>();
+    let mut next_ranks = vec![0.0; node_count];
+    let alpha = policy.alpha.clamp(0.0, 1.0);
+    let teleport_scale = 1.0 - alpha;
+    let mut iterations = 0;
+    let mut converged = false;
+
+    for _ in 0..policy.max_iterations {
+        iterations += 1;
+        next_ranks.fill(0.0);
+        for (node, seed_weight) in &personalization {
+            if let Some(index) = node_index.get(node.as_str()) {
+                next_ranks[*index] += teleport_scale * seed_weight;
+            }
+        }
+
+        let dangling_mass = ranks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, rank)| outgoing[index].is_empty().then_some(*rank))
+            .sum::<f64>();
+        if dangling_mass > 0.0 {
+            for (node, seed_weight) in &personalization {
+                if let Some(index) = node_index.get(node.as_str()) {
+                    next_ranks[*index] += alpha * dangling_mass * seed_weight;
+                }
+            }
+        }
+
+        for (source_index, edges) in outgoing.iter().enumerate() {
+            if edges.is_empty() || ranks[source_index] <= 0.0 {
+                continue;
+            }
+            let push = alpha * ranks[source_index];
+            for (target_index, weight_share) in edges {
+                next_ranks[*target_index] += push * weight_share;
+            }
+        }
+
+        let delta = next_ranks
+            .iter()
+            .zip(ranks.iter())
+            .map(|(left, right)| (left - right).abs())
+            .sum::<f64>();
+        ranks.copy_from_slice(&next_ranks);
+        if delta < node_count as f64 * policy.tolerance {
+            converged = true;
+            break;
+        }
+    }
+
+    let scores = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| CentralityScore {
+            node: (*node).to_owned(),
+            score: ranks[index],
+        })
+        .collect();
+    personalized_pagerank_result(
+        scores,
+        converged,
+        node_count.saturating_mul(iterations),
+        edges_per_iteration.saturating_mul(iterations),
+    )
+}
+
+pub fn emit_personalized_pagerank_witness(
+    spec: &PersonalizedPageRankWitnessSpec<'_>,
+    result: &PageRankResult,
+) -> GraphResult<()> {
+    let counters = ComplexityWitnessCounters {
+        elapsed_ms: spec.elapsed_ms,
+        sampling_choice: "exact".to_owned(),
+        decision_path_hash: personalized_pagerank_decision_path_hash(spec.params, result),
+    };
+    emit_complexity_witness(
+        spec.conn,
+        spec.workspace_id,
+        spec.snapshot_id,
+        "personalized_pagerank",
+        spec.snapshot_version,
+        spec.params,
+        &counters,
+    )
+}
+
+fn weighted_outgoing_edges(
+    graph: &DiGraph,
+    nodes: &[&str],
+    node_index: &BTreeMap<&str, usize>,
+) -> Vec<Vec<(usize, f64)>> {
+    nodes
+        .iter()
+        .map(|source| {
+            let mut edges = graph
+                .neighbors_iter(source)
+                .map(|neighbors| {
+                    neighbors
+                        .filter_map(|target| {
+                            let target_index = node_index.get(target).copied()?;
+                            let weight = edge_weight(graph, source, target);
+                            (weight > 0.0).then_some((target_index, weight))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            edges.sort_unstable_by_key(|(target_index, _)| *target_index);
+            let total = edges.iter().map(|(_, weight)| *weight).sum::<f64>();
+            if total > 0.0 {
+                for (_, weight) in &mut edges {
+                    *weight /= total;
+                }
+            }
+            edges
+        })
+        .collect()
+}
+
+fn normalized_seed_weights(
+    graph: &DiGraph,
+    seed_map: &BTreeMap<String, f64>,
+) -> BTreeMap<String, f64> {
+    let mut seeds = seed_map
+        .iter()
+        .filter_map(|(node, weight)| {
+            (graph.has_node(node) && weight.is_finite() && *weight > 0.0)
+                .then_some((node.clone(), *weight))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let total = seeds.values().sum::<f64>();
+    if total <= 0.0 {
+        return BTreeMap::new();
+    }
+    for weight in seeds.values_mut() {
+        *weight /= total;
+    }
+    seeds
+}
+
+fn edge_weight(graph: &DiGraph, source: &str, target: &str) -> f64 {
+    let Some(attrs) = graph.edge_attrs(source, target) else {
+        return 0.0;
+    };
+    let relation = attrs
+        .get("relation")
+        .map(fnx_runtime::CgseValue::as_str)
+        .unwrap_or_else(|| "related".to_owned());
+    let stored_weight = attrs
+        .get("weight")
+        .and_then(fnx_runtime::CgseValue::as_f64)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(1.0);
+    let confidence = attrs
+        .get("confidence")
+        .and_then(fnx_runtime::CgseValue::as_f64)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(1.0);
+    relation_weight(&relation) * stored_weight * confidence
+}
+
+fn relation_weight(relation: &str) -> f64 {
+    match relation {
+        "supports" => RELATION_WEIGHT_SUPPORTS,
+        "derived_from" => RELATION_WEIGHT_DERIVED_FROM,
+        "related" => RELATION_WEIGHT_RELATED,
+        "co_tag" => RELATION_WEIGHT_CO_TAG,
+        "co_mention" => RELATION_WEIGHT_CO_MENTION,
+        "contradicts" | "supersedes" => RELATION_WEIGHT_ZERO,
+        _ => RELATION_WEIGHT_RELATED,
+    }
+}
+
+fn personalized_pagerank_result(
+    scores: Vec<CentralityScore>,
+    converged: bool,
+    nodes_touched: usize,
+    edges_scanned: usize,
+) -> PageRankResult {
+    PageRankResult {
+        scores,
+        converged,
+        witness: ComplexityWitness {
+            algorithm: "personalized_pagerank_power_iteration".to_owned(),
+            complexity_claim: "O(k * (|V| + |E|))".to_owned(),
+            nodes_touched,
+            edges_scanned,
+            queue_peak: 0,
+        },
+    }
+}
+
+fn personalized_pagerank_decision_path_hash(
+    params: &serde_json::Value,
+    result: &PageRankResult,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.graph.personalized_pagerank.decision.v1");
+    hash_json_value(&mut hasher, params);
+    hasher.update(result.witness.algorithm.as_bytes());
+    hasher.update(result.witness.complexity_claim.as_bytes());
+    hasher.update(&result.witness.nodes_touched.to_le_bytes());
+    hasher.update(&result.witness.edges_scanned.to_le_bytes());
+    hasher.update(&result.witness.queue_peak.to_le_bytes());
+    hasher.update(&[u8::from(result.converged)]);
+    let mut scores = result.scores.clone();
+    scores.sort_unstable_by(|left, right| left.node.cmp(&right.node));
+    for score in scores {
+        hasher.update(score.node.as_bytes());
+        hasher.update(&score.score.to_le_bytes());
+    }
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn hash_json_value(hasher: &mut blake3::Hasher, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Null => hasher.update(b"n"),
+        serde_json::Value::Bool(value) => hasher.update(if *value { b"t" } else { b"f" }),
+        serde_json::Value::Number(value) => {
+            hasher.update(b"#");
+            hasher.update(value.to_string().as_bytes())
+        }
+        serde_json::Value::String(value) => {
+            hasher.update(b"s");
+            hasher.update(value.as_bytes())
+        }
+        serde_json::Value::Array(items) => {
+            hasher.update(b"[");
+            for item in items {
+                hash_json_value(hasher, item);
+            }
+            hasher.update(b"]")
+        }
+        serde_json::Value::Object(fields) => {
+            hasher.update(b"{");
+            let mut keys = fields.keys().collect::<Vec<_>>();
+            keys.sort();
+            for key in keys {
+                hasher.update(key.as_bytes());
+                if let Some(value) = fields.get(key) {
+                    hash_json_value(hasher, value);
+                }
+            }
+            hasher.update(b"}")
+        }
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{CreateGraphSnapshotInput, CreateWorkspaceInput, GraphSnapshotType};
+    use fnx_classes::AttrMap;
+    use fnx_runtime::CgseValue;
+    use uuid::Uuid;
+
+    type TestResult<T = ()> = Result<T, String>;
+    const WORKSPACE_ID: &str = "wsp_01234567890123456789012345";
+
+    fn memory_id(seed: u128) -> MemoryId {
+        MemoryId::from_uuid(Uuid::from_u128(seed))
+    }
+
+    fn edge_attrs(relation: &str, weight: f64, confidence: f64) -> AttrMap {
+        let mut attrs = AttrMap::new();
+        attrs.insert(
+            "relation".to_owned(),
+            CgseValue::String(relation.to_owned()),
+        );
+        attrs.insert("weight".to_owned(), CgseValue::Float(weight));
+        attrs.insert("confidence".to_owned(), CgseValue::Float(confidence));
+        attrs
+    }
+
+    #[test]
+    fn personalized_pagerank_single_seed_walks_outward() -> TestResult {
+        let mut graph = DiGraph::strict();
+        let a = memory_id(1);
+        let b = memory_id(2);
+        let c = memory_id(3);
+        graph
+            .add_edge_with_attrs(
+                a.to_string(),
+                b.to_string(),
+                edge_attrs("supports", 1.0, 1.0),
+            )
+            .map_err(|error| error.to_string())?;
+        graph
+            .add_edge_with_attrs(
+                b.to_string(),
+                c.to_string(),
+                edge_attrs("supports", 1.0, 1.0),
+            )
+            .map_err(|error| error.to_string())?;
+        let seeds = HashMap::from([(a, 1.0)]);
+
+        let result = compute_personalized_pagerank(&graph, &seeds);
+
+        assert_eq!(result.len(), 3);
+        assert!(result.get(&a).copied().unwrap_or(0.0) > 0.0);
+        assert!(result.get(&b).copied().unwrap_or(0.0) > 0.0);
+        assert!(result.get(&c).copied().unwrap_or(0.0) > 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn personalized_pagerank_normalizes_multi_seed_weights() -> TestResult {
+        let mut graph = DiGraph::strict();
+        let a = memory_id(11);
+        let b = memory_id(12);
+        let c = memory_id(13);
+        graph
+            .add_edge_with_attrs(
+                a.to_string(),
+                b.to_string(),
+                edge_attrs("supports", 1.0, 1.0),
+            )
+            .map_err(|error| error.to_string())?;
+        graph
+            .add_edge_with_attrs(
+                c.to_string(),
+                b.to_string(),
+                edge_attrs("supports", 1.0, 1.0),
+            )
+            .map_err(|error| error.to_string())?;
+        let seeds = HashMap::from([(a, 3.0), (c, 1.0)]);
+
+        let result = compute_personalized_pagerank_with_policy(
+            &graph,
+            &seeds,
+            PersonalizedPageRankPolicy {
+                alpha: 0.0,
+                ..PersonalizedPageRankPolicy::default()
+            },
+        );
+
+        assert!((result.get(&a).copied().unwrap_or(0.0) - 0.75).abs() < 1.0e-12);
+        assert!((result.get(&c).copied().unwrap_or(0.0) - 0.25).abs() < 1.0e-12);
+        assert!((result.get(&b).copied().unwrap_or(0.0)).abs() < 1.0e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn personalized_pagerank_uses_relation_weighted_edges() -> TestResult {
+        let mut graph = DiGraph::strict();
+        let seed = memory_id(21);
+        let strong = memory_id(22);
+        let weak = memory_id(23);
+        let zero = memory_id(24);
+        graph
+            .add_edge_with_attrs(
+                seed.to_string(),
+                strong.to_string(),
+                edge_attrs("supports", 1.0, 1.0),
+            )
+            .map_err(|error| error.to_string())?;
+        graph
+            .add_edge_with_attrs(
+                seed.to_string(),
+                weak.to_string(),
+                edge_attrs("co_mention", 1.0, 1.0),
+            )
+            .map_err(|error| error.to_string())?;
+        graph
+            .add_edge_with_attrs(
+                seed.to_string(),
+                zero.to_string(),
+                edge_attrs("contradicts", 1.0, 1.0),
+            )
+            .map_err(|error| error.to_string())?;
+        let seeds = HashMap::from([(seed, 1.0)]);
+
+        let result = compute_personalized_pagerank(&graph, &seeds);
+
+        assert!(
+            result.get(&strong).copied().unwrap_or(0.0) > result.get(&weak).copied().unwrap_or(0.0)
+        );
+        assert!((result.get(&zero).copied().unwrap_or(0.0)).abs() < 1.0e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn personalized_pagerank_is_deterministic_across_runs() -> TestResult {
+        let mut graph = DiGraph::strict();
+        let a = memory_id(31);
+        let b = memory_id(32);
+        let c = memory_id(33);
+        graph
+            .add_edge_with_attrs(
+                a.to_string(),
+                b.to_string(),
+                edge_attrs("supports", 0.8, 0.9),
+            )
+            .map_err(|error| error.to_string())?;
+        graph
+            .add_edge_with_attrs(
+                b.to_string(),
+                c.to_string(),
+                edge_attrs("derived_from", 0.6, 0.7),
+            )
+            .map_err(|error| error.to_string())?;
+        graph
+            .add_edge_with_attrs(
+                c.to_string(),
+                a.to_string(),
+                edge_attrs("related", 0.4, 0.5),
+            )
+            .map_err(|error| error.to_string())?;
+        let seeds = HashMap::from([(a, 2.0), (b, 1.0)]);
+
+        let first = compute_personalized_pagerank(&graph, &seeds);
+        let second = compute_personalized_pagerank(&graph, &seeds);
+        let third = compute_personalized_pagerank(&graph, &seeds);
+        let raw_seeds = seeds
+            .iter()
+            .map(|(memory_id, weight)| (memory_id.to_string(), *weight))
+            .collect::<BTreeMap<_, _>>();
+        let raw = compute_personalized_pagerank_result(&graph, &raw_seeds);
+
+        assert_eq!(first, second);
+        assert_eq!(second, third);
+        assert_eq!(
+            raw.witness.algorithm,
+            "personalized_pagerank_power_iteration"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn personalized_pagerank_witness_emits_deterministic_decision_hash() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let snapshot_id = "gsnap_0000000000000000000000322";
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-ppr-witness".to_owned(),
+                    name: Some("ppr witness".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_graph_snapshot(
+                snapshot_id,
+                &CreateGraphSnapshotInput {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    snapshot_version: 9,
+                    schema_version: "ee.graph.snapshot.v1".to_owned(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 2,
+                    edge_count: 1,
+                    metrics_json: r#"{"nodes":[],"edges":[]}"#.to_owned(),
+                    content_hash: "blake3:ppr-witness".to_owned(),
+                    source_generation: 9,
+                    expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut graph = DiGraph::strict();
+        let a = memory_id(41);
+        let b = memory_id(42);
+        graph
+            .add_edge_with_attrs(
+                a.to_string(),
+                b.to_string(),
+                edge_attrs("supports", 1.0, 1.0),
+            )
+            .map_err(|error| error.to_string())?;
+        let seeds = BTreeMap::from([(a.to_string(), 1.0)]);
+        let result = compute_personalized_pagerank_result(&graph, &seeds);
+        let params = serde_json::json!({
+            "alpha": DEFAULT_PERSONALIZED_PAGERANK_ALPHA,
+            "seedCount": 1
+        });
+
+        emit_personalized_pagerank_witness(
+            &PersonalizedPageRankWitnessSpec {
+                conn: &connection,
+                workspace_id: WORKSPACE_ID,
+                snapshot_id,
+                snapshot_version: 9,
+                params: &params,
+                elapsed_ms: 17,
+            },
+            &result,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let rows = connection
+            .list_graph_algorithm_witnesses(
+                WORKSPACE_ID,
+                snapshot_id,
+                Some("personalized_pagerank"),
+            )
+            .map_err(|error| error.to_string())?;
+        assert_eq!(rows.len(), 1);
+        let witness: serde_json::Value =
+            serde_json::from_str(&rows[0].witness_json).map_err(|error| error.to_string())?;
+        assert_eq!(witness["elapsed_ms"], 17);
+        assert_eq!(witness["sampling_choice"], "exact");
+        assert!(
+            witness["decision_path_hash"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("blake3:"))
+        );
+
+        connection.close().map_err(|error| error.to_string())
+    }
+}

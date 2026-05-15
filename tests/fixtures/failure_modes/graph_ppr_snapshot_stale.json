@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_ppr_snapshot_stale",
+  "introduced_by": {
+    "bead": "bd-bife.6",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "context"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "PPR graph reranking is requested with a graph snapshot more than 300 seconds behind the source data.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee graph centrality-refresh --workspace . --json"
+    ],
+    "invocation": "ee context 'graph-aware retrieval' --workspace . --ppr-weight 1 --json"
+  },
+  "expected_emission": {
+    "code": "graph_ppr_snapshot_stale",
+    "severity": "medium",
+    "message_contains": [
+      "PPR",
+      "snapshot stale"
+    ],
+    "repair_contains": "ee graph snapshot refresh",
+    "repair_string": "Run `ee graph snapshot refresh --workspace .`.",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}

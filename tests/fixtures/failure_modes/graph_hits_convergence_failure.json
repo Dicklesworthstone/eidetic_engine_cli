@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_hits_convergence_failure",
+  "introduced_by": {
+    "bead": "bd-bife.6",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "context",
+    "why"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "HITS graph scoring reaches its iteration cap without convergence.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee graph centrality-refresh --workspace . --json"
+    ],
+    "invocation": "ee why <memory-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_hits_convergence_failure",
+    "severity": "warning",
+    "message_contains": [
+      "HITS",
+      "convergence"
+    ],
+    "repair_contains": "ee graph snapshot refresh",
+    "repair_string": "Run `ee graph snapshot refresh --workspace .`."
+  }
+}

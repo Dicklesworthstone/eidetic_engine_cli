@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_proximity_unreachable",
+  "introduced_by": {
+    "bead": "bd-bife.6",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "proximity"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "A proximity query compares memories in different graph components.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Component A.' --workspace . --json",
+      "ee remember 'Component B.' --workspace . --json"
+    ],
+    "invocation": "ee proximity <memory-a> <memory-b> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_proximity_unreachable",
+    "severity": "info",
+    "message_contains": [
+      "unreachable",
+      "different components"
+    ]
+  }
+}

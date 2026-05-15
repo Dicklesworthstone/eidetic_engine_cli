@@ -24,6 +24,7 @@ use sqlmodel_core::{Row, Value};
 pub mod algorithms;
 pub mod decay;
 pub mod health;
+pub mod ppr;
 
 pub const SUBSYSTEM: &str = "graph";
 pub const MODULE_CONTRACT: &str = GRAPH_MODULE_SCHEMA_V1;
@@ -1769,7 +1770,16 @@ fn add_projection_edge(
 /// Compute PageRank centrality on a memory graph projection.
 #[must_use]
 pub fn compute_pagerank(projection: &MemoryGraphProjection) -> PageRankResult {
-    pagerank_directed(&projection.graph)
+    compute_pagerank_with_policy(projection, algorithms::PprPolicy::default())
+}
+
+/// Compute PageRank centrality with explicit graph runtime policy.
+#[must_use]
+pub fn compute_pagerank_with_policy(
+    projection: &MemoryGraphProjection,
+    policy: algorithms::PprPolicy,
+) -> PageRankResult {
+    algorithms::run_pagerank_with_policy(&projection.graph, policy)
 }
 
 /// Compute betweenness centrality on a memory graph projection.
@@ -2308,6 +2318,9 @@ fn persist_graph_snapshot_in_transaction(
 ) -> GraphResult<GraphRefreshSnapshot> {
     let snapshot_version = next_graph_snapshot_version(conn, workspace_id, input.graph_type)?;
     let snapshot_id = generate_graph_snapshot_id();
+
+    conn.archive_valid_graph_snapshots(workspace_id, input.graph_type)
+        .map_err(|error| GraphError::storage("archive previous graph snapshots", error))?;
 
     conn.insert_graph_snapshot(
         &snapshot_id,
@@ -5942,6 +5955,59 @@ mod tests {
         connection.close().map_err(|error| error.to_string())
     }
 
+    #[cfg(feature = "graph")]
+    #[test]
+    fn pagerank_wrapper_uses_policy_alpha() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000033",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000034",
+            MEMORY_B,
+            MEMORY_C,
+            true,
+            0.9,
+            0.9,
+        )?;
+
+        let projection = graph_result(super::build_memory_graph(
+            &connection,
+            &super::ProjectionOptions::default(),
+        ))?;
+        let default = super::compute_pagerank_with_policy(
+            &projection,
+            super::algorithms::PprPolicy::from_optional_config(None),
+        );
+        let overridden = super::compute_pagerank_with_policy(
+            &projection,
+            super::algorithms::PprPolicy::from_optional_config(Some(0.90)),
+        );
+        let default_b_score = default
+            .scores
+            .iter()
+            .find(|score| score.node == MEMORY_B)
+            .map(|score| score.score)
+            .ok_or_else(|| "default PageRank result should include MEMORY_B".to_owned())?;
+        let overridden_b_score = overridden
+            .scores
+            .iter()
+            .find(|score| score.node == MEMORY_B)
+            .map(|score| score.score)
+            .ok_or_else(|| "overridden PageRank result should include MEMORY_B".to_owned())?;
+
+        assert!((default_b_score - overridden_b_score).abs() > 1.0e-6);
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
     // -------------------------------------------------------------------------
     // Centrality Refresh Tests (EE-165)
     // -------------------------------------------------------------------------
@@ -7378,6 +7444,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![2, 1]
         );
+        assert_eq!(snapshots[0].status, GraphSnapshotStatus::Valid);
+        assert_eq!(snapshots[1].status, GraphSnapshotStatus::Archived);
 
         connection.close().map_err(|error| error.to_string())
     }

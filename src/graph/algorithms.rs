@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::{DateTime, Utc};
+use fnx_algorithms::{PageRankResult, pagerank_with_params};
+use fnx_classes::digraph::DiGraph;
 use fnx_runtime::CgseValue;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -9,8 +11,75 @@ use serde::{Deserialize, Serialize};
 use crate::db::{CreateGraphAlgorithmResultInput, DbConnection, StoredGraphAlgorithmResult};
 use crate::graph::{GraphError, GraphResult, graph_algorithm_params_hash};
 
+pub const DEFAULT_PPR_ALPHA: f64 = 0.30;
+pub const DEFAULT_PAGERANK_MAX_ITERATIONS: usize = 100;
+pub const DEFAULT_PAGERANK_TOLERANCE: f64 = 1.0e-6;
 pub const DEFAULT_SAMPLE_THRESHOLD: usize = 500;
 pub const DEFAULT_SAMPLE_SIZE: usize = 100;
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PprPolicy {
+    pub alpha: f64,
+}
+
+impl PprPolicy {
+    #[must_use]
+    pub fn from_optional_config(alpha: Option<f64>) -> Self {
+        Self {
+            alpha: alpha.unwrap_or(DEFAULT_PPR_ALPHA),
+        }
+    }
+}
+
+impl Default for PprPolicy {
+    fn default() -> Self {
+        Self {
+            alpha: DEFAULT_PPR_ALPHA,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SamplingPolicy {
+    pub sample_threshold: usize,
+    pub sample_size: usize,
+}
+
+impl SamplingPolicy {
+    #[must_use]
+    pub const fn new(sample_threshold: usize, sample_size: usize) -> Self {
+        Self {
+            sample_threshold,
+            sample_size,
+        }
+    }
+
+    #[must_use]
+    pub fn from_optional_sample_config(
+        sample_threshold: Option<u64>,
+        sample_size: Option<u64>,
+    ) -> Self {
+        Self {
+            sample_threshold: sample_threshold
+                .map(u64_to_usize_saturating)
+                .unwrap_or(DEFAULT_SAMPLE_THRESHOLD),
+            sample_size: sample_size
+                .map(u64_to_usize_saturating)
+                .unwrap_or(DEFAULT_SAMPLE_SIZE),
+        }
+    }
+}
+
+impl Default for SamplingPolicy {
+    fn default() -> Self {
+        Self {
+            sample_threshold: DEFAULT_SAMPLE_THRESHOLD,
+            sample_size: DEFAULT_SAMPLE_SIZE,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -354,6 +423,39 @@ where
     SamplingRun { result, witness }
 }
 
+pub fn run_with_sampling_policy<R, Exact, Approx>(
+    name: &str,
+    node_count: usize,
+    policy: SamplingPolicy,
+    snapshot_version: u64,
+    f_exact: Exact,
+    f_approx: Approx,
+) -> SamplingRun<R>
+where
+    Exact: FnOnce() -> R,
+    Approx: FnOnce(&[usize], u64) -> R,
+{
+    run_with_sampling(
+        name,
+        node_count,
+        policy.sample_threshold,
+        policy.sample_size,
+        snapshot_version,
+        f_exact,
+        f_approx,
+    )
+}
+
+#[must_use]
+pub fn run_pagerank_with_policy(graph: &DiGraph, policy: PprPolicy) -> PageRankResult {
+    pagerank_with_params(
+        graph,
+        policy.alpha,
+        DEFAULT_PAGERANK_MAX_ITERATIONS,
+        DEFAULT_PAGERANK_TOLERANCE,
+    )
+}
+
 #[must_use]
 pub fn deterministic_sampling_seed(
     name: &str,
@@ -448,6 +550,10 @@ fn cgse_u64(value: u64) -> CgseValue {
     }
 }
 
+fn u64_to_usize_saturating(value: u64) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,6 +609,62 @@ mod tests {
         assert_eq!(run.result.1, run.witness.seed);
         assert_eq!(run.witness.pivots.len(), DEFAULT_SAMPLE_SIZE);
         assert!(run.witness.pivots.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn sampling_policy_uses_graph_config_overrides() {
+        let policy = SamplingPolicy::from_optional_sample_config(Some(3), Some(2));
+        let run = run_with_sampling_policy(
+            "gomory_hu",
+            3,
+            policy,
+            21,
+            || "exact",
+            |pivots, _| {
+                assert_eq!(pivots.len(), 2);
+                "approx"
+            },
+        );
+
+        assert_eq!(policy.sample_threshold, 3);
+        assert_eq!(policy.sample_size, 2);
+        assert_eq!(run.result, "approx");
+        assert_eq!(run.witness.sample_threshold, 3);
+        assert_eq!(run.witness.requested_sample_size, 2);
+    }
+
+    #[test]
+    fn ppr_policy_uses_graph_config_alpha_override() -> TestResult {
+        let default_policy = PprPolicy::from_optional_config(None);
+        let override_policy = PprPolicy::from_optional_config(Some(0.90));
+        let mut graph = DiGraph::strict();
+        graph
+            .add_edge("a", "b")
+            .map_err(|error| format!("edge add a->b should succeed: {error}"))?;
+        graph
+            .add_edge("b", "c")
+            .map_err(|error| format!("edge add b->c should succeed: {error}"))?;
+
+        let default_result = run_pagerank_with_policy(&graph, default_policy);
+        let override_result = run_pagerank_with_policy(&graph, override_policy);
+        let default_b_score = default_result
+            .scores
+            .iter()
+            .find(|score| score.node == "b")
+            .map(|score| score.score)
+            .ok_or_else(|| "default PageRank result should include b".to_owned())?;
+        let override_b_score = override_result
+            .scores
+            .iter()
+            .find(|score| score.node == "b")
+            .map(|score| score.score)
+            .ok_or_else(|| "override PageRank result should include b".to_owned())?;
+
+        assert!((default_policy.alpha - DEFAULT_PPR_ALPHA).abs() <= f64::EPSILON);
+        assert!((override_policy.alpha - 0.90).abs() <= f64::EPSILON);
+        assert!((default_b_score - override_b_score).abs() > 1.0e-6);
+        assert!(override_result.converged);
+        Ok(())
     }
 
     #[test]

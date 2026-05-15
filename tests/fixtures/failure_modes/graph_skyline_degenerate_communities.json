@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_skyline_degenerate_communities",
+  "introduced_by": {
+    "bead": "bd-bife.6",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "status",
+    "insights"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "Knowledge skyline computation finds fewer than three Louvain communities.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Small workspace with too few communities.' --workspace . --json"
+    ],
+    "invocation": "ee status --skyline --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_skyline_degenerate_communities",
+    "severity": "info",
+    "message_contains": [
+      "degenerate",
+      "communities"
+    ]
+  }
+}

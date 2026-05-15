@@ -48,6 +48,30 @@ pub enum ContradictionSeverity {
     Incoherent,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContradictionClusterPolicy {
+    pub density_threshold: f64,
+}
+
+impl ContradictionClusterPolicy {
+    #[must_use]
+    pub fn from_optional_config(contradiction_threshold: Option<f64>) -> Self {
+        Self {
+            density_threshold: contradiction_threshold
+                .unwrap_or(DEFAULT_CONTRADICTION_DENSITY_THRESHOLD),
+        }
+    }
+}
+
+impl Default for ContradictionClusterPolicy {
+    fn default() -> Self {
+        Self {
+            density_threshold: DEFAULT_CONTRADICTION_DENSITY_THRESHOLD,
+        }
+    }
+}
+
 impl ContradictionSeverity {
     #[must_use]
     pub const fn suggested_action(self) -> &'static str {
@@ -112,7 +136,15 @@ pub fn detect_louvain_communities(graph: &Graph) -> Vec<Vec<String>> {
 
 #[must_use]
 pub fn detect_contradiction_clusters(graph: &Graph) -> Vec<ContradictionCluster> {
-    detect_contradiction_clusters_with_threshold(graph, DEFAULT_CONTRADICTION_DENSITY_THRESHOLD)
+    detect_contradiction_clusters_with_policy(graph, ContradictionClusterPolicy::default())
+}
+
+#[must_use]
+pub fn detect_contradiction_clusters_with_policy(
+    graph: &Graph,
+    policy: ContradictionClusterPolicy,
+) -> Vec<ContradictionCluster> {
+    detect_contradiction_clusters_with_threshold(graph, policy.density_threshold)
 }
 
 #[must_use]
@@ -228,5 +260,20 @@ mod tests {
         assert_eq!(clusters[0].internal_contradictions, 3);
         assert_eq!(clusters[0].severity, ContradictionSeverity::Incoherent);
         assert_eq!(clusters[0].exemplar_memory_ids, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn contradiction_policy_uses_graph_config_override() {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        let _ = graph.extend_edges_unrecorded([("a", "b"), ("b", "c")]);
+        let permissive_policy = ContradictionClusterPolicy::from_optional_config(Some(0.50));
+        let strict_policy = ContradictionClusterPolicy::from_optional_config(Some(0.75));
+
+        assert_eq!(permissive_policy.density_threshold, 0.50);
+        assert_eq!(
+            detect_contradiction_clusters_with_policy(&graph, permissive_policy).len(),
+            1
+        );
+        assert!(detect_contradiction_clusters_with_policy(&graph, strict_policy).is_empty());
     }
 }

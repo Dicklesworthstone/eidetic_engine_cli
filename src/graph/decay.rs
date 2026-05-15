@@ -14,6 +14,20 @@ pub struct StructuralDecayPolicy {
     pub articulation_protection: f64,
 }
 
+impl StructuralDecayPolicy {
+    #[must_use]
+    pub fn from_optional_config(
+        onion_decay_max: Option<f64>,
+        articulation_protection: Option<f64>,
+    ) -> Self {
+        Self {
+            onion_decay_max: onion_decay_max.unwrap_or(DEFAULT_ONION_DECAY_MAX),
+            articulation_protection: articulation_protection
+                .unwrap_or(DEFAULT_ARTICULATION_PROTECTION),
+        }
+    }
+}
+
 impl Default for StructuralDecayPolicy {
     fn default() -> Self {
         Self {
@@ -184,5 +198,19 @@ mod tests {
         assert!(adjustment.is_articulation_point);
         assert!(adjustment.structural_multiplier < 1.0);
         assert_eq!(adjustment.rationale, "articulation_point_in_layer_2");
+    }
+
+    #[test]
+    fn structural_decay_policy_uses_graph_config_overrides() {
+        let policy = StructuralDecayPolicy::from_optional_config(Some(2.0), Some(0.25));
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        let _ = graph.extend_edges_unrecorded([("a", "b"), ("b", "c"), ("c", "d"), ("c", "e")]);
+
+        let adjustment = compute_structural_decay_adjustment_with_policy(&graph, "c", policy);
+
+        assert_eq!(policy.onion_decay_max, 2.0);
+        assert_eq!(policy.articulation_protection, 0.25);
+        assert!(adjustment.is_articulation_point);
+        assert!(adjustment.structural_multiplier <= 0.5);
     }
 }

@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_dominance_no_revision_chain",
+  "introduced_by": {
+    "bead": "bd-bife.6",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "memory revise"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "Revision impact analysis is requested for a memory that has no logical_id revision chain.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Standalone memory without revisions.' --workspace . --json"
+    ],
+    "invocation": "ee memory revise <memory-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_dominance_no_revision_chain",
+    "severity": "info",
+    "message_contains": [
+      "revision chain",
+      "logical_id"
+    ]
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_curate_disconnected_graph",
+  "introduced_by": {
+    "bead": "bd-bife.6",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "curate"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A graph-informed curate pass runs against a memory graph with more than one connected component.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Disconnected cluster alpha.' --workspace . --json",
+      "ee remember 'Disconnected cluster beta.' --workspace . --json"
+    ],
+    "invocation": "ee curate dry-run --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_curate_disconnected_graph",
+    "severity": "warning",
+    "message_contains": [
+      "disconnected graph",
+      "connected component"
+    ],
+    "repair_contains": "ee graph snapshot refresh",
+    "repair_string": "Run `ee graph snapshot refresh --workspace .`, then inspect `ee health --robot-insights --workspace . --json`."
+  }
+}

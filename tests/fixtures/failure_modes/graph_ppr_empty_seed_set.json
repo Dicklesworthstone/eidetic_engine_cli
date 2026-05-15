@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_ppr_empty_seed_set",
+  "introduced_by": {
+    "bead": "bd-bife.6",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "context"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "PPR graph reranking is requested after top-k retrieval returns no seed memories.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee context 'query with no seed memories' --workspace . --ppr-weight 1 --json"
+  },
+  "expected_emission": {
+    "code": "graph_ppr_empty_seed_set",
+    "severity": "low",
+    "message_contains": [
+      "PPR",
+      "empty seed"
+    ],
+    "repair_contains": "Broaden the query",
+    "repair_string": "Broaden the query or lower the relevance floor before enabling PPR reranking."
+  }
+}

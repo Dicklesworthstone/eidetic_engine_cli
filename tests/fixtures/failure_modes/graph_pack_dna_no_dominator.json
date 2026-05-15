@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_pack_dna_no_dominator",
+  "introduced_by": {
+    "bead": "bd-bife.6",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "context"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "Pack DNA explanation runs without any trusted dominator or human-explicit trust anchor in the workspace.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Imported note with no explicit trust anchor.' --workspace . --level episodic --json"
+    ],
+    "invocation": "ee context 'explain pack dna' --workspace . --explain --json"
+  },
+  "expected_emission": {
+    "code": "graph_pack_dna_no_dominator",
+    "severity": "low",
+    "message_contains": [
+      "trust anchor",
+      "dominator"
+    ],
+    "repair_contains": "trust_class=human_explicit",
+    "repair_string": "Seed a trusted source memory with `trust_class=human_explicit`."
+  }
+}
