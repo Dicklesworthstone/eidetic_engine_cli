@@ -157,7 +157,7 @@ jobs:
           set -euo pipefail
           export CARGO_HOME="$RUNNER_TEMP/clean-cargo-home"
           export PATH="$CARGO_HOME/bin:$PATH"
-          cargo install ee
+          cargo install eidetic-engine
           EE_EXPECTED_VERSION="${{ steps.audit.outputs.latest_tag }}"
           EE_EXPECTED_VERSION="${EE_EXPECTED_VERSION#v}"
           ee --version | grep -F "$EE_EXPECTED_VERSION"

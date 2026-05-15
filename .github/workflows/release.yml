@@ -103,7 +103,8 @@ jobs:
       - name: Performance benchmarks
         run: |
           set -euo pipefail
-          ./scripts/bench.sh --check-regression --json > ee-perf.v1.json
+          ./scripts/bench_perf_regression.sh --check-regression --json > ee-perf.v1.json
+          ./scripts/sync_perf_table.sh --input benches/baselines/perf_v0_2.json --readme README.md --check
           echo "::notice title=Performance results::Benchmark artifact generated"
 
       - name: Upload perf artifact

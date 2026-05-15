@@ -16,8 +16,9 @@ set -euo pipefail
 #   1. Forbidden Dependencies  - cargo tree audit for banned crates
 #   2. Closure Linter          - prevent abstention-as-implementation closure
 #   3. Snapshot Proposal Guard - block unreviewed tracked insta proposals
-#   4. Vision Coverage         - report documented implemented/stubbed/missing surfaces
-#   5. Unit/Contract/Golden    - cargo test --workspace --lib --bins --tests --examples
+#   4. Untracked Work Audit    - advisory Beads FILE SURFACE coverage for dirty paths
+#   5. Vision Coverage         - report documented implemented/stubbed/missing surfaces
+#   6. Unit/Contract/Golden    - cargo test --workspace --lib --bins --tests --examples
 #   6. Basic E2E               - scripts/e2e_test.sh
 #   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
 #   7. Advanced E2E            - scripts/e2e_advanced.sh
@@ -261,6 +262,10 @@ run_stage "Verification Drift Guard" "with_beads_read_locks ./scripts/verificati
 
 # Gate 3: Snapshot Proposal Guard
 run_stage "Snapshot Proposal Guard" "snapshot_proposal_guard"
+
+# Gate 3.5: Advisory dirty-work ownership coverage. This remains advisory while
+# multi-agent sessions routinely carry unrelated in-flight changes.
+run_stage "Untracked Work Audit (advisory)" "with_beads_read_locks ./scripts/untracked-work-audit.sh"
 
 # Gate 4: Strategic Vision Coverage
 run_stage "Vision Coverage" "with_beads_read_locks sh ./scripts/vision-coverage.sh --json"

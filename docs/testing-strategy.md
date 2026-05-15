@@ -363,6 +363,22 @@ Deterministic tests must not depend on wall-clock network calls, paid LLM APIs,
 ambient user configuration, or a mutable global CASS corpus. Use explicit
 fixtures and temporary workspaces.
 
+### Graph Test Determinism
+
+Graph feature tests use the same determinism contract as context-pack and
+runtime tests, with two graph-specific constraints:
+
+- Any graph test that needs runtime scheduling uses `LabRuntime` through the
+  shared `ee::testing` helpers, not wall-clock sleeps or an ambient executor.
+- Any graph test that needs semantic seed vectors uses `HashEmbedder` or a
+  checked-in fixture. It must not instantiate real `model2vec` or `fastembed`
+  backends in CI.
+
+Tests that deliberately exercise a real embedding backend must be feature-gated
+outside the default CI profile and named as non-CI coverage in their module
+docs. Graph test fixtures should make this visible in source rather than relying
+on local machine configuration.
+
 ## Redaction And Privacy Tests
 
 Redaction tests cover storage, indexing, rendering, artifact export, and replay.
