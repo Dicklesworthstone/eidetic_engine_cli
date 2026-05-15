@@ -1,6 +1,6 @@
 {
   "schema": "ee.vision_coverage.v1",
-  "generated_at": "2026-05-15T15:45:49Z",
+  "generated_at": "2026-05-15T20:21:21Z",
   "status": "warn",
   "release_tag_commit": false,
   "sources": {
@@ -13,12 +13,12 @@
   },
   "surfaces": {
     "total_documented": 69,
-    "implemented": 64,
+    "implemented": 66,
     "stubbed": 0,
-    "missing": 5,
+    "missing": 3,
     "with_open_implements_bead": 0
   },
-  "gap_percentage": 7.25,
+  "gap_percentage": 4.35,
   "implemented_surfaces": [
     "analyze science-status",
     "backup create",
@@ -38,6 +38,7 @@
     "eval report",
     "eval run",
     "export",
+    "graph centrality",
     "graph centrality-refresh",
     "graph communities",
     "graph explain-link",
@@ -81,16 +82,15 @@
     "search",
     "status",
     "support bundle",
+    "swarm brief",
     "why",
     "workflow create",
     "workspace resolve"
   ],
   "missing_surfaces": [
     "db",
-    "graph centrality",
     "mcp",
-    "serve",
-    "swarm"
+    "serve"
   ],
   "documented_stubbed_surfaces": [],
   "stubbed_surfaces": [],
@@ -160,7 +160,7 @@
     "serve",
     "status",
     "support bundle",
-    "swarm",
+    "swarm brief",
     "why",
     "workflow create",
     "workspace resolve"

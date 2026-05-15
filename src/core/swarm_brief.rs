@@ -3349,9 +3349,13 @@ pub fn parse_rch_local_capability_snapshot(
     let queue_start_stalled = queue_health
         .as_ref()
         .is_some_and(|health| health.status == "start_stalled");
+    let queue_capacity_blocked = queue_health
+        .as_ref()
+        .is_some_and(|health| health.status == "capacity_blocked");
     let remote_only_safe = route_available
         && workers_probe_ready
         && !queue_start_stalled
+        && !queue_capacity_blocked
         && dry_run_would_offload.unwrap_or(true)
         && status_socket_consistent.unwrap_or(true)
         && (!remote_only_required || route_available);
@@ -3411,6 +3415,15 @@ pub fn parse_rch_local_capability_snapshot(
             Some("Inspect `rch queue --json`, avoid launching more Cargo jobs, and repair or restart RCH scheduling before remote-required verification.".to_string()),
         ));
         recovery.push("repair_rch_queue_scheduler_before_remote_cargo".to_string());
+    }
+    if queue_capacity_blocked {
+        degraded.push(SwarmBriefDegradation::warning(
+            SwarmBriefSourceKind::Rch,
+            RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE,
+            "RCH has queued remote builds that need more slots than are currently available; remote-only verification must fail closed before the client can time out toward local fallback.",
+            Some("Wait for RCH capacity, use fail-fast queue settings, or record static-only evidence instead of launching more Cargo jobs.".to_string()),
+        ));
+        recovery.push("wait_for_rch_capacity_or_fail_fast_before_remote_cargo".to_string());
     }
     if recovery.is_empty() {
         recovery.push("remote_only_cargo_allowed_from_this_shell".to_string());
@@ -3592,8 +3605,14 @@ fn rch_queue_health(status: &Value) -> Option<RchQueueHealth> {
         && slots_available
             .zip(first_slots_needed)
             .is_some_and(|(available, needed)| available >= needed);
+    let capacity_blocked = queued_count > 0
+        && slots_available
+            .zip(first_slots_needed)
+            .is_some_and(|(available, needed)| available < needed);
     let status_label = if startable_now {
         "start_stalled"
+    } else if capacity_blocked {
+        "capacity_blocked"
     } else if queued_count > 0 {
         "queued"
     } else {
@@ -5161,6 +5180,62 @@ mod tests {
             report
                 .recovery
                 .contains(&"repair_rch_queue_scheduler_before_remote_cargo".to_string())
+        );
+    }
+
+    #[test]
+    fn rch_local_capability_fails_closed_for_capacity_blocked_queue() {
+        let report = require_ok(
+            parse_rch_local_capability_snapshot(
+                r#"{
+                    "schema":"ee.rch.local_capability.fixture.v1",
+                    "remoteOnlyRequired":true,
+                    "captures":{
+                        "helpJson":{"commands":[{"name":"status"},{"name":"exec"}]},
+                        "hookStatus":{"data":{"agents":[{"agent":"CodexCli","status":"Not installed"}]}},
+                        "queue":{
+                            "data":{
+                                "active_builds":[
+                                    {
+                                        "id":31,
+                                        "command":"env TMPDIR=/tmp cargo build --bin ee"
+                                    }
+                                ],
+                                "queued_builds":[
+                                    {
+                                        "id":79,
+                                        "command":"cargo test --lib health_robot_insights_respects_structural_health_feature_flag -- --nocapture",
+                                        "slots_needed":4,
+                                        "estimated_start":"2026-05-15T19:48:32Z"
+                                    }
+                                ],
+                                "slots_available":2
+                            }
+                        },
+                        "status":{"data":{"daemon":{"daemon":{"version":"1.0.24","socket_path":"/tmp/rch.sock","workers_healthy":3}}}},
+                        "config":{"data":{"general":{"socket_path":"/tmp/rch.sock"}}},
+                        "workerProbe":{"data":{"summary":{"healthy":3,"failed":0}}},
+                        "diagnose":{"data":{"dry_run":{"would_offload":true}}}
+                    }
+                }"#,
+            ),
+            "capacity-blocked RCH queue fixture",
+        );
+        let queue = require_some(report.queue_health.as_ref(), "queue health");
+
+        assert_eq!(queue.queued_count, 1);
+        assert_eq!(queue.active_count, 1);
+        assert_eq!(queue.slots_available, Some(2));
+        assert_eq!(queue.status, "capacity_blocked");
+        assert!(!report.remote_only_safe);
+        assert!(report.degraded.iter().any(|degradation| {
+            degradation.code == RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE
+                && degradation.message.contains("need more slots")
+        }));
+        assert!(
+            report
+                .recovery
+                .contains(&"wait_for_rch_capacity_or_fail_fast_before_remote_cargo".to_string())
         );
     }
 

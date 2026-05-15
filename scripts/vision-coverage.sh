@@ -196,7 +196,7 @@ normalize_command() {
     esac
 
     case "$first" in
-        agent|analyze|artifact|audit|backup|causal|certificate|claim|curate|demo|diag|economy|eval|focus|graph|handoff|import|index|install|lab|learn|maintenance|memory|mcp|model|plan|playbook|preflight|procedure|recorder|rehearse|review|rule|schema|situation|support|task-frame|tripwire|workspace|workflow)
+        agent|analyze|artifact|audit|backup|causal|certificate|claim|curate|demo|diag|economy|eval|focus|graph|handoff|import|index|install|lab|learn|maintenance|memory|mcp|model|plan|playbook|preflight|procedure|recorder|rehearse|review|rule|schema|situation|support|swarm|task-frame|tripwire|workspace|workflow)
             if [ -n "$second" ]; then
                 printf "%s %s\n" "$first" "$second"
             else

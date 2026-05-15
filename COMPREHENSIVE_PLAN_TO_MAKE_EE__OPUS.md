@@ -1832,6 +1832,8 @@ COMMANDS:
         communities    Louvain / label propagation
         path           Shortest path between two memories
         explain-link   Why are these two memories linked?
+    swarm
+        brief          Coordination preflight for crowded repos and agent swarms
     index
         status         Index manifest, generation, freshness
         rebuild        Rebuild from DB
@@ -1905,6 +1907,37 @@ ee doctor [--fix-plan]
 ### 20.5 Stable JSON schema versioning
 
 Every `--json` output has `schema: "ee.<noun>.v<N>"` and `version: <int>`. When we evolve a contract we bump `v<N>` and document the change. Agents pin to a version they understand. Old versions remain available behind a flag for one full minor-version cycle.
+
+### 20.21 Swarm coordination preflight
+
+`ee swarm brief` is the read-only coordination surface for multi-agent work in
+crowded repositories. It summarizes dirty Git state, Beads readiness, BV
+recommendations, Agent Mail snapshots, file-surface conflict risk, and optional
+RCH resource posture without claiming work or mutating the repository.
+
+Canonical invocation:
+
+```bash
+ee swarm brief --workspace . --json
+```
+
+Use full fields when an agent harness needs every source array and risk record:
+
+```bash
+ee --fields full swarm brief --workspace . --include-rch --json
+```
+
+The surface degrades honestly when external coordination tools are unavailable:
+`git_unavailable`, `beads_unavailable`, `beads_tracker_stale`,
+`bv_unavailable`, `agent_mail_unavailable`, `rch_unavailable`,
+`rch_remote_required_fallback_prevented`, and `agent_status_unavailable` are
+reported in `degraded[]` with repair commands. These codes are runtime
+coordination signals, not stub sentinels.
+
+The brief complements existing authorities. `br ready --json` remains the
+source of ready-work records, Agent Mail remains the source of file
+reservations and agent messages, and RCH remains the required path for Cargo and
+other CPU-intensive verification.
 
 ---
 
