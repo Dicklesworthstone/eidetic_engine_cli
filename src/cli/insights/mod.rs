@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use clap::Args;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -12,6 +10,7 @@ const MAX_SECTION_LIMIT: usize = 100;
 const EMPTY_WORKSPACE_GENERATED_AT: &str = "1970-01-01T00:00:00Z";
 
 type SectionBuilder = fn() -> InsightsSection;
+type SectionRegistryEntry = (&'static str, &'static str, SectionBuilder);
 
 #[derive(Clone, Debug, Eq, PartialEq, Args)]
 pub struct InsightsArgs {
@@ -97,75 +96,55 @@ pub struct InsightsDegradedSignal {
     pub repair: Option<&'static str>,
 }
 
-fn section_registry() -> BTreeMap<&'static str, (&'static str, SectionBuilder)> {
-    let mut registry = BTreeMap::new();
-    registry.insert(
-        "authorities",
-        ("authorities", authorities_section as SectionBuilder),
-    );
-    registry.insert("bridges", ("bridges", bridges_section as SectionBuilder));
-    registry.insert(
-        "causalbottlenecks",
+fn section_registry() -> Vec<SectionRegistryEntry> {
+    vec![
+        ("authorities", "authorities", authorities_section),
+        ("bridges", "bridges", bridges_section),
         (
+            "causalbottlenecks",
             "causalBottlenecks",
-            causal_bottlenecks_section as SectionBuilder,
+            causal_bottlenecks_section,
         ),
-    );
-    registry.insert(
-        "comprehensiverules",
         (
+            "comprehensiverules",
             "comprehensiveRules",
-            comprehensive_rules_section as SectionBuilder,
+            comprehensive_rules_section,
         ),
-    );
-    registry.insert(
-        "contradictionclusters",
         (
+            "contradictionclusters",
             "contradictionClusters",
-            contradiction_clusters_section as SectionBuilder,
+            contradiction_clusters_section,
         ),
-    );
-    registry.insert("hubs", ("hubs", hubs_section as SectionBuilder));
-    registry.insert("kcore", ("kCore", k_core_section as SectionBuilder));
-    registry.insert("ktruss", ("kTruss", k_truss_section as SectionBuilder));
-    registry.insert(
-        "knowledgeskyline",
+        ("hubs", "hubs", hubs_section),
+        ("kcore", "kCore", k_core_section),
+        ("ktruss", "kTruss", k_truss_section),
         (
+            "knowledgeskyline",
             "knowledgeSkyline",
-            knowledge_skyline_section as SectionBuilder,
+            knowledge_skyline_section,
         ),
-    );
-    registry.insert(
-        "loadbearingmemories",
         (
+            "loadbearingmemories",
             "loadBearingMemories",
-            load_bearing_memories_section as SectionBuilder,
+            load_bearing_memories_section,
         ),
-    );
-    registry.insert(
-        "proximityhotspots",
         (
+            "proximityhotspots",
             "proximityHotspots",
-            proximity_hotspots_section as SectionBuilder,
+            proximity_hotspots_section,
         ),
-    );
-    registry.insert(
-        "revisionfrontiers",
         (
+            "revisionfrontiers",
             "revisionFrontiers",
-            revision_frontiers_section as SectionBuilder,
+            revision_frontiers_section,
         ),
-    );
-    registry.insert(
-        "topmemories",
-        ("topMemories", top_memories_section as SectionBuilder),
-    );
-    registry
+        ("topmemories", "topMemories", top_memories_section),
+    ]
 }
 
 pub fn build_insights_report(args: &InsightsArgs) -> Result<InsightsReport, DomainError> {
     let registry = section_registry();
-    let available_sections: Vec<&'static str> = registry.values().map(|(name, _)| *name).collect();
+    let available_sections: Vec<&'static str> = registry.iter().map(|(_, name, _)| *name).collect();
     let mode = if args.explain.is_some() {
         InsightsMode::Explain
     } else if args.section.is_some() {
@@ -176,7 +155,10 @@ pub fn build_insights_report(args: &InsightsArgs) -> Result<InsightsReport, Doma
 
     let (selected_section, sections, pagination) = if let Some(section) = args.section.as_deref() {
         let normalized = normalize_section_name(section);
-        let Some((display_name, builder)) = registry.get(normalized.as_str()) else {
+        let Some((_, display_name, builder)) = registry
+            .iter()
+            .find(|(lookup_name, _, _)| *lookup_name == normalized)
+        else {
             let available = available_sections.join(", ");
             return Err(DomainError::Usage {
                 message: format!(
@@ -194,7 +176,7 @@ pub fn build_insights_report(args: &InsightsArgs) -> Result<InsightsReport, Doma
     } else {
         (
             None,
-            registry.values().map(|(_, builder)| builder()).collect(),
+            registry.iter().map(|(_, _, builder)| builder()).collect(),
             None,
         )
     };
@@ -532,7 +514,7 @@ mod tests {
     #[test]
     fn rendered_json_wraps_schema_aligned_data() -> TestResult {
         let report = build_insights_report(&InsightsArgs {
-            section: Some("graph".to_owned()),
+            section: Some("topMemories".to_owned()),
             explain: None,
             limit: DEFAULT_SECTION_LIMIT,
             offset: 0,
@@ -552,7 +534,7 @@ mod tests {
         assert_eq!(data["snapshotVersion"], 0);
         assert_eq!(data["generatedAt"], EMPTY_WORKSPACE_GENERATED_AT);
         assert_eq!(data["runDurationMs"], 0);
-        assert_eq!(data["selectedSection"], "graph");
+        assert_eq!(data["selectedSection"], "topMemories");
         assert_eq!(data["pagination"]["limit"], DEFAULT_SECTION_LIMIT);
         assert_eq!(data["pagination"]["offset"], 0);
         assert_eq!(data["pagination"]["returned"], 0);

@@ -1,14 +1,14 @@
 ---
 source: tests/contracts/graph_config_behavior.rs
-expression: "json!({ \"schema\": \"ee.graph.config_behavior.v1\", \"surface\": \"graph.ppr.alpha\", \"legacyAlpha\": legacy_policy.alpha, \"defaultAlpha\": default_policy.alpha, \"strongAlpha\": strong_policy.alpha, \"legacyJsonStable\": true, \"legacyDiffersFromDefault\": legacy != default, \"defaultDiffersFromStrong\": default != strong, })"
+expression: value
 ---
 {
-  "defaultAlpha": 0.3,
-  "defaultDiffersFromStrong": true,
-  "legacyAlpha": 0.0,
-  "legacyDiffersFromDefault": true,
-  "legacyJsonStable": true,
   "schema": "ee.graph.config_behavior.v1",
+  "surface": "graph.ppr.alpha",
+  "legacyAlpha": 0.0,
+  "defaultAlpha": 0.3,
   "strongAlpha": 0.9,
-  "surface": "graph.ppr.alpha"
+  "legacyJsonStable": true,
+  "legacyDiffersFromDefault": true,
+  "defaultDiffersFromStrong": true
 }

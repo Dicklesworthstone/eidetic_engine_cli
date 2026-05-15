@@ -163,6 +163,10 @@ pub enum GraphError {
         operation: &'static str,
         source: String,
     },
+    AlgorithmTimeout {
+        algorithm: String,
+        timeout_ms: u64,
+    },
     NumericOverflow {
         field: &'static str,
         value: String,
@@ -216,6 +220,7 @@ impl GraphError {
             Self::Storage { .. } => "graph_storage",
             Self::Json { .. } => "graph_json",
             Self::GraphEngine { .. } => "graph_engine",
+            Self::AlgorithmTimeout { .. } => "graph_algorithm_timeout",
             Self::NumericOverflow { .. } => "graph_numeric_overflow",
             Self::SnapshotLockHeld { .. } => "graph_snapshot_lock_held",
             Self::SnapshotLockUnavailable { .. } => "graph_snapshot_lock_unavailable",
@@ -233,6 +238,9 @@ impl GraphError {
             }
             Self::GraphEngine { .. } => {
                 "Validate memory link rows and rebuild the graph projection."
+            }
+            Self::AlgorithmTimeout { .. } => {
+                "Run the graph operation in background mode or reduce the graph input size."
             }
             Self::NumericOverflow { .. } | Self::SnapshotVersionOverflow => {
                 "Archive old graph snapshots or reduce the graph snapshot input size."
@@ -256,6 +264,13 @@ impl fmt::Display for GraphError {
             Self::GraphEngine { operation, source } => {
                 write!(f, "graph {operation} failed: {source}")
             }
+            Self::AlgorithmTimeout {
+                algorithm,
+                timeout_ms,
+            } => write!(
+                f,
+                "graph algorithm {algorithm} exceeded timeout budget of {timeout_ms} ms"
+            ),
             Self::NumericOverflow { field, value } => {
                 write!(
                     f,
@@ -288,6 +303,7 @@ impl Error for GraphError {
             Self::Storage { source, .. } => Some(source.as_ref()),
             Self::Json { source, .. } => Some(source.as_ref()),
             Self::GraphEngine { .. }
+            | Self::AlgorithmTimeout { .. }
             | Self::NumericOverflow { .. }
             | Self::SnapshotLockHeld { .. }
             | Self::SnapshotLockUnavailable { .. }

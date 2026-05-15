@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use fnx_algorithms::{PageRankResult, pagerank_with_params};
@@ -16,6 +18,43 @@ pub const DEFAULT_PAGERANK_MAX_ITERATIONS: usize = 100;
 pub const DEFAULT_PAGERANK_TOLERANCE: f64 = 1.0e-6;
 pub const DEFAULT_SAMPLE_THRESHOLD: usize = 500;
 pub const DEFAULT_SAMPLE_SIZE: usize = 100;
+pub const DEFAULT_FOREGROUND_BUDGET: Duration = Duration::from_millis(250);
+pub const DEFAULT_BACKGROUND_BUDGET: Duration = Duration::from_millis(2_000);
+
+pub fn run_with_budget<R, F>(name: &'static str, budget: Duration, f: F) -> GraphResult<R>
+where
+    R: Send + 'static,
+    F: FnOnce() -> R + Send + 'static,
+{
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .thread_name_prefix("ee-graph-budget")
+        .build()
+        .map_err(|error| GraphError::GraphEngine {
+            operation: "start graph budget runtime",
+            source: error.to_string(),
+        })?;
+
+    let outcome = runtime.block_on(asupersync::time::timeout(
+        asupersync::time::wall_now(),
+        budget,
+        asupersync::runtime::spawn_blocking(move || std::panic::catch_unwind(AssertUnwindSafe(f))),
+    ));
+
+    match outcome {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(payload)) => Err(GraphError::GraphEngine {
+            operation: name,
+            source: format!(
+                "graph algorithm worker panicked: {}",
+                panic_payload_to_string(payload)
+            ),
+        }),
+        Err(_) => Err(GraphError::AlgorithmTimeout {
+            algorithm: name.to_owned(),
+            timeout_ms: duration_millis_saturating(budget),
+        }),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -554,6 +593,21 @@ fn u64_to_usize_saturating(value: u64) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }
 
+fn duration_millis_saturating(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send + 'static>) -> String {
+    let payload = match payload.downcast::<String>() {
+        Ok(message) => return *message,
+        Err(payload) => payload,
+    };
+    match payload.downcast::<&'static str>() {
+        Ok(message) => (*message).to_owned(),
+        Err(_) => "non-string panic payload".to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,6 +625,63 @@ mod tests {
 
     fn graph_result<T>(result: GraphResult<T>) -> Result<T, String> {
         result.map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn run_with_budget_returns_under_budget_result() -> TestResult {
+        let result = graph_result(run_with_budget(
+            "under_budget_fixture",
+            DEFAULT_FOREGROUND_BUDGET,
+            || 42_u64,
+        ))?;
+
+        assert_eq!(result, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn run_with_budget_times_out_over_budget_work() -> TestResult {
+        let error = run_with_budget("timeout_fixture", Duration::from_millis(10), || {
+            thread::sleep(Duration::from_millis(50));
+            7_u64
+        })
+        .expect_err("slow graph worker should exceed the timeout budget");
+
+        match error {
+            GraphError::AlgorithmTimeout {
+                algorithm,
+                timeout_ms,
+            } => {
+                assert_eq!(algorithm, "timeout_fixture");
+                assert_eq!(timeout_ms, 10);
+            }
+            other => {
+                return Err(format!("expected AlgorithmTimeout, got {other:?}"));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn run_with_budget_reports_worker_panic() -> TestResult {
+        let error = run_with_budget("panic_fixture", DEFAULT_FOREGROUND_BUDGET, || -> u64 {
+            panic!("graph worker exploded")
+        })
+        .expect_err("worker panic should be converted into GraphError");
+
+        match error {
+            GraphError::GraphEngine { operation, source } => {
+                assert_eq!(operation, "panic_fixture");
+                assert!(
+                    source.contains("graph worker exploded"),
+                    "panic source should include payload, got {source}"
+                );
+            }
+            other => {
+                return Err(format!("expected GraphEngine panic error, got {other:?}"));
+            }
+        }
+        Ok(())
     }
 
     #[test]

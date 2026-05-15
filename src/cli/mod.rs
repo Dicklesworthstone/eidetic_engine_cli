@@ -36699,12 +36699,14 @@ mod tests {
 
     #[test]
     fn insights_section_parser_accepts_known_section() -> TestResult {
-        let parsed = Cli::try_parse_from(["ee", "insights", "--section", "graph"])
+        let parsed = Cli::try_parse_from(["ee", "insights", "--section", "topMemories"])
             .map_err(|error| format!("failed to parse insights section: {:?}", error.kind()))?;
         match parsed.command {
-            Some(Command::Insights(args)) => {
-                ensure_equal(&args.section.as_deref(), &Some("graph"), "insights section")
-            }
+            Some(Command::Insights(args)) => ensure_equal(
+                &args.section.as_deref(),
+                &Some("topMemories"),
+                "insights section",
+            ),
             other => Err(format!("expected insights command, got {other:?}")),
         }
     }
@@ -36733,7 +36735,7 @@ mod tests {
         )?;
         ensure_contains(
             json["error"]["message"].as_str().unwrap_or_default(),
-            "Available sections: coordination, graph, retrieval, verification",
+            "Available sections: authorities, bridges, causalBottlenecks, comprehensiveRules, contradictionClusters, hubs, kCore, kTruss, knowledgeSkyline, loadBearingMemories, proximityHotspots, revisionFrontiers, topMemories",
             "unknown section available list",
         )
     }

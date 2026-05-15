@@ -1,24 +1,24 @@
 ---
 source: tests/contracts/graph_config_behavior.rs
-expression: "json!({ \"schema\": \"ee.graph.config_behavior.v1\", \"surface\": \"graph.gomory_hu.sample_threshold\", \"nodeCount\": 3, \"snapshotVersion\": 7, \"default\": { \"threshold\": exact.witness.sample_threshold, \"requestedSampleSize\": exact.witness.requested_sample_size, \"choice\": exact.witness.choice, \"effectiveSampleSize\": exact.witness.effective_sample_size, \"result\": exact.result, }, \"override\": { \"threshold\": sampled.witness.sample_threshold, \"requestedSampleSize\": sampled.witness.requested_sample_size, \"choice\": sampled.witness.choice, \"effectiveSampleSize\": sampled.witness.effective_sample_size, \"result\": sampled.result, }, })"
+expression: value
 ---
 {
+  "schema": "ee.graph.config_behavior.v1",
+  "surface": "graph.gomory_hu.sample_threshold",
+  "nodeCount": 3,
+  "snapshotVersion": 7,
   "default": {
+    "threshold": 500,
+    "requestedSampleSize": 100,
     "choice": "exact",
     "effectiveSampleSize": 0,
-    "requestedSampleSize": 100,
-    "result": "exact",
-    "threshold": 500
+    "result": "exact"
   },
-  "nodeCount": 3,
   "override": {
+    "threshold": 3,
+    "requestedSampleSize": 2,
     "choice": "approximate",
     "effectiveSampleSize": 2,
-    "requestedSampleSize": 2,
-    "result": "approximate",
-    "threshold": 3
-  },
-  "schema": "ee.graph.config_behavior.v1",
-  "snapshotVersion": 7,
-  "surface": "graph.gomory_hu.sample_threshold"
+    "result": "approximate"
+  }
 }

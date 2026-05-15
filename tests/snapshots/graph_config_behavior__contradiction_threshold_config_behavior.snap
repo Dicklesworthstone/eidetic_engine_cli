@@ -1,23 +1,23 @@
 ---
 source: tests/contracts/graph_config_behavior.rs
-expression: "json!({ \"schema\": \"ee.graph.config_behavior.v1\", \"surface\": \"graph.health.contradiction_threshold\", \"permissiveThreshold\": permissive_policy.density_threshold, \"strictThreshold\": strict_policy.density_threshold, \"permissiveClusterCount\": permissive.len(), \"strictClusterCount\": strict.len(), \"boundaryCluster\": { \"size\": cluster.size, \"internalContradictions\": cluster.internal_contradictions, \"densityPpm\": (cluster.density * 1_000_000.0).round() as i64, \"severity\": cluster.severity, \"exemplars\": cluster.exemplar_memory_ids, }, })"
+expression: value
 ---
 {
+  "schema": "ee.graph.config_behavior.v1",
+  "surface": "graph.health.contradiction_threshold",
+  "permissiveThreshold": 0.5,
+  "strictThreshold": 0.75,
+  "permissiveClusterCount": 1,
+  "strictClusterCount": 0,
   "boundaryCluster": {
+    "size": 3,
+    "internalContradictions": 2,
     "densityPpm": 666667,
+    "severity": "incoherent",
     "exemplars": [
       "mem_a",
       "mem_b",
       "mem_c"
-    ],
-    "internalContradictions": 2,
-    "severity": "incoherent",
-    "size": 3
-  },
-  "permissiveClusterCount": 1,
-  "permissiveThreshold": 0.5,
-  "schema": "ee.graph.config_behavior.v1",
-  "strictClusterCount": 0,
-  "strictThreshold": 0.75,
-  "surface": "graph.health.contradiction_threshold"
+    ]
+  }
 }

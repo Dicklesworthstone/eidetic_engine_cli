@@ -3013,12 +3013,8 @@ fn render_status_posture_json(
             obj.field_str("id", subsystem.id);
             obj.field_str("status", subsystem.status.as_str());
             obj.field_u32("checksPassed", subsystem.checks_passed);
-            if let Some(reason) = subsystem.reason {
-                obj.field_str("reason", reason);
-            }
-            if let Some(fallback) = subsystem.fallback {
-                obj.field_str("fallback", fallback);
-            }
+            field_optional_str(obj, "reason", subsystem.reason);
+            field_optional_str(obj, "fallback", subsystem.fallback);
         });
     });
 }
@@ -3046,12 +3042,8 @@ fn render_posture_subsystem_object(
     parent.field_object(field_name, |obj| {
         obj.field_str("status", subsystem.status.as_str());
         obj.field_u32("checksPassed", subsystem.checks_passed);
-        if let Some(reason) = subsystem.reason {
-            obj.field_str("reason", reason);
-        }
-        if let Some(fallback) = subsystem.fallback {
-            obj.field_str("fallback", fallback);
-        }
+        field_optional_str(obj, "reason", subsystem.reason);
+        field_optional_str(obj, "fallback", subsystem.fallback);
     });
 }
 

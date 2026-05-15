@@ -12,7 +12,6 @@ use fnx_algorithms::PageRankResult;
 use fnx_classes::Graph;
 use fnx_classes::digraph::DiGraph;
 use fnx_runtime::CompatibilityMode;
-use insta::assert_json_snapshot;
 use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
@@ -67,6 +66,15 @@ fn assert_float_eq(actual: f64, expected: f64, context: &str) -> TestResult {
     }
 }
 
+fn assert_graph_config_snapshot(name: &str, value: Value) {
+    let mut settings = insta::Settings::clone_current();
+    settings.set_snapshot_path("../snapshots");
+    settings.set_prepend_module_to_snapshot(false);
+    settings.bind(|| {
+        insta::assert_json_snapshot!(name, value);
+    });
+}
+
 #[test]
 fn ppr_alpha_zero_is_stable_legacy_behavior_and_alpha_changes_scores() -> TestResult {
     let legacy_config = merged_graph_config(
@@ -106,8 +114,8 @@ alpha = 0.90
         return Err("graph.ppr.alpha=0.90 did not change PageRank output".to_string());
     }
 
-    assert_json_snapshot!(
-        "ppr_alpha_config_behavior",
+    assert_graph_config_snapshot(
+        "graph_config_behavior__ppr_alpha_config_behavior",
         json!({
             "schema": "ee.graph.config_behavior.v1",
             "surface": "graph.ppr.alpha",
@@ -117,7 +125,7 @@ alpha = 0.90
             "legacyJsonStable": true,
             "legacyDiffersFromDefault": legacy != default,
             "defaultDiffersFromStrong": default != strong,
-        })
+        }),
     );
     Ok(())
 }
@@ -163,8 +171,8 @@ contradiction_threshold = 0.75
     }
 
     let cluster = &permissive[0];
-    assert_json_snapshot!(
-        "contradiction_threshold_config_behavior",
+    assert_graph_config_snapshot(
+        "graph_config_behavior__contradiction_threshold_config_behavior",
         json!({
             "schema": "ee.graph.config_behavior.v1",
             "surface": "graph.health.contradiction_threshold",
@@ -179,7 +187,7 @@ contradiction_threshold = 0.75
                 "severity": cluster.severity,
                 "exemplars": &cluster.exemplar_memory_ids,
             },
-        })
+        }),
     );
     Ok(())
 }
@@ -234,8 +242,8 @@ sample_size = 2
         ));
     }
 
-    assert_json_snapshot!(
-        "gomory_hu_sampling_config_behavior",
+    assert_graph_config_snapshot(
+        "graph_config_behavior__gomory_hu_sampling_config_behavior",
         json!({
             "schema": "ee.graph.config_behavior.v1",
             "surface": "graph.gomory_hu.sample_threshold",
@@ -255,7 +263,7 @@ sample_size = 2
                 "effectiveSampleSize": sampled.witness.effective_sample_size,
                 "result": sampled.result,
             },
-        })
+        }),
     );
     Ok(())
 }
