@@ -265,11 +265,14 @@ pub fn emit_personalized_pagerank_witness(
     spec: &PersonalizedPageRankWitnessSpec<'_>,
     result: &PageRankResult,
 ) -> GraphResult<()> {
-    let counters = ComplexityWitnessCounters {
-        elapsed_ms: spec.elapsed_ms,
-        sampling_choice: "exact".to_owned(),
-        decision_path_hash: personalized_pagerank_decision_path_hash(spec.params, result),
-    };
+    let counters = ComplexityWitnessCounters::strict_with_fnx_counters(
+        spec.elapsed_ms,
+        "exact",
+        personalized_pagerank_decision_path_hash(spec.params, result),
+        result.witness.nodes_touched,
+        result.witness.edges_scanned,
+        result.witness.queue_peak,
+    );
     emit_complexity_witness(
         spec.conn,
         spec.workspace_id,
@@ -710,10 +713,27 @@ mod tests {
             serde_json::from_str(&rows[0].witness_json).map_err(|error| error.to_string())?;
         assert_eq!(witness["elapsed_ms"], 17);
         assert_eq!(witness["sampling_choice"], "exact");
+        assert_eq!(witness["snapshot_id"], snapshot_id);
+        assert_eq!(witness["snapshot_version"], 9);
+        assert_eq!(witness["snapshot_content_hash"], "blake3:ppr-witness");
+        assert_eq!(witness["params"], params);
+        assert_eq!(witness["compatibility_mode"], "strict");
         assert!(
             witness["decision_path_hash"]
                 .as_str()
                 .is_some_and(|value| value.starts_with("blake3:"))
+        );
+        assert_eq!(
+            witness["observed_counters"]["nodes_touched"],
+            result.witness.nodes_touched
+        );
+        assert_eq!(
+            witness["observed_counters"]["edges_scanned"],
+            result.witness.edges_scanned
+        );
+        assert_eq!(
+            witness["observed_counters"]["queue_peak"],
+            result.witness.queue_peak
         );
 
         connection.close().map_err(|error| error.to_string())

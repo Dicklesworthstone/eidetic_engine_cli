@@ -46,6 +46,53 @@ pub struct ComplexityWitnessCounters {
     pub elapsed_ms: u64,
     pub sampling_choice: String,
     pub decision_path_hash: String,
+    pub compatibility_mode: CompatibilityMode,
+    pub nodes_touched: Option<u64>,
+    pub edges_scanned: Option<u64>,
+    pub queue_peak: Option<u64>,
+}
+
+impl ComplexityWitnessCounters {
+    #[must_use]
+    pub fn strict(
+        elapsed_ms: u64,
+        sampling_choice: impl Into<String>,
+        decision_path_hash: impl Into<String>,
+    ) -> Self {
+        Self {
+            elapsed_ms,
+            sampling_choice: sampling_choice.into(),
+            decision_path_hash: decision_path_hash.into(),
+            compatibility_mode: CompatibilityMode::Strict,
+            nodes_touched: None,
+            edges_scanned: None,
+            queue_peak: None,
+        }
+    }
+
+    #[must_use]
+    pub fn strict_with_fnx_counters(
+        elapsed_ms: u64,
+        sampling_choice: impl Into<String>,
+        decision_path_hash: impl Into<String>,
+        nodes_touched: usize,
+        edges_scanned: usize,
+        queue_peak: usize,
+    ) -> Self {
+        Self {
+            elapsed_ms,
+            sampling_choice: sampling_choice.into(),
+            decision_path_hash: decision_path_hash.into(),
+            compatibility_mode: CompatibilityMode::Strict,
+            nodes_touched: Some(u64_from_usize_saturating(nodes_touched)),
+            edges_scanned: Some(u64_from_usize_saturating(edges_scanned)),
+            queue_peak: Some(u64_from_usize_saturating(queue_peak)),
+        }
+    }
+}
+
+fn u64_from_usize_saturating(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 pub fn graph_algorithm_params_hash(
@@ -135,13 +182,30 @@ fn persist_complexity_witness(
 ) -> GraphResult<()> {
     let params_json = serde_json::to_string(params)
         .map_err(|error| GraphError::json("serialize graph algorithm witness params", error))?;
+    let snapshot = conn
+        .get_graph_snapshot(snapshot_id)
+        .map_err(|error| GraphError::storage("load graph algorithm witness snapshot", error))?
+        .ok_or_else(|| GraphError::GraphEngine {
+            operation: "load graph algorithm witness snapshot",
+            source: format!("graph snapshot {snapshot_id} does not exist"),
+        })?;
     let witness_json = serde_json::to_string(&serde_json::json!({
         "schema": GRAPH_ALGORITHM_WITNESS_SCHEMA_V1,
         "algorithm": name,
+        "snapshot_id": snapshot_id,
         "snapshot_version": snapshot_version,
+        "snapshot_content_hash": snapshot.content_hash,
+        "params": params,
+        "compatibility_mode": observed_counters.compatibility_mode,
         "elapsed_ms": observed_counters.elapsed_ms,
         "sampling_choice": observed_counters.sampling_choice.as_str(),
         "decision_path_hash": observed_counters.decision_path_hash.as_str(),
+        "observed_counters": {
+            "elapsed_ms": observed_counters.elapsed_ms,
+            "nodes_touched": observed_counters.nodes_touched,
+            "edges_scanned": observed_counters.edges_scanned,
+            "queue_peak": observed_counters.queue_peak,
+        },
     }))
     .map_err(|error| GraphError::json("serialize graph algorithm witness", error))?;
 
@@ -2360,11 +2424,11 @@ fn emit_centrality_refresh_witnesses(
         "pagerank",
         u64::from(snapshot.snapshot_version),
         &pagerank_params,
-        &ComplexityWitnessCounters {
-            elapsed_ms: float_millis_to_u64_saturating(centrality.pagerank_ms),
-            sampling_choice: "exact".to_owned(),
+        &ComplexityWitnessCounters::strict(
+            float_millis_to_u64_saturating(centrality.pagerank_ms),
+            "exact",
             decision_path_hash,
-        },
+        ),
     )
 }
 
@@ -5395,11 +5459,14 @@ mod tests {
             "pagerank",
             7,
             &serde_json::json!({ "damping": 0.85 }),
-            &super::ComplexityWitnessCounters {
-                elapsed_ms: 19,
-                sampling_choice: "exact".to_string(),
-                decision_path_hash: "blake3:witness-decision".to_string(),
-            },
+            &super::ComplexityWitnessCounters::strict_with_fnx_counters(
+                19,
+                "exact",
+                "blake3:witness-decision",
+                3,
+                2,
+                1,
+            ),
         ))?;
 
         let rows = connection
@@ -5409,9 +5476,21 @@ mod tests {
         let witness: serde_json::Value =
             serde_json::from_str(&rows[0].witness_json).map_err(|error| error.to_string())?;
         assert_eq!(witness["schema"], super::GRAPH_ALGORITHM_WITNESS_SCHEMA_V1);
+        assert_eq!(witness["snapshot_id"], snapshot_id);
+        assert_eq!(witness["snapshot_version"], 7);
+        assert_eq!(
+            witness["snapshot_content_hash"],
+            "blake3:graph-witness-emit"
+        );
+        assert_eq!(witness["params"]["damping"], 0.85);
+        assert_eq!(witness["compatibility_mode"], "strict");
         assert_eq!(witness["elapsed_ms"], 19);
         assert_eq!(witness["sampling_choice"], "exact");
         assert_eq!(witness["decision_path_hash"], "blake3:witness-decision");
+        assert_eq!(witness["observed_counters"]["elapsed_ms"], 19);
+        assert_eq!(witness["observed_counters"]["nodes_touched"], 3);
+        assert_eq!(witness["observed_counters"]["edges_scanned"], 2);
+        assert_eq!(witness["observed_counters"]["queue_peak"], 1);
 
         connection.close().map_err(|error| error.to_string())
     }

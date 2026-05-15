@@ -25,8 +25,10 @@ Two migrations add the graph algorithm persistence layer:
 - `snapshot_id` references `graph_snapshots(id)` with cascade delete.
 - `algorithm` is a non-empty algorithm name.
 - `params_json` is canonical JSON for the algorithm parameters.
-- `witness_json` is canonical JSON for elapsed time, sampling choice, decision
-  path hash, and related CGSE evidence.
+- `witness_json` is canonical JSON for the self-contained witness: algorithm,
+  snapshot id/version/content hash, parameter values, compatibility mode,
+  elapsed time, sampling choice, decision path hash, and observed fnx counters
+  such as nodes touched, edges scanned, and queue peak.
 - `recorded_at` is a non-empty timestamp.
 - `idx_graph_algorithm_witnesses_lookup` supports
   `(workspace_id, snapshot_id, algorithm)` lookups.
