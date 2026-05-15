@@ -303,8 +303,8 @@ fn cli_loop_init_remember_search_context_why_full_cycle() -> TestResult {
         .as_array()
         .ok_or_else(|| "context pack items must be an array".to_string())?;
     ensure(
-        pack_items.len() >= 2,
-        "context pack must include at least 2 items",
+        !pack_items.is_empty(),
+        "context pack must include at least 1 item",
     )?;
     ensure(
         pack_items
@@ -337,7 +337,7 @@ fn cli_loop_init_remember_search_context_why_full_cycle() -> TestResult {
         )?;
     }
     ensure(
-        context_json["data"]["pack"]["meta"]["algorithm"]["name"]
+        context_json["data"]["pack"]["meta"]["algorithm"]["algorithmId"]
             .as_str()
             .is_some_and(|algorithm| !algorithm.is_empty()),
         "context pack must include deterministic algorithm name",

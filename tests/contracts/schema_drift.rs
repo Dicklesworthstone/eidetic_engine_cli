@@ -601,6 +601,7 @@ mod tests {
         "curation_ttl_policies",
         "ee_advisory_locks",
         "ee_schema_migrations",
+        "ee_wal_holds",
         "evidence_spans",
         "feedback_events",
         "feedback_events_v037",
@@ -609,6 +610,7 @@ mod tests {
         "graph_algorithm_results",
         "graph_algorithm_witnesses",
         "graph_snapshots",
+        "graph_snapshots_v044",
         "import_ledger",
         "learning_observations",
         "memories",
@@ -640,6 +642,8 @@ mod tests {
     const CRITICAL_SCHEMA_INDEXES: &[&str] = &[
         "idx_audit_log_chain",
         "idx_ee_advisory_locks_holder",
+        "idx_ee_wal_holds_episode",
+        "idx_ee_wal_holds_workspace_expires",
         "idx_graph_algorithm_results_computed",
         "idx_graph_algorithm_results_lookup",
         "idx_graph_algorithm_witnesses_lookup",
@@ -750,6 +754,16 @@ mod tests {
                 "after_hash",
                 "prev_row_hash",
                 "this_row_hash",
+            ],
+        ),
+        (
+            "ee_wal_holds",
+            &[
+                "workspace_id",
+                "episode_id",
+                "lsn",
+                "created_at",
+                "expires_at",
             ],
         ),
         (

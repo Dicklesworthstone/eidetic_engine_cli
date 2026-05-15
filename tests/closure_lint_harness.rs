@@ -12,6 +12,18 @@ use serde_json::Value;
 
 type TestResult = Result<(), String>;
 
+const GRAPH_SCHEMA_DOCS: &[&str] = &[
+    "ee.insights.v1",
+    "ee.context.pack_dna.v1",
+    "ee.why.causal.v1",
+    "ee.health.structural.v1",
+    "ee.status.skyline.v1",
+    "ee.memory.impact_analysis.v1",
+    "ee.proximity.v1",
+    "ee.why.v1",
+    "ee.context.v1",
+];
+
 fn ensure(actual: bool, context: impl AsRef<str>) -> TestResult {
     if actual {
         Ok(())
@@ -51,6 +63,10 @@ fn write_workspace(
         .map_err(|error| format!("create src/cli: {error}"))?;
     fs::create_dir_all(root.join("tests").join("golden"))
         .map_err(|error| format!("create tests/golden: {error}"))?;
+    fs::create_dir_all(root.join("docs").join("schemas"))
+        .map_err(|error| format!("create docs/schemas: {error}"))?;
+    fs::create_dir_all(root.join("tests").join("snapshots"))
+        .map_err(|error| format!("create tests/snapshots: {error}"))?;
 
     fs::write(
         root.join(".beads").join("issues.jsonl"),
@@ -68,6 +84,23 @@ fn write_workspace(
             format!("snapshot for {surface}\n"),
         )
         .map_err(|error| format!("write golden for {surface}: {error}"))?;
+    }
+    for schema in GRAPH_SCHEMA_DOCS {
+        fs::write(
+            root.join("docs")
+                .join("schemas")
+                .join(format!("{schema}.json")),
+            "{}\n",
+        )
+        .map_err(|error| format!("write schema doc for {schema}: {error}"))?;
+        let snapshot_name = schema.replace('.', "_");
+        fs::write(
+            root.join("tests")
+                .join("snapshots")
+                .join(format!("graph_schemas_v1__{snapshot_name}.snap")),
+            format!("snapshot for {schema}\n"),
+        )
+        .map_err(|error| format!("write schema snapshot for {schema}: {error}"))?;
     }
     Ok(())
 }
