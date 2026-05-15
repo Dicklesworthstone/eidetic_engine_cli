@@ -107,6 +107,13 @@ const SCHEMA_CASES: &[SchemaCase] = &[
         tracking_bead: "bd-2nkbn",
         shipped: true,
     },
+    SchemaCase {
+        id: "ee.swarm_incident.v1",
+        file_name: "ee.swarm_incident.v1.json",
+        doc_path: "docs/swarm/swarm_incident_drills.md",
+        tracking_bead: "bd-1zb7k.14.1",
+        shipped: false,
+    },
 ];
 
 const DRIFT_CASES: &[DriftCase] = &[
@@ -175,6 +182,12 @@ const DRIFT_CASES: &[DriftCase] = &[
         command: "ee swarm brief --json",
         json_path: ".data.recommendations[]",
         fixture_manifest_key: "ee.swarm.recommendation.v1",
+    },
+    DriftCase {
+        schema_id: "ee.swarm_incident.v1",
+        command: "ee diag incident --fixture tests/fixtures/swarm_incidents/rch_topology_blocked.json --json",
+        json_path: ".examples[\"ee.swarm_incident.v1\"]",
+        fixture_manifest_key: "ee.swarm_incident.v1",
     },
 ];
 

@@ -1,0 +1,25 @@
+{
+  "schema": "ee.swarm_incident.v1",
+  "scenarioId": "agent_mail_unavailable",
+  "fixedClock": "2026-05-15T00:00:00Z",
+  "purpose": "Agent Mail cannot be read, but Beads and local files are available for fallback coordination evidence.",
+  "substrates": {
+    "agentMail": {"status": "unavailable", "evidence": ["MCP transport returned an unavailable error"], "degradedCodes": ["agent_mail_unavailable"], "metrics": {"unread": null, "ackRequired": null}},
+    "beads": {"status": "ok", "evidence": ["br ready --json succeeds"], "degradedCodes": [], "metrics": {"jsonlRecords": 1848, "cycles": 0}},
+    "rch": {"status": "not_applicable", "evidence": ["no build requested"], "degradedCodes": [], "metrics": {}},
+    "disk": {"status": "ok", "evidence": ["workspace is writable"], "degradedCodes": [], "metrics": {"writeProbe": true}},
+    "hotPath": {"status": "not_applicable", "evidence": ["no search/context burst in this scenario"], "degradedCodes": [], "metrics": {}}
+  },
+  "expectedDegraded": [
+    {"code": "agent_mail_unavailable", "severity": "medium", "surface": "diag incident", "reason": "Coordination mail cannot be fetched, so agents must fall back to Beads and local evidence."}
+  ],
+  "expectedRecoveryActions": [
+    {"priority": 1, "kind": "observe", "summary": "Check Beads before editing because Agent Mail reservations may be stale or unreadable.", "command": "br ready --json", "manualStep": null, "evidence": ["agent_mail_unavailable"], "destructive": false, "preconditions": []},
+    {"priority": 2, "kind": "manual", "summary": "Record progress in Beads comments until Agent Mail health returns.", "command": null, "manualStep": "Use br comments add on the active bead with exact blockers and files touched.", "evidence": ["br ready --json succeeds"], "destructive": false, "preconditions": ["Beads is writable"]}
+  ],
+  "redactionExpectations": {"pathPolicy": "synthetic_only", "secretPolicy": "no_secrets", "allowedHostLabels": []},
+  "assertions": {"deterministic": true, "noLiveServices": true, "noLocalCargo": true, "noDeletion": true, "noMutation": true},
+  "artifacts": [
+    {"path": "tests/fixtures/swarm_incidents/agent_mail_unavailable.json", "kind": "fixture"}
+  ]
+}

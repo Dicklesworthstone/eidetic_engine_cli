@@ -1,0 +1,25 @@
+{
+  "schema": "ee.swarm_incident.v1",
+  "scenarioId": "beads_jsonl_ahead_of_db",
+  "fixedClock": "2026-05-15T00:00:00Z",
+  "purpose": "Beads JSONL has newer coordination records than the SQLite cache, so agents must not trust stale DB-backed issue state.",
+  "substrates": {
+    "agentMail": {"status": "ok", "evidence": ["mail fetch succeeds"], "degradedCodes": [], "metrics": {"unread": 0, "ackRequired": 0}},
+    "beads": {"status": "stale", "evidence": ["br doctor reports external changes pending import"], "degradedCodes": ["beads_tracker_stale"], "metrics": {"dirtyIssues": 0, "jsonlAhead": true}},
+    "rch": {"status": "not_applicable", "evidence": ["no build requested"], "degradedCodes": [], "metrics": {}},
+    "disk": {"status": "ok", "evidence": ["JSONL parse succeeds"], "degradedCodes": [], "metrics": {"jsonlParse": true}},
+    "hotPath": {"status": "not_applicable", "evidence": ["no search/context burst in this scenario"], "degradedCodes": [], "metrics": {}}
+  },
+  "expectedDegraded": [
+    {"code": "beads_tracker_stale", "severity": "warning", "surface": "diag incident", "reason": "The JSONL source of truth is ahead of the DB cache."}
+  ],
+  "expectedRecoveryActions": [
+    {"priority": 1, "kind": "observe", "summary": "Run Beads doctor and record freshness before mutating issue state.", "command": "br doctor --json", "manualStep": null, "evidence": ["jsonlAhead"], "destructive": false, "preconditions": []},
+    {"priority": 2, "kind": "refresh", "summary": "Import or refresh Beads state using the project-approved Beads workflow before relying on stale DB results.", "command": "br sync --import-only --json", "manualStep": null, "evidence": ["br doctor reports external changes pending import"], "destructive": false, "preconditions": ["No other agent holds .beads/issues.jsonl"]}
+  ],
+  "redactionExpectations": {"pathPolicy": "synthetic_only", "secretPolicy": "no_secrets", "allowedHostLabels": []},
+  "assertions": {"deterministic": true, "noLiveServices": true, "noLocalCargo": true, "noDeletion": true, "noMutation": true},
+  "artifacts": [
+    {"path": "tests/fixtures/swarm_incidents/beads_jsonl_ahead_of_db.json", "kind": "fixture"}
+  ]
+}

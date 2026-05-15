@@ -32,7 +32,7 @@ emit_event() {
     | tee -a "$EVENT_LOG" >&2
 }
 
-expected_count=11
+expected_count=12
 actual_count="$(find "$SCHEMA_DIR" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')"
 if [[ "$actual_count" != "$expected_count" ]]; then
   emit_event "catalog" false 1 "expected $expected_count schema files, found $actual_count"

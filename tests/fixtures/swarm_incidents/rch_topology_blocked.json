@@ -1,0 +1,27 @@
+{
+  "schema": "ee.swarm_incident.v1",
+  "scenarioId": "rch_topology_blocked",
+  "fixedClock": "2026-05-15T00:00:00Z",
+  "purpose": "RCH fleet is healthy, but remote-required Cargo verification is blocked before execution by path topology.",
+  "substrates": {
+    "agentMail": {"status": "ok", "evidence": ["inbox fetch succeeds"], "degradedCodes": [], "metrics": {"unread": 0, "ackRequired": 0}},
+    "beads": {"status": "ok", "evidence": ["br doctor ok"], "degradedCodes": [], "metrics": {"jsonlRecords": 1848, "cycles": 0}},
+    "rch": {"status": "blocked", "evidence": ["RCH-E327 alias root is not a symlink: /data/projects"], "degradedCodes": ["rch_worker_topology_blocked", "rch_remote_required_fallback_prevented"], "metrics": {"workersHealthy": 3, "localFallback": false}},
+    "disk": {"status": "ok", "evidence": ["CARGO_TARGET_DIR uses external scratch"], "degradedCodes": [], "metrics": {"externalTarget": true}},
+    "hotPath": {"status": "not_applicable", "evidence": ["no search/context burst in this scenario"], "degradedCodes": [], "metrics": {}}
+  },
+  "expectedDegraded": [
+    {"code": "rch_worker_topology_blocked", "severity": "warning", "surface": "diag incident", "reason": "Remote-required Cargo cannot start until the path topology policy accepts the local /data/projects alias layout."},
+    {"code": "rch_remote_required_fallback_prevented", "severity": "medium", "surface": "diag incident", "reason": "Local Cargo fallback is explicitly forbidden for this repository."}
+  ],
+  "expectedRecoveryActions": [
+    {"priority": 1, "kind": "observe", "summary": "Capture RCH status and exact topology error before changing code.", "command": "rch status --workers --jobs --json", "manualStep": null, "evidence": ["RCH-E327"], "destructive": false, "preconditions": []},
+    {"priority": 2, "kind": "repair", "summary": "Install or build a patched native macOS RCH client; do not run local Cargo as fallback.", "command": null, "manualStep": "Coordinate on bd-18i4h and verify the patched RCH client before retrying ee Cargo gates.", "evidence": ["bd-18i4h"], "destructive": false, "preconditions": ["RCH source patch is reviewed", "native client install is approved"]}
+  ],
+  "redactionExpectations": {"pathPolicy": "redact_home", "secretPolicy": "no_secrets", "allowedHostLabels": ["css", "csd", "trj"]},
+  "assertions": {"deterministic": true, "noLiveServices": true, "noLocalCargo": true, "noDeletion": true, "noMutation": true},
+  "artifacts": [
+    {"path": "tests/fixtures/swarm_incidents/rch_topology_blocked.json", "kind": "fixture"},
+    {"path": "docs/schemas/swarm/ee.swarm_incident.v1.json", "kind": "schema"}
+  ]
+}

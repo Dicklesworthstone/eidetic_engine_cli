@@ -1,0 +1,25 @@
+{
+  "schema": "ee.swarm_incident.v1",
+  "scenarioId": "hot_path_burst_admission",
+  "fixedClock": "2026-05-15T00:00:00Z",
+  "purpose": "Concurrent agents exceed the configured context-pack admission limit, so replay must return structured backoff instead of silent degradation.",
+  "substrates": {
+    "agentMail": {"status": "ok", "evidence": ["mail fetch succeeds"], "degradedCodes": [], "metrics": {"unread": 0, "ackRequired": 0}},
+    "beads": {"status": "ok", "evidence": ["ready graph is acyclic"], "degradedCodes": [], "metrics": {"cycles": 0}},
+    "rch": {"status": "not_applicable", "evidence": ["no build requested"], "degradedCodes": [], "metrics": {}},
+    "disk": {"status": "ok", "evidence": ["scratch budget is within threshold"], "degradedCodes": [], "metrics": {"scratchFreeBytes": 1099511627776}},
+    "hotPath": {"status": "degraded", "evidence": ["concurrent pack requests exceed profile limit"], "degradedCodes": ["pack_concurrent_limit_reached"], "metrics": {"queueDepth": 17, "concurrentPackMax": 8}}
+  },
+  "expectedDegraded": [
+    {"code": "pack_concurrent_limit_reached", "severity": "low", "surface": "diag incident", "reason": "The current resource profile should return structured backoff when pack concurrency exceeds its limit."}
+  ],
+  "expectedRecoveryActions": [
+    {"priority": 1, "kind": "observe", "summary": "Capture pack admission posture and queue depth.", "command": "ee perf explain-latency --workspace . --json", "manualStep": null, "evidence": ["pack_concurrent_limit_reached"], "destructive": false, "preconditions": []},
+    {"priority": 2, "kind": "retry", "summary": "Retry after structured backoff instead of starting more parallel context packs.", "command": null, "manualStep": "Honor the backoff delay and retry with the same deterministic inputs.", "evidence": ["queueDepth"], "destructive": false, "preconditions": ["Backoff delay elapsed"]}
+  ],
+  "redactionExpectations": {"pathPolicy": "synthetic_only", "secretPolicy": "no_secrets", "allowedHostLabels": []},
+  "assertions": {"deterministic": true, "noLiveServices": true, "noLocalCargo": true, "noDeletion": true, "noMutation": true},
+  "artifacts": [
+    {"path": "tests/fixtures/swarm_incidents/hot_path_burst_admission.json", "kind": "fixture"}
+  ]
+}

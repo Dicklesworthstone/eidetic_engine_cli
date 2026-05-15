@@ -1,0 +1,25 @@
+{
+  "schema": "ee.swarm_incident.v1",
+  "scenarioId": "disk_pressure_external_target_ok",
+  "fixedClock": "2026-05-15T00:00:00Z",
+  "purpose": "Internal workspace volume is near the admission threshold, but Cargo target and temp scratch are correctly routed to external storage.",
+  "substrates": {
+    "agentMail": {"status": "not_applicable", "evidence": ["no mail probe in this scenario"], "degradedCodes": [], "metrics": {}},
+    "beads": {"status": "ok", "evidence": ["JSONL remains parseable"], "degradedCodes": [], "metrics": {"jsonlParse": true}},
+    "rch": {"status": "not_applicable", "evidence": ["no build requested"], "degradedCodes": [], "metrics": {}},
+    "disk": {"status": "degraded", "evidence": ["workspace free bytes below build admission threshold", "CARGO_TARGET_DIR is external"], "degradedCodes": ["build_admission_denied"], "metrics": {"workspaceFreeBytes": 536870912, "externalTarget": true, "tmpExternal": true}},
+    "hotPath": {"status": "not_applicable", "evidence": ["no search/context burst in this scenario"], "degradedCodes": [], "metrics": {}}
+  },
+  "expectedDegraded": [
+    {"code": "build_admission_denied", "severity": "medium", "surface": "diag incident", "reason": "Workspace free space is below the configured safe admission floor even though build outputs are external."}
+  ],
+  "expectedRecoveryActions": [
+    {"priority": 1, "kind": "observe", "summary": "Collect disk posture without deleting files.", "command": "ee diag build-admission --workspace . --json", "manualStep": null, "evidence": ["build_admission_denied"], "destructive": false, "preconditions": []},
+    {"priority": 2, "kind": "manual", "summary": "Ask the human before cleanup; prefer non-destructive relocation manifests.", "command": null, "manualStep": "Use the disk-pressure repair planner and request explicit approval for any cleanup or deletion.", "evidence": ["AGENTS.md no-file-deletion rule"], "destructive": false, "preconditions": ["Repair planner identifies safe relocation candidates"]}
+  ],
+  "redactionExpectations": {"pathPolicy": "redact_home", "secretPolicy": "no_secrets", "allowedHostLabels": []},
+  "assertions": {"deterministic": true, "noLiveServices": true, "noLocalCargo": true, "noDeletion": true, "noMutation": true},
+  "artifacts": [
+    {"path": "tests/fixtures/swarm_incidents/disk_pressure_external_target_ok.json", "kind": "fixture"}
+  ]
+}
