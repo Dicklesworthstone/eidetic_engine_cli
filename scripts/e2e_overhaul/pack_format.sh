@@ -3,13 +3,11 @@
 #
 # Drives `ee context` against the 2026-05-10 reference corpus and asserts the
 # pack envelope is dense, honest, and stable. Each assertion maps to a bead
-# in epic A. Assertions for shipped beads are real; assertions for unshipped
-# beads are recorded via todo_assert() so the script always reports an honest
-# picture of progress without flipping its exit code on known-unimplemented
-# surfaces.
+# in epic A. When future A-surface gaps are discovered, add explicit assertions
+# or a fresh follow-up bead rather than leaving stale TODO notes in this driver.
 #
-# Shipped (real assertions):  A3, A7, A8, A9
-# Not yet shipped (todo):     A1, A2, A4, A5, A6, A11
+# Shipped (real assertions):  A1, A2, A3, A4, A5, A6, A7, A8, A9
+# Covered elsewhere:          A11 (`tests/contracts/context_show_persisted_pack.rs`)
 #
 # Usage:
 #   scripts/e2e_overhaul/pack_format.sh
@@ -85,31 +83,71 @@ PERSIST_FAIL_COUNT=$(printf '%s' "$PACK_JSON" \
 e2e_log_assert_eq "$PERSIST_FAIL_COUNT" "0" "a9_no_pack_persist_failure_for_canonical_path"
 
 # ------------------------------------------------------------
-# A1 (not shipped) — canonical items[] consolidates the four parallel
-# structures (selectedItems, items, selectionAudit.steps,
-# provenanceFooter.entries) into one. Today these are still distinct, so we
-# record TODOs.
+# A1 (shipped) — canonical items[] consolidates per-item data from the
+# legacy selectedItems / steps / provenance-footer entries. The aggregate
+# selectionAudit and provenanceFooter summaries remain, but they no longer
+# carry parallel per-item arrays by default.
 # ------------------------------------------------------------
-todo_assert "a1_single_canonical_items_array" "bd-17c65.1.1" \
-    "Currently has selectedItems[], items[], selectionAudit.steps[], provenanceFooter.entries[] as four parallel structures."
+HAS_SELECTION_AUDIT=$(printf '%s' "$PACK_JSON" | jq -r '.data.pack | has("selectionAudit")' 2>/dev/null || echo false)
+HAS_SELECTION_CERTIFICATE=$(printf '%s' "$PACK_JSON" | jq -r '.data.pack | has("selectionCertificate")' 2>/dev/null || echo false)
+AUDIT_HAS_SELECTED_ITEMS=$(printf '%s' "$PACK_JSON" | jq -r '.data.pack.selectionAudit | has("selectedItems") or has("selected_items")' 2>/dev/null || echo false)
+AUDIT_HAS_STEPS=$(printf '%s' "$PACK_JSON" | jq -r '.data.pack.selectionAudit | has("steps")' 2>/dev/null || echo false)
+FOOTER_HAS_ENTRIES=$(printf '%s' "$PACK_JSON" | jq -r '.data.pack.provenanceFooter | has("entries")' 2>/dev/null || echo false)
+e2e_log_assert_eq "$HAS_SELECTION_AUDIT" "true" "a1_selection_audit_summary_present"
+e2e_log_assert_eq "$HAS_SELECTION_CERTIFICATE" "false" "a1_legacy_selection_certificate_omitted"
+e2e_log_assert_eq "$AUDIT_HAS_SELECTED_ITEMS" "false" "a1_no_parallel_selected_items"
+e2e_log_assert_eq "$AUDIT_HAS_STEPS" "false" "a1_no_parallel_selection_steps"
+e2e_log_assert_eq "$FOOTER_HAS_ENTRIES" "false" "a1_no_parallel_provenance_footer_entries"
 
-# A4 — pack.text (markdown render embedded in JSON).
-todo_assert "a4_pack_text_field_present" "bd-17c65.1.4" \
-    "Currently no pack.text in JSON response — agents must call --format markdown separately."
+ITEM_COUNT=$(printf '%s' "$PACK_JSON" | jq '.data.pack.items | length' 2>/dev/null || echo 0)
+if [ "$ITEM_COUNT" -gt 0 ]; then
+    FIRST_HAS_TOKEN_COST=$(printf '%s' "$PACK_JSON" | jq -r '.data.pack.items[0] | has("tokenCost")' 2>/dev/null || echo false)
+    FIRST_HAS_FEASIBLE=$(printf '%s' "$PACK_JSON" | jq -r '.data.pack.items[0] | has("feasible")' 2>/dev/null || echo false)
+    FIRST_HAS_COVERED_FEATURES=$(printf '%s' "$PACK_JSON" | jq -r '.data.pack.items[0] | has("coveredFeatures")' 2>/dev/null || echo false)
+    FIRST_HAS_SOURCE_INDEX=$(printf '%s' "$PACK_JSON" | jq -r '.data.pack.items[0] | has("sourceIndex")' 2>/dev/null || echo false)
+    e2e_log_assert_eq "$FIRST_HAS_TOKEN_COST" "true" "a1_items_inline_token_cost"
+    e2e_log_assert_eq "$FIRST_HAS_FEASIBLE" "true" "a1_items_inline_feasible"
+    e2e_log_assert_eq "$FIRST_HAS_COVERED_FEATURES" "true" "a1_items_inline_covered_features"
+    e2e_log_assert_eq "$FIRST_HAS_SOURCE_INDEX" "true" "a1_items_inline_source_index"
+else
+    e2e_log_note "a1_no_items_to_check_inline_fields skip=true"
+fi
+
+# ------------------------------------------------------------
+# A2 (shipped) — algorithm description is emitted once at pack.meta.algorithm
+# instead of repeated in per-step structures.
+# ------------------------------------------------------------
+META_ALGORITHM_ID=$(printf '%s' "$PACK_JSON" | jq -r '.data.pack.meta.algorithm.algorithmId // ""' 2>/dev/null || true)
+AUDIT_ALGORITHM_ID=$(printf '%s' "$PACK_JSON" | jq -r '.data.pack.selectionAudit.algorithmId // ""' 2>/dev/null || true)
+e2e_log_assert_eq "$META_ALGORITHM_ID" "$AUDIT_ALGORITHM_ID" "a2_algorithm_metadata_matches_audit"
+WHY_HAS_UNIT_SCORE=$(printf '%s' "$WHY_FIRST" | grep -c 'unit_score' || true)
+e2e_log_assert_eq "$WHY_HAS_UNIT_SCORE" "0" "a2_no_per_item_formula_boilerplate"
+
+# ------------------------------------------------------------
+# A4 (shipped) — pack.text embeds the canonical Markdown render in JSON.
+# ------------------------------------------------------------
 HAS_PACK_TEXT=$(printf '%s' "$PACK_JSON" | jq -r '.data.pack | has("text")' 2>/dev/null || echo false)
-e2e_log_note "a4_pack_has_text_field=$HAS_PACK_TEXT"
+PACK_TEXT_HAS_HEADER=$(printf '%s' "$PACK_JSON" | jq -r '.data.pack.text // "" | startswith("# Context Pack:")' 2>/dev/null || echo false)
+e2e_log_assert_eq "$HAS_PACK_TEXT" "true" "a4_pack_text_field_present"
+e2e_log_assert_eq "$PACK_TEXT_HAS_HEADER" "true" "a4_pack_text_is_markdown_fragment"
 
-# A5 — unify omitted[] and rejectedFrontier[] into pack.skipped[].
-todo_assert "a5_unified_skipped_array" "bd-17c65.1.6" \
-    "Currently omitted[] and rejectedFrontier[] are separate parallel skip lists."
+# ------------------------------------------------------------
+# A5 (shipped) — omitted/rejected candidates are surfaced through the unified
+# pack.skipped[] list, not selectionAudit.rejectedFrontier[].
+# ------------------------------------------------------------
+HAS_SKIPPED=$(printf '%s' "$PACK_JSON" | jq -r '.data.pack | has("skipped")' 2>/dev/null || echo false)
+HAS_REJECTED_FRONTIER=$(printf '%s' "$PACK_JSON" | jq -r '.data.pack.selectionAudit | has("rejectedFrontier")' 2>/dev/null || echo false)
+e2e_log_assert_eq "$HAS_SKIPPED" "true" "a5_unified_skipped_array_present"
+e2e_log_assert_eq "$HAS_REJECTED_FRONTIER" "false" "a5_no_rejected_frontier_parallel_list"
 
-# A2 — collapse per-item math why into shared selectionAudit.formula.
-todo_assert "a2_shared_selection_formula_block" "bd-17c65.1.2" \
-    "Per-item why no longer contains the math (A3 done), but the shared formula block isn't surfaced yet."
-
-# A6 — pack.budget includes usedTokens, maxTokens, sectionTokens breakdown.
-todo_assert "a6_budget_breakdown_by_section" "bd-17c65.1.5" \
-    "pack.budget today shows max+used; per-section breakdown not yet emitted."
+# ------------------------------------------------------------
+# A6 (shipped) — coverage fill is part of the pack algorithm metadata and each
+# item records whether it entered during strict MMR or coverage-fill selection.
+# ------------------------------------------------------------
+HAS_COVERAGE_FILL_COUNT=$(printf '%s' "$PACK_JSON" | jq -r '.data.pack.meta | has("coverageFillCount")' 2>/dev/null || echo false)
+HAS_SELECTED_IN=$(printf '%s' "$PACK_JSON" | jq -r '([.data.pack.items[]? | has("selectedIn")] | all)' 2>/dev/null || echo false)
+e2e_log_assert_eq "$HAS_COVERAGE_FILL_COUNT" "true" "a6_coverage_fill_count_reported"
+e2e_log_assert_eq "$HAS_SELECTED_IN" "true" "a6_items_report_selection_phase"
 
 # A8 — pack output profiles and opt-out flags.
 LEAN_JSON=$(ee_workspace context "prepare release v0.2.0" --max-tokens 1000 --pack-profile lean --json || true)
@@ -147,6 +185,4 @@ else
     e2e_log_assert_eq "unparseable" "json" "a8_profile_json_parses"
 fi
 
-# A11 — pack.advisoryBanner stops being non-empty when nothing is degraded.
-todo_assert "a11_advisory_banner_conditional" "bd-17c65.1.10" \
-    "Advisory banner currently emits when no issues exist — see E2 for the conditional emission fix."
+e2e_log_note "a11_context_show_covered_by=tests/contracts/context_show_persisted_pack.rs"
