@@ -23,6 +23,21 @@
 # (database, locks, history, sync caches) is excluded by .beads/.gitignore.
 # The blanket .beads/ exclusion that used to live here also hid issues.jsonl,
 # which is the canonical task-tracking source of truth and MUST be committed.
+#
+# Project-side additions that the upstream br .beads/.gitignore template
+# does not (yet) cover. These are dated per-machine artifacts created by
+# `br doctor`, `br migrate`, and `br upgrade`; the JSONL/metadata/config
+# files allow-listed under .beads/.gitignore remain tracked.
+/.beads.recovery_*/
+.beads/.br_history/
+.beads/last-touched
+.beads/daemon.lock.stale_*
+.beads/issues.jsonl.pre_*
+.beads/issues.jsonl.truncated_*
+# Tool-installed marketing README under .beads/ — not authored by this
+# project. If a real .beads/README.md ever becomes intentional, add it
+# with `git add -f`.
+.beads/README.md
 
 # Modes-of-reasoning analysis artifacts
 MODES_OF_REASONING_REPORT_AND_ANALYSIS_OF_PROJECT.md
@@ -93,6 +108,10 @@ Cargo.lock.bak
 .codex_write_probe
 .cursor/
 .stash_janitor_workspace/
+# mcp-agent-mail per-project Python stub installed by `install_guard`.
+# The real coordinator lives outside this repo; the on-disk stub is
+# scratch and must never be committed.
+/mcp_agent_mail/
 !tests/fixtures/agent_detect/remote_mirror/
 !tests/fixtures/agent_detect/remote_mirror/**
 !tests/fixtures/agent_detect/remote_mirror/**/.claude/
