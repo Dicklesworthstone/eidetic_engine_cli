@@ -29,6 +29,7 @@
 # `br doctor`, `br migrate`, and `br upgrade`; the JSONL/metadata/config
 # files allow-listed under .beads/.gitignore remain tracked.
 /.beads.recovery_*/
+.beads/recovery_*/
 .beads/.br_history/
 .beads/last-touched
 .beads/daemon.lock.stale_*
