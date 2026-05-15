@@ -309,7 +309,9 @@ Additional **SAFE** groups documented in the contract:
 |---------|--------|
 | Query, graph, pagination, pack profile, and field selector defaults | Missing optional user filters or profiles intentionally select empty/default behavior after validation rejects malformed values. |
 | Pack replay, pack ledger, support-bundle, and coordination snapshot optional arrays | Missing optional diagnostic arrays mean empty diagnostic sections, not successful replacement of failed I/O. |
-| Search hit metadata, graph PPR neighbors, learn-cluster tags, curation tag hints, and cluster dimensions | Empty metadata or inputs are represented as generic/empty derived state, with explicit errors where required inputs are absent. |
+| Search hit metadata, graph PPR neighbors, pack-DNA PPR neighbors, learn-cluster tags, curation tag hints, and cluster dimensions | Empty metadata or inputs are represented as generic/empty derived state, with explicit errors where required inputs are absent. |
+| Swarm brief RCH topology worker detail | RCH-E327 degradations may omit a selected worker while still emitting an explicit topology-blocked code and redacted root summary. |
+| Graph causal successors and node attributes | Missing optional causal successors or node attributes represent leaf nodes or empty metadata; required causal demand and degradation fields are added explicitly. |
 | Perf-forensics metadata and security profile env parsing | Missing optional metadata/env values choose documented defaults. |
 
 The scanner also ignores directories ending in `.tmp-sync` so remote sync

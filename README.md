@@ -240,14 +240,14 @@ The current audit (`scripts/audit_install_pipeline.sh`) reports:
 
 | Path | Status | Tracking |
 |---|---|---|
-| GitHub release installer | planned; no release assets published yet | `bd-2gill.3` |
-| Homebrew tap | planned; tap formula not published yet | `bd-2gill.2` |
+| GitHub release installer | planned; no release assets published yet | `bd-3usjw.9` |
+| Homebrew tap | planned; tap formula not published yet | `bd-3usjw.13` |
 | crates.io | planned; package name selected as `eidetic-engine`; binary remains `ee` | `bd-3usjw.10` |
 | Source build | available now | this README |
 
 ### Release installer (planned)
 
-Planned after the first signed GitHub release ships; see `bd-2gill.3`.
+Planned after the first signed GitHub release ships; see `bd-3usjw.9`.
 
 ```bash
 curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.1.0/install.sh \
@@ -259,7 +259,7 @@ This will verify the binary against the published Sigstore bundle, drop it in
 
 PowerShell (Windows):
 
-Planned after the first signed GitHub release ships; see `bd-2gill.3`.
+Planned after the first signed GitHub release ships; see `bd-3usjw.9`.
 
 ```powershell
 & ([scriptblock]::Create((iwr -useb https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.1.0/install.ps1).Content)) -Version "0.1.0"
@@ -268,7 +268,7 @@ Planned after the first signed GitHub release ships; see `bd-2gill.3`.
 ### Homebrew (macOS / Linux)
 
 Planned after `Dicklesworthstone/homebrew-tap` publishes `Formula/ee.rb`; see
-`bd-2gill.2`.
+`bd-3usjw.13`.
 
 ```bash
 brew install Dicklesworthstone/tap/ee
@@ -375,6 +375,79 @@ Each gate reports exit code and elapsed time.
 | `ee pack replay <pack-id> --json` | Inspect the persisted, redaction-safe selection ledger for a historical pack |
 | `ee pack diff <old-pack-id> <new-pack-id> --json` | Compare two persisted pack ledgers and explain selection, freshness, redaction, or derived-asset changes |
 | `ee support bundle --out <dir> --json` | Create a redacted diagnostic bundle, including pack replay and swarm-brief summaries without raw query, mail body, memory, or full file-listing content |
+
+### Graph-derived insights
+
+Graph views show relationships between memories for navigation, packing,
+curation, and triage; they do not replace provenance from the memory records
+themselves.
+
+| Command | Purpose |
+|---|---|
+| `ee insights --json` | Bundle graph-derived findings such as top memories, bridges, contradiction clusters, proximity hotspots, load-bearing memories, HITS hubs/authorities, and skyline posture |
+| `ee insights --section <name> --json` | Return one deterministic section when a full bundle is too broad |
+| `ee context "<task>" --explain --json` | Include a Pack DNA block that explains pack composition with dominators, communities, ego subgraphs, and PPR neighbors when available |
+| `ee why <memory-id> --causal-explain --json` | Add a causalExplanation block with causal ancestry and min-cost path evidence |
+| `ee insights --section causalBottlenecks --json` | Inspect causal bottleneck findings across failure-oriented causal evidence |
+| `ee health --robot-insights --json` | Surface structural health through k-truss and contradiction-cluster summaries |
+| `ee insights --section knowledgeSkyline --json` | Summarize portfolio-level memory posture across onion layers, communities, trust, age, and graph support |
+
+Worked example: inspect bridge memories before curation.
+
+```bash
+ee insights --section bridges --workspace . --json \
+  | jq '.data.sections[] | select(.name == "bridges") | .items[0]'
+```
+
+```json
+{
+  "memoryId": "mem_release_policy",
+  "articulationPoint": true,
+  "nextCommands": ["ee why mem_release_policy --workspace . --json"]
+}
+```
+
+Worked example: debug a surprising context pack.
+
+```bash
+ee context "prepare release" --workspace . --explain --json \
+  | jq '.data.pack.packDna'
+```
+
+```json
+{
+  "schema": "ee.context.pack_dna.v1",
+  "voronoiDominator": {"memoryId": "mem_release_policy"},
+  "pprNeighbors": [{"memoryId": "mem_rch_remote_required", "rank": 1}]
+}
+```
+
+Worked example: inspect tightly connected memory pairs before editing related
+records. Use `proximityHotspots` to find ranked pairs worth reviewing, then use
+`ee proximity` for the pairwise min-cut explanation.
+
+```bash
+ee insights --section proximityHotspots --workspace . --json \
+  | jq '.data.sections[] | select(.name == "proximityHotspots") | .items[0]'
+```
+
+```json
+{
+  "schema": "ee.proximity.v1",
+  "interpretation": "strong",
+  "treePath": ["mem_release_policy", "mem_rch_remote_required"]
+}
+```
+
+```bash
+ee proximity mem_release_policy mem_rch_remote_required --workspace . --json
+```
+
+Start with [`docs/agent-ux/insights-onboarding.md`](docs/agent-ux/insights-onboarding.md)
+for the agent workflow, [`docs/configuration/graph.md`](docs/configuration/graph.md)
+for graph feature flags and thresholds, and
+[`docs/architecture/graph-snapshots.md`](docs/architecture/graph-snapshots.md)
+for snapshot lifecycle rules.
 
 ### Pack replay evidence
 
@@ -546,6 +619,7 @@ service, mail sender, Beads mutator, or agent loop.
 | `ee graph neighborhood <id> [--direction both] [--limit N]` | Expand around a memory/session/rule |
 | `ee graph centrality-refresh [--dry-run]` | Refresh PageRank / betweenness metrics |
 | `ee graph feature-enrichment [--dry-run]` | Compute bounded graph-derived retrieval features |
+| `ee insights [--section <name>] [--explain <id>] --json` | Inspect graph-derived findings and memory-centric topology |
 
 ### Index
 
@@ -559,6 +633,7 @@ service, mail sender, Beads mutator, or agent loop.
 | Command | Purpose |
 |---|---|
 | `ee workspace resolve` / `list` / `alias <name>` | Identity, monorepo subscopes, and aliases |
+| `ee db status` / `inspect <table>` / `check-integrity` | Inspect FrankenSQLite schema, table rows, and integrity without bypassing `ee` |
 | `ee model status` / `list` | Inspect embedding model registry posture |
 | `ee schema list` / `export <schema-id>` | Inspect stable machine-output schemas |
 
@@ -567,7 +642,7 @@ service, mail sender, Beads mutator, or agent loop.
 | Command | Purpose |
 |---|---|
 | `ee export [--output-dir <dir>] [--redaction standard]` | Export redacted JSONL records as a portable side-path artifact |
-| `ee backup create [--label <name>]` | Create a verified backup with manifest |
+| `ee backup create [--label <name>] [--include-graph-cache[=bool]]` | Create a verified backup with manifest; graph-cache derived assets are included by default |
 | `ee backup list` / `verify <id>` / `inspect <id>` | Audit existing backups |
 | `ee backup restore <backup-id> --side-path <path>` | Restore into an isolated side path |
 
@@ -843,14 +918,19 @@ Codex shells out, so the same calls work. The output of `ee context "<task>" --j
 
 ### MCP
 
-Optional MCP adapter (feature-gated, off by default):
+The MCP manifest is always available so agents can discover the CLI contract
+from default builds:
 
 ```bash
-cargo build --release --features mcp
-./target/release/ee mcp manifest --json
+ee mcp manifest --json
 ```
 
-The manifest mirrors the CLI contracts for tools such as `ee_context`, `ee_search`, `ee_remember`, `ee_outcome`, `ee_curate_candidates`, and `ee_memory_show`. Schemas match CLI JSON exactly; the CLI is the compatibility contract.
+When the `mcp` feature is not enabled, the manifest succeeds and reports
+`capabilityGap.code=mcp_feature_disabled` for the stdio adapter. Build with
+`cargo build --release --features mcp` when you need the adapter itself. The
+manifest mirrors the CLI contracts for tools such as `ee_context`, `ee_search`,
+`ee_remember`, `ee_outcome`, `ee_curate_candidates`, and `ee_memory_show`.
+Schemas match CLI JSON exactly; the CLI is the compatibility contract.
 
 ### Plain humans
 
@@ -894,7 +974,7 @@ The trust pipeline flags suspicious patterns (fake instructions, role override a
 ## Backup & Restore
 
 ```bash
-# Verified backup
+# Verified backup, including graph snapshots, witnesses, and result-cache rows
 ee backup create --label pre-refactor
 ✓ backup bk_01HQ4… (32 MB) verified
 
@@ -907,11 +987,11 @@ ee backup list
 # Inspect contents without restoring
 ee backup inspect bk_01HQ4… --json
 
-# Restore to an isolated side path
+# Restore to an isolated side path, replaying graph cache by default
 ee backup restore bk_01HQ4… --side-path ~/ee-restored/
 ```
 
-Backups include the durable DB/JSONL source of truth, the curation audit log, and a `manifest.json` with content hashes. Missing index manifests are reported as degraded, and graph snapshots are derived assets that are not included in the current backup foundation slice. Verification re-hashes everything included on disk.
+Backups include the durable DB/JSONL source of truth, the curation audit log, and a `manifest.json` with content hashes. By default, `ee backup create` also includes graph-cache derived assets: graph snapshots, graph algorithm witnesses, and graph algorithm result-cache rows. Use `--include-graph-cache=false` to create a source-only backup, and use `ee backup restore --skip-graph-cache` when you want restore to leave that cache cold and re-warm it on first use. Missing index manifests are reported as degraded. Verification re-hashes everything included on disk.
 
 ---
 
@@ -1099,6 +1179,10 @@ No. The steward proposes; you approve. Every promotion, consolidation, replaceme
 | [`docs/query-schema.md`](docs/query-schema.md) | EQL-inspired request schema for `ee pack` |
 | [`docs/trust-model.md`](docs/trust-model.md) | Memory advisory priority, trust classes, prompt-injection defenses |
 | [`docs/agent-outcome-scenarios.md`](docs/agent-outcome-scenarios.md) | North-star agent journey matrix and acceptance scenarios |
+| [`docs/agent-ux/insights-onboarding.md`](docs/agent-ux/insights-onboarding.md) | Agent workflow for graph-derived insights, Pack DNA, skyline, and proximity surfaces |
+| [`docs/cli-reference/graph-flags.md`](docs/cli-reference/graph-flags.md) | Aggregated graph-related CLI flags by command, including implemented and pending surfaces |
+| [`docs/configuration/graph.md`](docs/configuration/graph.md) | Graph feature flags, thresholds, and tuning guidance |
+| [`docs/architecture/graph-snapshots.md`](docs/architecture/graph-snapshots.md) | Graph snapshot families, lifecycle, locks, budgets, and degraded behavior |
 | [`docs/dependency-contract-matrix.md`](docs/dependency-contract-matrix.md) | Franken-stack integration contracts and version pins |
 | [`docs/testing-strategy.md`](docs/testing-strategy.md) | Test categories, verification gates, golden test structure |
 | [`docs/command_classification.md`](docs/command_classification.md) | Command effect taxonomy and read/write classification |

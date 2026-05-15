@@ -26,6 +26,31 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 4. **Mandatory explicit plan:** Even after explicit user authorization, restate the command verbatim, list exactly what will be affected, and wait for a confirmation that your understanding is correct. Only then may you execute it—if anything remains ambiguous, refuse and escalate.
 5. **Document the confirmation:** When running any approved destructive command, record (in the session notes / final response) the exact user text that authorized it, the command actually run, and the execution time. If that record is absent, the operation did not happen.
 
+### Wiring Trauma-Guard Into Agent Hooks
+
+`ee preflight check --cmd "<shell-command>" --json` is the command-facing
+trauma-guard surface. Agent harnesses should call it before running shell
+commands that may delete files, rewrite Git history, mutate clusters, destroy
+infrastructure, or write raw block devices. Exit code `7` means policy denied:
+stop and ask for explicit human authorization instead of retrying with a
+different spelling.
+
+Hook integration rules:
+
+- Pass the exact command string the agent is about to run; do not sanitize away
+  flags or shell wrappers before calling `ee preflight check`.
+- Treat `matches[].source` and `matches[].ruleId` as the audit trail for why
+  the guard fired.
+- Only use `--override-token` when a human has already approved that exact
+  destructive action. Bypass-token issuance, verification, revocation, and
+  rate-limit behavior are audited separately.
+- Keep `tests/fixtures/destructive_patterns/commands.json` in sync when adding
+  new built-in destructive-command patterns.
+- Current guard coverage is rule/registry based. The full `bd-3usjw.6`
+  contract also requires matching destructive commands against high-severity
+  `risk`, `anti-pattern`, and `failure` memories with provenance; do not close
+  that bead until the memory-query layer and its e2e evidence exist.
+
 ---
 
 ## Git Branch: ONLY Use `main`, NEVER `master`
@@ -511,6 +536,29 @@ ee why      <id>      --workspace . --json                  # explain why a memo
 ```
 
 Everything else (`ee curate`, `ee graph`, `ee handoff`, `ee diag`, `ee lab`, …) is in service of these five. `ee --help` opens with this list under "Most-used commands (start here)".
+
+#### Graph-derived explanation surfaces
+
+Pack DNA explains why graph structure shaped a context pack. When debugging a
+surprising `ee context --explain --json` result, inspect
+`data.pack.packDna` before changing retrieval code or weakening tests. The
+block is explanatory, not authoritative: ordinary pack items, provenance, and
+degraded signals still decide whether the pack is usable.
+
+Agent rules:
+
+- Use `ee context "<task>" --explain --json` when selected memories look
+  plausible but their graph relationship is unclear.
+- Inspect `packDna.voronoiDominator`, `packDna.communityOfMass`,
+  `packDna.egoSubgraph`, and `packDna.pprNeighbors` as separate signals.
+- Treat non-empty `packDna.degraded[]` as a graph-explanation gap, not as a
+  failed context pack.
+- Use `ee insights --section <name> --json`, `ee health --robot-insights
+  --json`, `ee status --skyline --json`, and `ee proximity <id1> <id2> --json`
+  for narrower graph questions instead of repeatedly running full-bundle
+  commands.
+- Start with `docs/agent-ux/insights-onboarding.md` when wiring a new agent
+  harness to graph-derived fields.
 
 #### Response envelope contract
 
@@ -1113,6 +1161,17 @@ Returns structured results with file paths, line ranges, and extracted code snip
 This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`) for issue tracking. Issues are stored in `.beads/` and tracked in git.
 
 **Important:** `br` is non-invasive—it NEVER executes git commands. After `br sync --flush-only`, you must manually run `git add .beads/ && git commit`.
+
+### Reality-Check Cadence
+
+Every 90 days, or whenever `scripts/vision-coverage.sh --json` reports
+`gap_percentage > 5`, run the `reality-check-for-project` skill end-to-end.
+The bridge plan lives at `CLOSE_THE_GAP_PLAN.md` or its archived predecessor;
+update the existing plan from Part N to Part N+1 instead of creating another
+plan file.
+
+The last bridge began on 2026-05-14. The next scheduled bridge target is
+2026-08-13, unless the vision-coverage gap exceeds 5% before then.
 
 ### Essential Commands
 

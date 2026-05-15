@@ -376,8 +376,10 @@ runtime tests, with two graph-specific constraints:
 
 Tests that deliberately exercise a real embedding backend must be feature-gated
 outside the default CI profile and named as non-CI coverage in their module
-docs. Graph test fixtures should make this visible in source rather than relying
-on local machine configuration.
+docs. The default policy sentinel is `#[ignore]` and requires
+`EE_RUN_NON_CI_REAL_EMBEDDER_GRAPH_TEST=1` before any non-CI real-backend graph
+coverage is allowed to run. Graph test fixtures should make this visible in
+source rather than relying on local machine configuration.
 
 ## Redaction And Privacy Tests
 

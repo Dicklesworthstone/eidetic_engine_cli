@@ -194,9 +194,14 @@ A degraded entry's `code` is classified into one of three buckets:
 | `why_pack_selection_unavailable` | low | bd-17c65.10.6 (J6) |
 | `why_result_target_unsupported_source` | medium | bd-17c65.10.6 (J6) |
 
-#### Preflight + quarantine (3)
+#### Preflight + quarantine (9)
 | Code | Severity | Bead |
 |------|----------|------|
+| `bypass_rate_limit_exceeded` | high | bd-3usjw.6.1 |
+| `bypass_token_exhausted` | high | bd-3usjw.6.1 |
+| `bypass_token_expired` | medium | bd-3usjw.6.1 |
+| `bypass_token_invalid` | high | bd-3usjw.6.1 |
+| `bypass_token_revoked` | high | bd-3usjw.6.1 |
 | `preflight_evidence_stale` | warning | bd-17c65.10.6 (J6) |
 | `preflight_evidence_unavailable` | medium | bd-17c65.10.6 (J6) |
 | `quarantine_database_missing` | medium | bd-17c65.10.6 (J6) |
@@ -297,9 +302,10 @@ A degraded entry's `code` is classified into one of three buckets:
 | `replay_fidelity` | info | bd-17c65.14.15.5 (N15.4) |
 | `stable_unit` | info | bd-17c65.14.3 (N3) — replay verification |
 
-#### Graph snapshot (5 — response_time variants of graph_unavailable)
+#### Graph snapshot (6 — response_time variants of graph_unavailable)
 | Code | Severity | Bead |
 |------|----------|------|
+| `graph_algorithm_unavailable` | medium | bd-3usjw.2 |
 | `graph_snapshot_missing` | medium | bd-17c65.5.3 (E3) |
 | `graph_snapshot_stale` | medium | bd-17c65.5.3 (E3) |
 | `graph_snapshot_scores_unavailable` | low | bd-17c65.5.3 (E3) |
@@ -362,13 +368,13 @@ A degraded entry's `code` is classified into one of three buckets:
 | `agent_mail_unavailable` | medium | bd-2nkbn (Agent Mail resilience) |
 | `agent_mail_archive_degraded` | warning | bd-1zb7k.11 (P) |
 | `agent_status_unavailable` | low | (TBD) |
-| `beads_tracker_stale` | warning | bd-1zb7k.13.1 (C1) |
+| `beads_tracker_stale` | warning | bd-1zb7k.13.3 (C3) |
 | `beads_unavailable` | medium | bd-1zb7k.4 (S3) |
 | `bv_unavailable` | medium | bd-1zb7k.4 (S3) |
 | `git_unavailable` | medium | bd-1zb7k.4 (S3) |
-| `rch_remote_required_fallback_prevented` | warning | bd-1zb7k.13.1 (C1) |
+| `rch_remote_required_fallback_prevented` | warning | bd-1zb7k.13.4 (C4) |
 | `rch_unavailable` | low | bd-1zb7k.5 (S4) |
-| `rch_worker_topology_blocked` | warning | bd-1zb7k.13.1 (C1) |
+| `rch_worker_topology_blocked` | warning | bd-1zb7k.13.4 (C4) |
 
 #### Model registry / science (5)
 | Code | Severity | Bead |

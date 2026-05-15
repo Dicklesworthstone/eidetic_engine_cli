@@ -39,3 +39,6 @@ including rejected alternatives and verification hooks.
 - [ADR 0031: Submodular Pack Assembly — Audit, Don't Certify](0031-submodular-pack-or-rename.md)
 - [ADR 0032: Bayesian (alpha, beta) Posteriors on Memories](0032-bayesian-memory-posteriors.md)
 - [ADR 0033: Serve Localhost V2 Design](0033-serve-localhost-v2-design.md)
+- [ADR 0034: Multi-Graph Snapshot Framework](0034-multi-graph-snapshot-framework.md)
+- [ADR 0035: Structural Decay Policy](0035-structural-decay-policy.md)
+- [ADR 0036: Pack DNA Explanation Contract](0036-pack-dna-explanation-contract.md)

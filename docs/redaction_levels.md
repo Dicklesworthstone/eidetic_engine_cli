@@ -67,7 +67,7 @@ Notes on the matrix:
 | `ee support bundle`| `paranoid`   | Third-party-facing; max safety for bug-report uploads.           | `--redaction <level>`           |
 | `ee why`          | `none`        | Forensic surface; must show the actual stored content.           | (no override; see Notes)         |
 
-Defaults can be overridden per-workspace via `<workspace>/.ee/config.toml`:
+The planned per-workspace override shape is:
 
 ```toml
 [redaction.defaults]
@@ -77,8 +77,10 @@ context_json   = "minimal"
 support_bundle = "paranoid"
 ```
 
-The override precedence (highest wins) is: CLI flag → env var
-(`EE_REDACTION_<SURFACE>=<level>`) → workspace config → built-in default.
+The override precedence once that policy surface is implemented is:
+CLI flag → workspace config → built-in default. No `EE_REDACTION_*`
+redaction-level override is currently registered; adding one must update
+both `src/config/env_registry.rs` and `docs/env_vars.md` in the same change.
 
 ## Round-trip symmetry property
 
@@ -166,5 +168,5 @@ validate it.
   — fixture catalog format for the redaction failure modes.
 - [`docs/degraded_code_taxonomy.md`](degraded_code_taxonomy.md) —
   `redaction_uncertain` and related codes classified as `response_time`.
-- [`docs/env_vars.md`](env_vars.md) — `EE_REDACTION_<SURFACE>` env
-  overrides registered (per K4 / F5).
+- [`docs/env_vars.md`](env_vars.md) — the canonical registry for `EE_*`
+  overrides if a future redaction-level env override is added.

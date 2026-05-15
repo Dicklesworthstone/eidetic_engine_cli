@@ -465,14 +465,15 @@ ee remember 'One isolated fact.' --workspace . --level semantic --kind fact --js
 
 **Surfaces:** swarm brief
 
-**Introduced by:** bd-1zb7k.13.1 (epic C)
+**Introduced by:** bd-1zb7k.13.3 (epic C)
 
-**Trigger.** Swarm brief detects that Beads issues.jsonl is newer than the local Beads database.
+**Trigger.** Swarm brief detects that Beads issues.jsonl or the local Beads database is newer than its counterpart.
 
 **Setup.**
 
 ```bash
 # create a Beads workspace where .beads/issues.jsonl has entries not imported into .beads/beads.db
+# the sibling DB-newer case is covered by swarm brief unit tests and repairs with br sync --flush-only
 ```
 
 **Invocation.**
@@ -2895,6 +2896,39 @@ ee status --skyline --workspace . --json
 
 ---
 
+## `graph_algorithm_unavailable`
+
+**Severity:** medium
+
+**Surfaces:** graph centrality
+
+**Introduced by:** bd-3usjw.2 (epic Bridge Part II)
+
+**Trigger.** The latest memory-link graph snapshot exists, but the requested centrality algorithm has no persisted scores in that snapshot.
+
+**Setup.**
+
+```bash
+ee init --workspace .
+ee remember 'Centrality source memory.' --workspace . --level semantic --kind fact --json
+ee remember 'Centrality target memory.' --workspace . --level semantic --kind fact --json
+ee graph centrality-refresh --workspace . --json
+```
+
+**Invocation.**
+
+```bash
+ee graph centrality --algorithm authority --workspace . --json
+```
+
+**Expected emission.** Message contains: `Graph centrality algorithm ... no computed scores`
+
+**Repair hint.** `ee graph centrality-refresh --algorithm authority`
+
+**Fixture.** [`tests/fixtures/failure_modes/graph_algorithm_unavailable.json`](../tests/fixtures/failure_modes/graph_algorithm_unavailable.json)
+
+---
+
 ## `graph_snapshot_missing`
 
 **Severity:** medium
@@ -4916,6 +4950,162 @@ ee remember 'Tag rejection should be recoverable.' --workspace . --level semanti
 
 ---
 
+## `bypass_rate_limit_exceeded`
+
+**Severity:** high
+
+**Surfaces:** preflight
+
+**Introduced by:** bd-3usjw.6.1 (epic W)
+
+**Trigger.** A workspace attempts more than five successful preflight bypass-token uses in one hour.
+
+**Setup.**
+
+```bash
+ee init --workspace .
+for i in 1 2 3 4 5; do ee preflight issue-bypass-token --reason "approved $i" --json; done
+```
+
+**Invocation.**
+
+```bash
+ee preflight check --cmd 'rm -rf build-output' --override-token <sixth-token> --json
+```
+
+**Expected emission.** Message contains: `rate limit ... workspace`
+
+**Repair hint.** `hourly window`
+
+**Fixture.** [`tests/fixtures/failure_modes/bypass_rate_limit_exceeded.json`](../tests/fixtures/failure_modes/bypass_rate_limit_exceeded.json)
+
+---
+
+## `bypass_token_exhausted`
+
+**Severity:** high
+
+**Surfaces:** preflight
+
+**Introduced by:** bd-3usjw.6.1 (epic W)
+
+**Trigger.** A one-shot preflight bypass token is reused after its max_uses allowance is consumed.
+
+**Setup.**
+
+```bash
+ee init --workspace .
+ee preflight issue-bypass-token --reason 'approved once' --json
+ee preflight check --cmd 'rm -rf build-output' --override-token <token> --json
+```
+
+**Invocation.**
+
+```bash
+ee preflight check --cmd 'rm -rf build-output' --override-token <same-token> --json
+```
+
+**Expected emission.** Message contains: `bypass token ... remaining uses`
+
+**Repair hint.** `fresh one-shot`
+
+**Fixture.** [`tests/fixtures/failure_modes/bypass_token_exhausted.json`](../tests/fixtures/failure_modes/bypass_token_exhausted.json)
+
+---
+
+## `bypass_token_expired`
+
+**Severity:** medium
+
+**Surfaces:** preflight
+
+**Introduced by:** bd-3usjw.6.1 (epic W)
+
+**Trigger.** A preflight bypass token is presented after its short TTL has elapsed.
+
+**Setup.**
+
+```bash
+ee init --workspace .
+ee preflight issue-bypass-token --reason 'approved once' --ttl-minutes 1 --json
+```
+
+**Invocation.**
+
+```bash
+ee preflight check --cmd 'rm -rf build-output' --override-token <expired-token> --json
+```
+
+**Expected emission.** Message contains: `bypass token ... expired`
+
+**Repair hint.** `fresh bypass token`
+
+**Fixture.** [`tests/fixtures/failure_modes/bypass_token_expired.json`](../tests/fixtures/failure_modes/bypass_token_expired.json)
+
+---
+
+## `bypass_token_invalid`
+
+**Severity:** high
+
+**Surfaces:** preflight
+
+**Introduced by:** bd-3usjw.6.1 (epic W)
+
+**Trigger.** A preflight bypass token is unknown to the workspace or was issued for another workspace.
+
+**Setup.**
+
+```bash
+ee init --workspace .
+```
+
+**Invocation.**
+
+```bash
+ee preflight check --cmd 'rm -rf build-output' --override-token not-a-real-token --json
+```
+
+**Expected emission.** Message contains: `bypass token ... invalid`
+
+**Repair hint.** `fresh bypass token`
+
+**Fixture.** [`tests/fixtures/failure_modes/bypass_token_invalid.json`](../tests/fixtures/failure_modes/bypass_token_invalid.json)
+
+---
+
+## `bypass_token_revoked`
+
+**Severity:** high
+
+**Surfaces:** preflight
+
+**Introduced by:** bd-3usjw.6.1 (epic W)
+
+**Trigger.** A preflight bypass token is presented after it was explicitly revoked.
+
+**Setup.**
+
+```bash
+ee init --workspace .
+ee preflight issue-bypass-token --reason 'approved once' --json
+ee preflight revoke-bypass-token --token <token> --json
+```
+
+**Invocation.**
+
+```bash
+ee preflight check --cmd 'rm -rf build-output' --override-token <revoked-token> --json
+```
+
+**Expected emission.** Message contains: `bypass token ... revoked`
+
+**Repair hint.** `fresh bypass token`
+
+**Fixture.** [`tests/fixtures/failure_modes/bypass_token_revoked.json`](../tests/fixtures/failure_modes/bypass_token_revoked.json)
+
+---
+
 ## `preflight_evidence_stale`
 
 **Severity:** warning
@@ -5275,7 +5465,7 @@ export RCH_REQUIRE_REMOTE=1
 ee swarm brief --include-rch --workspace . --json
 ```
 
-**Expected emission.** Message contains: `remote required fallback prevented`
+**Expected emission.** Message contains: `RCH_REQUIRE_REMOTE`, `no valid remote evidence`
 
 **Repair hint.** `Fix remote worker availability`
 
@@ -5319,13 +5509,14 @@ ee swarm brief --include-rch --workspace . --json
 
 **Surfaces:** swarm brief
 
-**Introduced by:** bd-1zb7k.13.1 (epic C)
+**Introduced by:** bd-1zb7k.13.4 (epic C)
 
-**Trigger.** Swarm brief collects RCH posture while workers are reachable but workspace path topology prevents remote execution.
+**Trigger.** Swarm brief collects RCH posture while the fleet is remote-ready but the selected worker cannot map this workspace path topology.
 
 **Setup.**
 
 ```bash
+# status payload includes workersHealthy=3, selectedWorker=css, and absolute canonical/alias roots that must be redacted
 # run swarm brief --include-rch in a workspace whose path dependencies cannot be mapped onto the selected worker
 ```
 
@@ -5335,7 +5526,7 @@ ee swarm brief --include-rch --workspace . --json
 ee swarm brief --include-rch --workspace . --json
 ```
 
-**Expected emission.** Message contains: `RCH-E327`
+**Expected emission.** Message contains: `RCH-E327`, `selected worker`, `root metadata redacted`
 
 **Repair hint.** `worker path mapping`
 
