@@ -37,7 +37,10 @@ use rustix::fs::{FlockOperation, flock};
 #[cfg(unix)]
 use rustix::io::Errno;
 
-use crate::config::{ConfigFile, GRAPH_FEATURE_PPR_ENABLED_KEY, WorkspaceLocation};
+use crate::config::{
+    ConfigFile, GRAPH_FEATURE_PACK_DNA_ENABLED_KEY, GRAPH_FEATURE_PPR_ENABLED_KEY,
+    WorkspaceLocation,
+};
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
 use crate::core::memory_scope::MemoryScopeContext;
@@ -653,6 +656,31 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
 }
 
 pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut ContextResponse) {
+    let workspace_path = workspace_path_from_database_path(database_path);
+    match workspace_path
+        .as_deref()
+        .map(context_pack_dna_feature_enabled)
+        .unwrap_or(Ok(false))
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            response.data.pack_dna = Some(serde_json::Value::Null);
+            push_pack_dna_feature_disabled_degradation(&mut response.data.degraded);
+            return;
+        }
+        Err(message) => {
+            response.data.pack_dna = Some(serde_json::Value::Null);
+            push_degradation(
+                &mut response.data.degraded,
+                "context_config_unavailable",
+                ContextResponseSeverity::Medium,
+                message,
+                Some("Fix or remove .ee/config.toml.".to_string()),
+            );
+            return;
+        }
+    }
+
     let connection = match DbConnection::open_file(database_path) {
         Ok(connection) => connection,
         Err(error) => {
@@ -751,6 +779,30 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
 
     response.data.pack_dna =
         Some(serde_json::to_value(&pack_dna).unwrap_or(serde_json::Value::Null));
+}
+
+fn workspace_path_from_database_path(database_path: &Path) -> Option<PathBuf> {
+    let ee_dir = database_path.parent()?;
+    (ee_dir.file_name()? == ".ee").then(|| ee_dir.parent().map(Path::to_path_buf))?
+}
+
+fn context_pack_dna_feature_enabled(workspace_path: &Path) -> Result<bool, String> {
+    let config = context_workspace_config(workspace_path, "Pack DNA")?;
+    Ok(config
+        .and_then(|config| config.graph.feature.pack_dna_enabled)
+        .unwrap_or(false))
+}
+
+fn push_pack_dna_feature_disabled_degradation(degraded: &mut Vec<ContextResponseDegradation>) {
+    push_degradation(
+        degraded,
+        "graph_feature_disabled",
+        ContextResponseSeverity::Medium,
+        format!("Pack DNA is disabled by {GRAPH_FEATURE_PACK_DNA_ENABLED_KEY}."),
+        Some(format!(
+            "ee config set {GRAPH_FEATURE_PACK_DNA_ENABLED_KEY} true"
+        )),
+    );
 }
 
 const fn context_severity_from_pack_dna(severity: &str) -> ContextResponseSeverity {
@@ -2985,24 +3037,35 @@ fn apply_personalized_pagerank_rerank(
 }
 
 fn context_ppr_feature_enabled(workspace_path: &Path) -> Result<bool, String> {
+    let config = context_workspace_config(workspace_path, "Personalized PageRank rerank")?;
+    Ok(config
+        .and_then(|config| config.graph.feature.ppr_enabled)
+        .unwrap_or(false))
+}
+
+fn context_workspace_config(
+    workspace_path: &Path,
+    surface: &str,
+) -> Result<Option<ConfigFile>, String> {
     let config_path = workspace_path.join(".ee").join("config.toml");
     let contents = match fs::read_to_string(&config_path) {
         Ok(contents) => contents,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(format!(
-                "Personalized PageRank rerank skipped because workspace config {} could not be read: {error}",
+                "{surface} skipped because workspace config {} could not be read: {error}",
                 config_path.display()
             ));
         }
     };
-    let config = ConfigFile::parse(&contents).map_err(|error| {
-        format!(
-            "Personalized PageRank rerank skipped because workspace config {} could not be parsed: {error}",
-            config_path.display()
-        )
-    })?;
-    Ok(config.graph.feature.ppr_enabled.unwrap_or(false))
+    ConfigFile::parse(&contents)
+        .map_err(|error| {
+            format!(
+                "{surface} skipped because workspace config {} could not be parsed: {error}",
+                config_path.display()
+            )
+        })
+        .map(Some)
 }
 
 fn push_ppr_feature_disabled_degradation(degraded: &mut Vec<ContextResponseDegradation>) {
@@ -4942,6 +5005,29 @@ mod tests {
         .map_err(|error| error.to_string())
     }
 
+    fn context_response_with_pack_item(
+        memory_id: MemoryId,
+    ) -> Result<crate::pack::ContextResponse, String> {
+        let request = ContextRequest::new(ContextRequestInput {
+            query: "pack dna disabled contract".to_string(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(64),
+            candidate_pool: Some(1),
+            max_results: None,
+            sections: Vec::new(),
+        })
+        .map_err(|error| error.to_string())?;
+        let draft = assemble_draft_with_profile(
+            request.profile,
+            request.query.clone(),
+            TokenBudget::new(64).map_err(|error| error.to_string())?,
+            [ppr_candidate(memory_id, 0.80)?],
+        )
+        .map_err(|error| error.to_string())?;
+        crate::pack::ContextResponse::new(request, draft, Vec::new())
+            .map_err(|error| error.to_string())
+    }
+
     #[test]
     fn context_ppr_weight_defaults_to_disabled() {
         assert_eq!(super::effective_context_ppr_weight(None), 0.0);
@@ -5112,6 +5198,32 @@ mod tests {
         assert_eq!(candidates[1].relevance.into_inner(), 0.20);
         assert!(candidates.iter().all(|item| item.score_breakdown.is_none()));
         assert!(degraded.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn context_pack_dna_feature_disabled_skips_graph_open() -> Result<(), String> {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join(".ee").join("ee.db");
+        let mut response =
+            context_response_with_pack_item(MemoryId::from_uuid(uuid::Uuid::from_u128(904)))?;
+
+        super::attach_pack_dna_to_context_response(&database_path, &mut response);
+
+        assert_eq!(response.data.pack_dna, Some(serde_json::Value::Null));
+        let disabled = response
+            .data
+            .degraded
+            .iter()
+            .find(|entry| entry.code == "graph_feature_disabled")
+            .ok_or_else(|| "expected graph_feature_disabled degradation".to_string())?;
+        assert_eq!(disabled.severity, ContextResponseSeverity::Medium);
+        assert!(disabled.message.contains("graph.feature.pack_dna.enabled"));
+        assert_eq!(
+            disabled.repair.as_deref(),
+            Some("ee config set graph.feature.pack_dna.enabled true")
+        );
         Ok(())
     }
 

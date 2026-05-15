@@ -7271,6 +7271,11 @@ fn seed_context_pack_dna_workspace(name: &str) -> Result<String, String> {
         format!("init should succeed; stderr: {init_stderr}"),
     )?;
     ensure(init.stderr.is_empty(), "init stderr clean")?;
+    fs::write(
+        workspace.join(".ee").join("config.toml"),
+        "[graph.feature.pack_dna]\nenabled = true\n",
+    )
+    .map_err(|error| error.to_string())?;
 
     let remember = run_ee(&[
         "--workspace",

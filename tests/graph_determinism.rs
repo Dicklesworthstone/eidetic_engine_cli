@@ -90,6 +90,11 @@ fn seed_graph_workspace() -> Result<(PathBuf, Vec<String>), String> {
             String::from_utf8_lossy(&init.stderr)
         ));
     }
+    fs::write(
+        workspace.join(".ee").join("config.toml"),
+        "[graph.feature.pack_dna]\nenabled = true\n",
+    )
+    .map_err(|error| error.to_string())?;
 
     let mut memory_ids = Vec::new();
     for i in 0..5 {
