@@ -16,7 +16,7 @@ use toml_edit::{DocumentMut, Item};
 
 use crate::models::{ArtifactSummary, MetricValueKind};
 
-pub const HOST_PROFILE_PROBE_SCHEMA_V1: &str = "ee.profile.probe.v1";
+pub const HOST_PROFILE_PROBE_SCHEMA_V1: &str = "ee.host_profile.v1";
 pub const PROFILE_CONFIG_PLAN_SCHEMA_V1: &str = "ee.profile.config.plan.v1";
 pub const RUNTIME_PROFILE_SCHEMA_V1: &str = "ee.profile.runtime.v1";
 pub const PROFILE_BUDGET_CONFORMANCE_SCHEMA_V1: &str = "ee.profile.budget_conformance.v1";
@@ -37,18 +37,28 @@ pub struct HostResourceProbeReport {
     pub paths: Vec<PathCapacityProbe>,
     pub tools: Vec<ToolProbe>,
     pub environment: EnvironmentProbe,
+    pub topology: HostTopologyProbe,
     pub degraded: Vec<HostProbeDegradation>,
 }
 
 impl HostResourceProbeReport {
     #[must_use]
     pub fn gather_for_workspace(workspace_root: &Path) -> Self {
+        Self::gather_for_workspace_with_options(workspace_root, &HostProfileProbeOptions::default())
+    }
+
+    #[must_use]
+    pub fn gather_for_workspace_with_options(
+        workspace_root: &Path,
+        options: &HostProfileProbeOptions,
+    ) -> Self {
         let workspace = WorkspaceProbe::for_path(workspace_root);
         let cpu = CpuProbe::gather();
         let memory = MemoryProbe::gather();
-        let paths = gather_path_probes(workspace_root);
+        let paths = gather_path_probes_with_options(workspace_root, options);
         let tools = gather_tool_probes(env::var_os("PATH").as_deref());
         let environment = EnvironmentProbe::gather();
+        let topology = HostTopologyProbe::gather(env::var_os("PATH").as_deref());
         let degraded = host_probe_degradations(&cpu, &memory, &paths);
 
         let complete = degraded.is_empty();
@@ -56,7 +66,11 @@ impl HostResourceProbeReport {
         Self {
             schema: HOST_PROFILE_PROBE_SCHEMA_V1,
             side_effect_free: true,
-            redaction: "label_only_paths_presence_only_env",
+            redaction: if options.include_paths {
+                "operator_requested_paths_presence_only_env"
+            } else {
+                "label_only_paths_presence_only_env"
+            },
             complete,
             workspace,
             cpu,
@@ -64,9 +78,15 @@ impl HostResourceProbeReport {
             paths,
             tools,
             environment,
+            topology,
             degraded,
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HostProfileProbeOptions {
+    pub include_paths: bool,
 }
 
 fn host_probe_degradations(
@@ -102,7 +122,6 @@ fn host_probe_degradations(
             ));
         }
     }
-
     degraded
 }
 
@@ -1934,6 +1953,8 @@ impl MemoryProbe {
 pub struct PathCapacityProbe {
     pub label: &'static str,
     pub role: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     pub exists: bool,
     pub nearest_existing_ancestor: bool,
     pub same_filesystem_as_workspace: Option<bool>,
@@ -1956,7 +1977,15 @@ struct PathSpec<'a> {
     path: &'a Path,
 }
 
+#[cfg(test)]
 fn gather_path_probes(workspace_root: &Path) -> Vec<PathCapacityProbe> {
+    gather_path_probes_with_options(workspace_root, &HostProfileProbeOptions::default())
+}
+
+fn gather_path_probes_with_options(
+    workspace_root: &Path,
+    options: &HostProfileProbeOptions,
+) -> Vec<PathCapacityProbe> {
     let ee_dir = workspace_root.join(".ee");
     let database_path = ee_dir.join("ee.db");
     let index_dir = ee_dir.join("index");
@@ -2026,12 +2055,19 @@ fn gather_path_probes(workspace_root: &Path) -> Vec<PathCapacityProbe> {
             PathCapacityProbe {
                 label: spec.label,
                 role: spec.role,
+                path: options
+                    .include_paths
+                    .then(|| spec.path.to_string_lossy().into_owned()),
                 exists,
                 nearest_existing_ancestor,
                 same_filesystem_as_workspace,
                 total_bytes: capacity.map(|capacity| capacity.total_bytes),
                 available_bytes: capacity.map(|capacity| capacity.available_bytes),
-                redaction: "path_not_emitted",
+                redaction: if options.include_paths {
+                    "path_emitted_by_operator_request"
+                } else {
+                    "path_not_emitted"
+                },
             }
         })
         .collect()
@@ -2116,6 +2152,61 @@ impl EnvironmentProbe {
                 || env::var_os("RCH_VISIBILITY").is_some()
                 || env::var_os("RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS").is_some(),
             redaction: "presence_only",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostTopologyProbe {
+    pub rch: RchTopologyProbe,
+}
+
+impl HostTopologyProbe {
+    #[must_use]
+    pub fn gather(path_env: Option<&OsStr>) -> Self {
+        Self {
+            rch: RchTopologyProbe::gather(path_env),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RchTopologyProbe {
+    pub available: bool,
+    pub status: &'static str,
+    pub posture: &'static str,
+    pub source: &'static str,
+    pub message: String,
+    pub repair: Option<&'static str>,
+}
+
+impl RchTopologyProbe {
+    #[must_use]
+    pub fn gather(path_env: Option<&OsStr>) -> Self {
+        let available = path_env.is_some_and(|paths| path_contains_tool(paths, "rch"));
+        if available {
+            Self {
+                available,
+                status: "available_not_queried",
+                posture: "ok",
+                source: "path_lookup_presence_only",
+                message:
+                    "RCH binary is present on PATH; worker health is checked by RCH-specific diagnostics."
+                        .to_string(),
+                repair: None,
+            }
+        } else {
+            Self {
+                available,
+                status: "missing",
+                posture: "degraded_recoverable",
+                source: "path_lookup_presence_only",
+                message: "RCH binary is missing from PATH; ordinary ee commands are not blocked."
+                    .to_string(),
+                repair: Some("Install rch or provide it on PATH before heavy Cargo verification."),
+            }
         }
     }
 }
@@ -2297,6 +2388,48 @@ mod tests {
     }
 
     #[test]
+    fn full_path_probe_mode_is_explicit() -> TestResult {
+        let workspace = Path::new("/workspace/example");
+        let redacted = gather_path_probes(workspace);
+        ensure_true(
+            redacted.iter().all(|probe| probe.path.is_none()),
+            "default path probes omit raw paths",
+        )?;
+
+        let full = gather_path_probes_with_options(
+            workspace,
+            &HostProfileProbeOptions {
+                include_paths: true,
+            },
+        );
+        ensure_true(
+            full.iter().any(|probe| probe.path.is_some()),
+            "full path mode emits paths",
+        )?;
+        ensure_true(
+            full.iter()
+                .all(|probe| probe.redaction == "path_emitted_by_operator_request"),
+            "full path mode reports operator-requested path emission",
+        )
+    }
+
+    #[test]
+    fn missing_rch_is_degraded_recoverable() -> TestResult {
+        let topology = HostTopologyProbe::gather(Some(OsStr::new("/definitely/no/rch/here")));
+        ensure_true(!topology.rch.available, "rch unavailable")?;
+        ensure(
+            topology.rch.posture,
+            "degraded_recoverable",
+            "rch missing posture",
+        )?;
+        ensure(
+            topology.rch.status,
+            "missing",
+            "missing rch status is stable",
+        )
+    }
+
+    #[test]
     fn profile_config_plan_reports_exact_toml_without_writing() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let config_path = temp.path().join(".ee").join("config.toml");
@@ -2452,6 +2585,16 @@ mod tests {
                 rch_hint_configured: false,
                 redaction: "presence_only",
             },
+            topology: HostTopologyProbe {
+                rch: RchTopologyProbe {
+                    available: true,
+                    status: "available_not_queried",
+                    posture: "ok",
+                    source: "test_synthetic",
+                    message: "RCH available for synthetic test probe.".to_string(),
+                    repair: None,
+                },
+            },
             degraded: vec![],
         }
     }
@@ -2473,6 +2616,7 @@ mod tests {
             &[PathCapacityProbe {
                 label: "workspace",
                 role: "workspace_root",
+                path: None,
                 exists: false,
                 nearest_existing_ancestor: false,
                 same_filesystem_as_workspace: None,

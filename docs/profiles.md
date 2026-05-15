@@ -22,9 +22,15 @@ The probe is **side-effect-free** and runs automatically when you plan a config:
 ```bash
 # See what the probe detects (embedded in plan output)
 ee profile config plan --json | jq '.data.probe'
+
+# Or inspect the read-only host profile surface directly
+ee diag host-profile --workspace . --json
 ```
 
-Output includes: CPU cores, memory totals, path capacities, tool availability.
+Output includes: CPU cores, memory totals, path capacities, tool availability,
+and RCH posture. Absolute paths are redacted by default. When
+`ee diag host-profile --full-paths --json` is used, the response changes its
+redaction markers to record that local paths were explicitly requested.
 
 ### Step 2: Plan config changes
 
@@ -182,7 +188,7 @@ ee profile config plan --json | jq '{
 
 | Schema | Description |
 |--------|-------------|
-| `ee.profile.probe.v1` | Host resource probe results |
+| `ee.host_profile.v1` | Host resource probe results |
 | `ee.profile.config.plan.v1` | Config plan/apply report |
 | `ee.profile.runtime.v1` | Runtime profile status |
 

@@ -17,7 +17,12 @@ use toml_edit::{DocumentMut, Item};
 use crate::config::{
     ConfigFile, ConfigLayers, ConfigShowEntry, ConfigShowReport, EnvironmentConfigError,
     GRAPH_CAUSAL_MIN_COST_NORMALIZATION_KEY, GRAPH_CURATE_ARTICULATION_PROTECTION_MULTIPLIER_KEY,
-    GRAPH_CURATE_ONION_DECAY_MAX_KEY, GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY,
+    GRAPH_CURATE_ONION_DECAY_MAX_KEY, GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY,
+    GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY, GRAPH_FEATURE_LOAD_BEARING_ENABLED_KEY,
+    GRAPH_FEATURE_PACK_DNA_ENABLED_KEY, GRAPH_FEATURE_PPR_ENABLED_KEY,
+    GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY,
+    GRAPH_FEATURE_SKYLINE_ENABLED_KEY, GRAPH_FEATURE_STRUCTURAL_DECAY_ENABLED_KEY,
+    GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY, GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY,
     GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY, GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY,
     GRAPH_HITS_PROFILE_BOOST_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY, GRAPH_PACK_DNA_MAX_ITEMS_KEY,
     GRAPH_PPR_ALPHA_KEY, PathExpander, built_in_config, config_from_env, merge_config,
@@ -156,6 +161,16 @@ pub fn graph_config_keys() -> &'static [&'static str] {
         GRAPH_PACK_DNA_MAX_EDGES_KEY,
         GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY,
         GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY,
+        GRAPH_FEATURE_PPR_ENABLED_KEY,
+        GRAPH_FEATURE_PACK_DNA_ENABLED_KEY,
+        GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY,
+        GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY,
+        GRAPH_FEATURE_STRUCTURAL_DECAY_ENABLED_KEY,
+        GRAPH_FEATURE_PROXIMITY_ENABLED_KEY,
+        GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY,
+        GRAPH_FEATURE_SKYLINE_ENABLED_KEY,
+        GRAPH_FEATURE_LOAD_BEARING_ENABLED_KEY,
+        GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY,
     ]
 }
 
@@ -347,6 +362,7 @@ fn read_optional_config(path: &Path) -> Result<(bool, String), ConfigSurfaceErro
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GraphValueKind {
+    Bool,
     UnitFloat,
     PositiveFloat,
     NonNegativeFloat,
@@ -412,12 +428,63 @@ fn graph_key_spec(key: &str) -> Option<GraphKeySpec> {
             path: &["graph", "gomory_hu", "sample_size"],
             kind: GraphValueKind::UnsignedInteger,
         }),
+        GRAPH_FEATURE_PPR_ENABLED_KEY => Some(GraphKeySpec {
+            key: GRAPH_FEATURE_PPR_ENABLED_KEY,
+            path: &["graph", "feature", "ppr", "enabled"],
+            kind: GraphValueKind::Bool,
+        }),
+        GRAPH_FEATURE_PACK_DNA_ENABLED_KEY => Some(GraphKeySpec {
+            key: GRAPH_FEATURE_PACK_DNA_ENABLED_KEY,
+            path: &["graph", "feature", "pack_dna", "enabled"],
+            kind: GraphValueKind::Bool,
+        }),
+        GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY => Some(GraphKeySpec {
+            key: GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY,
+            path: &["graph", "feature", "causal_explain", "enabled"],
+            kind: GraphValueKind::Bool,
+        }),
+        GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY => Some(GraphKeySpec {
+            key: GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY,
+            path: &["graph", "feature", "structural_health", "enabled"],
+            kind: GraphValueKind::Bool,
+        }),
+        GRAPH_FEATURE_STRUCTURAL_DECAY_ENABLED_KEY => Some(GraphKeySpec {
+            key: GRAPH_FEATURE_STRUCTURAL_DECAY_ENABLED_KEY,
+            path: &["graph", "feature", "structural_decay", "enabled"],
+            kind: GraphValueKind::Bool,
+        }),
+        GRAPH_FEATURE_PROXIMITY_ENABLED_KEY => Some(GraphKeySpec {
+            key: GRAPH_FEATURE_PROXIMITY_ENABLED_KEY,
+            path: &["graph", "feature", "proximity", "enabled"],
+            kind: GraphValueKind::Bool,
+        }),
+        GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY => Some(GraphKeySpec {
+            key: GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY,
+            path: &["graph", "feature", "revision_dominance", "enabled"],
+            kind: GraphValueKind::Bool,
+        }),
+        GRAPH_FEATURE_SKYLINE_ENABLED_KEY => Some(GraphKeySpec {
+            key: GRAPH_FEATURE_SKYLINE_ENABLED_KEY,
+            path: &["graph", "feature", "skyline", "enabled"],
+            kind: GraphValueKind::Bool,
+        }),
+        GRAPH_FEATURE_LOAD_BEARING_ENABLED_KEY => Some(GraphKeySpec {
+            key: GRAPH_FEATURE_LOAD_BEARING_ENABLED_KEY,
+            path: &["graph", "feature", "load_bearing", "enabled"],
+            kind: GraphValueKind::Bool,
+        }),
+        GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY => Some(GraphKeySpec {
+            key: GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY,
+            path: &["graph", "feature", "hits_profiles", "enabled"],
+            kind: GraphValueKind::Bool,
+        }),
         _ => None,
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum TomlScalar {
+    Bool(bool),
     Float(f64),
     Integer(i64),
 }
@@ -425,6 +492,7 @@ enum TomlScalar {
 impl TomlScalar {
     fn report_value(self) -> String {
         match self {
+            Self::Bool(value) => value.to_string(),
             Self::Float(value) => value.to_string(),
             Self::Integer(value) => value.to_string(),
         }
@@ -433,6 +501,11 @@ impl TomlScalar {
 
 fn parse_graph_value(spec: GraphKeySpec, raw: &str) -> Result<TomlScalar, ConfigSurfaceError> {
     match spec.kind {
+        GraphValueKind::Bool => match raw {
+            "true" => Ok(TomlScalar::Bool(true)),
+            "false" => Ok(TomlScalar::Bool(false)),
+            _ => Err(invalid_value(spec, raw, "`true` or `false`")),
+        },
         GraphValueKind::UnitFloat => {
             let value = parse_finite_float(spec, raw, "a finite number in the range 0.0..=1.0")?;
             if (0.0..=1.0).contains(&value) {
@@ -519,6 +592,8 @@ fn item_value_for_report(item: &Item) -> String {
         value.to_string()
     } else if let Some(value) = item.as_integer() {
         value.to_string()
+    } else if let Some(value) = item.as_bool() {
+        value.to_string()
     } else {
         item.type_name().to_string()
     }
@@ -527,9 +602,11 @@ fn item_value_for_report(item: &Item) -> String {
 fn set_toml_value(document: &mut DocumentMut, path: &[&str], value: TomlScalar) {
     let item = match path {
         [section, subsection, key] => &mut document[*section][*subsection][*key],
+        [section, subsection, leaf, key] => &mut document[*section][*subsection][*leaf][*key],
         _ => return,
     };
     *item = match value {
+        TomlScalar::Bool(value) => toml_edit::value(value),
         TomlScalar::Float(value) => toml_edit::value(value),
         TomlScalar::Integer(value) => toml_edit::value(value),
     };
@@ -597,6 +674,16 @@ mod tests {
             ("graph.pack_dna.max_edges", "34"),
             ("graph.gomory_hu.sample_threshold", "600"),
             ("graph.gomory_hu.sample_size", "150"),
+            ("graph.feature.ppr.enabled", "true"),
+            ("graph.feature.pack_dna.enabled", "true"),
+            ("graph.feature.causal_explain.enabled", "false"),
+            ("graph.feature.structural_health.enabled", "true"),
+            ("graph.feature.structural_decay.enabled", "true"),
+            ("graph.feature.proximity.enabled", "false"),
+            ("graph.feature.revision_dominance.enabled", "false"),
+            ("graph.feature.skyline.enabled", "true"),
+            ("graph.feature.load_bearing.enabled", "false"),
+            ("graph.feature.hits_profiles.enabled", "true"),
         ];
 
         for (key, value) in samples {
@@ -628,6 +715,29 @@ mod tests {
             Err(error) => error.to_string(),
         };
         if error.contains("0.0..=1.0") {
+            Ok(())
+        } else {
+            Err(format!("unexpected error: {error}"))
+        }
+    }
+
+    #[test]
+    fn graph_set_rejects_invalid_feature_flag_bool() -> TestResult {
+        let temp = workspace()?;
+        let error = match set_config(
+            &options(temp.path()),
+            "graph.feature.ppr.enabled",
+            "yes",
+            false,
+        ) {
+            Ok(report) => {
+                return Err(format!(
+                    "invalid graph feature flag unexpectedly succeeded: {report:?}"
+                ));
+            }
+            Err(error) => error.to_string(),
+        };
+        if error.contains("`true` or `false`") {
             Ok(())
         } else {
             Err(format!("unexpected error: {error}"))

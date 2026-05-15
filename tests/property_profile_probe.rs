@@ -6,10 +6,10 @@
 //! 3. Budget scaling is monotonic with profile tier
 
 use ee::core::profile::{
-    CpuProbe, EnvironmentProbe, HOST_PROFILE_PROBE_SCHEMA_V1, HostResourceProbeReport, MemoryProbe,
-    OperatingProfile, PROFILE_BUDGET_CONFORMANCE_SCHEMA_V1, ProfileBudgetConformanceStatus,
-    ProfileBudgets, WorkspaceProbe, check_profile_budget_artifact_conformance,
-    recommend_operating_profile,
+    CpuProbe, EnvironmentProbe, HOST_PROFILE_PROBE_SCHEMA_V1, HostResourceProbeReport,
+    HostTopologyProbe, MemoryProbe, OperatingProfile, PROFILE_BUDGET_CONFORMANCE_SCHEMA_V1,
+    ProfileBudgetConformanceStatus, ProfileBudgets, RchTopologyProbe, WorkspaceProbe,
+    check_profile_budget_artifact_conformance, recommend_operating_profile,
 };
 use ee::models::{
     ArtifactKind, ArtifactSummary, MetricValue, ProfileReference, SummaryDegradation,
@@ -68,6 +68,16 @@ fn synthetic_probe(
         paths: Vec::new(),
         tools: Vec::new(),
         environment: synthetic_environment_probe(),
+        topology: HostTopologyProbe {
+            rch: RchTopologyProbe {
+                available: true,
+                status: "available_not_queried",
+                posture: "ok",
+                source: "property_test",
+                message: "RCH available for synthetic property probe.".to_string(),
+                repair: None,
+            },
+        },
         degraded: Vec::new(),
     }
 }

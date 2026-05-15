@@ -38,3 +38,4 @@ including rejected alternatives and verification hooks.
 - [ADR 0030: Typed Determinism Capability Token](0030-typed-determinism-capability-token.md)
 - [ADR 0031: Submodular Pack Assembly — Audit, Don't Certify](0031-submodular-pack-or-rename.md)
 - [ADR 0032: Bayesian (alpha, beta) Posteriors on Memories](0032-bayesian-memory-posteriors.md)
+- [ADR 0033: Serve Localhost V2 Design](0033-serve-localhost-v2-design.md)

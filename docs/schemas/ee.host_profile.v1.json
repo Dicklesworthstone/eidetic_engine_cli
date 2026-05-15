@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.host_profile.v1.json",
+  "title": "ee.host_profile.v1",
+  "description": "Read-only host profile probe data for resource calibration and RCH posture.",
+  "type": "object",
+  "required": [
+    "schema",
+    "sideEffectFree",
+    "redaction",
+    "complete",
+    "workspace",
+    "cpu",
+    "memory",
+    "paths",
+    "tools",
+    "environment",
+    "topology",
+    "degraded"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "type": "string", "const": "ee.host_profile.v1" },
+    "sideEffectFree": { "type": "boolean", "const": true },
+    "redaction": {
+      "type": "string",
+      "enum": [
+        "label_only_paths_presence_only_env",
+        "operator_requested_paths_presence_only_env"
+      ]
+    },
+    "complete": { "type": "boolean" },
+    "workspace": { "$ref": "#/$defs/workspaceProbe" },
+    "cpu": { "$ref": "#/$defs/cpuProbe" },
+    "memory": { "$ref": "#/$defs/memoryProbe" },
+    "paths": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/pathCapacityProbe" }
+    },
+    "tools": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/toolProbe" }
+    },
+    "environment": { "$ref": "#/$defs/environmentProbe" },
+    "topology": { "$ref": "#/$defs/hostTopologyProbe" },
+    "degraded": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/degradation" }
+    }
+  },
+  "$defs": {
+    "workspaceProbe": {
+      "type": "object",
+      "required": ["label", "initialized", "redaction"],
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": "string" },
+        "initialized": { "type": "boolean" },
+        "redaction": {
+          "type": "string",
+          "enum": [
+            "path_not_emitted",
+            "path_emitted_by_operator_request"
+          ]
+        }
+      }
+    },
+    "cpuProbe": {
+      "type": "object",
+      "required": ["logicalCores", "physicalCores", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "logicalCores": { "type": ["integer", "null"], "minimum": 1 },
+        "physicalCores": { "type": ["integer", "null"], "minimum": 1 },
+        "source": { "type": "string" }
+      }
+    },
+    "memoryProbe": {
+      "type": "object",
+      "required": ["totalBytes", "availableBytes", "cgroupLimitBytes", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "totalBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "availableBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "cgroupLimitBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "source": { "type": "string" }
+      }
+    },
+    "pathCapacityProbe": {
+      "type": "object",
+      "required": [
+        "label",
+        "role",
+        "exists",
+        "nearestExistingAncestor",
+        "sameFilesystemAsWorkspace",
+        "totalBytes",
+        "availableBytes",
+        "redaction"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": "string" },
+        "role": { "type": "string" },
+        "path": { "type": "string" },
+        "exists": { "type": "boolean" },
+        "nearestExistingAncestor": { "type": "boolean" },
+        "sameFilesystemAsWorkspace": { "type": ["boolean", "null"] },
+        "totalBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "availableBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "redaction": { "type": "string", "const": "path_not_emitted" }
+      }
+    },
+    "toolProbe": {
+      "type": "object",
+      "required": ["name", "available", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "available": { "type": "boolean" },
+        "source": { "type": "string", "const": "path_lookup_presence_only" }
+      }
+    },
+    "environmentProbe": {
+      "type": "object",
+      "required": [
+        "tmpdirConfigured",
+        "cargoTargetDirConfigured",
+        "rchHintConfigured",
+        "redaction"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "tmpdirConfigured": { "type": "boolean" },
+        "cargoTargetDirConfigured": { "type": "boolean" },
+        "rchHintConfigured": { "type": "boolean" },
+        "redaction": { "type": "string", "const": "presence_only" }
+      }
+    },
+    "hostTopologyProbe": {
+      "type": "object",
+      "required": ["rch"],
+      "additionalProperties": false,
+      "properties": {
+        "rch": { "$ref": "#/$defs/rchTopologyProbe" }
+      }
+    },
+    "rchTopologyProbe": {
+      "type": "object",
+      "required": [
+        "available",
+        "status",
+        "posture",
+        "source",
+        "message",
+        "repair"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "available": { "type": "boolean" },
+        "status": {
+          "type": "string",
+          "enum": ["available_not_queried", "missing"]
+        },
+        "posture": {
+          "type": "string",
+          "enum": ["ok", "degraded_recoverable"]
+        },
+        "source": { "type": "string", "const": "path_lookup_presence_only" },
+        "message": { "type": "string" },
+        "repair": { "type": ["string", "null"] }
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message", "repair"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "string" },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": { "type": "string" },
+        "repair": { "type": "string" }
+      }
+    }
+  }
+}

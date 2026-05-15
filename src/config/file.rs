@@ -259,6 +259,7 @@ pub struct GraphConfig {
     pub causal: GraphCausalConfig,
     pub pack_dna: GraphPackDnaConfig,
     pub gomory_hu: GraphGomoryHuConfig,
+    pub feature: GraphFeatureFlagsConfig,
 }
 
 impl GraphConfig {
@@ -271,6 +272,7 @@ impl GraphConfig {
             causal: GraphCausalConfig::parse(document)?,
             pack_dna: GraphPackDnaConfig::parse(document)?,
             gomory_hu: GraphGomoryHuConfig::parse(document)?,
+            feature: GraphFeatureFlagsConfig::parse(document)?,
         })
     }
 }
@@ -387,6 +389,73 @@ impl GraphGomoryHuConfig {
         Ok(Self {
             sample_threshold: optional_u64_path(document, SECTIONS, "sample_threshold")?,
             sample_size: optional_u64_path(document, SECTIONS, "sample_size")?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GraphFeatureFlagsConfig {
+    pub ppr_enabled: Option<bool>,
+    pub pack_dna_enabled: Option<bool>,
+    pub causal_explain_enabled: Option<bool>,
+    pub structural_health_enabled: Option<bool>,
+    pub structural_decay_enabled: Option<bool>,
+    pub proximity_enabled: Option<bool>,
+    pub revision_dominance_enabled: Option<bool>,
+    pub skyline_enabled: Option<bool>,
+    pub load_bearing_enabled: Option<bool>,
+    pub hits_profiles_enabled: Option<bool>,
+}
+
+impl GraphFeatureFlagsConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            ppr_enabled: optional_bool_path(document, &["graph", "feature", "ppr"], "enabled")?,
+            pack_dna_enabled: optional_bool_path(
+                document,
+                &["graph", "feature", "pack_dna"],
+                "enabled",
+            )?,
+            causal_explain_enabled: optional_bool_path(
+                document,
+                &["graph", "feature", "causal_explain"],
+                "enabled",
+            )?,
+            structural_health_enabled: optional_bool_path(
+                document,
+                &["graph", "feature", "structural_health"],
+                "enabled",
+            )?,
+            structural_decay_enabled: optional_bool_path(
+                document,
+                &["graph", "feature", "structural_decay"],
+                "enabled",
+            )?,
+            proximity_enabled: optional_bool_path(
+                document,
+                &["graph", "feature", "proximity"],
+                "enabled",
+            )?,
+            revision_dominance_enabled: optional_bool_path(
+                document,
+                &["graph", "feature", "revision_dominance"],
+                "enabled",
+            )?,
+            skyline_enabled: optional_bool_path(
+                document,
+                &["graph", "feature", "skyline"],
+                "enabled",
+            )?,
+            load_bearing_enabled: optional_bool_path(
+                document,
+                &["graph", "feature", "load_bearing"],
+                "enabled",
+            )?,
+            hits_profiles_enabled: optional_bool_path(
+                document,
+                &["graph", "feature", "hits_profiles"],
+                "enabled",
+            )?,
         })
     }
 }

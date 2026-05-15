@@ -55,7 +55,7 @@ when both the CPU and memory thresholds for that tier are met.
 |-------|-----------|------------|
 | `schema` | `/schema` | `json_contract_snapshots__profile_config_*`; `report_serialization_omits_raw_paths_and_env_values` |
 | `side_effect_free` | `/sideEffectFree` | `HostResourceProbeReport::gather_for_workspace`; JSON snapshots |
-| `redaction` | `/redaction` | `report_serialization_omits_raw_paths_and_env_values`; JSON snapshots |
+| `redaction` | `/redaction` | `report_serialization_omits_raw_paths_and_env_values`; `full_path_probe_mode_is_explicit`; JSON snapshots |
 | `complete` | `/complete` | JSON snapshots; incomplete-probe unit coverage |
 | `workspace.initialized` | `/workspace/initialized` | `profile_workflow_probe_recommend_plan_apply_dryrun`; JSON snapshots |
 | `cpu.logical_cores` | `/cpu/logicalCores` | E2E plan assertion; threshold unit tests |
@@ -66,15 +66,16 @@ when both the CPU and memory thresholds for that tier are met.
 | `paths[]` | `/paths[]` | `path_probe_labels_are_stable`; `profile_probe_includes_path_filesystem_info` |
 | `tools[]` | `/tools[]` | `tool_probe_order_is_stable_and_presence_only`; `profile_probe_includes_tool_availability` |
 | `environment` | `/environment` | JSON snapshots preserve presence-only booleans |
+| `topology` | `/topology` | `missing_rch_is_degraded_recoverable`; JSON snapshots preserve RCH posture |
 | `degraded[]` | `/degraded[]` | `host_probe_degradation_codes_are_stable`; probe construction emits stable degradation codes for missing CPU, memory, or path capacity |
 
 ### MUST Clauses
 
 | ID | Clause | Coverage |
 |----|--------|----------|
-| PF-01 | MUST emit `ee.profile.probe.v1`. | JSON snapshots; serialization unit test |
+| PF-01 | MUST emit `ee.host_profile.v1`. | JSON snapshots; serialization unit test |
 | PF-02 | MUST mark the probe side-effect-free. | JSON snapshots; report construction |
-| PF-03 | MUST avoid raw workspace paths in serialized probe output. | `report_serialization_omits_raw_paths_and_env_values`; `path_probe_labels_are_stable` |
+| PF-03 | MUST avoid raw workspace paths in serialized probe output unless full paths are explicitly requested. | `report_serialization_omits_raw_paths_and_env_values`; `path_probe_labels_are_stable`; `full_path_probe_mode_is_explicit` |
 | PF-04 | MUST expose `cpu.logicalCores` for tier selection. | E2E plan assertion; recommendation tests |
 | PF-05 | MUST preserve optional `cpu.physicalCores` in the schema. | JSON snapshots |
 | PF-06 | MUST expose `memory.totalBytes` and `memory.availableBytes`. | E2E plan assertion; parser unit tests; JSON snapshots |

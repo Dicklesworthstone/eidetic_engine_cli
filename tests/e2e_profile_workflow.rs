@@ -155,7 +155,7 @@ fn profile_workflow_probe_recommend_plan_apply_dryrun() -> TestResult {
         .ok_or("missing probe in plan")?;
     ensure_equal(
         &probe.pointer("/schema"),
-        &Some(&json!("ee.profile.probe.v1")),
+        &Some(&json!("ee.host_profile.v1")),
         "probe schema",
     )?;
     ensure(

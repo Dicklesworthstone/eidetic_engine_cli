@@ -298,7 +298,7 @@ expression: profile_config_plan
         }
       ],
       "redaction": "label_only_paths_presence_only_env",
-      "schema": "ee.profile.probe.v1",
+      "schema": "ee.host_profile.v1",
       "sideEffectFree": true,
       "tools": [
         {
@@ -337,6 +337,16 @@ expression: profile_config_plan
           "source": "path_lookup_presence_only"
         }
       ],
+      "topology": {
+        "rch": {
+          "available": true,
+          "message": "RCH binary is present on PATH; worker health is checked by RCH-specific diagnostics.",
+          "posture": "ok",
+          "repair": null,
+          "source": "path_lookup_presence_only",
+          "status": "available_not_queried"
+        }
+      },
       "workspace": {
         "initialized": true,
         "label": "workspace",

@@ -10,10 +10,11 @@ pub use env_registry::{EnvVar, is_set as env_var_is_set, read as read_env_var};
 pub use env_registry::{read_or_default as read_env_var_or_default, read_os as read_env_var_os};
 pub use file::{
     CassConfig, ConfigFile, ConfigParseError, CurationConfig, FeedbackConfig, GraphCausalConfig,
-    GraphConfig, GraphCurateConfig, GraphGomoryHuConfig, GraphHealthConfig, GraphHitsConfig,
-    GraphPackDnaConfig, GraphPprConfig, HandoffConfig, HandoffStaleThresholdConfig, LearnConfig,
-    LearnDecayConfig, OutputRedactionConfig, PackConfig, PolicyConfig, PrivacyConfig,
-    RuntimeConfig, SearchConfig, SearchSpeed, SecretDetectorConfig, StorageConfig, TrustConfig,
+    GraphConfig, GraphCurateConfig, GraphFeatureFlagsConfig, GraphGomoryHuConfig,
+    GraphHealthConfig, GraphHitsConfig, GraphPackDnaConfig, GraphPprConfig, HandoffConfig,
+    HandoffStaleThresholdConfig, LearnConfig, LearnDecayConfig, OutputRedactionConfig, PackConfig,
+    PolicyConfig, PrivacyConfig, RuntimeConfig, SearchConfig, SearchSpeed, SecretDetectorConfig,
+    StorageConfig, TrustConfig,
 };
 pub use merge::{
     CASS_BINARY_KEY, CASS_ENABLED_KEY, CASS_SINCE_KEY, CURATION_DECAY_HALF_LIFE_DAYS_KEY,
@@ -21,7 +22,12 @@ pub use merge::{
     ConfigShowReport, ConfigValueSource, EnvironmentConfigError,
     FEEDBACK_HARMFUL_BURST_WINDOW_SECONDS_KEY, FEEDBACK_HARMFUL_PER_SOURCE_PER_HOUR_KEY,
     GRAPH_CAUSAL_MIN_COST_NORMALIZATION_KEY, GRAPH_CURATE_ARTICULATION_PROTECTION_MULTIPLIER_KEY,
-    GRAPH_CURATE_ONION_DECAY_MAX_KEY, GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY,
+    GRAPH_CURATE_ONION_DECAY_MAX_KEY, GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY,
+    GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY, GRAPH_FEATURE_LOAD_BEARING_ENABLED_KEY,
+    GRAPH_FEATURE_PACK_DNA_ENABLED_KEY, GRAPH_FEATURE_PPR_ENABLED_KEY,
+    GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY,
+    GRAPH_FEATURE_SKYLINE_ENABLED_KEY, GRAPH_FEATURE_STRUCTURAL_DECAY_ENABLED_KEY,
+    GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY, GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY,
     GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY, GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY,
     GRAPH_HITS_PROFILE_BOOST_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY, GRAPH_PACK_DNA_MAX_ITEMS_KEY,
     GRAPH_PPR_ALPHA_KEY, LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY,

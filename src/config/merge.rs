@@ -16,10 +16,10 @@ use serde::Serialize;
 use super::env_registry::EnvVar;
 use super::file::{
     CassConfig, ConfigFile, CurationConfig, FeedbackConfig, GraphCausalConfig, GraphConfig,
-    GraphCurateConfig, GraphGomoryHuConfig, GraphHealthConfig, GraphHitsConfig, GraphPackDnaConfig,
-    GraphPprConfig, HandoffConfig, LearnConfig, LearnDecayConfig, OutputRedactionConfig,
-    PackConfig, PolicyConfig, PrivacyConfig, RuntimeConfig, SearchConfig, SearchSpeed,
-    SecretDetectorConfig, StorageConfig, TrustConfig,
+    GraphCurateConfig, GraphFeatureFlagsConfig, GraphGomoryHuConfig, GraphHealthConfig,
+    GraphHitsConfig, GraphPackDnaConfig, GraphPprConfig, HandoffConfig, LearnConfig,
+    LearnDecayConfig, OutputRedactionConfig, PackConfig, PolicyConfig, PrivacyConfig,
+    RuntimeConfig, SearchConfig, SearchSpeed, SecretDetectorConfig, StorageConfig, TrustConfig,
 };
 use super::path::{PathExpander, PathExpansionError};
 
@@ -52,6 +52,19 @@ pub const GRAPH_PACK_DNA_MAX_ITEMS_KEY: &str = "graph.pack_dna.max_items";
 pub const GRAPH_PACK_DNA_MAX_EDGES_KEY: &str = "graph.pack_dna.max_edges";
 pub const GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY: &str = "graph.gomory_hu.sample_threshold";
 pub const GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY: &str = "graph.gomory_hu.sample_size";
+pub const GRAPH_FEATURE_PPR_ENABLED_KEY: &str = "graph.feature.ppr.enabled";
+pub const GRAPH_FEATURE_PACK_DNA_ENABLED_KEY: &str = "graph.feature.pack_dna.enabled";
+pub const GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY: &str = "graph.feature.causal_explain.enabled";
+pub const GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY: &str =
+    "graph.feature.structural_health.enabled";
+pub const GRAPH_FEATURE_STRUCTURAL_DECAY_ENABLED_KEY: &str =
+    "graph.feature.structural_decay.enabled";
+pub const GRAPH_FEATURE_PROXIMITY_ENABLED_KEY: &str = "graph.feature.proximity.enabled";
+pub const GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY: &str =
+    "graph.feature.revision_dominance.enabled";
+pub const GRAPH_FEATURE_SKYLINE_ENABLED_KEY: &str = "graph.feature.skyline.enabled";
+pub const GRAPH_FEATURE_LOAD_BEARING_ENABLED_KEY: &str = "graph.feature.load_bearing.enabled";
+pub const GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY: &str = "graph.feature.hits_profiles.enabled";
 pub const CURATION_DUPLICATE_SIMILARITY_KEY: &str = "curation.duplicate_similarity";
 pub const CURATION_HARMFUL_WEIGHT_KEY: &str = "curation.harmful_weight";
 pub const CURATION_DECAY_HALF_LIFE_DAYS_KEY: &str = "curation.decay_half_life_days";
@@ -355,6 +368,76 @@ impl MergedConfig {
                 self.source(GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY),
             ));
         }
+        if let Some(enabled) = self.values.graph.feature.ppr_enabled {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_FEATURE_PPR_ENABLED_KEY,
+                enabled.to_string(),
+                self.source(GRAPH_FEATURE_PPR_ENABLED_KEY),
+            ));
+        }
+        if let Some(enabled) = self.values.graph.feature.pack_dna_enabled {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_FEATURE_PACK_DNA_ENABLED_KEY,
+                enabled.to_string(),
+                self.source(GRAPH_FEATURE_PACK_DNA_ENABLED_KEY),
+            ));
+        }
+        if let Some(enabled) = self.values.graph.feature.causal_explain_enabled {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY,
+                enabled.to_string(),
+                self.source(GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY),
+            ));
+        }
+        if let Some(enabled) = self.values.graph.feature.structural_health_enabled {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY,
+                enabled.to_string(),
+                self.source(GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY),
+            ));
+        }
+        if let Some(enabled) = self.values.graph.feature.structural_decay_enabled {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_FEATURE_STRUCTURAL_DECAY_ENABLED_KEY,
+                enabled.to_string(),
+                self.source(GRAPH_FEATURE_STRUCTURAL_DECAY_ENABLED_KEY),
+            ));
+        }
+        if let Some(enabled) = self.values.graph.feature.proximity_enabled {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_FEATURE_PROXIMITY_ENABLED_KEY,
+                enabled.to_string(),
+                self.source(GRAPH_FEATURE_PROXIMITY_ENABLED_KEY),
+            ));
+        }
+        if let Some(enabled) = self.values.graph.feature.revision_dominance_enabled {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY,
+                enabled.to_string(),
+                self.source(GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY),
+            ));
+        }
+        if let Some(enabled) = self.values.graph.feature.skyline_enabled {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_FEATURE_SKYLINE_ENABLED_KEY,
+                enabled.to_string(),
+                self.source(GRAPH_FEATURE_SKYLINE_ENABLED_KEY),
+            ));
+        }
+        if let Some(enabled) = self.values.graph.feature.load_bearing_enabled {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_FEATURE_LOAD_BEARING_ENABLED_KEY,
+                enabled.to_string(),
+                self.source(GRAPH_FEATURE_LOAD_BEARING_ENABLED_KEY),
+            ));
+        }
+        if let Some(enabled) = self.values.graph.feature.hits_profiles_enabled {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY,
+                enabled.to_string(),
+                self.source(GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY),
+            ));
+        }
 
         // Curation section
         if let Some(sim) = self.values.curation.duplicate_similarity {
@@ -618,6 +701,18 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             gomory_hu: GraphGomoryHuConfig {
                 sample_threshold: Some(500),
                 sample_size: Some(100),
+            },
+            feature: GraphFeatureFlagsConfig {
+                ppr_enabled: Some(false),
+                pack_dna_enabled: Some(false),
+                causal_explain_enabled: Some(false),
+                structural_health_enabled: Some(false),
+                structural_decay_enabled: Some(false),
+                proximity_enabled: Some(false),
+                revision_dominance_enabled: Some(false),
+                skyline_enabled: Some(false),
+                load_bearing_enabled: Some(false),
+                hits_profiles_enabled: Some(false),
             },
         },
         curation: CurationConfig {
@@ -1051,6 +1146,98 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                     &layers.defaults.graph.gomory_hu.sample_size,
                 ),
             },
+            feature: GraphFeatureFlagsConfig {
+                ppr_enabled: pick_field(
+                    &mut sources,
+                    GRAPH_FEATURE_PPR_ENABLED_KEY,
+                    &layers.cli.graph.feature.ppr_enabled,
+                    &layers.environment.graph.feature.ppr_enabled,
+                    &layers.project.graph.feature.ppr_enabled,
+                    &layers.user.graph.feature.ppr_enabled,
+                    &layers.defaults.graph.feature.ppr_enabled,
+                ),
+                pack_dna_enabled: pick_field(
+                    &mut sources,
+                    GRAPH_FEATURE_PACK_DNA_ENABLED_KEY,
+                    &layers.cli.graph.feature.pack_dna_enabled,
+                    &layers.environment.graph.feature.pack_dna_enabled,
+                    &layers.project.graph.feature.pack_dna_enabled,
+                    &layers.user.graph.feature.pack_dna_enabled,
+                    &layers.defaults.graph.feature.pack_dna_enabled,
+                ),
+                causal_explain_enabled: pick_field(
+                    &mut sources,
+                    GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY,
+                    &layers.cli.graph.feature.causal_explain_enabled,
+                    &layers.environment.graph.feature.causal_explain_enabled,
+                    &layers.project.graph.feature.causal_explain_enabled,
+                    &layers.user.graph.feature.causal_explain_enabled,
+                    &layers.defaults.graph.feature.causal_explain_enabled,
+                ),
+                structural_health_enabled: pick_field(
+                    &mut sources,
+                    GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY,
+                    &layers.cli.graph.feature.structural_health_enabled,
+                    &layers.environment.graph.feature.structural_health_enabled,
+                    &layers.project.graph.feature.structural_health_enabled,
+                    &layers.user.graph.feature.structural_health_enabled,
+                    &layers.defaults.graph.feature.structural_health_enabled,
+                ),
+                structural_decay_enabled: pick_field(
+                    &mut sources,
+                    GRAPH_FEATURE_STRUCTURAL_DECAY_ENABLED_KEY,
+                    &layers.cli.graph.feature.structural_decay_enabled,
+                    &layers.environment.graph.feature.structural_decay_enabled,
+                    &layers.project.graph.feature.structural_decay_enabled,
+                    &layers.user.graph.feature.structural_decay_enabled,
+                    &layers.defaults.graph.feature.structural_decay_enabled,
+                ),
+                proximity_enabled: pick_field(
+                    &mut sources,
+                    GRAPH_FEATURE_PROXIMITY_ENABLED_KEY,
+                    &layers.cli.graph.feature.proximity_enabled,
+                    &layers.environment.graph.feature.proximity_enabled,
+                    &layers.project.graph.feature.proximity_enabled,
+                    &layers.user.graph.feature.proximity_enabled,
+                    &layers.defaults.graph.feature.proximity_enabled,
+                ),
+                revision_dominance_enabled: pick_field(
+                    &mut sources,
+                    GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY,
+                    &layers.cli.graph.feature.revision_dominance_enabled,
+                    &layers.environment.graph.feature.revision_dominance_enabled,
+                    &layers.project.graph.feature.revision_dominance_enabled,
+                    &layers.user.graph.feature.revision_dominance_enabled,
+                    &layers.defaults.graph.feature.revision_dominance_enabled,
+                ),
+                skyline_enabled: pick_field(
+                    &mut sources,
+                    GRAPH_FEATURE_SKYLINE_ENABLED_KEY,
+                    &layers.cli.graph.feature.skyline_enabled,
+                    &layers.environment.graph.feature.skyline_enabled,
+                    &layers.project.graph.feature.skyline_enabled,
+                    &layers.user.graph.feature.skyline_enabled,
+                    &layers.defaults.graph.feature.skyline_enabled,
+                ),
+                load_bearing_enabled: pick_field(
+                    &mut sources,
+                    GRAPH_FEATURE_LOAD_BEARING_ENABLED_KEY,
+                    &layers.cli.graph.feature.load_bearing_enabled,
+                    &layers.environment.graph.feature.load_bearing_enabled,
+                    &layers.project.graph.feature.load_bearing_enabled,
+                    &layers.user.graph.feature.load_bearing_enabled,
+                    &layers.defaults.graph.feature.load_bearing_enabled,
+                ),
+                hits_profiles_enabled: pick_field(
+                    &mut sources,
+                    GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY,
+                    &layers.cli.graph.feature.hits_profiles_enabled,
+                    &layers.environment.graph.feature.hits_profiles_enabled,
+                    &layers.project.graph.feature.hits_profiles_enabled,
+                    &layers.user.graph.feature.hits_profiles_enabled,
+                    &layers.defaults.graph.feature.hits_profiles_enabled,
+                ),
+            },
         },
         curation: CurationConfig {
             duplicate_similarity: pick_field(
@@ -1378,19 +1565,21 @@ mod tests {
         CURATION_SPECIFICITY_MIN_KEY, ConfigLayers, ConfigValueSource, EnvironmentConfigError,
         GRAPH_CAUSAL_MIN_COST_NORMALIZATION_KEY,
         GRAPH_CURATE_ARTICULATION_PROTECTION_MULTIPLIER_KEY, GRAPH_CURATE_ONION_DECAY_MAX_KEY,
-        GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY, GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY,
-        GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY, GRAPH_HITS_PROFILE_BOOST_KEY,
-        GRAPH_PACK_DNA_MAX_EDGES_KEY, GRAPH_PACK_DNA_MAX_ITEMS_KEY, GRAPH_PPR_ALPHA_KEY,
-        LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY, LEARN_DECAY_DEMOTE_THRESHOLD_KEY,
-        LEARN_DECAY_PROCEDURAL_RULE_HALF_LIFE_DAYS_KEY, PACK_DEFAULT_MAX_TOKENS_KEY,
-        PACK_DEFAULT_PROFILE_KEY, POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY,
-        SEARCH_DEFAULT_SPEED_KEY, STORAGE_DATABASE_PATH_KEY, STORAGE_INDEX_DIR_KEY,
-        built_in_config, config_from_env, merge_config,
+        GRAPH_FEATURE_PPR_ENABLED_KEY, GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY,
+        GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY, GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY,
+        GRAPH_HITS_PROFILE_BOOST_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY, GRAPH_PACK_DNA_MAX_ITEMS_KEY,
+        GRAPH_PPR_ALPHA_KEY, LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY,
+        LEARN_DECAY_DEMOTE_THRESHOLD_KEY, LEARN_DECAY_PROCEDURAL_RULE_HALF_LIFE_DAYS_KEY,
+        PACK_DEFAULT_MAX_TOKENS_KEY, PACK_DEFAULT_PROFILE_KEY,
+        POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY, SEARCH_DEFAULT_SPEED_KEY,
+        STORAGE_DATABASE_PATH_KEY, STORAGE_INDEX_DIR_KEY, built_in_config, config_from_env,
+        merge_config,
     };
     use crate::config::{
-        ConfigFile, CurationConfig, GraphConfig, GraphCurateConfig, GraphGomoryHuConfig,
-        GraphHealthConfig, GraphPprConfig, LearnConfig, LearnDecayConfig, PackConfig, PathExpander,
-        PolicyConfig, SearchConfig, SearchSpeed, SecretDetectorConfig, StorageConfig,
+        ConfigFile, CurationConfig, GraphConfig, GraphCurateConfig, GraphFeatureFlagsConfig,
+        GraphGomoryHuConfig, GraphHealthConfig, GraphPprConfig, LearnConfig, LearnDecayConfig,
+        PackConfig, PathExpander, PolicyConfig, SearchConfig, SearchSpeed, SecretDetectorConfig,
+        StorageConfig,
     };
 
     type TestResult = Result<(), String>;
@@ -1568,6 +1757,10 @@ mod tests {
                     sample_threshold: Some(750),
                     ..GraphGomoryHuConfig::default()
                 },
+                feature: GraphFeatureFlagsConfig {
+                    ppr_enabled: Some(true),
+                    ..GraphFeatureFlagsConfig::default()
+                },
                 ..GraphConfig::default()
             },
             curation: CurationConfig {
@@ -1702,6 +1895,16 @@ mod tests {
             &merged.source(GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY),
             &Some(ConfigValueSource::Project),
             "graph gomory-hu sample threshold source",
+        )?;
+        ensure_equal(
+            &merged.values.graph.feature.ppr_enabled,
+            &Some(true),
+            "project graph feature ppr enabled",
+        )?;
+        ensure_equal(
+            &merged.source(GRAPH_FEATURE_PPR_ENABLED_KEY),
+            &Some(ConfigValueSource::Project),
+            "graph feature ppr source",
         )?;
         ensure_equal(
             &merged.values.curation.specificity_min,

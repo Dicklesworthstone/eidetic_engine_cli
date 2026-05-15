@@ -121,7 +121,7 @@ them:
     "reasons": []
   },
   "probe": {
-    "schema": "ee.profile.probe.v1",
+    "schema": "ee.host_profile.v1",
     "complete": true,
     "redaction": "policy_applied"
   },
@@ -196,7 +196,7 @@ The decision remains true when the profile track proves all of the following:
    tie-breaking, override precedence, invalid override rejection, and the
    monotonicity rule that more available resources do not select a more
    constrained profile without an explicit reason.
-4. Golden tests freeze `ee.profile.probe.v1` and `ee.profile.report.v1`
+4. Golden tests freeze `ee.host_profile.v1` and `ee.profile.report.v1`
    response shapes for `constrained`, `portable`, `workstation`, `swarm`, and
    override cases.
 5. Config dry-run tests prove profile changes report planned mutations,
