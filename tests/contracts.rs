@@ -130,6 +130,9 @@ mod schema_roundtrip;
 #[path = "contracts/graph_schemas_v1.rs"]
 mod graph_schemas_v1;
 
+#[path = "contracts/graph_config_behavior.rs"]
+mod graph_config_behavior;
+
 #[path = "contracts/audit_event_coverage.rs"]
 mod audit_event_coverage;
 

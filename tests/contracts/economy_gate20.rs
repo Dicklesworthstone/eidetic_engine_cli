@@ -113,7 +113,7 @@ fn add_memory(
                 valid_to: None,
             },
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| format!("insert memory {id}: {error}"))
 }
 
 fn add_feedback(fixture: &EconomyDbFixture, id: &str, target_id: &str, signal: &str) -> TestResult {
@@ -135,7 +135,7 @@ fn add_feedback(fixture: &EconomyDbFixture, id: &str, target_id: &str, signal: &
                 session_id: None,
             },
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| format!("insert feedback {id} for {target_id}: {error}"))
 }
 
 fn run_json_with_exit(args: &[&str], expected_exit: i32) -> Result<JsonValue, String> {

@@ -155,12 +155,14 @@ pub fn normalize_trace_jsonl(path: &Path) -> Result<String, String> {
         for (key, value) in fields {
             sorted_fields.insert(key.clone(), value.clone());
         }
-        let normalized_line = serde_json::json!({
-            "timestamp": "[TIMESTAMP]",
-            "level": object.get("level").cloned().unwrap_or(Value::Null),
-            "target": object.get("target").cloned().unwrap_or(Value::Null),
-            "fields": sorted_fields,
-        });
+        let mut normalized_line = BTreeMap::new();
+        normalized_line.insert("fields", serde_json::json!(sorted_fields));
+        normalized_line.insert("level", object.get("level").cloned().unwrap_or(Value::Null));
+        normalized_line.insert(
+            "target",
+            object.get("target").cloned().unwrap_or(Value::Null),
+        );
+        normalized_line.insert("timestamp", Value::String("[TIMESTAMP]".to_owned()));
         normalized.push_str(
             &serde_json::to_string(&normalized_line)
                 .map_err(|error| format!("failed to render normalized trace line: {error}"))?,

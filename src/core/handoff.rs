@@ -1229,6 +1229,8 @@ fn compute_content_hash(content: &str) -> String {
 ///     and recursively scrubs the volatile per-section fields:
 ///   - `audit_id` (assigned at write time)
 ///   - `last_accessed_at` (changes on every memory touch)
+///   - `swarm_brief_summary` diagnostics (read-only coordination
+///     posture; not part of the durable workspace memory state)
 ///
 /// Two creates of the same workspace state always produce the same
 /// canonical hash regardless of when/where they ran. This is the
@@ -1248,6 +1250,12 @@ fn strip_volatile_capsule_fields(value: &mut serde_json::Value) {
         object.remove("integrity");
         object.remove("audit_id");
         object.remove("last_accessed_at");
+        object.remove("swarm_brief_summary");
+        if object.get("id").and_then(serde_json::Value::as_str) == Some("swarm_brief_summary") {
+            object.remove("content");
+            object.remove("evidence_ids");
+            object.remove("token_estimate");
+        }
         for (_, child) in object.iter_mut() {
             strip_volatile_capsule_fields(child);
         }
@@ -3136,7 +3144,9 @@ fn compute_capsule_memory_snapshot(
     let workspaces = conn.list_workspaces().ok()?;
     let mut memories = Vec::new();
     for workspace in &workspaces {
-        let stored_memories = conn.list_memories(&workspace.id, None, false).ok()?;
+        let stored_memories = conn
+            .list_memories_for_retrieval(&workspace.id, None, false)
+            .ok()?;
         for memory in stored_memories {
             let tags = conn.get_memory_tags(&memory.id).unwrap_or_default();
             memories.push(snapshot_item_from_memory(&memory, &tags));

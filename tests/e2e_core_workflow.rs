@@ -5,6 +5,9 @@
 //!
 //! NO MOCKS. Real ee binary, real DB, real search indexes.
 
+#[path = "support/test_tracing.rs"]
+mod test_tracing;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::fs;
@@ -135,9 +138,15 @@ fn json_str<'a>(
 fn core_workflow_init_remember_search_context_why() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let workspace = tempdir.path().to_string_lossy().to_string();
+    let trace = test_tracing::init_test_tracing(
+        "bd-3usjw.55",
+        "core_workflow_init_remember_search_context_why",
+    );
+    trace.setup("core_workflow", "created temporary workspace");
 
     // Step 1: ee init
     let init_output = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    trace.exercise("core_workflow", "ee init --json", "ran init command");
     ensure_equal(
         &init_output.status.code(),
         &Some(EXIT_SUCCESS),
@@ -208,6 +217,12 @@ fn core_workflow_init_remember_search_context_why() -> TestResult {
     )?;
     let search_json = stdout_json(&search_output)?;
     assert_schema(&search_json, "ee.response.v1", "search")?;
+    trace.verify(
+        "core_workflow",
+        "ee.response.v1",
+        "ee.response.v1",
+        "search schema matched",
+    );
 
     // Verify search returns results
     let results = search_json
@@ -267,6 +282,7 @@ fn core_workflow_init_remember_search_context_why() -> TestResult {
             "why should return explanation data",
         )?;
     }
+    trace.teardown("core_workflow", "temporary workspace dropped");
 
     Ok(())
 }
