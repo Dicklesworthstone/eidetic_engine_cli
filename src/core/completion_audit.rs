@@ -168,6 +168,27 @@ pub struct RequirementEvidence {
     pub missing_expectations: Vec<MissingExpectation>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimContradictionKind {
+    StaleAcceptance,
+    UnsupportedDuplicateClaim,
+    VerifierInconclusive,
+    SourceDocsConflict,
+    PermissionGateUnresolved,
+    NeedsOwnerDecision,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaimContradiction {
+    pub kind: ClaimContradictionKind,
+    pub target: String,
+    pub blocks_closure: bool,
+    pub suggested_tracker_action: String,
+    pub evidence_records: Vec<EvidenceRecord>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RequirementAccumulator {
     kind: RequirementKind,
@@ -425,6 +446,176 @@ fn support_confidence(support: RequirementSupport) -> &'static str {
         RequirementSupport::Stale => "stale",
         RequirementSupport::Missing => "missing",
         RequirementSupport::Contradicted => "contradicted",
+    }
+}
+
+#[must_use]
+pub fn detect_claim_contradictions(bundle: &EvidenceBundle) -> Vec<ClaimContradiction> {
+    let mut contradictions = Vec::new();
+
+    push_status_issue(
+        &mut contradictions,
+        bundle,
+        ClaimContradictionKind::StaleAcceptance,
+        &["acceptance", "beads_acceptance"],
+        &[EvidenceRecordStatus::Stale],
+        true,
+    );
+    push_status_issue(
+        &mut contradictions,
+        bundle,
+        ClaimContradictionKind::UnsupportedDuplicateClaim,
+        &["duplicate_claim", "duplicate_audit"],
+        &[EvidenceRecordStatus::Fail, EvidenceRecordStatus::Missing],
+        true,
+    );
+    push_verifier_inconclusive_issues(&mut contradictions, bundle);
+    push_status_issue(
+        &mut contradictions,
+        bundle,
+        ClaimContradictionKind::SourceDocsConflict,
+        &["source_docs", "docs_contract"],
+        &[EvidenceRecordStatus::Fail],
+        true,
+    );
+    push_status_issue(
+        &mut contradictions,
+        bundle,
+        ClaimContradictionKind::PermissionGateUnresolved,
+        &["permission_record", "permission_gate"],
+        &[
+            EvidenceRecordStatus::Missing,
+            EvidenceRecordStatus::Inconclusive,
+        ],
+        true,
+    );
+    push_status_issue(
+        &mut contradictions,
+        bundle,
+        ClaimContradictionKind::NeedsOwnerDecision,
+        &["scope_decision", "owner_decision"],
+        &[
+            EvidenceRecordStatus::Missing,
+            EvidenceRecordStatus::Inconclusive,
+        ],
+        true,
+    );
+
+    contradictions.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.target.cmp(&right.target))
+            .then_with(|| {
+                left.suggested_tracker_action
+                    .cmp(&right.suggested_tracker_action)
+            })
+    });
+    contradictions
+}
+
+fn push_status_issue(
+    contradictions: &mut Vec<ClaimContradiction>,
+    bundle: &EvidenceBundle,
+    kind: ClaimContradictionKind,
+    record_kinds: &[&str],
+    statuses: &[EvidenceRecordStatus],
+    blocks_closure: bool,
+) {
+    let records = bundle
+        .records
+        .iter()
+        .filter(|record| {
+            record_kinds.contains(&record.kind.as_str()) && statuses.contains(&record.status)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    push_grouped_issues(contradictions, kind, records, blocks_closure);
+}
+
+fn push_verifier_inconclusive_issues(
+    contradictions: &mut Vec<ClaimContradiction>,
+    bundle: &EvidenceBundle,
+) {
+    let records = bundle
+        .records
+        .iter()
+        .filter(|record| verifier_record_kind(&record.kind))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut inconclusive_records = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.status,
+                EvidenceRecordStatus::Inconclusive | EvidenceRecordStatus::Missing
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    inconclusive_records.retain(|record| !has_direct_verifier_pass(&records, &record.target));
+    push_grouped_issues(
+        contradictions,
+        ClaimContradictionKind::VerifierInconclusive,
+        inconclusive_records,
+        true,
+    );
+}
+
+fn verifier_record_kind(kind: &str) -> bool {
+    matches!(kind, "rch" | "remote_rch" | "verifier" | "test_result")
+}
+
+fn has_direct_verifier_pass(records: &[EvidenceRecord], target: &str) -> bool {
+    records.iter().any(|record| {
+        record.target == target
+            && record.status == EvidenceRecordStatus::Pass
+            && record.strength == "direct"
+    })
+}
+
+fn push_grouped_issues(
+    contradictions: &mut Vec<ClaimContradiction>,
+    kind: ClaimContradictionKind,
+    mut records: Vec<EvidenceRecord>,
+    blocks_closure: bool,
+) {
+    records.sort();
+    records.dedup();
+    let mut targets = records
+        .iter()
+        .map(|record| record.target.clone())
+        .collect::<Vec<_>>();
+    targets.sort();
+    targets.dedup();
+
+    for target in targets {
+        let mut evidence_records = records
+            .iter()
+            .filter(|record| record.target == target)
+            .cloned()
+            .collect::<Vec<_>>();
+        evidence_records.sort();
+        evidence_records.dedup();
+        contradictions.push(ClaimContradiction {
+            kind,
+            target,
+            blocks_closure,
+            suggested_tracker_action: tracker_action_for(kind).to_owned(),
+            evidence_records,
+        });
+    }
+}
+
+fn tracker_action_for(kind: ClaimContradictionKind) -> &'static str {
+    match kind {
+        ClaimContradictionKind::StaleAcceptance => "refresh_acceptance_or_create_followup",
+        ClaimContradictionKind::UnsupportedDuplicateClaim => {
+            "replace_duplicate_claim_with_diff_evidence"
+        }
+        ClaimContradictionKind::VerifierInconclusive => "rerun_or_record_remote_verifier_result",
+        ClaimContradictionKind::SourceDocsConflict => "align_docs_schema_and_source_contract",
+        ClaimContradictionKind::PermissionGateUnresolved => "request_explicit_user_permission",
+        ClaimContradictionKind::NeedsOwnerDecision => "record_owner_decision_before_closure",
     }
 }
 
@@ -1282,5 +1473,152 @@ mod tests {
 
         assert_eq!(item.support, RequirementSupport::Contradicted);
         assert_eq!(item.confidence, "contradicted");
+    }
+
+    #[test]
+    fn claim_detector_flags_stale_acceptance_text() {
+        let bundle = EvidenceBundle {
+            records: vec![record(
+                "acceptance",
+                "bd-mcp manifest acceptance",
+                "bead description expects default-build error exit",
+                EvidenceRecordStatus::Stale,
+                "direct",
+            )],
+        };
+
+        let contradictions = detect_claim_contradictions(&bundle);
+
+        assert_eq!(contradictions.len(), 1);
+        assert_eq!(
+            contradictions[0].kind,
+            ClaimContradictionKind::StaleAcceptance
+        );
+        assert!(contradictions[0].blocks_closure);
+    }
+
+    #[test]
+    fn claim_detector_flags_unsupported_duplicate_claim() {
+        let bundle = EvidenceBundle {
+            records: vec![record(
+                "duplicate_claim",
+                "orphan plan bead",
+                "diff audit found unique content",
+                EvidenceRecordStatus::Fail,
+                "direct",
+            )],
+        };
+
+        let contradictions = detect_claim_contradictions(&bundle);
+
+        assert_eq!(contradictions.len(), 1);
+        assert_eq!(
+            contradictions[0].kind,
+            ClaimContradictionKind::UnsupportedDuplicateClaim
+        );
+        assert_eq!(
+            contradictions[0].suggested_tracker_action,
+            "replace_duplicate_claim_with_diff_evidence"
+        );
+    }
+
+    #[test]
+    fn claim_detector_ignores_vanished_verifier_when_direct_remote_pass_exists() {
+        let bundle = EvidenceBundle {
+            records: vec![
+                record(
+                    "remote_rch",
+                    "cargo test --lib completion_audit",
+                    "old queued job vanished",
+                    EvidenceRecordStatus::Inconclusive,
+                    "direct",
+                ),
+                record(
+                    "remote_rch",
+                    "cargo test --lib completion_audit",
+                    "rch job 162 on csd",
+                    EvidenceRecordStatus::Pass,
+                    "direct",
+                ),
+            ],
+        };
+
+        let contradictions = detect_claim_contradictions(&bundle);
+
+        assert!(contradictions.is_empty());
+    }
+
+    #[test]
+    fn claim_detector_flags_verifier_inconclusive_without_remote_pass() {
+        let bundle = EvidenceBundle {
+            records: vec![record(
+                "remote_rch",
+                "cargo test --test smoke mcp_manifest_json_real_binary_smoke",
+                "queued job disappeared before terminal status",
+                EvidenceRecordStatus::Inconclusive,
+                "direct",
+            )],
+        };
+
+        let contradictions = detect_claim_contradictions(&bundle);
+
+        assert_eq!(contradictions.len(), 1);
+        assert_eq!(
+            contradictions[0].kind,
+            ClaimContradictionKind::VerifierInconclusive
+        );
+    }
+
+    #[test]
+    fn claim_detector_flags_docs_source_conflict() {
+        let bundle = EvidenceBundle {
+            records: vec![record(
+                "source_docs",
+                "README command table",
+                "docs list command absent from source enum",
+                EvidenceRecordStatus::Fail,
+                "direct",
+            )],
+        };
+
+        let contradictions = detect_claim_contradictions(&bundle);
+
+        assert_eq!(contradictions.len(), 1);
+        assert_eq!(
+            contradictions[0].kind,
+            ClaimContradictionKind::SourceDocsConflict
+        );
+    }
+
+    #[test]
+    fn claim_detector_separates_permission_gate_from_owner_decision() {
+        let bundle = EvidenceBundle {
+            records: vec![
+                record(
+                    "permission_record",
+                    "file deletion authorization",
+                    "no user authorization text found",
+                    EvidenceRecordStatus::Missing,
+                    "direct",
+                ),
+                record(
+                    "scope_decision",
+                    "mcp parity public command",
+                    "scope decision unresolved",
+                    EvidenceRecordStatus::Inconclusive,
+                    "supporting",
+                ),
+            ],
+        };
+
+        let contradictions = detect_claim_contradictions(&bundle);
+        let kinds = contradictions
+            .iter()
+            .map(|contradiction| contradiction.kind)
+            .collect::<Vec<_>>();
+
+        assert_eq!(contradictions.len(), 2);
+        assert!(kinds.contains(&ClaimContradictionKind::PermissionGateUnresolved));
+        assert!(kinds.contains(&ClaimContradictionKind::NeedsOwnerDecision));
     }
 }
