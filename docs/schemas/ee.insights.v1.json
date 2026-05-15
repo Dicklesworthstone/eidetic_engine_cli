@@ -4,20 +4,26 @@
   "title": "ee.insights.v1",
   "description": "Insights bundle response data for graph-accretion findings.",
   "type": "object",
-  "required": ["schema", "snapshotVersion", "generatedAt", "runDurationMs", "sections", "degradedSignals"],
+  "required": ["schema", "command", "mode", "snapshotVersion", "generatedAt", "runDurationMs", "availableSections", "sections", "degradedSignals"],
   "additionalProperties": false,
   "properties": {
     "schema": {"type": "string", "const": "ee.insights.v1"},
+    "command": {"type": "string", "const": "insights"},
+    "mode": {"type": "string", "enum": ["full_bundle", "section", "explain"]},
     "snapshotVersion": {"type": ["integer", "string"]},
     "generatedAt": {"type": ["string", "null"]},
     "runDurationMs": {"type": "integer", "minimum": 0},
+    "selectedSection": {"type": ["string", "null"]},
+    "explainMemoryId": {"type": ["string", "null"]},
+    "explainCommand": {"type": ["string", "null"]},
+    "availableSections": {"type": "array", "items": {"type": "string"}},
     "sections": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}},
     "degradedSignals": {"type": "array", "items": {"$ref": "#/$defs/degradedSignal"}}
   },
   "field_presets": {
     "minimal": ["schema", "snapshotVersion"],
-    "summary": ["schema", "snapshotVersion", "runDurationMs", "degradedSignals"],
-    "standard": ["schema", "snapshotVersion", "generatedAt", "runDurationMs", "sections", "degradedSignals"],
+    "summary": ["schema", "mode", "snapshotVersion", "runDurationMs", "degradedSignals"],
+    "standard": ["schema", "command", "mode", "snapshotVersion", "generatedAt", "runDurationMs", "availableSections", "sections", "degradedSignals"],
     "full": ["*"]
   },
   "$defs": {

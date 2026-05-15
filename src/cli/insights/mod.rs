@@ -26,11 +26,15 @@ pub struct InsightsReport {
     pub schema: &'static str,
     pub command: &'static str,
     pub mode: InsightsMode,
+    pub snapshot_version: &'static str,
+    pub generated_at: Option<String>,
+    pub run_duration_ms: u64,
     pub selected_section: Option<String>,
     pub explain_memory_id: Option<String>,
     pub explain_command: Option<String>,
     pub available_sections: Vec<&'static str>,
     pub sections: Vec<InsightsSection>,
+    pub degraded_signals: Vec<InsightsDegradedSignal>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -59,6 +63,15 @@ pub struct InsightsSection {
     pub summary: &'static str,
     pub why_it_matters: &'static str,
     pub next_commands: Vec<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InsightsDegradedSignal {
+    pub code: &'static str,
+    pub severity: &'static str,
+    pub message: &'static str,
+    pub repair: Option<&'static str>,
 }
 
 fn section_registry() -> BTreeMap<&'static str, SectionBuilder> {
@@ -106,11 +119,15 @@ pub fn build_insights_report(args: &InsightsArgs) -> Result<InsightsReport, Doma
         schema: INSIGHTS_SCHEMA_V1,
         command: "insights",
         mode,
+        snapshot_version: "scaffold",
+        generated_at: None,
+        run_duration_ms: 0,
         selected_section,
         explain_memory_id,
         explain_command,
         available_sections,
         sections,
+        degraded_signals: Vec::new(),
     })
 }
 
@@ -210,5 +227,92 @@ fn verification_section() -> InsightsSection {
             "cargo fmt --check",
             "cargo clippy --all-targets -- -D warnings",
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type TestResult = Result<(), String>;
+
+    fn section_names(report: &InsightsReport) -> Vec<&'static str> {
+        report.sections.iter().map(|section| section.name).collect()
+    }
+
+    #[test]
+    fn full_bundle_uses_deterministic_section_order() -> TestResult {
+        let report = build_insights_report(&InsightsArgs {
+            section: None,
+            explain: None,
+        })
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(report.schema, INSIGHTS_SCHEMA_V1);
+        assert_eq!(report.mode, InsightsMode::FullBundle);
+        assert_eq!(report.snapshot_version, "scaffold");
+        assert_eq!(report.generated_at, None);
+        assert_eq!(report.run_duration_ms, 0);
+        assert_eq!(
+            report.available_sections,
+            vec!["coordination", "graph", "retrieval", "verification"]
+        );
+        assert_eq!(section_names(&report), report.available_sections);
+        assert_eq!(report.selected_section, None);
+        assert_eq!(report.explain_memory_id, None);
+        assert_eq!(report.explain_command, None);
+        assert!(report.degraded_signals.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn explain_mode_preserves_memory_target_and_full_context() -> TestResult {
+        let report = build_insights_report(&InsightsArgs {
+            section: None,
+            explain: Some("mem_123".to_owned()),
+        })
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(report.mode, InsightsMode::Explain);
+        assert_eq!(report.explain_memory_id.as_deref(), Some("mem_123"));
+        assert_eq!(
+            report.explain_command.as_deref(),
+            Some("ee why mem_123 --json")
+        );
+        assert_eq!(section_names(&report), report.available_sections);
+
+        Ok(())
+    }
+
+    #[test]
+    fn rendered_json_wraps_schema_aligned_data() -> TestResult {
+        let report = build_insights_report(&InsightsArgs {
+            section: Some("graph".to_owned()),
+            explain: None,
+        })
+        .map_err(|error| error.to_string())?;
+        let json: serde_json::Value = serde_json::from_str(&render_insights_json(&report))
+            .map_err(|error| {
+                format!("rendered insights JSON should parse as response envelope: {error}")
+            })?;
+        let data = &json["data"];
+
+        assert_eq!(json["schema"], RESPONSE_SCHEMA_V1);
+        assert_eq!(json["success"], true);
+        assert_eq!(data["schema"], INSIGHTS_SCHEMA_V1);
+        assert_eq!(data["command"], "insights");
+        assert_eq!(data["mode"], "section");
+        assert_eq!(data["snapshotVersion"], "scaffold");
+        assert!(data["generatedAt"].is_null());
+        assert_eq!(data["runDurationMs"], 0);
+        assert_eq!(data["selectedSection"], "graph");
+        assert!(
+            data["degradedSignals"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        );
+
+        Ok(())
     }
 }
