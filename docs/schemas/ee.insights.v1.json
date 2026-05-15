@@ -4,30 +4,54 @@
   "title": "ee.insights.v1",
   "description": "Insights bundle response data for graph-accretion findings.",
   "type": "object",
-  "required": ["schema", "command", "mode", "snapshotVersion", "generatedAt", "runDurationMs", "availableSections", "sections", "degradedSignals"],
+  "required": ["schema", "command", "mode", "snapshotVersion", "generatedAt", "runDurationMs", "selectedSection", "explainMemoryId", "explainCommand", "pagination", "availableSections", "sections", "degradedSignals"],
   "additionalProperties": false,
   "properties": {
     "schema": {"type": "string", "const": "ee.insights.v1"},
     "command": {"type": "string", "const": "insights"},
     "mode": {"type": "string", "enum": ["full_bundle", "section", "explain"]},
-    "snapshotVersion": {"type": ["integer", "string"]},
-    "generatedAt": {"type": ["string", "null"]},
+    "snapshotVersion": {"type": "integer", "minimum": 0},
+    "generatedAt": {"type": "string"},
     "runDurationMs": {"type": "integer", "minimum": 0},
     "selectedSection": {"type": ["string", "null"]},
     "explainMemoryId": {"type": ["string", "null"]},
     "explainCommand": {"type": ["string", "null"]},
+    "pagination": {
+      "type": ["object", "null"],
+      "required": ["limit", "offset", "returned", "total"],
+      "additionalProperties": false,
+      "properties": {
+        "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+        "offset": {"type": "integer", "minimum": 0},
+        "returned": {"type": "integer", "minimum": 0},
+        "total": {"type": "integer", "minimum": 0}
+      }
+    },
     "availableSections": {"type": "array", "items": {"type": "string"}},
-    "sections": {"type": "array", "items": {"$ref": "#/$defs/jsonObject"}},
+    "sections": {"type": "array", "items": {"$ref": "#/$defs/section"}},
     "degradedSignals": {"type": "array", "items": {"$ref": "#/$defs/degradedSignal"}}
   },
   "field_presets": {
     "minimal": ["schema", "snapshotVersion"],
     "summary": ["schema", "mode", "snapshotVersion", "runDurationMs", "degradedSignals"],
-    "standard": ["schema", "command", "mode", "snapshotVersion", "generatedAt", "runDurationMs", "availableSections", "sections", "degradedSignals"],
+    "standard": ["schema", "command", "mode", "snapshotVersion", "generatedAt", "runDurationMs", "selectedSection", "explainMemoryId", "explainCommand", "pagination", "availableSections", "sections", "degradedSignals"],
     "full": ["*"]
   },
   "$defs": {
     "jsonObject": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+    "section": {
+      "type": "object",
+      "required": ["name", "title", "summary", "whyItMatters", "items", "nextCommands"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "title": {"type": "string"},
+        "summary": {"type": "string"},
+        "whyItMatters": {"type": "string"},
+        "items": {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        "nextCommands": {"type": "array", "items": {"type": "string"}}
+      }
+    },
     "degradedSignal": {
       "type": "object",
       "required": ["code", "severity", "message"],
