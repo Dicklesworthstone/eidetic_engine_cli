@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -1261,7 +1262,7 @@ impl SwarmBriefSourceAdapter for AgentMailSnapshotFileAdapter {
             };
         };
 
-        match std::fs::read_to_string(path) {
+        match read_agent_mail_snapshot_file(path) {
             Ok(contents) => match parse_agent_mail_snapshot_json(&contents) {
                 Ok(snapshot) => {
                     let item_count = snapshot.file_reservations.len()
@@ -1317,6 +1318,53 @@ impl SwarmBriefSourceAdapter for AgentMailSnapshotFileAdapter {
             }
         }
     }
+}
+
+fn read_agent_mail_snapshot_file(path: &Path) -> io::Result<String> {
+    if let Some(symlink) = first_existing_snapshot_symlink_component(path)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to read Agent Mail snapshot through symlink '{}'",
+                symlink.display()
+            ),
+        ));
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Agent Mail snapshot path '{}' is not a file",
+                path.display()
+            ),
+        ));
+    }
+    fs::read_to_string(path)
+}
+
+fn first_existing_snapshot_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                current.push(component.as_os_str());
+                continue;
+            }
+            std::path::Component::CurDir => continue,
+            std::path::Component::ParentDir | std::path::Component::Normal(_) => {
+                current.push(component.as_os_str());
+            }
+        }
+
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
 }
 
 pub struct RchSourceAdapter<'a, R> {
@@ -5440,6 +5488,73 @@ mod tests {
         )
         .with_degraded(snapshot.degraded);
         assert_eq!(source.status, SwarmBriefSourceStatus::Degraded);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_mail_snapshot_adapter_refuses_symlinked_snapshot_file() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_snapshot = outside.path().join("agent-mail.json");
+        fs::write(
+            &outside_snapshot,
+            r#"{"file_reservations":[],"inbox":[],"threads":[]}"#,
+        )
+        .map_err(|error| error.to_string())?;
+        let snapshot_path = tempdir.path().join("agent-mail.json");
+        std::os::unix::fs::symlink(&outside_snapshot, &snapshot_path)
+            .map_err(|error| error.to_string())?;
+
+        let mut options = SwarmBriefCollectOptions::for_workspace(tempdir.path());
+        options.agent_mail_snapshot_path = Some(snapshot_path);
+        let output = AgentMailSnapshotFileAdapter.collect(&options);
+
+        assert_eq!(output.snapshot.status, SwarmBriefSourceStatus::Unavailable);
+        assert!(
+            output
+                .snapshot
+                .degraded
+                .iter()
+                .any(|item| item.code == AGENT_MAIL_UNAVAILABLE_CODE
+                    && item.message.contains("symlink")),
+            "expected symlink degradation, got {:?}",
+            output.snapshot.degraded
+        );
+        assert!(matches!(output.contribution, SwarmBriefContribution::None));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_mail_snapshot_adapter_refuses_symlinked_snapshot_parent() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::write(
+            outside.path().join("agent-mail.json"),
+            r#"{"file_reservations":[],"inbox":[],"threads":[]}"#,
+        )
+        .map_err(|error| error.to_string())?;
+        let snapshot_parent = tempdir.path().join("mail-snapshot");
+        std::os::unix::fs::symlink(outside.path(), &snapshot_parent)
+            .map_err(|error| error.to_string())?;
+
+        let mut options = SwarmBriefCollectOptions::for_workspace(tempdir.path());
+        options.agent_mail_snapshot_path = Some(snapshot_parent.join("agent-mail.json"));
+        let output = AgentMailSnapshotFileAdapter.collect(&options);
+
+        assert_eq!(output.snapshot.status, SwarmBriefSourceStatus::Unavailable);
+        assert!(
+            output
+                .snapshot
+                .degraded
+                .iter()
+                .any(|item| item.code == AGENT_MAIL_UNAVAILABLE_CODE
+                    && item.message.contains("symlink")),
+            "expected symlink parent degradation, got {:?}",
+            output.snapshot.degraded
+        );
+        assert!(matches!(output.contribution, SwarmBriefContribution::None));
+        Ok(())
     }
 
     #[test]
