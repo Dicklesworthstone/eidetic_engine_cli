@@ -42,7 +42,7 @@ const SURFACES_WITH_DEFAULTS: &[(&str, &str, &str)] = &[
     (
         "ee handoff create",
         "standard",
-        "planned `--redaction <level>`",
+        "current `--redaction <level>`",
     ),
     (
         "ee context --json",
@@ -111,7 +111,7 @@ fn doc_distinguishes_current_and_planned_redaction_flags() -> TestResult {
     for required_phrase in [
         "current `--redaction <level>`",
         "planned `--redaction <level>`",
-        "Handoff and support-bundle level flags are part of",
+        "support bundle level flag is part of",
         "not all live",
     ] {
         ensure(
@@ -312,5 +312,34 @@ fn current_context_redaction_claim_matches_cli_and_pack_wiring() -> TestResult {
     ensure(
         context.contains("redaction_level: options.redaction_level"),
         "context pack assembly must use ContextPackOptions.redaction_level instead of a hardcoded level",
+    )
+}
+
+#[test]
+fn current_handoff_redaction_claim_matches_cli_wiring() -> TestResult {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let doc = read_doc()?;
+    let cli = std::fs::read_to_string(manifest_dir.join("src/cli/mod.rs"))
+        .map_err(|e| format!("read src/cli/mod.rs: {e}"))?;
+
+    ensure(
+        doc.lines().any(|line| {
+            line.contains("`ee handoff create`")
+                && line.contains("`standard`")
+                && line.contains("current `--redaction <level>`")
+        }),
+        "docs/redaction_levels.md must mark ee handoff create as a current standard-redaction surface",
+    )?;
+    ensure(
+        cli.contains("pub struct HandoffCreateArgs"),
+        "src/cli/mod.rs must define HandoffCreateArgs",
+    )?;
+    ensure(
+        cli.contains("default_value_t = BackupRedaction::Standard"),
+        "ee handoff create --redaction must default to the documented standard level",
+    )?;
+    ensure(
+        cli.contains("redaction_level: args.redaction.to_model()"),
+        "handoff create must pass the parsed redaction level into HandoffCreateOptions",
     )
 }

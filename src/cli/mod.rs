@@ -3455,6 +3455,10 @@ pub struct HandoffCreateArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
 
+    /// Redaction level for the handoff capsule.
+    #[arg(long, value_enum, default_value_t = BackupRedaction::Standard)]
+    pub redaction: BackupRedaction,
+
     /// Bind capsule integrity to this machine's local handoff salt.
     #[arg(long = "bind-to-machine", action = ArgAction::SetTrue)]
     pub bind_to_machine: bool,
@@ -8457,7 +8461,7 @@ where
                     task_frame_id: None,
                     bind_to_machine: args.bind_to_machine,
                     machine_salt_path: None,
-                    redaction_level: crate::models::RedactionLevel::Standard,
+                    redaction_level: args.redaction.to_model(),
                 };
                 match create_handoff(&options) {
                     Ok(report) => match cli.renderer() {
@@ -42900,6 +42904,40 @@ mod tests {
                 "capsule path",
             ),
             _ => Err("expected handoff rotate-key command".to_string()),
+        }
+    }
+
+    #[test]
+    fn handoff_create_redaction_command_parses_and_defaults_standard() -> TestResult {
+        let default_parsed =
+            Cli::try_parse_from(["ee", "handoff", "create", "--out", "handoff.json"])
+                .map_err(|e| format!("failed to parse handoff create: {:?}", e.kind()))?;
+        match default_parsed.command {
+            Some(Command::Handoff(HandoffCommand::Create(args))) => {
+                ensure_equal(
+                    &args.redaction,
+                    &BackupRedaction::Standard,
+                    "default redaction",
+                )?;
+            }
+            _ => return Err("expected handoff create command".to_string()),
+        }
+
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "handoff",
+            "create",
+            "--out",
+            "handoff.json",
+            "--redaction",
+            "strict",
+        ])
+        .map_err(|e| format!("failed to parse handoff create redaction: {:?}", e.kind()))?;
+        match parsed.command {
+            Some(Command::Handoff(HandoffCommand::Create(args))) => {
+                ensure_equal(&args.redaction, &BackupRedaction::Strict, "redaction")
+            }
+            _ => Err("expected handoff create command".to_string()),
         }
     }
 
