@@ -163,10 +163,9 @@ impl PprPrefetchCache {
         }
 
         let last_used_sequence = self.next_access_sequence();
-        let entry = self
-            .entries
-            .get_mut(key)
-            .expect("entry exists after hash validation");
+        let Some(entry) = self.entries.get_mut(key) else {
+            return None;
+        };
         entry.last_used_sequence = last_used_sequence;
         Some(PprPrefetchCacheHit {
             scores: entry.scores().to_vec(),
@@ -181,10 +180,9 @@ impl PprPrefetchCache {
         }
 
         let last_used_sequence = self.next_access_sequence();
-        let entry = self
-            .entries
-            .get_mut(key)
-            .expect("entry exists after hash validation");
+        let Some(entry) = self.entries.get_mut(key) else {
+            return None;
+        };
         let result = entry.result.clone()?;
         entry.last_used_sequence = last_used_sequence;
         Some(PprPrefetchCacheResultHit {
@@ -306,8 +304,8 @@ pub fn ppr_prefetch_page_rank_result_hash(
     hasher.update(key.seed_set_hash.as_bytes());
     hasher.update(&key.snapshot_generation.to_le_bytes());
     hasher.update(&[u8::from(result.converged)]);
-    hasher.update(result.witness.algorithm.as_bytes());
-    hasher.update(result.witness.complexity_claim.as_bytes());
+    update_hash_with_str(&mut hasher, &result.witness.algorithm);
+    update_hash_with_str(&mut hasher, &result.witness.complexity_claim);
     hasher.update(&result.witness.nodes_touched.to_le_bytes());
     hasher.update(&result.witness.edges_scanned.to_le_bytes());
     hasher.update(&result.witness.queue_peak.to_le_bytes());
@@ -318,6 +316,11 @@ pub fn ppr_prefetch_page_rank_result_hash(
         hasher.update(&score.score.to_le_bytes());
     }
     format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn update_hash_with_str(hasher: &mut blake3::Hasher, value: &str) {
+    hasher.update(&(value.len() as u64).to_le_bytes());
+    hasher.update(value.as_bytes());
 }
 
 #[cfg(test)]
@@ -342,12 +345,24 @@ mod tests {
     }
 
     fn page_rank_result(nodes: &[(&str, f64)]) -> PageRankResult {
+        page_rank_result_with_witness(
+            nodes,
+            "personalized_pagerank_power_iteration",
+            "O(k * (|V| + |E|))",
+        )
+    }
+
+    fn page_rank_result_with_witness(
+        nodes: &[(&str, f64)],
+        algorithm: &str,
+        complexity_claim: &str,
+    ) -> PageRankResult {
         PageRankResult {
             scores: scores(nodes),
             converged: true,
             witness: fnx_algorithms::ComplexityWitness {
-                algorithm: "personalized_pagerank_power_iteration".to_owned(),
-                complexity_claim: "O(k * (|V| + |E|))".to_owned(),
+                algorithm: algorithm.to_owned(),
+                complexity_claim: complexity_claim.to_owned(),
                 nodes_touched: 3,
                 edges_scanned: 2,
                 queue_peak: 0,
@@ -394,6 +409,18 @@ mod tests {
         assert_eq!(
             hit.result_hash,
             ppr_prefetch_page_rank_result_hash(&key, &expected)
+        );
+    }
+
+    #[test]
+    fn full_result_hash_length_prefixes_witness_strings() {
+        let key = key("seed-a", 1);
+        let left = page_rank_result_with_witness(&[("mem-a", 1.0)], "ab", "c");
+        let right = page_rank_result_with_witness(&[("mem-a", 1.0)], "a", "bc");
+
+        assert_ne!(
+            ppr_prefetch_page_rank_result_hash(&key, &left),
+            ppr_prefetch_page_rank_result_hash(&key, &right)
         );
     }
 

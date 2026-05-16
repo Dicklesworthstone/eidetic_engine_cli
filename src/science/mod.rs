@@ -894,21 +894,100 @@ fn discover_evaluation_snapshots(workspace: &Path) -> Vec<PathBuf> {
 }
 
 fn collect_snapshot_paths(dir: &Path, paths: &mut Vec<PathBuf>) {
+    if first_existing_snapshot_symlink_component(dir)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             collect_snapshot_paths(&path, paths);
-        } else if path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        } else if file_type.is_file()
+            && snapshot_path_has_json_extension(&path)
+            && first_existing_snapshot_symlink_component(&path)
+                .ok()
+                .flatten()
+                .is_none()
         {
             paths.push(path);
         }
     }
+}
+
+fn ensure_snapshot_path_has_no_symlink_components(path: &Path) -> Result<(), DriftDegradation> {
+    if let Some(component) =
+        first_existing_snapshot_symlink_component(path).map_err(|error| DriftDegradation {
+            code: DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
+            message: format!(
+                "Evaluation snapshot {} could not be inspected: {error}",
+                path.display()
+            ),
+            severity: "high".to_string(),
+            repair: "Pass readable --baseline and --current snapshot paths.".to_string(),
+        })?
+    {
+        return Err(DriftDegradation {
+            code: DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
+            message: format!(
+                "Evaluation snapshot {} traverses symlinked path component {}.",
+                path.display(),
+                component.display()
+            ),
+            severity: "high".to_string(),
+            repair:
+                "Replace symlinked evaluation snapshot paths with regular directories and files."
+                    .to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn first_existing_snapshot_symlink_component(path: &Path) -> std::io::Result<Option<PathBuf>> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                current.push(component.as_os_str());
+                continue;
+            }
+            std::path::Component::CurDir => continue,
+            std::path::Component::ParentDir | std::path::Component::Normal(_) => {
+                current.push(component.as_os_str());
+            }
+        }
+
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
+fn snapshot_path_is_regular_file_no_follow(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_file())
+        .unwrap_or(false)
+}
+
+fn snapshot_path_has_json_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
 }
 
 fn previous_discovered_snapshot(
@@ -968,6 +1047,19 @@ fn same_path(left: &Path, right: &Path) -> bool {
 }
 
 fn load_evaluation_snapshot(path: &Path) -> Result<EvaluationSnapshot, DriftDegradation> {
+    ensure_snapshot_path_has_no_symlink_components(path)?;
+    if !snapshot_path_is_regular_file_no_follow(path) {
+        return Err(DriftDegradation {
+            code: DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
+            message: format!(
+                "Evaluation snapshot {} is not a regular file.",
+                path.display()
+            ),
+            severity: "high".to_string(),
+            repair: "Pass readable --baseline and --current snapshot paths.".to_string(),
+        });
+    }
+
     let text = std::fs::read_to_string(path).map_err(|error| DriftDegradation {
         code: DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
         message: format!(
@@ -1825,6 +1917,31 @@ mod tests {
             .ok_or_else(|| format!("missing capability {name}"))
     }
 
+    fn write_eval_snapshot(path: &Path, snapshot_id: &str, f1_score: f64) -> TestResult {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        std::fs::write(
+            path,
+            serde_json::json!({
+                "schema": "ee.eval.snapshot.v1",
+                "snapshotId": snapshot_id,
+                "createdAt": "2026-05-04T18:00:00Z",
+                "scenariosRun": 1,
+                "scenariosPassed": 1,
+                "scenariosFailed": 0,
+                "scienceMetrics": {
+                    "f1Score": f1_score
+                },
+                "results": [
+                    { "scenarioId": snapshot_id, "passed": true }
+                ]
+            })
+            .to_string(),
+        )
+        .map_err(|error| error.to_string())
+    }
+
     fn seed_clustering_workspace() -> Result<(tempfile::TempDir, PathBuf), String> {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path().canonicalize().map_err(|error| {
@@ -2133,6 +2250,104 @@ mod tests {
             }),
             true,
             "f1 drift",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_evaluation_snapshots_skips_symlinked_snapshot_entries() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let snapshot_dir = temp.path().join(".ee").join("eval").join("snapshots");
+        let outside_dir = temp.path().join("outside-snapshots");
+        write_eval_snapshot(&snapshot_dir.join("baseline.json"), "eval_baseline", 1.0)?;
+        write_eval_snapshot(&snapshot_dir.join("current.json"), "eval_current", 0.9)?;
+        write_eval_snapshot(&outside_dir.join("outside.json"), "outside_snapshot", 0.1)?;
+        symlink(
+            outside_dir.join("outside.json"),
+            snapshot_dir.join("linked.json"),
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(&outside_dir, snapshot_dir.join("linked-dir"))
+            .map_err(|error| error.to_string())?;
+
+        let discovered = discover_evaluation_snapshots(temp.path());
+        ensure(discovered.len(), 2, "only real snapshots discovered")?;
+        ensure(
+            discovered
+                .iter()
+                .any(|path| path.file_name().and_then(|name| name.to_str()) == Some("linked.json")),
+            false,
+            "symlinked snapshot file skipped",
+        )?;
+        ensure(
+            discovered.iter().any(|path| {
+                path.components()
+                    .any(|component| component.as_os_str() == std::ffi::OsStr::new("linked-dir"))
+            }),
+            false,
+            "symlinked snapshot directory skipped",
+        )?;
+
+        let loaded_ids = load_discovered_snapshots(&discovered)
+            .into_iter()
+            .map(|snapshot| snapshot.id)
+            .collect::<Vec<_>>();
+        ensure(
+            loaded_ids,
+            vec!["eval_baseline".to_string(), "eval_current".to_string()],
+            "loaded snapshot IDs",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_evaluation_snapshot_rejects_symlinked_snapshot_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_snapshot = temp.path().join("outside.json");
+        let linked_snapshot = temp.path().join("snapshot.json");
+        std::fs::write(&real_snapshot, b"{not-json").map_err(|error| error.to_string())?;
+        symlink(&real_snapshot, &linked_snapshot).map_err(|error| error.to_string())?;
+
+        let error = load_evaluation_snapshot(&linked_snapshot)
+            .map(|snapshot| format!("unexpected snapshot: {snapshot:?}"))
+            .expect_err("symlinked explicit snapshot must reject before parse");
+
+        ensure(
+            error.code,
+            DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
+            "symlinked snapshot code",
+        )?;
+        ensure(
+            error.message.contains("symlinked path component"),
+            true,
+            "symlinked snapshot error message",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_evaluation_snapshot_rejects_symlinked_snapshot_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_parent = temp.path().join("real-parent");
+        let linked_parent = temp.path().join("linked-parent");
+        let real_snapshot = real_parent.join("snapshot.json");
+        write_eval_snapshot(&real_snapshot, "outside_snapshot", 0.2)?;
+        symlink(&real_parent, &linked_parent).map_err(|error| error.to_string())?;
+
+        let error = load_evaluation_snapshot(&linked_parent.join("snapshot.json"))
+            .map(|snapshot| format!("unexpected snapshot: {snapshot:?}"))
+            .expect_err("symlinked snapshot parent must reject");
+
+        ensure(
+            error.message.contains("symlinked path component"),
+            true,
+            "symlinked parent error message",
         )
     }
 
