@@ -53,7 +53,7 @@ use crate::core::search::{
 use crate::db::read_pool::{PoolConfig, ReadConnectionPool};
 use crate::db::{
     CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, DatabaseConfig,
-    DbConnection, StoredAgentContextProfile, StoredMemory,
+    DbConnection, StoredAgentContextProfileForPack, StoredMemory,
 };
 use crate::models::degradation::{GRAPH_PPR_EMPTY_SEED_SET_CODE, GRAPH_PPR_SNAPSHOT_STALE_CODE};
 use crate::models::{
@@ -2390,7 +2390,7 @@ impl AgentContextProfileSummary {
 fn summarize_agent_context_profiles(
     agent_name: &str,
     workspace_id: &str,
-    profiles: Vec<StoredAgentContextProfile>,
+    profiles: Vec<StoredAgentContextProfileForPack>,
     candidates: &mut [PackCandidate],
 ) -> AgentContextProfileSummary {
     let mut counts = AgentContextProfileCounts::default();
@@ -5310,7 +5310,7 @@ mod tests {
     use crate::db::read_pool::{PoolConfig, ReadConnectionPool};
     use crate::db::{
         CreateMemoryInput, CreateWorkspaceInput, DatabaseConfig, DbConnection,
-        StoredAgentContextProfile, StoredMemory,
+        StoredAgentContextProfileForPack, StoredMemory,
     };
     use crate::models::{
         AgentContextProfileCounts, FocusItem, FocusState, MemoryId, MemoryScope, MemoryScopeStats,
@@ -5537,13 +5537,11 @@ mod tests {
     }
 
     fn stored_agent_profile(
-        agent_name: &str,
+        _agent_name: &str,
         memory_id: MemoryId,
         counts: AgentContextProfileCounts,
-    ) -> StoredAgentContextProfile {
-        StoredAgentContextProfile {
-            workspace_id: "wsp_01234567890123456789012345".to_string(),
-            agent_name: agent_name.to_string(),
+    ) -> StoredAgentContextProfileForPack {
+        StoredAgentContextProfileForPack {
             memory_id: memory_id.to_string(),
             counts,
             last_seen_at: "2026-05-16T01:12:00Z".to_string(),

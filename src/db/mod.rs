@@ -206,6 +206,14 @@ pub struct DbConnection {
     inner: FrankenConnection,
     location: DatabaseLocation,
     mode: DatabaseOpenMode,
+    agent_context_profile_pack_cache: Mutex<Option<AgentContextProfilePackCache>>,
+}
+
+#[derive(Debug, Clone)]
+struct AgentContextProfilePackCache {
+    workspace_id: String,
+    agent_name: String,
+    rows: Vec<StoredAgentContextProfileForPack>,
 }
 
 static FILE_WRITE_OWNER_GATE: OnceLock<Mutex<()>> = OnceLock::new();
@@ -374,6 +382,7 @@ impl DbConnection {
             inner,
             location: config.location,
             mode: config.mode,
+            agent_context_profile_pack_cache: Mutex::new(None),
         })
     }
 
@@ -6394,6 +6403,15 @@ pub struct StoredAgentContextProfile {
     pub weight_cached: f64,
 }
 
+/// Agent context profile fields needed by pack-time bias application.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredAgentContextProfileForPack {
+    pub memory_id: String,
+    pub counts: AgentContextProfileCounts,
+    pub last_seen_at: String,
+    pub weight_cached: f64,
+}
+
 /// Input for creating a learning observation ledger row.
 #[derive(Debug, Clone)]
 pub struct CreateLearningObservationInput {
@@ -6669,6 +6687,7 @@ impl DbConnection {
                 Value::Double(input.weight_cached),
             ],
         )?;
+        self.clear_agent_context_profile_pack_cache(DbOperation::Execute)?;
 
         self.get_agent_context_profile(&input.workspace_id, &input.agent_name, &input.memory_id)?
             .ok_or_else(|| DbError::MalformedRow {
@@ -6707,11 +6726,15 @@ impl DbConnection {
         &self,
         workspace_id: &str,
         agent_name: &str,
-    ) -> Result<Vec<StoredAgentContextProfile>> {
+    ) -> Result<Vec<StoredAgentContextProfileForPack>> {
+        if let Some(rows) = self.cached_agent_context_profiles_for_pack(workspace_id, agent_name)? {
+            return Ok(rows);
+        }
+
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT workspace_id, agent_name, memory_id, helpful_count, harmful_count,
-                    ignored_count, last_seen_at, weight_cached
+            "SELECT memory_id, helpful_count, harmful_count, ignored_count,
+                    last_seen_at, weight_cached
              FROM agent_context_profiles
              WHERE workspace_id = ?1 AND agent_name = ?2
              ORDER BY memory_id ASC",
@@ -6722,8 +6745,67 @@ impl DbConnection {
         )?;
 
         rows.iter()
-            .map(stored_agent_context_profile_from_row)
-            .collect()
+            .map(stored_agent_context_profile_for_pack_from_row)
+            .collect::<Result<Vec<_>>>()
+            .and_then(|profiles| {
+                self.store_agent_context_profiles_for_pack_cache(
+                    workspace_id,
+                    agent_name,
+                    &profiles,
+                )?;
+                Ok(profiles)
+            })
+    }
+
+    fn cached_agent_context_profiles_for_pack(
+        &self,
+        workspace_id: &str,
+        agent_name: &str,
+    ) -> Result<Option<Vec<StoredAgentContextProfileForPack>>> {
+        let cache =
+            self.agent_context_profile_pack_cache
+                .lock()
+                .map_err(|_| DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "agent context profile pack cache lock poisoned".to_string(),
+                })?;
+        Ok(cache
+            .as_ref()
+            .filter(|cached| cached.workspace_id == workspace_id && cached.agent_name == agent_name)
+            .map(|cached| cached.rows.clone()))
+    }
+
+    fn store_agent_context_profiles_for_pack_cache(
+        &self,
+        workspace_id: &str,
+        agent_name: &str,
+        rows: &[StoredAgentContextProfileForPack],
+    ) -> Result<()> {
+        let mut cache =
+            self.agent_context_profile_pack_cache
+                .lock()
+                .map_err(|_| DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "agent context profile pack cache lock poisoned".to_string(),
+                })?;
+        *cache = Some(AgentContextProfilePackCache {
+            workspace_id: workspace_id.to_string(),
+            agent_name: agent_name.to_string(),
+            rows: rows.to_vec(),
+        });
+        Ok(())
+    }
+
+    fn clear_agent_context_profile_pack_cache(&self, operation: DbOperation) -> Result<()> {
+        let mut cache =
+            self.agent_context_profile_pack_cache
+                .lock()
+                .map_err(|_| DbError::MalformedRow {
+                    operation,
+                    message: "agent context profile pack cache lock poisoned".to_string(),
+                })?;
+        *cache = None;
+        Ok(())
     }
 
     /// Insert a learning observation ledger row idempotently.
@@ -7725,6 +7807,21 @@ fn stored_agent_context_profile_from_row(row: &Row) -> Result<StoredAgentContext
         ),
         last_seen_at: required_text(row, 6, DbOperation::Query, "last_seen_at")?.to_string(),
         weight_cached: required_f64(row, 7, DbOperation::Query, "weight_cached")?,
+    })
+}
+
+fn stored_agent_context_profile_for_pack_from_row(
+    row: &Row,
+) -> Result<StoredAgentContextProfileForPack> {
+    Ok(StoredAgentContextProfileForPack {
+        memory_id: required_text(row, 0, DbOperation::Query, "memory_id")?.to_string(),
+        counts: AgentContextProfileCounts::new(
+            required_u32(row, 1, DbOperation::Query, "helpful_count")?,
+            required_u32(row, 2, DbOperation::Query, "harmful_count")?,
+            required_u32(row, 3, DbOperation::Query, "ignored_count")?,
+        ),
+        last_seen_at: required_text(row, 4, DbOperation::Query, "last_seen_at")?.to_string(),
+        weight_cached: required_f64(row, 5, DbOperation::Query, "weight_cached")?,
     })
 }
 
@@ -18141,8 +18238,8 @@ mod tests {
         let plan_rows = connection.query_for(
             DbOperation::Query,
             "EXPLAIN QUERY PLAN
-             SELECT workspace_id, agent_name, memory_id, helpful_count, harmful_count,
-                    ignored_count, last_seen_at, weight_cached
+             SELECT memory_id, helpful_count, harmful_count, ignored_count,
+                    last_seen_at, weight_cached
              FROM agent_context_profiles INDEXED BY idx_agent_context_profiles_pack_covering
              WHERE workspace_id = ?1 AND agent_name = ?2
              ORDER BY memory_id ASC",
@@ -18159,6 +18256,63 @@ mod tests {
         ensure(
             plan.contains("idx_agent_context_profiles_pack_covering"),
             "pack query plan names the covering index",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn agent_context_profiles_pack_cache_invalidates_on_upsert() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        seed_memory(&connection, "mem_01234567890123456789012345")?;
+
+        let input = super::UpsertAgentContextProfileInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            agent_name: "CloudyHawk".to_string(),
+            memory_id: "mem_01234567890123456789012345".to_string(),
+            counts_delta: AgentContextProfileCounts::new(10, 0, 0),
+            last_seen_at: Some("2026-05-16T01:12:00Z".to_string()),
+            weight_cached: 0.05,
+        };
+        connection.upsert_agent_context_profile_event(&input)?;
+
+        let first = connection
+            .list_agent_context_profiles_for_pack("wsp_01234567890123456789012345", "CloudyHawk")?;
+        ensure_equal(&first.len(), &1_usize, "initial cached row count")?;
+        ensure_equal(
+            &first[0].counts.helpful_count,
+            &10_u32,
+            "initial helpful count",
+        )?;
+
+        connection.upsert_agent_context_profile_event(&super::UpsertAgentContextProfileInput {
+            counts_delta: AgentContextProfileCounts::new(0, 3, 0),
+            last_seen_at: Some("2026-05-16T01:13:00Z".to_string()),
+            weight_cached: -0.03,
+            ..input
+        })?;
+
+        let second = connection
+            .list_agent_context_profiles_for_pack("wsp_01234567890123456789012345", "CloudyHawk")?;
+        ensure_equal(&second.len(), &1_usize, "updated cached row count")?;
+        ensure_equal(
+            &second[0].counts.helpful_count,
+            &10_u32,
+            "helpful count remains",
+        )?;
+        ensure_equal(
+            &second[0].counts.harmful_count,
+            &3_u32,
+            "harmful count refreshes",
+        )?;
+        ensure_equal(&second[0].weight_cached, &-0.03, "cached weight refreshes")?;
+        ensure_equal(
+            &second[0].last_seen_at.as_str(),
+            &"2026-05-16T01:13:00Z",
+            "last seen refreshes",
         )?;
 
         connection.close()?;
