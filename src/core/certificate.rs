@@ -1094,6 +1094,24 @@ fn json_bool_field(value: &serde_json::Value, field: &str) -> Option<bool> {
 fn read_certificate_manifest(
     manifest_path: &Path,
 ) -> Result<Vec<ManifestCertificateRecord>, CertificateManifestError> {
+    reject_certificate_manifest_symlink_chain(manifest_path).map_err(|error| {
+        CertificateManifestError::new(format!(
+            "failed to inspect certificate manifest {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    let metadata = fs::symlink_metadata(manifest_path).map_err(|error| {
+        CertificateManifestError::new(format!(
+            "failed to inspect certificate manifest {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(CertificateManifestError::new(format!(
+            "certificate manifest {} is not a regular file",
+            manifest_path.display()
+        )));
+    }
     let input = fs::read_to_string(manifest_path).map_err(|error| {
         CertificateManifestError::new(format!(
             "failed to read certificate manifest {}: {error}",
@@ -1119,6 +1137,46 @@ fn read_certificate_manifest(
     }
     records.sort_by(|left, right| left.certificate.id.cmp(&right.certificate.id));
     Ok(records)
+}
+
+fn reject_certificate_manifest_symlink_chain(path: &Path) -> io::Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::RootDir => current.push(component.as_os_str()),
+            Component::Normal(component) => {
+                current.push(component);
+                match fs::symlink_metadata(&current) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "certificate manifest symlink refused: {}",
+                                current.display()
+                            ),
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                    Err(error) => return Err(error),
+                }
+            }
+            Component::CurDir | Component::ParentDir => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unsafe certificate manifest path",
+                ));
+            }
+        }
+    }
+    if current.as_os_str().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "empty certificate manifest path",
+        ));
+    }
+    Ok(())
 }
 
 fn convert_raw_certificate(
@@ -2377,6 +2435,91 @@ mod tests {
             &failed.result,
             &VerificationResult::FailedAssumptions,
             "failed assumptions win before hash mismatch",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_backed_certificate_rejects_symlinked_manifest_file() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_manifest = dir.path().join("real-certificates.json");
+        let manifest = serde_json::json!({
+            "schema": CERTIFICATE_MANIFEST_SCHEMA_V1,
+            "certificates": []
+        });
+        fs::write(
+            &real_manifest,
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let linked_manifest = dir.path().join("certificates.json");
+        std::os::unix::fs::symlink(&real_manifest, &linked_manifest)
+            .map_err(|error| error.to_string())?;
+
+        let report = verify_certificate_with_options(
+            &CertificateLookupOptions::new("cert_pack_valid").with_manifest_path(&linked_manifest),
+        );
+
+        ensure_equal(
+            &report.result,
+            &VerificationResult::StaleSchemaVersion,
+            "symlinked manifest result",
+        )?;
+        ensure(
+            report
+                .failure_codes
+                .iter()
+                .any(|code| code == "invalid_manifest"),
+            "symlinked manifest failure code",
+        )?;
+        ensure(
+            report
+                .message
+                .contains("certificate manifest symlink refused"),
+            "symlinked manifest message",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_backed_certificate_rejects_symlinked_manifest_parent() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_dir = dir.path().join("real-manifests");
+        fs::create_dir_all(&real_dir).map_err(|error| error.to_string())?;
+        let manifest = serde_json::json!({
+            "schema": CERTIFICATE_MANIFEST_SCHEMA_V1,
+            "certificates": []
+        });
+        fs::write(
+            real_dir.join("certificates.json"),
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let linked_dir = dir.path().join("linked-manifests");
+        std::os::unix::fs::symlink(&real_dir, &linked_dir).map_err(|error| error.to_string())?;
+
+        let report = verify_certificate_with_options(
+            &CertificateLookupOptions::new("cert_pack_valid")
+                .with_manifest_path(linked_dir.join("certificates.json")),
+        );
+
+        ensure_equal(
+            &report.result,
+            &VerificationResult::StaleSchemaVersion,
+            "symlinked manifest parent result",
+        )?;
+        ensure(
+            report
+                .failure_codes
+                .iter()
+                .any(|code| code == "invalid_manifest"),
+            "symlinked manifest parent failure code",
+        )?;
+        ensure(
+            report
+                .message
+                .contains("certificate manifest symlink refused"),
+            "symlinked manifest parent message",
         )
     }
 
