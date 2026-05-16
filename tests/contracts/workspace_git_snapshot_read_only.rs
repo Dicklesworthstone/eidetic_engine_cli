@@ -38,6 +38,22 @@ fn run_git(workspace: &Path, args: &[&str]) -> Result<String, String> {
     String::from_utf8(output.stdout).map_err(|error| format!("git stdout utf8: {error}"))
 }
 
+fn run_git_expect_failure(workspace: &Path, args: &[&str]) -> TestResult {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .output()
+        .map_err(|error| format!("spawn git {args:?}: {error}"))?;
+    if output.status.success() {
+        return Err(format!(
+            "git {args:?} should fail for this scenario\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
 fn write_file(path: &Path, content: impl AsRef<[u8]>) -> TestResult {
     fs::write(path, content).map_err(|error| format!("write {}: {error}", path.display()))
 }
@@ -230,6 +246,68 @@ fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
             .map(|metadata| metadata.file_type.as_str()),
         Some("symlink")
     );
+
+    Ok(())
+}
+
+#[test]
+fn workspace_git_snapshot_provider_is_read_only_for_unmerged_conflict() -> TestResult {
+    let temp = tempfile::Builder::new()
+        .prefix("ee-workspace-git-conflict-readonly-")
+        .tempdir()
+        .map_err(|error| format!("tempdir: {error}"))?;
+    let workspace = temp.path();
+
+    run_git(workspace, &["init", "-q", "-b", "main"])?;
+    run_git(
+        workspace,
+        &["config", "user.email", "ee-test@example.invalid"],
+    )?;
+    run_git(workspace, &["config", "user.name", "ee test"])?;
+
+    write_file(&workspace.join("conflict.txt"), "base\n")?;
+    run_git(workspace, &["add", "conflict.txt"])?;
+    run_git(workspace, &["commit", "-q", "-m", "base"])?;
+
+    run_git(workspace, &["checkout", "-q", "-b", "side"])?;
+    write_file(&workspace.join("conflict.txt"), "side\n")?;
+    run_git(workspace, &["commit", "-am", "side", "-q"])?;
+
+    run_git(workspace, &["checkout", "-q", "main"])?;
+    write_file(&workspace.join("conflict.txt"), "main\n")?;
+    run_git(workspace, &["commit", "-am", "main", "-q"])?;
+    run_git_expect_failure(workspace, &["merge", "side"])?;
+
+    let before_status = status_digest(workspace)?;
+    let before_files = file_state_digest(workspace)?;
+    if !before_status.lines().any(|line| line.starts_with("u ")) {
+        return Err(format!(
+            "expected porcelain-v2 unmerged record before snapshot, got:\n{before_status}"
+        ));
+    }
+
+    let options = WorkspaceGitSnapshotOptions::for_workspace(workspace);
+    let snapshot = collect_workspace_git_snapshot(&options, &SystemSwarmBriefCommandRunner)
+        .map_err(|error| format!("collect workspace git snapshot: {error:?}"))?;
+
+    let after_status = status_digest(workspace)?;
+    let after_files = file_state_digest(workspace)?;
+    assert_eq!(
+        after_status, before_status,
+        "provider must not change unmerged git status"
+    );
+    assert_eq!(
+        after_files, before_files,
+        "provider must not change conflicted files"
+    );
+
+    let conflict = entry_by_path(&snapshot.entries, "conflict.txt")?;
+    assert_eq!(conflict.entry_kind, "unmerged");
+    assert_eq!(conflict.staged, "U");
+    assert_eq!(conflict.unstaged, "U");
+    assert!(conflict.metadata.as_ref().is_some_and(|metadata| {
+        metadata.exists && metadata.file_type == "file" && !metadata.large_file
+    }));
 
     Ok(())
 }
