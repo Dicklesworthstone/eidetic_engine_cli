@@ -757,6 +757,19 @@ fn verify_required_pack_file(
 
 fn read_pack_file_no_symlinks(pack_path: &Path, relative_path: &str) -> Result<Vec<u8>, String> {
     let target_path = resolve_pack_file_path_no_symlinks(pack_path, relative_path)?;
+    let metadata = fs::symlink_metadata(&target_path).map_err(|error| {
+        format!(
+            "pack_artifact_unavailable: {}: {}",
+            target_path.display(),
+            error
+        )
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "pack_artifact_unavailable: {}: not a regular file",
+            target_path.display()
+        ));
+    }
     fs::read(&target_path).map_err(|error| {
         format!(
             "pack_artifact_unavailable: {}: {}",
@@ -1180,6 +1193,27 @@ mod tests {
 
         assert_eq!(error.code(), "storage");
         assert!(error.message().contains("symlink"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_pack_rejects_non_regular_manifest_member() -> TestResult {
+        let workspace = temp_root("ee_repro_replay_non_regular_manifest_")?;
+        let pack = workspace.join("pack");
+        fs::create_dir_all(pack.join("manifest.json")).map_err(|e| e.to_string())?;
+
+        let error = replay_pack(&ReplayOptions {
+            pack_path: pack,
+            dry_run: false,
+            verify_hashes: true,
+            check_env: false,
+            ..Default::default()
+        })
+        .expect_err("non-regular manifest member must be rejected");
+
+        assert_eq!(error.code(), "storage");
+        assert!(error.message().contains("regular file"));
         Ok(())
     }
 
