@@ -10,6 +10,7 @@
 //! per-task risk-brief surface; it operates on raw command strings and reuses
 //! the deterministic glob matcher shipped by `core::tripwire`.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -157,17 +158,21 @@ impl PreflightGuardRegistry {
     pub fn load(workspace: &Path) -> Result<Self, DomainError> {
         let mut registry = Self::with_builtins();
         let rules_path = workspace.join(PREFLIGHT_RULES_RELATIVE_PATH);
-        if !rules_path.exists() {
-            return Ok(registry);
-        }
+        validate_preflight_rules_path(&rules_path)?;
         let source_label = rules_path.to_string_lossy().into_owned();
-        let body = std::fs::read_to_string(&rules_path).map_err(|error| DomainError::Storage {
-            message: format!("Failed to read {source_label}: {error}"),
-            repair: Some(format!(
-                "Check filesystem permissions on {} or remove the file to fall back to builtins.",
-                source_label
-            )),
-        })?;
+        let body = match fs::read_to_string(&rules_path) {
+            Ok(body) => body,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(registry),
+            Err(error) => {
+                return Err(DomainError::Storage {
+                    message: format!("Failed to read {source_label}: {error}"),
+                    repair: Some(format!(
+                        "Check filesystem permissions on {} or remove the file to fall back to builtins.",
+                        source_label
+                    )),
+                });
+            }
+        };
         let workspace_rules = parse_workspace_rules(&body, &source_label)?;
         registry.rules.extend(workspace_rules);
         Ok(registry)
@@ -213,6 +218,82 @@ impl PreflightGuardRegistry {
             .filter(|rule| rule_matches_command(rule, command))
             .collect()
     }
+}
+
+fn validate_preflight_rules_path(path: &Path) -> Result<(), DomainError> {
+    if let Some(symlink_path) =
+        first_existing_symlink_component(path).map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to inspect preflight rule path component {}: {}",
+                error.path.display(),
+                error.source
+            ),
+            repair: Some("Fix or remove .ee/preflight_rules.toml.".to_owned()),
+        })?
+    {
+        return Err(DomainError::Configuration {
+            message: format!(
+                "Refusing to read preflight rule file {} through symlinked path component {}.",
+                path.display(),
+                symlink_path.display()
+            ),
+            repair: Some(
+                "Replace .ee/preflight_rules.toml with a regular file inside the workspace."
+                    .to_owned(),
+            ),
+        });
+    }
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!("Failed to inspect preflight rule file {}: {error}", path.display()),
+                repair: Some("Fix or remove .ee/preflight_rules.toml.".to_owned()),
+            });
+        }
+    };
+    if !metadata.is_file() {
+        return Err(DomainError::Configuration {
+            message: format!("Preflight rule path is not a regular file: {}", path.display()),
+            repair: Some("Replace .ee/preflight_rules.toml with a regular TOML file.".to_owned()),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct SymlinkComponentInspectionError {
+    path: PathBuf,
+    source: std::io::Error,
+}
+
+fn first_existing_symlink_component(
+    path: &Path,
+) -> Result<Option<PathBuf>, SymlinkComponentInspectionError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(source) => {
+                return Err(SymlinkComponentInspectionError {
+                    path: current,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn rule_matches_command(rule: &PreflightGuardRule, command: &str) -> bool {
