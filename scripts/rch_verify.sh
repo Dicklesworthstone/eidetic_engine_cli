@@ -412,7 +412,7 @@ fi
 if printf '%s' "$combined_output" | grep -q "remote required; refusing local fallback"; then
     degraded+=("rch_verify_local_fallback_refused")
 fi
-if [ "$exit_code" -ne 0 ] && printf '%s' "$combined_output" | grep -Eiq "timed out|timeout|capacity|busy|no workers|workers_healthy: 0|all_workers_offline"; then
+if [ "$exit_code" -ne 0 ] && [ -z "$worker_id" ] && printf '%s' "$combined_output" | grep -Eiq "timed out|timeout|capacity|busy|no workers|workers_healthy: 0|all_workers_offline"; then
     degraded+=("rch_verify_capacity_or_timeout")
 fi
 if printf '%s' "$combined_output" | grep -q "non-compilation command"; then

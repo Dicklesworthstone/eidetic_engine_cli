@@ -288,6 +288,56 @@ fn synthetic_local_fallback_refusal_is_not_worker_id() -> TestResult {
 }
 
 #[test]
+fn synthetic_remote_test_failure_with_timeout_env_is_remote_failure() -> TestResult {
+    let (status, stdout, _stderr) = run_script_with_env(
+        &[
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "why_toon_matches_json_contract",
+        ],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "RCH_DAEMON_RESPONSE_TIMEOUT_SECS=900\nrunning 1 test\ntest cli::tests::why_toon_matches_json_contract ... FAILED\nError: \"expected Number(12), got Number(12.0)\"\n[RCH] remote trj failed (exit 101)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "195544"),
+        ],
+    )?;
+    if status.success() {
+        return Err("remote Rust test failure should preserve non-zero exit".to_owned());
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse remote failure: {error}"))?;
+    if report["worker_id"] != "trj" {
+        return Err(format!("remote failure should retain worker id: {report}"));
+    }
+    if report["status"] != "remote_failure" {
+        return Err(format!(
+            "remote Rust test failure should not be capacity: {report}"
+        ));
+    }
+    let degraded = report["degraded_codes"]
+        .as_array()
+        .ok_or_else(|| "missing degraded codes".to_owned())?;
+    if !degraded
+        .iter()
+        .any(|code| code == "rch_verify_remote_command_failed")
+    {
+        return Err(format!("missing remote failure degraded code: {report}"));
+    }
+    if degraded
+        .iter()
+        .any(|code| code == "rch_verify_capacity_or_timeout")
+    {
+        return Err(format!("remote test failure was misclassified: {report}"));
+    }
+    Ok(())
+}
+
+#[test]
 fn synthetic_remote_transcript_writes_ledger_and_summary() -> TestResult {
     let dir = target_tmp_dir().join(format!("rch-verify-ledger-{}", std::process::id()));
     fs::create_dir_all(&dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
