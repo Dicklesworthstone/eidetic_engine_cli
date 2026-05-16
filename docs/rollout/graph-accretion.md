@@ -171,7 +171,7 @@ feature disabled.
 | `graph.feature.revision_dominance.enabled` | `ee memory revise --dry-run` and `ee why` revision lineage | Impact/lineage blocks are empty or disabled-degraded, never populated from stale dominance data. | Revision-chain integration test with disabled flag. |
 | `graph.feature.skyline.enabled` | `ee status` / `ee insights --section skyline` | Skyline summary remains schema-valid and reports disabled instead of placeholder scores. | Status/insights snapshot with disabled flag. |
 | `graph.feature.load_bearing.enabled` | Rule-provenance / load-bearing insights | Load-bearing scores are suppressed and the section emits `graph_feature_disabled`. | Bipartite fixture integration or insight-section contract test. |
-| `graph.feature.hits_profiles.enabled` | HITS query profiles and graph HITS output | Profile boosts are suppressed; HITS profile surface emits `graph_feature_disabled` while base HITS remains honest about graph availability. | HITS profile integration test and wrapper unit coverage. |
+| `graph.feature.hits_profiles.enabled` | HITS query profiles and `ee insights --section hubs` / `authorities` | Profile boosts are suppressed; HITS profile insights emit `graph_feature_disabled` while base `ee graph hits` remains governed by ordinary graph availability instead of this profile rollout flag. | HITS profile integration test or `ee insights --section hubs` / `authorities` contract coverage, plus wrapper unit coverage. |
 
 Closeout for `bd-bife.8` requires at least one executable proof per row. If a
 downstream G-feature bead has not landed the owning surface yet, that row stays
@@ -184,8 +184,11 @@ now knows the ten `graph.feature.*.enabled` keys, including default values and
 `ee config get/set` round-tripping, but the bead is still not closed by this
 alone. Remaining acceptance work:
 
-- Implement disabled-feature behavior for every affected surface.
-- Add tests proving disabled features suppress output and emit degraded
-  sentinels, using the matrix above as the row-level checklist.
+- Keep disabled-feature behavior implemented for every affected surface in the
+  matrix above. The HITS row is scoped to profile-driven context/insights
+  surfaces; base `ee graph hits` remains a graph-availability surface, not a
+  `graph.feature.hits_profiles.enabled` consumer.
+- Add or preserve tests proving disabled features suppress output and emit
+  degraded sentinels, using the matrix above as the row-level checklist.
 - Run the required Cargo gates remotely through RCH after the topology blocker
   is resolved.

@@ -928,6 +928,7 @@ pub fn verification_broker_view(
         candidates.iter().copied().find(|record| {
             record.source_hash.as_deref() == Some(source_hash)
                 && record.execution_substrate == request.execution_substrate
+                && broker_env_match(record, &request)
         })
     });
 
