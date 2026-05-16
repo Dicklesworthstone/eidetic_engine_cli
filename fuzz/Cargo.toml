@@ -110,6 +110,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "graph_memory_budget"
+path = "fuzz_targets/graph_memory_budget.rs"
+test = false
+doc = false
+bench = false
+
 [patch.crates-io]
 asupersync = { path = "/data/projects/asupersync" }
 fsqlite = { path = "/data/projects/frankensqlite/crates/fsqlite" }
