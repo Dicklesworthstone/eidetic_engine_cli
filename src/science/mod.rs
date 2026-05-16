@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::config::env_registry::{EnvVar, read, read_os};
+use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 
 /// Science analytics subsystem identifier.
 pub const SUBSYSTEM: &str = "science";
@@ -205,11 +206,7 @@ impl ScienceStatusReport {
                 .iter()
                 .map(ScienceCapabilityStatus::data_json)
                 .collect::<Vec<_>>(),
-            "degradations": self
-                .degradations
-                .iter()
-                .map(ScienceDegradation::data_json)
-                .collect::<Vec<_>>(),
+            "degradations": science_status_degradations_data_json(&self.degradations),
             "nextActions": self.next_actions,
         })
     }
@@ -406,16 +403,31 @@ impl ScienceDegradation {
             repair: "Increase the science analytics budget or use a smaller input.",
         }
     }
+}
 
-    #[must_use]
-    fn data_json(&self) -> serde_json::Value {
+fn science_status_degradations_data_json(
+    degradations: &[ScienceDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_degraded_entries(degradations.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "science_status",
+            entry.code,
+            entry.severity,
+            entry.message,
+            entry.repair,
+        )
+    }))
+    .into_iter()
+    .map(|entry| {
         serde_json::json!({
-            "code": self.code,
-            "severity": self.severity,
-            "message": self.message,
-            "repair": self.repair,
+            "code": entry.code,
+            "severity": entry.severity,
+            "message": entry.message,
+            "repair": entry.repair,
+            "sources": entry.sources,
         })
-    }
+    })
+    .collect()
 }
 
 // ============================================================================
@@ -2161,6 +2173,43 @@ mod tests {
                 .is_some_and(|entries| entries.len() == 2),
             true,
             "json capabilities count",
+        )
+    }
+
+    #[test]
+    fn science_status_report_degradations_are_aggregated() -> TestResult {
+        let report = ScienceStatusReport {
+            schema: SCIENCE_STATUS_SCHEMA_V1,
+            command: SCIENCE_STATUS_COMMAND,
+            subsystem: SUBSYSTEM,
+            status: ScienceStatus::BackendUnavailable,
+            available: false,
+            feature: ScienceFeatureStatus::current(),
+            capabilities: Vec::new(),
+            degradations: vec![
+                ScienceDegradation::backend_unavailable(),
+                ScienceDegradation::backend_unavailable(),
+            ],
+            next_actions: Vec::new(),
+        };
+        let json = report.data_json();
+        let degradations = json
+            .get("degradations")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "expected degradations array".to_owned())?;
+
+        ensure(degradations.len(), 1, "aggregated degradation count")?;
+        ensure_json_str(
+            degradations[0]
+                .get("code")
+                .and_then(serde_json::Value::as_str),
+            DEGRADATION_CODE_BACKEND_UNAVAILABLE,
+            "aggregate code",
+        )?;
+        ensure(
+            degradations[0].get("sources").cloned(),
+            Some(serde_json::json!(["science_status"])),
+            "aggregate source label",
         )
     }
 

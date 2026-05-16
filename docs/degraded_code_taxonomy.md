@@ -149,6 +149,7 @@ Current conventions:
 | `quarantine` | `ee diag quarantine` trust or feedback quarantine degradation. |
 | `rch` | Swarm brief RCH source degradation. |
 | `structural_health` | `ee health structural` graph-health degradation. |
+| `science_status` | `ee analyze science-status` availability degradation. |
 | `science_drift` | `ee analyze drift` science/evaluation drift degradation. |
 | `science_clustering` | `ee analyze clustering` candidate clustering degradation. |
 | `situation_classify` | `ee situation classify` deterministic heuristic-routing degradation. |
