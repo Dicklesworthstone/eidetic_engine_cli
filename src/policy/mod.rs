@@ -401,6 +401,171 @@ pub struct SecretRedactionMatch {
     pub end: usize,
 }
 
+pub const WORKSPACE_SECRET_RISK_SCHEMA_V1: &str = "ee.workspace.secret_risk.v1";
+pub const WORKSPACE_SECRET_RISK_DEFAULT_MAX_SCAN_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceSecretRiskReport {
+    pub schema: &'static str,
+    pub path: String,
+    pub secret_risk: bool,
+    pub skipped_content_scan: bool,
+    pub risk_classes: Vec<&'static str>,
+    pub reasons: Vec<&'static str>,
+    pub evidence: Vec<WorkspaceSecretRiskEvidence>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceSecretRiskEvidence {
+    pub risk_class: &'static str,
+    pub pattern_id: &'static str,
+    pub line: Option<usize>,
+    pub hash_prefix: Option<String>,
+    pub redacted: String,
+}
+
+/// Build redaction-safe evidence for commit-readiness secret-risk decisions.
+///
+/// This is deliberately a lightweight adapter, not a full secret scanner. It
+/// reuses the policy redactor for small UTF-8 content and emits only pattern
+/// names, line numbers, placeholders, and short hashes of matched values.
+#[must_use]
+pub fn workspace_secret_risk_evidence(
+    path: &str,
+    content: Option<&[u8]>,
+    max_scan_bytes: usize,
+) -> WorkspaceSecretRiskReport {
+    let max_scan_bytes = if max_scan_bytes == 0 {
+        WORKSPACE_SECRET_RISK_DEFAULT_MAX_SCAN_BYTES
+    } else {
+        max_scan_bytes
+    };
+    let mut risk_classes = workspace_secret_path_risk_classes(path);
+    let mut reasons = Vec::new();
+    let mut evidence = Vec::new();
+    let mut skipped_content_scan = false;
+
+    match content {
+        Some(bytes) if bytes.len() > max_scan_bytes => {
+            skipped_content_scan = true;
+            reasons.push("content_scan_skipped_large_file");
+        }
+        Some(bytes) => match std::str::from_utf8(bytes) {
+            Ok(text) => {
+                let redaction = redact_secret_like_content(text);
+                if redaction.redacted {
+                    risk_classes.push("content_secret");
+                    reasons.extend(redaction.redacted_reasons.iter().copied());
+                    evidence.extend(
+                        redaction
+                            .matches
+                            .iter()
+                            .map(|matched| workspace_secret_content_evidence(text, matched)),
+                    );
+                }
+            }
+            Err(_) => {
+                skipped_content_scan = true;
+                reasons.push("content_scan_skipped_binary");
+            }
+        },
+        None => reasons.push("content_not_provided"),
+    }
+
+    risk_classes.sort_unstable();
+    risk_classes.dedup();
+    reasons.sort_unstable();
+    reasons.dedup();
+    evidence.sort_by(|left, right| {
+        left.line
+            .cmp(&right.line)
+            .then_with(|| left.pattern_id.cmp(right.pattern_id))
+            .then_with(|| left.hash_prefix.cmp(&right.hash_prefix))
+    });
+    evidence.dedup();
+
+    WorkspaceSecretRiskReport {
+        schema: WORKSPACE_SECRET_RISK_SCHEMA_V1,
+        path: path.to_owned(),
+        secret_risk: !risk_classes.is_empty() || !evidence.is_empty(),
+        skipped_content_scan,
+        risk_classes,
+        reasons,
+        evidence,
+    }
+}
+
+fn workspace_secret_path_risk_classes(path: &str) -> Vec<&'static str> {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    let file_name = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
+    let mut classes = Vec::new();
+
+    if file_name == ".env"
+        || file_name.starts_with(".env.")
+        || file_name.ends_with(".env")
+        || normalized.contains("/.env.")
+    {
+        classes.push("env_file");
+    }
+    if file_name.ends_with(".pem")
+        || file_name.ends_with(".key")
+        || file_name == "id_rsa"
+        || file_name == "id_dsa"
+        || file_name == "id_ecdsa"
+        || file_name == "id_ed25519"
+        || file_name.contains("private_key")
+    {
+        classes.push("private_key_path");
+    }
+    if file_name.contains("credential")
+        || file_name.contains("credentials")
+        || file_name.contains("token")
+        || file_name.contains("secret")
+        || file_name.contains("password")
+        || normalized.contains("/.aws/credentials")
+        || normalized.contains("/.config/gcloud/")
+    {
+        classes.push("credential_path");
+    }
+
+    classes.sort_unstable();
+    classes.dedup();
+    classes
+}
+
+fn workspace_secret_content_evidence(
+    text: &str,
+    matched: &SecretRedactionMatch,
+) -> WorkspaceSecretRiskEvidence {
+    let value = text.get(matched.start..matched.end).unwrap_or("");
+    WorkspaceSecretRiskEvidence {
+        risk_class: "content_secret",
+        pattern_id: matched.pattern_id,
+        line: byte_line_number(text, matched.start),
+        hash_prefix: Some(short_secret_hash(value)),
+        redacted: redaction_placeholder(matched.pattern_id),
+    }
+}
+
+fn byte_line_number(text: &str, byte_index: usize) -> Option<usize> {
+    if byte_index > text.len() {
+        return None;
+    }
+    let safe_index = previous_char_boundary(text, byte_index);
+    Some(
+        text[..safe_index]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            + 1,
+    )
+}
+
+fn short_secret_hash(value: &str) -> String {
+    let digest = blake3::hash(value.as_bytes());
+    digest.to_hex()[..12].to_owned()
+}
+
 /// Stable rejection returned when privileged trust promotion evidence is not
 /// allowed to support the proposed trust class.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1760,7 +1925,7 @@ mod tests {
         INSTRUCTION_LIKE_SCORE_THRESHOLD, InstructionRisk, InstructionSignalKind,
         TRUST_PROMOTION_EVIDENCE_REJECTED_CODE, detect_instruction_like_content,
         redact_secret_like_content, redaction_placeholder, subsystem_name,
-        validate_trust_promotion_evidence,
+        validate_trust_promotion_evidence, workspace_secret_risk_evidence,
     };
 
     #[test]
@@ -1829,6 +1994,91 @@ mod tests {
         assert!(report.is_instruction_like);
         assert_eq!(report.risk, InstructionRisk::High);
         assert!(report.rejected_reasons.contains(&"destructive_rm_rf"));
+    }
+
+    #[test]
+    fn workspace_secret_risk_flags_env_and_key_paths_without_content() {
+        let env_report = workspace_secret_risk_evidence(".env.local", None, 4096);
+        assert!(env_report.secret_risk);
+        assert_eq!(env_report.risk_classes, vec!["env_file"]);
+        assert!(env_report.reasons.contains(&"content_not_provided"));
+
+        let key_report = workspace_secret_risk_evidence("keys/id_ed25519", None, 4096);
+        assert!(key_report.secret_risk);
+        assert_eq!(key_report.risk_classes, vec!["private_key_path"]);
+        assert!(key_report.evidence.is_empty());
+    }
+
+    #[test]
+    fn workspace_secret_risk_redacts_content_evidence() {
+        let raw_value = concat!(
+            "sk",
+            "-",
+            "proj-",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        );
+        let content = format!("first line\nOPENAI_API_KEY={raw_value}\n");
+        let report =
+            workspace_secret_risk_evidence("config/app.txt", Some(content.as_bytes()), 4096);
+
+        assert!(report.secret_risk);
+        assert!(report.risk_classes.contains(&"content_secret"));
+        assert!(report.reasons.contains(&"openai_api_key") || report.reasons.contains(&"api_key"));
+        assert!(!report.evidence.is_empty());
+        assert!(
+            report
+                .evidence
+                .iter()
+                .all(|evidence| evidence.line == Some(2))
+        );
+        assert!(
+            report
+                .evidence
+                .iter()
+                .all(|evidence| evidence.redacted.starts_with("[REDACTED:"))
+        );
+        let rendered = format!("{report:?}");
+        assert!(
+            !rendered.contains(raw_value),
+            "workspace secret-risk evidence must not leak raw matched values: {rendered}"
+        );
+    }
+
+    #[test]
+    fn workspace_secret_risk_skips_large_and_binary_content() {
+        let large = vec![b'a'; 16];
+        let large_report = workspace_secret_risk_evidence("notes.txt", Some(&large), 8);
+        assert!(!large_report.secret_risk);
+        assert!(large_report.skipped_content_scan);
+        assert!(
+            large_report
+                .reasons
+                .contains(&"content_scan_skipped_large_file")
+        );
+
+        let binary = [0xff, 0xfe, 0xfd];
+        let binary_report = workspace_secret_risk_evidence("blob.bin", Some(&binary), 4096);
+        assert!(!binary_report.secret_risk);
+        assert!(binary_report.skipped_content_scan);
+        assert!(
+            binary_report
+                .reasons
+                .contains(&"content_scan_skipped_binary")
+        );
+    }
+
+    #[test]
+    fn workspace_secret_risk_allows_benign_text() {
+        let report = workspace_secret_risk_evidence(
+            "docs/readme.md",
+            Some(b"documented token budgets and deterministic hashes are not secrets"),
+            4096,
+        );
+
+        assert!(!report.secret_risk);
+        assert!(!report.skipped_content_scan);
+        assert!(report.risk_classes.is_empty());
+        assert!(report.evidence.is_empty());
     }
 
     #[test]
