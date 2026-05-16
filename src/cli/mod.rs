@@ -11272,6 +11272,21 @@ where
         .collect()
 }
 
+fn aggregate_why_degraded_json(
+    source: &'static str,
+    degraded: &[crate::core::why::WhyDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_cli_degraded_json(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            source,
+            entry.code,
+            entry.severity,
+            entry.message.as_str(),
+            entry.repair.as_deref().unwrap_or_default(),
+        )
+    }))
+}
+
 fn aggregate_drift_degraded_json(
     degradations: &[crate::science::DriftDegradation],
 ) -> Vec<serde_json::Value> {
@@ -28814,18 +28829,7 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
                 "createdAt": snapshot.created_at,
             })
         });
-        let degraded: Vec<serde_json::Value> = graph
-            .degraded
-            .iter()
-            .map(|entry| {
-                serde_json::json!({
-                    "code": entry.code,
-                    "severity": entry.severity,
-                    "message": entry.message,
-                    "repair": entry.repair,
-                })
-            })
-            .collect();
+        let degraded = aggregate_why_degraded_json("why_graph_retrieval", &graph.degraded);
 
         serde_json::json!({
             "status": graph.status,
@@ -28921,18 +28925,7 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
         })
     });
 
-    let degraded: Vec<serde_json::Value> = report
-        .degraded
-        .iter()
-        .map(|d| {
-            serde_json::json!({
-                "code": d.code,
-                "severity": d.severity,
-                "message": d.message,
-                "repair": d.repair,
-            })
-        })
-        .collect();
+    let degraded = aggregate_why_degraded_json("why", &report.degraded);
 
     let contradictions: Vec<serde_json::Value> = report
         .contradictions
@@ -37010,8 +37003,9 @@ mod tests {
         SearchStatus,
     };
     use crate::core::why::{
-        AgentProfileSelectionExplanation, PackSelectionExplanation, RationaleTraceSummary,
-        RetrievalExplanation, SelectionExplanation, StorageExplanation, WhyReport,
+        AgentProfileSelectionExplanation, GraphMetricExplanation, GraphRetrievalExplanation,
+        GraphRetrievalSourceExplanation, PackSelectionExplanation, RationaleTraceSummary,
+        RetrievalExplanation, SelectionExplanation, StorageExplanation, WhyDegradation, WhyReport,
     };
     use crate::models::error_codes::ALL_ERROR_CODES;
     use crate::models::{
@@ -37805,6 +37799,114 @@ mod tests {
                 "why TOON preserves agent helpful count: expected 12, got {:?}",
                 actual["data"]["agentProfile"]["helpfulCount"]
             ),
+        )
+    }
+
+    #[test]
+    fn why_degraded_entries_are_aggregated() -> TestResult {
+        let graph_metric = GraphMetricExplanation {
+            raw: 0.0,
+            normalized: 0.0,
+            rank: None,
+            weight: 0.0,
+            contribution: 0.0,
+            formula: "fixture".to_string(),
+        };
+        let graph = GraphRetrievalExplanation {
+            status: "degraded".to_string(),
+            source: GraphRetrievalSourceExplanation {
+                kind: "graph_snapshot".to_string(),
+                workspace_id: Some("wsp_fixture".to_string()),
+                graph_type: Some("memory_links".to_string()),
+                snapshot: None,
+            },
+            centrality_score: 0.0,
+            authority_score: 0.0,
+            hub_score: 0.0,
+            community_id: None,
+            distance_to_query_seed: None,
+            same_cluster_as_top_result: None,
+            evidence_support_count: 0,
+            contradiction_count: 0,
+            orphan_penalty: 0.0,
+            stale_bridge_penalty: 0.0,
+            pagerank: graph_metric.clone(),
+            betweenness: graph_metric,
+            labels: Vec::new(),
+            reasons: Vec::new(),
+            centrality_formula: "fixture".to_string(),
+            orphan_penalty_formula: "fixture".to_string(),
+            stale_bridge_penalty_formula: "fixture".to_string(),
+            degraded: vec![
+                WhyDegradation {
+                    code: "why_pack_selection_unavailable",
+                    severity: "low",
+                    message: "graph selection unavailable".to_string(),
+                    repair: Some("ee graph snapshot rebuild --json".to_string()),
+                },
+                WhyDegradation {
+                    code: "why_pack_selection_unavailable",
+                    severity: "medium",
+                    message: "graph selection still unavailable".to_string(),
+                    repair: Some("ee graph snapshot rebuild --workspace . --json".to_string()),
+                },
+            ],
+        };
+        let report = why_found_fixture()
+            .with_graph_retrieval(graph)
+            .with_degradations(vec![
+                WhyDegradation {
+                    code: "why_result_target_unsupported_source",
+                    severity: "medium",
+                    message: "result target unsupported".to_string(),
+                    repair: Some("ee why mem_... --json".to_string()),
+                },
+                WhyDegradation {
+                    code: "why_result_target_unsupported_source",
+                    severity: "high",
+                    message: "result target unsupported with higher severity".to_string(),
+                    repair: Some("ee search <query> --json".to_string()),
+                },
+            ]);
+        let value: serde_json::Value = serde_json::from_str(&super::format_why_json(&report))
+            .map_err(|error| error.to_string())?;
+
+        let degraded = value["data"]["degraded"]
+            .as_array()
+            .ok_or_else(|| "why degraded should be an array".to_string())?;
+        ensure_equal(
+            &degraded.len(),
+            &1,
+            "top-level why duplicate code collapses",
+        )?;
+        ensure_equal(
+            &degraded[0]["severity"],
+            &serde_json::json!("high"),
+            "top-level why keeps max severity",
+        )?;
+        ensure_equal(
+            &degraded[0]["sources"],
+            &serde_json::json!(["why"]),
+            "top-level why records source",
+        )?;
+
+        let graph_degraded = value["data"]["graphRetrievalFeatures"]["degraded"]
+            .as_array()
+            .ok_or_else(|| "graph why degraded should be an array".to_string())?;
+        ensure_equal(
+            &graph_degraded.len(),
+            &1,
+            "graph why duplicate code collapses",
+        )?;
+        ensure_equal(
+            &graph_degraded[0]["severity"],
+            &serde_json::json!("medium"),
+            "graph why keeps max severity",
+        )?;
+        ensure_equal(
+            &graph_degraded[0]["sources"],
+            &serde_json::json!(["why_graph_retrieval"]),
+            "graph why records source",
         )
     }
 
