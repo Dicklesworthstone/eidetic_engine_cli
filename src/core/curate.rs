@@ -389,6 +389,7 @@ pub struct CurateDispositionReport {
     pub decisions: Vec<CurateDispositionDecision>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub structural_adjustments: Vec<CurateStructuralDecayAdjustment>,
+    #[serde(serialize_with = "serialize_curate_disposition_degradations")]
     pub degraded: Vec<CurateCandidatesDegradation>,
     pub next_action: String,
 }
@@ -412,6 +413,7 @@ pub struct ReviewSessionReport {
     pub topic_count: usize,
     pub candidate_count: usize,
     pub candidates: Vec<ReviewSessionCandidate>,
+    #[serde(serialize_with = "serialize_review_session_degradations")]
     pub degraded: Vec<CurateCandidatesDegradation>,
     pub next_action: String,
 }
@@ -454,6 +456,7 @@ pub struct CurateRetireReport {
     pub dry_run: bool,
     pub persisted: bool,
     pub audit_id: Option<String>,
+    #[serde(serialize_with = "serialize_curate_retire_degradations")]
     pub degraded: Vec<CurateCandidatesDegradation>,
     pub next_action: String,
 }
@@ -514,6 +517,7 @@ pub struct CurateTombstoneReport {
     pub dry_run: bool,
     pub persisted: bool,
     pub audit_id: Option<String>,
+    #[serde(serialize_with = "serialize_curate_tombstone_degradations")]
     pub degraded: Vec<CurateCandidatesDegradation>,
     pub next_action: String,
 }
@@ -575,6 +579,7 @@ pub struct CurateUntombstoneReport {
     pub dry_run: bool,
     pub persisted: bool,
     pub audit_id: Option<String>,
+    #[serde(serialize_with = "serialize_curate_untombstone_degradations")]
     pub degraded: Vec<CurateCandidatesDegradation>,
     pub next_action: String,
 }
@@ -636,6 +641,7 @@ pub struct ReviewWorkspaceReport {
     pub evidence_count: usize,
     pub candidate_count: usize,
     pub candidates: Vec<ReviewSessionCandidate>,
+    #[serde(serialize_with = "serialize_review_workspace_degradations")]
     pub degraded: Vec<CurateCandidatesDegradation>,
     pub next_action: String,
 }
@@ -1346,6 +1352,66 @@ where
     S: Serializer,
 {
     aggregate_curate_degradations("curate_review", degraded).serialize(serializer)
+}
+
+fn serialize_curate_disposition_degradations<S>(
+    degraded: &[CurateCandidatesDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_curate_degradations("curate_disposition", degraded).serialize(serializer)
+}
+
+fn serialize_review_session_degradations<S>(
+    degraded: &[CurateCandidatesDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_curate_degradations("review_session", degraded).serialize(serializer)
+}
+
+fn serialize_curate_retire_degradations<S>(
+    degraded: &[CurateCandidatesDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_curate_degradations("curate_retire", degraded).serialize(serializer)
+}
+
+fn serialize_curate_tombstone_degradations<S>(
+    degraded: &[CurateCandidatesDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_curate_degradations("curate_tombstone", degraded).serialize(serializer)
+}
+
+fn serialize_curate_untombstone_degradations<S>(
+    degraded: &[CurateCandidatesDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_curate_degradations("curate_untombstone", degraded).serialize(serializer)
+}
+
+fn serialize_review_workspace_degradations<S>(
+    degraded: &[CurateCandidatesDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_curate_degradations("review_workspace", degraded).serialize(serializer)
 }
 
 fn aggregate_curate_degradations(
@@ -6225,11 +6291,16 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        CurateCandidatesOptions, CurateDispositionOptions, CurateReviewAction, CurateReviewOptions,
-        ReviewSessionCandidate, ReviewSessionOptions, ReviewSessionReport,
-        apply_curation_candidate, candidate_summary_from_stored, list_curation_candidates,
-        review_curation_candidate, review_session_proposals, run_curation_disposition,
-        stable_workspace_id, validate_curation_candidate,
+        CURATE_APPLY_SCHEMA_V1, CURATE_CANDIDATES_SCHEMA_V1, CURATE_DISPOSITION_SCHEMA_V1,
+        CURATE_RETIRE_SCHEMA_V1, CURATE_REVIEW_SCHEMA_V1, CURATE_TOMBSTONE_SCHEMA_V1,
+        CURATE_UNTOMBSTONE_SCHEMA_V1, CURATE_VALIDATE_SCHEMA_V1, CurateCandidatesDegradation,
+        CurateCandidatesFilter, CurateCandidatesOptions, CurateCandidatesReport,
+        CurateDispositionOptions, CurateReviewAction, CurateReviewOptions,
+        REVIEW_SESSION_SCHEMA_V1, REVIEW_WORKSPACE_SCHEMA_V1, ReviewSessionCandidate,
+        ReviewSessionOptions, ReviewSessionReport, apply_curation_candidate,
+        candidate_summary_from_stored, list_curation_candidates, review_curation_candidate,
+        review_session_proposals, run_curation_disposition, stable_workspace_id,
+        validate_curation_candidate,
     };
     use crate::db::{
         CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateFeedbackEventInput,
@@ -8383,6 +8454,145 @@ mod tests {
             next_action: "ee curate apply <candidate-id> --json".to_owned(),
         };
         assert_aggregated_degraded_source(&review_report.data_json(), "curate_review")?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn remaining_curate_reports_aggregate_duplicate_degraded_entries() -> TestResult {
+        let disposition_report = super::CurateDispositionReport {
+            schema: CURATE_DISPOSITION_SCHEMA_V1,
+            command: "curate disposition",
+            version: env!("CARGO_PKG_VERSION"),
+            workspace_id: "wsp_curate_aggregate".to_owned(),
+            workspace_path: "/workspace".to_owned(),
+            database_path: "/workspace/.ee/ee.db".to_owned(),
+            dry_run: true,
+            apply: false,
+            durable_mutation: false,
+            summary: super::CurateDispositionSummary {
+                total_candidates: 0,
+                due_count: 0,
+                applied_count: 0,
+                prompt_count: 0,
+                escalation_count: 0,
+                blocked_count: 0,
+                next_scheduled_at: None,
+            },
+            policies: Vec::new(),
+            decisions: Vec::new(),
+            structural_adjustments: Vec::new(),
+            degraded: duplicate_curate_degradations(),
+            next_action: "ee curate candidates --json".to_owned(),
+        };
+        assert_aggregated_degraded_source(&disposition_report.data_json(), "curate_disposition")?;
+
+        let review_session_report = ReviewSessionReport {
+            schema: REVIEW_SESSION_SCHEMA_V1,
+            command: "review session",
+            version: env!("CARGO_PKG_VERSION"),
+            workspace_id: "wsp_curate_aggregate".to_owned(),
+            workspace_path: "/workspace".to_owned(),
+            database_path: "/workspace/.ee/ee.db".to_owned(),
+            session_id: "ses_aggregate".to_owned(),
+            cass_session_id: "cass_aggregate".to_owned(),
+            propose_mode: false,
+            dry_run: true,
+            durable_mutation: false,
+            evidence_span_count: 0,
+            topic_count: 0,
+            candidate_count: 0,
+            candidates: Vec::new(),
+            degraded: duplicate_curate_degradations(),
+            next_action: "ee curate candidates --json".to_owned(),
+        };
+        let review_session_json =
+            serde_json::to_string(&review_session_report).map_err(|error| error.to_string())?;
+        assert_aggregated_degraded_source(&review_session_json, "review_session")?;
+
+        let retire_report = super::CurateRetireReport {
+            schema: CURATE_RETIRE_SCHEMA_V1,
+            command: "curate retire",
+            version: env!("CARGO_PKG_VERSION"),
+            workspace_id: "wsp_curate_aggregate".to_owned(),
+            workspace_path: "/workspace".to_owned(),
+            database_path: "/workspace/.ee/ee.db".to_owned(),
+            candidate_id: "curate_aggregate00000000000001".to_owned(),
+            from_status: "pending".to_owned(),
+            to_status: "retired".to_owned(),
+            reason: Some("duplicate".to_owned()),
+            retired_at: "2026-05-01T00:00:00Z".to_owned(),
+            retired_by: Some("ee".to_owned()),
+            dry_run: true,
+            persisted: false,
+            audit_id: None,
+            degraded: duplicate_curate_degradations(),
+            next_action: "ee curate candidates --json".to_owned(),
+        };
+        assert_aggregated_degraded_source(&retire_report.json_output(), "curate_retire")?;
+
+        let tombstone_report = super::CurateTombstoneReport {
+            schema: CURATE_TOMBSTONE_SCHEMA_V1,
+            command: "curate tombstone",
+            version: env!("CARGO_PKG_VERSION"),
+            workspace_id: "wsp_curate_aggregate".to_owned(),
+            workspace_path: "/workspace".to_owned(),
+            database_path: "/workspace/.ee/ee.db".to_owned(),
+            memory_id: "mem_aggregate000000000000001".to_owned(),
+            reason: Some("superseded".to_owned()),
+            tombstoned_at: "2026-05-01T00:00:00Z".to_owned(),
+            tombstoned_by: Some("ee".to_owned()),
+            dry_run: true,
+            persisted: false,
+            audit_id: None,
+            degraded: duplicate_curate_degradations(),
+            next_action: "ee memory show <memory-id> --json".to_owned(),
+        };
+        assert_aggregated_degraded_source(&tombstone_report.json_output(), "curate_tombstone")?;
+
+        let untombstone_report = super::CurateUntombstoneReport {
+            schema: CURATE_UNTOMBSTONE_SCHEMA_V1,
+            command: "curate untombstone",
+            version: env!("CARGO_PKG_VERSION"),
+            workspace_id: "wsp_curate_aggregate".to_owned(),
+            workspace_path: "/workspace".to_owned(),
+            database_path: "/workspace/.ee/ee.db".to_owned(),
+            memory_id: "mem_aggregate000000000000001".to_owned(),
+            reason: Some("restored".to_owned()),
+            previous_tombstoned_at: Some("2026-05-01T00:00:00Z".to_owned()),
+            restored_at: "2026-05-02T00:00:00Z".to_owned(),
+            restored_by: Some("ee".to_owned()),
+            dry_run: true,
+            persisted: false,
+            audit_id: None,
+            degraded: duplicate_curate_degradations(),
+            next_action: "ee memory show <memory-id> --json".to_owned(),
+        };
+        assert_aggregated_degraded_source(&untombstone_report.json_output(), "curate_untombstone")?;
+
+        let review_workspace_report = super::ReviewWorkspaceReport {
+            schema: REVIEW_WORKSPACE_SCHEMA_V1,
+            command: "review workspace",
+            version: env!("CARGO_PKG_VERSION"),
+            workspace_id: "wsp_curate_aggregate".to_owned(),
+            workspace_path: "/workspace".to_owned(),
+            database_path: "/workspace/.ee/ee.db".to_owned(),
+            scope_path: "/workspace".to_owned(),
+            include_cass: false,
+            propose_mode: false,
+            dry_run: true,
+            durable_mutation: false,
+            memory_count: 0,
+            evidence_count: 0,
+            candidate_count: 0,
+            candidates: Vec::new(),
+            degraded: duplicate_curate_degradations(),
+            next_action: "ee curate candidates --json".to_owned(),
+        };
+        assert_aggregated_degraded_source(
+            &review_workspace_report.json_output(),
+            "review_workspace",
+        )?;
 
         Ok(())
     }

@@ -116,7 +116,11 @@ Current conventions:
 | `bv` | Swarm brief BV source degradation. |
 | `curate_apply` | `ee curate apply` candidate-application degradation. |
 | `curate_candidates` | `ee curate candidates` queue listing degradation. |
+| `curate_disposition` | `ee curate disposition` TTL-disposition degradation. |
 | `curate_review` | `ee curate accept/reject/snooze/merge` review-lifecycle degradation. |
+| `curate_retire` | `ee curate retire` candidate-retirement degradation. |
+| `curate_tombstone` | `ee curate tombstone` memory-tombstone degradation. |
+| `curate_untombstone` | `ee curate untombstone` memory-restoration degradation. |
 | `curate_validate` | `ee curate validate` candidate-validation degradation. |
 | `db_status` | `ee db status` migration or sidecar-file degradation. |
 | `dependency_contract` | `ee diag dependencies` dependency-contract degradation. |
@@ -131,6 +135,8 @@ Current conventions:
 | `graph_export` | `ee graph export` graph snapshot export degradation. |
 | `graph_feature_enrichment` | `ee graph feature-enrichment` graph-derived scoring degradation. |
 | `hits` | `ee graph hits` HITS algorithm degradation. |
+| `review_session` | `ee review session` curation proposal degradation. |
+| `review_workspace` | `ee review workspace` curation proposal degradation. |
 | `host_profile` | Swarm brief host-profile source degradation. |
 | `integrity` | `ee diag integrity` database, schema, canary, or provenance-sample degradation. |
 | `lab_counterfactual` | `ee lab counterfactual` replay-evidence degradation. |
