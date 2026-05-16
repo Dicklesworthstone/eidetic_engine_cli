@@ -300,9 +300,14 @@ fn regression_fixture_for_pack_case_mismatch(
     ))
 }
 
-fn regression_fixture_file_name(input_hash: &str) -> String {
+fn regression_fixture_file_name(input_hash: &str) -> Result<String, String> {
     let input_hash_hex = input_hash.trim_start_matches("blake3:");
-    format!("{}.json", &input_hash_hex[..16])
+    if input_hash_hex.len() < 16 {
+        return Err(format!(
+            "input_hash {input_hash:?} is too short for regression fixture file name"
+        ));
+    }
+    Ok(format!("{}.json", &input_hash_hex[..16]))
 }
 
 fn serialize_regression_fixture(fixture: &DeterminismRegressionFixture) -> Result<String, String> {
@@ -314,7 +319,7 @@ fn persist_regression_fixture(
     fixture: &DeterminismRegressionFixture,
 ) -> Result<PathBuf, String> {
     fs::create_dir_all(dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
-    let path = dir.join(regression_fixture_file_name(&fixture.input_hash));
+    let path = dir.join(regression_fixture_file_name(&fixture.input_hash)?);
     fs::write(&path, serialize_regression_fixture(fixture)?)
         .map_err(|error| format!("write {}: {error}", path.display()))?;
     Ok(path)
@@ -362,7 +367,7 @@ fn parse_regression_fixture_entries(
                 fixture.schema
             ));
         }
-        let expected_file_name = regression_fixture_file_name(&fixture.input_hash);
+        let expected_file_name = regression_fixture_file_name(&fixture.input_hash)?;
         if file_name != expected_file_name {
             return Err(format!(
                 "parse {file_name}: fixture input_hash maps to {expected_file_name}"
@@ -565,7 +570,7 @@ fn determinism_regression_fixture_metadata_is_stable() -> Result<(), String> {
     assert_eq!(first.seed, 42);
     assert_eq!(first.input["query"], "release");
     assert_eq!(first.input["profile"], "compact");
-    let file_name = regression_fixture_file_name(&first.input_hash);
+    let file_name = regression_fixture_file_name(&first.input_hash)?;
     assert!(file_name.ends_with(".json"));
     assert_eq!(file_name.len(), 21);
     assert_ne!(first.expected_hash, first.observed_hash_run2);
@@ -666,8 +671,8 @@ fn determinism_regression_fixture_loader_replays_sorted_json_entries() -> Result
         .ok_or_else(|| "first fixture should detect mismatch".to_owned())?;
     let second = regression_fixture_for_mismatch(2, b"second-input", b"expected-b", b"observed-b")
         .ok_or_else(|| "second fixture should detect mismatch".to_owned())?;
-    let first_name = regression_fixture_file_name(&first.input_hash);
-    let second_name = regression_fixture_file_name(&second.input_hash);
+    let first_name = regression_fixture_file_name(&first.input_hash)?;
+    let second_name = regression_fixture_file_name(&second.input_hash)?;
     let mut expected = vec![
         (first_name.clone(), first.clone()),
         (second_name.clone(), second.clone()),
@@ -700,7 +705,25 @@ fn determinism_regression_fixture_loader_rejects_hash_filename_drift() -> Result
     .expect_err("fixture filename should match input hash prefix");
 
     assert!(error.contains("0000000000000000.json"));
-    assert!(error.contains(&regression_fixture_file_name(&fixture.input_hash)));
+    let expected_name = regression_fixture_file_name(&fixture.input_hash)?;
+    assert!(error.contains(&expected_name));
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_loader_rejects_short_input_hash() -> Result<(), String> {
+    let mut fixture = regression_fixture_for_mismatch(6, b"short-hash", b"expected", b"observed")
+        .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    fixture.input_hash = "blake3:short".to_string();
+
+    let error = parse_regression_fixture_entries(vec![(
+        "0000000000000000.json".to_string(),
+        serialize_regression_fixture(&fixture)?,
+    )])
+    .expect_err("short input_hash should be rejected before filename comparison");
+
+    assert!(error.contains("too short"));
+    assert!(error.contains("blake3:short"));
     Ok(())
 }
 
@@ -729,7 +752,7 @@ fn determinism_regression_fixture_persists_to_stable_file_name() -> Result<(), S
 
     let first_path = persist_regression_fixture(tempdir.path(), &fixture)?;
     let second_path = persist_regression_fixture(tempdir.path(), &fixture)?;
-    let expected_name = regression_fixture_file_name(&fixture.input_hash);
+    let expected_name = regression_fixture_file_name(&fixture.input_hash)?;
 
     assert_eq!(first_path, second_path);
     assert_eq!(
