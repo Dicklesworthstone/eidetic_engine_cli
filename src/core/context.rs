@@ -2725,7 +2725,7 @@ fn load_coordination_snapshot(
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<PackCoordinationSnapshot> {
     let path = options.coordination_snapshot_path.as_ref()?;
-    match std::fs::read_to_string(path) {
+    match read_coordination_snapshot_contents(path) {
         Ok(contents) => match PackCoordinationSnapshot::from_json_str(
             &contents,
             options.coordination_stale_after_ms,
@@ -2777,6 +2777,21 @@ fn load_coordination_snapshot(
             None
         }
     }
+}
+
+fn read_coordination_snapshot_contents(path: &Path) -> Result<String, String> {
+    if let Some(symlink_path) = first_existing_context_path_symlink_component(path)? {
+        return Err(format!(
+            "path traverses symbolic link '{}'",
+            symlink_path.display()
+        ));
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => return Err("path is not a regular file".to_string()),
+        Err(error) => return Err(format!("failed to inspect path: {error}")),
+    }
+    fs::read_to_string(path).map_err(|error| error.to_string())
 }
 
 fn push_coordination_snapshot_degradations(
@@ -3674,7 +3689,7 @@ fn context_workspace_config(
 }
 
 fn context_config_path_is_regular_file_no_symlinks(path: &Path) -> Result<bool, String> {
-    if let Some(symlink_path) = first_existing_context_config_symlink_component(path)? {
+    if let Some(symlink_path) = first_existing_context_path_symlink_component(path)? {
         return Err(format!(
             "path traverses symbolic link '{}'",
             symlink_path.display()
@@ -3688,7 +3703,7 @@ fn context_config_path_is_regular_file_no_symlinks(path: &Path) -> Result<bool, 
     }
 }
 
-fn first_existing_context_config_symlink_component(path: &Path) -> Result<Option<PathBuf>, String> {
+fn first_existing_context_path_symlink_component(path: &Path) -> Result<Option<PathBuf>, String> {
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
@@ -5664,6 +5679,84 @@ mod tests {
                 "symlinked pack slot lock should be unavailable: {other:?}"
             )),
         }
+    }
+
+    fn context_options_with_coordination_snapshot(path: PathBuf) -> super::ContextPackOptions {
+        super::ContextPackOptions {
+            workspace_path: PathBuf::from("/tmp/ee-context-coordination-test"),
+            database_path: None,
+            index_dir: None,
+            query: "coordinate safely".to_owned(),
+            speed: crate::search::SpeedMode::Default,
+            filters: crate::models::QueryFilters::default(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(400),
+            candidate_pool: Some(10),
+            max_results: None,
+            include_tombstoned: false,
+            as_of: None,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            redaction_level: crate::models::RedactionLevel::Minimal,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            ppr_weight: None,
+            pagination: None,
+            coordination_snapshot_path: Some(path),
+            coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            output_options: Default::default(),
+        }
+    }
+
+    #[test]
+    fn coordination_snapshot_rejects_non_regular_path() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let snapshot_path = tempdir.path().join("coordination-snapshot.json");
+        std::fs::create_dir(&snapshot_path).map_err(|error| error.to_string())?;
+        let options = context_options_with_coordination_snapshot(snapshot_path);
+        let mut degraded = Vec::new();
+
+        let snapshot = super::load_coordination_snapshot(&options, &mut degraded);
+
+        assert!(snapshot.is_none());
+        let degradation = degraded
+            .iter()
+            .find(|entry| entry.code == "coordination_snapshot_unavailable")
+            .ok_or_else(|| "missing coordination snapshot degradation".to_string())?;
+        assert!(
+            degradation.message.contains("not a regular file"),
+            "expected non-regular path degradation, got: {}",
+            degradation.message
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn coordination_snapshot_rejects_symlinked_path() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_snapshot = tempdir.path().join("outside-coordination.json");
+        std::fs::write(&outside_snapshot, "{not valid json").map_err(|error| error.to_string())?;
+        let snapshot_path = tempdir.path().join("coordination-snapshot.json");
+        std::os::unix::fs::symlink(&outside_snapshot, &snapshot_path)
+            .map_err(|error| error.to_string())?;
+        let options = context_options_with_coordination_snapshot(snapshot_path);
+        let mut degraded = Vec::new();
+
+        let snapshot = super::load_coordination_snapshot(&options, &mut degraded);
+
+        assert!(snapshot.is_none());
+        let degradation = degraded
+            .iter()
+            .find(|entry| entry.code == "coordination_snapshot_unavailable")
+            .ok_or_else(|| "missing coordination snapshot degradation".to_string())?;
+        assert!(
+            degradation.message.contains("symbolic link"),
+            "expected symlink path degradation, got: {}",
+            degradation.message
+        );
+        Ok(())
     }
 
     struct PprContextFixture {
