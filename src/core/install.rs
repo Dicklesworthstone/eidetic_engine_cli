@@ -21,6 +21,7 @@ use crate::models::{
 const TRUSTED_TAR_PATHS: &[&str] = &["/usr/bin/tar", "/bin/tar"];
 const TRUSTED_INSTALL_TOOL_PATH: &str = "/usr/bin:/bin";
 const EXTRACT_TEMP_PREFIX: &str = "ee-extract-";
+const MAX_BACKUP_PATH_ATTEMPTS: usize = 1000;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct InstallCheckOptions {
@@ -707,6 +708,25 @@ fn normalize_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+fn select_install_backup_path(install_path: &Path) -> Result<PathBuf, String> {
+    for attempt in 0..MAX_BACKUP_PATH_ATTEMPTS {
+        let backup = if attempt == 0 {
+            install_path.with_extension("backup")
+        } else {
+            install_path.with_extension(format!("backup.{attempt}"))
+        };
+        if !backup.exists() {
+            return Ok(backup);
+        }
+    }
+
+    Err(format!(
+        "no available backup path for '{}' after {} attempts",
+        install_path.display(),
+        MAX_BACKUP_PATH_ATTEMPTS
+    ))
+}
+
 /// Result of executing an install/update plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstallExecutionResult {
@@ -879,7 +899,18 @@ pub fn execute_install_plan(
 
     // Back up existing binary
     let backup_path = if install_path.exists() {
-        let backup = install_path.with_extension("backup");
+        let backup = match select_install_backup_path(install_path) {
+            Ok(backup) => backup,
+            Err(error) => {
+                return InstallExecutionResult {
+                    success: false,
+                    artifact_verified: true,
+                    binary_installed: false,
+                    backup_path: None,
+                    error_message: Some(error),
+                };
+            }
+        };
         if let Err(error) = fs::rename(install_path, &backup) {
             return InstallExecutionResult {
                 success: false,
@@ -1530,6 +1561,28 @@ mod tests {
             supported_archive_format("zip"),
             None,
             "zip apply stays unsupported until a verifier is implemented",
+        )
+    }
+
+    #[test]
+    fn install_backup_path_does_not_clobber_existing_backup() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let install_path = tempdir.path().join("ee");
+        let first_backup = install_path.with_extension("backup");
+        fs::write(&first_backup, b"previous backup").map_err(|error| error.to_string())?;
+
+        let selected = select_install_backup_path(&install_path)?;
+
+        ensure_equal(
+            selected,
+            install_path.with_extension("backup.1"),
+            "backup path",
+        )?;
+        let previous = fs::read(&first_backup).map_err(|error| error.to_string())?;
+        ensure_equal(
+            previous,
+            b"previous backup".to_vec(),
+            "existing backup bytes",
         )
     }
 
