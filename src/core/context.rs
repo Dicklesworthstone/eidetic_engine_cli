@@ -39,7 +39,7 @@ use rustix::io::Errno;
 
 use crate::config::{
     ConfigFile, EnvVar, GRAPH_FEATURE_PACK_DNA_ENABLED_KEY, GRAPH_FEATURE_PPR_ENABLED_KEY,
-    GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, WorkspaceLocation, read_env_var,
+    GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, ReadPoolConfig, WorkspaceLocation, read_env_var,
 };
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
@@ -3672,25 +3672,7 @@ fn context_read_pool_config(
             let read_pool = config
                 .map(|config| config.storage.read_pool)
                 .unwrap_or_default();
-            let max_size = read_pool
-                .size
-                .and_then(|value| usize::try_from(value).ok())
-                .unwrap_or(1);
-            let idle_timeout_seconds = read_pool.idle_timeout_seconds.unwrap_or(30);
-            let max_pin_duration_seconds = read_env_var(EnvVar::ReadPoolMaxPinSeconds)
-                .and_then(|raw| raw.parse::<u64>().ok())
-                .or(read_pool.max_pin_duration_seconds)
-                .unwrap_or(30);
-            let acquire_timeout_ms = read_env_var(EnvVar::ReadPoolAcquireTimeoutMs)
-                .and_then(|raw| raw.parse::<u64>().ok())
-                .unwrap_or(5000);
-            let pin_snapshot = read_pool.pin_snapshot.unwrap_or(true);
-            (
-                PoolConfig::new(max_size, Duration::from_secs(idle_timeout_seconds))
-                    .with_max_pin_duration(Duration::from_secs(max_pin_duration_seconds))
-                    .with_acquire_timeout(Duration::from_millis(acquire_timeout_ms)),
-                pin_snapshot,
-            )
+            context_read_pool_config_from_values(read_pool, ContextReadPoolEnv::current())
         }
         Err(message) => {
             push_degradation(
@@ -3703,6 +3685,71 @@ fn context_read_pool_config(
             (PoolConfig::default_single(), true)
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ContextReadPoolEnv {
+    size: Option<u64>,
+    idle_timeout_seconds: Option<u64>,
+    max_pin_duration_seconds: Option<u64>,
+    acquire_timeout_ms: Option<u64>,
+    disable_pin: Option<bool>,
+}
+
+impl ContextReadPoolEnv {
+    fn current() -> Self {
+        Self {
+            size: read_env_u64(EnvVar::ReadPoolSize),
+            idle_timeout_seconds: read_env_u64(EnvVar::ReadPoolIdleTimeoutSeconds),
+            max_pin_duration_seconds: read_env_u64(EnvVar::ReadPoolMaxPinSeconds),
+            acquire_timeout_ms: read_env_u64(EnvVar::ReadPoolAcquireTimeoutMs),
+            disable_pin: read_env_bool(EnvVar::ReadPoolDisablePin),
+        }
+    }
+}
+
+fn context_read_pool_config_from_values(
+    read_pool: ReadPoolConfig,
+    env: ContextReadPoolEnv,
+) -> (PoolConfig, bool) {
+    let max_size = env
+        .size
+        .or(read_pool.size)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(1);
+    let idle_timeout_seconds = env
+        .idle_timeout_seconds
+        .or(read_pool.idle_timeout_seconds)
+        .unwrap_or(30);
+    let max_pin_duration_seconds = env
+        .max_pin_duration_seconds
+        .or(read_pool.max_pin_duration_seconds)
+        .unwrap_or(30);
+    let acquire_timeout_ms = env.acquire_timeout_ms.unwrap_or(5000);
+    let pin_snapshot = env
+        .disable_pin
+        .map(|disabled| !disabled)
+        .or(read_pool.pin_snapshot)
+        .unwrap_or(true);
+
+    (
+        PoolConfig::new(max_size, Duration::from_secs(idle_timeout_seconds))
+            .with_max_pin_duration(Duration::from_secs(max_pin_duration_seconds))
+            .with_acquire_timeout(Duration::from_millis(acquire_timeout_ms)),
+        pin_snapshot,
+    )
+}
+
+fn read_env_u64(var: EnvVar) -> Option<u64> {
+    read_env_var(var).and_then(|raw| raw.parse::<u64>().ok())
+}
+
+fn read_env_bool(var: EnvVar) -> Option<bool> {
+    read_env_var(var).and_then(|raw| match raw.as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    })
 }
 
 fn checked_context_read_snapshot<'snapshot>(
@@ -5434,7 +5481,7 @@ mod tests {
         context_performance_json, focus_candidate_why, focus_relevance, pack_assembly_slo_for_run,
         try_acquire_pack_slot, unit_score,
     };
-    use crate::config::WorkspaceLocation;
+    use crate::config::{ReadPoolConfig, WorkspaceLocation};
     use crate::core::budget::RequestBudget;
     use crate::core::memory::{ReviseMemoryOptions, ReviseReason, revise_memory};
     use crate::core::profile::{OperatingProfile, RuntimeProfileReport};
@@ -7445,6 +7492,32 @@ mod tests {
         assert_eq!(config.max_size(), 2);
         assert_eq!(config.idle_timeout(), Duration::from_secs(11));
         assert_eq!(config.max_pin_duration(), Duration::from_secs(7));
+        Ok(())
+    }
+
+    #[test]
+    fn context_read_pool_config_honors_env_overrides() -> Result<(), String> {
+        let read_pool = ReadPoolConfig {
+            size: Some(2),
+            idle_timeout_seconds: Some(11),
+            max_pin_duration_seconds: Some(7),
+            pin_snapshot: Some(true),
+        };
+        let env = super::ContextReadPoolEnv {
+            size: Some(4),
+            idle_timeout_seconds: Some(13),
+            max_pin_duration_seconds: Some(17),
+            acquire_timeout_ms: Some(23),
+            disable_pin: Some(true),
+        };
+
+        let (config, pin_snapshot) = super::context_read_pool_config_from_values(read_pool, env);
+
+        assert!(!pin_snapshot);
+        assert_eq!(config.max_size(), 4);
+        assert_eq!(config.idle_timeout(), Duration::from_secs(13));
+        assert_eq!(config.max_pin_duration(), Duration::from_secs(17));
+        assert_eq!(config.acquire_timeout(), Duration::from_millis(23));
         Ok(())
     }
 
