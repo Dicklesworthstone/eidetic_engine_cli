@@ -21,6 +21,7 @@ pub mod runtime;
 pub mod search;
 pub mod shadow;
 pub mod steward;
+pub mod util;
 
 #[cfg(feature = "mcp")]
 pub mod mcp;
