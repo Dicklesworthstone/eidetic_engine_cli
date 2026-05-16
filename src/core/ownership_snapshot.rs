@@ -505,8 +505,22 @@ fn has_active_owner_conflict(candidates: &[OwnershipCandidate]) -> bool {
     if active.len() < 2 {
         return false;
     }
-    active.iter().any(|candidate| candidate.exclusive)
-        && active.windows(2).any(|pair| pair[0].owner != pair[1].owner)
+
+    // Conflict = multiple distinct active owners on the same path.
+    // This is the correct safety signal for agent coordination (swarm brief,
+    // status file-surface risks, compile blocker attribution, etc.).
+    //
+    // Previous logic only flagged when an *exclusive* claim existed. That was
+    // too narrow once advisory (non-exclusive) Beads file_patterns were added.
+    // Two agents with overlapping non-exclusive claims can still cause
+    // concurrent unsafe edits → lost work.
+    //
+    // We deliberately err on the side of reporting conflict (better to force
+    // coordination than to silently allow races). A future refinement can
+    // distinguish "exclusive conflict" (high severity) vs "advisory overlap"
+    // (medium severity) if the data model needs it.
+    let distinct_owners: std::collections::BTreeSet<_> = active.iter().map(|c| &c.owner).collect();
+    distinct_owners.len() > 1
 }
 
 fn compare_candidates(left: &OwnershipCandidate, right: &OwnershipCandidate) -> Ordering {
