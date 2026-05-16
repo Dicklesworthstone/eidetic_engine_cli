@@ -33,10 +33,14 @@ pub struct CassDbHealth {
     pub exists: bool,
     /// True if the database could be opened.
     pub opened: bool,
-    /// Number of indexed conversations.
-    pub conversations: u64,
-    /// Number of indexed messages.
-    pub messages: u64,
+    /// Number of indexed conversations, when the fast health probe counted them.
+    pub conversations: Option<u64>,
+    /// Number of indexed messages, when the fast health probe counted them.
+    pub messages: Option<u64>,
+    /// True when CASS skipped expensive count queries for the health fast path.
+    pub counts_skipped: bool,
+    /// True when CASS reported an assumed-good open without opening the DB.
+    pub open_skipped: bool,
 }
 
 /// Index health from `cass health --json`.
@@ -50,8 +54,8 @@ pub struct CassIndexHealth {
     pub fresh: bool,
     /// True if the index is stale.
     pub stale: bool,
-    /// Number of documents in the index.
-    pub documents: u64,
+    /// Number of documents in the index, when known.
+    pub documents: Option<u64>,
 }
 
 impl CassHealth {
@@ -90,8 +94,10 @@ impl CassHealth {
         let db = CassDbHealth {
             exists: get_bool(db_value, "exists")?,
             opened: get_bool(db_value, "opened")?,
-            conversations: get_u64(db_value, "conversations")?,
-            messages: get_u64(db_value, "messages")?,
+            conversations: get_optional_u64(db_value, "conversations")?,
+            messages: get_optional_u64(db_value, "messages")?,
+            counts_skipped: get_bool_or_false(db_value, "counts_skipped")?,
+            open_skipped: get_bool_or_false(db_value, "open_skipped")?,
         };
 
         let state_value = value
@@ -109,7 +115,7 @@ impl CassHealth {
             status: get_string(index_value, "status")?,
             fresh: get_bool(index_value, "fresh")?,
             stale: get_bool(index_value, "stale")?,
-            documents: get_u64(index_value, "documents")?,
+            documents: get_optional_u64(index_value, "documents")?,
         };
 
         Ok(Self {
@@ -163,6 +169,30 @@ fn get_u64(value: &serde_json::Value, field: &str) -> Result<u64, CassError> {
         })
 }
 
+fn get_optional_u64(value: &serde_json::Value, field: &str) -> Result<Option<u64>, CassError> {
+    match value.get(field) {
+        Some(serde_json::Value::Null) => Ok(None),
+        Some(number) => number
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| CassError::InvalidStdoutJson {
+                hint: format!("missing or invalid '{field}' u64 field"),
+            }),
+        None => Err(CassError::InvalidStdoutJson {
+            hint: format!("missing or invalid '{field}' u64 field"),
+        }),
+    }
+}
+
+fn get_bool_or_false(value: &serde_json::Value, field: &str) -> Result<bool, CassError> {
+    match value.get(field) {
+        Some(flag) => flag.as_bool().ok_or_else(|| CassError::InvalidStdoutJson {
+            hint: format!("missing or invalid '{field}' bool field"),
+        }),
+        None => Ok(false),
+    }
+}
+
 fn get_string_array(value: &serde_json::Value, field: &str) -> Result<Vec<String>, CassError> {
     let arr = value
         .get(field)
@@ -199,8 +229,13 @@ mod tests {
         assert!(health.errors.is_empty());
         assert!(health.db.exists);
         assert!(health.db.opened);
+        assert_eq!(health.db.conversations, Some(42));
+        assert_eq!(health.db.messages, Some(1234));
+        assert!(!health.db.counts_skipped);
+        assert!(!health.db.open_skipped);
         assert!(health.index.exists);
         assert!(health.index.fresh);
+        assert_eq!(health.index.documents, Some(1234));
         Ok(())
     }
 
@@ -214,15 +249,17 @@ mod tests {
             db: super::CassDbHealth {
                 exists: true,
                 opened: true,
-                conversations: 10,
-                messages: 100,
+                conversations: Some(10),
+                messages: Some(100),
+                counts_skipped: false,
+                open_skipped: false,
             },
             index: super::CassIndexHealth {
                 exists: true,
                 status: "fresh".to_string(),
                 fresh: true,
                 stale: false,
-                documents: 100,
+                documents: Some(100),
             },
         };
         assert!(healthy_fresh.is_ready());
@@ -255,18 +292,59 @@ mod tests {
             db: super::CassDbHealth {
                 exists: true,
                 opened: true,
-                conversations: 10,
-                messages: 100,
+                conversations: Some(10),
+                messages: Some(100),
+                counts_skipped: false,
+                open_skipped: false,
             },
             index: super::CassIndexHealth {
                 exists: true,
                 status: "stale".to_string(),
                 fresh: false,
                 stale: true,
-                documents: 50,
+                documents: Some(50),
             },
         };
         assert!(stale.is_stale());
+    }
+
+    #[test]
+    fn parse_accepts_health_fast_path_unknown_counts() -> TestResult {
+        let payload = r#"{
+          "status": "unhealthy",
+          "healthy": false,
+          "errors": ["index not found"],
+          "latency_ms": 7,
+          "db": {
+            "exists": true,
+            "opened": true,
+            "conversations": null,
+            "messages": null,
+            "counts_skipped": true,
+            "open_skipped": true
+          },
+          "state": {
+            "index": {
+              "exists": false,
+              "status": "missing",
+              "fresh": false,
+              "stale": false,
+              "documents": null
+            }
+          }
+        }"#;
+
+        let health = CassHealth::parse_json(payload)
+            .map_err(|error| format!("fast-path health payload should parse: {error}"))?;
+
+        assert!(!health.healthy);
+        assert!(!health.is_ready());
+        assert_eq!(health.db.conversations, None);
+        assert_eq!(health.db.messages, None);
+        assert!(health.db.counts_skipped);
+        assert!(health.db.open_skipped);
+        assert_eq!(health.index.documents, None);
+        Ok(())
     }
 
     #[test]
