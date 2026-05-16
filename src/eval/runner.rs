@@ -362,6 +362,8 @@ pub struct FixtureListEntry {
 pub fn discover_fixtures(fixture_dir: &Path) -> Result<Vec<DiscoveredFixture>, DomainError> {
     let mut fixtures = Vec::new();
 
+    ensure_eval_fixture_path_has_no_symlink_components(fixture_dir, "read fixture directory")?;
+
     if !fixture_dir.exists() {
         return Err(DomainError::Configuration {
             message: format!(
@@ -384,14 +386,36 @@ pub fn discover_fixtures(fixture_dir: &Path) -> Result<Vec<DiscoveredFixture>, D
         })?;
 
         let path = entry.path();
-        if !path.is_dir() {
+        let file_type = entry.file_type().map_err(|e| DomainError::Storage {
+            message: format!("Failed to inspect fixture entry {}: {e}", path.display()),
+            repair: None,
+        })?;
+        if file_type.is_symlink() {
+            return Err(eval_fixture_symlink_error(
+                &path,
+                &path,
+                "inspect fixture entry",
+            ));
+        }
+        if !file_type.is_dir() {
             continue;
         }
 
         let scenario_path = path.join("scenario.json");
         let source_memory_path = path.join("source_memory.json");
 
-        if !scenario_path.exists() || !source_memory_path.exists() {
+        ensure_eval_fixture_path_has_no_symlink_components(
+            &scenario_path,
+            "inspect fixture scenario",
+        )?;
+        ensure_eval_fixture_path_has_no_symlink_components(
+            &source_memory_path,
+            "inspect fixture source memories",
+        )?;
+
+        if !path_is_regular_file_no_follow(&scenario_path)?
+            || !path_is_regular_file_no_follow(&source_memory_path)?
+        {
             continue;
         }
 
@@ -412,6 +436,8 @@ pub fn discover_fixtures(fixture_dir: &Path) -> Result<Vec<DiscoveredFixture>, D
 
 /// Load a fixture scenario from JSON.
 pub fn load_scenario(path: &Path) -> Result<FixtureScenario, DomainError> {
+    ensure_eval_fixture_path_has_no_symlink_components(path, "read fixture scenario")?;
+
     let content = std::fs::read_to_string(path).map_err(|e| DomainError::Storage {
         message: format!("Failed to read scenario file {}: {e}", path.display()),
         repair: None,
@@ -425,6 +451,8 @@ pub fn load_scenario(path: &Path) -> Result<FixtureScenario, DomainError> {
 
 /// Load source memories from JSON.
 pub fn load_source_memories(path: &Path) -> Result<SourceMemoryFile, DomainError> {
+    ensure_eval_fixture_path_has_no_symlink_components(path, "read fixture source memories")?;
+
     let content = std::fs::read_to_string(path).map_err(|e| DomainError::Storage {
         message: format!("Failed to read source memory file {}: {e}", path.display()),
         repair: None,
@@ -920,6 +948,8 @@ fn stable_numeric_suffix(value: &str) -> Option<(&str, u64, usize)> {
 }
 
 fn source_memory_counts(path: &Path) -> Result<(usize, usize), DomainError> {
+    ensure_eval_fixture_path_has_no_symlink_components(path, "read fixture source memories")?;
+
     let content = std::fs::read_to_string(path).map_err(|e| DomainError::Storage {
         message: format!("Failed to read source memory file {}: {e}", path.display()),
         repair: None,
@@ -949,6 +979,71 @@ fn source_memory_counts(path: &Path) -> Result<(usize, usize), DomainError> {
         .len();
 
     Ok((memories.len(), query_count))
+}
+
+fn path_is_regular_file_no_follow(path: &Path) -> Result<bool, DomainError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.file_type().is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(DomainError::Storage {
+            message: format!("Failed to inspect fixture file {}: {error}", path.display()),
+            repair: None,
+        }),
+    }
+}
+
+fn ensure_eval_fixture_path_has_no_symlink_components(
+    path: &Path,
+    operation: &'static str,
+) -> Result<(), DomainError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                current.push(component.as_os_str());
+                continue;
+            }
+            std::path::Component::CurDir => continue,
+            std::path::Component::ParentDir | std::path::Component::Normal(_) => {
+                current.push(component.as_os_str());
+            }
+        }
+
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(eval_fixture_symlink_error(path, &current, operation));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Failed to inspect eval fixture path component {}: {error}",
+                        current.display()
+                    ),
+                    repair: None,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn eval_fixture_symlink_error(
+    path: &Path,
+    symlink_path: &Path,
+    operation: &'static str,
+) -> DomainError {
+    DomainError::Storage {
+        message: format!(
+            "Refusing to {operation} {} through symlinked path component {}.",
+            path.display(),
+            symlink_path.display()
+        ),
+        repair: Some(
+            "Replace symlinked eval fixture paths with regular directories and files.".into(),
+        ),
+    }
 }
 
 /// List all available fixtures with metadata.
@@ -1428,6 +1523,118 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    fn write_minimal_fixture(dir: &Path, fixture_id: &str) -> TestResult {
+        std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            dir.join("scenario.json"),
+            format!(
+                r#"{{
+  "schema": "{EVAL_FIXTURE_SCHEMA_V1}",
+  "fixture_id": "{fixture_id}",
+  "fixture_family": "symlink-hardening",
+  "journey": "fixture discovery",
+  "agent_success_signal": "listed"
+}}"#
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        std::fs::write(
+            dir.join("source_memory.json"),
+            format!(r#"{{"schema":"{EVAL_SOURCE_MEMORY_SCHEMA_V1}","memories":[]}}"#),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_fixtures_rejects_symlinked_fixture_root() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_root = tempdir.path().join("real-fixtures");
+        let linked_root = tempdir.path().join("linked-fixtures");
+        std::fs::create_dir_all(&real_root).map_err(|error| error.to_string())?;
+        symlink(&real_root, &linked_root).map_err(|error| error.to_string())?;
+
+        let error = discover_fixtures(&linked_root)
+            .map(|fixtures| format!("unexpected fixtures: {fixtures:?}"))
+            .expect_err("symlinked fixture root should reject");
+
+        ensure(
+            error.to_string().contains("symlinked path component"),
+            true,
+            "symlinked fixture root error",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_fixtures_rejects_symlinked_fixture_entry() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let fixture_root = tempdir.path().join("fixtures");
+        let outside_fixture = tempdir.path().join("outside-fixture");
+        let linked_fixture = fixture_root.join("linked-fixture");
+        std::fs::create_dir_all(&fixture_root).map_err(|error| error.to_string())?;
+        write_minimal_fixture(&outside_fixture, "outside")?;
+        symlink(&outside_fixture, &linked_fixture).map_err(|error| error.to_string())?;
+
+        let error = discover_fixtures(&fixture_root)
+            .map(|fixtures| format!("unexpected fixtures: {fixtures:?}"))
+            .expect_err("symlinked fixture entry should reject");
+
+        ensure(
+            error.to_string().contains("symlinked path component"),
+            true,
+            "symlinked fixture entry error",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_scenario_rejects_symlinked_scenario_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_scenario = tempdir.path().join("outside-scenario.json");
+        let linked_scenario = tempdir.path().join("scenario.json");
+        std::fs::write(&real_scenario, b"{not-json").map_err(|error| error.to_string())?;
+        symlink(&real_scenario, &linked_scenario).map_err(|error| error.to_string())?;
+
+        let error = load_scenario(&linked_scenario)
+            .map(|scenario| format!("unexpected scenario: {scenario:?}"))
+            .expect_err("symlinked scenario file should reject before parse");
+
+        ensure(
+            error.to_string().contains("symlinked path component"),
+            true,
+            "symlinked scenario file error",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_memory_counts_rejects_symlinked_source_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_source = tempdir.path().join("outside-source-memory.json");
+        let linked_source = tempdir.path().join("source_memory.json");
+        std::fs::write(&real_source, b"{not-json").map_err(|error| error.to_string())?;
+        symlink(&real_source, &linked_source).map_err(|error| error.to_string())?;
+
+        let error = source_memory_counts(&linked_source)
+            .map(|counts| format!("unexpected counts: {counts:?}"))
+            .expect_err("symlinked source memory file should reject before parse");
+
+        ensure(
+            error.to_string().contains("symlinked path component"),
+            true,
+            "symlinked source memory file error",
+        )
     }
 
     #[test]
