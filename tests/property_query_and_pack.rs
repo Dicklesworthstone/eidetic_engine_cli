@@ -362,6 +362,12 @@ fn parse_regression_fixture_entries(
                 fixture.schema
             ));
         }
+        let expected_file_name = regression_fixture_file_name(&fixture.input_hash);
+        if file_name != expected_file_name {
+            return Err(format!(
+                "parse {file_name}: fixture input_hash maps to {expected_file_name}"
+            ));
+        }
         fixtures.push(fixture);
     }
     Ok(fixtures)
@@ -679,6 +685,22 @@ fn determinism_regression_fixture_loader_replays_sorted_json_entries() -> Result
     ])?;
 
     assert_eq!(loaded, expected);
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_loader_rejects_hash_filename_drift() -> Result<(), String> {
+    let fixture = regression_fixture_for_mismatch(5, b"hash-drift", b"expected", b"observed")
+        .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+
+    let error = parse_regression_fixture_entries(vec![(
+        "0000000000000000.json".to_string(),
+        serialize_regression_fixture(&fixture)?,
+    )])
+    .expect_err("fixture filename should match input hash prefix");
+
+    assert!(error.contains("0000000000000000.json"));
+    assert!(error.contains(&regression_fixture_file_name(&fixture.input_hash)));
     Ok(())
 }
 
