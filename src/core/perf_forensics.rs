@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -774,7 +774,26 @@ pub fn read_perf_artifact_summary(path: &Path) -> Result<models::ArtifactSummary
 }
 
 fn validate_perf_artifact_path(path: &Path) -> Result<(), DomainError> {
-    let metadata = fs::metadata(path).map_err(|_| DomainError::NotFound {
+    if let Some(symlink_path) =
+        first_existing_symlink_component(path).map_err(|error| DomainError::Storage {
+            message: format!(
+                "Could not inspect perf artifact path component {}: {}",
+                error.path.display(),
+                error.source
+            ),
+            repair: Some("Verify the file is readable and retry.".to_owned()),
+        })?
+    {
+        return Err(DomainError::Usage {
+            message: format!(
+                "Unsupported perf artifact path {}: path traverses symlinked component {}",
+                path.display(),
+                symlink_path.display()
+            ),
+            repair: Some("Pass a regular JSON artifact file, not a symlink.".to_owned()),
+        });
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|_| DomainError::NotFound {
         resource: "perf artifact summary".to_owned(),
         id: path.display().to_string(),
         repair: Some("Pass a readable ee.perf.artifact_summary.v1 JSON file.".to_owned()),
@@ -792,6 +811,40 @@ fn validate_perf_artifact_path(path: &Path) -> Result<(), DomainError> {
         });
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct SymlinkComponentInspectionError {
+    path: PathBuf,
+    source: std::io::Error,
+}
+
+fn first_existing_symlink_component(
+    path: &Path,
+) -> Result<Option<PathBuf>, SymlinkComponentInspectionError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(source) => {
+                return Err(SymlinkComponentInspectionError {
+                    path: current,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Compare normalized artifact summary files without mutating durable state.
@@ -1378,6 +1431,45 @@ mod tests {
             let parsed = ArtifactKind::parse(s).expect("should parse");
             assert_eq!(kind, parsed);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perf_artifact_path_rejects_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let real_parent = tempdir.path().join("real-artifacts");
+        std::fs::create_dir(&real_parent).expect("real parent");
+        std::fs::write(real_parent.join("summary.json"), "{}").expect("summary");
+        let linked_parent = tempdir.path().join("linked-artifacts");
+        symlink(&real_parent, &linked_parent).expect("symlink parent");
+
+        let error = validate_perf_artifact_path(&linked_parent.join("summary.json"))
+            .expect_err("symlinked parent should reject");
+        assert!(
+            error.to_string().contains("symlinked component"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perf_artifact_path_rejects_symlinked_file() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let real_summary = tempdir.path().join("real-summary.json");
+        std::fs::write(&real_summary, "{}").expect("summary");
+        let linked_summary = tempdir.path().join("linked-summary.json");
+        symlink(&real_summary, &linked_summary).expect("symlink file");
+
+        let error =
+            validate_perf_artifact_path(&linked_summary).expect_err("symlinked file should reject");
+        assert!(
+            error.to_string().contains("symlinked component"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
