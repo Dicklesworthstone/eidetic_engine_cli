@@ -41,6 +41,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use asupersync::channel::{mpsc, oneshot};
@@ -114,6 +115,9 @@ pub fn mark_write_replay_clean(workspace_path: &Path) -> std::io::Result<()> {
 #[must_use]
 pub fn workspace_write_replay_required(workspace_path: &Path) -> bool {
     let path = write_spool_recovery_state_path(workspace_path);
+    if recovery_state_path_has_symlink_component(&path).unwrap_or(true) {
+        return false;
+    }
     let Ok(raw) = fs::read_to_string(path) else {
         return false;
     };
@@ -131,15 +135,18 @@ pub fn workspace_write_replay_required(workspace_path: &Path) -> bool {
 
 fn write_recovery_state(workspace_path: &Path, state: &str) -> std::io::Result<()> {
     let path = write_spool_recovery_state_path(workspace_path);
+    ensure_recovery_state_path_has_no_symlink_components(&path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    ensure_recovery_state_path_has_no_symlink_components(&path)?;
     let payload = format!(
         "{{\"schema\":\"{WRITE_SPOOL_RECOVERY_STATE_SCHEMA_V1}\",\"state\":\"{state}\"}}\n"
     );
 
     let mut temp_path = path.clone();
     temp_path.set_extension("tmp");
+    ensure_recovery_state_path_has_no_symlink_components(&temp_path)?;
 
     {
         use std::io::Write;
@@ -161,6 +168,40 @@ fn write_recovery_state(workspace_path: &Path, state: &str) -> std::io::Result<(
     }
 
     Ok(())
+}
+
+fn ensure_recovery_state_path_has_no_symlink_components(path: &Path) -> io::Result<()> {
+    if recovery_state_path_has_symlink_component(path)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing write-spool recovery state path with symlink component: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn recovery_state_path_has_symlink_component(path: &Path) -> io::Result<bool> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(true),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
 }
 
 /// A request to perform a write operation.
@@ -1627,6 +1668,59 @@ mod tests {
         assert!(
             !workspace_write_replay_required(temp.path()),
             "clean marker should clear replay requirement"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_spool_recovery_state_rejects_symlinked_spool_parent() -> Result<(), String> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&outside).map_err(|error| error.to_string())?;
+        let ee_dir = temp.path().join(".ee");
+        fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        symlink(&outside, ee_dir.join("write-spool")).map_err(|error| error.to_string())?;
+
+        let error = mark_write_replay_required(temp.path())
+            .expect_err("symlinked write-spool parent must be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            !outside.join("recovery-state.json").exists(),
+            "recovery marker must not be written through symlinked write-spool parent"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_write_replay_required_ignores_symlinked_marker_file() -> Result<(), String> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let spool_dir = temp.path().join(".ee").join("write-spool");
+        fs::create_dir_all(&spool_dir).map_err(|error| error.to_string())?;
+        let outside_marker = temp.path().join("outside-recovery-state.json");
+        fs::write(
+            &outside_marker,
+            format!(
+                "{{\"schema\":\"{WRITE_SPOOL_RECOVERY_STATE_SCHEMA_V1}\",\"state\":\"{WRITE_SPOOL_RECOVERY_STATE_REPLAY_REQUIRED}\"}}\n"
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(
+            &outside_marker,
+            write_spool_recovery_state_path(temp.path()),
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert!(
+            !workspace_write_replay_required(temp.path()),
+            "status must not trust a symlinked recovery marker file"
         );
 
         Ok(())
