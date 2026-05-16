@@ -43,7 +43,7 @@ use crate::config::{
 };
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
-use crate::core::memory_scope::MemoryScopeContext;
+use crate::core::memory_scope::{MemoryScopeContext, MeshQueryVisibility, mesh_query_visibility};
 use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
@@ -3105,6 +3105,13 @@ fn candidates_from_search_with_metrics(
         Option<(MemoryId, Option<String>)>,
     )> = Vec::new();
     for hit in &search_report.results {
+        if matches!(
+            mesh_query_visibility(hit.metadata.as_ref()),
+            MeshQueryVisibility::Blocked
+        ) {
+            metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
+            continue;
+        }
         let resolution = match MemoryId::from_str(&hit.doc_id) {
             Ok(id) => Some((id, None)),
             Err(_) => {
@@ -6171,6 +6178,132 @@ mod tests {
                     .message
                     .contains("Context candidate memory tags could not be batch-loaded")
         }));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn context_candidates_skip_blocked_mesh_hits_defensively() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = WorkspaceId::from_uuid(uuid::Uuid::from_u128(710)).to_string();
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.to_string_lossy().into_owned(),
+                    name: Some("mesh-context-guard".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let local_id = MemoryId::from_uuid(uuid::Uuid::from_u128(711)).to_string();
+        let blocked_id = MemoryId::from_uuid(uuid::Uuid::from_u128(712)).to_string();
+        for (id, content) in [
+            (
+                local_id.as_str(),
+                "Local release rule allowed in the context pack.",
+            ),
+            (
+                blocked_id.as_str(),
+                "PRIVATE REMOTE MESH BODY MUST NOT ENTER CONTEXT PACK",
+            ),
+        ] {
+            connection
+                .insert_memory(
+                    id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "procedural".to_string(),
+                        kind: "rule".to_string(),
+                        content: content.to_string(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.8,
+                        importance: 0.7,
+                        provenance_uri: Some(format!("ee://memory/{id}")),
+                        trust_class: TrustClass::HumanExplicit.as_str().to_string(),
+                        trust_subclass: Some("fixture".to_string()),
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        let search_report = SearchReport {
+            status: SearchStatus::Success,
+            query: "release mesh context guard".to_string(),
+            requested_limit: 2,
+            results: vec![
+                SearchHit {
+                    doc_id: blocked_id.clone(),
+                    score: 0.99,
+                    source: ScoreSource::Lexical,
+                    fast_score: None,
+                    quality_score: None,
+                    lexical_score: Some(0.99),
+                    rerank_score: None,
+                    metadata: Some(serde_json::json!({
+                        "mesh": {
+                            "workspaceScopeDecision": "quarantine",
+                            "cachedMaterialId": "mesh-quarantined-context",
+                            "originWorkspaceId": "origin-private",
+                            "originWorkspaceLabel": "/Users/alice/private/repo",
+                            "producerPeerId": "peer-private",
+                            "materialLane": "memory",
+                            "trustLane": "cached",
+                            "redactionPosture": "quarantined"
+                        }
+                    })),
+                    explanation: None,
+                },
+                freshness_search_hit(&local_id, 0.90),
+            ],
+            elapsed_ms: 0.0,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: crate::core::search::SearchSourceMode::Hybrid,
+            source_mode_applied: crate::core::search::SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        };
+
+        let mut degraded = Vec::new();
+        let (candidates, metrics) = super::candidates_from_search_with_metrics(
+            &connection,
+            workspace_path,
+            &search_report,
+            &crate::models::QueryFilters::default(),
+            false,
+            &mut degraded,
+        );
+
+        assert_eq!(metrics.search_hits, 2);
+        assert_eq!(metrics.skipped_candidates, 1);
+        assert_eq!(metrics.resolved_memory_ids, 1);
+        assert_eq!(metrics.converted_candidates, 1);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].memory_id.to_string(), local_id);
+        let candidate = &candidates[0];
+        assert!(candidate.content.contains("Local release rule"));
+        assert!(!candidate.content.contains("PRIVATE REMOTE MESH BODY"));
+        assert!(
+            candidate
+                .provenance
+                .iter()
+                .all(|entry| !entry.note.contains("/Users/alice/private/repo"))
+        );
+        assert!(!candidate.why.contains("mesh-quarantined-context"));
 
         connection.close().map_err(|error| error.to_string())
     }
