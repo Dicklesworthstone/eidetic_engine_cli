@@ -20,6 +20,8 @@ configuration precedence chain.
 | `graph.pack_dna.max_edges` | integer | `30` | `>= 0` | Maximum graph edges included in a Pack DNA explanation block. | Raise when agents need richer local topology; lower when JSON size matters more than topology detail. |
 | `graph.gomory_hu.sample_threshold` | integer | `500` | `>= 0` | Node-count threshold above which Gomory-Hu style proximity work should use deterministic sampling instead of exact computation. | Lower on constrained hosts; raise on large hosts when exact cuts are affordable. |
 | `graph.gomory_hu.sample_size` | integer | `100` | `>= 0` | Deterministic pivot/sample size used for large-graph Gomory-Hu approximations. | Increase for better approximation quality; lower to bound latency in agent hot paths. |
+| `graph.witnesses.retention_days` | integer | `30` | `>= 0` | Default TTL for graph algorithm witness rows pruned by `ee maintenance graph-witnesses-prune`. | Keep at the default for normal workspaces; raise when graph auditability matters more than table size. |
+| `graph.witnesses.algorithm_ttl_days.<algorithm>` | integer | unset | `>= 0` | Per-algorithm TTL override for graph witness retention. | Use longer windows for cache or audit witnesses, shorter windows for high-volume ad-hoc algorithms. |
 | `graph.feature.ppr.enabled` | boolean | `false` | `true` or `false` | Enables Personalized PageRank graph re-ranking once its runtime surface is wired. | Keep disabled until the PPR path has fresh graph snapshots and behavior-shift tests in the target workspace. |
 | `graph.feature.pack_dna.enabled` | boolean | `false` | `true` or `false` | Enables Pack DNA explanation blocks once the section is available. | Enable for audits and debugging; keep disabled for tight prompt budgets until the JSON budget is validated. |
 | `graph.feature.causal_explain.enabled` | boolean | `false` | `true` or `false` | Enables causal explanation graph surfaces. | Enable only after causal evidence builders are populated; otherwise prefer honest unavailable signals. |
@@ -40,6 +42,12 @@ alpha = 0.0
 [graph.gomory_hu]
 sample_threshold = 250
 sample_size = 64
+
+[graph.witnesses]
+retention_days = 30
+
+[graph.witnesses.algorithm_ttl_days]
+cache_results = 90
 
 [graph.feature.ppr]
 enabled = true
@@ -120,3 +128,21 @@ enabled = true
 Agent effect: `ee curate candidates --dry-run --json` should show how
 articulation points and onion layers change decay before any memory is
 promoted, demoted, or tombstoned.
+
+## Witness Retention
+
+Graph algorithm witnesses are derived evidence rows under
+`graph_algorithm_witnesses`. They are useful for audits and `ee insights`, but
+busy workspaces can accumulate many rows. The maintenance command classifies
+each row before deleting anything:
+
+```bash
+ee maintenance graph-witnesses-prune --workspace . --dry-run --json
+ee maintenance graph-witnesses-prune --workspace . --retention-days 45 --json
+ee maintenance graph-witnesses-prune --workspace . --algorithm-ttl cache_results=90 --json
+```
+
+Rows tied to active graph snapshots are never pruned. Rows with malformed
+`recorded_at` values are also kept and surfaced as
+`graph_witness_unparseable_recorded_at` so operators investigate schema drift
+before deleting evidence.

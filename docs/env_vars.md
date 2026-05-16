@@ -20,6 +20,7 @@ must not expose their current value.
 | `EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS` | tuning | boolean flag | none | Disable Frankensearch neighbors during remember-time proposal. | Forces remember-time curation proposal to use deterministic tag-overlap neighbors only. |
 | `EE_EXPERIMENTAL_TRIAD` | output | boolean flag | none | Compatibility no-op for the promoted ee pack/note/why aliases. | Retained so spike-era scripts continue to run; it no longer gates behavior. |
 | `EE_FORMAT` | output | output format | none | Select the default output renderer. | Lower-priority compatibility alias for output format selection. |
+| `EE_GRAPH_WITNESSES_RETENTION_DAYS` | tuning | integer days | `30` | Override the default graph algorithm witness retention window in days. | Maps to `[graph.witnesses].retention_days`; per-algorithm config overrides still come from config files or CLI flags. |
 | `EE_HARMFUL_BURST_WINDOW_SECONDS` | tuning | integer seconds | none | Override the harmful feedback burst window in seconds. | Overrides feedback policy timing from config. |
 | `EE_HARMFUL_PER_SOURCE_PER_HOUR` | tuning | integer count | none | Override the harmful feedback rate limit per source. | Overrides feedback rate limits from config. |
 | `EE_HOOK_MODE` | output | boolean flag | none | Use hook-oriented machine output defaults. | Optimizes renderer auto-detection for hook protocols. |

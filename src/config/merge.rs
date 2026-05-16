@@ -17,10 +17,11 @@ use super::env_registry::EnvVar;
 use super::file::{
     CacheConfig, CassConfig, ConfigFile, CurationConfig, FeedbackConfig, GraphCausalConfig,
     GraphConfig, GraphCurateConfig, GraphFeatureFlagsConfig, GraphGomoryHuConfig,
-    GraphHealthConfig, GraphHitsConfig, GraphPackDnaConfig, GraphPprConfig, HandoffConfig,
-    LearnConfig, LearnDecayConfig, MeshCommandMode, MeshConfig, OutputRedactionConfig, PackConfig,
-    PackL2CacheConfig, PolicyConfig, PrivacyConfig, ReadPoolConfig, RuntimeConfig, SearchConfig,
-    SearchSpeed, SecretDetectorConfig, StorageConfig, TrustConfig,
+    GraphHealthConfig, GraphHitsConfig, GraphPackDnaConfig, GraphPprConfig,
+    GraphWitnessesConfig, HandoffConfig, LearnConfig, LearnDecayConfig, MeshCommandMode,
+    MeshConfig, OutputRedactionConfig, PackConfig, PackL2CacheConfig, PolicyConfig,
+    PrivacyConfig, ReadPoolConfig, RuntimeConfig, SearchConfig, SearchSpeed, SecretDetectorConfig,
+    StorageConfig, TrustConfig,
 };
 use super::path::{PathExpander, PathExpansionError};
 
@@ -65,6 +66,9 @@ pub const GRAPH_PACK_DNA_MAX_ITEMS_KEY: &str = "graph.pack_dna.max_items";
 pub const GRAPH_PACK_DNA_MAX_EDGES_KEY: &str = "graph.pack_dna.max_edges";
 pub const GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY: &str = "graph.gomory_hu.sample_threshold";
 pub const GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY: &str = "graph.gomory_hu.sample_size";
+pub const GRAPH_WITNESSES_RETENTION_DAYS_KEY: &str = "graph.witnesses.retention_days";
+pub const GRAPH_WITNESSES_ALGORITHM_TTL_DAYS_KEY: &str =
+    "graph.witnesses.algorithm_ttl_days";
 pub const GRAPH_FEATURE_PPR_ENABLED_KEY: &str = "graph.feature.ppr.enabled";
 pub const GRAPH_FEATURE_PACK_DNA_ENABLED_KEY: &str = "graph.feature.pack_dna.enabled";
 pub const GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY: &str = "graph.feature.causal_explain.enabled";
@@ -462,6 +466,20 @@ impl MergedConfig {
                 self.source(GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY),
             ));
         }
+        if let Some(days) = self.values.graph.witnesses.retention_days {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_WITNESSES_RETENTION_DAYS_KEY,
+                days.to_string(),
+                self.source(GRAPH_WITNESSES_RETENTION_DAYS_KEY),
+            ));
+        }
+        if let Some(ref overrides) = self.values.graph.witnesses.algorithm_ttl_days {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_WITNESSES_ALGORITHM_TTL_DAYS_KEY,
+                overrides.len().to_string(),
+                self.source(GRAPH_WITNESSES_ALGORITHM_TTL_DAYS_KEY),
+            ));
+        }
         if let Some(enabled) = self.values.graph.feature.ppr_enabled {
             entries.push(ConfigShowEntry::new(
                 GRAPH_FEATURE_PPR_ENABLED_KEY,
@@ -829,6 +847,10 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
                 sample_threshold: Some(500),
                 sample_size: Some(100),
             },
+            witnesses: GraphWitnessesConfig {
+                retention_days: Some(30),
+                algorithm_ttl_days: Some(BTreeMap::new()),
+            },
             feature: GraphFeatureFlagsConfig {
                 ppr_enabled: Some(false),
                 pack_dna_enabled: Some(false),
@@ -933,7 +955,16 @@ pub fn config_from_env(
             peer_group_bindings: None,
             peer_policies: None,
         },
-        graph: GraphConfig::default(),
+        graph: GraphConfig {
+            witnesses: GraphWitnessesConfig {
+                retention_days: optional_env_u64(
+                    env,
+                    EnvVar::GraphWitnessesRetentionDays.name(),
+                )?,
+                algorithm_ttl_days: None,
+            },
+            ..GraphConfig::default()
+        },
         pack: PackConfig {
             default_profile: optional_env_string(env, EnvVar::Profile.name())?,
             default_format: None,
@@ -1421,6 +1452,26 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                     &layers.project.graph.gomory_hu.sample_size,
                     &layers.user.graph.gomory_hu.sample_size,
                     &layers.defaults.graph.gomory_hu.sample_size,
+                ),
+            },
+            witnesses: GraphWitnessesConfig {
+                retention_days: pick_field(
+                    &mut sources,
+                    GRAPH_WITNESSES_RETENTION_DAYS_KEY,
+                    &layers.cli.graph.witnesses.retention_days,
+                    &layers.environment.graph.witnesses.retention_days,
+                    &layers.project.graph.witnesses.retention_days,
+                    &layers.user.graph.witnesses.retention_days,
+                    &layers.defaults.graph.witnesses.retention_days,
+                ),
+                algorithm_ttl_days: pick_field(
+                    &mut sources,
+                    GRAPH_WITNESSES_ALGORITHM_TTL_DAYS_KEY,
+                    &layers.cli.graph.witnesses.algorithm_ttl_days,
+                    &layers.environment.graph.witnesses.algorithm_ttl_days,
+                    &layers.project.graph.witnesses.algorithm_ttl_days,
+                    &layers.user.graph.witnesses.algorithm_ttl_days,
+                    &layers.defaults.graph.witnesses.algorithm_ttl_days,
                 ),
             },
             feature: GraphFeatureFlagsConfig {

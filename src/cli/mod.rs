@@ -206,6 +206,10 @@ use crate::core::verify::{
     verification_closure_guidance_from_ledger, verification_response_json,
 };
 use crate::core::why::{WhyOptions, explain_memory};
+use crate::core::witness_retention::{
+    WITNESS_PRUNE_REPORT_SCHEMA_V1, WitnessAction, WitnessRetentionPolicy,
+    classify_witnesses_for_pruning,
+};
 use crate::core::workspace as workspace_core;
 use crate::db::DbConnection;
 use crate::graph::{
@@ -1681,6 +1685,8 @@ pub enum MaintenanceCommand {
     Run(MaintenanceRunArgs),
     /// Prune archived graph snapshots using the graph snapshot lifecycle policy.
     GraphSnapshotPrune(MaintenanceGraphSnapshotPruneArgs),
+    /// Prune graph algorithm witnesses past retention and not tied to active snapshots.
+    GraphWitnessesPrune(MaintenanceGraphWitnessesPruneArgs),
     /// Report maintenance job availability.
     Status(MaintenanceStatusArgs),
 }
@@ -1798,6 +1804,26 @@ pub struct MaintenanceGraphSnapshotPruneArgs {
     /// Override per-job item budget.
     #[arg(long, value_name = "N")]
     pub item_limit: Option<u64>,
+}
+
+/// Arguments for `ee maintenance graph-witnesses-prune`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct MaintenanceGraphWitnessesPruneArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Report planned witness deletions without mutating graph witness rows.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Override the default witness retention window in days.
+    #[arg(long = "retention-days", value_name = "DAYS")]
+    pub retention_days: Option<u64>,
+
+    /// Override one algorithm TTL as <algorithm>=<days>; repeatable.
+    #[arg(long = "algorithm-ttl", value_name = "NAME=DAYS")]
+    pub algorithm_ttl: Vec<String>,
 }
 
 /// Arguments for `ee maintenance status`.
@@ -8406,6 +8432,9 @@ where
             MaintenanceCommand::Run(args) => handle_maintenance_run(&cli, args, stdout),
             MaintenanceCommand::GraphSnapshotPrune(args) => {
                 handle_maintenance_graph_snapshot_prune(&cli, args, stdout)
+            }
+            MaintenanceCommand::GraphWitnessesPrune(args) => {
+                handle_maintenance_graph_witnesses_prune(&cli, args, stdout)
             }
             MaintenanceCommand::Status(args) => handle_maintenance_status(&cli, args, stdout),
         },
@@ -35158,6 +35187,150 @@ where
     )
 }
 
+fn handle_maintenance_graph_witnesses_prune<W>(
+    cli: &Cli,
+    args: &MaintenanceGraphWitnessesPruneArgs,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let database_path = match graph_database_path(cli, args.database.as_deref()) {
+        Ok(path) => path,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, &mut io::sink()),
+    };
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let error = DomainError::Storage {
+                message: format!("Failed to open database {}: {error}", database_path.display()),
+                repair: Some("ee doctor --json".to_string()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, &mut io::sink());
+        }
+    };
+    let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
+        Ok(id) => id,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, &mut io::sink()),
+    };
+    let policy = match load_witness_retention_policy(&workspace, args) {
+        Ok(policy) => policy,
+        Err(error) => {
+            let data = serde_json::json!({
+                "schema": WITNESS_PRUNE_REPORT_SCHEMA_V1,
+                "command": "maintenance graph-witnesses-prune",
+                "workspace": workspace.display().to_string(),
+                "workspaceId": workspace_id,
+                "databasePath": database_path.display().to_string(),
+                "dryRun": args.dry_run,
+                "code": error.code,
+                "message": error.message,
+                "repair": error.repair,
+            });
+            return write_maintenance_response(cli, stdout, false, data);
+        }
+    };
+    let rows = match conn.list_graph_algorithm_witnesses_with_snapshot_active(&workspace_id) {
+        Ok(rows) => rows,
+        Err(error) => {
+            let data = serde_json::json!({
+                "schema": WITNESS_PRUNE_REPORT_SCHEMA_V1,
+                "command": "maintenance graph-witnesses-prune",
+                "workspace": workspace.display().to_string(),
+                "workspaceId": workspace_id,
+                "databasePath": database_path.display().to_string(),
+                "dryRun": args.dry_run,
+                "code": "graph_witness_prune_query_failed",
+                "message": format!("Failed to list graph algorithm witnesses: {error}"),
+                "repair": "Run ee doctor --json and retry ee maintenance graph-witnesses-prune --dry-run --json.",
+            });
+            return write_maintenance_response(cli, stdout, false, data);
+        }
+    };
+
+    let report = classify_witnesses_for_pruning(&rows, &policy, chrono::Utc::now());
+    let prune_keys = report
+        .classifications
+        .iter()
+        .filter(|classification| matches!(classification.action, WitnessAction::Prune { .. }))
+        .map(|classification| {
+            (
+                classification.workspace_id.as_str(),
+                classification.snapshot_id.as_str(),
+                classification.algorithm.as_str(),
+                classification.recorded_at.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let pruned_witnesses = rows
+        .iter()
+        .map(|(witness, _)| witness)
+        .filter(|witness| {
+            prune_keys
+                .iter()
+                .any(|(workspace_id, snapshot_id, algorithm, recorded_at)| {
+                    witness.workspace_id == *workspace_id
+                        && witness.snapshot_id == *snapshot_id
+                        && witness.algorithm == *algorithm
+                        && witness.recorded_at == *recorded_at
+                })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let deleted_count = if args.dry_run || pruned_witnesses.is_empty() {
+        0
+    } else {
+        match conn.delete_graph_algorithm_witnesses(&workspace_id, &pruned_witnesses) {
+            Ok(deleted) => deleted,
+            Err(error) => {
+                let data = serde_json::json!({
+                    "schema": WITNESS_PRUNE_REPORT_SCHEMA_V1,
+                    "command": "maintenance graph-witnesses-prune",
+                    "workspace": workspace.display().to_string(),
+                    "workspaceId": workspace_id,
+                    "databasePath": database_path.display().to_string(),
+                    "dryRun": args.dry_run,
+                    "code": "graph_witness_prune_delete_failed",
+                    "message": format!("Failed to delete graph algorithm witnesses: {error}"),
+                    "repair": "Rerun ee maintenance graph-witnesses-prune --dry-run --json and inspect active snapshot guards before retrying.",
+                });
+                return write_maintenance_response(cli, stdout, false, data);
+            }
+        }
+    };
+
+    let mut data = serde_json::json!({
+        "schema": WITNESS_PRUNE_REPORT_SCHEMA_V1,
+        "command": "maintenance graph-witnesses-prune",
+        "workspace": workspace.display().to_string(),
+        "workspaceId": workspace_id,
+        "databasePath": database_path.display().to_string(),
+        "dryRun": args.dry_run,
+        "durableMutation": !args.dry_run && deleted_count > 0,
+        "deletedCount": deleted_count,
+        "report": report,
+    });
+    if let Some(summary) = data["report"].get("summary").cloned() {
+        data["summary"] = summary;
+        data["summary"]["deletedCount"] = serde_json::json!(deleted_count);
+    }
+    if data["report"]["summary"]["keepUnparseableRecordedAtCount"]
+        .as_u64()
+        .is_some_and(|count| count > 0)
+    {
+        data["degraded"] = serde_json::json!([{
+            "code": "graph_witness_unparseable_recorded_at",
+            "severity": "medium",
+            "message": "One or more graph algorithm witnesses had unparseable recordedAt timestamps and were kept.",
+            "repair": "Inspect graph_algorithm_witnesses recorded_at values before pruning."
+        }]);
+    }
+    write_graph_witness_prune_response(cli, stdout, true, data)
+}
+
 struct MaintenanceJobRunRequest<'a> {
     command: &'static str,
     job_type: JobType,
@@ -35424,6 +35597,132 @@ fn load_maintenance_decay_settings(
         }
     })?;
     decay_settings_from_config(&config)
+}
+
+fn load_witness_retention_policy(
+    workspace_path: &Path,
+    args: &MaintenanceGraphWitnessesPruneArgs,
+) -> Result<WitnessRetentionPolicy, MaintenanceConfigError> {
+    let mut policy = WitnessRetentionPolicy::defaults();
+    let config_path = workspace_path.join(".ee").join("config.toml");
+    match fs::read_to_string(&config_path) {
+        Ok(contents) => {
+            let config = crate::config::ConfigFile::parse(&contents).map_err(|error| {
+                MaintenanceConfigError {
+                    code: "graph_witness_retention_config_invalid",
+                    message: format!(
+                        "Failed to parse graph witness retention config {}: {error}",
+                        config_path.display()
+                    ),
+                    repair: "Fix [graph.witnesses] in .ee/config.toml and rerun ee maintenance graph-witnesses-prune --dry-run --json.",
+                }
+            })?;
+            apply_graph_witness_config_to_policy(&mut policy, &config)?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(MaintenanceConfigError {
+                code: "graph_witness_retention_config_read_failed",
+                message: format!(
+                    "Failed to read workspace graph witness config {}: {error}",
+                    config_path.display()
+                ),
+                repair: "Check .ee/config.toml permissions and rerun ee maintenance graph-witnesses-prune --dry-run --json.",
+            });
+        }
+    }
+    if let Some(raw) = read(EnvVar::GraphWitnessesRetentionDays) {
+        policy.default_ttl_days = parse_witness_ttl_days(
+            &raw,
+            "EE_GRAPH_WITNESSES_RETENTION_DAYS",
+            "graph_witness_retention_env_invalid",
+        )?;
+    }
+    if let Some(days) = args.retention_days {
+        policy.default_ttl_days = witness_ttl_u64_to_u32(
+            days,
+            "graph.witnesses.retention_days",
+            "graph_witness_retention_config_invalid",
+        )?;
+    }
+    for raw in &args.algorithm_ttl {
+        let (algorithm, days) = parse_algorithm_ttl_override(raw)?;
+        policy.per_algorithm_ttl_days.insert(algorithm, days);
+    }
+    Ok(policy)
+}
+
+fn apply_graph_witness_config_to_policy(
+    policy: &mut WitnessRetentionPolicy,
+    config: &crate::config::ConfigFile,
+) -> Result<(), MaintenanceConfigError> {
+    if let Some(days) = config.graph.witnesses.retention_days {
+        policy.default_ttl_days = witness_ttl_u64_to_u32(
+            days,
+            "graph.witnesses.retention_days",
+            "graph_witness_retention_config_invalid",
+        )?;
+    }
+    if let Some(ref overrides) = config.graph.witnesses.algorithm_ttl_days {
+        for (algorithm, days) in overrides {
+            let days = witness_ttl_u64_to_u32(
+                *days,
+                &format!("graph.witnesses.algorithm_ttl_days.{algorithm}"),
+                "graph_witness_retention_config_invalid",
+            )?;
+            policy.per_algorithm_ttl_days.insert(algorithm.clone(), days);
+        }
+    }
+    Ok(())
+}
+
+fn parse_algorithm_ttl_override(raw: &str) -> Result<(String, u32), MaintenanceConfigError> {
+    let Some((algorithm, days)) = raw.split_once('=') else {
+        return Err(MaintenanceConfigError {
+            code: "graph_witness_retention_cli_invalid",
+            message: format!("Invalid --algorithm-ttl `{raw}`; expected <algorithm>=<days>."),
+            repair: "Pass --algorithm-ttl personalized_pagerank=90.",
+        });
+    };
+    let algorithm = algorithm.trim();
+    if algorithm.is_empty() {
+        return Err(MaintenanceConfigError {
+            code: "graph_witness_retention_cli_invalid",
+            message: format!("Invalid --algorithm-ttl `{raw}`; algorithm name is empty."),
+            repair: "Pass --algorithm-ttl personalized_pagerank=90.",
+        });
+    }
+    let days = parse_witness_ttl_days(
+        days.trim(),
+        "--algorithm-ttl",
+        "graph_witness_retention_cli_invalid",
+    )?;
+    Ok((algorithm.to_owned(), days))
+}
+
+fn parse_witness_ttl_days(
+    raw: &str,
+    key: &str,
+    code: &'static str,
+) -> Result<u32, MaintenanceConfigError> {
+    let parsed = raw.parse::<u64>().map_err(|error| MaintenanceConfigError {
+        code,
+        message: format!("Invalid witness retention days for `{key}`: {error}."),
+        repair: "Use a non-negative integer number of days.",
+    })?;
+    witness_ttl_u64_to_u32(parsed, key, code)
+}
+
+fn witness_ttl_u64_to_u32(
+    value: u64,
+    key: &str,
+    code: &'static str,
+) -> Result<u32, MaintenanceConfigError> {
+    u32::try_from(value).map_err(|_| MaintenanceConfigError {
+        code,
+        message: format!("Witness retention days for `{key}` exceeds the supported range."),
+        repair: "Use a retention window no larger than 4294967295 days.",
+    })
 }
 
 fn decay_settings_from_config(
@@ -35811,6 +36110,65 @@ where
         return exit;
     }
 
+    if success {
+        ProcessExitCode::Success
+    } else {
+        ProcessExitCode::UnsatisfiedDegradedMode
+    }
+}
+
+fn write_graph_witness_prune_response<W>(
+    cli: &Cli,
+    stdout: &mut W,
+    success: bool,
+    data: serde_json::Value,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let degraded = data["degraded"].as_array().cloned().unwrap_or_default();
+    let response = if degraded.is_empty() {
+        serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": success,
+            "data": data,
+        })
+    } else {
+        serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": success,
+            "data": data,
+            "degraded": degraded,
+        })
+    };
+    let exit = match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let summary = &response["data"]["summary"];
+            write_stdout(
+                stdout,
+                &format!(
+                    "maintenance graph-witnesses-prune: completed\n  Total: {}\n  Prune candidates: {}\n  Deleted: {}\n  Kept active snapshot: {}\n  Kept within TTL: {}\n  Kept unparseable recorded_at: {}\n",
+                    summary["totalCount"].as_u64().unwrap_or(0),
+                    summary["pruneCount"].as_u64().unwrap_or(0),
+                    summary["deletedCount"].as_u64().unwrap_or(0),
+                    summary["keepActiveSnapshotCount"].as_u64().unwrap_or(0),
+                    summary["keepWithinTtlCount"].as_u64().unwrap_or(0),
+                    summary["keepUnparseableRecordedAtCount"].as_u64().unwrap_or(0),
+                ),
+            )
+        }
+        output::Renderer::Toon => {
+            let rendered = output::render_toon_from_json(&response.to_string());
+            write_stdout(stdout, &(rendered + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    };
+    if exit != ProcessExitCode::Success {
+        return exit;
+    }
     if success {
         ProcessExitCode::Success
     } else {
@@ -37307,7 +37665,8 @@ const LEARN_SUBCOMMANDS: &[&str] = &[
     "summary",
 ];
 const LEARN_EXPERIMENT_SUBCOMMANDS: &[&str] = &["propose", "run"];
-const MAINTENANCE_SUBCOMMANDS: &[&str] = &["run", "graph-snapshot-prune", "status"];
+const MAINTENANCE_SUBCOMMANDS: &[&str] =
+    &["run", "graph-snapshot-prune", "graph-witnesses-prune", "status"];
 const MEMORY_SUBCOMMANDS: &[&str] = &["expire", "list", "show", "history", "revise", "tags"];
 const MIGRATE_SUBCOMMANDS: &[&str] = &["status", "run"];
 const MCP_SUBCOMMANDS: &[&str] = &["manifest"];
@@ -37455,6 +37814,9 @@ impl NormalizedInvocation {
                     MaintenanceCommand::Run(_) => "maintenance run".to_string(),
                     MaintenanceCommand::GraphSnapshotPrune(_) => {
                         "maintenance graph-snapshot-prune".to_string()
+                    }
+                    MaintenanceCommand::GraphWitnessesPrune(_) => {
+                        "maintenance graph-witnesses-prune".to_string()
                     }
                     MaintenanceCommand::Status(_) => "maintenance status".to_string(),
                 },

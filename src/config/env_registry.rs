@@ -30,6 +30,8 @@ pub enum EnvVar {
     ExperimentalTriad,
     /// `EE_FORMAT`
     Format,
+    /// `EE_GRAPH_WITNESSES_RETENTION_DAYS`
+    GraphWitnessesRetentionDays,
     /// `EE_HARMFUL_BURST_WINDOW_SECONDS`
     HarmfulBurstWindowSeconds,
     /// `EE_HARMFUL_PER_SOURCE_PER_HOUR`
@@ -115,6 +117,7 @@ impl EnvVar {
             Self::DisableRememberSearchNeighbors,
             Self::ExperimentalTriad,
             Self::Format,
+            Self::GraphWitnessesRetentionDays,
             Self::HarmfulBurstWindowSeconds,
             Self::HarmfulPerSourcePerHour,
             Self::HookMode,
@@ -166,6 +169,7 @@ impl EnvVar {
             Self::DisableRememberSearchNeighbors => "EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS",
             Self::ExperimentalTriad => "EE_EXPERIMENTAL_TRIAD",
             Self::Format => "EE_FORMAT",
+            Self::GraphWitnessesRetentionDays => "EE_GRAPH_WITNESSES_RETENTION_DAYS",
             Self::HarmfulBurstWindowSeconds => "EE_HARMFUL_BURST_WINDOW_SECONDS",
             Self::HarmfulPerSourcePerHour => "EE_HARMFUL_PER_SOURCE_PER_HOUR",
             Self::HookMode => "EE_HOOK_MODE",
@@ -223,6 +227,9 @@ impl EnvVar {
                 "Compatibility no-op for the promoted ee pack/note/why aliases."
             }
             Self::Format => "Select the default output renderer.",
+            Self::GraphWitnessesRetentionDays => {
+                "Override the default graph algorithm witness retention window in days."
+            }
             Self::HarmfulBurstWindowSeconds => {
                 "Override the harmful feedback burst window in seconds."
             }
@@ -284,6 +291,7 @@ impl EnvVar {
             Self::MeshEnabled => Some("false"),
             Self::TailscaleProbeTimeoutMs => Some("1500"),
             Self::PprCacheEntries => Some("4096"),
+            Self::GraphWitnessesRetentionDays => Some("30"),
             Self::ReadPoolAcquireTimeoutMs => Some("5000"),
             Self::IndexPublishLockRetryAttempts => Some("200"),
             Self::RememberCurationSyncBudgetMs => Some("50"),
@@ -329,6 +337,7 @@ impl EnvVar {
             | Self::TailscaleProbeTimeoutMs
             | Self::TailscaleProbeSocketOverride => "mesh",
             Self::HarmfulBurstWindowSeconds
+            | Self::GraphWitnessesRetentionDays
             | Self::HarmfulPerSourcePerHour
             | Self::L2PackCacheBytes
             | Self::L2PackCacheDisable

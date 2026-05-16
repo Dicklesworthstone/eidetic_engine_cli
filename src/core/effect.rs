@@ -1334,6 +1334,13 @@ impl EffectManifest {
                 vec!["memories", "feedback_events", "audit_log"],
                 "Run an explicit bounded maintenance job through the steward backend",
             ),
+            CommandEffect::durable_state_write(
+                "maintenance graph-witnesses-prune",
+                vec!["graph_algorithm_witnesses"],
+                "workspace id plus retention policy plus witness row identity",
+                "graph_algorithm_witnesses",
+                "Classify graph algorithm witnesses and delete only rows older than policy TTL that are not tied to active snapshots",
+            ),
         ]
     }
 

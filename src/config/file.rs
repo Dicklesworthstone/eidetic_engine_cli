@@ -4,6 +4,7 @@
 //! Precedence merging lives in the next layer; this module only answers
 //! "what did this file say?" with deterministic validation errors.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -594,6 +595,7 @@ pub struct GraphConfig {
     pub causal: GraphCausalConfig,
     pub pack_dna: GraphPackDnaConfig,
     pub gomory_hu: GraphGomoryHuConfig,
+    pub witnesses: GraphWitnessesConfig,
     pub feature: GraphFeatureFlagsConfig,
 }
 
@@ -607,6 +609,7 @@ impl GraphConfig {
             causal: GraphCausalConfig::parse(document)?,
             pack_dna: GraphPackDnaConfig::parse(document)?,
             gomory_hu: GraphGomoryHuConfig::parse(document)?,
+            witnesses: GraphWitnessesConfig::parse(document)?,
             feature: GraphFeatureFlagsConfig::parse(document)?,
         })
     }
@@ -724,6 +727,22 @@ impl GraphGomoryHuConfig {
         Ok(Self {
             sample_threshold: optional_u64_path(document, SECTIONS, "sample_threshold")?,
             sample_size: optional_u64_path(document, SECTIONS, "sample_size")?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GraphWitnessesConfig {
+    pub retention_days: Option<u64>,
+    pub algorithm_ttl_days: Option<BTreeMap<String, u64>>,
+}
+
+impl GraphWitnessesConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        const SECTIONS: &[&str] = &["graph", "witnesses"];
+        Ok(Self {
+            retention_days: optional_u64_path(document, SECTIONS, "retention_days")?,
+            algorithm_ttl_days: optional_u64_map_path(document, SECTIONS, "algorithm_ttl_days")?,
         })
     }
 }
@@ -1235,6 +1254,45 @@ fn optional_u64_path(
         },
         None => Ok(None),
     }
+}
+
+fn optional_u64_map_path(
+    document: &DocumentMut,
+    sections: &[&str],
+    key: &str,
+) -> Result<Option<BTreeMap<String, u64>>, ConfigParseError> {
+    let Some(value) = item_path(document, sections, key) else {
+        return Ok(None);
+    };
+    let Some(table) = value.as_table() else {
+        return Err(ConfigParseError::InvalidType {
+            key: key_path_name(sections, key),
+            expected: "a table of non-negative integers",
+        });
+    };
+    let prefix = key_path_name(sections, key);
+    let mut parsed = BTreeMap::new();
+    for (name, item) in table {
+        match item.as_integer() {
+            Some(integer) if integer >= 0 => {
+                parsed.insert(name.to_string(), integer as u64);
+            }
+            Some(integer) => {
+                return Err(ConfigParseError::InvalidValue {
+                    key: format!("{prefix}.{name}"),
+                    value: integer.to_string(),
+                    message: "expected a non-negative integer".to_string(),
+                });
+            }
+            None => {
+                return Err(ConfigParseError::InvalidType {
+                    key: format!("{prefix}.{name}"),
+                    expected: "an integer",
+                });
+            }
+        }
+    }
+    Ok(Some(parsed))
 }
 
 fn optional_float(
