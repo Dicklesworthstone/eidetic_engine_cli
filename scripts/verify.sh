@@ -18,6 +18,7 @@ set -euo pipefail
 #   3. Snapshot Proposal Guard - block unreviewed tracked insta proposals
 #   4. Untracked Work Audit    - advisory Beads FILE SURFACE coverage for dirty paths
 #   4.5. Bridge Staleness      - advisory signal when CLOSE_THE_GAP_PLAN needs refresh
+#   4.6. Plan Drift Advisory   - advisory plan_doc_section drift hints for Beads triage
 #   5. Vision Coverage         - report documented implemented/stubbed/missing surfaces
 #   5.5. Proof Verification    - advisory Lean4/TLA+ proof artifact checks
 #   6. Unit/Contract/Golden    - cargo test --workspace --lib --bins --tests --examples
@@ -405,6 +406,11 @@ run_stage "Untracked Work Audit (advisory)" "with_beads_read_locks ./scripts/unt
 # .bridge-staleness-report.json so the trailing verify summary includes whether
 # Part II appears stale enough to plan the next bridge.
 run_stage "Bridge Staleness Advisory" "with_beads_read_locks ./scripts/bridge-staleness.sh --quiet"
+
+# Gate 3.7: Advisory plan/bead drift. This always exits 0 and writes
+# .plan-drift-report.json with BV-friendly warning hints for active
+# implements-surface beads whose plan_doc_section labels point at evolved text.
+run_stage "Plan Drift Advisory" "with_beads_read_locks ./scripts/plan-drift.sh --quiet"
 
 # Gate 4: Strategic Vision Coverage
 run_stage "Vision Coverage" "with_beads_read_locks sh ./scripts/vision-coverage.sh --json"
