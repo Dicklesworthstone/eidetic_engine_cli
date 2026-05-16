@@ -2505,6 +2505,33 @@ fn read_side_path_no_symlinks(path: &Path) -> Result<Vec<u8>, DomainError> {
         });
     }
 
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(DomainError::Import {
+                message: format!(
+                    "playbook import source path '{}' is not a regular file",
+                    path.display()
+                ),
+                repair: Some("choose a regular playbook JSON file".to_owned()),
+            });
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) => {}
+        Err(error) => {
+            return Err(DomainError::Import {
+                message: format!(
+                    "failed to inspect playbook source '{}': {error}",
+                    path.display()
+                ),
+                repair: Some("choose a readable playbook JSON file".to_owned()),
+            });
+        }
+    }
+
     fs::read(path).map_err(|error| DomainError::Import {
         message: format!(
             "failed to read playbook source '{}': {error}",
@@ -4465,6 +4492,38 @@ mod tests {
         ensure(
             err.message().contains("symbolic link"),
             "error should mention symbolic link",
+        )
+    }
+
+    #[test]
+    fn playbook_import_rejects_non_regular_source_path() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let source_path = tempdir.path().join("playbook.json");
+        fs::create_dir(&source_path).map_err(|error| error.to_string())?;
+
+        let err = match import_playbook(&PlaybookImportOptions {
+            workspace_path: tempdir.path(),
+            database_path: Some(&tempdir.path().join("ee.db")),
+            source_path: &source_path,
+            dry_run: true,
+            actor: Some("test"),
+        }) {
+            Ok(report) => {
+                return Err(format!(
+                    "non-regular import source should reject, got status {}",
+                    report.status
+                ));
+            }
+            Err(err) => err,
+        };
+
+        ensure(
+            matches!(err, DomainError::Import { .. }),
+            "expected import error",
+        )?;
+        ensure(
+            err.message().contains("regular file"),
+            "error should mention regular file",
         )
     }
 
