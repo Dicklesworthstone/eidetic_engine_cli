@@ -17,11 +17,11 @@ use super::env_registry::EnvVar;
 use super::file::{
     CacheConfig, CassConfig, ConfigFile, CurationConfig, FeedbackConfig, GraphCausalConfig,
     GraphConfig, GraphCurateConfig, GraphFeatureFlagsConfig, GraphGomoryHuConfig,
-    GraphHealthConfig, GraphHitsConfig, GraphPackDnaConfig, GraphPprConfig,
-    GraphWitnessesConfig, HandoffConfig, LearnConfig, LearnDecayConfig, MeshCommandMode,
-    MeshConfig, OutputRedactionConfig, PackConfig, PackL2CacheConfig, PolicyConfig,
-    PrivacyConfig, ReadPoolConfig, RuntimeConfig, SearchConfig, SearchSpeed, SecretDetectorConfig,
-    StorageConfig, TrustConfig,
+    GraphHealthConfig, GraphHitsConfig, GraphPackDnaConfig, GraphPprConfig, GraphWitnessesConfig,
+    HandoffConfig, LearnConfig, LearnDecayConfig, MeshCommandMode, MeshConfig,
+    OutputRedactionConfig, PackConfig, PackL2CacheConfig, PolicyConfig, PrivacyConfig,
+    ReadPoolConfig, RuntimeConfig, SearchConfig, SearchSpeed, SecretDetectorConfig, StorageConfig,
+    TrustConfig,
 };
 use super::path::{PathExpander, PathExpansionError};
 
@@ -67,8 +67,7 @@ pub const GRAPH_PACK_DNA_MAX_EDGES_KEY: &str = "graph.pack_dna.max_edges";
 pub const GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY: &str = "graph.gomory_hu.sample_threshold";
 pub const GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY: &str = "graph.gomory_hu.sample_size";
 pub const GRAPH_WITNESSES_RETENTION_DAYS_KEY: &str = "graph.witnesses.retention_days";
-pub const GRAPH_WITNESSES_ALGORITHM_TTL_DAYS_KEY: &str =
-    "graph.witnesses.algorithm_ttl_days";
+pub const GRAPH_WITNESSES_ALGORITHM_TTL_DAYS_KEY: &str = "graph.witnesses.algorithm_ttl_days";
 pub const GRAPH_FEATURE_PPR_ENABLED_KEY: &str = "graph.feature.ppr.enabled";
 pub const GRAPH_FEATURE_PACK_DNA_ENABLED_KEY: &str = "graph.feature.pack_dna.enabled";
 pub const GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY: &str = "graph.feature.causal_explain.enabled";
@@ -957,10 +956,7 @@ pub fn config_from_env(
         },
         graph: GraphConfig {
             witnesses: GraphWitnessesConfig {
-                retention_days: optional_env_u64(
-                    env,
-                    EnvVar::GraphWitnessesRetentionDays.name(),
-                )?,
+                retention_days: optional_env_u64(env, EnvVar::GraphWitnessesRetentionDays.name())?,
                 algorithm_ttl_days: None,
             },
             ..GraphConfig::default()

@@ -35205,7 +35205,10 @@ where
         Ok(conn) => conn,
         Err(error) => {
             let error = DomainError::Storage {
-                message: format!("Failed to open database {}: {error}", database_path.display()),
+                message: format!(
+                    "Failed to open database {}: {error}",
+                    database_path.display()
+                ),
                 repair: Some("ee doctor --json".to_string()),
             };
             return write_domain_error(&error, cli.wants_json(), stdout, &mut io::sink());
@@ -35670,7 +35673,9 @@ fn apply_graph_witness_config_to_policy(
                 &format!("graph.witnesses.algorithm_ttl_days.{algorithm}"),
                 "graph_witness_retention_config_invalid",
             )?;
-            policy.per_algorithm_ttl_days.insert(algorithm.clone(), days);
+            policy
+                .per_algorithm_ttl_days
+                .insert(algorithm.clone(), days);
         }
     }
     Ok(())
@@ -36153,7 +36158,9 @@ where
                     summary["deletedCount"].as_u64().unwrap_or(0),
                     summary["keepActiveSnapshotCount"].as_u64().unwrap_or(0),
                     summary["keepWithinTtlCount"].as_u64().unwrap_or(0),
-                    summary["keepUnparseableRecordedAtCount"].as_u64().unwrap_or(0),
+                    summary["keepUnparseableRecordedAtCount"]
+                        .as_u64()
+                        .unwrap_or(0),
                 ),
             )
         }
@@ -37665,8 +37672,12 @@ const LEARN_SUBCOMMANDS: &[&str] = &[
     "summary",
 ];
 const LEARN_EXPERIMENT_SUBCOMMANDS: &[&str] = &["propose", "run"];
-const MAINTENANCE_SUBCOMMANDS: &[&str] =
-    &["run", "graph-snapshot-prune", "graph-witnesses-prune", "status"];
+const MAINTENANCE_SUBCOMMANDS: &[&str] = &[
+    "run",
+    "graph-snapshot-prune",
+    "graph-witnesses-prune",
+    "status",
+];
 const MEMORY_SUBCOMMANDS: &[&str] = &["expire", "list", "show", "history", "revise", "tags"];
 const MIGRATE_SUBCOMMANDS: &[&str] = &["status", "run"];
 const MCP_SUBCOMMANDS: &[&str] = &["manifest"];
