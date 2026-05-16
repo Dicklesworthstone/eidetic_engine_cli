@@ -338,6 +338,35 @@
       "sourceStatusCounts": {"ready": 1},
       "sourceStatuses": [],
       "resourcePressurePosture": "low",
+      "singleFlight": {
+        "schema": "ee.singleflight.posture.v1",
+        "status": "idle",
+        "configuredSurfaceCount": 1,
+        "activeLeaderCount": 0,
+        "leaderStartCount": 0,
+        "followerWaitCount": 0,
+        "followerTimeoutCount": 0,
+        "leaderFailureCount": 0,
+        "reusedResultCount": 0,
+        "surfaces": [
+          {
+            "surface": "graph_feature_enrichment",
+            "status": "idle",
+            "configured": true,
+            "activeLeaderCount": 0,
+            "leaderStartCount": 0,
+            "completedLeaderCount": 0,
+            "followerJoinCount": 0,
+            "followerTimeoutCount": 0,
+            "leaderFailureCount": 0,
+            "reusedResultCount": 0,
+            "statePoisonedCount": 0,
+            "followerTimeoutMs": 2000,
+            "lastKey": null,
+            "suggestedAction": "no action; single-flight is available for duplicate read-heavy work"
+          }
+        ]
+      },
       "degradedCodes": [],
       "fileSurfaceRiskSummary": {
         "countsBySeverity": {"medium": 1},

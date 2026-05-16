@@ -18,6 +18,7 @@
     "sourceStatusCounts",
     "sourceStatuses",
     "resourcePressurePosture",
+    "singleFlight",
     "degradedCodes",
     "fileSurfaceRiskSummary",
     "topRecommendations",
@@ -42,6 +43,7 @@
       "items": {"type": "object"}
     },
     "resourcePressurePosture": {"type": "string"},
+    "singleFlight": {"$ref": "#/definitions/singleFlightPosture"},
     "degradedCodes": {
       "type": "array",
       "items": {"type": "string"}
@@ -71,6 +73,89 @@
           "type": "array",
           "items": {"$ref": "#/definitions/topRisk"}
         }
+      }
+    },
+    "singleFlightPosture": {
+      "type": "object",
+      "required": [
+        "schema",
+        "status",
+        "configuredSurfaceCount",
+        "activeLeaderCount",
+        "leaderStartCount",
+        "followerWaitCount",
+        "followerTimeoutCount",
+        "leaderFailureCount",
+        "reusedResultCount",
+        "surfaces"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "ee.singleflight.posture.v1"},
+        "status": {"type": "string"},
+        "configuredSurfaceCount": {"type": "integer", "minimum": 0},
+        "activeLeaderCount": {"type": "integer", "minimum": 0},
+        "leaderStartCount": {"type": "integer", "minimum": 0},
+        "followerWaitCount": {"type": "integer", "minimum": 0},
+        "followerTimeoutCount": {"type": "integer", "minimum": 0},
+        "leaderFailureCount": {"type": "integer", "minimum": 0},
+        "reusedResultCount": {"type": "integer", "minimum": 0},
+        "surfaces": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/singleFlightSurfacePosture"}
+        }
+      }
+    },
+    "singleFlightSurfacePosture": {
+      "type": "object",
+      "required": [
+        "surface",
+        "status",
+        "configured",
+        "activeLeaderCount",
+        "leaderStartCount",
+        "completedLeaderCount",
+        "followerJoinCount",
+        "followerTimeoutCount",
+        "leaderFailureCount",
+        "reusedResultCount",
+        "statePoisonedCount",
+        "followerTimeoutMs",
+        "lastKey",
+        "suggestedAction"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "surface": {"type": "string"},
+        "status": {"type": "string"},
+        "configured": {"type": "boolean"},
+        "activeLeaderCount": {"type": "integer", "minimum": 0},
+        "leaderStartCount": {"type": "integer", "minimum": 0},
+        "completedLeaderCount": {"type": "integer", "minimum": 0},
+        "followerJoinCount": {"type": "integer", "minimum": 0},
+        "followerTimeoutCount": {"type": "integer", "minimum": 0},
+        "leaderFailureCount": {"type": "integer", "minimum": 0},
+        "reusedResultCount": {"type": "integer", "minimum": 0},
+        "statePoisonedCount": {"type": "integer", "minimum": 0},
+        "followerTimeoutMs": {"type": "integer", "minimum": 0},
+        "lastKey": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/definitions/singleFlightLastKey"}
+          ]
+        },
+        "suggestedAction": {"type": "string"}
+      }
+    },
+    "singleFlightLastKey": {
+      "type": "object",
+      "required": ["keyHash", "workspaceGeneration", "indexGeneration", "graphGeneration"],
+      "additionalProperties": false,
+      "properties": {
+        "keyHash": {"type": "string", "pattern": "^sha256:"},
+        "workspaceGeneration": {"type": "integer", "minimum": 0},
+        "indexGeneration": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0}]},
+        "graphGeneration": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0}]}
       }
     },
     "topRisk": {
@@ -133,6 +218,35 @@
       "sourceStatusCounts": {"ready": 1},
       "sourceStatuses": [],
       "resourcePressurePosture": "low",
+      "singleFlight": {
+        "schema": "ee.singleflight.posture.v1",
+        "status": "idle",
+        "configuredSurfaceCount": 1,
+        "activeLeaderCount": 0,
+        "leaderStartCount": 0,
+        "followerWaitCount": 0,
+        "followerTimeoutCount": 0,
+        "leaderFailureCount": 0,
+        "reusedResultCount": 0,
+        "surfaces": [
+          {
+            "surface": "graph_feature_enrichment",
+            "status": "idle",
+            "configured": true,
+            "activeLeaderCount": 0,
+            "leaderStartCount": 0,
+            "completedLeaderCount": 0,
+            "followerJoinCount": 0,
+            "followerTimeoutCount": 0,
+            "leaderFailureCount": 0,
+            "reusedResultCount": 0,
+            "statePoisonedCount": 0,
+            "followerTimeoutMs": 2000,
+            "lastKey": null,
+            "suggestedAction": "no action; single-flight is available for duplicate read-heavy work"
+          }
+        ]
+      },
       "degradedCodes": [],
       "fileSurfaceRiskSummary": {
         "countsBySeverity": {"medium": 1},

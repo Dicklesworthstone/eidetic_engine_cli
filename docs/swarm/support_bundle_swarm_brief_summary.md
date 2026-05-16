@@ -6,6 +6,11 @@ Support bundles include a compact, redacted summary derived from
 `ee.swarm.brief.v1`. The ownership posture appears under
 `fileSurfaceRiskSummary`, with counts by severity, reservation holder, and git
 status bucket plus the top risks represented by hashes and IDs.
+The duplicate-work posture appears under `singleFlight` using the same
+redaction-safe `ee.singleflight.posture.v1` shape exposed by `ee status` and
+`ee doctor`, so handoff readers can see active leaders, follower waits,
+timeouts, failures, reused-result counts, surface names, and key hashes without
+raw queries or memory content.
 
 Versioning: field renames or incompatible redaction semantics require a new
 schema version and a migration note. Additive counts may remain in
@@ -13,8 +18,9 @@ schema version and a migration note. Additive counts may remain in
 ignore them.
 
 Redaction rules: counts, severity labels, risk codes, reservation subjects,
-Bead IDs, path hashes, and command hashes are allowed. Raw paths in the top-risk
-summary, raw commands, mail bodies, raw logs, raw memory content, env dumps,
+Bead IDs, path hashes, command hashes, single-flight key hashes, surface names,
+and generation counters are allowed. Raw paths in the top-risk summary, raw
+commands, mail bodies, raw logs, raw memory content, raw query text, env dumps,
 file contents, and secret-like tokens are not allowed.
 
 Example:

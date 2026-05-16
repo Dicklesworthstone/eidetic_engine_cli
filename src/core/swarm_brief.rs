@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 
 use crate::core::agent_detect::{AgentInventoryStatus, AgentStatusOptions, gather_agent_status};
 use crate::core::profile::{HostResourceProbeReport, recommend_operating_profile};
+use crate::core::singleflight::singleflight_posture_report;
 use crate::policy::redact_secret_like_content;
 
 pub const SWARM_BRIEF_SCHEMA_V1: &str = "ee.swarm.brief.v1";
@@ -1678,6 +1679,7 @@ pub fn summarize_swarm_brief_report(report: &SwarmBriefReport) -> Value {
         "sourceStatusCounts": source_status_counts,
         "sourceStatuses": swarm_brief_source_status_summaries(report),
         "resourcePressurePosture": swarm_brief_resource_pressure_posture(report),
+        "singleFlight": singleflight_posture_report(),
         "degradedCodes": degraded_codes,
         "fileSurfaceRiskSummary": swarm_brief_file_surface_risk_summary(report),
         "topRecommendations": swarm_brief_summary_recommendations(report),
@@ -1725,6 +1727,31 @@ pub fn render_swarm_brief_summary_for_handoff(summary: &Value) -> String {
         .get("resourcePressurePosture")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
+    let singleflight = summary.get("singleFlight").unwrap_or(&Value::Null);
+    let singleflight_status = singleflight
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let singleflight_active = singleflight
+        .get("activeLeaderCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let singleflight_waits = singleflight
+        .get("followerWaitCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let singleflight_timeouts = singleflight
+        .get("followerTimeoutCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let singleflight_failures = singleflight
+        .get("leaderFailureCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let singleflight_reused = singleflight
+        .get("reusedResultCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let hash = summary
         .get("reportHash")
         .and_then(Value::as_str)
@@ -1744,6 +1771,9 @@ pub fn render_swarm_brief_summary_for_handoff(summary: &Value) -> String {
     let mut lines = vec![
         format!(
             "Swarm brief summary: ready={ready}, blocked={blocked}, in_progress={in_progress}, active_conflicts={conflicts}, resource_pressure={pressure}, degraded_sources={degraded}."
+        ),
+        format!(
+            "Single-flight posture: status={singleflight_status}, active_leaders={singleflight_active}, follower_waits={singleflight_waits}, follower_timeouts={singleflight_timeouts}, leader_failures={singleflight_failures}, reused_results={singleflight_reused}."
         ),
         format!("Source report hash: {hash}."),
         "Diagnostic posture only; run a fresh live brief before claiming or coordinating work."
@@ -4204,6 +4234,17 @@ mod tests {
             Some(&json!(SWARM_BRIEF_SUMMARY_SCHEMA_V1))
         );
         assert_eq!(
+            summary.pointer("/singleFlight/schema"),
+            Some(&json!("ee.singleflight.posture.v1"))
+        );
+        assert!(
+            summary
+                .pointer("/singleFlight/surfaces/0/surface")
+                .and_then(Value::as_str)
+                .is_some(),
+            "summary must expose redaction-safe single-flight surface posture"
+        );
+        assert_eq!(
             summary.pointer("/redaction/rawMailBodiesIncluded"),
             Some(&json!(false))
         );
@@ -4218,6 +4259,10 @@ mod tests {
         assert!(
             !rendered.contains(raw_remote_workspace),
             "summary must not expose raw remote workspace paths"
+        );
+        assert!(
+            !rendered.contains("raw_query") && !rendered.contains("memory_body"),
+            "single-flight summary must not expose raw query or memory body labels"
         );
         assert!(
             rendered.contains("[REDACTED_PATH:"),
@@ -4247,6 +4292,27 @@ mod tests {
                 .and_then(Value::as_str)
                 .is_some_and(|hash| hash.starts_with("blake3:")),
             "summary must hash high-risk file paths instead of listing them"
+        );
+    }
+
+    #[test]
+    fn handoff_summary_text_mentions_singleflight_posture_without_raw_keys() {
+        let mut report = report_with_ready_sources();
+        apply_swarm_brief_advice(&mut report);
+        report.finalize();
+
+        let summary = summarize_swarm_brief_report(&report);
+        let rendered = render_swarm_brief_summary_for_handoff(&summary);
+
+        assert!(
+            rendered.contains("Single-flight posture: status="),
+            "handoff text must include single-flight aggregate posture"
+        );
+        assert!(
+            !rendered.contains("keyHash")
+                && !rendered.contains("queryShapeHash")
+                && !rendered.contains("workspaceHash"),
+            "handoff text should stay compact and omit raw key-shape field names"
         );
     }
 
