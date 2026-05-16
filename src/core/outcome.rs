@@ -34,10 +34,10 @@ use crate::core::bayes::{BetaPosterior, DEFAULT_HARMFUL_WEIGHT};
 use crate::db::{
     ApplyProcedureFeedbackInput, AuditedFeedbackEventInput, CreateAuditInput,
     CreateFeedbackEventInput, CreateFeedbackQuarantineInput, DbConnection, FeedbackCounts,
-    StoredFeedbackEvent, StoredFeedbackQuarantine, audit_actions, feedback_scoring,
-    generate_audit_id,
+    StoredFeedbackEvent, StoredFeedbackQuarantine, UpsertAgentContextProfileInput, audit_actions,
+    feedback_scoring, generate_audit_id,
 };
-use crate::models::{DomainError, ProcessExitCode};
+use crate::models::{AgentContextProfileCounts, DomainError, ProcessExitCode};
 
 /// Exit code for cancelled operations (SIGINT convention).
 pub const EXIT_CANCELLED: u8 = 130;
@@ -326,6 +326,7 @@ pub struct OutcomeRecordOptions<'a> {
     pub session_id: Option<String>,
     pub event_id: Option<String>,
     pub actor: Option<String>,
+    pub agent_name: Option<String>,
     pub dry_run: bool,
     pub harmful_per_source_per_hour: u32,
     pub harmful_burst_window_seconds: u32,
@@ -881,6 +882,18 @@ pub fn record_outcome(
                 message: format!("Failed to update procedure feedback score: {error}"),
                 repair: Some("ee procedure show <id> --json".to_string()),
             })?;
+    }
+
+    if target_type == "memory" {
+        record_agent_context_profile_update(
+            &connection,
+            &target.workspace_id,
+            &target_id,
+            &signal,
+            &event_id,
+            options.agent_name.as_deref(),
+            options.actor.as_deref(),
+        )?;
     }
 
     // Bayesian (alpha, beta) posterior update — N7.1 / ADR 0032.
@@ -1475,6 +1488,120 @@ fn current_feedback_summary(
             message: format!("Failed to summarize feedback: {error}"),
             repair: Some("ee doctor".to_string()),
         })
+}
+
+fn record_agent_context_profile_update(
+    connection: &DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+    signal: &str,
+    feedback_event_id: &str,
+    agent_name: Option<&str>,
+    actor: Option<&str>,
+) -> Result<(), DomainError> {
+    let Some(agent_name) = agent_name.and_then(normalized_agent_name) else {
+        return Ok(());
+    };
+    let Some(counts_delta) = agent_profile_counts_delta(signal) else {
+        return Ok(());
+    };
+
+    let existing = connection
+        .get_agent_context_profile(workspace_id, &agent_name, memory_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to read agent context profile: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+    let next_counts = existing.as_ref().map_or(counts_delta, |profile| {
+        add_agent_profile_counts(profile.counts, counts_delta)
+    });
+    let next_bias = next_counts.bias();
+    let last_seen_at = Utc::now().to_rfc3339();
+
+    connection
+        .with_transaction(|| {
+            let stored =
+                connection.upsert_agent_context_profile_event(&UpsertAgentContextProfileInput {
+                    workspace_id: workspace_id.to_owned(),
+                    agent_name: agent_name.clone(),
+                    memory_id: memory_id.to_owned(),
+                    counts_delta,
+                    last_seen_at: Some(last_seen_at.clone()),
+                    weight_cached: next_bias.weight,
+                })?;
+            let audit_id = generate_audit_id();
+            connection.insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(workspace_id.to_owned()),
+                    actor: actor
+                        .map(str::to_owned)
+                        .or_else(|| Some(agent_name.clone())),
+                    action: audit_actions::AGENT_PROFILE_UPDATE.to_owned(),
+                    target_type: Some("memory".to_owned()),
+                    target_id: Some(memory_id.to_owned()),
+                    details: Some(agent_profile_update_audit_details(
+                        feedback_event_id,
+                        &agent_name,
+                        &counts_delta,
+                        &stored.counts,
+                        stored.weight_cached,
+                        next_bias.cold_start,
+                    )),
+                },
+            )
+        })
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to update agent context profile: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })
+}
+
+fn normalized_agent_name(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn agent_profile_counts_delta(signal: &str) -> Option<AgentContextProfileCounts> {
+    match signal {
+        "positive" | "helpful" | "confirmation" => Some(AgentContextProfileCounts::new(1, 0, 0)),
+        "negative" | "harmful" | "contradiction" | "inaccurate" => {
+            Some(AgentContextProfileCounts::new(0, 1, 0))
+        }
+        "neutral" => Some(AgentContextProfileCounts::new(0, 0, 1)),
+        _ => None,
+    }
+}
+
+fn add_agent_profile_counts(
+    current: AgentContextProfileCounts,
+    delta: AgentContextProfileCounts,
+) -> AgentContextProfileCounts {
+    AgentContextProfileCounts::new(
+        current.helpful_count.saturating_add(delta.helpful_count),
+        current.harmful_count.saturating_add(delta.harmful_count),
+        current.ignored_count.saturating_add(delta.ignored_count),
+    )
+}
+
+fn agent_profile_update_audit_details(
+    feedback_event_id: &str,
+    agent_name: &str,
+    counts_delta: &AgentContextProfileCounts,
+    stored_counts: &AgentContextProfileCounts,
+    weight_cached: f64,
+    cold_start: bool,
+) -> String {
+    serde_json::json!({
+        "schema": "ee.audit.agent_profile_update.v1",
+        "feedbackEventId": feedback_event_id,
+        "agentName": agent_name,
+        "countsDelta": counts_delta,
+        "storedCounts": stored_counts,
+        "weightCached": weight_cached,
+        "coldStart": cold_start,
+    })
+    .to_string()
 }
 
 fn get_existing_event(
@@ -2164,6 +2291,7 @@ mod tests {
             session_id: None,
             event_id: Some("fb_01234567890123456789012345".to_string()),
             actor: Some("test".to_string()),
+            agent_name: None,
             dry_run: true,
             harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
@@ -2201,6 +2329,7 @@ mod tests {
             session_id: Some(OUTCOME_TEST_SESSION_ID.to_string()),
             event_id: Some("fb_11234567890123456789012345".to_string()),
             actor: Some("test".to_string()),
+            agent_name: None,
             dry_run: false,
             harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
@@ -2236,6 +2365,87 @@ mod tests {
             &audit_row.action,
             &crate::db::audit_actions::FEEDBACK_RECORD.to_string(),
             "audit action",
+        )?;
+        let profile = connection
+            .get_agent_context_profile(OUTCOME_TEST_WORKSPACE_ID, "test", OUTCOME_TEST_MEMORY_ID)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &profile.is_none(),
+            &true,
+            "audit actor alone must not create an agent profile",
+        )
+    }
+
+    #[test]
+    fn record_outcome_updates_agent_context_profile_when_agent_identity_present() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-outcome-agent-profile")?;
+        let cases = [
+            ("helpful", "fb_31234567890123456789012345"),
+            ("harmful", "fb_41234567890123456789012345"),
+            ("neutral", "fb_51234567890123456789012345"),
+        ];
+
+        for (signal, event_id) in cases {
+            let report = record_outcome(&OutcomeRecordOptions {
+                database_path: &database,
+                target_type: "memory".to_string(),
+                target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+                workspace_id: None,
+                signal: signal.to_string(),
+                weight: Some(1.0),
+                source_type: "outcome_observed".to_string(),
+                source_id: Some(format!("agent-profile-{signal}")),
+                reason: Some(format!("Profile signal {signal}.")),
+                evidence_json: None,
+                session_id: None,
+                event_id: Some(event_id.to_string()),
+                actor: Some("test".to_string()),
+                agent_name: Some("FrostyMoose".to_string()),
+                dry_run: false,
+                harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+                harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            })
+            .map_err(|error| error.message())?;
+            ensure_equal(
+                &report.status,
+                &OutcomeRecordStatus::Recorded,
+                "recorded status",
+            )?;
+        }
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let profile = connection
+            .get_agent_context_profile(
+                OUTCOME_TEST_WORKSPACE_ID,
+                "FrostyMoose",
+                OUTCOME_TEST_MEMORY_ID,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "agent profile row missing".to_string())?;
+        ensure_equal(
+            &profile.counts,
+            &crate::models::AgentContextProfileCounts::new(1, 1, 1),
+            "profile counts",
+        )?;
+        ensure_equal(
+            &profile.weight_cached,
+            &0.0_f64,
+            "cold-start profile cache remains neutral",
+        )?;
+
+        let audit = connection
+            .list_audit_by_action(crate::db::audit_actions::AGENT_PROFILE_UPDATE, None)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&audit.len(), &3_usize, "agent profile audit rows")?;
+        ensure(
+            audit.iter().all(|row| row.this_row_hash.is_some()),
+            "profile audit rows must carry chain hashes",
+        )?;
+        ensure(
+            audit
+                .iter()
+                .all(|row| row.target_type.as_deref() == Some("memory")),
+            "profile audit rows target the memory",
         )
     }
 
@@ -2256,6 +2466,7 @@ mod tests {
             session_id: None,
             event_id: Some("fb_21234567890123456789012345".to_string()),
             actor: Some("test".to_string()),
+            agent_name: None,
             dry_run: false,
             harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
@@ -2295,6 +2506,7 @@ mod tests {
                 session_id: None,
                 event_id: Some(format!("fb_{:026}", 300 + index)),
                 actor: Some("test".to_string()),
+                agent_name: None,
                 dry_run: false,
                 harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
                 harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
@@ -2321,6 +2533,7 @@ mod tests {
             session_id: None,
             event_id: Some("fb_00000000000000000000000999".to_string()),
             actor: Some("test".to_string()),
+            agent_name: None,
             dry_run: false,
             harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
@@ -2385,6 +2598,7 @@ mod tests {
             session_id: None,
             event_id: Some("fb_00000000000000000000000997".to_string()),
             actor: Some("test".to_string()),
+            agent_name: None,
             dry_run: false,
             harmful_per_source_per_hour: 1,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
@@ -2410,6 +2624,7 @@ mod tests {
             session_id: None,
             event_id: Some("fb_00000000000000000000000998".to_string()),
             actor: Some("test".to_string()),
+            agent_name: None,
             dry_run: false,
             harmful_per_source_per_hour: 1,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
@@ -2493,6 +2708,7 @@ mod tests {
             session_id: None,
             event_id: Some("fb_00000000000000000000000995".to_string()),
             actor: Some("test".to_string()),
+            agent_name: None,
             dry_run: false,
             harmful_per_source_per_hour: 1,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
@@ -2519,6 +2735,7 @@ mod tests {
             session_id: Some(OUTCOME_TEST_SESSION_ID.to_string()),
             event_id: Some(proposed_event_id.clone()),
             actor: Some("test".to_string()),
+            agent_name: None,
             dry_run: false,
             harmful_per_source_per_hour: 1,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
@@ -2619,6 +2836,7 @@ mod tests {
             session_id: None,
             event_id: None,
             actor: None,
+            agent_name: None,
             dry_run: false,
             harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,

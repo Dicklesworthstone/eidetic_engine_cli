@@ -45,6 +45,7 @@ pub const PACK_REPLAY_LEDGER_HASH_MISMATCH: &str = "pack_replay_ledger_hash_mism
 pub mod audit_actions {
     pub const ARTIFACT_REGISTER: &str = "artifact.register";
     pub const CERTIFICATE_UPSERT: &str = "certificate.upsert";
+    pub const AGENT_PROFILE_UPDATE: &str = "agent_profile.update";
     pub const FEEDBACK_RECORD: &str = "feedback.record";
     pub const HANDOFF_INSECURE_LOAD: &str = "handoff.insecure_load";
     pub const HANDOFF_HMAC_ROTATE: &str = "handoff.hmac_rotate";

@@ -27669,6 +27669,7 @@ where
         session_id: args.session_id.clone(),
         event_id: args.event_id.clone(),
         actor: args.actor.clone(),
+        agent_name: crate::core::memory_scope::current_agent_name(),
         dry_run: args.dry_run,
         harmful_per_source_per_hour: args.harmful_per_source_per_hour,
         harmful_burst_window_seconds: args.harmful_burst_window_seconds,
