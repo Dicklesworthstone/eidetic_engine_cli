@@ -11433,15 +11433,16 @@ pub fn render_learn_cluster_json(report: &LearnClusterReport) -> String {
     .to_string()
 }
 
-fn learn_cluster_degraded_json(report: &LearnClusterReport) -> Vec<serde_json::Value> {
-    report
-        .degradations
-        .iter()
-        .map(|degradation| learn_cluster_degradation_json(degradation))
-        .collect()
+fn learn_cluster_degraded_json(report: &LearnClusterReport) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(
+        report
+            .degradations
+            .iter()
+            .map(|degradation| learn_cluster_degradation_input(degradation)),
+    )
 }
 
-fn learn_cluster_degradation_json(degradation: &str) -> serde_json::Value {
+fn learn_cluster_degradation_input(degradation: &str) -> DegradationAggregationInput {
     let code = degradation.strip_prefix("degraded.").unwrap_or(degradation);
     let (severity, message, repair) = match code {
         "clustering_insufficient_data" => (
@@ -11470,12 +11471,7 @@ fn learn_cluster_degradation_json(degradation: &str) -> serde_json::Value {
             "Inspect the learn cluster output and adjust the workspace evidence.",
         ),
     };
-    serde_json::json!({
-        "code": code,
-        "severity": severity,
-        "message": message,
-        "repair": repair,
-    })
+    DegradationAggregationInput::new("learn_cluster", code, severity, message, repair)
 }
 
 /// Render a learn cluster report as human-readable text.
@@ -11501,9 +11497,9 @@ pub fn render_learn_cluster_human(report: &LearnClusterReport) -> String {
     if !report.degradations.is_empty() {
         out.push_str("\nDegraded:\n");
         for degradation in learn_cluster_degraded_json(report) {
-            let code = degradation["code"].as_str().unwrap_or("unknown");
-            let message = degradation["message"].as_str().unwrap_or("degraded");
-            let repair = degradation["repair"].as_str().unwrap_or("inspect output");
+            let code = degradation.code;
+            let message = degradation.message;
+            let repair = degradation.repair;
             out.push_str(&format!("  {code}: {message} (repair: {repair})\n"));
         }
     }
@@ -12424,12 +12420,12 @@ mod tests {
         render_handoff_inspect_json, render_handoff_inspect_toon, render_handoff_preview_json,
         render_handoff_preview_toon, render_handoff_resume_json, render_handoff_resume_toon,
         render_health_json, render_health_toon, render_integrity_diagnostics_json,
-        render_learn_experiment_proposal_human, render_learn_experiment_proposal_json,
-        render_learn_experiment_proposal_toon, render_memory_history_json,
-        render_memory_history_toon, render_preflight_run_json, render_preflight_show_json,
-        render_schema_export_json, render_shadow_run_human, render_shadow_run_json,
-        render_shadow_run_toon, render_status_json, render_status_json_filtered,
-        render_status_toon, render_version_json, status_response_json,
+        render_learn_cluster_json, render_learn_experiment_proposal_human,
+        render_learn_experiment_proposal_json, render_learn_experiment_proposal_toon,
+        render_memory_history_json, render_memory_history_toon, render_preflight_run_json,
+        render_preflight_show_json, render_schema_export_json, render_shadow_run_human,
+        render_shadow_run_json, render_shadow_run_toon, render_status_json,
+        render_status_json_filtered, render_status_toon, render_version_json, status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::doctor::{
@@ -12445,7 +12441,7 @@ mod tests {
     use crate::core::health::HealthReport;
     use crate::core::learn::{
         ExperimentBudget, ExperimentDecisionImpact, ExperimentProposal, ExperimentSafetyPlan,
-        LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1, LearnExperimentProposalReport,
+        LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1, LearnClusterReport, LearnExperimentProposalReport,
     };
     use crate::core::memory::{MemoryHistoryEntry, MemoryHistoryReport};
     use crate::core::preflight::{
@@ -12668,6 +12664,36 @@ mod tests {
             show_degraded[0]["sources"],
             serde_json::json!(["preflight_show"])
         );
+        Ok(())
+    }
+
+    #[test]
+    fn learn_cluster_degraded_entries_are_aggregated() -> TestResult {
+        let report = LearnClusterReport {
+            schema: "ee.learn.cluster.v1".to_owned(),
+            workspace_id: "workspace_test".to_owned(),
+            threshold: 0.82,
+            min_cluster_size: 3,
+            memory_count: 4,
+            clustered_memory_count: 0,
+            cluster_count: 0,
+            clusters: Vec::new(),
+            degradations: vec![
+                "degraded.clustering_threshold_too_strict".to_owned(),
+                "degraded.clustering_threshold_too_strict".to_owned(),
+            ],
+            generated_at: "1970-01-01T00:00:00Z".to_owned(),
+        };
+
+        let json = render_learn_cluster_json(&report);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        let degraded = parsed["degraded"]
+            .as_array()
+            .ok_or_else(|| "learn cluster degraded must be an array".to_string())?;
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0]["code"], "clustering_threshold_too_strict");
+        assert_eq!(degraded[0]["sources"], serde_json::json!(["learn_cluster"]));
         Ok(())
     }
 

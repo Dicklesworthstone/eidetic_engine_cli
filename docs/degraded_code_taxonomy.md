@@ -85,6 +85,7 @@ Current conventions:
 | `integrity` | `ee diag integrity` database, schema, canary, or provenance-sample degradation. |
 | `lab_counterfactual` | `ee lab counterfactual` replay-evidence degradation. |
 | `lab_replay` | `ee lab replay` replay-evidence degradation. |
+| `learn_cluster` | `ee learn cluster` deterministic clustering degradation. |
 | `quarantine` | `ee diag quarantine` trust or feedback quarantine degradation. |
 | `structural_health` | `ee health structural` graph-health degradation. |
 | `science_drift` | `ee analyze drift` science/evaluation drift degradation. |
