@@ -204,3 +204,6 @@ mod mesh_command_modes_contract;
 
 #[path = "contracts/workspace_git_snapshot_read_only.rs"]
 mod workspace_git_snapshot_read_only;
+
+#[path = "contracts/workspace_secret_risk_no_leak.rs"]
+mod workspace_secret_risk_no_leak;
