@@ -346,6 +346,7 @@ impl MeshPolicyFailureSurface {
     #[must_use]
     pub fn to_json(&self) -> JsonValue {
         json!({
+            "schema": "ee.mesh.policy_failure_surface.v1",
             "code": self.code,
             "action": self.action.as_str(),
             "reason": self.reason,

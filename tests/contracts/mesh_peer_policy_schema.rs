@@ -8,12 +8,16 @@ use serde_json::Value;
 type TestResult = Result<(), String>;
 
 const MESH_PEER_POLICY_SCHEMA_V1: &str = "ee.mesh.peer_policy.v1";
+const MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1: &str = "ee.mesh.policy_failure_surface.v1";
 const SCHEMA_PATH: &str = "docs/schemas/ee.mesh.peer_policy.v1.json";
+const FAILURE_SURFACE_SCHEMA_PATH: &str = "docs/schemas/ee.mesh.policy_failure_surface.v1.json";
 const FIXTURES: &[&str] = &[
     "tests/fixtures/mesh/peer_policy_metadata_only.json",
     "tests/fixtures/mesh/peer_policy_body_denied.json",
     "tests/fixtures/mesh/peer_policy_redacted_body_allowed.json",
 ];
+const FAILURE_SURFACE_FIXTURES: &[&str] =
+    &["tests/fixtures/mesh/peer_policy_failure_surface_denied.json"];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -121,6 +125,81 @@ fn peer_policy_fixtures_are_redaction_safe_and_never_human_explicit() -> TestRes
             format!("{fixture} imports peer material as human_explicit"),
         )?;
         for field in ["workspaceId", "peerId", "policyId"] {
+            let text = value
+                .get(field)
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("{fixture} missing {field}"))?;
+            ensure(
+                !text.contains('/') && !text.contains('\\'),
+                format!("{fixture} {field} contains raw path separator"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn peer_policy_failure_surface_schema_pins_structured_codes() -> TestResult {
+    let schema = read_json(FAILURE_SURFACE_SCHEMA_PATH)?;
+
+    ensure_equal(
+        &schema.pointer("/$schema").and_then(Value::as_str),
+        &Some("https://json-schema.org/draft/2020-12/schema"),
+        "json schema draft",
+    )?;
+    ensure_equal(
+        &schema.pointer("/$id").and_then(Value::as_str),
+        &Some("https://eidetic-engine/schemas/ee.mesh.policy_failure_surface.v1.json"),
+        "schema id",
+    )?;
+    ensure_equal(
+        &schema.pointer("/title").and_then(Value::as_str),
+        &Some(MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1),
+        "schema title",
+    )?;
+
+    let codes = schema
+        .pointer("/properties/code/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "code enum missing".to_string())?;
+    for code in [
+        "mesh_peer_policy_denied",
+        "mesh_peer_policy_quarantined",
+        "mesh_peer_policy_rejected",
+        "mesh_outbound_policy_denied",
+        "mesh_outbound_policy_quarantined",
+        "mesh_outbound_policy_rejected",
+    ] {
+        ensure(
+            codes.iter().any(|value| value.as_str() == Some(code)),
+            format!("failure code {code} missing"),
+        )?;
+    }
+
+    let actions = schema
+        .pointer("/properties/action/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "action enum missing".to_string())?;
+    ensure(
+        !actions.iter().any(|value| value.as_str() == Some("allow")),
+        "failure surface must not include allow action",
+    )
+}
+
+#[test]
+fn peer_policy_failure_surface_fixtures_are_redaction_safe() -> TestResult {
+    for fixture in FAILURE_SURFACE_FIXTURES {
+        let value = read_json(fixture)?;
+        ensure_equal(
+            &value.pointer("/schema").and_then(Value::as_str),
+            &Some(MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1),
+            fixture,
+        )?;
+        ensure(
+            value.pointer("/action").and_then(Value::as_str) != Some("allow"),
+            format!("{fixture} is not a failure surface"),
+        )?;
+        for field in ["policyRef", "reason"] {
             let text = value
                 .get(field)
                 .and_then(Value::as_str)
