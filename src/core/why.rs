@@ -1957,6 +1957,9 @@ fn fetch_links(conn: &DbConnection, memory_id: &str) -> WhyEvidenceFetch<MemoryL
     WhyEvidenceFetch::available(
         stored_links
             .into_iter()
+            .filter(|link| {
+                crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref())
+            })
             .map(|link| {
                 let direction = if !link.directed {
                     "undirected".to_string()
@@ -2719,6 +2722,135 @@ mod tests {
             report.links.is_empty(),
             true,
             "links should be empty by default",
+        )
+    }
+
+    fn insert_why_link_memory(
+        conn: &DbConnection,
+        workspace_id: &str,
+        memory_id: &str,
+        content: &str,
+    ) -> TestResult {
+        conn.insert_memory(
+            memory_id,
+            &crate::db::CreateMemoryInput {
+                workspace_id: workspace_id.to_owned(),
+                level: "semantic".to_owned(),
+                kind: "fact".to_owned(),
+                content: content.to_owned(),
+                workflow_id: None,
+                confidence: 0.8,
+                utility: 0.7,
+                importance: 0.6,
+                provenance_uri: None,
+                trust_class: "agent_assertion".to_owned(),
+                trust_subclass: None,
+                tags: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+            },
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn denied_mesh_link_metadata() -> String {
+        serde_json::json!({
+            "mesh": {
+                "workspaceScopeDecision": "deny",
+                "materialLane": "graphSignal",
+                "cachedMaterialId": "mesh_why_denied",
+                "originWorkspaceId": "wsp_remote_private",
+                "originWorkspaceLabel": "/Users/alice/private/repo",
+                "producerPeerId": "peer_builder_one",
+                "producerPeerLabel": "/Users/alice/private/peer-agent",
+                "importDecisionId": "mesh_why_decision_denied",
+                "trustLane": "quarantined",
+                "redactionPosture": "metadata_only"
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn why_fetch_links_ignores_denied_mesh_links() -> TestResult {
+        let conn = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        conn.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_00000000000000000000000001";
+        let source_memory_id = "mem_00000000000000000000000001";
+        let allowed_memory_id = "mem_00000000000000000000000002";
+        let denied_memory_id = "mem_00000000000000000000000003";
+
+        conn.insert_workspace(
+            workspace_id,
+            &crate::db::CreateWorkspaceInput {
+                path: "/tmp/why-mesh-filter".to_owned(),
+                name: Some("why-mesh-filter".to_owned()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        insert_why_link_memory(&conn, workspace_id, source_memory_id, "source why memory")?;
+        insert_why_link_memory(&conn, workspace_id, allowed_memory_id, "allowed neighbor")?;
+        insert_why_link_memory(
+            &conn,
+            workspace_id,
+            denied_memory_id,
+            "denied mesh neighbor",
+        )?;
+
+        conn.insert_memory_link(
+            "link_00000000000000000000000001",
+            &crate::db::CreateMemoryLinkInput {
+                src_memory_id: source_memory_id.to_owned(),
+                dst_memory_id: allowed_memory_id.to_owned(),
+                relation: crate::db::MemoryLinkRelation::Supports,
+                weight: 1.0,
+                confidence: 0.9,
+                directed: true,
+                evidence_count: 2,
+                last_reinforced_at: None,
+                source: crate::db::MemoryLinkSource::Agent,
+                created_by: Some("why-mesh-filter-test".to_owned()),
+                metadata_json: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        conn.insert_memory_link(
+            "link_00000000000000000000000002",
+            &crate::db::CreateMemoryLinkInput {
+                src_memory_id: source_memory_id.to_owned(),
+                dst_memory_id: denied_memory_id.to_owned(),
+                relation: crate::db::MemoryLinkRelation::Supports,
+                weight: 1.0,
+                confidence: 0.9,
+                directed: true,
+                evidence_count: 2,
+                last_reinforced_at: None,
+                source: crate::db::MemoryLinkSource::Import,
+                created_by: Some("why-mesh-filter-test".to_owned()),
+                metadata_json: Some(denied_mesh_link_metadata()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        let links = fetch_links(&conn, source_memory_id);
+        ensure(
+            links.degradation.is_none(),
+            true,
+            "visible filtering is not a degradation",
+        )?;
+        ensure(links.items.len(), 1_usize, "visible link count")?;
+        ensure(
+            links.items[0].linked_memory_id.as_str(),
+            allowed_memory_id,
+            "allowed link remains",
+        )?;
+        ensure(
+            links
+                .items
+                .iter()
+                .any(|link| link.linked_memory_id == denied_memory_id),
+            false,
+            "denied mesh link is absent",
         )
     }
 
