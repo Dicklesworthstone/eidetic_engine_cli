@@ -1972,6 +1972,12 @@ fn graph_link_metadata_has_policy_decision(metadata: &serde_json::Value) -> bool
 
 fn graph_link_mesh_policy_decision_kind(metadata: &serde_json::Value) -> Option<&str> {
     let policy_decision = graph_link_mesh_policy_decision(metadata)?;
+    if graph_link_json_string(policy_decision, "schema")? != "ee.mesh.policy_decision.v1" {
+        return None;
+    }
+    if graph_link_json_string(policy_decision, "direction")? != "inbound" {
+        return None;
+    }
     graph_link_json_string(policy_decision, "action")
 }
 
@@ -6770,6 +6776,18 @@ mod tests {
                 "allow", "metadata", true, "deny",
             )),
         )?;
+        insert_link_with_metadata(
+            &connection,
+            "link_00000000000000000000000030",
+            MEMORY_A,
+            MEMORY_C,
+            true,
+            0.9,
+            0.9,
+            Some(mesh_link_metadata_with_policy_direction(
+                "allow", "metadata", true, "outbound", "allow",
+            )),
+        )?;
 
         let projection = graph_result(super::build_memory_graph(
             &connection,
@@ -6806,11 +6824,27 @@ mod tests {
         complete: bool,
         policy_action: &str,
     ) -> String {
+        mesh_link_metadata_with_policy_direction(
+            workspace_scope_decision,
+            material_lane,
+            complete,
+            "inbound",
+            policy_action,
+        )
+    }
+
+    fn mesh_link_metadata_with_policy_direction(
+        workspace_scope_decision: &str,
+        material_lane: &str,
+        complete: bool,
+        policy_direction: &str,
+        policy_action: &str,
+    ) -> String {
         mesh_link_metadata_with_optional_policy_action(
             workspace_scope_decision,
             material_lane,
             complete,
-            Some(policy_action),
+            Some((policy_direction, policy_action)),
         )
     }
 
@@ -6818,7 +6852,7 @@ mod tests {
         workspace_scope_decision: &str,
         material_lane: &str,
         complete: bool,
-        policy_action: Option<&str>,
+        policy_action: Option<(&str, &str)>,
     ) -> String {
         let mut mesh = serde_json::json!({
             "workspaceScopeDecision": workspace_scope_decision,
@@ -6836,14 +6870,14 @@ mod tests {
         if !complete && let Some(object) = mesh.as_object_mut() {
             object.remove("trustLane");
         }
-        if let Some(policy_action) = policy_action
+        if let Some((policy_direction, policy_action)) = policy_action
             && let Some(object) = mesh.as_object_mut()
         {
             object.insert(
                 "policyDecision".to_owned(),
                 serde_json::json!({
                     "schema": "ee.mesh.policy_decision.v1",
-                    "direction": "inbound",
+                    "direction": policy_direction,
                     "action": policy_action,
                 }),
             );

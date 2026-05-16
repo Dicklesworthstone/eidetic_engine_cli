@@ -1442,6 +1442,12 @@ fn metadata_has_mesh_policy_decision(metadata: &JsonValue) -> bool {
 
 fn metadata_mesh_policy_decision_kind(metadata: &JsonValue) -> Option<MeshImportDecisionKind> {
     let policy_decision = metadata_mesh_policy_decision(metadata)?;
+    if json_string(policy_decision, "schema")? != "ee.mesh.policy_decision.v1" {
+        return None;
+    }
+    if json_string(policy_decision, "direction")? != "inbound" {
+        return None;
+    }
     match json_string(policy_decision, "action")? {
         "allow" => Some(MeshImportDecisionKind::Allow),
         "quarantine" => Some(MeshImportDecisionKind::Quarantine),
@@ -2669,6 +2675,22 @@ max_bytes = 0
                 }
             }
         });
+        let outbound_policy_decision = json!({
+            "mesh": {
+                "workspaceScopeDecision": "allow",
+                "cachedMaterialId": "mesh_mat_123",
+                "originWorkspaceId": "wsp_remote_beta",
+                "producerPeerId": "peer_builder_one",
+                "materialLane": "metadata",
+                "trustLane": "mesh_metadata",
+                "redactionPosture": "standard",
+                "policyDecision": {
+                    "schema": "ee.mesh.policy_decision.v1",
+                    "direction": "outbound",
+                    "action": "allow"
+                }
+            }
+        });
         let standalone_policy_decision = json!({
             "policyDecision": {
                 "schema": "ee.mesh.policy_decision.v1",
@@ -2706,6 +2728,10 @@ max_bytes = 0
         );
         assert_eq!(
             mesh_query_visibility(Some(&malformed_policy_decision)),
+            MeshQueryVisibility::Blocked
+        );
+        assert_eq!(
+            mesh_query_visibility(Some(&outbound_policy_decision)),
             MeshQueryVisibility::Blocked
         );
         assert_eq!(
