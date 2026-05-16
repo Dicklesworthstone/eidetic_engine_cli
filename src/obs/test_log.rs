@@ -248,7 +248,9 @@ pub fn log_event_to(path: &Path, level: LogLevel, event: &TestEvent) -> bool {
     let Ok(serialized) = serde_json::to_string(event) else {
         return false;
     };
-    let _guard = WRITE_LOCK.lock();
+    let _guard = WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
