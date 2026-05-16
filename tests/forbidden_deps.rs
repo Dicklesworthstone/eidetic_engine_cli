@@ -562,3 +562,115 @@ fn core_source_excludes_ai_api_patterns() {
         panic!("{report}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Determinism ambient-randomness lint scaffold (N4.4)
+// ---------------------------------------------------------------------------
+
+const DETERMINISM_CLIPPY_METHODS: &[&str] =
+    &["rand::thread_rng", "rand::random", "uuid::Uuid::new_v4"];
+
+const DETERMINISM_AMBIENT_RANDOMNESS_PATTERNS: &[&str] =
+    &["thread_rng(", "rand::random", "Uuid::new_v4("];
+
+fn clippy_toml_text() -> &'static str {
+    include_str!("../clippy.toml")
+}
+
+fn source_scan_exclude_dirs(file_name: &str) -> bool {
+    matches!(
+        file_name,
+        "docs" | "target" | ".git" | "benches" | "tests" | "scripts"
+    )
+}
+
+fn scan_rust_files_for_patterns(
+    root: &Path,
+    patterns: &[&'static str],
+) -> Vec<(String, usize, &'static str)> {
+    let mut findings = Vec::new();
+    scan_directory_for_patterns(root, patterns, &mut findings);
+    findings
+}
+
+fn scan_directory_for_patterns(
+    dir: &Path,
+    patterns: &[&'static str],
+    findings: &mut Vec<(String, usize, &'static str)>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+        if source_scan_exclude_dirs(file_name) {
+            continue;
+        }
+
+        if path.is_dir() {
+            scan_directory_for_patterns(&path, patterns, findings);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            scan_file_for_patterns(&path, patterns, findings);
+        }
+    }
+}
+
+fn scan_file_for_patterns(
+    path: &Path,
+    patterns: &[&'static str],
+    findings: &mut Vec<(String, usize, &'static str)>,
+) {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => return,
+    };
+    let path_str = path.display().to_string();
+
+    for (line_num, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+            continue;
+        }
+
+        for pattern in patterns {
+            if line.contains(pattern) {
+                findings.push((path_str.clone(), line_num + 1, *pattern));
+            }
+        }
+    }
+}
+
+#[test]
+fn determinism_clippy_config_disallows_ambient_randomness_methods() {
+    let config = clippy_toml_text();
+    for method in DETERMINISM_CLIPPY_METHODS {
+        assert!(
+            config.contains(&format!("path = \"{method}\"")),
+            "clippy.toml must disallow `{method}` for bd-17c65.14.4.4"
+        );
+    }
+}
+
+#[test]
+fn core_source_excludes_ambient_randomness_patterns() {
+    let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let findings = scan_rust_files_for_patterns(&src_dir, DETERMINISM_AMBIENT_RANDOMNESS_PATTERNS);
+
+    if !findings.is_empty() {
+        let mut report = String::from(
+            "Ambient randomness patterns found in core source code:\n\n\
+             N4.4 requires deterministic paths to use Deterministic<Seed> or \
+             seeded ID helpers instead of ambient RNG/UUID calls.\n\n",
+        );
+
+        for (path, line, pattern) in &findings {
+            report.push_str(&format!("  {path}:{line} - matched: {pattern}\n"));
+        }
+
+        panic!("{report}");
+    }
+}

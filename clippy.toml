@@ -1,0 +1,5 @@
+disallowed-methods = [
+    { path = "rand::thread_rng", reason = "Determinism: use crate::runtime::determinism::Deterministic<Seed> instead of ambient thread-local randomness. See bd-17c65.14.4.4." },
+    { path = "rand::random", reason = "Determinism: use crate::runtime::determinism::Deterministic<Seed> instead of ambient randomness. See bd-17c65.14.4.4." },
+    { path = "uuid::Uuid::new_v4", reason = "Determinism: use UUIDv7 through DeterministicClock/seeded ID helpers for persisted IDs. See bd-17c65.14.4.4." },
+]
