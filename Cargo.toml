@@ -127,6 +127,10 @@ name = "context"
 harness = false
 
 [[bench]]
+name = "context_stream"
+harness = false
+
+[[bench]]
 name = "context_with_ppr"
 harness = false
 
