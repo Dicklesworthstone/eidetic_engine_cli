@@ -10382,7 +10382,7 @@ fn pack_quality_provenance_density(
                 .is_some_and(|uri| !uri.trim().is_empty())
         })
         .count();
-    
+
     if selected_memory_ids.is_empty() {
         0.0
     } else {

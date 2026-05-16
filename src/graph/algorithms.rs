@@ -378,13 +378,15 @@ where
 }
 
 fn algorithm_cache_lock(cache_key: &str) -> Arc<Mutex<()>> {
+    static CLEANUP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    
     let mut locks = ALGORITHM_CACHE_LOCKS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-        
+
     // Periodically clean up unreferenced locks to prevent memory leaks
-    if locks.len() % 64 == 0 {
+    if CLEANUP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 64 == 0 {
         locks.retain(|_, v| Arc::strong_count(v) > 1);
     }
 
@@ -455,18 +457,20 @@ fn store_in_memory_algorithm_result<R>(cache_key: &str, result: &R, ttl_seconds:
 where
     R: Clone + Send + Sync + 'static,
 {
+    static CLEANUP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
     let expires_at = Instant::now().checked_add(Duration::from_secs(ttl_seconds));
     let mut cache = IN_MEMORY_ALGORITHM_RESULTS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-        
+
     // Periodic garbage collection of expired results
-    if cache.len() % 64 == 0 {
+    if CLEANUP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 64 == 0 {
         let now = Instant::now();
         cache.retain(|_, v| !v.expires_at.is_some_and(|exp| exp <= now));
     }
-        
+
     cache.insert(
         cache_key.to_owned(),
         InMemoryAlgorithmResult {
