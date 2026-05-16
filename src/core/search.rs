@@ -3973,7 +3973,7 @@ mod tests {
                         "originWorkspaceId": "wsp_remote_beta",
                         "originWorkspaceLabel": "/Users/alice/private/repo",
                         "producerPeerId": "peer_builder_one",
-                        "producerPeerLabel": "builder-one",
+                        "producerPeerLabel": "/Users/alice/private/peer-agent",
                         "materialLane": "metadata",
                         "importDecisionId": "mesh_dec_456",
                         "trustLane": "mesh_metadata",
@@ -4005,7 +4005,7 @@ mod tests {
                 .as_str()
                 .is_some_and(|alias| alias.starts_with("mesh_ns_"))
         );
-        assert_eq!(provenance["producerPeer"], "builder-one");
+        assert_eq!(provenance["producerPeer"], "peer_builder_one");
         assert_eq!(provenance["materialLane"], "metadata");
         assert_eq!(provenance["importDecisionRef"], "mesh_dec_456");
         assert_eq!(provenance["trustLane"], "mesh_metadata");
@@ -4015,6 +4015,11 @@ mod tests {
             !json["results"][0]["metadata"]
                 .to_string()
                 .contains("/Users/alice/private/repo")
+        );
+        assert!(
+            !json["results"][0]
+                .to_string()
+                .contains("/Users/alice/private/peer-agent")
         );
     }
 
