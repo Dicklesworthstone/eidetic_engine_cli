@@ -7,8 +7,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
+use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::db::{
     DbConnection, StoredFeedbackEvent, StoredMemory, StoredProcedure, StoredProcedureEvent,
 };
@@ -80,6 +81,7 @@ pub struct EconomyReport {
     pub attention_budget_total: f64,
     pub scored_artifact_ids: Vec<String>,
     pub formula_components: Vec<String>,
+    #[serde(serialize_with = "serialize_economy_report_degraded")]
     pub degraded: Vec<EconomyDegradation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub maintenance_debt: Option<MaintenanceDebt>,
@@ -143,6 +145,7 @@ pub struct EconomyScoreReport {
     pub false_alarm_rate: f64,
     pub maintenance_debt: f64,
     pub tail_risk_protected: bool,
+    #[serde(serialize_with = "serialize_economy_score_degraded")]
     pub degraded: Vec<EconomyDegradation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub breakdown: Option<ScoreBreakdown>,
@@ -172,6 +175,7 @@ pub struct EconomyPrunePlan {
     pub mutation_status: String,
     pub summary: EconomyPrunePlanSummary,
     pub recommendations: Vec<EconomyPruneRecommendation>,
+    #[serde(serialize_with = "serialize_economy_prune_degraded")]
     pub degraded: Vec<EconomyDegradation>,
 }
 
@@ -217,6 +221,7 @@ pub struct EconomySimulationReport {
     pub ranking_state_hash_after: String,
     pub ranking_state_unchanged: bool,
     pub scored_artifact_ids: Vec<String>,
+    #[serde(serialize_with = "serialize_economy_simulation_degraded")]
     pub degraded: Vec<EconomyDegradation>,
     pub summary: EconomySimulationSummary,
     pub scenarios: Vec<EconomySimulationScenario>,
@@ -1260,6 +1265,61 @@ fn economy_degradation(
     }
 }
 
+fn serialize_economy_report_degraded<S>(
+    degraded: &[EconomyDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_economy_degraded("economy_report", degraded).serialize(serializer)
+}
+
+fn serialize_economy_score_degraded<S>(
+    degraded: &[EconomyDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_economy_degraded("economy_score", degraded).serialize(serializer)
+}
+
+fn serialize_economy_prune_degraded<S>(
+    degraded: &[EconomyDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_economy_degraded("economy_prune", degraded).serialize(serializer)
+}
+
+fn serialize_economy_simulation_degraded<S>(
+    degraded: &[EconomyDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_economy_degraded("economy_simulation", degraded).serialize(serializer)
+}
+
+fn aggregate_economy_degraded(
+    source: &'static str,
+    degraded: &[EconomyDegradation],
+) -> Vec<crate::core::degraded_aggregation::AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            source,
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry.repair.clone(),
+        )
+    }))
+}
+
 fn economy_status(artifacts: &[EconomyArtifactMetric], degraded: &[EconomyDegradation]) -> String {
     if artifacts.is_empty() {
         "abstain".to_owned()
@@ -1642,6 +1702,62 @@ mod tests {
         );
         assert_eq!(report.artifact_breakdown[0].artifact_type, "memory");
         assert_eq!(report.degraded[0].code, "economy_evidence_sparse");
+        Ok(())
+    }
+
+    #[test]
+    fn economy_report_serializes_aggregated_degraded_entries() -> TestResult {
+        let report = EconomyReport {
+            schema: ECONOMY_REPORT_SCHEMA_V1,
+            generated_at: "2026-05-16T00:00:00Z".to_owned(),
+            status: "review".to_owned(),
+            mutation_status: "read_only_no_mutation".to_owned(),
+            workspace_id: "wsp_test".to_owned(),
+            database_path: "/tmp/ee.db".to_owned(),
+            total_artifacts: 0,
+            artifact_breakdown: Vec::new(),
+            overall_utility_score: 0.0,
+            attention_budget_used: 0.0,
+            attention_budget_total: 0.0,
+            scored_artifact_ids: Vec::new(),
+            formula_components: Vec::new(),
+            degraded: vec![
+                economy_degradation(
+                    "economy_evidence_sparse",
+                    "low",
+                    "Sparse economy evidence.",
+                    "ee outcome <memory-id> --signal helpful --json",
+                ),
+                economy_degradation(
+                    "economy_evidence_sparse",
+                    "medium",
+                    "Sparse economy evidence from another path.",
+                    "ee economy report --json",
+                ),
+            ],
+            maintenance_debt: None,
+            tail_risk_reserves: None,
+        };
+
+        let value = serde_json::to_value(&report).map_err(|error| error.to_string())?;
+        let degraded = value["degraded"]
+            .as_array()
+            .ok_or_else(|| "degraded should serialize as an array".to_owned())?;
+        assert_eq!(
+            degraded.len(),
+            1,
+            "expected one aggregated degradation, got {degraded:?}",
+        );
+        assert_eq!(
+            degraded[0]["code"].as_str(),
+            Some("economy_evidence_sparse")
+        );
+        assert_eq!(degraded[0]["severity"].as_str(), Some("medium"));
+        assert_eq!(
+            degraded[0]["repair"].as_str(),
+            Some("ee economy report --json")
+        );
+        assert_eq!(degraded[0]["sources"][0].as_str(), Some("economy_report"));
         Ok(())
     }
 

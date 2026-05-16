@@ -94,6 +94,10 @@ Current conventions:
 | `bv` | Swarm brief BV source degradation. |
 | `db_status` | `ee db status` migration or sidecar-file degradation. |
 | `dependency_contract` | `ee diag dependencies` dependency-contract degradation. |
+| `economy_prune` | `ee economy prune-plan` memory-economy recommendation degradation. |
+| `economy_report` | `ee economy report` memory-economy metric degradation. |
+| `economy_score` | `ee economy score` single-artifact economy degradation. |
+| `economy_simulation` | `ee economy simulate` attention-budget simulation degradation. |
 | `focus` | `ee focus` passive focus-state degradation. |
 | `git` | Swarm brief Git source degradation. |
 | `graph_centrality_read` | `ee graph centrality` persisted centrality read degradation. |
