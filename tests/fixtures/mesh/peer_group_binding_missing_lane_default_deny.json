@@ -1,0 +1,16 @@
+{
+  "schema": "ee.mesh.peer_group_binding.v1",
+  "workspaceId": "wsp_local_missing_001",
+  "workspaceAlias": "local-missing",
+  "peerGroupId": "pg_missing_lane_001",
+  "peerIds": [
+    "peer_missing_lane_001"
+  ],
+  "originWorkspaceIds": [
+    "wsp_remote_missing_001"
+  ],
+  "lanes": {
+    "metadata": "allow"
+  },
+  "defaultAction": "deny"
+}

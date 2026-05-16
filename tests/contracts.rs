@@ -139,6 +139,9 @@ mod graph_additive_only;
 #[path = "contracts/graph_config_behavior.rs"]
 mod graph_config_behavior;
 
+#[path = "contracts/peer_group_binding_schema.rs"]
+mod peer_group_binding_schema;
+
 #[path = "contracts/cli_help_completeness.rs"]
 mod cli_help_completeness;
 

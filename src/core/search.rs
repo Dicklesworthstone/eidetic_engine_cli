@@ -21,7 +21,7 @@ use crate::pack::{
 use super::index::{
     IndexHealth, IndexStatusError, IndexStatusOptions, IndexStatusReport, get_index_status,
 };
-use super::memory_scope::MemoryScopeContext;
+use super::memory_scope::{MemoryScopeContext, MeshQueryVisibility, mesh_query_visibility};
 use super::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 #[cfg(feature = "lexical-bm25")]
 use crate::search::TantivyIndex;
@@ -531,6 +531,22 @@ impl SearchDegradation {
     }
 
     #[must_use]
+    fn mesh_workspace_scope_filtered(filtered: usize) -> Self {
+        Self {
+            code: "mesh_workspace_scope_filtered".to_string(),
+            severity: "low".to_string(),
+            message: format!(
+                "Filtered {filtered} mesh-derived search hit{plural} because the indexed workspace-scope decision was not an explicit allow for this workspace.",
+                plural = if filtered == 1 { "" } else { "s" },
+            ),
+            repair: Some(
+                "Review the mesh peer-group binding and import ledger before authorizing remote workspace material."
+                    .to_string(),
+            ),
+        }
+    }
+
+    #[must_use]
     fn source_mode_fallback(
         requested: SearchSourceMode,
         applied: SearchSourceMode,
@@ -974,6 +990,11 @@ impl SearchReport {
                         let (metadata, redacted_patterns) =
                             public_search_metadata(meta, output_redaction_enabled);
                         obj_map.insert("metadata".to_string(), metadata);
+                        if let MeshQueryVisibility::Allowed(provenance) =
+                            mesh_query_visibility(Some(meta))
+                        {
+                            obj_map.insert("meshProvenance".to_string(), provenance.to_json());
+                        }
                         if !redacted_patterns.is_empty() {
                             obj_map
                                 .insert("contentRedacted".to_string(), serde_json::json!(true));
@@ -1284,7 +1305,7 @@ fn public_search_metadata(
     let mut redacted_patterns = BTreeSet::new();
     let mut public_fields: serde_json::Map<String, serde_json::Value> = object
         .iter()
-        .filter(|(key, _)| !key.starts_with("_ee_"))
+        .filter(|(key, _)| !search_metadata_key_is_internal(key))
         .map(|(key, value)| {
             let value = if search_metadata_content_key_needs_redaction(key) {
                 redact_search_metadata_content_value(
@@ -1316,6 +1337,43 @@ fn public_search_metadata(
         serde_json::Value::Object(public_fields),
         redacted_patterns.into_iter().collect(),
     )
+}
+
+fn search_metadata_key_is_internal(key: &str) -> bool {
+    key.starts_with("_ee_")
+        || matches!(
+            key,
+            "mesh"
+                | "workspaceScopeDecision"
+                | "workspace_scope_decision"
+                | "workspaceId"
+                | "workspace_id"
+                | "peerGroupId"
+                | "peer_group_id"
+                | "cachedMaterialId"
+                | "cached_material_id"
+                | "originWorkspaceId"
+                | "origin_workspace_id"
+                | "originWorkspaceAlias"
+                | "originWorkspaceLabel"
+                | "origin_workspace_label"
+                | "producerPeer"
+                | "producerPeerId"
+                | "producerPeerLabel"
+                | "producer_peer_id"
+                | "producer_peer_label"
+                | "materialLane"
+                | "material_lane"
+                | "importDecisionRef"
+                | "importDecisionId"
+                | "import_decision_id"
+                | "ledgerCursor"
+                | "ledger_cursor"
+                | "trustLane"
+                | "trust_lane"
+                | "redactionPosture"
+                | "redaction_posture"
+        )
 }
 
 fn search_metadata_content_key_needs_redaction(key: &str) -> bool {
@@ -2164,6 +2222,7 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
             let above_floor = apply_tombstone_visibility(options, above_floor, &mut degraded);
             let (above_floor, scope_stats) =
                 apply_memory_scope_visibility(options, above_floor, &mut degraded);
+            let above_floor = apply_mesh_query_visibility(above_floor, &mut degraded);
             let kept = above_floor.len();
 
             // Representative floor for degradation reporting + metrics:
@@ -3351,6 +3410,27 @@ fn apply_memory_scope_visibility(
     (scoped_hits, stats)
 }
 
+fn apply_mesh_query_visibility(
+    hits: Vec<SearchHit>,
+    degraded: &mut Vec<SearchDegradation>,
+) -> Vec<SearchHit> {
+    let mut visible_hits = Vec::with_capacity(hits.len());
+    let mut filtered = 0usize;
+
+    for hit in hits {
+        match mesh_query_visibility(hit.metadata.as_ref()) {
+            MeshQueryVisibility::Local | MeshQueryVisibility::Allowed(_) => visible_hits.push(hit),
+            MeshQueryVisibility::Blocked => filtered = filtered.saturating_add(1),
+        }
+    }
+
+    if filtered > 0 {
+        degraded.push(SearchDegradation::mesh_workspace_scope_filtered(filtered));
+    }
+
+    visible_hits
+}
+
 fn mark_hit_scope(hit: &mut SearchHit, scope: MemoryScope, memory: &crate::db::StoredMemory) {
     let mut metadata = hit.metadata.take().unwrap_or_else(|| serde_json::json!({}));
     if let Some(object) = metadata.as_object_mut() {
@@ -3734,6 +3814,119 @@ mod tests {
         assert_eq!(json["metrics"]["strictSourceMode"], false);
         assert!(json["results"][0]["why"].is_string());
         assert!(json["results"][0]["provenance"].is_array());
+    }
+
+    #[test]
+    fn search_report_data_json_exposes_allowed_mesh_provenance() {
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "mesh query".to_string(),
+            requested_limit: 10,
+            results: vec![SearchHit {
+                doc_id: "mesh-doc-1".to_string(),
+                score: 0.95,
+                source: ScoreSource::SemanticFast,
+                fast_score: Some(0.95),
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                metadata: Some(serde_json::json!({
+                    "mesh": {
+                        "workspaceScopeDecision": "allow",
+                        "workspaceId": "wsp_local_alpha",
+                        "cachedMaterialId": "mesh_mat_123",
+                        "originWorkspaceId": "wsp_remote_beta",
+                        "originWorkspaceLabel": "/Users/alice/private/repo",
+                        "producerPeerId": "peer_builder_one",
+                        "producerPeerLabel": "builder-one",
+                        "materialLane": "metadata",
+                        "importDecisionId": "mesh_dec_456",
+                        "trustLane": "mesh_metadata",
+                        "redactionPosture": "standard"
+                    }
+                })),
+                explanation: None,
+            }],
+            elapsed_ms: 12.3,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        };
+
+        let json = report.data_json();
+        let provenance = &json["results"][0]["meshProvenance"];
+        assert_eq!(provenance["cachedMaterialId"], "mesh_mat_123");
+        assert!(
+            provenance["originWorkspaceAlias"]
+                .as_str()
+                .is_some_and(|alias| alias.starts_with("mesh_ns_"))
+        );
+        assert_eq!(provenance["producerPeer"], "builder-one");
+        assert_eq!(provenance["materialLane"], "metadata");
+        assert_eq!(provenance["importDecisionRef"], "mesh_dec_456");
+        assert_eq!(provenance["trustLane"], "mesh_metadata");
+        assert_eq!(provenance["redactionPosture"], "standard");
+        assert!(json["results"][0]["metadata"].get("mesh").is_none());
+        assert!(
+            !json["results"][0]["metadata"]
+                .to_string()
+                .contains("/Users/alice/private/repo")
+        );
+    }
+
+    #[test]
+    fn search_mesh_query_visibility_filters_non_allowed_hits() {
+        let mut degraded = Vec::new();
+        let hits = vec![
+            SearchHit {
+                doc_id: "local-doc".to_string(),
+                score: 0.90,
+                source: ScoreSource::SemanticFast,
+                fast_score: Some(0.90),
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                metadata: None,
+                explanation: None,
+            },
+            SearchHit {
+                doc_id: "mesh-denied".to_string(),
+                score: 0.88,
+                source: ScoreSource::SemanticFast,
+                fast_score: Some(0.88),
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                metadata: Some(serde_json::json!({
+                    "mesh": {
+                        "workspaceScopeDecision": "deny",
+                        "cachedMaterialId": "mesh_mat_denied",
+                        "originWorkspaceId": "wsp_remote_beta",
+                        "producerPeerId": "peer_builder_one",
+                        "materialLane": "metadata",
+                        "trustLane": "mesh_metadata",
+                        "redactionPosture": "standard"
+                    }
+                })),
+                explanation: None,
+            },
+        ];
+
+        let visible = apply_mesh_query_visibility(hits, &mut degraded);
+
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].doc_id, "local-doc");
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "mesh_workspace_scope_filtered");
     }
 
     #[test]

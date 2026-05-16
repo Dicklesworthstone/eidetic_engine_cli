@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.peer_group_binding.v1.json",
+  "title": "ee.mesh.peer_group_binding.v1",
+  "description": "Workspace-scoped peer-group binding for optional mesh memory authorization.",
+  "type": "object",
+  "required": [
+    "schema",
+    "workspaceId",
+    "workspaceAlias",
+    "peerGroupId",
+    "peerIds",
+    "originWorkspaceIds",
+    "lanes",
+    "defaultAction"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.mesh.peer_group_binding.v1"
+    },
+    "workspaceId": {
+      "$ref": "#/$defs/workspaceId"
+    },
+    "workspaceAlias": {
+      "$ref": "#/$defs/redactedAlias"
+    },
+    "peerGroupId": {
+      "$ref": "#/$defs/peerGroupId"
+    },
+    "peerGroupLabel": {
+      "$ref": "#/$defs/redactedAlias"
+    },
+    "peerIds": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/peerId"
+      }
+    },
+    "originWorkspaceIds": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/workspaceId"
+      }
+    },
+    "originWorkspaceAliases": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/workspaceId"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/redactedAlias"
+      }
+    },
+    "lanes": {
+      "type": "object",
+      "description": "Per-lane grants. Omitted lanes are interpreted as deny.",
+      "additionalProperties": false,
+      "properties": {
+        "metadata": {
+          "$ref": "#/$defs/laneDecision"
+        },
+        "body": {
+          "$ref": "#/$defs/laneDecision"
+        },
+        "embedding": {
+          "$ref": "#/$defs/laneDecision"
+        },
+        "graphLink": {
+          "$ref": "#/$defs/laneDecision"
+        },
+        "revisionNotice": {
+          "$ref": "#/$defs/laneDecision"
+        },
+        "curationSignal": {
+          "$ref": "#/$defs/laneDecision"
+        }
+      }
+    },
+    "defaultAction": {
+      "type": "string",
+      "const": "deny"
+    },
+    "createdAt": {
+      "$ref": "#/$defs/rfc3339"
+    },
+    "updatedAt": {
+      "$ref": "#/$defs/rfc3339"
+    }
+  },
+  "$defs": {
+    "workspaceId": {
+      "type": "string",
+      "pattern": "^wsp_[A-Za-z0-9._:-]{6,128}$"
+    },
+    "peerGroupId": {
+      "type": "string",
+      "pattern": "^pg_[A-Za-z0-9._:-]{6,128}$"
+    },
+    "peerId": {
+      "type": "string",
+      "pattern": "^peer_[A-Za-z0-9._:-]{6,128}$"
+    },
+    "redactedAlias": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "laneDecision": {
+      "type": "string",
+      "enum": ["allow", "quarantine", "deny"]
+    },
+    "rfc3339": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

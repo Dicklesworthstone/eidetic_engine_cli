@@ -10,7 +10,7 @@ use crate::models::CapabilityStatus;
 use super::build_info;
 use super::index::{IndexStatusOptions, get_index_status};
 use super::status::{
-    default_workspace_path, probe_cass_capability, probe_graph_capability,
+    default_workspace_path, probe_cass_capability, probe_graph_capability, probe_mesh_capability,
     probe_runtime_capability, probe_search_capability, probe_storage_capability,
 };
 
@@ -238,6 +238,7 @@ impl CapabilitiesReport {
         let storage_status = probe_storage_capability(workspace_path);
         let search_status = probe_search_capability(workspace_path);
         let graph_status = probe_graph_capability();
+        let mesh_status = probe_mesh_capability();
         let cass_status = probe_cass_capability();
         let index = IndexCapabilitySummary::gather(workspace_path);
 
@@ -250,6 +251,11 @@ impl CapabilitiesReport {
             ),
             CapabilityEntry::new("search", search_status, "Frankensearch hybrid retrieval"),
             CapabilityEntry::new("graph", graph_status, "FrankenNetworkX graph analytics"),
+            CapabilityEntry::new(
+                "mesh",
+                mesh_status,
+                "Optional peer mesh memory cache; disabled by default",
+            ),
             CapabilityEntry::new("cass", cass_status, "CASS session import adapter"),
         ];
 
@@ -272,6 +278,7 @@ impl CapabilitiesReport {
                 "BM25 lexical scoring",
             ),
             FeatureEntry::new("mcp", cfg!(feature = "mcp"), "MCP server adapter"),
+            FeatureEntry::new("mesh", false, "Optional mesh memory cache"),
             FeatureEntry::new("serve", cfg!(feature = "serve"), "HTTP serve adapter"),
         ];
 
@@ -328,6 +335,15 @@ impl CapabilitiesReport {
                 "v0.2",
                 "bd-17c65.5.5",
                 "MCP stdio adapter support is disabled in this build.",
+            ));
+        }
+        if mesh_status == CapabilityStatus::Unimplemented {
+            unimplemented.push(UnimplementedCapabilityEntry::new(
+                "mesh_feature_disabled",
+                "mesh",
+                "post-v0.5",
+                "bd-x4hn7",
+                "Optional mesh memory surfaces are disabled or not linked in this build.",
             ));
         }
         if !cfg!(feature = "serve") {
@@ -509,6 +525,29 @@ mod tests {
             .find(|s| s.name == "runtime")
             .unwrap_or_else(|| panic!("runtime subsystem must exist")); // ubs:ignore
         ensure(runtime.status, CapabilityStatus::Ready, "runtime is ready")
+    }
+
+    #[test]
+    fn capabilities_report_surfaces_mesh_as_default_off() -> TestResult {
+        let report = CapabilitiesReport::gather();
+
+        let mesh = report
+            .subsystems
+            .iter()
+            .find(|s| s.name == "mesh")
+            .unwrap_or_else(|| panic!("mesh subsystem must exist")); // ubs:ignore
+        ensure(
+            mesh.status,
+            CapabilityStatus::Pending,
+            "mesh defaults to pending",
+        )?;
+
+        let feature = report
+            .features
+            .iter()
+            .find(|feature| feature.name == "mesh")
+            .unwrap_or_else(|| panic!("mesh feature must exist")); // ubs:ignore
+        ensure(feature.enabled, false, "mesh feature defaults off")
     }
 
     #[test]

@@ -1,0 +1,28 @@
+{
+  "schema": "ee.mesh.peer_group_binding.v1",
+  "workspaceId": "wsp_local_release_001",
+  "workspaceAlias": "local-release",
+  "peerGroupId": "pg_release_mesh_001",
+  "peerGroupLabel": "release-mesh",
+  "peerIds": [
+    "peer_alice_laptop_001",
+    "peer_builder_host_001"
+  ],
+  "originWorkspaceIds": [
+    "wsp_remote_release_001"
+  ],
+  "originWorkspaceAliases": {
+    "wsp_remote_release_001": "remote-release"
+  },
+  "lanes": {
+    "metadata": "allow",
+    "body": "deny",
+    "embedding": "deny",
+    "graphLink": "allow",
+    "revisionNotice": "allow",
+    "curationSignal": "quarantine"
+  },
+  "defaultAction": "deny",
+  "createdAt": "2026-05-15T00:00:00Z",
+  "updatedAt": "2026-05-15T00:00:00Z"
+}

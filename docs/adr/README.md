@@ -42,3 +42,4 @@ including rejected alternatives and verification hooks.
 - [ADR 0034: Multi-Graph Snapshot Framework](0034-multi-graph-snapshot-framework.md)
 - [ADR 0035: Structural Decay Policy](0035-structural-decay-policy.md)
 - [ADR 0036: Pack DNA Explanation Contract](0036-pack-dna-explanation-contract.md)
+- [ADR 0037: Optional Mesh Memory](0037-optional-mesh-memory.md)
