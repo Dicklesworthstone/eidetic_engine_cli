@@ -504,11 +504,15 @@ impl SnapshotPin<'_> {
     }
 
     pub fn checked_connection(&self) -> Result<&DbConnection> {
+        if self.is_expired() {
+            self.poisoned.store(true, Ordering::Release);
+        }
+
         if self.is_poisoned() {
             return Err(DbError::MalformedRow {
                 operation: DbOperation::Query,
                 message: format!(
-                    "snapshot pin {} was poisoned by the read-pool lifecycle watchdog; release it and acquire a fresh snapshot",
+                    "snapshot pin {} was poisoned or expired by the read-pool lifecycle watchdog; release it and acquire a fresh snapshot",
                     self.pin_id
                         .map(|pin_id| pin_id.to_string())
                         .unwrap_or_else(|| "<unpinned>".to_string())
@@ -1286,6 +1290,31 @@ mod tests {
         assert_eq!(stats.active, 0);
         assert_eq!(stats.idle, 1);
         assert_eq!(stats.active_pins, 0);
+    }
+
+    #[test]
+    fn checked_connection_expires_over_age_pin_without_pool_scan() {
+        let tempdir = must(tempfile::tempdir(), "tempdir creates");
+        let database_path = tempdir.path().join("read-pool-checked-expiry.db");
+        seed_snapshot_database(&database_path);
+        let pool = ReadConnectionPool::new(
+            DatabaseConfig::file(database_path),
+            PoolConfig::new(1, Duration::from_secs(30)).with_max_pin_duration(Duration::ZERO),
+        );
+        let pin = must(pool.pin_snapshot(), "snapshot pin opens");
+
+        let error = match pin.checked_connection() {
+            Ok(_) => panic!("expired pin should not return checked connection"),
+            Err(error) => error,
+        };
+        assert_eq!(error.operation(), Some(DbOperation::Query));
+        assert!(error.to_string().contains("expired"));
+        assert!(pin.is_poisoned());
+        assert_eq!(pool.stats().active_pins, 1);
+        assert_eq!(pool.stats().expired_pins, 1);
+
+        drop(pin);
+        assert_eq!(pool.stats().active_pins, 0);
     }
 
     #[test]
