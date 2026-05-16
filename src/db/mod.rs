@@ -6759,6 +6759,7 @@ pub struct MeshStorageStatus {
     pub peer_count: u32,
     pub cursor_count: u32,
     pub imported_event_count: u32,
+    pub policy_failure_event_count: u32,
     pub mapped_memory_count: u32,
     pub cached_body_count: u32,
 }
@@ -7650,8 +7651,26 @@ impl DbConnection {
             peer_count: self.count_mesh_rows("mesh_peers", workspace_id)?,
             cursor_count: self.count_mesh_rows("mesh_peer_cursors", workspace_id)?,
             imported_event_count: self.count_mesh_rows("mesh_import_ledger", workspace_id)?,
+            policy_failure_event_count: self.count_mesh_import_policy_failures(workspace_id)?,
             mapped_memory_count: self.count_mesh_rows("mesh_memory_mappings", workspace_id)?,
             cached_body_count: self.count_mesh_rows("mesh_body_cache_metadata", workspace_id)?,
+        })
+    }
+
+    fn count_mesh_import_policy_failures(&self, workspace_id: &str) -> Result<u32> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT COUNT(*) FROM mesh_import_ledger
+             WHERE workspace_id = ?1
+               AND policy_failure_surface_json IS NOT NULL",
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        rows.first().map_or(Ok(0), |row| {
+            let count = required_i64(row, 0, DbOperation::Query, "mesh policy failure count")?;
+            u32::try_from(count).map_err(|_| DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "mesh policy failure count must fit u32".to_owned(),
+            })
         })
     }
 
@@ -19377,6 +19396,11 @@ mod tests {
             &0,
             "mesh imported event count",
         )?;
+        ensure_equal(
+            &status.policy_failure_event_count,
+            &0,
+            "mesh policy failure event count",
+        )?;
         ensure_equal(&status.mapped_memory_count, &0, "mesh mapped memory count")?;
         ensure_equal(&status.cached_body_count, &0, "mesh cached body count")?;
 
@@ -19523,6 +19547,13 @@ mod tests {
             &rows[0].policy_failure_surface_json.as_deref(),
             &Some(policy_failure_surface),
             "listed ledger row stores policy failure surface",
+        )?;
+        let status = connection.mesh_storage_status("wsp_01234567890123456789012345")?;
+        ensure_equal(&status.imported_event_count, &1, "one imported event")?;
+        ensure_equal(
+            &status.policy_failure_event_count,
+            &1,
+            "one imported policy failure event",
         )?;
 
         connection.close()?;
