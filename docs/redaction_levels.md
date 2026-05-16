@@ -163,8 +163,9 @@ Three failure-mode fixtures are pinned under
   × 4 surfaces) that asserts per-row output exactly matches the table
   above. Each row carries a `tests/fixtures/secrets/pre_redaction.jsonl`
   fixture pattern as the seed memory.
-- **Round-trip:** `tests/redaction_round_trip_unit.rs` — for each
-  level, seed → export → import → assert the symmetry property.
+- **Round-trip:** `tests/contracts/backup_import_roundtrip.rs`
+  (registered by `tests/contracts.rs`) — for each level, seed → export
+  → import → assert the symmetry property.
 - **E2E:** `scripts/e2e_overhaul/policy_detectors.sh` K6 block —
   exercises every level end-to-end against the real binary, asserts
   the per-surface defaults, and verifies the audit chain shows

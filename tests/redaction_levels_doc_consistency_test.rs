@@ -11,7 +11,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 type TestResult = Result<(), String>;
 
@@ -21,6 +21,11 @@ fn doc_path() -> PathBuf {
 
 fn read_doc() -> Result<String, String> {
     std::fs::read_to_string(doc_path()).map_err(|e| format!("read docs/redaction_levels.md: {e}"))
+}
+
+fn read_workspace_file(path: impl AsRef<Path>) -> Result<String, String> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path);
+    std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))
 }
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
@@ -135,6 +140,7 @@ fn doc_declares_round_trip_symmetry_property() -> TestResult {
         "redaction_markers",
         "Non-redacted fields are byte-identical",
         "Audit chain shows",
+        "tests/contracts/backup_import_roundtrip.rs",
     ] {
         ensure(
             doc.contains(required_phrase),
@@ -143,6 +149,48 @@ fn doc_declares_round_trip_symmetry_property() -> TestResult {
             ),
         )?;
     }
+    Ok(())
+}
+
+#[test]
+fn doc_round_trip_test_reference_points_to_registered_contract() -> TestResult {
+    let doc = read_doc()?;
+    ensure(
+        !doc.contains("tests/redaction_round_trip_unit.rs"),
+        "docs/redaction_levels.md must not reference stale nonexistent `tests/redaction_round_trip_unit.rs`",
+    )?;
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let roundtrip_path = PathBuf::from("tests/contracts/backup_import_roundtrip.rs");
+    ensure(
+        manifest_dir.join(&roundtrip_path).is_file(),
+        format!(
+            "docs/redaction_levels.md references missing round-trip contract `{}`",
+            roundtrip_path.display()
+        ),
+    )?;
+
+    let contracts_rs = read_workspace_file("tests/contracts.rs")?;
+    ensure(
+        contracts_rs.contains("#[path = \"contracts/backup_import_roundtrip.rs\"]"),
+        "tests/contracts.rs must register `tests/contracts/backup_import_roundtrip.rs`",
+    )?;
+
+    let roundtrip_test = read_workspace_file(&roundtrip_path)?;
+    for required_token in [
+        "backup_export_import_roundtrip_imports_all_redaction_levels",
+        "RedactionLevel::all()",
+        "run_roundtrip(*level)",
+    ] {
+        ensure(
+            roundtrip_test.contains(required_token),
+            format!(
+                "{} must contain `{required_token}` so the doc's all-level round-trip claim stays grounded",
+                roundtrip_path.display()
+            ),
+        )?;
+    }
+
     Ok(())
 }
 
