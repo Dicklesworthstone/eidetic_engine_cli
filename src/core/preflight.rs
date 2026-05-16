@@ -724,7 +724,18 @@ pub fn preflight_run_store_path(workspace: &Path) -> PathBuf {
 fn read_preflight_run_store(store_path: &Path) -> Result<PreflightRunStoreDocument, DomainError> {
     ensure_no_symlink_components(store_path, "read")?;
     match fs::symlink_metadata(store_path) {
-        Ok(_) => {}
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Refusing to read preflight run store `{}` because it is not a regular file.",
+                    store_path.display()
+                ),
+                repair: Some(
+                    "Replace the preflight run store with a regular JSON file.".to_owned(),
+                ),
+            });
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(PreflightRunStoreDocument::default());
         }
@@ -1627,6 +1638,25 @@ mod tests {
             error.message().contains("symlinked path component"),
             true,
             "symlinked store error message",
+        )
+    }
+
+    #[test]
+    fn show_preflight_rejects_non_regular_run_store_file() -> TestResult {
+        let workspace = temp_workspace()?;
+        std::fs::create_dir_all(preflight_run_store_path(workspace.path()))
+            .map_err(|error| error.to_string())?;
+
+        let result = show_preflight(&ShowOptions {
+            workspace: workspace.path().to_path_buf(),
+            run_id: "pf_directory000000000000000000".to_owned(),
+            ..Default::default()
+        });
+        let error = result.expect_err("directory preflight run store should be rejected");
+        ensure(
+            error.message().contains("not a regular file"),
+            true,
+            "non-regular store error message",
         )
     }
 
