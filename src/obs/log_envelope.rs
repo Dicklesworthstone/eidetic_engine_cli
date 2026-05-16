@@ -4,9 +4,9 @@
 //! row shape is pinned here so tests can validate log and audit streams without
 //! depending on a tracing subscriber implementation detail.
 
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -169,9 +169,53 @@ impl AuditEvent {
     }
 
     pub fn append_to_path(&self, path: &Path) -> io::Result<()> {
+        ensure_append_path_has_no_symlink_components(path)?;
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         self.write_to(&mut file)
     }
+}
+
+fn ensure_append_path_has_no_symlink_components(path: &Path) -> io::Result<()> {
+    if let Some(symlink_path) = first_existing_symlink_component(path)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to append audit event to '{}': path traverses symbolic link '{}'",
+                path.display(),
+                symlink_path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn first_existing_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "failed to inspect audit append path component '{}': {error}",
+                        current.display()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(None)
 }
 
 #[must_use]
@@ -238,6 +282,63 @@ mod tests {
         assert_eq!(
             line.trim_end(),
             r#"{"schema":"ee.audit.v1","ts":"2026-05-06T00:00:00.123456789Z","actor":"agent:SwiftCat","action":"remember","subject":"memory:mem_01","outcome":"success","fields":{"audit_id":"audit_01"}}"#
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_event_append_rejects_symlinked_path_components() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_dir = tempdir.path().join("real-ee");
+        std::fs::create_dir_all(&real_dir).map_err(|error| error.to_string())?;
+        let linked_dir = tempdir.path().join(".ee");
+        symlink(&real_dir, &linked_dir).map_err(|error| error.to_string())?;
+
+        let event = AuditEvent::new(
+            "2026-05-06T00:00:00.123456789Z",
+            "agent:SwiftCat",
+            "remember",
+            "memory:mem_01",
+            AuditOutcome::Success,
+        );
+        let error = match event.append_to_path(&linked_dir.join("audit.jsonl")) {
+            Ok(()) => return Err("append should reject symlinked audit parent".to_owned()),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            error.to_string().contains("path traverses symbolic link"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !real_dir.join("audit.jsonl").exists(),
+            "audit append must not write through symlinked parent"
+        );
+
+        let ee_dir = tempdir.path().join("safe-ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let outside_audit = tempdir.path().join("outside-audit.jsonl");
+        std::fs::write(&outside_audit, "").map_err(|error| error.to_string())?;
+        let linked_audit = ee_dir.join("audit.jsonl");
+        symlink(&outside_audit, &linked_audit).map_err(|error| error.to_string())?;
+
+        let error = match event.append_to_path(&linked_audit) {
+            Ok(()) => return Err("append should reject symlinked audit file".to_owned()),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            error.to_string().contains("path traverses symbolic link"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            std::fs::read_to_string(&outside_audit)
+                .map_err(|error| error.to_string())?
+                .is_empty(),
+            "audit append must not write through symlinked file"
         );
         Ok(())
     }
