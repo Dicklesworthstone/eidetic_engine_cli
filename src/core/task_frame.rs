@@ -520,6 +520,7 @@ pub fn add_task_subgoal(options: &TaskSubgoalAddOptions) -> Result<TaskFrameRepo
 }
 
 fn read_store(store_path: &Path) -> Result<TaskFrameStoreDocument, DomainError> {
+    ensure_no_symlink_components(store_path, "read")?;
     if !store_path.exists() {
         return Ok(TaskFrameStoreDocument::default());
     }
@@ -540,6 +541,7 @@ fn read_store(store_path: &Path) -> Result<TaskFrameStoreDocument, DomainError> 
 }
 
 fn write_store(store_path: &Path, store: &TaskFrameStoreDocument) -> Result<(), DomainError> {
+    ensure_no_symlink_components(store_path, "write")?;
     if let Some(parent) = store_path.parent() {
         fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
             message: format!(
@@ -549,6 +551,7 @@ fn write_store(store_path: &Path, store: &TaskFrameStoreDocument) -> Result<(), 
             repair: Some("Check workspace .ee permissions.".to_owned()),
         })?;
     }
+    ensure_no_symlink_components(store_path, "write")?;
     let text = serde_json::to_string_pretty(store).map_err(|error| DomainError::Storage {
         message: format!("Failed to serialize task-frame store: {error}"),
         repair: Some("Report this serialization bug.".to_owned()),
@@ -560,6 +563,47 @@ fn write_store(store_path: &Path, store: &TaskFrameStoreDocument) -> Result<(), 
         ),
         repair: Some("Check workspace .ee permissions.".to_owned()),
     })
+}
+
+fn ensure_no_symlink_components(path: &Path, operation: &'static str) -> Result<(), DomainError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Refusing to {operation} task-frame store `{}` through symlinked path component `{}`.",
+                        path.display(),
+                        current.display()
+                    ),
+                    repair: Some(
+                        "Replace the symlink with a real workspace .ee path before retrying."
+                            .to_owned(),
+                    ),
+                });
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Failed to inspect task-frame store path component `{}` before {operation}: {error}",
+                        current.display()
+                    ),
+                    repair: Some("Check workspace .ee permissions.".to_owned()),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -876,6 +920,77 @@ mod tests {
         assert!(report.dry_run);
         assert!(!report.mutated);
         assert!(!task_frame_store_path(&workspace).exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_frame_rejects_symlinked_ee_directory() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let workspace = temp_workspace("symlink-ee")?;
+        let real_ee = workspace.join("real-ee");
+        fs::create_dir_all(&real_ee).map_err(|error| error.to_string())?;
+        symlink(&real_ee, workspace.join(".ee")).map_err(|error| error.to_string())?;
+
+        let error = match create_task_frame(&create_options(workspace.clone())) {
+            Ok(report) => return Err(format!("symlinked .ee should fail, got {report:?}")),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "storage");
+        assert!(
+            error.message().contains("symlink"),
+            "error should mention symlink"
+        );
+        assert!(
+            !real_ee.join("task_frames.json").exists(),
+            "task-frame store must not be written through symlinked .ee"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn show_frame_rejects_symlinked_store_file_before_read() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let workspace = temp_workspace("symlink-store")?;
+        let ee_dir = workspace.join(".ee");
+        fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let outside_store = workspace.join("outside-task-frames.json");
+        fs::write(
+            &outside_store,
+            format!(
+                "{{\"schema\":\"{}\",\"frames\":[]}}\n",
+                TASK_FRAME_STORE_SCHEMA_V1
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(&outside_store, task_frame_store_path(&workspace))
+            .map_err(|error| error.to_string())?;
+
+        let error = match show_task_frame(&TaskFrameShowOptions {
+            workspace_path: workspace,
+            frame_id: None,
+            active: true,
+        }) {
+            Ok(report) => return Err(format!("symlinked store should fail, got {report:?}")),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "storage");
+        assert!(
+            error.message().contains("symlink"),
+            "error should mention symlink"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_store).map_err(|error| error.to_string())?,
+            format!(
+                "{{\"schema\":\"{}\",\"frames\":[]}}\n",
+                TASK_FRAME_STORE_SCHEMA_V1
+            )
+        );
         Ok(())
     }
 
