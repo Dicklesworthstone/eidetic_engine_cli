@@ -11,8 +11,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
+use crate::core::degraded_aggregation::{
+    AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
+};
 use crate::models::{self, DomainError};
 
 pub const COMPARE_RESULT_SCHEMA_V1: &str = "ee.perf.compare.v1";
@@ -86,6 +89,7 @@ pub struct ArtifactSummary {
     pub fixture_tier: Option<String>,
     pub command_family: Option<String>,
     pub metrics: BTreeMap<String, MetricValue>,
+    #[serde(serialize_with = "serialize_artifact_summary_degraded")]
     pub degraded: Vec<SummaryDegradation>,
     pub redaction: RedactionPosture,
     pub provenance: Vec<ProvenanceEntry>,
@@ -623,6 +627,7 @@ pub struct CompareReport {
     pub summary: CompareSummary,
     pub deltas: Vec<MetricDelta>,
     pub owner_hints: Vec<OwnerHint>,
+    #[serde(serialize_with = "serialize_compare_degraded")]
     pub degraded: Vec<CompareDegradation>,
     pub next_commands: Vec<String>,
 }
@@ -678,6 +683,7 @@ pub struct BudgetCheckReport {
     pub requested_profile: String,
     pub artifact: BudgetCheckArtifact,
     pub summary: BudgetCheckSummary,
+    #[serde(serialize_with = "serialize_budget_check_degraded")]
     pub degraded: Vec<BudgetCheckDegradation>,
     pub next_commands: Vec<String>,
 }
@@ -755,6 +761,83 @@ impl BudgetCheckDegradation {
             ),
         }
     }
+}
+
+fn serialize_artifact_summary_degraded<S>(
+    degraded: &[SummaryDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_summary_degraded(degraded).serialize(serializer)
+}
+
+fn serialize_compare_degraded<S>(
+    degraded: &[CompareDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_compare_degraded(degraded).serialize(serializer)
+}
+
+fn serialize_budget_check_degraded<S>(
+    degraded: &[BudgetCheckDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_budget_check_degraded(degraded).serialize(serializer)
+}
+
+fn aggregate_summary_degraded(degraded: &[SummaryDegradation]) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "perf_artifact_summary",
+            entry.code.clone(),
+            entry.severity.as_str(),
+            entry.message.clone(),
+            entry
+                .repair
+                .clone()
+                .unwrap_or_else(|| "Review the normalized perf artifact summary.".to_owned()),
+        )
+    }))
+}
+
+fn aggregate_compare_degraded(degraded: &[CompareDegradation]) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "perf_compare",
+            entry.code.clone(),
+            entry.severity.as_str(),
+            entry.message.clone(),
+            entry
+                .repair
+                .clone()
+                .unwrap_or_else(|| "Review the compared perf artifacts.".to_owned()),
+        )
+    }))
+}
+
+fn aggregate_budget_check_degraded(
+    degraded: &[BudgetCheckDegradation],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "perf_budget_check",
+            entry.code.clone(),
+            entry.severity.as_str(),
+            entry.message.clone(),
+            entry
+                .repair
+                .clone()
+                .unwrap_or_else(|| "Review the perf budget check report.".to_owned()),
+        )
+    }))
 }
 
 /// Load a normalized perf artifact summary from a JSON file.
@@ -1718,6 +1801,65 @@ mod tests {
         let metrics1: Vec<_> = report1.deltas.iter().map(|d| &d.metric).collect();
         let metrics2: Vec<_> = report2.deltas.iter().map(|d| &d.metric).collect();
         assert_eq!(metrics1, metrics2);
+    }
+
+    #[test]
+    fn artifact_summary_degraded_entries_are_aggregated() {
+        let summary = ArtifactSummary::new("test", ArtifactKind::CacheReport)
+            .with_degradation(SummaryDegradation::missing_metric("cache_hit_rate"))
+            .with_degradation(SummaryDegradation::missing_metric("cache_hit_rate"));
+
+        let value = serde_json::to_value(&summary).expect("summary serializes");
+        let degraded = value["degraded"].as_array().expect("degraded array");
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0]["code"], "missing_metric");
+        assert_eq!(
+            degraded[0]["sources"],
+            serde_json::json!(["perf_artifact_summary"])
+        );
+    }
+
+    #[test]
+    fn compare_report_degraded_entries_are_aggregated() {
+        let baseline = ArtifactSummary::new("baseline", ArtifactKind::BenchmarkReport)
+            .with_metric("baseline_only", MetricValue::stable(1.0));
+        let candidate = ArtifactSummary::new("candidate", ArtifactKind::BenchmarkReport)
+            .with_metric("candidate_only", MetricValue::stable(1.0));
+
+        let report = compare_artifacts(&baseline, &candidate);
+        let value = serde_json::to_value(&report).expect("compare report serializes");
+        let degraded = value["degraded"].as_array().expect("degraded array");
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0]["code"], "metric_missing");
+        assert_eq!(degraded[0]["sources"], serde_json::json!(["perf_compare"]));
+    }
+
+    #[test]
+    fn budget_check_degraded_entries_are_aggregated() {
+        let summary = ArtifactSummary::new("test", ArtifactKind::BenchmarkReport)
+            .with_degradation(SummaryDegradation::missing_metric("latency_ms"));
+
+        let report = check_perf_budget_summary("swarm", &summary);
+        let value = serde_json::to_value(&report).expect("budget report serializes");
+        let degraded = value["degraded"].as_array().expect("degraded array");
+        let missing_metric = degraded
+            .iter()
+            .find(|entry| entry["code"] == "missing_metric")
+            .expect("missing metric aggregate");
+
+        assert_eq!(
+            missing_metric["sources"],
+            serde_json::json!(["perf_budget_check"])
+        );
+        assert_eq!(
+            degraded
+                .iter()
+                .filter(|entry| entry["code"] == "missing_metric")
+                .count(),
+            1
+        );
     }
 
     #[test]

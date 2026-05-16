@@ -80,6 +80,9 @@ Current conventions:
 | `index_vacuum` | `ee index vacuum` derived-index preview and lock-state degradation. |
 | `model_status` | `ee model status` registry posture degradation. |
 | `model_list` | `ee model list` registry posture degradation. |
+| `perf_artifact_summary` | Normalized perf artifact summary degradation. |
+| `perf_budget_check` | `ee perf budget check` artifact-budget degradation. |
+| `perf_compare` | `ee perf compare` artifact comparison degradation. |
 | `preflight_guard` | `ee preflight check --cmd` command-guard degradation. |
 | `preflight_run` | `ee preflight run` risk-evidence degradation. |
 | `preflight_show` | `ee preflight show` persisted-run or risk-evidence degradation. |
