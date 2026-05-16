@@ -44544,7 +44544,7 @@ default_half_life_days = 45
     #[test]
     fn export_report_degraded_entries_are_aggregated() -> TestResult {
         let report = super::BackupCreateReport {
-            schema: crate::core::backup::BACKUP_CREATE_SCHEMA_V1,
+            schema: crate::models::BACKUP_CREATE_SCHEMA_V1,
             backup_id: "backup-1".to_string(),
             label: None,
             status: "complete".to_string(),
