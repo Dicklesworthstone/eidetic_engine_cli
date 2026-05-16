@@ -3,10 +3,13 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt;
 use std::sync::OnceLock;
 
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use tiktoken_rs::{CoreBPE, cl100k_base};
 
 use crate::cache::{CacheBudget, MemoryPressure, assess_pressure};
+use crate::core::degraded_aggregation::{
+    AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
+};
 use crate::models::{
     ContextProfile, ContextProfileName, ContextProfileSection, ContextProfileSectionMix,
     ERROR_SCHEMA_V2, MemoryId, MemoryScopeStats, ProvenanceUri, RESPONSE_SCHEMA_V1, RedactionLevel,
@@ -210,6 +213,7 @@ pub struct PackCoordinationSource {
     pub stale: bool,
     pub entry_count: usize,
     pub entries: Vec<PackCoordinationEntry>,
+    #[serde(serialize_with = "serialize_pack_coordination_degraded")]
     pub degraded: Vec<PackCoordinationDegradation>,
 }
 
@@ -234,6 +238,33 @@ pub struct PackCoordinationDegradation {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repair: Option<String>,
+}
+
+fn serialize_pack_coordination_degraded<S>(
+    degraded: &[PackCoordinationDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_pack_coordination_degraded(degraded).serialize(serializer)
+}
+
+fn aggregate_pack_coordination_degraded(
+    degraded: &[PackCoordinationDegradation],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "pack_coordination",
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry
+                .repair
+                .clone()
+                .unwrap_or_else(|| "Review coordination source diagnostics.".to_owned()),
+        )
+    }))
 }
 
 fn coordination_payload_value(root: &serde_json::Value) -> &serde_json::Value {
@@ -5519,6 +5550,61 @@ mod tests {
             Some(super::RATE_DISTORTION_SCHEMA_V1)
         );
         assert_ne!(json, "{}");
+        Ok(())
+    }
+
+    #[test]
+    fn coordination_snapshot_degraded_entries_are_aggregated() -> TestResult {
+        let snapshot = super::PackCoordinationSnapshot::from_json_str(
+            r#"{
+                "schema": "ee.coordination_snapshot.v1",
+                "scope": "workspace",
+                "sources": [{
+                    "kind": "agent_mail",
+                    "id": "mail",
+                    "degraded": [
+                        {
+                            "code": "coordination_stale",
+                            "severity": "warning",
+                            "message": "Agent Mail snapshot is stale.",
+                            "repair": "Refresh Agent Mail state."
+                        },
+                        {
+                            "code": "coordination_stale",
+                            "severity": "medium",
+                            "message": "Agent Mail snapshot is too stale for conflict checks.",
+                            "repair": "Re-run swarm brief."
+                        }
+                    ]
+                }]
+            }"#,
+            super::DEFAULT_COORDINATION_STALE_AFTER_MS,
+        )?;
+        let value = serde_json::to_value(&snapshot).map_err(|error| error.to_string())?;
+        let degraded = value["sources"][0]["degraded"]
+            .as_array()
+            .ok_or_else(|| "expected source degraded array".to_owned())?;
+
+        ensure_equal(
+            &degraded.len(),
+            &1,
+            "duplicate coordination degradation count",
+        )?;
+        ensure_equal(
+            &degraded[0]["code"],
+            &serde_json::json!("coordination_stale"),
+            "aggregate code",
+        )?;
+        ensure_equal(
+            &degraded[0]["severity"],
+            &serde_json::json!("medium"),
+            "aggregate severity",
+        )?;
+        ensure_equal(
+            &degraded[0]["sources"],
+            &serde_json::json!(["pack_coordination"]),
+            "aggregate source label",
+        )?;
         Ok(())
     }
 

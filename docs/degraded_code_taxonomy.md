@@ -83,6 +83,7 @@ Current conventions:
 | `perf_artifact_summary` | Normalized perf artifact summary degradation. |
 | `perf_budget_check` | `ee perf budget check` artifact-budget degradation. |
 | `perf_compare` | `ee perf compare` artifact comparison degradation. |
+| `pack_coordination` | Context-pack embedded coordination snapshot degradation. |
 | `preflight_guard` | `ee preflight check --cmd` command-guard degradation. |
 | `preflight_run` | `ee preflight run` risk-evidence degradation. |
 | `preflight_show` | `ee preflight show` persisted-run or risk-evidence degradation. |

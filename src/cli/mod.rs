@@ -35985,14 +35985,21 @@ fn read_coordination_evidence_input(
             io::stdin()
                 .read_to_string(&mut input)
                 .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to read coordination fallback evidence from stdin: {error}"),
-                    repair: Some("Pipe one ee.coordination_fallback_evidence.v1 JSON object to stdin.".to_owned()),
+                    message: format!(
+                        "Failed to read coordination fallback evidence from stdin: {error}"
+                    ),
+                    repair: Some(
+                        "Pipe one ee.coordination_fallback_evidence.v1 JSON object to stdin."
+                            .to_owned(),
+                    ),
                 })?;
             Ok(input)
         }
         (None, false) => Err(DomainError::Usage {
             message: "coordination evidence ingest requires --file or --stdin".to_owned(),
-            repair: Some("Run `ee coordination evidence ingest --file evidence.json --json`.".to_owned()),
+            repair: Some(
+                "Run `ee coordination evidence ingest --file evidence.json --json`.".to_owned(),
+            ),
         }),
         (Some(_), true) => Err(DomainError::Usage {
             message: "Pass only one of --file or --stdin".to_owned(),
@@ -36001,7 +36008,9 @@ fn read_coordination_evidence_input(
     }
 }
 
-fn validate_coordination_fallback_evidence(evidence: &serde_json::Value) -> Result<(), DomainError> {
+fn validate_coordination_fallback_evidence(
+    evidence: &serde_json::Value,
+) -> Result<(), DomainError> {
     if !evidence.is_object() {
         return Err(DomainError::Usage {
             message: "Coordination fallback evidence must be a JSON object.".to_owned(),
@@ -36025,9 +36034,7 @@ fn validate_coordination_fallback_evidence(evidence: &serde_json::Value) -> Resu
     ) {
         return Err(DomainError::Usage {
             message: format!("Unsupported coordination fallback status `{status}`."),
-            repair: Some(
-                "Use available, unavailable, stale, blocked, or unknown.".to_owned(),
-            ),
+            repair: Some("Use available, unavailable, stale, blocked, or unknown.".to_owned()),
         });
     }
 
@@ -36095,8 +36102,7 @@ fn required_json_string<'a>(
         .ok_or_else(|| DomainError::Usage {
             message: format!("Coordination fallback evidence is missing string field `{pointer}`."),
             repair: Some(
-                "Use the ee.coordination_fallback_evidence.v1 schema and fixture shape."
-                    .to_owned(),
+                "Use the ee.coordination_fallback_evidence.v1 schema and fixture shape.".to_owned(),
             ),
         })
 }
@@ -38697,6 +38703,139 @@ mod tests {
                 .as_array()
                 .is_some_and(|sources| !sources.is_empty()),
             "swarm brief reports skipped source states",
+        )
+    }
+
+    #[test]
+    fn coordination_evidence_ingest_appends_idempotent_ledger() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().to_string_lossy().into_owned();
+        let fixture = "tests/fixtures/swarm/coordination_fallback_evidence.json";
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "--workspace",
+            &workspace,
+            "coordination",
+            "evidence",
+            "ingest",
+            "--file",
+            fixture,
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "coordination ingest exit")?;
+        ensure(stderr.is_empty(), "coordination ingest JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!(COORDINATION_FALLBACK_INGEST_SCHEMA_V1),
+            "coordination ingest schema",
+        )?;
+        ensure_equal(
+            &value["data"]["inserted"],
+            &serde_json::json!(true),
+            "first ingest inserted",
+        )?;
+        ensure_equal(
+            &value["data"]["duplicate"],
+            &serde_json::json!(false),
+            "first ingest duplicate",
+        )?;
+
+        let ledger_path = tempdir
+            .path()
+            .join(".ee")
+            .join(COORDINATION_FALLBACK_LEDGER_FILE);
+        let first_ledger = fs::read_to_string(&ledger_path)
+            .map_err(|error| format!("read first ledger: {error}"))?;
+        ensure_equal(
+            &first_ledger.lines().count(),
+            &1usize,
+            "first ingest ledger line count",
+        )?;
+
+        let (second_exit, second_stdout, second_stderr) = invoke(&[
+            "ee",
+            "--json",
+            "--workspace",
+            &workspace,
+            "coordination",
+            "evidence",
+            "ingest",
+            "--file",
+            fixture,
+        ]);
+        ensure_equal(
+            &second_exit,
+            &ProcessExitCode::Success,
+            "duplicate coordination ingest exit",
+        )?;
+        ensure(
+            second_stderr.is_empty(),
+            "duplicate coordination ingest JSON stderr clean",
+        )?;
+        let second_value: serde_json::Value =
+            serde_json::from_str(&second_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &second_value["data"]["inserted"],
+            &serde_json::json!(false),
+            "duplicate ingest inserted",
+        )?;
+        ensure_equal(
+            &second_value["data"]["duplicate"],
+            &serde_json::json!(true),
+            "duplicate ingest duplicate",
+        )?;
+        let second_ledger = fs::read_to_string(&ledger_path)
+            .map_err(|error| format!("read second ledger: {error}"))?;
+        ensure_equal(
+            &second_ledger.lines().count(),
+            &1usize,
+            "duplicate ingest ledger line count",
+        )
+    }
+
+    #[test]
+    fn coordination_evidence_ingest_rejects_unredacted_payload() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().to_string_lossy().into_owned();
+        let raw = fs::read_to_string("tests/fixtures/swarm/coordination_fallback_evidence.json")
+            .map_err(|error| error.to_string())?;
+        let mut evidence: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+        evidence["summary"]["redacted"] = serde_json::json!(false);
+        let evidence_path = tempdir.path().join("unredacted-evidence.json");
+        fs::write(&evidence_path, evidence.to_string())
+            .map_err(|error| format!("write unredacted fixture: {error}"))?;
+        let evidence_path = evidence_path.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "--workspace",
+            &workspace,
+            "coordination",
+            "evidence",
+            "ingest",
+            "--file",
+            &evidence_path,
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::PolicyDenied,
+            "unredacted coordination ingest exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "unredacted coordination ingest JSON stderr clean",
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("policy_denied"),
+            "unredacted coordination ingest error code",
         )
     }
 
