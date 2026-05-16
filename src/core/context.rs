@@ -3643,6 +3643,16 @@ fn context_workspace_config(
     surface: &str,
 ) -> Result<Option<ConfigFile>, String> {
     let config_path = workspace_path.join(".ee").join("config.toml");
+    match context_config_path_is_regular_file_no_symlinks(&config_path) {
+        Ok(false) => return Ok(None),
+        Ok(true) => {}
+        Err(message) => {
+            return Err(format!(
+                "{surface} skipped because workspace config {} could not be read: {message}",
+                config_path.display()
+            ));
+        }
+    }
     let contents = match fs::read_to_string(&config_path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -3661,6 +3671,47 @@ fn context_workspace_config(
             )
         })
         .map(Some)
+}
+
+fn context_config_path_is_regular_file_no_symlinks(path: &Path) -> Result<bool, String> {
+    if let Some(symlink_path) = first_existing_context_config_symlink_component(path)? {
+        return Err(format!(
+            "path traverses symbolic link '{}'",
+            symlink_path.display()
+        ));
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err("path is not a regular file".to_string()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("failed to inspect path: {error}")),
+    }
+}
+
+fn first_existing_context_config_symlink_component(path: &Path) -> Result<Option<PathBuf>, String> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect path component '{}': {error}",
+                    current.display()
+                ));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn context_read_pool_config(
@@ -7492,6 +7543,55 @@ mod tests {
         assert_eq!(config.max_size(), 2);
         assert_eq!(config.idle_timeout(), Duration::from_secs(11));
         assert_eq!(config.max_pin_duration(), Duration::from_secs(7));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_workspace_config_rejects_symlinked_config_file() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        let ee_dir = workspace.join(".ee");
+        let outside_config = tempdir.path().join("outside-config.toml");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        std::fs::write(&outside_config, "[graph.feature]\nppr_enabled = true\n")
+            .map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_config, ee_dir.join("config.toml"))
+            .map_err(|error| error.to_string())?;
+
+        let error = super::context_workspace_config(&workspace, "test context config")
+            .expect_err("symlinked context config file must be rejected");
+
+        assert!(
+            error.contains("symbolic link"),
+            "expected symlink rejection, got {error}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_workspace_config_rejects_symlinked_metadata_parent() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        let real_metadata = tempdir.path().join("real-ee");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&real_metadata).map_err(|error| error.to_string())?;
+        std::fs::write(
+            real_metadata.join("config.toml"),
+            "[graph.feature]\nppr_enabled = true\n",
+        )
+        .map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&real_metadata, workspace.join(".ee"))
+            .map_err(|error| error.to_string())?;
+
+        let error = super::context_workspace_config(&workspace, "test context config")
+            .expect_err("symlinked context config parent must be rejected");
+
+        assert!(
+            error.contains("symbolic link"),
+            "expected symlink rejection, got {error}"
+        );
         Ok(())
     }
 

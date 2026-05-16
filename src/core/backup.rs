@@ -3041,6 +3041,8 @@ fn redaction_pattern_degradations(
 }
 
 fn ensure_backup_directory(backup_root: &Path, backup_path: &Path) -> Result<(), DomainError> {
+    ensure_backup_create_path_has_no_symlink_components(backup_root, "backup root")?;
+    ensure_backup_create_path_has_no_symlink_components(backup_path, "backup directory")?;
     fs::create_dir_all(backup_root).map_err(|error| DomainError::Storage {
         message: format!(
             "failed to create backup root '{}': {error}",
@@ -3057,6 +3059,23 @@ fn ensure_backup_directory(backup_root: &Path, backup_path: &Path) -> Result<(),
             "retry backup creation; existing backup directories are never overwritten".to_owned(),
         ),
     })
+}
+
+fn ensure_backup_create_path_has_no_symlink_components(
+    path: &Path,
+    role: &'static str,
+) -> Result<(), DomainError> {
+    if let Some(symlink_path) = first_existing_symlink_component(path)? {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "{role} '{}' traverses symbolic link '{}'; backup creation requires a real output path",
+                path.display(),
+                symlink_path.display()
+            ),
+            repair: Some("choose a real, non-symlink directory for --output-dir".to_owned()),
+        });
+    }
+    Ok(())
 }
 
 fn ensure_side_path_is_isolated(side_path: &Path) -> Result<(), DomainError> {
@@ -3732,6 +3751,49 @@ mod tests {
             }
             other => Err(format!("expected storage error, got {other:?}")),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_backup_rejects_symlinked_output_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let real_output_parent = tempdir.path().join("real-output-parent");
+        fs::create_dir_all(&real_output_parent).map_err(|error| error.to_string())?;
+        let output_parent_link = tempdir.path().join("linked-output-parent");
+        symlink(&real_output_parent, &output_parent_link).map_err(|error| error.to_string())?;
+        let output_dir = output_parent_link.join("backups");
+
+        let result = create_backup(&BackupCreateOptions {
+            workspace_path: workspace,
+            database_path: Some(database),
+            output_dir: Some(output_dir),
+            label: Some("symlink-output".to_owned()),
+            redaction_level: RedactionLevel::None,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        });
+
+        match result {
+            Err(DomainError::PolicyDenied { message, repair }) => {
+                ensure(
+                    message.contains("traverses symbolic link"),
+                    "symlinked output parent is rejected",
+                )?;
+                ensure_equal(
+                    repair.as_deref(),
+                    Some("choose a real, non-symlink directory for --output-dir"),
+                    "symlinked output repair",
+                )?;
+            }
+            other => return Err(format!("expected policy denied error, got {other:?}")),
+        }
+        ensure(
+            !real_output_parent.join("backups").exists(),
+            "backup creation must not write through a symlinked output parent",
+        )
     }
 
     #[test]
