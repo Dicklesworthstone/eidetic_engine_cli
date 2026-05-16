@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.storage_status.v1.json",
+  "title": "ee.mesh.storage_status.v1",
+  "description": "Redaction-safe mesh storage posture embedded in status reports.",
+  "type": "object",
+  "required": [
+    "schema",
+    "peerCount",
+    "cursorCount",
+    "importedEventCount",
+    "policyFailureEventCount",
+    "mappedMemoryCount",
+    "cachedBodyCount",
+    "hasRows"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.mesh.storage_status.v1"
+    },
+    "peerCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "cursorCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "importedEventCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "policyFailureEventCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "mappedMemoryCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "cachedBodyCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "hasRows": {
+      "type": "boolean"
+    }
+  }
+}

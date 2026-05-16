@@ -367,6 +367,9 @@ pub const MESH_POLICY_DECISION_SCHEMA_V1: &str = "ee.mesh.policy_decision.v1";
 /// Schema for redaction-safe mesh policy failure surfaces.
 pub const MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1: &str = "ee.mesh.policy_failure_surface.v1";
 
+/// Schema for redaction-safe mesh storage status posture.
+pub const MESH_STORAGE_STATUS_SCHEMA_V1: &str = "ee.mesh.storage_status.v1";
+
 /// Schema for append-only optional mesh memory events.
 pub const MESH_EVENT_SCHEMA_V1: &str = "ee.mesh.event.v1";
 

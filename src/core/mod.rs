@@ -3,8 +3,9 @@ use std::future::Future;
 use crate::models::{
     ARTIFACT_SUMMARY_SCHEMA_V1, ERROR_SCHEMA_V2, INSTALL_CHECK_SCHEMA_V1, INSTALL_PLAN_SCHEMA_V1,
     MESH_EVENT_SCHEMA_V1, MESH_PEER_GROUP_BINDING_SCHEMA_V1, MESH_PEER_POLICY_SCHEMA_V1,
-    MESH_POLICY_DECISION_SCHEMA_V1, MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1, RESPONSE_SCHEMA_V1,
-    SINGLEFLIGHT_KEY_SCHEMA_V1, SINGLEFLIGHT_POSTURE_SCHEMA_V1, UPDATE_PLAN_SCHEMA_V1,
+    MESH_POLICY_DECISION_SCHEMA_V1, MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1,
+    MESH_STORAGE_STATUS_SCHEMA_V1, RESPONSE_SCHEMA_V1, SINGLEFLIGHT_KEY_SCHEMA_V1,
+    SINGLEFLIGHT_POSTURE_SCHEMA_V1, UPDATE_PLAN_SCHEMA_V1,
 };
 
 pub mod agent_detect;
@@ -256,6 +257,7 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
             "mesh_policy_failure_surface",
             MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1,
         ),
+        SupportedSchema::new("mesh_storage_status", MESH_STORAGE_STATUS_SCHEMA_V1),
         SupportedSchema::new("singleflight_key", SINGLEFLIGHT_KEY_SCHEMA_V1),
         SupportedSchema::new("singleflight_posture", SINGLEFLIGHT_POSTURE_SCHEMA_V1),
         SupportedSchema::new("proof_check", proof_verify::PROOF_CHECK_SCHEMA_V1),
@@ -613,6 +615,7 @@ mod tests {
                 "mesh_peer_policy",
                 "mesh_policy_decision",
                 "mesh_policy_failure_surface",
+                "mesh_storage_status",
                 "singleflight_key",
                 "singleflight_posture",
                 "proof_check",
