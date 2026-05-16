@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.pack.stream.v1.json",
+  "title": "ee.pack.stream.v1",
+  "description": "NDJSON frame contract for ee context --stream. Each line is exactly one frame object.",
+  "oneOf": [
+    {"$ref": "#/$defs/headerFrame"},
+    {"$ref": "#/$defs/itemFrame"},
+    {"$ref": "#/$defs/trailerFrame"},
+    {"$ref": "#/$defs/errorFrame"}
+  ],
+  "$defs": {
+    "headerFrame": {
+      "type": "object",
+      "required": [
+        "schema",
+        "kind",
+        "packId",
+        "query",
+        "workspaceId",
+        "requestId",
+        "profile",
+        "maxTokens",
+        "candidatePool",
+        "memoryScope",
+        "strictScope",
+        "startedAt"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.pack.stream.v1"},
+        "kind": {"type": "string", "const": "header"},
+        "packId": {"type": "string"},
+        "query": {"type": "string"},
+        "workspaceId": {"type": "string"},
+        "requestId": {"type": "string"},
+        "profile": {"type": "string"},
+        "maxTokens": {"type": "integer", "minimum": 1},
+        "candidatePool": {"type": "integer", "minimum": 1},
+        "memoryScope": {"type": "string"},
+        "strictScope": {"type": "boolean"},
+        "startedAt": {"type": "string", "format": "date-time"},
+        "featureFlagsHash": {"type": ["string", "null"]},
+        "canonicalKeyHash": {"type": ["string", "null"]},
+        "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}}
+      }
+    },
+    "itemFrame": {
+      "type": "object",
+      "required": [
+        "schema",
+        "kind",
+        "packId",
+        "seq",
+        "rank",
+        "memoryId",
+        "section",
+        "content",
+        "estimatedTokens",
+        "scores",
+        "why",
+        "provenance",
+        "trust"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.pack.stream.v1"},
+        "kind": {"type": "string", "const": "item"},
+        "packId": {"type": "string"},
+        "seq": {"type": "integer", "minimum": 0},
+        "rank": {"type": "integer", "minimum": 1},
+        "memoryId": {"type": "string"},
+        "section": {"type": "string"},
+        "content": {"type": "string"},
+        "estimatedTokens": {"type": "integer", "minimum": 0},
+        "scores": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "why": {"type": "string"},
+        "provenance": {
+          "type": "array",
+          "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        },
+        "trust": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "diversityKey": {"type": ["string", "null"]},
+        "selectedIn": {"type": "string"},
+        "lifecycle": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "redactions": {
+          "type": "array",
+          "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        }
+      }
+    },
+    "trailerFrame": {
+      "type": "object",
+      "required": [
+        "schema",
+        "kind",
+        "packId",
+        "packHash",
+        "totalItems",
+        "usedTokens",
+        "selectionAudit",
+        "quality",
+        "degraded",
+        "completedAt"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.pack.stream.v1"},
+        "kind": {"type": "string", "const": "trailer"},
+        "packId": {"type": "string"},
+        "packHash": {"type": "string"},
+        "totalItems": {"type": "integer", "minimum": 0},
+        "usedTokens": {"type": "integer", "minimum": 0},
+        "selectionAudit": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "quality": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "skippedTotal": {"type": "integer", "minimum": 0},
+        "provenanceFooter": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "coordination": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "packDna": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}},
+        "completedAt": {"type": "string", "format": "date-time"}
+      }
+    },
+    "errorFrame": {
+      "type": "object",
+      "required": ["schema", "kind", "packId", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.pack.stream.v1"},
+        "kind": {"type": "string", "enum": ["error", "cancelled"]},
+        "packId": {"type": ["string", "null"]},
+        "emittedItems": {"type": "integer", "minimum": 0},
+        "error": {"$ref": "#/$defs/error"},
+        "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}},
+        "completedAt": {"type": "string", "format": "date-time"}
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {"type": "string"},
+        "repair": {"type": ["string", "null"]},
+        "details": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "message", "severity"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "message": {"type": "string"},
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "repair": {"type": ["string", "null"]},
+        "details": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}
