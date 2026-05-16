@@ -26,7 +26,7 @@ use crate::cache::CacheBudget;
 use crate::db::DbConnection;
 use crate::models::{
     ArtifactDegradationSeverity, ArtifactKind, ArtifactSummary, DomainError, MetricValue,
-    ProfileReference, ProvenanceEntry, RedactionPosture, SummaryDegradation,
+    ProfileReference, ProvenanceEntry, RedactionLevel, RedactionPosture, SummaryDegradation,
     SummaryDegradationCode,
 };
 use crate::output;
@@ -93,6 +93,7 @@ pub struct BundleOptions {
     pub output_dir: Option<PathBuf>,
     pub dry_run: bool,
     pub redacted: bool,
+    pub redaction_level: RedactionLevel,
     pub include_raw: bool,
     pub audit_limit: u32,
 }
@@ -104,8 +105,20 @@ impl Default for BundleOptions {
             output_dir: None,
             dry_run: false,
             redacted: true,
+            redaction_level: RedactionLevel::Paranoid,
             include_raw: false,
             audit_limit: 100,
+        }
+    }
+}
+
+impl BundleOptions {
+    #[must_use]
+    pub const fn effective_redaction_level(&self) -> RedactionLevel {
+        if !self.redacted || self.include_raw {
+            RedactionLevel::None
+        } else {
+            self.redaction_level
         }
     }
 }
@@ -155,6 +168,7 @@ pub struct BundleReport {
     pub files_collected: Vec<String>,
     pub total_size_bytes: u64,
     pub redaction_applied: bool,
+    pub redaction_level: RedactionLevel,
     pub redaction_summary: RedactionSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_path: Option<PathBuf>,
@@ -173,6 +187,7 @@ impl BundleReport {
             "filesCollected": self.files_collected,
             "totalSizeBytes": self.total_size_bytes,
             "redactionApplied": self.redaction_applied,
+            "redactionLevel": self.redaction_level.as_str(),
             "redactionSummary": {
                 "totalRedactions": self.redaction_summary.total_redactions,
                 "reasons": self.redaction_summary.reasons
@@ -250,7 +265,8 @@ pub fn plan_bundle(options: &BundleOptions) -> Result<BundleReport, DomainError>
         bundle_id,
         files_collected,
         total_size_bytes: 0,
-        redaction_applied: options.redacted,
+        redaction_applied: options.effective_redaction_level().redacts_secrets(),
+        redaction_level: options.effective_redaction_level(),
         redaction_summary: RedactionSummary {
             total_redactions: 0,
             reasons: vec![],
@@ -288,6 +304,7 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
     reject_existing_symlink_component(&bundle_dir, "support bundle output")?;
 
     let diagnostics = collect_diagnostics(&workspace_path, options.audit_limit)?;
+    let redaction_level = options.effective_redaction_level();
 
     let mut manifest_entries = Vec::new();
     let mut all_redaction_reasons: Vec<String> = Vec::new();
@@ -339,14 +356,10 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
     ];
 
     for (filename, content) in files_to_write {
-        let (final_content, redacted) = if options.redacted && !options.include_raw {
-            let report = redact_secret_like_content(content);
+        let (final_content, redacted) = if redaction_level.redacts_secrets() {
+            let report = redact_support_bundle_content(content, redaction_level);
             let redacted = report.redacted;
-            let reasons: Vec<String> = report
-                .redacted_reasons
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect();
+            let reasons = report.redacted_reasons;
             if redacted {
                 total_redactions += 1;
                 for reason in &reasons {
@@ -382,7 +395,7 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         ee_version: env!("CARGO_PKG_VERSION").to_owned(),
         files: manifest_entries,
         total_size_bytes: total_size,
-        redaction_applied: options.redacted,
+        redaction_applied: redaction_level.redacts_secrets(),
         redaction_reasons: all_redaction_reasons.clone(),
     };
 
@@ -408,7 +421,8 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         bundle_id,
         files_collected,
         total_size_bytes: total_size,
-        redaction_applied: options.redacted,
+        redaction_applied: redaction_level.redacts_secrets(),
+        redaction_level,
         redaction_summary: RedactionSummary {
             total_redactions,
             reasons: all_redaction_reasons,
@@ -1980,6 +1994,32 @@ fn redact_support_diagnostic_text(text: &str) -> String {
     redact_support_diagnostic_content(text).content
 }
 
+fn redact_support_bundle_content(text: &str, level: RedactionLevel) -> SupportDiagnosticRedaction {
+    match level {
+        RedactionLevel::None => SupportDiagnosticRedaction {
+            content: text.to_owned(),
+            redacted: false,
+            redacted_reasons: Vec::new(),
+        },
+        RedactionLevel::Minimal => {
+            let report = redact_secret_like_content(text);
+            SupportDiagnosticRedaction {
+                content: report.content,
+                redacted: report.redacted,
+                redacted_reasons: report
+                    .redacted_reasons
+                    .iter()
+                    .map(|reason| (*reason).to_owned())
+                    .collect(),
+            }
+        }
+        RedactionLevel::Standard
+        | RedactionLevel::Strict
+        | RedactionLevel::Paranoid
+        | RedactionLevel::Full => redact_support_diagnostic_content(text),
+    }
+}
+
 fn redact_support_diagnostic_content(text: &str) -> SupportDiagnosticRedaction {
     let secret_redacted = redact_secret_like_content(text);
     let path_redacted_content = redact_path_like_segments(&secret_redacted.content);
@@ -2238,6 +2278,7 @@ mod tests {
             output_dir: None,
             dry_run: true,
             redacted: true,
+            redaction_level: RedactionLevel::Paranoid,
             include_raw: false,
             audit_limit: 100,
         };
@@ -2255,6 +2296,7 @@ mod tests {
             output_dir: None,
             dry_run: false,
             redacted: true,
+            redaction_level: RedactionLevel::Paranoid,
             include_raw: false,
             audit_limit: 100,
         };
@@ -2309,6 +2351,7 @@ mod tests {
             output_dir: Some(linked_output),
             dry_run: false,
             redacted: true,
+            redaction_level: RedactionLevel::Paranoid,
             include_raw: false,
             audit_limit: 5,
         });
@@ -2708,6 +2751,7 @@ mod tests {
             output_dir: Some(output_dir),
             dry_run: false,
             redacted: true,
+            redaction_level: RedactionLevel::Paranoid,
             include_raw: false,
             audit_limit: 5,
         })
@@ -3250,6 +3294,7 @@ mod tests {
             output_dir: Some(output_dir),
             dry_run: false,
             redacted: true,
+            redaction_level: RedactionLevel::Paranoid,
             include_raw: false,
             audit_limit: 5,
         })
@@ -3460,6 +3505,7 @@ mod tests {
             output_dir: Some(output_dir),
             dry_run: false,
             redacted: true,
+            redaction_level: RedactionLevel::Paranoid,
             include_raw: false,
             audit_limit: 5,
         })
@@ -3572,6 +3618,7 @@ mod tests {
             output_dir: Some(output_dir),
             dry_run: false,
             redacted: true,
+            redaction_level: RedactionLevel::Paranoid,
             include_raw: false,
             audit_limit: 5,
         })
