@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine.local/schemas/ee.proof_check.v1.json",
+  "title": "ee proof check report",
+  "description": "Machine-readable report emitted by the proof verification surface. Missing Lean4 or TLC tooling is reported as degraded proof_tool_missing and does not make the report unsuccessful.",
+  "type": "object",
+  "required": ["schema", "success", "checks", "degraded"],
+  "properties": {
+    "schema": {
+      "const": "ee.proof_check.v1"
+    },
+    "success": {
+      "type": "boolean"
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "artifact",
+          "command",
+          "durationMs",
+          "status",
+          "exitCode",
+          "stdout",
+          "stderr"
+        ],
+        "properties": {
+          "artifact": {
+            "type": "object",
+            "required": ["path", "kind", "invariants"],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": ["lean4", "tla+"]
+              },
+              "invariants": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "command": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "durationMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "status": {
+            "enum": ["proved", "model_checked", "violation", "tool_missing"]
+          },
+          "exitCode": {
+            "type": ["integer", "null"]
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "stderr": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "degraded.proof_tool_missing",
+          "degraded.proof_violation_detected"
+        ]
+      },
+      "uniqueItems": true
+    }
+  },
+  "additionalProperties": false
+}
