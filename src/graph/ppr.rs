@@ -8,7 +8,7 @@ use fnx_classes::digraph::DiGraph;
 use crate::db::DbConnection;
 use crate::graph::algorithms::{
     AlgorithmResultCacheRun, AlgorithmResultCacheSpec, DEFAULT_FOREGROUND_BUDGET,
-    current_or_testing_cx, run_with_budget, run_with_cached_budget, run_with_result_cache,
+    current_or_testing_cx, run_with_budget, run_with_result_cache,
 };
 use crate::graph::{ComplexityWitnessCounters, GraphResult, emit_complexity_witness};
 use crate::models::MemoryId;
@@ -174,15 +174,9 @@ pub fn compute_personalized_pagerank_result_cached_with_cx(
     seed_map: &BTreeMap<String, f64>,
     policy: PersonalizedPageRankPolicy,
 ) -> GraphResult<AlgorithmResultCacheRun<PageRankResult>> {
-    let graph = graph.clone();
-    let seed_map = seed_map.clone();
-    run_with_cached_budget(
-        cx,
-        spec,
-        "personalized_pagerank",
-        DEFAULT_FOREGROUND_BUDGET,
-        move || compute_personalized_pagerank_result_unbudgeted(&graph, &seed_map, policy),
-    )
+    run_with_result_cache(spec, || {
+        compute_personalized_pagerank_result_with_cx(cx, graph, seed_map, policy)
+    })
 }
 
 pub fn compute_personalized_pagerank_result_cached_with_graph<F>(
