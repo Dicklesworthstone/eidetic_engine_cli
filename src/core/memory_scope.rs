@@ -5,7 +5,8 @@ use std::str::FromStr;
 use serde_json::{Value as JsonValue, json};
 
 use crate::config::{
-    ConfigFile, EnvVar, MeshLane, MeshLaneDecision, MeshPeerGroupBinding, read_env_var,
+    ConfigFile, EnvVar, MeshLane, MeshLaneDecision, MeshLaneGrants, MeshPeerGroupBinding,
+    read_env_var,
 };
 use crate::db::StoredMemory;
 use crate::models::{MemoryScope, MemoryScopeStats, TrustClass};
@@ -24,6 +25,125 @@ pub enum MeshEventValidity {
     PolicyQuarantine,
     Malformed,
     Unsafe,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MeshTrustLane {
+    LocalHuman,
+    PeerHumanViaPeer,
+    PeerAgent,
+    PeerDerived,
+    Untrusted,
+}
+
+impl MeshTrustLane {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalHuman => "localHuman",
+            Self::PeerHumanViaPeer => "peerHumanViaPeer",
+            Self::PeerAgent => "peerAgent",
+            Self::PeerDerived => "peerDerived",
+            Self::Untrusted => "untrusted",
+        }
+    }
+
+    #[must_use]
+    pub const fn permits_peer_import(self) -> bool {
+        !matches!(self, Self::LocalHuman)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseMeshTrustLaneError {
+    input: String,
+}
+
+impl std::fmt::Display for ParseMeshTrustLaneError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "unknown mesh trust lane `{}`; expected one of localHuman, peerHumanViaPeer, peerAgent, peerDerived, untrusted",
+            self.input
+        )
+    }
+}
+
+impl std::error::Error for ParseMeshTrustLaneError {}
+
+impl FromStr for MeshTrustLane {
+    type Err = ParseMeshTrustLaneError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input {
+            "localHuman" => Ok(Self::LocalHuman),
+            "peerHumanViaPeer" => Ok(Self::PeerHumanViaPeer),
+            "peerAgent" => Ok(Self::PeerAgent),
+            "peerDerived" => Ok(Self::PeerDerived),
+            "untrusted" => Ok(Self::Untrusted),
+            _ => Err(ParseMeshTrustLaneError {
+                input: input.to_owned(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MeshRedactionDecision {
+    Share,
+    Redact,
+    Deny,
+}
+
+impl MeshRedactionDecision {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Share => "share",
+            Self::Redact => "redact",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshRedactionPolicy {
+    pub metadata: MeshRedactionDecision,
+    pub preview: MeshRedactionDecision,
+    pub body: MeshRedactionDecision,
+    pub embedding: MeshRedactionDecision,
+}
+
+impl MeshRedactionPolicy {
+    #[must_use]
+    pub const fn decision_for_lane(&self, lane: MeshLane) -> MeshRedactionDecision {
+        match lane {
+            MeshLane::Metadata
+            | MeshLane::GraphLink
+            | MeshLane::RevisionNotice
+            | MeshLane::CurationSignal => self.metadata,
+            MeshLane::Body => self.body,
+            MeshLane::Embedding => self.embedding,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MeshBodyFetchPolicy {
+    pub allowed: bool,
+    pub requires_consent: bool,
+    pub max_bytes: Option<usize>,
+}
+
+impl MeshBodyFetchPolicy {
+    #[must_use]
+    pub const fn denied() -> Self {
+        Self {
+            allowed: false,
+            requires_consent: true,
+            max_bytes: Some(0),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,6 +173,86 @@ pub struct MeshImportDecisionInput<'a> {
     pub producer_peer_id: &'a str,
     pub material_lane: MeshLane,
     pub event_validity: MeshEventValidity,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshPeerPolicy {
+    pub policy_id: String,
+    pub workspace_id: String,
+    pub peer_id: String,
+    pub origin_workspace_ids: Vec<String>,
+    pub trust_lane: MeshTrustLane,
+    pub import_trust_class: TrustClass,
+    pub allowed_lanes: MeshLaneGrants,
+    pub redaction: MeshRedactionPolicy,
+    pub body_fetch: MeshBodyFetchPolicy,
+    pub default_action: MeshLaneDecision,
+}
+
+impl From<&crate::config::MeshPeerPolicyConfig> for MeshPeerPolicy {
+    fn from(config: &crate::config::MeshPeerPolicyConfig) -> Self {
+        Self {
+            policy_id: config.policy_id.clone(),
+            workspace_id: config.workspace_id.clone(),
+            peer_id: config.peer_id.clone(),
+            origin_workspace_ids: config.origin_workspace_ids.clone(),
+            trust_lane: mesh_trust_lane_from_config(config.trust_lane),
+            import_trust_class: config.import_trust_class,
+            allowed_lanes: config.allowed_lanes.clone(),
+            redaction: MeshRedactionPolicy {
+                metadata: mesh_redaction_decision_from_config(config.redaction.metadata),
+                preview: mesh_redaction_decision_from_config(config.redaction.preview),
+                body: mesh_redaction_decision_from_config(config.redaction.body),
+                embedding: mesh_redaction_decision_from_config(config.redaction.embedding),
+            },
+            body_fetch: MeshBodyFetchPolicy {
+                allowed: config.body_fetch.allowed,
+                requires_consent: config.body_fetch.requires_consent,
+                max_bytes: config.body_fetch.max_bytes,
+            },
+            default_action: config.default_action,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshPeerPolicyDecisionInput<'a> {
+    pub local_workspace_id: &'a str,
+    pub origin_workspace_id: &'a str,
+    pub producer_peer_id: &'a str,
+    pub material_lane: MeshLane,
+    pub event_validity: MeshEventValidity,
+    pub requested_body_bytes: Option<usize>,
+    pub body_fetch_consent: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshPeerPolicyDecision {
+    pub import: MeshImportDecision,
+    pub policy_id: Option<String>,
+    pub trust_lane: Option<MeshTrustLane>,
+    pub import_trust_class: Option<TrustClass>,
+    pub redaction: MeshRedactionDecision,
+    pub body_fetch_allowed: bool,
+}
+
+impl MeshPeerPolicyDecision {
+    #[must_use]
+    pub fn permits_import_as_human_explicit(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn permits_body_fetch(&self) -> bool {
+        self.body_fetch_allowed
+            && self.import.material_lane == MeshLane::Body
+            && self.import.workspace_scope_decision == MeshImportDecisionKind::Allow
+    }
+
+    #[must_use]
+    pub fn redaction_posture(&self) -> &'static str {
+        self.redaction.as_str()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -366,6 +566,238 @@ pub fn decide_mesh_import(
     }
 }
 
+#[must_use]
+pub fn decide_mesh_peer_policy(
+    input: &MeshPeerPolicyDecisionInput<'_>,
+    policy: Option<&MeshPeerPolicy>,
+) -> MeshPeerPolicyDecision {
+    let import_input = MeshImportDecisionInput {
+        local_workspace_id: input.local_workspace_id,
+        origin_workspace_id: input.origin_workspace_id,
+        producer_peer_id: input.producer_peer_id,
+        material_lane: input.material_lane,
+        event_validity: input.event_validity,
+    };
+
+    let Some(policy) = policy else {
+        return mesh_peer_policy_decision(
+            &import_input,
+            None,
+            MeshImportDecisionKind::Deny,
+            "missing_peer_policy",
+            None,
+            None,
+            MeshRedactionDecision::Deny,
+            false,
+        );
+    };
+
+    let policy_id = Some(policy.policy_id.clone());
+    if policy.default_action != MeshLaneDecision::Deny {
+        return mesh_peer_policy_decision(
+            &import_input,
+            policy_id,
+            MeshImportDecisionKind::Reject,
+            "non_deny_default_action",
+            Some(policy.trust_lane),
+            Some(policy.import_trust_class),
+            MeshRedactionDecision::Deny,
+            false,
+        );
+    }
+    if input.event_validity == MeshEventValidity::Malformed {
+        return mesh_peer_policy_decision(
+            &import_input,
+            policy_id,
+            MeshImportDecisionKind::Reject,
+            "malformed_event",
+            Some(policy.trust_lane),
+            Some(policy.import_trust_class),
+            MeshRedactionDecision::Deny,
+            false,
+        );
+    }
+    if input.event_validity == MeshEventValidity::Unsafe {
+        return mesh_peer_policy_decision(
+            &import_input,
+            policy_id,
+            MeshImportDecisionKind::Reject,
+            "unsafe_event",
+            Some(policy.trust_lane),
+            Some(policy.import_trust_class),
+            MeshRedactionDecision::Deny,
+            false,
+        );
+    }
+    if policy.workspace_id != input.local_workspace_id {
+        return mesh_peer_policy_decision(
+            &import_input,
+            policy_id,
+            MeshImportDecisionKind::Deny,
+            "peer_policy_workspace_mismatch",
+            Some(policy.trust_lane),
+            Some(policy.import_trust_class),
+            MeshRedactionDecision::Deny,
+            false,
+        );
+    }
+    if policy.peer_id != input.producer_peer_id {
+        return mesh_peer_policy_decision(
+            &import_input,
+            policy_id,
+            MeshImportDecisionKind::Deny,
+            "peer_policy_peer_mismatch",
+            Some(policy.trust_lane),
+            Some(policy.import_trust_class),
+            MeshRedactionDecision::Deny,
+            false,
+        );
+    }
+    if !policy
+        .origin_workspace_ids
+        .iter()
+        .any(|origin| origin == input.origin_workspace_id)
+    {
+        return mesh_peer_policy_decision(
+            &import_input,
+            policy_id,
+            MeshImportDecisionKind::Deny,
+            "peer_policy_origin_workspace_mismatch",
+            Some(policy.trust_lane),
+            Some(policy.import_trust_class),
+            MeshRedactionDecision::Deny,
+            false,
+        );
+    }
+    if !policy.trust_lane.permits_peer_import() {
+        return mesh_peer_policy_decision(
+            &import_input,
+            policy_id,
+            MeshImportDecisionKind::Reject,
+            "peer_import_local_human_trust_lane",
+            Some(policy.trust_lane),
+            Some(policy.import_trust_class),
+            MeshRedactionDecision::Deny,
+            false,
+        );
+    }
+    if policy.import_trust_class == TrustClass::HumanExplicit {
+        return mesh_peer_policy_decision(
+            &import_input,
+            policy_id,
+            MeshImportDecisionKind::Reject,
+            "peer_import_human_explicit_disallowed",
+            Some(policy.trust_lane),
+            Some(policy.import_trust_class),
+            MeshRedactionDecision::Deny,
+            false,
+        );
+    }
+
+    let redaction = policy.redaction.decision_for_lane(input.material_lane);
+    if redaction == MeshRedactionDecision::Deny {
+        return mesh_peer_policy_decision(
+            &import_input,
+            policy_id,
+            MeshImportDecisionKind::Deny,
+            "peer_policy_redaction_denied",
+            Some(policy.trust_lane),
+            Some(policy.import_trust_class),
+            redaction,
+            false,
+        );
+    }
+
+    if input.material_lane == MeshLane::Body || input.requested_body_bytes.is_some() {
+        if !policy.body_fetch.allowed {
+            return mesh_peer_policy_decision(
+                &import_input,
+                policy_id,
+                MeshImportDecisionKind::Deny,
+                "body_fetch_denied",
+                Some(policy.trust_lane),
+                Some(policy.import_trust_class),
+                redaction,
+                false,
+            );
+        }
+        if policy.body_fetch.requires_consent && !input.body_fetch_consent {
+            return mesh_peer_policy_decision(
+                &import_input,
+                policy_id,
+                MeshImportDecisionKind::Deny,
+                "body_fetch_requires_consent",
+                Some(policy.trust_lane),
+                Some(policy.import_trust_class),
+                redaction,
+                false,
+            );
+        }
+        if policy
+            .body_fetch
+            .max_bytes
+            .zip(input.requested_body_bytes)
+            .is_some_and(|(max_bytes, requested_bytes)| requested_bytes > max_bytes)
+        {
+            return mesh_peer_policy_decision(
+                &import_input,
+                policy_id,
+                MeshImportDecisionKind::Deny,
+                "body_fetch_too_large",
+                Some(policy.trust_lane),
+                Some(policy.import_trust_class),
+                redaction,
+                false,
+            );
+        }
+    }
+
+    match policy.allowed_lanes.decision(input.material_lane) {
+        MeshLaneDecision::Allow if input.event_validity == MeshEventValidity::Valid => {
+            mesh_peer_policy_decision(
+                &import_input,
+                policy_id,
+                MeshImportDecisionKind::Allow,
+                "peer_policy_lane_allowed",
+                Some(policy.trust_lane),
+                Some(policy.import_trust_class),
+                redaction,
+                input.material_lane == MeshLane::Body,
+            )
+        }
+        MeshLaneDecision::Allow => mesh_peer_policy_decision(
+            &import_input,
+            policy_id,
+            MeshImportDecisionKind::Quarantine,
+            "event_policy_quarantine",
+            Some(policy.trust_lane),
+            Some(policy.import_trust_class),
+            redaction,
+            false,
+        ),
+        MeshLaneDecision::Quarantine => mesh_peer_policy_decision(
+            &import_input,
+            policy_id,
+            MeshImportDecisionKind::Quarantine,
+            "peer_policy_lane_quarantined",
+            Some(policy.trust_lane),
+            Some(policy.import_trust_class),
+            redaction,
+            false,
+        ),
+        MeshLaneDecision::Deny => mesh_peer_policy_decision(
+            &import_input,
+            policy_id,
+            MeshImportDecisionKind::Deny,
+            "peer_policy_lane_denied",
+            Some(policy.trust_lane),
+            Some(policy.import_trust_class),
+            redaction,
+            false,
+        ),
+    }
+}
+
 impl MemoryScopeContext {
     #[must_use]
     pub fn for_workspace(workspace_path: &Path, scope: MemoryScope, strict_scope: bool) -> Self {
@@ -506,6 +938,46 @@ fn mesh_decision(
         material_lane: input.material_lane,
         allowed: workspace_scope_decision == MeshImportDecisionKind::Allow,
         reason,
+    }
+}
+
+fn mesh_peer_policy_decision(
+    input: &MeshImportDecisionInput<'_>,
+    policy_id: Option<String>,
+    workspace_scope_decision: MeshImportDecisionKind,
+    reason: &'static str,
+    trust_lane: Option<MeshTrustLane>,
+    import_trust_class: Option<TrustClass>,
+    redaction: MeshRedactionDecision,
+    body_fetch_allowed: bool,
+) -> MeshPeerPolicyDecision {
+    MeshPeerPolicyDecision {
+        import: mesh_decision(input, None, workspace_scope_decision, reason),
+        policy_id,
+        trust_lane,
+        import_trust_class,
+        redaction,
+        body_fetch_allowed,
+    }
+}
+
+fn mesh_trust_lane_from_config(lane: crate::config::MeshTrustLane) -> MeshTrustLane {
+    match lane {
+        crate::config::MeshTrustLane::LocalHuman => MeshTrustLane::LocalHuman,
+        crate::config::MeshTrustLane::PeerHumanViaPeer => MeshTrustLane::PeerHumanViaPeer,
+        crate::config::MeshTrustLane::PeerAgent => MeshTrustLane::PeerAgent,
+        crate::config::MeshTrustLane::PeerDerived => MeshTrustLane::PeerDerived,
+        crate::config::MeshTrustLane::Untrusted => MeshTrustLane::Untrusted,
+    }
+}
+
+fn mesh_redaction_decision_from_config(
+    decision: crate::config::MeshRedactionDecision,
+) -> MeshRedactionDecision {
+    match decision {
+        crate::config::MeshRedactionDecision::Share => MeshRedactionDecision::Share,
+        crate::config::MeshRedactionDecision::Redact => MeshRedactionDecision::Redact,
+        crate::config::MeshRedactionDecision::Deny => MeshRedactionDecision::Deny,
     }
 }
 
@@ -764,6 +1236,45 @@ mod tests {
         }
     }
 
+    fn peer_policy() -> MeshPeerPolicy {
+        MeshPeerPolicy {
+            policy_id: "pol_alpha_mesh_policy".to_owned(),
+            workspace_id: "wsp_local_alpha".to_owned(),
+            peer_id: "peer_builder_one".to_owned(),
+            origin_workspace_ids: vec!["wsp_remote_beta".to_owned()],
+            trust_lane: MeshTrustLane::PeerAgent,
+            import_trust_class: TrustClass::AgentValidated,
+            allowed_lanes: MeshLaneGrants {
+                metadata: Some(MeshLaneDecision::Allow),
+                body: Some(MeshLaneDecision::Deny),
+                embedding: Some(MeshLaneDecision::Deny),
+                graph_link: Some(MeshLaneDecision::Allow),
+                revision_notice: Some(MeshLaneDecision::Allow),
+                curation_signal: Some(MeshLaneDecision::Quarantine),
+            },
+            redaction: MeshRedactionPolicy {
+                metadata: MeshRedactionDecision::Share,
+                preview: MeshRedactionDecision::Redact,
+                body: MeshRedactionDecision::Deny,
+                embedding: MeshRedactionDecision::Deny,
+            },
+            body_fetch: MeshBodyFetchPolicy::denied(),
+            default_action: MeshLaneDecision::Deny,
+        }
+    }
+
+    fn peer_policy_input(lane: MeshLane) -> MeshPeerPolicyDecisionInput<'static> {
+        MeshPeerPolicyDecisionInput {
+            local_workspace_id: "wsp_local_alpha",
+            origin_workspace_id: "wsp_remote_beta",
+            producer_peer_id: "peer_builder_one",
+            material_lane: lane,
+            event_validity: MeshEventValidity::Valid,
+            requested_body_bytes: None,
+            body_fetch_consent: false,
+        }
+    }
+
     #[test]
     fn mesh_import_allows_authorized_metadata_side_effects_only_for_allow() {
         let decision = decide_mesh_import(&mesh_input(MeshLane::Metadata), &[mesh_binding()]);
@@ -779,6 +1290,222 @@ mod tests {
         assert!(!decision.permits_redacted_quarantine_state());
         assert_eq!(decision.reason, "lane_allowed");
         assert_eq!(decision.peer_group_id.as_deref(), Some("pg_alpha_mesh"));
+    }
+
+    #[test]
+    fn mesh_peer_policy_allows_metadata_with_non_human_import_trust() {
+        let decision =
+            decide_mesh_peer_policy(&peer_policy_input(MeshLane::Metadata), Some(&peer_policy()));
+
+        assert_eq!(
+            decision.import.workspace_scope_decision,
+            MeshImportDecisionKind::Allow
+        );
+        assert_eq!(decision.import.reason, "peer_policy_lane_allowed");
+        assert_eq!(decision.policy_id.as_deref(), Some("pol_alpha_mesh_policy"));
+        assert_eq!(decision.trust_lane, Some(MeshTrustLane::PeerAgent));
+        assert_eq!(
+            decision.import_trust_class,
+            Some(TrustClass::AgentValidated)
+        );
+        assert_eq!(decision.redaction_posture(), "share");
+        assert!(!decision.permits_import_as_human_explicit());
+        assert!(!decision.permits_body_fetch());
+    }
+
+    #[test]
+    fn mesh_peer_policy_rejects_local_human_trust_lane_for_peer_import() {
+        let mut policy = peer_policy();
+        policy.trust_lane = MeshTrustLane::LocalHuman;
+
+        let decision =
+            decide_mesh_peer_policy(&peer_policy_input(MeshLane::Metadata), Some(&policy));
+
+        assert_eq!(
+            decision.import.workspace_scope_decision,
+            MeshImportDecisionKind::Reject
+        );
+        assert_eq!(decision.import.reason, "peer_import_local_human_trust_lane");
+        assert_eq!(decision.redaction, MeshRedactionDecision::Deny);
+        assert!(!decision.import.permits_local_truth_side_effects());
+    }
+
+    #[test]
+    fn mesh_peer_policy_rejects_human_explicit_import_trust_class() {
+        let mut policy = peer_policy();
+        policy.import_trust_class = TrustClass::HumanExplicit;
+
+        let decision =
+            decide_mesh_peer_policy(&peer_policy_input(MeshLane::Metadata), Some(&policy));
+
+        assert_eq!(
+            decision.import.workspace_scope_decision,
+            MeshImportDecisionKind::Reject
+        );
+        assert_eq!(
+            decision.import.reason,
+            "peer_import_human_explicit_disallowed"
+        );
+        assert!(!decision.permits_import_as_human_explicit());
+    }
+
+    #[test]
+    fn mesh_peer_policy_denies_body_when_body_fetch_is_not_granted() {
+        let mut policy = peer_policy();
+        policy.allowed_lanes.body = Some(MeshLaneDecision::Allow);
+        policy.redaction.body = MeshRedactionDecision::Redact;
+
+        let decision = decide_mesh_peer_policy(&peer_policy_input(MeshLane::Body), Some(&policy));
+
+        assert_eq!(
+            decision.import.workspace_scope_decision,
+            MeshImportDecisionKind::Deny
+        );
+        assert_eq!(decision.import.reason, "body_fetch_denied");
+        assert_eq!(decision.redaction, MeshRedactionDecision::Redact);
+        assert!(!decision.permits_body_fetch());
+        assert!(!decision.import.retains_payload());
+    }
+
+    #[test]
+    fn mesh_peer_policy_allows_body_only_with_consent_size_and_redaction_grants() {
+        let mut policy = peer_policy();
+        policy.allowed_lanes.body = Some(MeshLaneDecision::Allow);
+        policy.redaction.body = MeshRedactionDecision::Redact;
+        policy.body_fetch = MeshBodyFetchPolicy {
+            allowed: true,
+            requires_consent: true,
+            max_bytes: Some(512),
+        };
+        let mut input = peer_policy_input(MeshLane::Body);
+        input.requested_body_bytes = Some(256);
+        input.body_fetch_consent = true;
+
+        let decision = decide_mesh_peer_policy(&input, Some(&policy));
+
+        assert_eq!(
+            decision.import.workspace_scope_decision,
+            MeshImportDecisionKind::Allow
+        );
+        assert_eq!(decision.import.reason, "peer_policy_lane_allowed");
+        assert_eq!(decision.redaction, MeshRedactionDecision::Redact);
+        assert!(decision.permits_body_fetch());
+    }
+
+    #[test]
+    fn mesh_peer_policy_denies_oversized_or_unconsented_body_fetch() {
+        let mut policy = peer_policy();
+        policy.allowed_lanes.body = Some(MeshLaneDecision::Allow);
+        policy.redaction.body = MeshRedactionDecision::Redact;
+        policy.body_fetch = MeshBodyFetchPolicy {
+            allowed: true,
+            requires_consent: true,
+            max_bytes: Some(512),
+        };
+        let mut without_consent = peer_policy_input(MeshLane::Body);
+        without_consent.requested_body_bytes = Some(256);
+
+        let consent_decision = decide_mesh_peer_policy(&without_consent, Some(&policy));
+        assert_eq!(
+            consent_decision.import.workspace_scope_decision,
+            MeshImportDecisionKind::Deny
+        );
+        assert_eq!(
+            consent_decision.import.reason,
+            "body_fetch_requires_consent"
+        );
+
+        let mut oversized = without_consent;
+        oversized.body_fetch_consent = true;
+        oversized.requested_body_bytes = Some(1024);
+        let size_decision = decide_mesh_peer_policy(&oversized, Some(&policy));
+        assert_eq!(
+            size_decision.import.workspace_scope_decision,
+            MeshImportDecisionKind::Deny
+        );
+        assert_eq!(size_decision.import.reason, "body_fetch_too_large");
+    }
+
+    #[test]
+    fn mesh_peer_policy_quarantines_quarantine_lanes_and_policy_quarantine_events() {
+        let curation = decide_mesh_peer_policy(
+            &peer_policy_input(MeshLane::CurationSignal),
+            Some(&peer_policy()),
+        );
+
+        assert_eq!(
+            curation.import.workspace_scope_decision,
+            MeshImportDecisionKind::Quarantine
+        );
+        assert_eq!(curation.import.reason, "peer_policy_lane_quarantined");
+        assert!(curation.import.permits_redacted_quarantine_state());
+
+        let mut input = peer_policy_input(MeshLane::Metadata);
+        input.event_validity = MeshEventValidity::PolicyQuarantine;
+        let event = decide_mesh_peer_policy(&input, Some(&peer_policy()));
+        assert_eq!(
+            event.import.workspace_scope_decision,
+            MeshImportDecisionKind::Quarantine
+        );
+        assert_eq!(event.import.reason, "event_policy_quarantine");
+    }
+
+    #[test]
+    fn mesh_peer_policy_converts_from_config_record_for_runtime_decision() {
+        let config = ConfigFile::parse(
+            r#"
+[[mesh.peer_policies]]
+policy_id = "pol_configured_001"
+workspace_id = "wsp_local_alpha"
+peer_id = "peer_builder_one"
+origin_workspace_ids = ["wsp_remote_beta"]
+trust_lane = "peerAgent"
+import_trust_class = "agent_validated"
+default_action = "deny"
+
+[mesh.peer_policies.allowed_lanes]
+metadata = "allow"
+body = "deny"
+embedding = "deny"
+graph_link = "allow"
+revision_notice = "allow"
+curation_signal = "quarantine"
+
+[mesh.peer_policies.redaction]
+metadata = "share"
+preview = "redact"
+body = "deny"
+embedding = "deny"
+
+[mesh.peer_policies.body_fetch]
+allowed = false
+requires_consent = true
+max_bytes = 0
+"#,
+        )
+        .expect("configured peer policy should parse");
+        let configured_policy = config
+            .mesh
+            .peer_policies
+            .as_ref()
+            .and_then(|policies| policies.first())
+            .expect("peer policy should exist");
+        let policy = MeshPeerPolicy::from(configured_policy);
+
+        let decision =
+            decide_mesh_peer_policy(&peer_policy_input(MeshLane::Metadata), Some(&policy));
+
+        assert_eq!(
+            decision.import.workspace_scope_decision,
+            MeshImportDecisionKind::Allow
+        );
+        assert_eq!(decision.import.reason, "peer_policy_lane_allowed");
+        assert_eq!(decision.policy_id.as_deref(), Some("pol_configured_001"));
+        assert_eq!(
+            decision.import_trust_class,
+            Some(TrustClass::AgentValidated)
+        );
+        assert!(!decision.permits_import_as_human_explicit());
     }
 
     #[test]

@@ -61,6 +61,47 @@ redaction-safe peer/workspace aliases. Raw remote workspace paths, memory
 bodies, embeddings, and secrets do not belong in status, support bundle, or
 handoff output unless a later explicit grant permits that lane.
 
+## Config Registry
+
+Workspace-local peer policies are registered in `.ee/config.toml` under
+`[[mesh.peer_policies]]`. The config parser is intentionally stricter than the
+schema fixture surface: missing policy fields are configuration errors, the
+default action must be `deny`, peer material can import only as
+`agent_assertion` or `agent_validated`, and `localHuman` is rejected for peer
+policy imports.
+
+```toml
+[[mesh.peer_policies]]
+policy_id = "pol_metadata_only_001"
+workspace_id = "wsp_local_release_001"
+workspace_alias = "local-release"
+peer_id = "peer_builder_host_001"
+peer_alias = "builder-host"
+origin_workspace_ids = ["wsp_remote_release_001"]
+trust_lane = "peerHumanViaPeer"
+import_trust_class = "agent_assertion"
+default_action = "deny"
+
+[mesh.peer_policies.allowed_lanes]
+metadata = "allow"
+body = "deny"
+embedding = "deny"
+graph_link = "quarantine"
+revision_notice = "allow"
+curation_signal = "deny"
+
+[mesh.peer_policies.redaction]
+metadata = "share"
+preview = "redact"
+body = "deny"
+embedding = "deny"
+
+[mesh.peer_policies.body_fetch]
+allowed = false
+requires_consent = true
+max_bytes = 0
+```
+
 ## Fixtures
 
 Initial fixtures live under `tests/fixtures/mesh/`:
