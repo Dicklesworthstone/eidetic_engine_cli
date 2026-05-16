@@ -32,6 +32,7 @@ pub mod economy;
 pub mod effect;
 pub mod feedback;
 pub mod focus;
+pub mod graph_audit;
 pub mod graph_telemetry;
 pub mod handoff;
 pub mod health;
