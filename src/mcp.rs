@@ -913,6 +913,9 @@ fn optional_string<'a>(arguments: &'a Value, names: &[&str]) -> Result<Option<&'
     let Some(value) = find_argument(arguments, names) else {
         return Ok(None);
     };
+    if value.is_null() {
+        return Ok(None);
+    }
     value
         .as_str()
         .map(Some)
@@ -924,6 +927,9 @@ fn optional_bool(arguments: &Value, names: &[&str]) -> Result<bool, String> {
     let Some(value) = find_argument(arguments, names) else {
         return Ok(false);
     };
+    if value.is_null() {
+        return Ok(false);
+    }
     value
         .as_bool()
         .ok_or_else(|| format!("Argument '{name}' must be a boolean"))
@@ -938,6 +944,9 @@ fn optional_bool_with_default(
     let Some(value) = find_argument(arguments, names) else {
         return Ok(default);
     };
+    if value.is_null() {
+        return Ok(default);
+    }
     value
         .as_bool()
         .ok_or_else(|| format!("Argument '{name}' must be a boolean"))
@@ -948,6 +957,9 @@ fn optional_u32(arguments: &Value, names: &[&str]) -> Result<Option<u32>, String
     let Some(value) = find_argument(arguments, names) else {
         return Ok(None);
     };
+    if value.is_null() {
+        return Ok(None);
+    }
     let Some(raw) = value.as_u64() else {
         return Err(format!("Argument '{name}' must be a non-negative integer"));
     };
@@ -961,6 +973,9 @@ fn optional_number_string(arguments: &Value, names: &[&str]) -> Result<Option<St
     let Some(value) = find_argument(arguments, names) else {
         return Ok(None);
     };
+    if value.is_null() {
+        return Ok(None);
+    }
     let Some(raw) = value.as_f64() else {
         return Err(format!("Argument '{name}' must be a number"));
     };
