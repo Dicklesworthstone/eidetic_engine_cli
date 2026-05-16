@@ -50,6 +50,12 @@ VOLATILE_FIELD_NAMES=(
     audit_ts
     elapsedMs
     elapsed_ms
+    elapsedMsBucket
+    nondeterministic
+    projectionMs
+    pagerankMs
+    betweennessMs
+    totalMs
     startedAt
     started_at
     endedAt

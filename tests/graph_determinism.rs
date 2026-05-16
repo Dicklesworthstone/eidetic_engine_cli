@@ -43,6 +43,108 @@ fn unique_workspace(prefix: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+fn unique_tmp_path(label: &str, extension: &str) -> Result<PathBuf, String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("clock moved backwards: {error}"))?
+        .as_nanos();
+    Ok(PathBuf::from(format!(
+        "/tmp/ee-{label}-{}-{now}.{extension}",
+        std::process::id()
+    )))
+}
+
+fn assert_graph_determinism_shell_log(log_path: &Path) -> TestResult {
+    let contents = fs::read_to_string(log_path)
+        .map_err(|error| format!("failed to read {}: {error}", log_path.display()))?;
+    let mut saw_schema = false;
+    let mut saw_test_start = false;
+    let mut saw_test_end = false;
+    let mut saw_environment_note = false;
+    let mut saw_assert_fail = false;
+    let mut final_assert_fail_count = None;
+    let mut assert_labels = Vec::new();
+
+    for (line_index, line) in contents.lines().enumerate() {
+        let event: Value = serde_json::from_str(line).map_err(|error| {
+            format!(
+                "{}:{}: malformed test event JSON: {error}\n{line}",
+                log_path.display(),
+                line_index + 1
+            )
+        })?;
+        if event.get("schema").and_then(Value::as_str) == Some("ee.test_event.v1") {
+            saw_schema = true;
+        }
+        if event.get("kind").and_then(Value::as_str) == Some("assert_fail") {
+            saw_assert_fail = true;
+        }
+        let fields = event
+            .get("fields")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        if event.get("kind").and_then(Value::as_str) == Some("assert_ok") {
+            if let Some(label) = fields.get("label").and_then(Value::as_str) {
+                assert_labels.push(label.to_owned());
+            }
+        }
+        if let Some(message) = fields.get("message").and_then(Value::as_str) {
+            if message == "test_start: epic_F4_graph_determinism" {
+                saw_test_start = true;
+            }
+            if message.starts_with("graph_determinism_environment ") {
+                saw_environment_note = true;
+            }
+            if message == "test_end: epic_F4_graph_determinism" {
+                saw_test_end = true;
+                final_assert_fail_count = fields
+                    .get("asserts_fail")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
+        }
+    }
+
+    if !saw_schema {
+        return Err("graph determinism shell log did not emit ee.test_event.v1 events".to_owned());
+    }
+    if !saw_test_start || !saw_test_end {
+        return Err("graph determinism shell log missing test_start or test_end note".to_owned());
+    }
+    if !saw_environment_note {
+        return Err("graph determinism shell log missing environment note".to_owned());
+    }
+    if saw_assert_fail {
+        return Err(
+            "graph determinism shell log emitted at least one assert_fail event".to_owned(),
+        );
+    }
+    if final_assert_fail_count.as_deref() != Some("0") {
+        return Err(format!(
+            "graph determinism shell reported non-zero assertion failures: {final_assert_fail_count:?}"
+        ));
+    }
+
+    for required in [
+        "graph_determinism_health_robot_insights",
+        "graph_determinism_context_explain_performance",
+        "graph_determinism_why_graph_badges",
+        "graph_determinism_why_causal_explain",
+        "graph_determinism_graph_centrality_refresh_dry_run",
+        "graph_determinism_graph_feature_enrichment_dry_run",
+        "graph_determinism_curate_candidates_read_only",
+    ] {
+        if !assert_labels.iter().any(|label| label == required) {
+            return Err(format!(
+                "graph determinism shell log missing required assert label {required}; labels={assert_labels:?}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn remember(workspace_arg: &str, content: &str) -> Result<String, String> {
     let output = run_ee(&[
         "--workspace",
@@ -341,6 +443,45 @@ fn run_why_causal_explain(workspace: &Path, memory_id: &str) -> Result<String, S
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[test]
+fn graph_determinism_shell_driver_emits_structured_log() -> TestResult {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = repo_root.join("scripts/e2e_overhaul/graph_determinism.sh");
+    let log_path = unique_tmp_path("graph-determinism", "jsonl")?;
+    let retention_manifest = unique_tmp_path("graph-determinism-retention", "json")?;
+    let output = Command::new("bash")
+        .arg(&script)
+        .current_dir(repo_root)
+        .env("EE_BINARY", env!("CARGO_BIN_EXE_ee"))
+        .env("EE_TEST_LOG_PATH", &log_path)
+        .env("EE_TEST_LOG_LEVEL", "normal")
+        .env("EE_TEST_EXECUTION_SUBSTRATE", "cargo_integration_test")
+        .env("EE_E2E_KEEP_WORKSPACE", "1")
+        .env("EE_E2E_KEEP_ARTIFACTS", "1")
+        .env("EE_E2E_TMPDIR", "/tmp")
+        .env("EE_E2E_ARTIFACT_TMPDIR", "/tmp")
+        .env("EE_E2E_RETENTION_MANIFEST", &retention_manifest)
+        .env("EE_GRAPH_DETERMINISM_MAX_SECONDS", "600")
+        .env("EE_GRAPH_DETERMINISM_TIMEOUT_SECONDS", "60")
+        .env("TMPDIR", "/tmp")
+        .output()
+        .map_err(|error| format!("failed to run {}: {error}", script.display()))?;
+    if !output.status.success() {
+        let log_contents = fs::read_to_string(&log_path)
+            .unwrap_or_else(|error| format!("failed to read {}: {error}", log_path.display()));
+        return Err(format!(
+            "graph determinism shell driver exited {:?}\nlog_path: {}\nretention_manifest: {}\nlog:\n{}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            log_path.display(),
+            retention_manifest.display(),
+            log_contents,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    assert_graph_determinism_shell_log(&log_path)
 }
 
 #[test]
