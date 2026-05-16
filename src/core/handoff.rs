@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::core::focus::{focus_state_hash, read_active_focus_state};
+use crate::core::singleflight::singleflight_posture_report;
 use crate::core::swarm_brief::{
     collect_swarm_brief_summary, render_swarm_brief_summary_for_handoff,
     swarm_brief_summary_evidence_id,
@@ -33,7 +34,12 @@ use crate::core::task_frame::{
     NON_EXECUTING_CONTRACT, TaskFrameRecord, TaskFrameShowOptions, show_task_frame,
 };
 use crate::db::{CreateAuditInput, DbConnection, audit_actions, generate_audit_id};
-use crate::models::{DomainError, RedactionLevel};
+use crate::models::{DomainError, RedactionLevel, SingleFlightPostureReport};
+#[cfg(test)]
+use crate::models::{
+    SingleFlightLastKeyPosture, SingleFlightSurface, SingleFlightSurfaceCounters,
+    SingleFlightSurfacePosture,
+};
 
 /// Schema for handoff capsule format.
 pub const HANDOFF_CAPSULE_SCHEMA_V1: &str = "ee.handoff.capsule.v1";
@@ -488,6 +494,52 @@ impl PreviewReport {
     pub fn to_json_pretty(&self) -> String {
         crate::core::serialize_pretty_or_error(self)
     }
+}
+
+fn render_singleflight_posture_for_handoff(report: &SingleFlightPostureReport) -> String {
+    let mut lines = vec![
+        format!("Schema: {}", report.schema),
+        format!("Status: {}", report.status),
+        format!("Configured surfaces: {}", report.configured_surface_count),
+        format!("Active leaders: {}", report.active_leader_count),
+        format!("Follower waits: {}", report.follower_wait_count),
+        format!("Follower timeouts: {}", report.follower_timeout_count),
+        format!("Leader failures: {}", report.leader_failure_count),
+        format!("Reused results: {}", report.reused_result_count),
+    ];
+
+    for surface in &report.surfaces {
+        lines.push(format!(
+            "- {}: status={}, configured={}, active_leaders={}, follower_waits={}, timeouts={}, failures={}, generation_counts=leaders:{} completed:{} reused:{}",
+            surface.surface.as_str(),
+            surface.status,
+            surface.configured,
+            surface.active_leader_count,
+            surface.follower_join_count,
+            surface.follower_timeout_count,
+            surface.leader_failure_count,
+            surface.leader_start_count,
+            surface.completed_leader_count,
+            surface.reused_result_count
+        ));
+        match &surface.last_key {
+            Some(last_key) => lines.push(format!(
+                "  last_key: key_hash={} workspace_generation={} index_generation={} graph_generation={}",
+                last_key.key_hash,
+                last_key.workspace_generation,
+                generation_label(last_key.index_generation),
+                generation_label(last_key.graph_generation)
+            )),
+            None => lines.push("  last_key: none".to_owned()),
+        }
+        lines.push(format!("  suggested_action: {}", surface.suggested_action));
+    }
+
+    lines.join("\n")
+}
+
+fn generation_label(generation: Option<u64>) -> String {
+    generation.map_or_else(|| "none".to_owned(), |value| value.to_string())
 }
 
 // ============================================================================
@@ -1221,16 +1273,14 @@ fn compute_content_hash(content: &str) -> String {
 }
 
 /// Compute the round-trip-stable canonical content hash for a capsule
-/// (M3 / bd-17c65.13.4). Strips the volatile top-level fields that
-/// change on every create regardless of workspace state:
-///   - `capsule_id` — freshly generated ULID per call
-///   - `created_at` — wall-clock timestamp
-///   - `captured_at` — memory snapshot capture timestamp
-///     and recursively scrubs the volatile per-section fields:
-///   - `audit_id` (assigned at write time)
-///   - `last_accessed_at` (changes on every memory touch)
-///   - `swarm_brief_summary` diagnostics (read-only coordination
-///     posture; not part of the durable workspace memory state)
+/// (M3 / bd-17c65.13.4). Delegates to the single source of truth
+/// [`crate::obs::volatile_fields::strip_volatile_fields`] (augmented with
+/// capsule-specific names per bd-1um33) for all common volatile timestamps,
+/// paths, ids, run indices, and "swarm_brief_summary" keys. Then applies
+/// the one value-dependent special case that cannot be expressed as a pure
+/// field-name list: when an object carries `"id": "swarm_brief_summary"`,
+/// its large diagnostic content subtree is redacted for both determinism
+/// (host-specific posture) and because it is not durable workspace memory.
 ///
 /// Two creates of the same workspace state always produce the same
 /// canonical hash regardless of when/where they ran. This is the
@@ -1242,27 +1292,51 @@ fn compute_canonical_capsule_hash(content: &serde_json::Value) -> String {
     compute_content_hash(&canonical)
 }
 
+/// Strip volatile fields for handoff capsule determinism.
+///
+/// Reuses the canonical `obs::volatile_fields` implementation (the single
+/// source of truth for VOLATILE_FIELD_NAMES and the recursive stripper)
+/// so that any future timestamp/path/elapsed/runIndex/etc. field added for
+/// J7 determinism automatically applies to capsules without drift.
+///
+/// Only the value-dependent "swarm_brief_summary by id" content redaction
+/// remains local; everything else is delegated.
 fn strip_volatile_capsule_fields(value: &mut serde_json::Value) {
-    if let Some(object) = value.as_object_mut() {
-        object.remove("capsule_id");
-        object.remove("created_at");
-        object.remove("captured_at");
-        object.remove("integrity");
-        object.remove("audit_id");
-        object.remove("last_accessed_at");
-        object.remove("swarm_brief_summary");
-        if object.get("id").and_then(serde_json::Value::as_str) == Some("swarm_brief_summary") {
-            object.remove("content");
-            object.remove("evidence_ids");
-            object.remove("token_estimate");
+    // Delegate name-based volatile stripping (timestamps, paths, runIndex,
+    // capsule_id, integrity, swarm_brief_summary key itself, etc.) to the
+    // single source of truth. This recurses into every object/array.
+    crate::obs::volatile_fields::strip_volatile_fields(value);
+
+    // Apply the *one* value-dependent rule that the pure name-based registry
+    // cannot express: any object whose "id" field is "swarm_brief_summary"
+    // has its large diagnostic content subtree redacted (for determinism
+    // of host posture + because it is not part of durable memory state).
+    // We must recurse ourselves for this rule because it is not a simple
+    // key-name match.
+    strip_swarm_brief_content_by_id(value);
+}
+
+/// Recursively find objects with `"id": "swarm_brief_summary"` and remove
+/// their volatile diagnostic payload fields. Kept separate so the main
+/// name-based stripping can stay in the canonical obs implementation.
+fn strip_swarm_brief_content_by_id(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object.get("id").and_then(serde_json::Value::as_str) == Some("swarm_brief_summary") {
+                object.remove("content");
+                object.remove("evidence_ids");
+                object.remove("token_estimate");
+            }
+            for (_, child) in object.iter_mut() {
+                strip_swarm_brief_content_by_id(child);
+            }
         }
-        for (_, child) in object.iter_mut() {
-            strip_volatile_capsule_fields(child);
+        serde_json::Value::Array(items) => {
+            for child in items.iter_mut() {
+                strip_swarm_brief_content_by_id(child);
+            }
         }
-    } else if let Some(array) = value.as_array_mut() {
-        for child in array.iter_mut() {
-            strip_volatile_capsule_fields(child);
-        }
+        _ => {}
     }
 }
 
@@ -2136,6 +2210,20 @@ pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, Domain
         token_estimate: swarm_brief_section.token_estimate,
     });
 
+    let singleflight_posture = singleflight_posture_report();
+    let singleflight_section = CapsuleSection::new("singleflight_posture", "Single-flight Posture")
+        .with_content(render_singleflight_posture_for_handoff(
+            &singleflight_posture,
+        ))
+        .with_confidence(EvidenceConfidence::Verified);
+    report.planned_sections.push(PlannedSection {
+        id: singleflight_section.id.clone(),
+        title: singleflight_section.title.clone(),
+        confidence: singleflight_section.confidence.as_str().to_owned(),
+        evidence_count: 0,
+        token_estimate: singleflight_section.token_estimate,
+    });
+
     match read_active_focus_state(&options.workspace) {
         Ok(Some(focus_state)) => {
             let focus_section = CapsuleSection::new("active_focus", "Active Memory Focus")
@@ -2297,6 +2385,15 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         .evidence_count
         .saturating_add(swarm_brief_evidence.len());
     report.swarm_brief_summary = Some(swarm_brief_summary.clone());
+
+    let singleflight_posture = singleflight_posture_report();
+    sections.push(
+        CapsuleSection::new("singleflight_posture", "Single-flight Posture")
+            .with_content(render_singleflight_posture_for_handoff(
+                &singleflight_posture,
+            ))
+            .with_confidence(EvidenceConfidence::Verified),
+    );
 
     if options.profile.include_full_evidence() {
         sections.push(
@@ -4345,6 +4442,65 @@ mod tests {
         ensure(
             !report.planned_sections.is_empty(),
             "should have planned sections",
+        )
+    }
+
+    #[test]
+    fn handoff_includes_redaction_safe_singleflight_posture() -> TestResult {
+        let options = PreviewOptions {
+            workspace: PathBuf::from("."),
+            profile: CapsuleProfile::Resume,
+            since: None,
+            include_estimates: true,
+            task_frame_id: None,
+        };
+
+        let report = preview_handoff(&options).map_err(|error| error.message())?;
+        ensure(
+            report
+                .planned_sections
+                .iter()
+                .any(|section| section.id == "singleflight_posture"),
+            "preview plans single-flight posture section",
+        )?;
+
+        let rendered = render_singleflight_posture_for_handoff(
+            &SingleFlightPostureReport::from_surfaces(vec![SingleFlightSurfacePosture::new(
+                SingleFlightSurface::GraphFeatureEnrichment,
+                true,
+                0,
+                SingleFlightSurfaceCounters {
+                    leader_start_count: 1,
+                    completed_leader_count: 1,
+                    follower_join_count: 2,
+                    follower_timeout_count: 0,
+                    leader_failure_count: 0,
+                    reused_result_count: 2,
+                    state_poisoned_count: 0,
+                },
+                250,
+                Some(SingleFlightLastKeyPosture {
+                    key_hash: "abc123redacted".to_owned(),
+                    workspace_generation: 9,
+                    index_generation: Some(4),
+                    graph_generation: Some(7),
+                }),
+            )]),
+        );
+        ensure(
+            rendered.contains("graph_feature_enrichment"),
+            "handoff summary names configured surface",
+        )?;
+        ensure(
+            rendered.contains("key_hash=abc123redacted")
+                && rendered.contains("workspace_generation=9")
+                && rendered.contains("index_generation=4")
+                && rendered.contains("graph_generation=7"),
+            "handoff summary includes redaction-safe key hash and generation details",
+        )?;
+        ensure(
+            !rendered.contains("raw_query") && !rendered.contains("memory_body"),
+            "handoff summary omits raw query and memory body fields",
         )
     }
 

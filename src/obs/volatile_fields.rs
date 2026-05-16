@@ -31,7 +31,16 @@ pub const VOLATILE_FIELD_NAMES: &[&str] = &[
     "timestamp",
     "runIndex",
     "run_index",
+    "runDurationMs",
+    "run_duration_ms",
     "ee_binary_hash",
+    // Handoff capsule determinism (bd-1um33): capsule_id and integrity are
+    // freshly generated per create even for identical workspace state.
+    // swarm_brief_summary subtree redaction is handled specially in handoff.rs
+    // (value-dependent on "id" field) but its volatile children are covered here.
+    "capsule_id",
+    "integrity",
+    "swarm_brief_summary",
     "databasePath",
     "workspacePath",
     "indexDir",
