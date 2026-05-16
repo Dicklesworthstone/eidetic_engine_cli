@@ -28,24 +28,10 @@ const EXPECTED_OPS: &[&str] = &[
     "ee_graph_centrality_refresh",
 ];
 const EXPECTED_SCALES: &[&str] = &["1k", "10k", "100k"];
-const VOLATILE_FIELDS: &[&str] = &[
-    "generatedAt",
-    "generated_at",
-    "elapsedMs",
-    "elapsed_ms",
-    "startedAt",
-    "started_at",
-    "endedAt",
-    "ended_at",
-    "ts",
-    "timestamp",
-    "runIndex",
-    "run_index",
-    "ee_binary_hash",
-    "databasePath",
-    "workspacePath",
-    "indexDir",
-];
+// Uses the single canonical volatile field registry from the ee library
+// (src/obs/volatile_fields.rs) so that any future additions for J7 determinism,
+// handoff capsules, insights, graph diagnostics, etc. are automatically honored
+// here without duplication or drift. See bd-1um33.
 
 type TestResult<T = ()> = Result<T, String>;
 
@@ -172,26 +158,11 @@ fn stable_hash(value: &Value) -> String {
     format!("blake3:{}", blake3::hash(&bytes).to_hex())
 }
 
-fn normalize_volatile(value: &mut Value) {
-    match value {
-        Value::Object(object) => {
-            object.retain(|key, _| !VOLATILE_FIELDS.contains(&key.as_str()));
-            for child in object.values_mut() {
-                normalize_volatile(child);
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                normalize_volatile(item);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn normalized_hash(value: &Value) -> String {
     let mut normalized = value.clone();
-    normalize_volatile(&mut normalized);
+    // Delegate to the canonical implementation (single source of truth).
+    // This also exercises the report + test-log path when the J1 harness is active.
+    let _report = ee::obs::volatile_fields::strip_volatile_fields(&mut normalized);
     stable_hash(&normalized)
 }
 

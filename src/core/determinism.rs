@@ -118,6 +118,43 @@ pub const SEED_LABEL_REGISTRY: &[SeedLabelDefinition] = &[
     ),
 ];
 
+/// Required token shape for an N4.3 threading surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeterministicTokenShape {
+    /// The callee may inspect or fork deterministic state, but must not advance
+    /// the caller's root token.
+    Shared,
+    /// The callee advances deterministic state and must own mutable access.
+    Mutable,
+}
+
+impl DeterministicTokenShape {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Shared => "&Deterministic<Seed>",
+            Self::Mutable => "&mut Deterministic<Seed>",
+        }
+    }
+}
+
+/// Machine-checkable row for the N4.3 threading checklist.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ThreadingSurfaceDefinition {
+    pub surface: &'static str,
+    pub token_shape: DeterministicTokenShape,
+}
+
+impl ThreadingSurfaceDefinition {
+    #[must_use]
+    pub const fn new(surface: &'static str, token_shape: DeterministicTokenShape) -> Self {
+        Self {
+            surface,
+            token_shape,
+        }
+    }
+}
+
 /// N4.3 threading checklist.
 ///
 /// Each row becomes an implementation row in
@@ -146,6 +183,47 @@ pub const THREADING_SURFACES: &[&str] = &[
     "crate::core::workspace::stable_workspace_id",
     "crate::core::context::persist_pack_record",
     "crate::runtime::determinism::DeterministicClock::next_uuid_v7",
+];
+
+/// N4.3 threading checklist with the required token shape for each row.
+pub const THREADING_SURFACE_REGISTRY: &[ThreadingSurfaceDefinition] = &[
+    ThreadingSurfaceDefinition::new(
+        "crate::core::search::run_search",
+        DeterministicTokenShape::Shared,
+    ),
+    ThreadingSurfaceDefinition::new(
+        "crate::core::search::canonicalize_equivalent_component_scores",
+        DeterministicTokenShape::Shared,
+    ),
+    ThreadingSurfaceDefinition::new(
+        "crate::core::search::search_sync",
+        DeterministicTokenShape::Shared,
+    ),
+    ThreadingSurfaceDefinition::new(
+        "crate::pack::assemble_draft_with_profile_and_options",
+        DeterministicTokenShape::Shared,
+    ),
+    ThreadingSurfaceDefinition::new(
+        "crate::pack::assemble_mmr_draft",
+        DeterministicTokenShape::Shared,
+    ),
+    ThreadingSurfaceDefinition::new("crate::models::Id::now", DeterministicTokenShape::Mutable),
+    ThreadingSurfaceDefinition::new(
+        "crate::db::generate_audit_id",
+        DeterministicTokenShape::Mutable,
+    ),
+    ThreadingSurfaceDefinition::new(
+        "crate::core::workspace::stable_workspace_id",
+        DeterministicTokenShape::Mutable,
+    ),
+    ThreadingSurfaceDefinition::new(
+        "crate::core::context::persist_pack_record",
+        DeterministicTokenShape::Shared,
+    ),
+    ThreadingSurfaceDefinition::new(
+        "crate::runtime::determinism::DeterministicClock::next_uuid_v7",
+        DeterministicTokenShape::Mutable,
+    ),
 ];
 
 /// Return true when `label` is registered for deterministic child-seed use.

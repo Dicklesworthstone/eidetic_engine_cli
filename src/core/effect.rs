@@ -1051,6 +1051,10 @@ impl EffectManifest {
             CommandEffect::read_only("artifact list", "List registered artifacts"),
             CommandEffect::read_only("health", "Quick health check"),
             CommandEffect::read_only("help", "Print help"),
+            CommandEffect::read_only(
+                "hook preflight-shell",
+                "Emit a shell snippet wiring ee preflight check into bash or zsh",
+            ),
             CommandEffect::read_only("index status", "Show index status"),
             CommandEffect::read_only(
                 "index vacuum",

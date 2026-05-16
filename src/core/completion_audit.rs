@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const COMPLETION_AUDIT_CHECKLIST_SCHEMA_V1: &str = "ee.completion_audit.checklist.v1";
+pub const COMPLETION_AUDIT_REPORT_SCHEMA_V1: &str = "ee.completion_audit.report.v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -187,6 +188,43 @@ pub struct ClaimContradiction {
     pub blocks_closure: bool,
     pub suggested_tracker_action: String,
     pub evidence_records: Vec<EvidenceRecord>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionVerdict {
+    Complete,
+    Incomplete,
+    Blocked,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionGap {
+    pub requirement_id: String,
+    pub support: RequirementSupport,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResidualRisk {
+    pub kind: String,
+    pub target: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionAuditReport {
+    pub schema: String,
+    pub checklist: CompletionChecklist,
+    pub evidence_by_requirement: Vec<RequirementEvidence>,
+    pub gaps: Vec<CompletionGap>,
+    pub residual_risks: Vec<ResidualRisk>,
+    pub recommended_next_actions: Vec<String>,
+    pub completion_verdict: CompletionVerdict,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -616,6 +654,148 @@ fn tracker_action_for(kind: ClaimContradictionKind) -> &'static str {
         ClaimContradictionKind::SourceDocsConflict => "align_docs_schema_and_source_contract",
         ClaimContradictionKind::PermissionGateUnresolved => "request_explicit_user_permission",
         ClaimContradictionKind::NeedsOwnerDecision => "record_owner_decision_before_closure",
+    }
+}
+
+#[must_use]
+pub fn build_completion_audit_report(
+    checklist: &CompletionChecklist,
+    bundle: &EvidenceBundle,
+) -> CompletionAuditReport {
+    let evidence_by_requirement = evaluate_completion_evidence(checklist, bundle);
+    let contradictions = detect_claim_contradictions(bundle);
+    let gaps = completion_gaps(&evidence_by_requirement);
+    let residual_risks = completion_residual_risks(checklist, &contradictions);
+    let recommended_next_actions =
+        completion_recommended_next_actions(checklist, &gaps, &contradictions);
+    let completion_verdict =
+        completion_verdict(checklist, &evidence_by_requirement, &contradictions);
+
+    CompletionAuditReport {
+        schema: COMPLETION_AUDIT_REPORT_SCHEMA_V1.to_owned(),
+        checklist: checklist.clone(),
+        evidence_by_requirement,
+        gaps,
+        residual_risks,
+        recommended_next_actions,
+        completion_verdict,
+    }
+}
+
+fn completion_gaps(evidence: &[RequirementEvidence]) -> Vec<CompletionGap> {
+    evidence
+        .iter()
+        .filter(|item| item.support != RequirementSupport::Direct)
+        .map(|item| CompletionGap {
+            requirement_id: item.requirement_id.clone(),
+            support: item.support,
+            reason: gap_reason(item.support).to_owned(),
+        })
+        .collect()
+}
+
+fn gap_reason(support: RequirementSupport) -> &'static str {
+    match support {
+        RequirementSupport::Direct => "direct_evidence_present",
+        RequirementSupport::Supporting => "supporting_evidence_is_not_direct_completion_proof",
+        RequirementSupport::Weak => "only_weak_or_proxy_evidence_present",
+        RequirementSupport::Blocked => "required_evidence_blocked",
+        RequirementSupport::Stale => "evidence_is_stale",
+        RequirementSupport::Missing => "required_evidence_missing",
+        RequirementSupport::Contradicted => "evidence_contradicts_completion_claim",
+    }
+}
+
+fn completion_residual_risks(
+    checklist: &CompletionChecklist,
+    contradictions: &[ClaimContradiction],
+) -> Vec<ResidualRisk> {
+    let mut risks = Vec::new();
+    risks.extend(checklist.unknown_clauses.iter().map(|clause| ResidualRisk {
+        kind: "unknown_clause".to_owned(),
+        target: clause.id.clone(),
+        reason: clause.reason.clone(),
+    }));
+    risks.extend(contradictions.iter().map(|contradiction| ResidualRisk {
+        kind: contradiction_kind_name(contradiction.kind).to_owned(),
+        target: contradiction.target.clone(),
+        reason: contradiction.suggested_tracker_action.clone(),
+    }));
+    risks.sort();
+    risks.dedup();
+    risks
+}
+
+fn completion_recommended_next_actions(
+    checklist: &CompletionChecklist,
+    gaps: &[CompletionGap],
+    contradictions: &[ClaimContradiction],
+) -> Vec<String> {
+    let mut actions = gaps
+        .iter()
+        .map(|gap| format!("collect_direct_evidence_for:{}", gap.requirement_id))
+        .collect::<Vec<_>>();
+    actions.extend(
+        checklist
+            .unknown_clauses
+            .iter()
+            .map(|clause| format!("clarify_unknown_clause:{}", clause.id)),
+    );
+    actions.extend(
+        contradictions
+            .iter()
+            .map(|contradiction| contradiction.suggested_tracker_action.clone()),
+    );
+    actions.sort();
+    actions.dedup();
+    actions
+}
+
+fn completion_verdict(
+    checklist: &CompletionChecklist,
+    evidence: &[RequirementEvidence],
+    contradictions: &[ClaimContradiction],
+) -> CompletionVerdict {
+    if evidence
+        .iter()
+        .any(|item| item.support == RequirementSupport::Blocked)
+        || contradictions.iter().any(|contradiction| {
+            contradiction.kind == ClaimContradictionKind::PermissionGateUnresolved
+        })
+    {
+        return CompletionVerdict::Blocked;
+    }
+    if evidence
+        .iter()
+        .any(|item| item.support != RequirementSupport::Direct)
+        || contradictions.iter().any(|contradiction| {
+            !matches!(
+                contradiction.kind,
+                ClaimContradictionKind::NeedsOwnerDecision
+                    | ClaimContradictionKind::PermissionGateUnresolved
+            )
+        })
+    {
+        return CompletionVerdict::Incomplete;
+    }
+    if !checklist.unknown_clauses.is_empty()
+        || contradictions
+            .iter()
+            .any(|contradiction| contradiction.kind == ClaimContradictionKind::NeedsOwnerDecision)
+    {
+        return CompletionVerdict::Unknown;
+    }
+    CompletionVerdict::Complete
+}
+
+fn contradiction_kind_name(kind: ClaimContradictionKind) -> &'static str {
+    match kind {
+        ClaimContradictionKind::StaleAcceptance => "stale_acceptance",
+        ClaimContradictionKind::UnsupportedDuplicateClaim => "unsupported_duplicate_claim",
+        ClaimContradictionKind::VerifierInconclusive => "verifier_inconclusive",
+        ClaimContradictionKind::SourceDocsConflict => "source_docs_conflict",
+        ClaimContradictionKind::PermissionGateUnresolved => "permission_gate_unresolved",
+        ClaimContradictionKind::NeedsOwnerDecision => "needs_owner_decision",
     }
 }
 
@@ -1620,5 +1800,180 @@ mod tests {
         assert_eq!(contradictions.len(), 2);
         assert!(kinds.contains(&ClaimContradictionKind::PermissionGateUnresolved));
         assert!(kinds.contains(&ClaimContradictionKind::NeedsOwnerDecision));
+    }
+
+    #[test]
+    fn completion_report_returns_complete_when_all_requirements_have_direct_evidence() {
+        let checklist = extract_completion_checklist(
+            "objective",
+            "Run all cargo builds and tests through RCH.",
+        );
+        let bundle = EvidenceBundle {
+            records: vec![
+                record(
+                    "rch",
+                    "remote build metadata",
+                    "rch job 162 on csd",
+                    EvidenceRecordStatus::Pass,
+                    "direct",
+                ),
+                record(
+                    "remote_rch",
+                    "cargo/build/test command",
+                    "cargo test --lib completion_audit",
+                    EvidenceRecordStatus::Pass,
+                    "direct",
+                ),
+            ],
+        };
+
+        let report = build_completion_audit_report(&checklist, &bundle);
+
+        assert_eq!(report.schema, COMPLETION_AUDIT_REPORT_SCHEMA_V1);
+        assert_eq!(report.completion_verdict, CompletionVerdict::Complete);
+        assert!(report.gaps.is_empty());
+        assert!(report.residual_risks.is_empty());
+    }
+
+    #[test]
+    fn completion_report_returns_incomplete_when_required_evidence_is_missing() {
+        let checklist = extract_completion_checklist(
+            "objective",
+            "Read AGENTS.md and run all cargo builds and tests through RCH.",
+        );
+        let bundle = EvidenceBundle {
+            records: vec![
+                record(
+                    "rch",
+                    "remote build metadata",
+                    "rch job 162 on csd",
+                    EvidenceRecordStatus::Pass,
+                    "direct",
+                ),
+                record(
+                    "remote_rch",
+                    "cargo/build/test command",
+                    "cargo test --lib completion_audit",
+                    EvidenceRecordStatus::Pass,
+                    "direct",
+                ),
+            ],
+        };
+
+        let report = build_completion_audit_report(&checklist, &bundle);
+
+        assert_eq!(report.completion_verdict, CompletionVerdict::Incomplete);
+        assert!(
+            report
+                .gaps
+                .iter()
+                .any(|gap| gap.reason == "required_evidence_missing")
+        );
+        assert!(
+            report
+                .recommended_next_actions
+                .iter()
+                .any(|action| action.starts_with("collect_direct_evidence_for:req_"))
+        );
+    }
+
+    #[test]
+    fn completion_report_returns_blocked_for_fail_closed_rch_capacity() {
+        let checklist = extract_completion_checklist(
+            "objective",
+            "Run all cargo builds and tests through RCH.",
+        );
+        let bundle = EvidenceBundle {
+            records: vec![record(
+                "remote_rch",
+                "cargo/build/test command",
+                "all workers at capacity",
+                EvidenceRecordStatus::CapacityBlocked,
+                "direct",
+            )],
+        };
+
+        let report = build_completion_audit_report(&checklist, &bundle);
+
+        assert_eq!(report.completion_verdict, CompletionVerdict::Blocked);
+        assert!(
+            report
+                .gaps
+                .iter()
+                .any(|gap| gap.support == RequirementSupport::Blocked)
+        );
+    }
+
+    #[test]
+    fn completion_report_returns_unknown_for_unresolved_broad_objective() {
+        let checklist = extract_completion_checklist(
+            "objective",
+            "Use code investigation to understand the technical architecture and take it to the next level.",
+        );
+        let bundle = EvidenceBundle {
+            records: vec![
+                record(
+                    "code_inspection",
+                    "repository",
+                    "architecture audit",
+                    EvidenceRecordStatus::Pass,
+                    "direct",
+                ),
+                record(
+                    "read_only_architecture_audit",
+                    "repository",
+                    "architecture audit",
+                    EvidenceRecordStatus::Pass,
+                    "direct",
+                ),
+            ],
+        };
+
+        let report = build_completion_audit_report(&checklist, &bundle);
+
+        assert_eq!(report.completion_verdict, CompletionVerdict::Unknown);
+        assert!(
+            report
+                .residual_risks
+                .iter()
+                .any(|risk| risk.kind == "unknown_clause")
+        );
+    }
+
+    #[test]
+    fn completion_report_rejects_passing_test_as_unrelated_proxy() {
+        let checklist = extract_completion_checklist(
+            "objective",
+            "Read README.md, coordinate through Agent Mail, and run all cargo builds and tests through RCH.",
+        );
+        let bundle = EvidenceBundle {
+            records: vec![
+                record(
+                    "rch",
+                    "remote build metadata",
+                    "rch job 162 on csd",
+                    EvidenceRecordStatus::Pass,
+                    "direct",
+                ),
+                record(
+                    "remote_rch",
+                    "cargo/build/test command",
+                    "cargo test --lib completion_audit",
+                    EvidenceRecordStatus::Pass,
+                    "direct",
+                ),
+            ],
+        };
+
+        let report = build_completion_audit_report(&checklist, &bundle);
+
+        assert_eq!(report.completion_verdict, CompletionVerdict::Incomplete);
+        assert!(report.gaps.len() >= 2);
+        assert!(
+            report
+                .gaps
+                .iter()
+                .any(|gap| gap.support == RequirementSupport::Missing)
+        );
     }
 }

@@ -2,7 +2,9 @@
 
 use std::collections::BTreeSet;
 
-use ee::core::determinism::{SEED_LABEL_REGISTRY, THREADING_SURFACES};
+use ee::core::determinism::{
+    DeterministicTokenShape, SEED_LABEL_REGISTRY, THREADING_SURFACE_REGISTRY, THREADING_SURFACES,
+};
 use ee::runtime::determinism::{
     DeterminismError, Deterministic, RANDOMNESS_INVENTORY_ROWS_CONTENT_HASH, RandomnessConsumer,
     Seed, SeedSource,
@@ -100,6 +102,30 @@ fn child_split_is_label_keyed_and_parent_replayable() {
     assert_eq!(pack_a.source(), SeedSource::Child);
     assert!(retrieval_a.scope().contains("retrieval#0"));
     assert!(pack_a.scope().contains("pack#1"));
+}
+
+#[test]
+fn shared_child_does_not_advance_parent_scope() {
+    let mut parent = Deterministic::from_seed(9);
+    let shared_a = parent.shared_child("pack.mmr_tiebreak");
+    let shared_b = parent.shared_child("pack.mmr_tiebreak");
+
+    assert_eq!(
+        shared_a.seed(),
+        shared_b.seed(),
+        "shared child calls replay the same label-derived seed"
+    );
+    assert_eq!(shared_a.source(), SeedSource::Child);
+    assert!(shared_a.scope().contains("pack.mmr_tiebreak"));
+
+    let ordinal_child_after_shared = parent.child("retrieval");
+    let mut replay_parent = Deterministic::from_seed(9);
+    let first_ordinal_child = replay_parent.child("retrieval");
+    assert_eq!(
+        ordinal_child_after_shared.seed(),
+        first_ordinal_child.seed(),
+        "shared child derivation must not consume the parent's ordinal counter"
+    );
 }
 
 #[test]
@@ -273,6 +299,94 @@ fn n4_3_threading_surface_checklist_is_executable() -> TestResult {
     {
         return Err(format!(
             "N4.3 threading checklist entries must be fully-qualified Rust paths: {THREADING_SURFACES:?}",
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn n4_3_threading_surface_token_shapes_are_executable() -> TestResult {
+    let expected = [
+        (
+            "crate::core::search::run_search",
+            DeterministicTokenShape::Shared,
+        ),
+        (
+            "crate::core::search::canonicalize_equivalent_component_scores",
+            DeterministicTokenShape::Shared,
+        ),
+        (
+            "crate::core::search::search_sync",
+            DeterministicTokenShape::Shared,
+        ),
+        (
+            "crate::pack::assemble_draft_with_profile_and_options",
+            DeterministicTokenShape::Shared,
+        ),
+        (
+            "crate::pack::assemble_mmr_draft",
+            DeterministicTokenShape::Shared,
+        ),
+        ("crate::models::Id::now", DeterministicTokenShape::Mutable),
+        (
+            "crate::db::generate_audit_id",
+            DeterministicTokenShape::Mutable,
+        ),
+        (
+            "crate::core::workspace::stable_workspace_id",
+            DeterministicTokenShape::Mutable,
+        ),
+        (
+            "crate::core::context::persist_pack_record",
+            DeterministicTokenShape::Shared,
+        ),
+        (
+            "crate::runtime::determinism::DeterministicClock::next_uuid_v7",
+            DeterministicTokenShape::Mutable,
+        ),
+    ];
+
+    if THREADING_SURFACE_REGISTRY.len() != expected.len() {
+        return Err(format!(
+            "N4.3 threading shape registry length drifted. expected {} rows, got {}",
+            expected.len(),
+            THREADING_SURFACE_REGISTRY.len()
+        ));
+    }
+
+    for (definition, (surface, token_shape)) in THREADING_SURFACE_REGISTRY.iter().zip(expected) {
+        if definition.surface != surface || definition.token_shape != token_shape {
+            return Err(format!(
+                "N4.3 threading shape drifted for `{surface}`. expected `{}`, got `{}:{}`",
+                token_shape.as_str(),
+                definition.surface,
+                definition.token_shape.as_str()
+            ));
+        }
+    }
+
+    let registry_surfaces = THREADING_SURFACE_REGISTRY
+        .iter()
+        .map(|definition| definition.surface)
+        .collect::<Vec<_>>();
+    if registry_surfaces != THREADING_SURFACES {
+        return Err(format!(
+            "N4.3 threading surfaces and shape registry diverged.\nsurfaces: {THREADING_SURFACES:?}\nregistry: {registry_surfaces:?}",
+        ));
+    }
+
+    let shared_count = THREADING_SURFACE_REGISTRY
+        .iter()
+        .filter(|definition| definition.token_shape == DeterministicTokenShape::Shared)
+        .count();
+    let mutable_count = THREADING_SURFACE_REGISTRY
+        .iter()
+        .filter(|definition| definition.token_shape == DeterministicTokenShape::Mutable)
+        .count();
+    if shared_count != 6 || mutable_count != 4 {
+        return Err(format!(
+            "N4.3 token shape split drifted. expected shared=6 mutable=4, got shared={shared_count} mutable={mutable_count}",
         ));
     }
 

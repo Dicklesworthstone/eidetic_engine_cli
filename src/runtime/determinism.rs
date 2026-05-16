@@ -289,6 +289,29 @@ impl<S> Deterministic<S> {
         )
     }
 
+    /// Fork a deterministic child scope from a shared token.
+    ///
+    /// Shared children are for read-only deterministic surfaces that need a
+    /// labeled scope without advancing the caller's root token. Repeated calls
+    /// with the same parent and label intentionally replay the same child seed.
+    #[must_use]
+    pub fn shared_child(&self, label: &str) -> Deterministic<Seed> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"ee.determinism.shared_child.v1");
+        hasher.update(&self.seed.as_u64().to_be_bytes());
+        hasher.update(self.scope.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(label.as_bytes());
+        let digest = hasher.finalize();
+        let mut bytes = [0_u8; 8];
+        bytes.copy_from_slice(&digest.as_bytes()[..8]);
+        Deterministic::from_parts(
+            Seed::new(u64::from_be_bytes(bytes)),
+            SeedSource::Child,
+            format!("{}::{label}", self.scope),
+        )
+    }
+
     /// Create a deterministic clock consumer tied to this token.
     pub fn clock(&mut self) -> DeterministicClock<'_, S> {
         DeterministicClock { token: self }
