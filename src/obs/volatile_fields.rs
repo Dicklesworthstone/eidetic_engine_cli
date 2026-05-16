@@ -213,6 +213,56 @@ mod tests {
     fn registry_predicate_matches_list() {
         assert!(is_volatile_field_name("generatedAt"));
         assert!(is_volatile_field_name("last_accessed_at"));
+        assert!(is_volatile_field_name("capsule_id"));
+        assert!(is_volatile_field_name("integrity"));
+        assert!(is_volatile_field_name("swarm_brief_summary"));
         assert!(!is_volatile_field_name("content"));
+    }
+
+    #[test]
+    fn strip_volatile_fields_covers_handoff_capsule_names() -> TestResult {
+        let mut value = serde_json::json!({
+            "schema": "ee.handoff.capsule.v1",
+            "capsule_id": "cap_a",
+            "created_at": "2026-05-16T00:00:00Z",
+            "integrity": {"hmac": "secret"},
+            "swarm_brief_summary": {"hostname": "agent-host"},
+            "sections": [
+                {
+                    "id": "objective",
+                    "content": "keep this"
+                }
+            ]
+        });
+        let report = strip_volatile_fields(&mut value);
+
+        for pointer in [
+            "/capsule_id",
+            "/created_at",
+            "/integrity",
+            "/swarm_brief_summary",
+        ] {
+            if value.pointer(pointer).is_some() {
+                return Err(format!("{pointer} was not stripped: {value}"));
+            }
+        }
+        if value
+            .pointer("/sections/0/content")
+            .and_then(|v| v.as_str())
+            != Some("keep this")
+        {
+            return Err("non-volatile handoff section content was stripped".to_owned());
+        }
+        for expected in [
+            "capsule_id",
+            "created_at",
+            "integrity",
+            "swarm_brief_summary",
+        ] {
+            if !report.fields_stripped.contains(&expected) {
+                return Err(format!("report missing stripped capsule field {expected}"));
+            }
+        }
+        Ok(())
     }
 }

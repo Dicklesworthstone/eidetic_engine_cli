@@ -3694,6 +3694,75 @@ mod tests {
     }
 
     #[test]
+    fn canonical_capsule_hash_ignores_registered_and_value_dependent_volatiles() -> TestResult {
+        let stable_section = serde_json::json!({
+            "id": "objective",
+            "title": "Current Objective",
+            "content": "Continue deterministic handoff work.",
+        });
+        let first = serde_json::json!({
+            "schema": HANDOFF_CAPSULE_SCHEMA_V1,
+            "capsule_id": "cap_first",
+            "created_at": "2026-05-16T00:00:00Z",
+            "integrity": {"hmac": "secret-one", "hmacPrefix": "aaa"},
+            "swarm_brief_summary": {"hostname": "agent-host-a", "generatedAt": "now"},
+            "sections": [
+                stable_section.clone(),
+                {
+                    "id": "swarm_brief_summary",
+                    "title": "Swarm Brief Summary",
+                    "content": "host-specific diagnostic body A",
+                    "evidence_ids": ["evidence-a"],
+                    "token_estimate": 99,
+                }
+            ]
+        });
+        let second = serde_json::json!({
+            "schema": HANDOFF_CAPSULE_SCHEMA_V1,
+            "capsule_id": "cap_second",
+            "created_at": "2026-05-16T00:01:00Z",
+            "integrity": {"hmac": "secret-two", "hmacPrefix": "bbb"},
+            "swarm_brief_summary": {"hostname": "agent-host-b", "generatedAt": "later"},
+            "sections": [
+                stable_section,
+                {
+                    "id": "swarm_brief_summary",
+                    "title": "Swarm Brief Summary",
+                    "content": "host-specific diagnostic body B",
+                    "evidence_ids": ["evidence-b"],
+                    "token_estimate": 5,
+                }
+            ]
+        });
+
+        let first_hash = compute_canonical_capsule_hash(&first);
+        let second_hash = compute_canonical_capsule_hash(&second);
+        ensure_equal(
+            &first_hash,
+            &second_hash,
+            "volatile capsule fields do not affect canonical hash",
+        )?;
+
+        let changed = serde_json::json!({
+            "schema": HANDOFF_CAPSULE_SCHEMA_V1,
+            "capsule_id": "cap_third",
+            "created_at": "2026-05-16T00:02:00Z",
+            "integrity": {"hmac": "secret-three", "hmacPrefix": "ccc"},
+            "sections": [
+                {
+                    "id": "objective",
+                    "title": "Current Objective",
+                    "content": "A durable section changed.",
+                }
+            ]
+        });
+        ensure(
+            first_hash != compute_canonical_capsule_hash(&changed),
+            "durable capsule content still affects canonical hash",
+        )
+    }
+
+    #[test]
     fn evidence_confidence_has_stable_string_representation() -> TestResult {
         ensure_equal(
             &EvidenceConfidence::Verified.as_str(),
