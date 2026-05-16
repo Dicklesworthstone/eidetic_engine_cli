@@ -596,6 +596,30 @@ pub fn gather_build_admission_report(options: &BuildAdmissionOptions) -> BuildAd
     let admitted = degraded
         .iter()
         .all(|entry| entry.code != "build_admission_denied");
+    let recovery_actions = build_admission_recovery_actions(&degraded, admitted);
+
+    BuildAdmissionReport {
+        schema: BUILD_ADMISSION_DIAGNOSTICS_SCHEMA_V1,
+        command: "diag build-admission",
+        side_effect_free: true,
+        mutation_policy: "read_only_report_no_files_modified",
+        workspace: DiskPressureWorkspace {
+            path: path_to_string(&workspace),
+            source: options.workspace_source,
+        },
+        external_build_root: EXTERNAL_BUILD_ROOT.to_owned(),
+        min_free_bytes: options.min_free_bytes,
+        admitted,
+        checks,
+        degraded,
+        recovery_actions,
+    }
+}
+
+fn build_admission_recovery_actions(
+    degraded: &[BuildAdmissionDegradation],
+    admitted: bool,
+) -> Vec<DiskPressureRecoveryAction> {
     let mut recovery_actions = Vec::new();
     if degraded
         .iter()
@@ -646,22 +670,7 @@ pub fn gather_build_admission_report(options: &BuildAdmissionOptions) -> BuildAd
         });
     }
 
-    BuildAdmissionReport {
-        schema: BUILD_ADMISSION_DIAGNOSTICS_SCHEMA_V1,
-        command: "diag build-admission",
-        side_effect_free: true,
-        mutation_policy: "read_only_report_no_files_modified",
-        workspace: DiskPressureWorkspace {
-            path: path_to_string(&workspace),
-            source: options.workspace_source,
-        },
-        external_build_root: EXTERNAL_BUILD_ROOT.to_owned(),
-        min_free_bytes: options.min_free_bytes,
-        admitted,
-        checks,
-        degraded,
-        recovery_actions,
-    }
+    recovery_actions
 }
 
 #[must_use]
@@ -1547,6 +1556,99 @@ mod tests {
         } else {
             Err(format!("unexpected action kinds: {actions:?}"))
         }
+    }
+
+    #[test]
+    fn build_admission_recovery_actions_cover_path_gaps_and_denial() -> TestResult {
+        let degraded = vec![
+            BuildAdmissionDegradation {
+                code: "cargo_target_not_external",
+                severity: "warning",
+                message: "cargo target outside external root".to_owned(),
+                repair: "repair".to_owned(),
+            },
+            BuildAdmissionDegradation {
+                code: "tmpdir_not_external",
+                severity: "warning",
+                message: "tmpdir outside external root".to_owned(),
+                repair: "repair".to_owned(),
+            },
+            BuildAdmissionDegradation {
+                code: "artifact_destination_not_external",
+                severity: "warning",
+                message: "artifact destination outside external root".to_owned(),
+                repair: "repair".to_owned(),
+            },
+            BuildAdmissionDegradation {
+                code: "build_admission_denied",
+                severity: "medium",
+                message: "required path below threshold".to_owned(),
+                repair: "repair".to_owned(),
+            },
+        ];
+
+        let actions = build_admission_recovery_actions(&degraded, false);
+        let targets: Vec<_> = actions.iter().map(|action| action.target).collect();
+        let kinds: Vec<_> = actions.iter().map(|action| action.kind).collect();
+
+        ensure(
+            targets,
+            vec![
+                "cargo_target",
+                "tmpdir",
+                "artifact_destination",
+                "build_admission",
+            ],
+            "action targets",
+        )?;
+        ensure(
+            kinds,
+            vec![
+                "move_preserve",
+                "move_preserve",
+                "move_preserve",
+                "ask_human",
+            ],
+            "action kinds",
+        )
+    }
+
+    #[test]
+    fn build_admission_recovery_actions_omit_denial_when_admitted() -> TestResult {
+        let degraded = vec![BuildAdmissionDegradation {
+            code: "cargo_target_not_external",
+            severity: "warning",
+            message: "cargo target outside external root".to_owned(),
+            repair: "repair".to_owned(),
+        }];
+
+        let actions = build_admission_recovery_actions(&degraded, true);
+        ensure(actions.len(), 1usize, "action count")?;
+        ensure(actions[0].target, "cargo_target", "cargo target action")?;
+        ensure(actions[0].kind, "move_preserve", "cargo target kind")
+    }
+
+    #[test]
+    fn external_path_classification_uses_external_build_root_prefix() -> TestResult {
+        let external_root = Path::new(EXTERNAL_BUILD_ROOT);
+        ensure(
+            path_string_is_within(
+                "/Volumes/USBNVME16TB/temp_agent_space/cargo-target/debug",
+                external_root,
+            ),
+            true,
+            "external target path",
+        )?;
+        ensure(
+            path_string_is_within("/tmp/ee-local-target", external_root),
+            false,
+            "local target path",
+        )?;
+        ensure(
+            path_string_is_within("./target/debug", external_root),
+            false,
+            "relative target path",
+        )
     }
 
     #[test]
