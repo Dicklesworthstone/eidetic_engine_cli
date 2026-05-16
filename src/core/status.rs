@@ -34,11 +34,12 @@ use super::curate::stable_workspace_id;
 use super::index::{IndexHealth, IndexStatusOptions, get_index_status};
 use super::outcome::{DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR};
 use super::tailscale_probe::{
-    SystemTailscaleCliProbeRunner, TAILSCALE_BINARY_INAUTHENTIC_CODE,
-    TAILSCALE_DAEMON_UNREACHABLE_CODE, TAILSCALE_NOT_AUTHENTICATED_CODE,
-    TAILSCALE_NOT_INSTALLED_CODE, TAILSCALE_PROBE_TIMEOUT_CODE, TAILSCALE_PROBE_UNAVAILABLE_CODE,
-    TAILSCALE_SHIELDS_UP_CODE, TailscaleCliProbeConfig, TailscaleLocalReport, TailscalePlatform,
-    probe_tailscale_cli_with_runner, tailscale_probe_timeout_ms_from_env_value,
+    SystemTailscaleCliProbeRunner, SystemTailscaleSocketProbeRunner,
+    TAILSCALE_BINARY_INAUTHENTIC_CODE, TAILSCALE_DAEMON_UNREACHABLE_CODE,
+    TAILSCALE_NOT_AUTHENTICATED_CODE, TAILSCALE_NOT_INSTALLED_CODE, TAILSCALE_PROBE_TIMEOUT_CODE,
+    TAILSCALE_PROBE_UNAVAILABLE_CODE, TAILSCALE_SHIELDS_UP_CODE, TailscaleCliProbeConfig,
+    TailscaleLocalReport, TailscalePlatform, TailscaleSocketProbeConfig,
+    probe_tailscale_local_with_runners, tailscale_probe_timeout_ms_from_env_value,
 };
 use super::{build_info, runtime_status};
 
@@ -1177,8 +1178,18 @@ fn gather_tailscale_local_report() -> Option<TailscaleLocalReport> {
     config.binary_override = read_env_var(EnvVar::TailscaleBinaryOverride).map(PathBuf::from);
     config.platform_hint = current_tailscale_platform();
 
-    let mut runner = SystemTailscaleCliProbeRunner;
-    Some(probe_tailscale_cli_with_runner(&config, &mut runner))
+    let mut socket_config = TailscaleSocketProbeConfig::mesh_enabled();
+    socket_config.timeout_ms = timeout_ms;
+    socket_config.platform_hint = current_tailscale_platform();
+
+    let mut socket_runner = SystemTailscaleSocketProbeRunner;
+    let mut cli_runner = SystemTailscaleCliProbeRunner;
+    Some(probe_tailscale_local_with_runners(
+        &socket_config,
+        &config,
+        &mut socket_runner,
+        &mut cli_runner,
+    ))
 }
 
 fn mesh_enabled_for_tailscale_probe() -> bool {

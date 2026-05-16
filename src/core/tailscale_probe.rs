@@ -1,10 +1,15 @@
-//! Pure Tailscale local-probe model and parsers for SRR6.46.1.
+//! Tailscale local-probe model, parsers, and narrow probe runners for SRR6.46.1.
 //!
-//! This module deliberately does not execute `tailscale`, connect to
-//! tailscaled, or open network sockets. It classifies already-collected status
-//! and prefs payloads so CLI/status/doctor surfaces can share one deterministic
-//! interpretation layer.
+//! The classification layer stays deterministic and testable: system I/O is
+//! isolated behind small runner traits so status/doctor surfaces can share one
+//! interpretation path.
 
+use std::fs;
+use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -288,6 +293,36 @@ impl TailscaleCliProbeConfig {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TailscaleSocketProbeConfig {
+    pub mesh_enabled: bool,
+    pub socket_candidates: Vec<PathBuf>,
+    pub timeout_ms: u64,
+    pub platform_hint: TailscalePlatform,
+}
+
+impl TailscaleSocketProbeConfig {
+    #[must_use]
+    pub fn mesh_disabled() -> Self {
+        Self {
+            mesh_enabled: false,
+            socket_candidates: default_tailscale_socket_candidates(),
+            timeout_ms: DEFAULT_TAILSCALE_PROBE_TIMEOUT_MS,
+            platform_hint: TailscalePlatform::Other,
+        }
+    }
+
+    #[must_use]
+    pub fn mesh_enabled() -> Self {
+        Self {
+            mesh_enabled: true,
+            socket_candidates: default_tailscale_socket_candidates(),
+            timeout_ms: DEFAULT_TAILSCALE_PROBE_TIMEOUT_MS,
+            platform_hint: TailscalePlatform::Other,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TailscaleCliCommandOutput {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -336,6 +371,16 @@ pub trait TailscaleCliProbeRunner {
     fn run(&mut self, path: &Path, args: &[&str], timeout_ms: u64) -> TailscaleCliCommandOutput;
 }
 
+pub trait TailscaleSocketProbeRunner {
+    fn socket_exists(&self, path: &Path) -> bool;
+    fn request(
+        &mut self,
+        path: &Path,
+        endpoint: &str,
+        timeout_ms: u64,
+    ) -> TailscaleCliCommandOutput;
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemTailscaleCliProbeRunner;
 
@@ -349,12 +394,87 @@ impl TailscaleCliProbeRunner for SystemTailscaleCliProbeRunner {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemTailscaleSocketProbeRunner;
+
+impl TailscaleSocketProbeRunner for SystemTailscaleSocketProbeRunner {
+    fn socket_exists(&self, path: &Path) -> bool {
+        socket_candidate_exists(path)
+    }
+
+    fn request(
+        &mut self,
+        path: &Path,
+        endpoint: &str,
+        timeout_ms: u64,
+    ) -> TailscaleCliCommandOutput {
+        run_system_tailscale_socket_request(path, endpoint, timeout_ms)
+    }
+}
+
 #[must_use]
 pub fn tailscale_probe_timeout_ms_from_env_value(value: Option<&str>) -> u64 {
     value
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_TAILSCALE_PROBE_TIMEOUT_MS)
+}
+
+pub fn probe_tailscale_local_with_runners<
+    S: TailscaleSocketProbeRunner,
+    C: TailscaleCliProbeRunner,
+>(
+    socket_config: &TailscaleSocketProbeConfig,
+    cli_config: &TailscaleCliProbeConfig,
+    socket_runner: &mut S,
+    cli_runner: &mut C,
+) -> TailscaleLocalReport {
+    if !socket_config.mesh_enabled || !cli_config.mesh_enabled {
+        return TailscaleLocalReport::mesh_disabled();
+    }
+
+    if let Some(socket_path) = resolve_tailscale_socket(socket_config, socket_runner) {
+        return probe_tailscale_socket_with_runner(socket_config, socket_runner, &socket_path);
+    }
+
+    probe_tailscale_cli_with_runner(cli_config, cli_runner)
+}
+
+pub fn probe_tailscale_socket_with_runner<R: TailscaleSocketProbeRunner>(
+    config: &TailscaleSocketProbeConfig,
+    runner: &mut R,
+    socket_path: &Path,
+) -> TailscaleLocalReport {
+    if !config.mesh_enabled {
+        return TailscaleLocalReport::mesh_disabled();
+    }
+
+    let status_output = runner.request(socket_path, "/localapi/v0/status", config.timeout_ms);
+    if status_output.timed_out {
+        return TailscaleLocalReport::timed_out(
+            TailscaleProbeMethod::Socket,
+            status_output.elapsed_ms,
+        );
+    }
+    if !status_output.success {
+        return TailscaleLocalReport::daemon_unreachable(
+            TailscaleProbeMethod::Socket,
+            status_output.elapsed_ms,
+            command_error_detail(&status_output),
+        );
+    }
+
+    let prefs_output = runner.request(socket_path, "/localapi/v0/prefs", config.timeout_ms);
+    let prefs_json =
+        (prefs_output.success && !prefs_output.timed_out).then_some(prefs_output.stdout.as_slice());
+    classify_status_payload(TailscaleStatusProbeInput {
+        status_json: &status_output.stdout,
+        prefs_json,
+        binary: None,
+        method: TailscaleProbeMethod::Socket,
+        elapsed_ms: status_output.elapsed_ms + prefs_output.elapsed_ms,
+        platform_hint: config.platform_hint,
+    })
 }
 
 pub fn probe_tailscale_cli_with_runner<R: TailscaleCliProbeRunner>(
@@ -500,6 +620,8 @@ pub fn classify_status_payload(input: TailscaleStatusProbeInput<'_>) -> Tailscal
                 "Run which tailscale, verify provenance, and reinstall Tailscale if needed.",
             ));
         }
+    } else if input.method == TailscaleProbeMethod::Socket {
+        report.binary_authentic = true;
     }
 
     if !report.daemon_reachable {
@@ -580,6 +702,17 @@ fn resolve_tailscale_binary<R: TailscaleCliProbeRunner>(
         .cloned()
 }
 
+fn resolve_tailscale_socket<R: TailscaleSocketProbeRunner>(
+    config: &TailscaleSocketProbeConfig,
+    runner: &R,
+) -> Option<PathBuf> {
+    config
+        .socket_candidates
+        .iter()
+        .find(|path| path.is_absolute() && runner.socket_exists(path))
+        .cloned()
+}
+
 fn command_error_detail(output: &TailscaleCliCommandOutput) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let trimmed = stderr.trim();
@@ -588,6 +721,83 @@ fn command_error_detail(output: &TailscaleCliCommandOutput) -> String {
     } else {
         trimmed.to_owned()
     }
+}
+
+#[cfg(unix)]
+fn run_system_tailscale_socket_request(
+    path: &Path,
+    endpoint: &str,
+    timeout_ms: u64,
+) -> TailscaleCliCommandOutput {
+    let start = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    let mut stream = match UnixStream::connect(path) {
+        Ok(stream) => stream,
+        Err(error) if is_timeout_error(&error) => {
+            return TailscaleCliCommandOutput::timeout(elapsed_ms_since(start));
+        }
+        Err(error) => {
+            return TailscaleCliCommandOutput::failure(
+                error.to_string().into_bytes(),
+                elapsed_ms_since(start),
+            );
+        }
+    };
+    if let Err(error) = stream.set_read_timeout(Some(timeout)) {
+        return TailscaleCliCommandOutput::failure(
+            error.to_string().into_bytes(),
+            elapsed_ms_since(start),
+        );
+    }
+    if let Err(error) = stream.set_write_timeout(Some(timeout)) {
+        return TailscaleCliCommandOutput::failure(
+            error.to_string().into_bytes(),
+            elapsed_ms_since(start),
+        );
+    }
+
+    let request = format!(
+        "GET {endpoint} HTTP/1.1\r\nHost: local-tailscaled.sock\r\nConnection: close\r\n\r\n"
+    );
+    if let Err(error) = stream.write_all(request.as_bytes()) {
+        if is_timeout_error(&error) {
+            return TailscaleCliCommandOutput::timeout(elapsed_ms_since(start));
+        }
+        return TailscaleCliCommandOutput::failure(
+            error.to_string().into_bytes(),
+            elapsed_ms_since(start),
+        );
+    }
+
+    let mut response = Vec::new();
+    if let Err(error) = stream.read_to_end(&mut response) {
+        if is_timeout_error(&error) {
+            return TailscaleCliCommandOutput::timeout(elapsed_ms_since(start));
+        }
+        return TailscaleCliCommandOutput::failure(
+            error.to_string().into_bytes(),
+            elapsed_ms_since(start),
+        );
+    }
+
+    match http_response_body(&response) {
+        Ok(body) => TailscaleCliCommandOutput::success(body, elapsed_ms_since(start)),
+        Err(error) => {
+            TailscaleCliCommandOutput::failure(error.into_bytes(), elapsed_ms_since(start))
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn run_system_tailscale_socket_request(
+    _path: &Path,
+    _endpoint: &str,
+    _timeout_ms: u64,
+) -> TailscaleCliCommandOutput {
+    TailscaleCliCommandOutput::failure(
+        "Tailscale socket probing is not implemented on this platform",
+        0,
+    )
 }
 
 fn run_system_tailscale_command(
@@ -651,6 +861,58 @@ fn run_system_tailscale_command(
 
 fn elapsed_ms_since(start: Instant) -> u64 {
     start.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+#[cfg(unix)]
+fn socket_candidate_exists(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|metadata| metadata.file_type().is_socket())
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn socket_candidate_exists(_path: &Path) -> bool {
+    false
+}
+
+fn is_timeout_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    )
+}
+
+fn http_response_body(response: &[u8]) -> Result<&[u8], String> {
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| "local API response did not include an HTTP header terminator".to_owned())?;
+    let header = String::from_utf8_lossy(&response[..header_end]);
+    let status_line = header
+        .lines()
+        .next()
+        .ok_or_else(|| "local API response did not include an HTTP status line".to_owned())?;
+    let status_code = status_line.split_whitespace().nth(1);
+    if status_code != Some("200") {
+        return Err(format!("local API returned {status_line}"));
+    }
+    Ok(&response[header_end + 4..])
+}
+
+fn default_tailscale_socket_candidates() -> Vec<PathBuf> {
+    let mut candidates = vec![
+        PathBuf::from("/var/run/tailscale/tailscaled.sock"),
+        PathBuf::from("/run/tailscale/tailscaled.sock"),
+        PathBuf::from("/var/run/tailscaled.socket"),
+    ];
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        candidates
+            .push(home.join("Library/Containers/io.tailscale.ipn.macsys/Data/IPN/tailscaled.sock"));
+        candidates.push(
+            home.join("Library/Group Containers/io.tailscale.ipn.macos/Data/IPN/tailscaled.sock"),
+        );
+    }
+    candidates
 }
 
 fn default_tailscale_binary_candidates() -> Vec<PathBuf> {

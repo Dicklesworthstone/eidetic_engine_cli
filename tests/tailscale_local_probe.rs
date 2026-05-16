@@ -6,9 +6,10 @@ use ee::core::tailscale_probe::{
     TAILSCALE_LOCAL_SCHEMA_V1, TAILSCALE_NOT_AUTHENTICATED_CODE, TAILSCALE_PROBE_TIMEOUT_CODE,
     TAILSCALE_PROBE_UNAVAILABLE_CODE, TailscaleBinaryReport, TailscaleCliCommandOutput,
     TailscaleCliProbeConfig, TailscaleCliProbeRunner, TailscaleLocalReport, TailscalePlatform,
-    TailscaleProbeMethod, TailscaleStatusProbeInput, classify_binary, classify_status_payload,
-    probe_tailscale_cli_with_runner, tailscale_probe_timeout_ms_from_env_value,
-    validate_binary_path,
+    TailscaleProbeMethod, TailscaleSocketProbeConfig, TailscaleSocketProbeRunner,
+    TailscaleStatusProbeInput, classify_binary, classify_status_payload,
+    probe_tailscale_cli_with_runner, probe_tailscale_local_with_runners,
+    tailscale_probe_timeout_ms_from_env_value, validate_binary_path,
 };
 use ee::output::render_status_json;
 
@@ -23,11 +24,56 @@ struct FakeCliRunner {
     calls: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct FakeSocketRunner {
+    existing_paths: Vec<String>,
+    status: Option<TailscaleCliCommandOutput>,
+    prefs: Option<TailscaleCliCommandOutput>,
+    calls: Vec<String>,
+}
+
+impl FakeSocketRunner {
+    fn with_existing(path: &str) -> Self {
+        Self {
+            existing_paths: vec![path.to_owned()],
+            ..Self::default()
+        }
+    }
+}
+
 impl FakeCliRunner {
     fn with_existing(path: &str) -> Self {
         Self {
             existing_paths: vec![path.to_owned()],
             ..Self::default()
+        }
+    }
+}
+
+impl TailscaleSocketProbeRunner for FakeSocketRunner {
+    fn socket_exists(&self, path: &Path) -> bool {
+        self.existing_paths
+            .iter()
+            .any(|candidate| Path::new(candidate) == path)
+    }
+
+    fn request(
+        &mut self,
+        _path: &Path,
+        endpoint: &str,
+        _timeout_ms: u64,
+    ) -> TailscaleCliCommandOutput {
+        self.calls.push(endpoint.to_owned());
+        match endpoint {
+            "/localapi/v0/status" => self
+                .status
+                .clone()
+                .unwrap_or_else(|| TailscaleCliCommandOutput::failure("missing status", 1)),
+            "/localapi/v0/prefs" => self
+                .prefs
+                .clone()
+                .unwrap_or_else(|| TailscaleCliCommandOutput::failure("missing prefs", 1)),
+            _ => TailscaleCliCommandOutput::failure("unexpected endpoint", 1),
         }
     }
 }
@@ -72,6 +118,15 @@ fn cli_probe_config(binary_path: &str) -> TailscaleCliProbeConfig {
         mesh_enabled: true,
         binary_override: None,
         binary_candidates: vec![Path::new(binary_path).to_path_buf()],
+        timeout_ms: 1_500,
+        platform_hint: TailscalePlatform::Linux,
+    }
+}
+
+fn socket_probe_config(socket_path: &str) -> TailscaleSocketProbeConfig {
+    TailscaleSocketProbeConfig {
+        mesh_enabled: true,
+        socket_candidates: vec![Path::new(socket_path).to_path_buf()],
         timeout_ms: 1_500,
         platform_hint: TailscalePlatform::Linux,
     }
@@ -288,6 +343,104 @@ fn cli_probe_reports_not_installed_when_no_binary_candidate_exists() -> TestResu
     assert!(!report.installed);
     assert!(runner.calls.is_empty());
     assert_eq!(report.degradations[0].code, "tailscale_not_installed");
+    Ok(())
+}
+
+#[test]
+fn local_probe_uses_socket_before_cli_when_socket_exists() -> TestResult {
+    let mut socket_runner = FakeSocketRunner::with_existing("/var/run/tailscaled.socket");
+    socket_runner.status = Some(TailscaleCliCommandOutput::success(healthy_status(), 4));
+    socket_runner.prefs = Some(TailscaleCliCommandOutput::success(
+        br#"{"ShieldsUp": false}"#.as_slice(),
+        5,
+    ));
+    let mut cli_runner = FakeCliRunner::with_existing("/opt/homebrew/bin/tailscale");
+    cli_runner.version = Some(TailscaleCliCommandOutput::success(good_version_output(), 3));
+    cli_runner.status = Some(TailscaleCliCommandOutput::success(healthy_status(), 4));
+
+    let report = probe_tailscale_local_with_runners(
+        &socket_probe_config("/var/run/tailscaled.socket"),
+        &cli_probe_config("/opt/homebrew/bin/tailscale"),
+        &mut socket_runner,
+        &mut cli_runner,
+    );
+
+    assert_eq!(report.probe_method, TailscaleProbeMethod::Socket);
+    assert!(report.installed);
+    assert!(report.daemon_reachable);
+    assert!(report.authenticated);
+    assert!(report.binary_authentic);
+    assert!(report.binary_absolute_path.is_none());
+    assert_eq!(report.shields_up, Some(false));
+    assert_eq!(
+        socket_runner.calls,
+        vec!["/localapi/v0/status", "/localapi/v0/prefs"]
+    );
+    assert!(
+        cli_runner.calls.is_empty(),
+        "CLI fallback should not run after socket success"
+    );
+    Ok(())
+}
+
+#[test]
+fn local_probe_falls_back_to_cli_when_no_socket_candidate_exists() -> TestResult {
+    let mut socket_runner = FakeSocketRunner::default();
+    let mut cli_runner = FakeCliRunner::with_existing("/opt/homebrew/bin/tailscale");
+    cli_runner.version = Some(TailscaleCliCommandOutput::success(good_version_output(), 3));
+    cli_runner.status = Some(TailscaleCliCommandOutput::success(healthy_status(), 4));
+    cli_runner.prefs = Some(TailscaleCliCommandOutput::success(
+        br#"{"ShieldsUp": false}"#.as_slice(),
+        5,
+    ));
+
+    let report = probe_tailscale_local_with_runners(
+        &socket_probe_config("/var/run/tailscaled.socket"),
+        &cli_probe_config("/opt/homebrew/bin/tailscale"),
+        &mut socket_runner,
+        &mut cli_runner,
+    );
+
+    assert_eq!(report.probe_method, TailscaleProbeMethod::Cli);
+    assert!(report.binary_authentic);
+    assert_eq!(
+        cli_runner.calls,
+        vec![
+            "--version",
+            "status --json --self=true --peers=true",
+            "debug localapi /localapi/v0/prefs"
+        ]
+    );
+    assert!(socket_runner.calls.is_empty());
+    Ok(())
+}
+
+#[test]
+fn local_probe_reports_socket_daemon_unreachable_without_cli_fallback() -> TestResult {
+    let mut socket_runner = FakeSocketRunner::with_existing("/var/run/tailscaled.socket");
+    socket_runner.status = Some(TailscaleCliCommandOutput::failure("socket refused", 4));
+    let mut cli_runner = FakeCliRunner::with_existing("/opt/homebrew/bin/tailscale");
+    cli_runner.version = Some(TailscaleCliCommandOutput::success(good_version_output(), 3));
+    cli_runner.status = Some(TailscaleCliCommandOutput::success(healthy_status(), 4));
+
+    let report = probe_tailscale_local_with_runners(
+        &socket_probe_config("/var/run/tailscaled.socket"),
+        &cli_probe_config("/opt/homebrew/bin/tailscale"),
+        &mut socket_runner,
+        &mut cli_runner,
+    );
+
+    assert_eq!(report.probe_method, TailscaleProbeMethod::Socket);
+    assert!(!report.daemon_reachable);
+    assert_eq!(
+        report.degradations[0].code,
+        TAILSCALE_DAEMON_UNREACHABLE_CODE
+    );
+    assert!(report.degradations[0].message.contains("socket refused"));
+    assert!(
+        cli_runner.calls.is_empty(),
+        "CLI fallback should only run when no socket is reachable"
+    );
     Ok(())
 }
 
