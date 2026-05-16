@@ -4026,6 +4026,48 @@ mod tests {
                 })),
                 explanation: None,
             },
+            SearchHit {
+                doc_id: "mesh-quarantined".to_string(),
+                score: 0.87,
+                source: ScoreSource::SemanticFast,
+                fast_score: Some(0.87),
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                metadata: Some(serde_json::json!({
+                    "mesh": {
+                        "workspaceScopeDecision": "quarantine",
+                        "cachedMaterialId": "mesh_mat_quarantined",
+                        "originWorkspaceId": "wsp_remote_beta",
+                        "producerPeerId": "peer_builder_one",
+                        "materialLane": "curationSignal",
+                        "trustLane": "mesh_curation",
+                        "redactionPosture": "standard"
+                    }
+                })),
+                explanation: None,
+            },
+            SearchHit {
+                doc_id: "mesh-rejected".to_string(),
+                score: 0.86,
+                source: ScoreSource::SemanticFast,
+                fast_score: Some(0.86),
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                metadata: Some(serde_json::json!({
+                    "mesh": {
+                        "workspaceScopeDecision": "reject",
+                        "cachedMaterialId": "mesh_mat_rejected",
+                        "originWorkspaceId": "wsp_remote_beta",
+                        "producerPeerId": "peer_builder_one",
+                        "materialLane": "metadata",
+                        "trustLane": "mesh_metadata",
+                        "redactionPosture": "standard"
+                    }
+                })),
+                explanation: None,
+            },
         ];
 
         let visible = apply_mesh_query_visibility(hits, &mut degraded);
@@ -4034,6 +4076,11 @@ mod tests {
         assert_eq!(visible[0].doc_id, "local-doc");
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0].code, "mesh_workspace_scope_filtered");
+        assert!(
+            degraded[0].message.contains("3 mesh-derived search hits"),
+            "unexpected degradation message: {}",
+            degraded[0].message
+        );
     }
 
     #[test]

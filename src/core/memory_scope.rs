@@ -1031,9 +1031,53 @@ mod tests {
                 "materialLane": "metadata"
             }
         });
+        let quarantined = json!({
+            "mesh": {
+                "workspaceScopeDecision": "quarantine",
+                "cachedMaterialId": "mesh_mat_123",
+                "originWorkspaceId": "wsp_remote_beta",
+                "producerPeerId": "peer_builder_one",
+                "materialLane": "curationSignal",
+                "trustLane": "mesh_curation",
+                "redactionPosture": "standard"
+            }
+        });
+        let rejected = json!({
+            "mesh": {
+                "workspaceScopeDecision": "reject",
+                "cachedMaterialId": "mesh_mat_123",
+                "originWorkspaceId": "wsp_remote_beta",
+                "producerPeerId": "peer_builder_one",
+                "materialLane": "metadata",
+                "trustLane": "mesh_metadata",
+                "redactionPosture": "standard"
+            }
+        });
+        let missing_decision = json!({
+            "mesh": {
+                "cachedMaterialId": "mesh_mat_123",
+                "originWorkspaceId": "wsp_remote_beta",
+                "producerPeerId": "peer_builder_one",
+                "materialLane": "metadata",
+                "trustLane": "mesh_metadata",
+                "redactionPosture": "standard"
+            }
+        });
 
         assert_eq!(
             mesh_query_visibility(Some(&denied)),
+            MeshQueryVisibility::Blocked
+        );
+        assert_eq!(
+            mesh_query_visibility(Some(&quarantined)),
+            MeshQueryVisibility::Blocked
+        );
+        assert_eq!(
+            mesh_query_visibility(Some(&rejected)),
+            MeshQueryVisibility::Blocked
+        );
+        assert_eq!(
+            mesh_query_visibility(Some(&missing_decision)),
             MeshQueryVisibility::Blocked
         );
         assert_eq!(
