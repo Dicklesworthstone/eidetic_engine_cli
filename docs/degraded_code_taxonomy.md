@@ -230,11 +230,13 @@ memory bodies in `sources[]`.
 | `feedback_protected_rules_unavailable` | medium | bd-17c65.10.6 (J6) |
 | `feedback_quarantine_unavailable` | medium | bd-17c65.10.6 (J6) |
 
-#### Why / pack inspection (4)
+#### Why / pack inspection and proof verification (6)
 | Code | Severity | Bead |
 |------|----------|------|
 | `graph_memory_not_in_snapshot` | low | bd-17c65.10.6 (J6) |
 | `graph_query_relative_features_unavailable` | low | bd-17c65.10.6 (J6) |
+| `proof_tool_missing` | info | bd-nnfq4 (SRR2) |
+| `proof_violation_detected` | high | bd-nnfq4 (SRR2) |
 | `verification_evidence_not_found` | low | bd-1zb7k.3 (S2) |
 | `why_pack_selection_unavailable` | low | bd-17c65.10.6 (J6) |
 | `why_result_target_unsupported_source` | medium | bd-17c65.10.6 (J6) |

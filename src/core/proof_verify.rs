@@ -10,6 +10,8 @@ use std::time::Instant;
 use serde::Serialize;
 
 pub const PROOF_CHECK_SCHEMA_V1: &str = "ee.proof_check.v1";
+pub const PROOF_TOOL_MISSING_CODE: &str = "proof_tool_missing";
+pub const PROOF_VIOLATION_DETECTED_CODE: &str = "proof_violation_detected";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -163,9 +165,9 @@ pub fn run_proof_checks(
             let outcome = runner.run(&artifact);
             let status = classify_status(artifact.kind, &outcome);
             if status == ProofCheckStatus::ToolMissing {
-                degraded.push("degraded.proof_tool_missing".to_owned());
+                degraded.push(degraded_code(PROOF_TOOL_MISSING_CODE));
             } else if status == ProofCheckStatus::Violation {
-                degraded.push("degraded.proof_violation_detected".to_owned());
+                degraded.push(degraded_code(PROOF_VIOLATION_DETECTED_CODE));
             }
             ProofCheck {
                 command: command_for_artifact(&artifact),
@@ -193,6 +195,10 @@ pub fn run_proof_checks(
         checks,
         degraded,
     })
+}
+
+fn degraded_code(code: &str) -> String {
+    format!("degraded.{code}")
 }
 
 fn collect_proof_artifacts(
@@ -371,7 +377,7 @@ mod tests {
         assert_eq!(report.schema, PROOF_CHECK_SCHEMA_V1);
         assert_eq!(
             report.degraded,
-            vec!["degraded.proof_tool_missing".to_owned()]
+            vec![degraded_code(PROOF_TOOL_MISSING_CODE)]
         );
         assert!(report.checks.iter().all(|check| {
             check.status == ProofCheckStatus::ToolMissing && !check.artifact.invariants.is_empty()

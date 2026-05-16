@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "proof_violation_detected",
+  "introduced_by": {
+    "bead": "bd-nnfq4",
+    "epic_letter": "SRR2"
+  },
+  "surfaces": [
+    "verify proofs"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "Lean4 or TLC is available, a committed proof artifact is malformed or its modeled invariant no longer holds, and the proof checker exits non-zero.",
+    "setup_commands": [
+      "cp proofs/lean4/pack_determinism.lean /tmp/broken_pack_determinism.lean",
+      "printf '\\n#check missing_symbol\\n' >> proofs/lean4/pack_determinism.lean"
+    ],
+    "invocation": "ee verify proofs --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "proof_violation_detected",
+    "severity": "high",
+    "message_contains": [
+      "proof",
+      "violation",
+      "artifact"
+    ],
+    "repair_contains": "Fix the proof artifact",
+    "repair_string": "Fix the proof artifact or update the modeled invariant, then rerun ee verify proofs --json.",
+    "repair_command_regex": "(?P<cmd>ee verify proofs --json)"
+  }
+}
