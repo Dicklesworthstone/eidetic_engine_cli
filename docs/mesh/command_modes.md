@@ -62,6 +62,8 @@ checks owned by the later SRR6 implementation beads.
 ## Verification
 
 The companion fixture `tests/fixtures/mesh/command_modes.v1.json` is the stable
-machine-readable matrix for parser, docs, and e2e assertions. Runtime tests that
-implement cache/revisable/blocking behavior must cite both this document and the
-SRR6 verification matrix in their closeout evidence.
+machine-readable matrix for parser, docs, and e2e assertions. It pins the mode
+vocabulary, precedence order, surface matrix, response-envelope rules, and
+redaction rules. Runtime tests that implement cache/revisable/blocking behavior
+must cite both this document and the SRR6 verification matrix in their closeout
+evidence.

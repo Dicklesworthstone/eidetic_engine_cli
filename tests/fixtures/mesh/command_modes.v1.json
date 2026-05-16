@@ -50,6 +50,60 @@
     "why",
     "status"
   ],
+  "surfaceMatrix": {
+    "search": {
+      "off": "local index only",
+      "cache": "local index plus authorized cached mesh documents",
+      "revisable": "cache behavior plus revision token metadata when known",
+      "blocking": "unsupported until latency-budgeted peer query lands"
+    },
+    "context": {
+      "off": "local context pack only",
+      "cache": "context pack may include authorized cached mesh material with namespace provenance",
+      "revisable": "immediately usable context pack plus revision token metadata when known",
+      "blocking": "unsupported until latency-budgeted peer query lands"
+    },
+    "pack": {
+      "off": "same local-only behavior as context pack calls",
+      "cache": "same authorized cached material behavior as context",
+      "revisable": "same immediately usable response and revision token behavior as context",
+      "blocking": "same unsupported posture as context"
+    },
+    "why": {
+      "off": "local memory evidence only",
+      "cache": "authorized cached namespace provenance may be explained when present",
+      "revisable": "revision ancestry may be included when present",
+      "blocking": "unsupported until latency-budgeted peer query lands"
+    },
+    "status": {
+      "off": "mesh disabled or local-only posture",
+      "cache": "cache capability and authorized or denied counts only",
+      "revisable": "revision-token capability and stale-revision counts",
+      "blocking": "unsupported until latency-budgeted peer query lands"
+    }
+  },
+  "responseEnvelopeRules": [
+    {
+      "mode": "off",
+      "resultShape": "same as non-mesh local-first response",
+      "degraded": "no mesh-specific degraded entry is emitted merely because mesh is disabled"
+    },
+    {
+      "mode": "cache",
+      "resultShape": "authorized cached material may appear only after current-workspace import approval",
+      "degraded": "denied or quarantined material is counted only in mesh or status posture"
+    },
+    {
+      "mode": "revisable",
+      "resultShape": "first response is usable without waiting for peers and revision metadata is explicit",
+      "degraded": "revision metadata must be redaction-safe and never imply an incomplete result"
+    },
+    {
+      "mode": "blocking",
+      "resultShape": "currently unsupported until hard-budget peer freshness is implemented",
+      "degraded": "commands must fail honestly or report unsupported instead of silently waiting or falling back"
+    }
+  ],
   "redactionRules": [
     "remote workspace paths are never emitted by default",
     "denied or quarantined material never enters search/context/why outputs",

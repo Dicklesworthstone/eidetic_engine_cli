@@ -192,3 +192,6 @@ mod failure_mode_repair_string;
 
 #[path = "contracts/read_pool_status_schema.rs"]
 mod read_pool_status_schema;
+
+#[path = "contracts/mesh_command_modes_contract.rs"]
+mod mesh_command_modes_contract;
