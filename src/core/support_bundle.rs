@@ -67,6 +67,9 @@ const MAX_PERFORMANCE_EXPLAIN_SAMPLES: usize = 16;
 const PACK_REPLAY_SUMMARY_FILE: &str = "pack_replay_summary.json";
 const MAX_PACK_REPLAY_SUMMARY_RECORDS: usize = 16;
 const SWARM_BRIEF_SUMMARY_FILE: &str = "swarm_brief_summary.json";
+const COORDINATION_FALLBACK_SUMMARY_FILE: &str = "coordination_fallback_summary.json";
+const COORDINATION_FALLBACK_LEDGER_FILE: &str = "coordination-fallback-evidence.jsonl";
+const MAX_COORDINATION_FALLBACK_SUMMARY_RECORDS: usize = 16;
 const SINGLEFLIGHT_POSTURE_FILE: &str = "singleflight_posture.json";
 const QOS_LANE_SUMMARY_FILE: &str = "qos_lane_summary.json";
 const TRIAGE_SUMMARY_FILE: &str = "scale_triage_summary.json";
@@ -255,6 +258,7 @@ struct CollectedDiagnostics {
     performance_explain_samples_json: String,
     pack_replay_summary_json: String,
     swarm_brief_summary_json: String,
+    coordination_fallback_summary_json: String,
     singleflight_posture_json: String,
     qos_lane_summary_json: String,
     triage_summary_json: String,
@@ -356,6 +360,10 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         (
             SWARM_BRIEF_SUMMARY_FILE,
             &diagnostics.swarm_brief_summary_json,
+        ),
+        (
+            COORDINATION_FALLBACK_SUMMARY_FILE,
+            &diagnostics.coordination_fallback_summary_json,
         ),
         (
             SINGLEFLIGHT_POSTURE_FILE,
@@ -802,6 +810,7 @@ fn collect_diagnostics(
     let performance_explain_samples_json = performance_explain_samples_json(workspace);
     let pack_replay_summary_json = pack_replay_summary_json(workspace);
     let swarm_brief_summary_json = swarm_brief_summary_json(workspace);
+    let coordination_fallback_summary_json = coordination_fallback_summary_json(workspace);
     let singleflight_posture_json = singleflight_posture_json();
     let qos_lane_summary_json = qos_lane_summary_json(workspace);
     let triage_summary_json = triage_summary_json(&status, &swarm_reports);
@@ -821,6 +830,7 @@ fn collect_diagnostics(
         performance_explain_samples_json,
         pack_replay_summary_json,
         swarm_brief_summary_json,
+        coordination_fallback_summary_json,
         singleflight_posture_json,
         qos_lane_summary_json,
         triage_summary_json,
@@ -1536,6 +1546,10 @@ fn swarm_brief_summary_json(workspace: &Path) -> String {
     stable_json(&super::swarm_brief::collect_swarm_brief_summary(workspace))
 }
 
+fn coordination_fallback_summary_json(workspace: &Path) -> String {
+    stable_json(&collect_coordination_fallback_summary(workspace))
+}
+
 fn singleflight_posture_json() -> String {
     serde_json::to_value(singleflight_posture_report()).map_or_else(
         |error| {
@@ -1788,6 +1802,155 @@ fn pack_ledger_degradation_codes(ledger: &Value) -> Vec<String> {
     codes.sort();
     codes.dedup();
     codes
+}
+
+fn collect_coordination_fallback_summary(workspace: &Path) -> Value {
+    let ledger_path = workspace
+        .join(".ee")
+        .join(COORDINATION_FALLBACK_LEDGER_FILE);
+    let mut ledger = json!({
+        "present": ledger_path.is_file(),
+        "readable": false,
+        "recordCount": 0,
+        "malformedCount": 0,
+        "summarizedRecordCount": 0,
+    });
+
+    if !ledger_path.exists() {
+        return coordination_fallback_summary_value("ledger_missing", ledger, Vec::new());
+    }
+    if !regular_file_no_symlink(&ledger_path) {
+        return coordination_fallback_summary_value("ledger_unreadable", ledger, Vec::new());
+    }
+
+    let Ok(content) = fs::read_to_string(&ledger_path) else {
+        return coordination_fallback_summary_value("ledger_unreadable", ledger, Vec::new());
+    };
+    ledger["readable"] = json!(true);
+
+    let mut records = Vec::new();
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        ledger["recordCount"] = json!(
+            ledger
+                .get("recordCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                + 1
+        );
+        match serde_json::from_str::<Value>(line)
+            .ok()
+            .and_then(|record| summarize_coordination_fallback_record(&record))
+        {
+            Some(summary) if records.len() < MAX_COORDINATION_FALLBACK_SUMMARY_RECORDS => {
+                records.push(summary);
+            }
+            Some(_) => {}
+            None => increment_json_count(&mut ledger, "malformedCount"),
+        }
+    }
+
+    records.sort_by(|left, right| {
+        left.pointer("/evidenceId")
+            .and_then(Value::as_str)
+            .cmp(&right.pointer("/evidenceId").and_then(Value::as_str))
+            .then_with(|| {
+                left.pointer("/contentHash")
+                    .and_then(Value::as_str)
+                    .cmp(&right.pointer("/contentHash").and_then(Value::as_str))
+            })
+    });
+    ledger["summarizedRecordCount"] = json!(records.len());
+
+    coordination_fallback_summary_value("available", ledger, records)
+}
+
+fn coordination_fallback_summary_value(status: &str, ledger: Value, records: Vec<Value>) -> Value {
+    let status_counts = coordination_fallback_counts(&records, "/status");
+    let source_counts = coordination_fallback_counts(&records, "/source/kind");
+    let mut reason_codes = records
+        .iter()
+        .filter_map(|record| record.get("reasonCode").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    reason_codes.sort();
+    reason_codes.dedup();
+
+    json!({
+        "schema": "ee.support_bundle.coordination_fallback_summary.v1",
+        "sourceSchema": "ee.coordination_fallback_evidence.v1",
+        "source": ".ee/coordination-fallback-evidence.jsonl",
+        "status": status,
+        "redactionStatus": "ids_hashes_status_counts_only_no_raw_logs_no_raw_inboxes_no_summary_text",
+        "limits": {
+            "maxRecords": MAX_COORDINATION_FALLBACK_SUMMARY_RECORDS,
+        },
+        "ledger": ledger,
+        "statusCounts": status_counts,
+        "sourceCounts": source_counts,
+        "reasonCodes": reason_codes,
+        "records": records,
+    })
+}
+
+fn summarize_coordination_fallback_record(record: &Value) -> Option<Value> {
+    if record.get("schema").and_then(Value::as_str)
+        != Some("ee.coordination_fallback_ledger_record.v1")
+    {
+        return None;
+    }
+    let content_hash = record.get("contentHash").and_then(Value::as_str)?;
+    let evidence = record.get("evidence")?;
+    if evidence.get("schema").and_then(Value::as_str)
+        != Some("ee.coordination_fallback_evidence.v1")
+    {
+        return None;
+    }
+    if evidence.pointer("/summary/redacted") != Some(&Value::Bool(true))
+        || evidence.pointer("/redaction/rawInboxIncluded") != Some(&Value::Bool(false))
+        || evidence.pointer("/redaction/rawLogIncluded") != Some(&Value::Bool(false))
+    {
+        return None;
+    }
+
+    Some(json!({
+        "evidenceId": evidence.get("evidenceId").and_then(Value::as_str),
+        "capturedAt": evidence.get("capturedAt").and_then(Value::as_str),
+        "status": evidence.get("status").and_then(Value::as_str),
+        "source": {
+            "kind": evidence.pointer("/source/kind").and_then(Value::as_str),
+            "sourceId": evidence.pointer("/source/sourceId").and_then(Value::as_str),
+        },
+        "reasonCode": evidence.get("reasonCode").and_then(Value::as_str),
+        "contentHash": content_hash,
+        "summaryContentHash": evidence.pointer("/summary/contentHash").and_then(Value::as_str),
+        "fallbackActionKind": evidence.pointer("/fallbackAction/kind").and_then(Value::as_str),
+        "linkedBeadIds": coordination_fallback_string_array(evidence.pointer("/links/beadIds")),
+        "linkedVerificationIds": coordination_fallback_string_array(evidence.pointer("/links/verificationIds")),
+        "linkedSupportBundleIds": coordination_fallback_string_array(evidence.pointer("/links/supportBundleIds")),
+    }))
+}
+
+fn coordination_fallback_string_array(value: Option<&Value>) -> Vec<String> {
+    let mut values = value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn coordination_fallback_counts(records: &[Value], pointer: &str) -> BTreeMap<String, u64> {
+    let mut counts = BTreeMap::new();
+    for record in records {
+        if let Some(value) = record.pointer(pointer).and_then(Value::as_str) {
+            *counts.entry(value.to_owned()).or_insert(0) += 1;
+        }
+    }
+    counts
 }
 
 fn blake3_text_hash(value: &str) -> String {
@@ -2246,6 +2409,7 @@ fn planned_files() -> Vec<String> {
         PERFORMANCE_EXPLAIN_SAMPLES_FILE.to_owned(),
         PACK_REPLAY_SUMMARY_FILE.to_owned(),
         SWARM_BRIEF_SUMMARY_FILE.to_owned(),
+        COORDINATION_FALLBACK_SUMMARY_FILE.to_owned(),
         SINGLEFLIGHT_POSTURE_FILE.to_owned(),
         QOS_LANE_SUMMARY_FILE.to_owned(),
         TRIAGE_SUMMARY_FILE.to_owned(),
@@ -2503,6 +2667,97 @@ mod tests {
                 .iter()
                 .any(|reason| reason == "tailscale_metadata")
         );
+    }
+
+    #[test]
+    fn coordination_fallback_summary_redacts_ledger_evidence() -> TestResult {
+        let workspace = unique_test_path("coordination-fallback-summary");
+        let ledger_dir = workspace.join(".ee");
+        fs::create_dir_all(&ledger_dir)
+            .map_err(|error| format!("failed to create ledger dir: {error}"))?;
+
+        let raw_summary =
+            "Agent Mail failed, so the agent recorded fallback evidence without raw inbox bodies.";
+        let evidence = json!({
+            "schema": "ee.coordination_fallback_evidence.v1",
+            "evidenceId": "coord_fallback_test_01",
+            "capturedAt": "2026-05-16T21:06:00Z",
+            "status": "unavailable",
+            "source": {"kind": "agent_mail", "sourceId": "mcp-agent-mail"},
+            "reasonCode": "agent_mail_transport_unavailable",
+            "summary": {
+                "text": raw_summary,
+                "contentHash": blake3_text_hash(raw_summary),
+                "redacted": true
+            },
+            "links": {
+                "beadIds": ["bd-1zb7k.13.2"],
+                "verificationIds": ["rch_cmd_test"],
+                "supportBundleIds": []
+            },
+            "fallbackAction": {
+                "kind": "record_only",
+                "summary": "Preserve redacted fallback evidence.",
+                "command": null,
+                "manualStep": null
+            },
+            "redaction": {
+                "rawInboxIncluded": false,
+                "rawLogIncluded": false,
+                "secretScanApplied": true,
+                "pathPolicy": "labels_only"
+            },
+            "producer": {
+                "schema": "ee.producer.metadata.v1",
+                "sourceSystem": "coordination_fallback",
+                "identity": {"status": "unknown", "agentName": null, "harness": null, "model": null},
+                "run": {"runId": "coord-fallback-test", "sessionId": null, "workspaceFingerprint": "repo:test"},
+                "observedAt": "2026-05-16T21:06:00Z"
+            }
+        });
+        let content_hash = blake3_text_hash(&stable_json(&evidence));
+        let ledger_record = json!({
+            "schema": "ee.coordination_fallback_ledger_record.v1",
+            "contentHash": content_hash,
+            "evidence": evidence,
+        });
+        fs::write(
+            ledger_dir.join(COORDINATION_FALLBACK_LEDGER_FILE),
+            stable_json(&ledger_record),
+        )
+        .map_err(|error| format!("failed to write ledger: {error}"))?;
+
+        let summary = collect_coordination_fallback_summary(&workspace);
+        let summary_text = stable_json(&summary);
+
+        assert_eq!(
+            summary.pointer("/schema"),
+            Some(&json!("ee.support_bundle.coordination_fallback_summary.v1"))
+        );
+        assert_eq!(summary.pointer("/status"), Some(&json!("available")));
+        assert_eq!(summary.pointer("/ledger/recordCount"), Some(&json!(1)));
+        assert_eq!(
+            summary.pointer("/statusCounts/unavailable"),
+            Some(&json!(1))
+        );
+        assert_eq!(summary.pointer("/sourceCounts/agent_mail"), Some(&json!(1)));
+        assert_eq!(
+            summary.pointer("/records/0/evidenceId"),
+            Some(&json!("coord_fallback_test_01"))
+        );
+        assert_eq!(
+            summary.pointer("/records/0/contentHash"),
+            Some(&json!(content_hash))
+        );
+        assert!(
+            summary_text.contains("agent_mail_transport_unavailable"),
+            "summary should keep stable reason code"
+        );
+        assert!(
+            !summary_text.contains(raw_summary),
+            "summary must not include raw fallback summary text"
+        );
+        Ok(())
     }
 
     #[test]

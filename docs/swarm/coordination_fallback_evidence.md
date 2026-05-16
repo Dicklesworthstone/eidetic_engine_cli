@@ -24,7 +24,11 @@ handled. The intended default is labels and counts only.
   agreed CLI should ingest records idempotently by `summary.contentHash`.
 - `ee why` may cite linked coordination evidence when explaining why an agent
   trusted, skipped, or could not verify a source.
-- Support bundles may include redacted counts and hashes for these records.
+- Support bundles include `coordination_fallback_summary.json`, a redacted
+  summary of the local `.ee/coordination-fallback-evidence.jsonl` ledger. It
+  carries status/source counts, reason codes, evidence IDs, linked IDs, and
+  content hashes only; it does not include raw inboxes, raw logs, full paths, or
+  fallback summary text.
 
 ## Fixture
 
