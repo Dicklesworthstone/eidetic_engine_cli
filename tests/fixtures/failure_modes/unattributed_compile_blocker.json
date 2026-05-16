@@ -5,14 +5,7 @@
     "bead": "ownership-posture-e2e",
     "epic_letter": "OP"
   },
-  // NOTE (fresh-eyes review 2026-05-16): This code appears as `fallback_code`
-  // inside the specialized `ee.compile_blocker_attribution.v1` report (used by
-  // ownership posture / swarm brief attribution), **not** as a top-level
-  // entry in `degraded[]` of `ee.response.v2`. Therefore it does not require
-  // a standard failure-mode fixture under the J6 contract until/unless it is
-  // promoted to a general degraded signal. Marked retired for now to avoid
-  // polluting the catalog with internal codes. The e2e harness and golden
-  // snapshots remain the correct home for exercising this fallback.
+  "review_note": "NOTE (fresh-eyes review 2026-05-16): This code appears as `fallback_code` inside the specialized `ee.compile_blocker_attribution.v1` report (used by ownership posture / swarm brief attribution), **not** as a top-level entry in `degraded[]` of `ee.response.v2`. Therefore it does not require a standard failure-mode fixture under the J6 contract until/unless it is promoted to a general degraded signal. Marked retired for now to avoid polluting the catalog with internal codes. The e2e harness and golden snapshots remain the correct home for exercising this fallback.",
   "retired": true,
   "retired_by": {
     "bead": "ownership-posture-fresh-eyes-review",
