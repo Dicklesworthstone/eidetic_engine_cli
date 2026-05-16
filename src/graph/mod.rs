@@ -2945,7 +2945,10 @@ fn typed_graph_snapshot_topology(
             let graph = build_contradiction_subgraph_from_rows(&rows)?;
             typed_directed_graph_snapshot_topology(graph_type, &graph, rows.len())
         }
-        GraphSnapshotType::MemoryLinks => unreachable!("memory_links uses centrality refresh"),
+        GraphSnapshotType::MemoryLinks => Err(GraphError::GraphEngine {
+            operation: "refresh typed graph snapshot",
+            source: "memory_links uses centrality refresh, not standard refresh".to_owned(),
+        }),
         other => Err(GraphError::GraphEngine {
             operation: "refresh typed graph snapshot",
             source: format!("unsupported graph snapshot type {}", other.as_str()),

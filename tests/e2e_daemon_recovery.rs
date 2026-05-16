@@ -25,7 +25,6 @@ const JOB_KIND: &str = "health_check";
 
 #[cfg(unix)]
 #[test]
-#[ignore = "Asupersync daemon runtime times out on CI; needs investigation in eidetic_engine_cli-12et"]
 fn daemon_supervised_job_recovery_after_kill_restart() -> TestResult {
     let artifact_dir = unique_artifact_dir("kill-restart")?;
     let workspace = artifact_dir.join("workspace");
