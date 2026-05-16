@@ -44,8 +44,9 @@ Notes on the matrix:
 - **`<class>`** in the redaction marker is the secret-detector class
   (e.g. `api_key`, `stripe_secret`, `aws_secret_access_key`, `jwt`,
   `password`, `oauth_token`, `private_key`, `ssh_key`,
-  `service_account_json`). Class names are pinned in
-  `src/policy/detectors.rs::SECRET_CLASS_NAMES`.
+  `service_account_json`). Detector classes are emitted by the
+  `src/policy/mod.rs::redact_secret_like_content` pipeline through
+  `SecretRedactionMatch::pattern_id` and `SecretRedactionReport::redacted_reasons`.
 - **"hash only"** for audit details means the `audit.details` JSON
   field is replaced with `{"hash": "blake3:<16-hex>"}` covering the
   canonical-JSON serialization of the original details.
@@ -59,13 +60,20 @@ Notes on the matrix:
 
 ## Per-surface defaults
 
-| Surface           | Default level | Rationale                                                       | Override flag                   |
+| Surface           | Default level | Rationale                                                       | Override status                 |
 |-------------------|---------------|-----------------------------------------------------------------|---------------------------------|
-| `ee export`       | `standard`    | Round-trip safe; preserves shape for re-import.                  | `--redaction <level>`           |
-| `ee handoff create`| `strict`      | Handoff capsule is bound for another agent; default to caution.  | `--redaction <level>`           |
-| `ee context --json`| `minimal`    | Agent-facing; minimal interference with retrieval intent.        | `--redaction <level>`           |
-| `ee support bundle`| `paranoid`   | Third-party-facing; max safety for bug-report uploads.           | `--redaction <level>`           |
-| `ee why`          | `none`        | Forensic surface; must show the actual stored content.           | (no override; see Notes)         |
+| `ee export`       | `standard`    | Round-trip safe; preserves shape for re-import.                  | current `--redaction <level>`   |
+| `ee handoff create`| `standard`   | Handoff capsules are redaction-safe artifacts; stricter defaults remain planned K6 work. | planned `--redaction <level>`   |
+| `ee context --json`| `minimal`    | Agent-facing; minimal interference with retrieval intent.        | planned `--redaction <level>`   |
+| `ee support bundle`| `paranoid`   | Third-party-facing; max safety for bug-report uploads.           | planned `--redaction <level>`; current CLI exposes redacted/raw mode flags |
+| `ee why`          | `none`        | Forensic surface; must show the actual stored content.           | no override planned             |
+
+Current implementation note: as of this K6 slice, the canonical five-level
+`--redaction <level>` CLI vocabulary is implemented for export/backup-style
+JSONL artifacts. Handoff, context, and support-bundle level flags are part of
+the K6 acceptance target, but their public CLI override flags are not all live
+yet. Documentation must keep this distinction visible until the implementation
+matrix catches up.
 
 The planned per-workspace override shape is:
 

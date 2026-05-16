@@ -40,7 +40,7 @@ const CANONICAL_LEVELS: &[&str] = &["none", "minimal", "standard", "strict", "pa
 /// list — it has no override.
 const SURFACES_WITH_DEFAULTS: &[(&str, &str)] = &[
     ("ee export", "standard"),
-    ("ee handoff create", "strict"),
+    ("ee handoff create", "standard"),
     ("ee context --json", "minimal"),
     ("ee support bundle", "paranoid"),
 ];
@@ -93,6 +93,27 @@ fn doc_declares_per_surface_defaults_in_canonical_table() -> TestResult {
 }
 
 #[test]
+fn doc_distinguishes_current_and_planned_redaction_flags() -> TestResult {
+    let doc = read_doc()?;
+
+    for required_phrase in [
+        "current `--redaction <level>`",
+        "planned `--redaction <level>`",
+        "Handoff, context, and support-bundle level flags are part of",
+        "not all live yet",
+    ] {
+        ensure(
+            doc.contains(required_phrase),
+            format!(
+                "docs/redaction_levels.md missing current/planned flag language: `{required_phrase}`"
+            ),
+        )?;
+    }
+
+    Ok(())
+}
+
+#[test]
 fn doc_declares_round_trip_symmetry_property() -> TestResult {
     let doc = read_doc()?;
     for required_phrase in [
@@ -137,6 +158,46 @@ fn doc_cross_references_test_event_kind() -> TestResult {
             || doc.contains("kind: \"redaction_apply\"")
             || doc.contains("`redaction_apply`"),
         "docs/redaction_levels.md must declare the canonical test-event `kind: \"redaction_apply\"`",
+    )
+}
+
+#[test]
+fn doc_references_existing_source_files() -> TestResult {
+    let doc = read_doc()?;
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut checked = Vec::new();
+
+    for token in doc.split(|ch: char| {
+        ch.is_whitespace()
+            || matches!(
+                ch,
+                '`' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';' | ':' | '"' | '\''
+            )
+    }) {
+        let Some(relative) = token.strip_prefix("src/") else {
+            continue;
+        };
+        let path = relative.split("::").next().unwrap_or(relative);
+        if !path.ends_with(".rs") {
+            continue;
+        }
+        let relative_path = PathBuf::from("src").join(path);
+        if checked.contains(&relative_path) {
+            continue;
+        }
+        ensure(
+            manifest_dir.join(&relative_path).is_file(),
+            format!(
+                "docs/redaction_levels.md references nonexistent source file `{}`",
+                relative_path.display()
+            ),
+        )?;
+        checked.push(relative_path);
+    }
+
+    ensure(
+        !checked.is_empty(),
+        "docs/redaction_levels.md should cross-reference at least one source file",
     )
 }
 
