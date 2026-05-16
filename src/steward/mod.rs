@@ -1915,6 +1915,9 @@ fn structural_decay_graph(memory_ids: &BTreeSet<String>, links: &[StoredMemoryLi
         graph.add_node(memory_id);
     }
     for link in links {
+        if !crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref()) {
+            continue;
+        }
         if !memory_ids.contains(&link.src_memory_id) || !memory_ids.contains(&link.dst_memory_id) {
             continue;
         }
@@ -5630,6 +5633,47 @@ mod tests {
             .map_err(|error| error.to_string())
     }
 
+    fn stored_score_memory_link(
+        link_id: &str,
+        src_memory_id: &str,
+        dst_memory_id: &str,
+        metadata_json: Option<String>,
+    ) -> StoredMemoryLink {
+        StoredMemoryLink {
+            id: link_id.to_owned(),
+            src_memory_id: src_memory_id.to_owned(),
+            dst_memory_id: dst_memory_id.to_owned(),
+            relation: MemoryLinkRelation::Supports.as_str().to_owned(),
+            weight: 1.0,
+            confidence: 1.0,
+            directed: false,
+            evidence_count: 1,
+            last_reinforced_at: None,
+            source: MemoryLinkSource::Agent.as_str().to_owned(),
+            created_at: "2026-05-16T00:00:00Z".to_owned(),
+            created_by: Some("score-decay-test".to_owned()),
+            metadata_json,
+        }
+    }
+
+    fn denied_mesh_score_link_metadata() -> String {
+        json!({
+            "mesh": {
+                "workspaceScopeDecision": "deny",
+                "materialLane": "graphSignal",
+                "cachedMaterialId": "mesh_steward_denied",
+                "originWorkspaceId": "wsp_remote_private",
+                "originWorkspaceLabel": "/Users/alice/private/repo",
+                "producerPeerId": "peer_builder_one",
+                "producerPeerLabel": "/Users/alice/private/peer-agent",
+                "importDecisionId": "mesh_steward_decision_denied",
+                "trustLane": "quarantined",
+                "redactionPosture": "metadata_only"
+            }
+        })
+        .to_string()
+    }
+
     #[test]
     fn subsystem_name_is_stable() {
         assert_eq!(subsystem_name(), "steward");
@@ -6458,6 +6502,56 @@ mod tests {
             structural_report.data_json()["decay"]["structuralAdjustments"].is_array(),
             true,
             "structural adjustments json",
+        )
+    }
+
+    #[test]
+    fn score_decay_structural_graph_ignores_denied_mesh_links() -> TestResult {
+        let memory_ids = [
+            SCORE_MEMORY_A.to_owned(),
+            SCORE_MEMORY_B.to_owned(),
+            "mem_scoredecay0000000000000003".to_owned(),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        let allowed_links = vec![
+            stored_score_memory_link(
+                "link_00000000000000000000000151",
+                SCORE_MEMORY_A,
+                SCORE_MEMORY_B,
+                None,
+            ),
+            stored_score_memory_link(
+                "link_00000000000000000000000152",
+                SCORE_MEMORY_B,
+                "mem_scoredecay0000000000000003",
+                None,
+            ),
+        ];
+        let denied_links = vec![
+            allowed_links[0].clone(),
+            stored_score_memory_link(
+                "link_00000000000000000000000153",
+                SCORE_MEMORY_B,
+                "mem_scoredecay0000000000000003",
+                Some(denied_mesh_score_link_metadata()),
+            ),
+        ];
+
+        let allowed_graph = structural_decay_graph(&memory_ids, &allowed_links);
+        let denied_graph = structural_decay_graph(&memory_ids, &denied_links);
+
+        ensure(
+            compute_structural_decay_adjustment(&allowed_graph, SCORE_MEMORY_B)
+                .is_articulation_point,
+            true,
+            "visible local link can make middle memory structural",
+        )?;
+        ensure(
+            compute_structural_decay_adjustment(&denied_graph, SCORE_MEMORY_B)
+                .is_articulation_point,
+            false,
+            "denied mesh link is ignored for structural decay",
         )
     }
 
