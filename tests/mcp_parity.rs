@@ -108,6 +108,50 @@ fn run_mcp_tool_call(name: &str, arguments: JsonValue) -> Result<JsonValue, Stri
     Ok(response)
 }
 
+fn run_mcp_tools_list() -> Result<JsonValue, String> {
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list"
+    });
+    ee::mcp::handle_json_rpc_message(&request)
+        .ok_or_else(|| "MCP handler returned None for tools/list".to_owned())
+}
+
+fn remember_test_memory(dir: &Path, content: &str) -> Result<String, String> {
+    let (remember_exit, remember_stdout, remember_stderr) = run_cli(vec![
+        OsString::from("ee"),
+        OsString::from("remember"),
+        OsString::from(content),
+        OsString::from("--workspace"),
+        OsString::from(dir),
+        OsString::from("--kind"),
+        OsString::from("rule"),
+        OsString::from("--level"),
+        OsString::from("procedural"),
+        OsString::from("--json"),
+    ]);
+    ensure(
+        remember_exit == ee::models::ProcessExitCode::Success,
+        format!(
+            "seed remember failed: {}",
+            if remember_stderr.is_empty() {
+                remember_stdout.as_str()
+            } else {
+                remember_stderr.as_str()
+            }
+        ),
+    )?;
+
+    let remember_json: JsonValue = serde_json::from_str(&remember_stdout)
+        .map_err(|e| format!("seed remember JSON parse error: {e}"))?;
+    remember_json
+        .pointer("/data/memory_id")
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("seed remember response missing data.memory_id: {remember_json}"))
+}
+
 fn extract_mcp_tool_text(response: &JsonValue) -> Result<String, String> {
     response
         .get("result")
@@ -294,22 +338,7 @@ fn mcp_parity_search_command() -> TestResult {
     let dir = scenario_dir("search")?;
     init_workspace(&dir)?;
 
-    let (remember_exit, _stdout, _stderr) = run_cli(vec![
-        OsString::from("ee"),
-        OsString::from("remember"),
-        OsString::from("Always run cargo test before release."),
-        OsString::from("--workspace"),
-        OsString::from(&dir),
-        OsString::from("--kind"),
-        OsString::from("rule"),
-        OsString::from("--level"),
-        OsString::from("procedural"),
-        OsString::from("--json"),
-    ]);
-    ensure(
-        remember_exit == ee::models::ProcessExitCode::Success,
-        "seed remember failed",
-    )?;
+    remember_test_memory(&dir, "Always run cargo test before release.")?;
 
     let (cli_exit, cli_stdout, _cli_stderr) = run_cli(vec![
         OsString::from("ee"),
@@ -345,22 +374,7 @@ fn mcp_parity_context_command() -> TestResult {
     let dir = scenario_dir("context")?;
     init_workspace(&dir)?;
 
-    let (remember_exit, _stdout, _stderr) = run_cli(vec![
-        OsString::from("ee"),
-        OsString::from("remember"),
-        OsString::from("Run cargo fmt --check before committing."),
-        OsString::from("--workspace"),
-        OsString::from(&dir),
-        OsString::from("--kind"),
-        OsString::from("rule"),
-        OsString::from("--level"),
-        OsString::from("procedural"),
-        OsString::from("--json"),
-    ]);
-    ensure(
-        remember_exit == ee::models::ProcessExitCode::Success,
-        "seed remember failed",
-    )?;
+    remember_test_memory(&dir, "Run cargo fmt --check before committing.")?;
 
     let (cli_exit, cli_stdout, _cli_stderr) = run_cli(vec![
         OsString::from("ee"),
@@ -388,6 +402,38 @@ fn mcp_parity_context_command() -> TestResult {
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
     assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "context")
+}
+
+/// Parity test: `ee why <memory-id> --json` vs `ee_why` MCP tool
+#[test]
+fn mcp_parity_why_command() -> TestResult {
+    let dir = scenario_dir("why")?;
+    init_workspace(&dir)?;
+    let memory_id = remember_test_memory(&dir, "Explain why this release rule was selected.")?;
+
+    let (cli_exit, cli_stdout, _cli_stderr) = run_cli(vec![
+        OsString::from("ee"),
+        OsString::from("why"),
+        OsString::from(&memory_id),
+        OsString::from("--workspace"),
+        OsString::from(&dir),
+        OsString::from("--json"),
+    ]);
+    ensure(
+        cli_exit == ee::models::ProcessExitCode::Success,
+        "CLI why failed",
+    )?;
+
+    let mcp_response = run_mcp_tool_call(
+        "ee_why",
+        json!({
+            "workspace": dir.to_string_lossy(),
+            "memoryId": memory_id
+        }),
+    )?;
+    let mcp_text = extract_mcp_tool_text(&mcp_response)?;
+
+    assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "why")
 }
 
 /// Parity test: `ee remember --dry-run --json` vs `ee_remember` MCP tool (default dry-run)
@@ -471,6 +517,41 @@ fn mcp_manifest_covers_walking_skeleton_commands() -> TestResult {
         ensure(
             tool_names.contains(&cmd),
             format!("manifest missing walking-skeleton tool: {cmd}"),
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Verify MCP tools/list covers every tool with an explicit parity test here.
+#[test]
+fn mcp_tools_list_covers_parity_tested_tools() -> TestResult {
+    let response = run_mcp_tools_list()?;
+    let tools = response
+        .get("result")
+        .and_then(|result| result.get("tools"))
+        .and_then(JsonValue::as_array)
+        .ok_or("tools/list response missing result.tools array")?;
+
+    let tool_names: Vec<&str> = tools
+        .iter()
+        .filter_map(|t| t.get("name").and_then(JsonValue::as_str))
+        .collect();
+
+    let parity_tested_tools = [
+        "ee_status",
+        "ee_health",
+        "ee_capabilities",
+        "ee_search",
+        "ee_context",
+        "ee_remember",
+        "ee_why",
+    ];
+
+    for tool in parity_tested_tools {
+        ensure(
+            tool_names.contains(&tool),
+            format!("tools/list missing parity-tested tool: {tool}"),
         )?;
     }
 

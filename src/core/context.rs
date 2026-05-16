@@ -58,8 +58,7 @@ use crate::db::{
 use crate::models::degradation::{GRAPH_PPR_EMPTY_SEED_SET_CODE, GRAPH_PPR_SNAPSHOT_STALE_CODE};
 use crate::models::{
     MemoryId, MemoryScope, MemoryScopeStats, PackId, ProvenanceUri, RedactionLevel, TrustClass,
-    UnitScore,
-    WorkspaceId, posture_for_trust_class,
+    UnitScore, WorkspaceId, posture_for_trust_class,
 };
 use crate::pack::{
     ConflictKind, ConflictRecommendedAction, ConsensusConflictReport, ContextPackProfile,
@@ -7265,9 +7264,7 @@ mod tests {
 
     #[test]
     fn pack_l2_cache_key_tracks_canonical_inputs() -> Result<(), String> {
-        use super::{
-            ContextPackOutputOptions, PackL2CacheKeyInput, compute_pack_l2_cache_key,
-        };
+        use super::{ContextPackOutputOptions, PackL2CacheKeyInput, compute_pack_l2_cache_key};
         use crate::models::{MemoryScope, RedactionLevel};
         use crate::pack::{
             ContextPackProfile, ContextRequest, ContextRequestInput, PackResourceProfile,

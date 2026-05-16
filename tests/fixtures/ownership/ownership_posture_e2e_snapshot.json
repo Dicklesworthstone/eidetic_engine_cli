@@ -1,0 +1,115 @@
+{
+  "schema": "ee.ownership_snapshot.v1",
+  "generatedAt": "2026-05-15T06:20:00Z",
+  "reservations": [
+    {
+      "pathPattern": "src/graph/hits.rs",
+      "holderAgent": "NobleStork",
+      "exclusive": true,
+      "expiresAt": "2026-05-15T10:16:11Z",
+      "beadId": "bd-1o99v",
+      "threadId": "bd-1o99v",
+      "provenance": {
+        "sourceKind": "agent_mail_reservation",
+        "sourceId": "reservation-active-exact",
+        "contentHash": "blake3:reservationactiveexact"
+      }
+    },
+    {
+      "pathPattern": "src/graph/*.rs",
+      "holderAgent": "PriorAgent",
+      "exclusive": true,
+      "expiresAt": "2026-05-15T05:00:00Z",
+      "beadId": "bd-expired",
+      "threadId": "bd-expired",
+      "provenance": {
+        "sourceKind": "agent_mail_reservation",
+        "sourceId": "reservation-expired-overlap",
+        "contentHash": "blake3:reservationexpiredoverlap"
+      }
+    },
+    {
+      "pathPattern": "src/graph/*.rs",
+      "holderAgent": "BroadObserver",
+      "exclusive": false,
+      "expiresAt": "2026-05-15T11:00:00Z",
+      "beadId": "bd-graph-observe",
+      "threadId": "bd-graph-observe",
+      "provenance": {
+        "sourceKind": "agent_mail_reservation",
+        "sourceId": "reservation-active-overlap",
+        "contentHash": "blake3:reservationactiveoverlap"
+      }
+    }
+  ],
+  "beads": [
+    {
+      "beadId": "bd-1o99v",
+      "title": "HITS snapshot persistence",
+      "status": "in_progress",
+      "assignee": "NobleStork",
+      "labels": ["graph", "ownership-posture"],
+      "filePatterns": ["src/graph/hits.rs", "tests/hits*.rs"],
+      "provenance": {
+        "sourceKind": "beads_issue",
+        "sourceId": "bd-1o99v",
+        "contentHash": "blake3:beadbd1o99v"
+      }
+    },
+    {
+      "beadId": "bd-db-active",
+      "title": "DB writer surface",
+      "status": "in_progress",
+      "assignee": "BlueLake",
+      "labels": ["db", "ownership-posture"],
+      "filePatterns": ["src/db/mod.rs"],
+      "provenance": {
+        "sourceKind": "beads_issue",
+        "sourceId": "bd-db-active",
+        "contentHash": "blake3:beadbddbactive"
+      }
+    },
+    {
+      "beadId": "bd-docs-open",
+      "title": "Unclaimed docs follow-up",
+      "status": "open",
+      "assignee": null,
+      "labels": ["docs", "ownership-posture"],
+      "filePatterns": ["docs/swarm/*.md"],
+      "provenance": {
+        "sourceKind": "beads_issue",
+        "sourceId": "bd-docs-open",
+        "contentHash": "blake3:beadbddocsopen"
+      }
+    }
+  ],
+  "dirtyFiles": [
+    {
+      "path": "src/graph/hits.rs",
+      "status": "modified",
+      "provenance": {
+        "sourceKind": "git_status",
+        "sourceId": "working_tree",
+        "contentHash": "blake3:dirtygraphhits"
+      }
+    },
+    {
+      "path": "src/db/mod.rs",
+      "status": "modified",
+      "provenance": {
+        "sourceKind": "git_status",
+        "sourceId": "working_tree",
+        "contentHash": "blake3:dirtydbmod"
+      }
+    },
+    {
+      "path": "README.md",
+      "status": "modified",
+      "provenance": {
+        "sourceKind": "git_status",
+        "sourceId": "working_tree",
+        "contentHash": "blake3:dirtyreadme"
+      }
+    }
+  ]
+}

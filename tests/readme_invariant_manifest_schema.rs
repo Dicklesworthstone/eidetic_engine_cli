@@ -215,7 +215,7 @@ fn validate_verify(entry: &Invariant<'_>, beads: &BeadsIndex, failures: &mut Vec
         Some("defer_bead") => {
             match inline_str(entry.verify, "id") {
                 Some(id) if id.starts_with("bd-") => match beads.status_for(&id) {
-                    Some(status) if status == "closed" => failures.push(format!(
+                    Some("closed") => failures.push(format!(
                         "{} defer_bead {id} is closed — migrate this manifest entry to a real test path or a different open bead",
                         entry.id
                     )),
