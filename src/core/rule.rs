@@ -2009,6 +2009,9 @@ pub fn import_playbook(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("ee playbook import");
+    if !options.dry_run {
+        preflight_playbook_import_candidates(&document, &prepared, &existing_contents, actor)?;
+    }
 
     let mut imported_count = 0_usize;
     let mut duplicate_count = 0_usize;
@@ -2255,6 +2258,56 @@ fn validate_playbook_document(document: &PlaybookPortableDocument) -> Result<(),
             ),
             repair: Some("recreate the playbook with `ee playbook export --out <path>`".to_owned()),
         });
+    }
+    Ok(())
+}
+
+fn preflight_playbook_import_candidates(
+    document: &PlaybookPortableDocument,
+    prepared: &PreparedRuleRead,
+    existing_contents: &BTreeSet<String>,
+    actor: &str,
+) -> Result<(), DomainError> {
+    let mut seen_contents = existing_contents.clone();
+    for rule in &document.rules {
+        let normalized = normalize_rule_text(&rule.content);
+        if seen_contents.contains(&normalized) {
+            continue;
+        }
+
+        let mut issue_codes = Vec::new();
+        let Some(maturity) = portable_import_maturity(rule, &mut issue_codes) else {
+            continue;
+        };
+        prepare_rule_add(&RuleAddOptions {
+            workspace_path: &prepared.workspace_path,
+            database_path: Some(&prepared.database_path),
+            content: &rule.content,
+            scope: &rule.scope,
+            scope_pattern: rule.scope_pattern.as_deref(),
+            maturity,
+            confidence: Some(rule.confidence),
+            utility: rule.utility,
+            importance: rule.importance,
+            trust_class: &rule.trust_class,
+            protected: rule.protected,
+            tags: &rule.tags,
+            source_memory_ids: &[],
+            dry_run: true,
+            actor: Some(actor),
+        })
+        .map_err(|error| DomainError::Import {
+            message: format!(
+                "playbook rule {} is invalid: {}",
+                rule.source_rule_id.as_deref().unwrap_or("<portable>"),
+                error.message()
+            ),
+            repair: Some(
+                "fix the playbook source or recreate it with `ee playbook export --out <path>`"
+                    .to_owned(),
+            ),
+        })?;
+        seen_contents.insert(normalized);
     }
     Ok(())
 }
@@ -3926,6 +3979,95 @@ mod tests {
         ensure(
             err.message().contains("rule_count 2 does not match 1"),
             "error should describe rule_count mismatch",
+        )
+    }
+
+    #[test]
+    fn playbook_import_preflights_all_rules_before_persisting() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = stable_workspace_id(workspace_path);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("playbook-import-preflight".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let mut valid_rule = PlaybookPortableRule {
+            source_rule_id: Some("rule_01234567890123456789012345".to_owned()),
+            content: "Run cargo fmt --check before release.".to_owned(),
+            maturity: RuleMaturity::Candidate.as_str().to_owned(),
+            scope: RuleScope::Workspace.as_str().to_owned(),
+            scope_pattern: None,
+            trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+            protected: false,
+            confidence: 0.8,
+            utility: 0.5,
+            importance: 0.6,
+            tags: vec!["release".to_owned()],
+            source_memory_ids: Vec::new(),
+            source_memory_count: 0,
+            created_at: Some("2026-05-16T00:00:00Z".to_owned()),
+            updated_at: None,
+        };
+        let mut invalid_rule = valid_rule.clone();
+        invalid_rule.source_rule_id = Some("rule_22222222222222222222222222".to_owned());
+        invalid_rule.content = "Use directory-local release guidance.".to_owned();
+        invalid_rule.scope = RuleScope::Directory.as_str().to_owned();
+        invalid_rule.scope_pattern = None;
+        valid_rule.source_rule_id = Some("rule_11111111111111111111111111".to_owned());
+        let document = PlaybookPortableDocument {
+            schema: PLAYBOOK_PORTABLE_SCHEMA_V1.to_owned(),
+            exported_at: "2026-05-16T00:00:00Z".to_owned(),
+            ee_version: env!("CARGO_PKG_VERSION").to_owned(),
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            workspace_path: "/source".to_owned(),
+            rule_count: 2,
+            rules: vec![valid_rule, invalid_rule],
+        };
+        let source_path = workspace_path.join("invalid-playbook.json");
+        fs::write(
+            &source_path,
+            serde_json::to_vec_pretty(&document).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let err = match import_playbook(&PlaybookImportOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            source_path: &source_path,
+            dry_run: false,
+            actor: Some("test"),
+        }) {
+            Ok(_) => return Err("invalid later rule should reject import".to_owned()),
+            Err(err) => err,
+        };
+
+        ensure(
+            matches!(err, DomainError::Import { .. }),
+            "expected import error",
+        )?;
+        ensure(
+            err.message().contains("scope `directory` requires"),
+            "error should include invalid rule reason",
+        )?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let rules = connection
+            .list_procedural_rules(&workspace_id, None, None, true)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            rules.is_empty(),
+            "preflight failure must not persist valid prefix",
         )
     }
 
