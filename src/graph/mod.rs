@@ -1854,7 +1854,10 @@ fn graph_projection_links(
         .map_err(|error| GraphError::storage("query memory links", error))?;
     Ok(links
         .into_iter()
-        .filter(|link| graph_link_matches_options(link, options))
+        .filter(|link| {
+            graph_link_matches_options(link, options)
+                && graph_link_mesh_metadata_visible(link.metadata_json.as_deref())
+        })
         .collect())
 }
 
@@ -1865,6 +1868,71 @@ fn graph_link_matches_options(link: &StoredMemoryLink, options: &ProjectionOptio
         && options
             .min_confidence
             .is_none_or(|min_confidence| link.confidence >= min_confidence)
+}
+
+fn graph_link_mesh_metadata_visible(metadata_json: Option<&str>) -> bool {
+    let Some(metadata_json) = metadata_json else {
+        return true;
+    };
+    let Ok(metadata) = serde_json::from_str::<serde_json::Value>(metadata_json) else {
+        return false;
+    };
+    if !graph_link_metadata_contains_mesh_marker(&metadata) {
+        return true;
+    }
+    graph_link_mesh_string(
+        &metadata,
+        &["workspaceScopeDecision", "workspace_scope_decision"],
+    ) == Some("allow")
+        && graph_link_mesh_string(&metadata, &["cachedMaterialId", "cached_material_id"]).is_some()
+        && graph_link_mesh_string(&metadata, &["originWorkspaceId", "origin_workspace_id"])
+            .is_some()
+        && graph_link_mesh_string(&metadata, &["producerPeerId", "producer_peer_id"]).is_some()
+        && graph_link_mesh_string(&metadata, &["materialLane", "material_lane"])
+            .is_some_and(graph_link_mesh_lane_is_known)
+        && graph_link_mesh_string(&metadata, &["trustLane", "trust_lane"]).is_some()
+        && graph_link_mesh_string(&metadata, &["redactionPosture", "redaction_posture"]).is_some()
+}
+
+fn graph_link_metadata_contains_mesh_marker(metadata: &serde_json::Value) -> bool {
+    [
+        "mesh",
+        "workspaceScopeDecision",
+        "workspace_scope_decision",
+        "cachedMaterialId",
+        "cached_material_id",
+        "originWorkspaceId",
+        "origin_workspace_id",
+        "producerPeerId",
+        "producer_peer_id",
+    ]
+    .iter()
+    .any(|key| metadata.get(key).is_some())
+}
+
+fn graph_link_mesh_string<'a>(metadata: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| graph_link_json_string(metadata, key))
+        .or_else(|| {
+            metadata.get("mesh").and_then(|mesh| {
+                keys.iter()
+                    .find_map(|key| graph_link_json_string(mesh, key))
+            })
+        })
+}
+
+fn graph_link_json_string<'a>(metadata: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    metadata
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn graph_link_mesh_lane_is_known(lane: &str) -> bool {
+    matches!(
+        lane,
+        "metadata" | "body" | "embedding" | "graphSignal" | "curationSignal"
+    )
 }
 
 fn add_projection_edge(
@@ -6353,6 +6421,19 @@ mod tests {
         weight: f32,
         confidence: f32,
     ) -> TestResult {
+        insert_link_with_metadata(connection, id, src, dst, directed, weight, confidence, None)
+    }
+
+    fn insert_link_with_metadata(
+        connection: &DbConnection,
+        id: &str,
+        src: &str,
+        dst: &str,
+        directed: bool,
+        weight: f32,
+        confidence: f32,
+        metadata_json: Option<String>,
+    ) -> TestResult {
         connection
             .insert_memory_link(
                 id,
@@ -6367,7 +6448,7 @@ mod tests {
                     last_reinforced_at: Some("2026-04-29T20:00:00Z".to_string()),
                     source: MemoryLinkSource::Agent,
                     created_by: Some("agent:test".to_string()),
-                    metadata_json: None,
+                    metadata_json,
                 },
             )
             .map_err(|error| error.to_string())
@@ -6538,6 +6619,100 @@ mod tests {
         assert!(!projection.graph.has_edge(MEMORY_C, MEMORY_A));
 
         connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn projection_filters_non_allowed_mesh_link_metadata() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000024",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+        insert_link_with_metadata(
+            &connection,
+            "link_00000000000000000000000025",
+            MEMORY_B,
+            MEMORY_C,
+            true,
+            0.9,
+            0.9,
+            Some(mesh_link_metadata("allow", "metadata", true)),
+        )?;
+        insert_link_with_metadata(
+            &connection,
+            "link_00000000000000000000000026",
+            MEMORY_C,
+            MEMORY_A,
+            true,
+            0.9,
+            0.9,
+            Some(mesh_link_metadata("deny", "metadata", true)),
+        )?;
+        insert_link_with_metadata(
+            &connection,
+            "link_00000000000000000000000027",
+            MEMORY_A,
+            MEMORY_C,
+            true,
+            0.9,
+            0.9,
+            Some(mesh_link_metadata("quarantine", "curationSignal", true)),
+        )?;
+        insert_link_with_metadata(
+            &connection,
+            "link_00000000000000000000000028",
+            MEMORY_C,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+            Some(mesh_link_metadata("allow", "metadata", false)),
+        )?;
+
+        let projection = graph_result(super::build_memory_graph(
+            &connection,
+            &super::ProjectionOptions::default(),
+        ))?;
+
+        assert_eq!(projection.node_count, 3);
+        assert_eq!(projection.edge_count, 2);
+        assert!(projection.graph.has_edge(MEMORY_A, MEMORY_B));
+        assert!(projection.graph.has_edge(MEMORY_B, MEMORY_C));
+        assert!(!projection.graph.has_edge(MEMORY_C, MEMORY_A));
+        assert!(!projection.graph.has_edge(MEMORY_A, MEMORY_C));
+        assert!(!projection.graph.has_edge(MEMORY_C, MEMORY_B));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    fn mesh_link_metadata(
+        workspace_scope_decision: &str,
+        material_lane: &str,
+        complete: bool,
+    ) -> String {
+        let mut mesh = serde_json::json!({
+            "workspaceScopeDecision": workspace_scope_decision,
+            "workspaceId": "wsp_local_alpha",
+            "cachedMaterialId": "mesh_link_123",
+            "originWorkspaceId": "wsp_remote_beta",
+            "originWorkspaceLabel": "/Users/alice/private/repo",
+            "producerPeerId": "peer_builder_one",
+            "producerPeerLabel": "/Users/alice/private/peer-agent",
+            "materialLane": material_lane,
+            "importDecisionId": "mesh_dec_456",
+            "trustLane": "mesh_metadata",
+            "redactionPosture": "standard"
+        });
+        if !complete && let Some(object) = mesh.as_object_mut() {
+            object.remove("trustLane");
+        }
+        serde_json::json!({ "mesh": mesh }).to_string()
     }
 
     #[cfg(feature = "graph")]
