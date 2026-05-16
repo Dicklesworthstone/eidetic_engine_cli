@@ -33,6 +33,7 @@ pub mod effect;
 pub mod feedback;
 pub mod focus;
 pub mod graph_audit;
+pub mod graph_memory_budget;
 pub mod graph_telemetry;
 pub mod handoff;
 pub mod health;
