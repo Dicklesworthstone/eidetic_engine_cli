@@ -1685,10 +1685,10 @@ fn find_case_insensitive_spans(content: &str, needle: &str) -> Vec<(usize, usize
         } else {
             // Handle edge case where a match occurs across character boundaries
             // by advancing to the next valid character boundary.
-            offset = content[start..]
-                .chars()
-                .next()
-                .map_or(content.len(), |c| start + c.len_utf8());
+            offset += 1;
+            while offset < content.len() && !content.is_char_boundary(offset) {
+                offset += 1;
+            }
         }
     }
     spans

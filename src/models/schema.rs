@@ -243,8 +243,8 @@ pub fn is_known_schema(schema: &str) -> bool {
 pub fn parse_schema_parts(schema: &str) -> Option<(&str, &str, &str)> {
     let stripped = schema.strip_prefix("ee.")?;
     let dot_v_pos = stripped.rfind(".v")?;
-    let name = &stripped[..dot_v_pos];
-    let version = &stripped[dot_v_pos + 2..];
+    let name = stripped.get(..dot_v_pos)?;
+    let version = stripped.get(dot_v_pos + 2..)?;
     if version.is_empty() || !version.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }

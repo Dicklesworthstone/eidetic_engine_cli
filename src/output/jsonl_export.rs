@@ -97,18 +97,29 @@ fn redact_paths_in_content(content: &str) -> String {
                 .map(|line| {
                     if line.contains(prefix) {
                         let mut output = String::new();
-                        let mut chars = line.chars().peekable();
-                        while let Some(c) = chars.next() {
-                            if line[output.len()..].starts_with(prefix) {
+                        let mut cursor = 0;
+                        while cursor < line.len() {
+                            let remaining = &line[cursor..];
+                            if remaining.starts_with(prefix) {
                                 output.push_str(REDACTED_PATH_PLACEHOLDER);
-                                while let Some(&next) = chars.peek() {
+                                cursor += prefix.len();
+                                while cursor < line.len() {
+                                    let next = line[cursor..]
+                                        .chars()
+                                        .next()
+                                        .expect("cursor stays on a character boundary");
                                     if next.is_whitespace() || next == '"' || next == '\'' {
                                         break;
                                     }
-                                    chars.next();
+                                    cursor += next.len_utf8();
                                 }
                             } else {
+                                let c = remaining
+                                    .chars()
+                                    .next()
+                                    .expect("cursor stays on a character boundary");
                                 output.push(c);
+                                cursor += c.len_utf8();
                             }
                         }
                         output
@@ -153,7 +164,9 @@ pub fn redact_identifier(id: &str, level: RedactionLevel) -> String {
         RedactionLevel::None | RedactionLevel::Minimal | RedactionLevel::Strict => id.to_owned(),
         RedactionLevel::Standard => {
             if id.len() > 8 {
-                format!("{}...{}", &id[..4], &id[id.len() - 4..])
+                let prefix = id.get(..4).unwrap_or("????");
+                let suffix = id.get(id.len() - 4..).unwrap_or("????");
+                format!("{prefix}...{suffix}")
             } else {
                 id.to_owned()
             }
@@ -763,6 +776,15 @@ mod tests {
             redact_path("/usr/local/bin", RedactionLevel::Standard),
             "/usr/local/bin".to_owned(),
             "standard preserves system paths",
+        )
+    }
+
+    #[test]
+    fn redact_content_standard_handles_short_path_before_more_text() -> TestResult {
+        ensure(
+            redact_content("open /Users/a now", RedactionLevel::Standard),
+            format!("open {REDACTED_PATH_PLACEHOLDER} now"),
+            "standard redacts short paths without losing trailing text",
         )
     }
 

@@ -1047,6 +1047,8 @@ fn verify_command_exit_evidence(
     let output = Command::new(&parts[0])
         .args(&parts[1..])
         .current_dir(workspace_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .output()
         .map_err(|error| format!("command_exit_unavailable: {}: {error}", evidence.target))?;
     let actual_exit = output.status.code().unwrap_or(-1);

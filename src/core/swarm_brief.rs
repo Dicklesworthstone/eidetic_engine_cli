@@ -680,14 +680,20 @@ impl SwarmBriefCommandRunner for SystemSwarmBriefCommandRunner {
         })?;
 
         let stdout_thread = thread::spawn(move || {
+            use std::io::Read;
             let mut buf = Vec::new();
-            let _ = std::io::Read::read_to_end(&mut stdout_handle, &mut buf);
+            let _ = (&mut stdout_handle)
+                .take(10 * 1024 * 1024)
+                .read_to_end(&mut buf);
             buf
         });
 
         let stderr_thread = thread::spawn(move || {
+            use std::io::Read;
             let mut buf = Vec::new();
-            let _ = std::io::Read::read_to_end(&mut stderr_handle, &mut buf);
+            let _ = (&mut stderr_handle)
+                .take(10 * 1024 * 1024)
+                .read_to_end(&mut buf);
             buf
         });
 
@@ -700,6 +706,11 @@ impl SwarmBriefCommandRunner for SystemSwarmBriefCommandRunner {
                     if elapsed >= timeout {
                         let _ = child.kill();
                         let _ = child.wait();
+                        // Reap drain threads even on timeout to prevent resource leak
+                        // (detached threads accumulate under repeated timeouts from flaky
+                        // external tools like br/bv/cass in swarm scenarios).
+                        let _ = stdout_thread.join();
+                        let _ = stderr_thread.join();
                         return Err(SwarmBriefCommandError::TimedOut { timeout_ms });
                     }
                     thread::sleep(Duration::from_millis(10).min(timeout.saturating_sub(elapsed)));
@@ -707,6 +718,9 @@ impl SwarmBriefCommandRunner for SystemSwarmBriefCommandRunner {
                 Err(error) => {
                     let _ = child.kill();
                     let _ = child.wait();
+                    // Reap drain threads to prevent leak on I/O errors.
+                    let _ = stdout_thread.join();
+                    let _ = stderr_thread.join();
                     return Err(SwarmBriefCommandError::Unavailable(error.to_string()));
                 }
             }

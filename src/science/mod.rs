@@ -1451,9 +1451,8 @@ fn science_capabilities(status: ScienceStatus) -> Vec<ScienceCapabilityStatus> {
         ]
     } else {
         let degradation_code = match status {
-            ScienceStatus::Available => unreachable!(),
-            ScienceStatus::NotCompiled => DEGRADATION_CODE_NOT_COMPILED,
             ScienceStatus::BackendUnavailable => DEGRADATION_CODE_BACKEND_UNAVAILABLE,
+            _ => DEGRADATION_CODE_NOT_COMPILED,
         };
         vec![
             ScienceCapabilityStatus::degraded(

@@ -270,14 +270,20 @@ impl CassInvocation {
         })?;
 
         let stdout_thread = thread::spawn(move || {
+            use std::io::Read;
             let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut stdout, &mut buf)?;
+            (&mut stdout)
+                .take(100 * 1024 * 1024)
+                .read_to_end(&mut buf)?;
             Ok(buf)
         });
 
         let stderr_thread = thread::spawn(move || {
+            use std::io::Read;
             let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut stderr, &mut buf)?;
+            (&mut stderr)
+                .take(100 * 1024 * 1024)
+                .read_to_end(&mut buf)?;
             Ok(buf)
         });
 
@@ -498,11 +504,20 @@ fn drain_pipe_readers_after_timeout(
         );
     }
 
-    if stdout_bytes.is_none() && stdout_thread.take().is_some() {
-        tracing::debug!("cass subprocess stdout pipe reader did not drain after timeout");
+    // Always join the reader threads to reap them and prevent detached thread leaks.
+    // After kill, the reads should complete quickly with EOF; joining ensures cleanup
+    // even if the grace period expires before the readers finish updating the buffers.
+    if stdout_bytes.is_none() {
+        if let Some(h) = stdout_thread.take() {
+            let _ = h.join();
+            tracing::debug!("cass subprocess stdout pipe reader did not drain after timeout");
+        }
     }
-    if stderr_bytes.is_none() && stderr_thread.take().is_some() {
-        tracing::debug!("cass subprocess stderr pipe reader did not drain after timeout");
+    if stderr_bytes.is_none() {
+        if let Some(h) = stderr_thread.take() {
+            let _ = h.join();
+            tracing::debug!("cass subprocess stderr pipe reader did not drain after timeout");
+        }
     }
 
     Ok((

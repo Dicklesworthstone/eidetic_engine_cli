@@ -600,12 +600,14 @@ fn item_value_for_report(item: &Item) -> String {
 }
 
 fn set_toml_value(document: &mut DocumentMut, path: &[&str], value: TomlScalar) {
-    let item = match path {
-        [section, subsection, key] => &mut document[*section][*subsection][*key],
-        [section, subsection, leaf, key] => &mut document[*section][*subsection][*leaf][*key],
-        _ => return,
-    };
-    *item = match value {
+    if path.is_empty() {
+        return;
+    }
+    let mut current = &mut document[path[0]];
+    for &segment in &path[1..] {
+        current = &mut current[segment];
+    }
+    *current = match value {
         TomlScalar::Bool(value) => toml_edit::value(value),
         TomlScalar::Float(value) => toml_edit::value(value),
         TomlScalar::Integer(value) => toml_edit::value(value),

@@ -1273,6 +1273,7 @@ fn execute_rehearsal_command(
         .arg(&command.command)
         .args(&command.args)
         .env("EE_REHEARSE_SANDBOX", "1")
+        .stdout(std::process::Stdio::null())
         .output()
         .map_err(|error| storage_error("execute rehearsal command", error))?;
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();

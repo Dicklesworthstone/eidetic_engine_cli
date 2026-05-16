@@ -1343,7 +1343,7 @@ mod tests {
 
         fn flush(&mut self) -> io::Result<()> {
             if self.fail_flush {
-                return Err(io::Error::new(io::ErrorKind::Other, "flush failed"));
+                return Err(io::Error::other("flush failed"));
             }
             Ok(())
         }

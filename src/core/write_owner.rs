@@ -143,7 +143,10 @@ fn write_recovery_state(workspace_path: &Path, state: &str) -> std::io::Result<(
 
     {
         use std::io::Write;
-        let mut file = fs::File::create(&temp_path)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
         file.write_all(payload.as_bytes())?;
         file.sync_data()?;
     }

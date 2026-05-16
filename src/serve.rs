@@ -411,12 +411,17 @@ fn append_daemon_job_rows(table_path: &Path, rows: &[DaemonJobRow]) -> Result<()
         .append(true)
         .open(table_path)
         .map_err(|error| format!("Failed to open daemon job table for append: {error}"))?;
+    
+    let mut buffer = Vec::new();
     for row in rows {
-        serde_json::to_writer(&mut file, row)
+        serde_json::to_writer(&mut buffer, row)
             .map_err(|error| format!("Failed to serialize daemon job row: {error}"))?;
-        file.write_all(b"\n")
-            .map_err(|error| format!("Failed to write daemon job row: {error}"))?;
+        buffer.push(b'\n');
     }
+    
+    file.write_all(&buffer)
+        .map_err(|error| format!("Failed to write daemon job rows: {error}"))?;
+        
     file.flush()
         .map_err(|error| format!("Failed to flush daemon job table: {error}"))?;
     file.sync_data()

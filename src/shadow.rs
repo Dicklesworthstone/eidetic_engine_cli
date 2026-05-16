@@ -323,8 +323,9 @@ pub fn determine_verdict(metrics: &ShadowMetrics, config: &ShadowGateConfig) -> 
         return ShadowVerdict::Equivalent;
     }
 
+    let baseline_threshold_us = 1000.0;
     let too_slow = (metrics.candidate_time_us as f64)
-        > (metrics.incumbent_time_us as f64 * config.max_slowdown_ratio);
+        > ((metrics.incumbent_time_us as f64).max(baseline_threshold_us) * config.max_slowdown_ratio);
 
     if quality_delta >= config.quality_threshold && !too_slow {
         ShadowVerdict::CandidateBetter

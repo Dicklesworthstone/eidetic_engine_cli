@@ -59,8 +59,8 @@ impl AgentContextProfileCounts {
 
         let helpful = f64::from(self.helpful_count).ln_1p();
         let harmful = f64::from(self.harmful_count).ln_1p();
-        let ignored_damping = f64::from(self.ignored_count.saturating_add(1)).ln_1p();
-        let raw = AGENT_PROFILE_BIAS_CAP * (helpful - harmful) / ignored_damping.max(f64::EPSILON);
+        let ignored_damping = f64::from(self.ignored_count).ln_1p().max(1.0);
+        let raw = AGENT_PROFILE_BIAS_CAP * (helpful - harmful) / ignored_damping;
 
         AgentContextProfileBias {
             observed_outcomes,
@@ -107,8 +107,8 @@ impl AgentContextProfileDecayedCounts {
 
         let helpful = self.helpful_count.ln_1p();
         let harmful = self.harmful_count.ln_1p();
-        let ignored_damping = (self.ignored_count + 1.0).ln_1p();
-        let raw = AGENT_PROFILE_BIAS_CAP * (helpful - harmful) / ignored_damping.max(f64::EPSILON);
+        let ignored_damping = self.ignored_count.ln_1p().max(1.0);
+        let raw = AGENT_PROFILE_BIAS_CAP * (helpful - harmful) / ignored_damping;
 
         AgentContextProfileBias {
             observed_outcomes: observed_outcomes.floor() as u32,

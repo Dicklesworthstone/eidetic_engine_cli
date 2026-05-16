@@ -1755,6 +1755,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn preflight_shell_requires_shell_choice() {
         let options = PreflightHookShellOptions {
             shell: None,

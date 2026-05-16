@@ -332,7 +332,11 @@ fn rm_option_has_recursive(option: &str) -> bool {
     if option.starts_with("--") {
         option == "--recursive"
     } else {
-        option[1..].chars().any(|ch| matches!(ch, 'r' | 'R'))
+        option
+            .get(1..)
+            .unwrap_or("")
+            .chars()
+            .any(|ch| matches!(ch, 'r' | 'R'))
     }
 }
 
@@ -340,7 +344,7 @@ fn rm_option_has_force(option: &str) -> bool {
     if option.starts_with("--") {
         option == "--force"
     } else {
-        option[1..].chars().any(|ch| ch == 'f')
+        option.get(1..).unwrap_or("").chars().any(|ch| ch == 'f')
     }
 }
 
