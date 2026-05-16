@@ -1008,17 +1008,20 @@ impl EffectManifest {
             ),
             CommandEffect::read_only("analyze science-status", "Report science readiness"),
             CommandEffect::read_only("agent-docs", "Display agent documentation"),
-            CommandEffect::read_only("audit diff", "Show audit log mutations in a time window"),
-            CommandEffect::read_only("audit show", "Show one audit log row"),
-            CommandEffect::read_only("audit timeline", "List audit log rows"),
-            CommandEffect::read_only("audit verify", "Verify audit hash-chain integrity"),
-            CommandEffect::read_only("backup inspect", "Inspect backup manifest"),
-            CommandEffect::read_only("backup list", "List backup manifests"),
-            CommandEffect::read_only("backup verify", "Verify backup manifest and contents"),
+            CommandEffect::read_only_db("audit diff", "Show audit log mutations in a time window"),
+            CommandEffect::read_only_db("audit show", "Show one audit log row"),
+            CommandEffect::read_only_db("audit timeline", "List audit log rows"),
+            CommandEffect::read_only_db("audit verify", "Verify audit hash-chain integrity"),
+            CommandEffect::read_only_db("backup inspect", "Inspect backup manifest"),
+            CommandEffect::read_only_db("backup list", "List backup manifests"),
+            CommandEffect::read_only_db("backup verify", "Verify backup manifest and contents"),
             CommandEffect::read_only("capabilities", "Report feature availability"),
-            CommandEffect::read_only("certificate list", "List persisted certificate records"),
-            CommandEffect::read_only("certificate show", "Inspect a persisted certificate record"),
-            CommandEffect::read_only(
+            CommandEffect::read_only_db("certificate list", "List persisted certificate records"),
+            CommandEffect::read_only_db(
+                "certificate show",
+                "Inspect a persisted certificate record",
+            ),
+            CommandEffect::read_only_db(
                 "certificate verify",
                 "Verify persisted certificate hash and signature evidence",
             ),
@@ -1035,49 +1038,58 @@ impl EffectManifest {
             ),
             CommandEffect::read_only("config get", "Read one merged config key"),
             CommandEffect::read_only("config show", "Show merged config values"),
-            CommandEffect::read_only("context", "Assemble context pack (reads only)"),
+            CommandEffect::read_only_db("context", "Assemble context pack (reads only)"),
             CommandEffect::read_only("completion", "Generate shell completion scripts"),
-            CommandEffect::read_only("db status", "Report database status"),
-            CommandEffect::read_only("db check", "Check database integrity"),
-            CommandEffect::read_only(
+            CommandEffect::read_only_db("db status", "Report database status"),
+            CommandEffect::read_only_db("db check", "Check database integrity"),
+            CommandEffect::read_only_db(
                 "db inspect",
                 "Inspect rows from one database table without mutation",
             ),
-            CommandEffect::read_only("db reindex", "Preview database-derived index rebuild work"),
-            CommandEffect::read_only("db migrations", "List database migrations"),
-            CommandEffect::read_only("curate candidates", "List curation candidates"),
-            CommandEffect::read_only("curate validate", "Validate curation candidate"),
+            CommandEffect::read_only_db(
+                "db reindex",
+                "Preview database-derived index rebuild work",
+            ),
+            CommandEffect::read_only_db("db migrations", "List database migrations"),
+            CommandEffect::read_only_db("curate candidates", "List curation candidates"),
+            CommandEffect::read_only_db("curate validate", "Validate curation candidate"),
             CommandEffect::read_only("demo list", "List demo manifests"),
-            CommandEffect::read_only("demo show", "Show persisted demo audit rows"),
-            CommandEffect::read_only("demo verify", "Verify demo artifacts"),
-            CommandEffect::read_only("diag claims", "Inspect claim diagnostics"),
-            CommandEffect::read_only("diag dependencies", "Inspect dependency diagnostics"),
-            CommandEffect::read_only("diag graph", "Inspect graph diagnostics"),
-            CommandEffect::read_only("diag integrity", "Inspect storage integrity diagnostics"),
-            CommandEffect::read_only("diag quarantine list", "List quarantine entries"),
-            CommandEffect::read_only("diag quarantine show", "Show single quarantine entry"),
-            CommandEffect::read_only("diag streams", "Show streams status"),
-            CommandEffect::read_only("doctor", "Run health checks"),
+            CommandEffect::read_only_db("demo show", "Show persisted demo audit rows"),
+            CommandEffect::read_only_db("demo verify", "Verify demo artifacts"),
+            CommandEffect::read_only_db("diag claims", "Inspect claim diagnostics"),
+            CommandEffect::read_only_db("diag dependencies", "Inspect dependency diagnostics"),
+            CommandEffect::read_only_db("diag graph", "Inspect graph diagnostics"),
+            CommandEffect::read_only_db("diag integrity", "Inspect storage integrity diagnostics"),
+            CommandEffect::read_only_db("diag quarantine list", "List quarantine entries"),
+            CommandEffect::read_only_db("diag quarantine show", "Show single quarantine entry"),
+            CommandEffect::read_only_db("diag streams", "Show streams status"),
+            CommandEffect::read_only_db("doctor", "Run health checks"),
             CommandEffect::read_only("eval list", "List evaluation scenarios"),
             CommandEffect::read_only("eval report", "Summarize evaluation fixture reports"),
             CommandEffect::read_only("eval run", "Run evaluation (reads fixtures)"),
-            CommandEffect::read_only("focus explain", "Explain passive active-memory focus state"),
-            CommandEffect::read_only("focus show", "Show passive active-memory focus state"),
+            CommandEffect::read_only_db(
+                "focus explain",
+                "Explain passive active-memory focus state",
+            ),
+            CommandEffect::read_only_db("focus show", "Show passive active-memory focus state"),
             CommandEffect::read_only(
                 "economy prune-plan",
                 "Plan economy pruning without mutation",
             ),
-            CommandEffect::read_only("graph articulation", "List graph articulation points"),
-            CommandEffect::read_only("graph betweenness", "Compute graph betweenness centrality"),
-            CommandEffect::read_only("graph communities", "Compute graph communities"),
-            CommandEffect::read_only("graph explain-link", "Explain graph link evidence"),
-            CommandEffect::read_only("graph export", "Export graph projection report"),
-            CommandEffect::read_only("graph hits", "Compute graph HITS centrality"),
-            CommandEffect::read_only("graph k-core", "Compute graph k-core decomposition"),
-            CommandEffect::read_only("graph louvain", "Compute graph Louvain communities"),
-            CommandEffect::read_only("graph neighborhood", "Inspect graph neighborhood"),
-            CommandEffect::read_only("graph pagerank", "Compute graph PageRank scores"),
-            CommandEffect::read_only("graph path", "Find graph shortest path"),
+            CommandEffect::read_only_db("graph articulation", "List graph articulation points"),
+            CommandEffect::read_only_db(
+                "graph betweenness",
+                "Compute graph betweenness centrality",
+            ),
+            CommandEffect::read_only_db("graph communities", "Compute graph communities"),
+            CommandEffect::read_only_db("graph explain-link", "Explain graph link evidence"),
+            CommandEffect::read_only_db("graph export", "Export graph projection report"),
+            CommandEffect::read_only_db("graph hits", "Compute graph HITS centrality"),
+            CommandEffect::read_only_db("graph k-core", "Compute graph k-core decomposition"),
+            CommandEffect::read_only_db("graph louvain", "Compute graph Louvain communities"),
+            CommandEffect::read_only_db("graph neighborhood", "Inspect graph neighborhood"),
+            CommandEffect::read_only_db("graph pagerank", "Compute graph PageRank scores"),
+            CommandEffect::read_only_db("graph path", "Find graph shortest path"),
             CommandEffect::read_only(
                 "handoff completion-audit",
                 "Audit objective completion evidence without mutation",
@@ -1088,15 +1100,15 @@ impl EffectManifest {
                 "Plan handoff capsule contents without writing",
             ),
             CommandEffect::read_only("handoff resume", "Render handoff resume payload"),
-            CommandEffect::read_only("artifact inspect", "Inspect artifact metadata"),
-            CommandEffect::read_only("artifact list", "List registered artifacts"),
-            CommandEffect::read_only("health", "Quick health check"),
+            CommandEffect::read_only_db("artifact inspect", "Inspect artifact metadata"),
+            CommandEffect::read_only_db("artifact list", "List registered artifacts"),
+            CommandEffect::read_only_db("health", "Quick health check"),
             CommandEffect::read_only("help", "Print help"),
             CommandEffect::read_only(
                 "hook preflight-shell",
                 "Emit a shell snippet wiring ee preflight check into bash or zsh",
             ),
-            CommandEffect::read_only("index status", "Show index status"),
+            CommandEffect::read_only_db("index status", "Show index status"),
             CommandEffect::read_only(
                 "index vacuum",
                 "Preview reclaimable derived index artifacts without mutation",
@@ -1104,21 +1116,27 @@ impl EffectManifest {
             CommandEffect::read_only("install check", "Inspect install posture"),
             CommandEffect::read_only("install plan", "Plan install without mutation"),
             CommandEffect::read_only("introspect", "Introspect ee metadata"),
-            CommandEffect::read_only("job list", "List available steward job types"),
-            CommandEffect::read_only("job show", "Show steward job row details"),
-            CommandEffect::read_only("learn agenda", "Show learning agenda with prioritized gaps"),
-            CommandEffect::read_only("learn summary", "Show learning summary statistics"),
-            CommandEffect::read_only("learn uncertainty", "Show uncertainty estimates"),
-            CommandEffect::read_only("maintenance status", "Report maintenance job availability"),
+            CommandEffect::read_only_db("job list", "List available steward job types"),
+            CommandEffect::read_only_db("job show", "Show steward job row details"),
+            CommandEffect::read_only_db(
+                "learn agenda",
+                "Show learning agenda with prioritized gaps",
+            ),
+            CommandEffect::read_only_db("learn summary", "Show learning summary statistics"),
+            CommandEffect::read_only_db("learn uncertainty", "Show uncertainty estimates"),
+            CommandEffect::read_only_db(
+                "maintenance status",
+                "Report maintenance job availability",
+            ),
             CommandEffect::read_only("mcp manifest", "Inspect optional MCP adapter manifest"),
-            CommandEffect::read_only("memory history", "Show memory revision history"),
-            CommandEffect::read_only("memory list", "List memories"),
-            CommandEffect::read_only("memory show", "Show memory details"),
-            CommandEffect::read_only("model list", "List model registry entries"),
-            CommandEffect::read_only("model status", "Inspect model registry status"),
-            CommandEffect::read_only("outcome quarantine list", "List feedback quarantine rows"),
-            CommandEffect::read_only("pack diff", "Compare persisted pack ledgers"),
-            CommandEffect::read_only("pack replay", "Inspect persisted pack ledger"),
+            CommandEffect::read_only_db("memory history", "Show memory revision history"),
+            CommandEffect::read_only_db("memory list", "List memories"),
+            CommandEffect::read_only_db("memory show", "Show memory details"),
+            CommandEffect::read_only_db("model list", "List model registry entries"),
+            CommandEffect::read_only_db("model status", "Inspect model registry status"),
+            CommandEffect::read_only_db("outcome quarantine list", "List feedback quarantine rows"),
+            CommandEffect::read_only_db("pack diff", "Compare persisted pack ledgers"),
+            CommandEffect::read_only_db("pack replay", "Inspect persisted pack ledger"),
             CommandEffect::read_only(
                 "perf budget check",
                 "Check normalized performance artifact budget posture",
@@ -1133,54 +1151,57 @@ impl EffectManifest {
                 "preflight show",
                 "Read a persisted preflight run from the workspace-local store",
             ),
-            CommandEffect::read_only("playbook list", "List procedural rules in playbook form"),
-            CommandEffect::read_only(
+            CommandEffect::read_only_db("playbook list", "List procedural rules in playbook form"),
+            CommandEffect::read_only_db(
                 "procedure drift",
                 "Inspect procedure maturity and feedback drift signals",
             ),
-            CommandEffect::read_only("procedure export", "Render a persisted procedure artifact"),
-            CommandEffect::read_only("procedure list", "List persisted procedures"),
-            CommandEffect::read_only("procedure show", "Show persisted procedure details"),
-            CommandEffect::read_only(
+            CommandEffect::read_only_db(
+                "procedure export",
+                "Render a persisted procedure artifact",
+            ),
+            CommandEffect::read_only_db("procedure list", "List persisted procedures"),
+            CommandEffect::read_only_db("procedure show", "Show persisted procedure details"),
+            CommandEffect::read_only_db(
                 "procedure verify",
                 "Verify a persisted procedure against evidence sources",
             ),
-            CommandEffect::read_only("rationale list", "List safe rationale traces"),
-            CommandEffect::read_only("rationale show", "Show a safe rationale trace"),
+            CommandEffect::read_only_db("rationale list", "List safe rationale traces"),
+            CommandEffect::read_only_db("rationale show", "Show a safe rationale trace"),
             CommandEffect::read_only(
                 "review session",
                 "Analyze session evidence spans for curation candidates",
             ),
-            CommandEffect::read_only("rule list", "List procedural rules"),
-            CommandEffect::read_only(
+            CommandEffect::read_only_db("rule list", "List procedural rules"),
+            CommandEffect::read_only_db(
                 "rule provenance",
                 "Inspect the rule-to-memory provenance ego graph",
             ),
-            CommandEffect::read_only("rule show", "Show procedural rule"),
+            CommandEffect::read_only_db("rule show", "Show procedural rule"),
             CommandEffect::read_only("schema export", "Export public response schemas"),
             CommandEffect::read_only("schema list", "List response schemas"),
-            CommandEffect::read_only("search", "Search memories"),
+            CommandEffect::read_only_db("search", "Search memories"),
             CommandEffect::read_only(
                 "situation classify",
                 "Classify task into situation category",
             ),
             CommandEffect::read_only("situation compare", "Compare two situations (dry-run)"),
-            CommandEffect::read_only("situation explain", "Explain a stored situation"),
+            CommandEffect::read_only_db("situation explain", "Explain a stored situation"),
             CommandEffect::read_only("situation link", "Plan situation link (dry-run)"),
-            CommandEffect::read_only("situation show", "Show stored situation details"),
-            CommandEffect::read_only("status", "Report workspace status"),
+            CommandEffect::read_only_db("situation show", "Show stored situation details"),
+            CommandEffect::read_only_db("status", "Report workspace status"),
             CommandEffect::read_only(
                 "support inspect",
                 "Verify and inspect a redacted support bundle manifest",
             ),
-            CommandEffect::read_only("swarm brief", "Report read-only swarm coordination brief"),
-            CommandEffect::read_only("task-frame show", "Show passive task-frame state"),
-            CommandEffect::read_only("tripwire list", "List persisted tripwire rules"),
+            CommandEffect::read_only_db("swarm brief", "Report read-only swarm coordination brief"),
+            CommandEffect::read_only_db("task-frame show", "Show passive task-frame state"),
+            CommandEffect::read_only_db("tripwire list", "List persisted tripwire rules"),
             CommandEffect::read_only("update", "Plan update without mutation"),
             CommandEffect::read_only("version", "Print version"),
             CommandEffect::read_only("workspace list", "List workspace aliases"),
             CommandEffect::read_only("workspace resolve", "Resolve workspace identity"),
-            CommandEffect::read_only("why", "Explain memory selection"),
+            CommandEffect::read_only_db("why", "Explain memory selection"),
         ]
     }
 
@@ -2451,6 +2472,55 @@ mod tests {
                 ));
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn db_backed_read_only_commands_declare_read_snapshot_requirement() -> TestResult {
+        let manifest = EffectManifest::build();
+        let db_backed = [
+            "context",
+            "search",
+            "why",
+            "status",
+            "doctor",
+            "memory list",
+            "memory show",
+            "pack replay",
+            "graph pagerank",
+            "db status",
+            "audit timeline",
+            "curate candidates",
+            "swarm brief",
+        ];
+
+        for command in db_backed {
+            let effect = manifest
+                .get(command)
+                .ok_or_else(|| format!("{command} not found"))?;
+            ensure(
+                effect.default_effect,
+                EffectClass::ReadOnly,
+                &format!("{command} remains read-only"),
+            )?;
+            ensure(
+                effect.read_snapshot(),
+                true,
+                &format!("{command} declares read snapshot requirement"),
+            )?;
+        }
+
+        for command in ["help", "version", "completion"] {
+            let effect = manifest
+                .get(command)
+                .ok_or_else(|| format!("{command} not found"))?;
+            ensure(
+                effect.read_snapshot(),
+                false,
+                &format!("{command} does not require a DB read snapshot"),
+            )?;
+        }
+
         Ok(())
     }
 
