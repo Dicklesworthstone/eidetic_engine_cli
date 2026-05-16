@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use ee::models::{
     KNOWN_SCHEMAS, MESH_PEER_POLICY_SCHEMA_V1, MESH_POLICY_DECISION_SCHEMA_V1,
-    MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1,
+    MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1, MESH_STORAGE_STATUS_SCHEMA_V1,
 };
 use serde_json::Value;
 
@@ -14,6 +14,7 @@ type TestResult = Result<(), String>;
 const SCHEMA_PATH: &str = "docs/schemas/ee.mesh.peer_policy.v1.json";
 const DECISION_SCHEMA_PATH: &str = "docs/schemas/ee.mesh.policy_decision.v1.json";
 const FAILURE_SURFACE_SCHEMA_PATH: &str = "docs/schemas/ee.mesh.policy_failure_surface.v1.json";
+const STORAGE_STATUS_SCHEMA_PATH: &str = "docs/schemas/ee.mesh.storage_status.v1.json";
 const FIXTURES: &[&str] = &[
     "tests/fixtures/mesh/peer_policy_metadata_only.json",
     "tests/fixtures/mesh/peer_policy_body_denied.json",

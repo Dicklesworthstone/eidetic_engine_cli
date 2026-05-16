@@ -6833,6 +6833,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: mesh_policy_failure_surface_schema_definition,
         },
         SchemaEntry {
+            id: crate::models::MESH_STORAGE_STATUS_SCHEMA_V1,
+            version: "1",
+            description: "Redaction-safe mesh storage posture embedded in status reports",
+            category: "mesh",
+            definition: mesh_storage_status_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.doctor.v1",
             version: "1",
             description: "Doctor diagnostics response envelope",
@@ -7185,6 +7192,10 @@ fn mesh_policy_decision_schema_definition() -> String {
 
 fn mesh_policy_failure_surface_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.mesh.policy_failure_surface.v1.json").to_string()
+}
+
+fn mesh_storage_status_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.storage_status.v1.json").to_string()
 }
 
 fn doctor_response_schema_definition() -> String {
