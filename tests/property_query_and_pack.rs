@@ -386,6 +386,20 @@ fn stale_regression_fixture_hashes(
     Ok(stale)
 }
 
+fn refresh_regression_fixture_verification(
+    fixtures: &[DeterminismRegressionFixture],
+    verified_at: &str,
+) -> Result<Vec<DeterminismRegressionFixture>, String> {
+    parse_fixture_timestamp("verified_at", verified_at)?;
+    let mut refreshed = fixtures.to_vec();
+    for fixture in &mut refreshed {
+        parse_fixture_timestamp(&fixture.input_hash, &fixture.last_verified_at)?;
+        fixture.last_verified_at = verified_at.to_string();
+    }
+    refreshed.sort_by(|left, right| left.input_hash.cmp(&right.input_hash));
+    Ok(refreshed)
+}
+
 fn parse_fixture_timestamp(label: &str, value: &str) -> Result<DateTime<Utc>, String> {
     DateTime::parse_from_rfc3339(value)
         .map(|timestamp| timestamp.with_timezone(&Utc))
@@ -735,6 +749,60 @@ fn determinism_regression_fixture_staleness_rejects_invalid_timestamp() -> Resul
         .expect_err("invalid fixture timestamp should be rejected");
 
     assert!(error.contains("not-a-date"));
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_refreshes_last_verified_at_stably() -> Result<(), String> {
+    let second =
+        regression_fixture_for_mismatch(2, b"second-refresh", b"expected-two", b"observed-two")
+            .ok_or_else(|| "second fixture should detect mismatch".to_owned())?;
+    let first =
+        regression_fixture_for_mismatch(1, b"first-refresh", b"expected-one", b"observed-one")
+            .ok_or_else(|| "first fixture should detect mismatch".to_owned())?;
+    let refreshed = refresh_regression_fixture_verification(
+        &[second.clone(), first.clone()],
+        "2026-05-16T12:00:00Z",
+    )?;
+
+    let mut expected_hashes = vec![first.input_hash, second.input_hash];
+    expected_hashes.sort();
+    let refreshed_hashes = refreshed
+        .iter()
+        .map(|fixture| fixture.input_hash.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(refreshed_hashes, expected_hashes);
+    assert!(
+        refreshed
+            .iter()
+            .all(|fixture| fixture.last_verified_at == "2026-05-16T12:00:00Z")
+    );
+    assert!(
+        refreshed
+            .iter()
+            .all(|fixture| fixture.captured_at == REGRESSION_FIXTURE_CAPTURED_AT)
+    );
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_refresh_rejects_invalid_dates() -> Result<(), String> {
+    let fixture = regression_fixture_for_mismatch(4, b"refresh-invalid", b"expected", b"observed")
+        .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    let verified_at_error =
+        refresh_regression_fixture_verification(std::slice::from_ref(&fixture), "not-a-date")
+            .expect_err("invalid verification timestamp should be rejected");
+    assert!(verified_at_error.contains("verified_at timestamp"));
+
+    let mut invalid_fixture = fixture;
+    invalid_fixture.last_verified_at = "also-not-a-date".to_string();
+    let fixture_error = refresh_regression_fixture_verification(
+        std::slice::from_ref(&invalid_fixture),
+        "2026-05-16T12:00:00Z",
+    )
+    .expect_err("invalid existing fixture timestamp should be rejected");
+    assert!(fixture_error.contains("also-not-a-date"));
     Ok(())
 }
 
