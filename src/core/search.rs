@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
-use crate::db::{CreateAuditInput, DbConnection, audit_actions, generate_audit_id};
+use crate::db::{
+    CreateAuditInput, DbConnection, audit_actions, generate_audit_id, generate_audit_id_seeded,
+};
 use crate::models::{
     MemoryId, MemoryScope, MemoryScopeStats, ProvenanceUri, TrustClass, UnitScore,
 };
@@ -2121,6 +2123,7 @@ fn dedupe_hits_on_doc_id(hits: Vec<SearchHit>) -> (Vec<SearchHit>, usize) {
 /// best-effort enrichment, not part of the read response contract.
 fn audit_append_best_effort(
     database_path: &Path,
+    audit_ids: &mut SearchAuditIdSource<'_>,
     workspace_id: Option<&str>,
     action: &'static str,
     target_type: Option<&str>,
@@ -2130,7 +2133,7 @@ fn audit_append_best_effort(
     let Ok(conn) = DbConnection::open_file(database_path) else {
         return;
     };
-    let audit_id = generate_audit_id();
+    let audit_id = audit_ids.next_audit_id();
     let input = CreateAuditInput {
         workspace_id: workspace_id.map(str::to_owned),
         actor: None,
@@ -2151,16 +2154,34 @@ fn audit_append_best_effort(
     }
 }
 
+enum SearchAuditIdSource<'a> {
+    Ambient,
+    Seeded(Deterministic<Seed>),
+    Borrowed(&'a mut Deterministic<Seed>),
+}
+
+impl SearchAuditIdSource<'_> {
+    fn next_audit_id(&mut self) -> String {
+        match self {
+            Self::Ambient => generate_audit_id(),
+            Self::Seeded(determinism) => generate_audit_id_seeded(determinism),
+            Self::Borrowed(determinism) => generate_audit_id_seeded(*determinism),
+        }
+    }
+}
+
 pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> {
     let determinism = Deterministic::from_seed(0);
-    run_search_seeded(options, &determinism)
+    let mut audit_ids = SearchAuditIdSource::Ambient;
+    run_search_inner(options, None, &determinism, &mut audit_ids)
 }
 
 pub fn run_search_seeded(
     options: &SearchOptions,
     determinism: &Deterministic<Seed>,
 ) -> Result<SearchReport, SearchError> {
-    run_search_inner(options, None, determinism)
+    let mut audit_ids = SearchAuditIdSource::Seeded(determinism.shared_child("audit.search"));
+    run_search_inner(options, None, determinism, &mut audit_ids)
 }
 
 pub fn run_search_with_read_connection(
@@ -2168,7 +2189,8 @@ pub fn run_search_with_read_connection(
     read_connection: &DbConnection,
 ) -> Result<SearchReport, SearchError> {
     let determinism = Deterministic::from_seed(0);
-    run_search_with_read_connection_seeded(options, read_connection, &determinism)
+    let mut audit_ids = SearchAuditIdSource::Ambient;
+    run_search_inner(options, Some(read_connection), &determinism, &mut audit_ids)
 }
 
 pub fn run_search_with_read_connection_seeded(
@@ -2176,13 +2198,15 @@ pub fn run_search_with_read_connection_seeded(
     read_connection: &DbConnection,
     determinism: &Deterministic<Seed>,
 ) -> Result<SearchReport, SearchError> {
-    run_search_inner(options, Some(read_connection), determinism)
+    let mut audit_ids = SearchAuditIdSource::Seeded(determinism.shared_child("audit.search"));
+    run_search_inner(options, Some(read_connection), determinism, &mut audit_ids)
 }
 
 fn run_search_inner(
     options: &SearchOptions,
     read_connection: Option<&DbConnection>,
     determinism: &Deterministic<Seed>,
+    audit_ids: &mut SearchAuditIdSource<'_>,
 ) -> Result<SearchReport, SearchError> {
     let start = Instant::now();
     let index_dir = options.resolve_index_dir();
@@ -2385,6 +2409,7 @@ fn run_search_inner(
             .to_string();
             audit_append_best_effort(
                 &database_path,
+                audit_ids,
                 Some(&workspace_id),
                 audit_actions::SEARCH_EXECUTED,
                 Some("workspace"),
@@ -2401,6 +2426,7 @@ fn run_search_inner(
                 .to_string();
                 audit_append_best_effort(
                     &database_path,
+                    audit_ids,
                     Some(&workspace_id),
                     audit_actions::SEARCH_RETURNED_MEM,
                     Some("memory"),
@@ -2420,6 +2446,7 @@ fn run_search_inner(
                         .to_string();
                         audit_append_best_effort(
                             &database_path,
+                            audit_ids,
                             Some(&workspace_id),
                             audit_actions::REDACT_AT_OUTPUT,
                             Some("memory"),
@@ -3846,6 +3873,70 @@ mod tests {
             label,
             std::process::id()
         ))
+    }
+
+    fn seeded_search_audit_ids(seed: u64) -> Result<Vec<String>, String> {
+        let workspace = unique_test_dir("seeded-search-audit");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let database_path = workspace.join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_01234567890123456789012345";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("seeded-search-audit".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut determinism = Deterministic::from_seed(seed);
+        let mut audit_ids = SearchAuditIdSource::Borrowed(&mut determinism);
+        audit_append_best_effort(
+            &database_path,
+            &mut audit_ids,
+            Some(workspace_id),
+            audit_actions::SEARCH_EXECUTED,
+            Some("workspace"),
+            Some(workspace_id),
+            Some(r#"{"queryHash":"hash","resultCount":0}"#.to_owned()),
+        );
+        audit_append_best_effort(
+            &database_path,
+            &mut audit_ids,
+            Some(workspace_id),
+            audit_actions::SEARCH_RETURNED_MEM,
+            Some("memory"),
+            Some("mem_00000000000000000000000001"),
+            Some(r#"{"queryHash":"hash","rank":1}"#.to_owned()),
+        );
+
+        let mut entries = connection
+            .list_audit_by_target("workspace", workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        entries.extend(
+            connection
+                .list_audit_by_target("memory", "mem_00000000000000000000000001", None)
+                .map_err(|error| error.to_string())?,
+        );
+        entries.sort_by(|left, right| left.action.cmp(&right.action));
+        Ok(entries.into_iter().map(|entry| entry.id).collect())
+    }
+
+    #[test]
+    fn search_best_effort_audit_seeded_ids_replay() -> TestResult {
+        let first = seeded_search_audit_ids(51_001)?;
+        let replay = seeded_search_audit_ids(51_001)?;
+        let other = seeded_search_audit_ids(51_002)?;
+
+        assert_eq!(first.len(), 2);
+        assert!(first.iter().all(|id| id.starts_with("audit_")));
+        assert_eq!(first, replay);
+        assert_ne!(first, other);
+        Ok(())
     }
 
     fn test_runtime_profile() -> RuntimeProfileReport {
