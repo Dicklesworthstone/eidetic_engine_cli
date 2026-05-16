@@ -44,38 +44,29 @@ snapshot() {
 
 before_snapshot="$(snapshot)"
 
-EE_UNDER_TEST="${EE_BIN:-${EE_BINARY:-}}"
-IMPOSSIBLE_MIN_FREE_BYTES="18446744073709551615"
-if [ -n "$EE_UNDER_TEST" ]; then
-    report="$("$EE_UNDER_TEST" --workspace "$WORKSPACE" diag disk-pressure --json \
-        --top-limit 3 --consumer-depth 1 --consumer-entry-limit 100)"
-    artifacts_report="$(CARGO_TARGET_DIR="$WORKSPACE/target" \
-        TMPDIR="$WORKSPACE/tmp" \
-        EE_TEST_LOG_PATH="$WORKSPACE/tmp/j1.jsonl" \
-        EE_E2E_RETENTION_MANIFEST="$WORKSPACE/tmp/e2e_retention_manifest.json" \
-        "$EE_UNDER_TEST" --workspace "$WORKSPACE" diag artifacts --json \
-        --top-limit 3 --consumer-depth 1 --consumer-entry-limit 100)"
-    build_admission_report="$(CARGO_TARGET_DIR="$WORKSPACE/target" \
-        TMPDIR="$WORKSPACE/tmp" \
-        "$EE_UNDER_TEST" --workspace "$WORKSPACE" diag build-admission --json \
-        --min-free-bytes "$IMPOSSIBLE_MIN_FREE_BYTES" \
-        --artifact-destination "$WORKSPACE/target/ee-e2e/sync-down")"
-else
-    report="$(cd "$REPO_ROOT" && cargo run --quiet -- --workspace "$WORKSPACE" \
-        diag disk-pressure --json --top-limit 3 --consumer-depth 1 \
-        --consumer-entry-limit 100)"
-    artifacts_report="$(cd "$REPO_ROOT" && CARGO_TARGET_DIR="$WORKSPACE/target" \
-        TMPDIR="$WORKSPACE/tmp" \
-        EE_TEST_LOG_PATH="$WORKSPACE/tmp/j1.jsonl" \
-        EE_E2E_RETENTION_MANIFEST="$WORKSPACE/tmp/e2e_retention_manifest.json" \
-        cargo run --quiet -- --workspace "$WORKSPACE" diag artifacts --json \
-        --top-limit 3 --consumer-depth 1 --consumer-entry-limit 100)"
-    build_admission_report="$(cd "$REPO_ROOT" && CARGO_TARGET_DIR="$WORKSPACE/target" \
-        TMPDIR="$WORKSPACE/tmp" \
-        cargo run --quiet -- --workspace "$WORKSPACE" diag build-admission --json \
-        --min-free-bytes "$IMPOSSIBLE_MIN_FREE_BYTES" \
-        --artifact-destination "$WORKSPACE/target/ee-e2e/sync-down")"
+if [ -n "${EE_BIN:-}" ]; then
+    EE_BINARY="$EE_BIN"
 fi
+if [ ! -x "$EE_BINARY" ]; then
+    echo "disk_pressure: ee binary not executable at $EE_BINARY" >&2
+    echo "    pass EE_BINARY/EE_BIN for an existing ee binary; this no-build harness will not run cargo" >&2
+    exit 2
+fi
+
+IMPOSSIBLE_MIN_FREE_BYTES="18446744073709551615"
+report="$("$EE_BINARY" --workspace "$WORKSPACE" diag disk-pressure --json \
+    --top-limit 3 --consumer-depth 1 --consumer-entry-limit 100)"
+artifacts_report="$(CARGO_TARGET_DIR="$WORKSPACE/target" \
+    TMPDIR="$WORKSPACE/tmp" \
+    EE_TEST_LOG_PATH="$WORKSPACE/tmp/j1.jsonl" \
+    EE_E2E_RETENTION_MANIFEST="$WORKSPACE/tmp/e2e_retention_manifest.json" \
+    "$EE_BINARY" --workspace "$WORKSPACE" diag artifacts --json \
+    --top-limit 3 --consumer-depth 1 --consumer-entry-limit 100)"
+build_admission_report="$(CARGO_TARGET_DIR="$WORKSPACE/target" \
+    TMPDIR="$WORKSPACE/tmp" \
+    "$EE_BINARY" --workspace "$WORKSPACE" diag build-admission --json \
+    --min-free-bytes "$IMPOSSIBLE_MIN_FREE_BYTES" \
+    --artifact-destination "$WORKSPACE/target/ee-e2e/sync-down")"
 
 after_snapshot="$(snapshot)"
 
