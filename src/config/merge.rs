@@ -31,6 +31,8 @@ pub const STORAGE_JSONL_EXPORT_KEY: &str = "storage.jsonl_export";
 pub const STORAGE_READ_POOL_SIZE_KEY: &str = "storage.read_pool.size";
 pub const STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY: &str =
     "storage.read_pool.idle_timeout_seconds";
+pub const STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY: &str =
+    "storage.read_pool.max_pin_duration_seconds";
 pub const STORAGE_READ_POOL_PIN_SNAPSHOT_KEY: &str = "storage.read_pool.pin_snapshot";
 pub const RUNTIME_DAEMON_KEY: &str = "runtime.daemon";
 pub const RUNTIME_JOB_BUDGET_MS_KEY: &str = "runtime.job_budget_ms";
@@ -211,6 +213,13 @@ impl MergedConfig {
                 STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY,
                 seconds.to_string(),
                 self.source(STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY),
+            ));
+        }
+        if let Some(seconds) = self.values.storage.read_pool.max_pin_duration_seconds {
+            entries.push(ConfigShowEntry::new(
+                STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY,
+                seconds.to_string(),
+                self.source(STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY),
             ));
         }
         if let Some(pin_snapshot) = self.values.storage.read_pool.pin_snapshot {
@@ -782,6 +791,7 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             read_pool: ReadPoolConfig {
                 size: Some(1),
                 idle_timeout_seconds: Some(30),
+                max_pin_duration_seconds: Some(30),
                 pin_snapshot: Some(true),
             },
         },
@@ -930,6 +940,10 @@ pub fn config_from_env(
                 idle_timeout_seconds: optional_env_u64(
                     env,
                     EnvVar::ReadPoolIdleTimeoutSeconds.name(),
+                )?,
+                max_pin_duration_seconds: optional_env_u64(
+                    env,
+                    EnvVar::ReadPoolMaxPinSeconds.name(),
                 )?,
                 pin_snapshot: optional_env_bool(env, EnvVar::ReadPoolDisablePin.name())?
                     .map(|disabled| !disabled),
@@ -1099,6 +1113,15 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                     &layers.project.storage.read_pool.idle_timeout_seconds,
                     &layers.user.storage.read_pool.idle_timeout_seconds,
                     &layers.defaults.storage.read_pool.idle_timeout_seconds,
+                ),
+                max_pin_duration_seconds: pick_field(
+                    &mut sources,
+                    STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY,
+                    &layers.cli.storage.read_pool.max_pin_duration_seconds,
+                    &layers.environment.storage.read_pool.max_pin_duration_seconds,
+                    &layers.project.storage.read_pool.max_pin_duration_seconds,
+                    &layers.user.storage.read_pool.max_pin_duration_seconds,
+                    &layers.defaults.storage.read_pool.max_pin_duration_seconds,
                 ),
                 pin_snapshot: pick_field(
                     &mut sources,
@@ -1926,8 +1949,9 @@ mod tests {
         MESH_PEER_POLICIES_KEY, PACK_DEFAULT_MAX_TOKENS_KEY, PACK_DEFAULT_PROFILE_KEY,
         POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY, SEARCH_DEFAULT_SPEED_KEY,
         STORAGE_DATABASE_PATH_KEY, STORAGE_INDEX_DIR_KEY,
-        STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY, STORAGE_READ_POOL_PIN_SNAPSHOT_KEY,
-        STORAGE_READ_POOL_SIZE_KEY, built_in_config, config_from_env, merge_config,
+        STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY, STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY,
+        STORAGE_READ_POOL_PIN_SNAPSHOT_KEY, STORAGE_READ_POOL_SIZE_KEY, built_in_config,
+        config_from_env, merge_config,
     };
     use crate::config::{
         CacheConfig, ConfigFile, CurationConfig, GraphConfig, GraphCurateConfig,
@@ -2037,6 +2061,11 @@ mod tests {
             "read pool idle timeout",
         )?;
         ensure_equal(
+            &defaults.storage.read_pool.max_pin_duration_seconds,
+            &Some(30),
+            "read pool max pin duration",
+        )?;
+        ensure_equal(
             &defaults.storage.read_pool.pin_snapshot,
             &Some(true),
             "read pool snapshot pinning",
@@ -2094,6 +2123,10 @@ mod tests {
             OsString::from("120"),
         );
         env.insert(
+            "EE_READ_POOL_MAX_PIN_SECONDS".to_string(),
+            OsString::from("45"),
+        );
+        env.insert(
             "EE_READ_POOL_DISABLE_PIN".to_string(),
             OsString::from("true"),
         );
@@ -2146,6 +2179,11 @@ mod tests {
             &parsed.storage.read_pool.idle_timeout_seconds,
             &Some(120),
             "env read pool idle timeout",
+        )?;
+        ensure_equal(
+            &parsed.storage.read_pool.max_pin_duration_seconds,
+            &Some(45),
+            "env read pool max pin duration",
         )?;
         ensure_equal(
             &parsed.storage.read_pool.pin_snapshot,
@@ -2383,6 +2421,16 @@ mod tests {
             "read pool idle timeout source",
         )?;
         ensure_equal(
+            &merged.values.storage.read_pool.max_pin_duration_seconds,
+            &Some(30),
+            "default read pool max pin duration",
+        )?;
+        ensure_equal(
+            &merged.source(STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY),
+            &Some(ConfigValueSource::Default),
+            "read pool max pin duration source",
+        )?;
+        ensure_equal(
             &merged.values.search.default_speed,
             &Some(SearchSpeed::Thorough),
             "project beats user search speed",
@@ -2586,6 +2634,7 @@ mod tests {
             MESH_PEER_POLICIES_KEY,
             STORAGE_READ_POOL_SIZE_KEY,
             STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY,
+            STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY,
             STORAGE_READ_POOL_PIN_SNAPSHOT_KEY,
         ] {
             if !keys.contains(&expected) {

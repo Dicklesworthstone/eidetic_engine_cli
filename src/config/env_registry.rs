@@ -76,6 +76,8 @@ pub enum EnvVar {
     ReadPoolAcquireTimeoutMs,
     /// `EE_READ_POOL_IDLE_TIMEOUT_S`
     ReadPoolIdleTimeoutSeconds,
+    /// `EE_READ_POOL_MAX_PIN_SECONDS`
+    ReadPoolMaxPinSeconds,
     /// `EE_READ_POOL_SIZE`
     ReadPoolSize,
     /// `EE_REMEMBER_CURATION_SYNC_BUDGET_MS`
@@ -140,6 +142,7 @@ impl EnvVar {
             Self::ReadPoolDisablePin,
             Self::ReadPoolAcquireTimeoutMs,
             Self::ReadPoolIdleTimeoutSeconds,
+            Self::ReadPoolMaxPinSeconds,
             Self::ReadPoolSize,
             Self::RememberCurationSyncBudgetMs,
             Self::SecurityProfile,
@@ -192,6 +195,7 @@ impl EnvVar {
             Self::ReadPoolDisablePin => "EE_READ_POOL_DISABLE_PIN",
             Self::ReadPoolAcquireTimeoutMs => "EE_READ_POOL_ACQUIRE_TIMEOUT_MS",
             Self::ReadPoolIdleTimeoutSeconds => "EE_READ_POOL_IDLE_TIMEOUT_S",
+            Self::ReadPoolMaxPinSeconds => "EE_READ_POOL_MAX_PIN_SECONDS",
             Self::ReadPoolSize => "EE_READ_POOL_SIZE",
             Self::RememberCurationSyncBudgetMs => "EE_REMEMBER_CURATION_SYNC_BUDGET_MS",
             Self::SecurityProfile => "EE_SECURITY_PROFILE",
@@ -260,6 +264,9 @@ impl EnvVar {
             Self::ReadPoolIdleTimeoutSeconds => {
                 "Override the read-side connection pool idle timeout in seconds."
             }
+            Self::ReadPoolMaxPinSeconds => {
+                "Override the read-side snapshot pin maximum lifetime in seconds."
+            }
             Self::ReadPoolSize => "Override the read-side connection pool size.",
             Self::RememberCurationSyncBudgetMs => {
                 "Override remember-time curation sync budget in milliseconds."
@@ -293,6 +300,7 @@ impl EnvVar {
             Self::PprCacheEntries => Some("4096"),
             Self::GraphWitnessesRetentionDays => Some("30"),
             Self::ReadPoolAcquireTimeoutMs => Some("5000"),
+            Self::ReadPoolMaxPinSeconds => Some("30"),
             Self::IndexPublishLockRetryAttempts => Some("200"),
             Self::RememberCurationSyncBudgetMs => Some("50"),
             _ => None,
