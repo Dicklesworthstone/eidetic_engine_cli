@@ -25,7 +25,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::config::env_registry::{EnvVar, read, read_os};
-use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
+use crate::core::degraded_aggregation::{
+    AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
+};
 
 /// Science analytics subsystem identifier.
 pub const SUBSYSTEM: &str = "science";
@@ -418,16 +420,50 @@ fn science_status_degradations_data_json(
         )
     }))
     .into_iter()
-    .map(|entry| {
-        serde_json::json!({
-            "code": entry.code,
-            "severity": entry.severity,
-            "message": entry.message,
-            "repair": entry.repair,
-            "sources": entry.sources,
-        })
-    })
+    .map(aggregated_degradation_data_json)
     .collect()
+}
+
+fn drift_degradations_data_json(degradations: &[DriftDegradation]) -> Vec<serde_json::Value> {
+    aggregate_degraded_entries(degradations.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "science_drift",
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry.repair.clone(),
+        )
+    }))
+    .into_iter()
+    .map(aggregated_degradation_data_json)
+    .collect()
+}
+
+fn clustering_degradations_data_json(
+    degradations: &[ClusteringDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_degraded_entries(degradations.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "science_clustering",
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry.repair.clone(),
+        )
+    }))
+    .into_iter()
+    .map(aggregated_degradation_data_json)
+    .collect()
+}
+
+fn aggregated_degradation_data_json(entry: AggregatedDegradation) -> serde_json::Value {
+    serde_json::json!({
+        "code": entry.code,
+        "severity": entry.severity,
+        "message": entry.message,
+        "repair": entry.repair,
+        "sources": entry.sources,
+    })
 }
 
 // ============================================================================
@@ -520,7 +556,7 @@ impl DriftAnalysisReport {
             "baselineId": self.baseline_id,
             "currentId": self.current_id,
             "metricDrifts": self.metric_drifts.iter().map(MetricDrift::data_json).collect::<Vec<_>>(),
-            "degradations": self.degradations.iter().map(DriftDegradation::data_json).collect::<Vec<_>>(),
+            "degradations": drift_degradations_data_json(&self.degradations),
             "nextActions": self.next_actions,
         })
     }
@@ -1274,7 +1310,7 @@ impl ClusteringAnalysisReport {
             "computed": self.computed,
             "candidateCount": self.candidate_count,
             "diagnostics": self.diagnostics.data_json(),
-            "degradations": self.degradations.iter().map(ClusteringDegradation::data_json).collect::<Vec<_>>(),
+            "degradations": clustering_degradations_data_json(&self.degradations),
             "nextActions": self.next_actions,
         })
     }
@@ -2209,6 +2245,123 @@ mod tests {
         ensure(
             degradations[0].get("sources").cloned(),
             Some(serde_json::json!(["science_status"])),
+            "aggregate source label",
+        )
+    }
+
+    #[test]
+    fn drift_analysis_report_degradations_are_aggregated() -> TestResult {
+        let report = DriftAnalysisReport {
+            schema: DRIFT_ANALYSIS_SCHEMA_V1,
+            command: DRIFT_ANALYSIS_COMMAND,
+            drift_detected: false,
+            drift_magnitude: 0.0,
+            threshold: 0.25,
+            baseline_id: None,
+            current_id: None,
+            metric_drifts: Vec::new(),
+            degradations: vec![
+                DriftDegradation {
+                    code: "drift_no_comparable_metrics".to_string(),
+                    message: "No comparable metrics were available.".to_string(),
+                    severity: "medium".to_string(),
+                    repair: "Capture comparable evaluation snapshots.".to_string(),
+                },
+                DriftDegradation {
+                    code: "drift_no_comparable_metrics".to_string(),
+                    message: "No overlapping metrics were available.".to_string(),
+                    severity: "high".to_string(),
+                    repair: "Regenerate both snapshots with shared metric keys.".to_string(),
+                },
+            ],
+            next_actions: Vec::new(),
+            generated_at: "2026-05-16T00:00:00Z".to_string(),
+        };
+
+        let json = report.data_json();
+        let degradations = json
+            .get("degradations")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "expected degradations array".to_owned())?;
+
+        ensure(degradations.len(), 1, "aggregated drift degradation count")?;
+        ensure_json_str(
+            degradations[0]
+                .get("code")
+                .and_then(serde_json::Value::as_str),
+            "drift_no_comparable_metrics",
+            "aggregate code",
+        )?;
+        ensure_json_str(
+            degradations[0]
+                .get("severity")
+                .and_then(serde_json::Value::as_str),
+            "high",
+            "aggregate escalates severity",
+        )?;
+        ensure(
+            degradations[0].get("sources").cloned(),
+            Some(serde_json::json!(["science_drift"])),
+            "aggregate source label",
+        )
+    }
+
+    #[test]
+    fn clustering_analysis_report_degradations_are_aggregated() -> TestResult {
+        let report = ClusteringAnalysisReport {
+            schema: CLUSTERING_ANALYSIS_SCHEMA_V1,
+            command: CLUSTERING_ANALYSIS_COMMAND,
+            available: false,
+            computed: false,
+            candidate_count: 0,
+            diagnostics: ClusteringDiagnostics::default(),
+            degradations: vec![
+                ClusteringDegradation {
+                    code: DEGRADATION_CODE_NO_CANDIDATES.to_string(),
+                    message: "No curation candidates available for clustering analysis."
+                        .to_string(),
+                    severity: "low".to_string(),
+                    repair: "ee curate candidates --workspace . --json".to_string(),
+                },
+                ClusteringDegradation {
+                    code: DEGRADATION_CODE_NO_CANDIDATES.to_string(),
+                    message: "No eligible candidates were found.".to_string(),
+                    severity: "medium".to_string(),
+                    repair: "ee learn agenda --workspace . --json".to_string(),
+                },
+            ],
+            next_actions: Vec::new(),
+            generated_at: "2026-05-16T00:00:00Z".to_string(),
+        };
+
+        let json = report.data_json();
+        let degradations = json
+            .get("degradations")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "expected degradations array".to_owned())?;
+
+        ensure(
+            degradations.len(),
+            1,
+            "aggregated clustering degradation count",
+        )?;
+        ensure_json_str(
+            degradations[0]
+                .get("code")
+                .and_then(serde_json::Value::as_str),
+            DEGRADATION_CODE_NO_CANDIDATES,
+            "aggregate code",
+        )?;
+        ensure_json_str(
+            degradations[0]
+                .get("severity")
+                .and_then(serde_json::Value::as_str),
+            "medium",
+            "aggregate escalates severity",
+        )?;
+        ensure(
+            degradations[0].get("sources").cloned(),
+            Some(serde_json::json!(["science_clustering"])),
             "aggregate source label",
         )
     }
