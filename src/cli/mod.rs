@@ -20978,9 +20978,10 @@ fn graph_link_matches_read_options(
     link: &crate::db::StoredMemoryLink,
     options: GraphReadOptions<'_>,
 ) -> bool {
-    options
-        .min_weight
-        .is_none_or(|min_weight| link.weight >= min_weight)
+    crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref())
+        && options
+            .min_weight
+            .is_none_or(|min_weight| link.weight >= min_weight)
         && options
             .min_confidence
             .is_none_or(|min_confidence| link.confidence >= min_confidence)
@@ -39770,6 +39771,100 @@ mod tests {
             }
             other => Err(format!("expected graph hits command, got {other:?}")),
         }
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn graph_algorithm_read_options_ignore_denied_mesh_links() -> TestResult {
+        let options = super::GraphReadOptions {
+            database: None,
+            min_weight: Some(0.5),
+            min_confidence: Some(0.5),
+            link_limit: None,
+            limit: None,
+            include_tombstoned: false,
+        };
+        let local = graph_algorithm_test_link("link_local", None);
+        let allowed = graph_algorithm_test_link(
+            "link_allowed_mesh",
+            Some(graph_algorithm_mesh_link_metadata("allow", true)),
+        );
+        let denied = graph_algorithm_test_link(
+            "link_denied_mesh",
+            Some(graph_algorithm_mesh_link_metadata("deny", true)),
+        );
+        let incomplete = graph_algorithm_test_link(
+            "link_incomplete_mesh",
+            Some(graph_algorithm_mesh_link_metadata("allow", false)),
+        );
+
+        ensure(
+            super::graph_link_matches_read_options(&local, options),
+            "ordinary local links stay visible to CLI graph algorithms",
+        )?;
+        ensure(
+            super::graph_link_matches_read_options(&allowed, options),
+            "allowed mesh links stay visible to CLI graph algorithms",
+        )?;
+        ensure(
+            !super::graph_link_matches_read_options(&denied, options),
+            "denied mesh links must not enter CLI graph algorithms",
+        )?;
+        ensure(
+            !super::graph_link_matches_read_options(&incomplete, options),
+            "incomplete mesh provenance must not enter CLI graph algorithms",
+        )
+    }
+
+    #[cfg(feature = "graph")]
+    fn graph_algorithm_test_link(
+        id: &str,
+        metadata_json: Option<String>,
+    ) -> crate::db::StoredMemoryLink {
+        crate::db::StoredMemoryLink {
+            id: id.to_string(),
+            src_memory_id: "mem_cli_graph_a".to_string(),
+            dst_memory_id: "mem_cli_graph_b".to_string(),
+            relation: "supports".to_string(),
+            weight: 0.9,
+            confidence: 0.9,
+            directed: true,
+            evidence_count: 1,
+            last_reinforced_at: None,
+            source: "agent".to_string(),
+            created_at: "2026-05-16T00:00:00Z".to_string(),
+            created_by: Some("cli-graph-mesh-test".to_string()),
+            metadata_json,
+        }
+    }
+
+    #[cfg(feature = "graph")]
+    fn graph_algorithm_mesh_link_metadata(
+        workspace_scope_decision: &str,
+        complete: bool,
+    ) -> String {
+        let mut mesh = serde_json::json!({
+            "mesh": {
+                "workspaceScopeDecision": workspace_scope_decision,
+                "cachedMaterialId": "mesh_cli_graph_link",
+                "originWorkspaceId": "wsp_remote_private",
+                "originWorkspaceLabel": "/Users/alice/private/repo",
+                "producerPeerId": "peer_builder_one",
+                "producerPeerLabel": "/Users/alice/private/peer-agent",
+                "materialLane": "graphSignal",
+                "importDecisionId": "mesh_cli_graph_decision",
+                "trustLane": "mesh_metadata",
+                "redactionPosture": "standard"
+            }
+        });
+        if !complete
+            && let Some(object) = mesh
+                .get_mut("mesh")
+                .and_then(serde_json::Value::as_object_mut)
+        {
+            object.remove("trustLane");
+        }
+        mesh.to_string()
     }
 
     #[test]
