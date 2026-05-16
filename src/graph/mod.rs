@@ -57,6 +57,7 @@ pub struct ComplexityWitnessCounters {
     pub nodes_touched: Option<u64>,
     pub edges_scanned: Option<u64>,
     pub queue_peak: Option<u64>,
+    pub final_residual_l1_bits: Option<u64>,
 }
 
 impl ComplexityWitnessCounters {
@@ -74,6 +75,7 @@ impl ComplexityWitnessCounters {
             nodes_touched: None,
             edges_scanned: None,
             queue_peak: None,
+            final_residual_l1_bits: None,
         }
     }
 
@@ -94,7 +96,17 @@ impl ComplexityWitnessCounters {
             nodes_touched: Some(u64_from_usize_saturating(nodes_touched)),
             edges_scanned: Some(u64_from_usize_saturating(edges_scanned)),
             queue_peak: Some(u64_from_usize_saturating(queue_peak)),
+            final_residual_l1_bits: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_final_residual_l1(mut self, final_residual_l1: Option<f64>) -> Self {
+        self.final_residual_l1_bits = match final_residual_l1 {
+            Some(value) if value.is_finite() && value >= 0.0 => Some(value.to_bits()),
+            _ => None,
+        };
+        self
     }
 }
 
@@ -196,6 +208,36 @@ fn persist_complexity_witness(
             operation: "load graph algorithm witness snapshot",
             source: format!("graph snapshot {snapshot_id} does not exist"),
         })?;
+    let mut observed_counter_fields = serde_json::Map::new();
+    observed_counter_fields.insert(
+        "elapsed_ms".to_owned(),
+        serde_json::Value::from(observed_counters.elapsed_ms),
+    );
+    observed_counter_fields.insert(
+        "nodes_touched".to_owned(),
+        observed_counters
+            .nodes_touched
+            .map_or(serde_json::Value::Null, serde_json::Value::from),
+    );
+    observed_counter_fields.insert(
+        "edges_scanned".to_owned(),
+        observed_counters
+            .edges_scanned
+            .map_or(serde_json::Value::Null, serde_json::Value::from),
+    );
+    observed_counter_fields.insert(
+        "queue_peak".to_owned(),
+        observed_counters
+            .queue_peak
+            .map_or(serde_json::Value::Null, serde_json::Value::from),
+    );
+    if let Some(final_residual_l1_bits) = observed_counters.final_residual_l1_bits {
+        observed_counter_fields.insert(
+            "final_residual_l1".to_owned(),
+            serde_json::Value::from(f64::from_bits(final_residual_l1_bits)),
+        );
+    }
+
     let witness_json = serde_json::to_string(&serde_json::json!({
         "schema": GRAPH_ALGORITHM_WITNESS_SCHEMA_V1,
         "algorithm": name,
@@ -207,12 +249,7 @@ fn persist_complexity_witness(
         "elapsed_ms": observed_counters.elapsed_ms,
         "sampling_choice": observed_counters.sampling_choice.as_str(),
         "decision_path_hash": observed_counters.decision_path_hash.as_str(),
-        "observed_counters": {
-            "elapsed_ms": observed_counters.elapsed_ms,
-            "nodes_touched": observed_counters.nodes_touched,
-            "edges_scanned": observed_counters.edges_scanned,
-            "queue_peak": observed_counters.queue_peak,
-        },
+        "observed_counters": observed_counter_fields,
     }))
     .map_err(|error| GraphError::json("serialize graph algorithm witness", error))?;
 

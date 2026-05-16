@@ -31,6 +31,7 @@ const RELATION_WEIGHT_RELATED: f64 = 0.6;
 const RELATION_WEIGHT_CO_TAG: f64 = 0.4;
 const RELATION_WEIGHT_CO_MENTION: f64 = 0.3;
 const RELATION_WEIGHT_ZERO: f64 = 0.0;
+const ACL_COMPLEXITY_CLAIM_PREFIX: &str = "O(1/epsilon * 1/(1-alpha)) local push";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PersonalizedPageRankPolicy {
@@ -282,7 +283,7 @@ fn compute_personalized_pagerank_result_unbudgeted(
     nodes.sort_unstable();
     let node_count = nodes.len();
     if node_count == 0 {
-        return personalized_pagerank_result(Vec::new(), true, 0, 0, 0);
+        return personalized_pagerank_result(Vec::new(), true, 0, 0, 0, 0.0);
     }
 
     let personalization = normalized_seed_weights(graph, seed_map);
@@ -294,7 +295,7 @@ fn compute_personalized_pagerank_result_unbudgeted(
                 score: 0.0,
             })
             .collect();
-        return personalized_pagerank_result(scores, true, 0, 0, 0);
+        return personalized_pagerank_result(scores, true, 0, 0, 0, 0.0);
     }
 
     let node_index = nodes
@@ -373,6 +374,7 @@ fn compute_personalized_pagerank_result_unbudgeted(
     }
 
     let converged = active.is_empty();
+    let final_residual_l1 = residuals.iter().copied().sum::<f64>();
 
     let scores = nodes
         .iter()
@@ -382,7 +384,14 @@ fn compute_personalized_pagerank_result_unbudgeted(
             score: estimates[index],
         })
         .collect();
-    personalized_pagerank_result(scores, converged, pushes, edges_scanned, queue_peak)
+    personalized_pagerank_result(
+        scores,
+        converged,
+        pushes,
+        edges_scanned,
+        queue_peak,
+        final_residual_l1,
+    )
 }
 
 fn should_push_residual(
@@ -412,12 +421,13 @@ pub fn emit_personalized_pagerank_witness(
 ) -> GraphResult<()> {
     let counters = ComplexityWitnessCounters::strict_with_fnx_counters(
         spec.elapsed_ms,
-        "exact",
+        "approximate",
         personalized_pagerank_decision_path_hash(spec.params, result),
         result.witness.nodes_touched,
         result.witness.edges_scanned,
         result.witness.queue_peak,
-    );
+    )
+    .with_final_residual_l1(personalized_pagerank_final_residual_l1(result));
     emit_complexity_witness(
         spec.conn,
         spec.workspace_id,
@@ -521,18 +531,33 @@ fn personalized_pagerank_result(
     nodes_touched: usize,
     edges_scanned: usize,
     queue_peak: usize,
+    final_residual_l1: f64,
 ) -> PageRankResult {
     PageRankResult {
         scores,
         converged,
         witness: ComplexityWitness {
             algorithm: "personalized_pagerank_acl_push".to_owned(),
-            complexity_claim: "O(1/epsilon * 1/(1-alpha)) local push".to_owned(),
+            complexity_claim: format!(
+                "{ACL_COMPLEXITY_CLAIM_PREFIX}; final_residual_l1={final_residual_l1:.17e}"
+            ),
             nodes_touched,
             edges_scanned,
             queue_peak,
         },
     }
+}
+
+fn personalized_pagerank_final_residual_l1(result: &PageRankResult) -> Option<f64> {
+    let marker = "; final_residual_l1=";
+    result
+        .witness
+        .complexity_claim
+        .strip_prefix(ACL_COMPLEXITY_CLAIM_PREFIX)?
+        .strip_prefix(marker)?
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 0.0)
 }
 
 fn personalized_pagerank_decision_path_hash(
@@ -791,6 +816,10 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(second, third);
         assert_eq!(raw.witness.algorithm, "personalized_pagerank_acl_push");
+        assert!(
+            personalized_pagerank_final_residual_l1(&raw).is_some(),
+            "ACL witness should expose final residual L1 norm"
+        );
         Ok(())
     }
 
@@ -913,7 +942,7 @@ mod tests {
         let witness: serde_json::Value =
             serde_json::from_str(&rows[0].witness_json).map_err(|error| error.to_string())?;
         assert_eq!(witness["elapsed_ms"], 17);
-        assert_eq!(witness["sampling_choice"], "exact");
+        assert_eq!(witness["sampling_choice"], "approximate");
         assert_eq!(witness["snapshot_id"], snapshot_id);
         assert_eq!(witness["snapshot_version"], 9);
         assert_eq!(witness["snapshot_content_hash"], "blake3:ppr-witness");
@@ -935,6 +964,12 @@ mod tests {
         assert_eq!(
             witness["observed_counters"]["queue_peak"],
             result.witness.queue_peak
+        );
+        assert!(
+            witness["observed_counters"]["final_residual_l1"]
+                .as_f64()
+                .is_some_and(|value| value >= 0.0),
+            "ACL witness should record final residual L1 norm: {witness}"
         );
 
         connection.close().map_err(|error| error.to_string())
