@@ -2260,7 +2260,7 @@ fn persist_pack_record(
     .map(|_| ())
 }
 
-#[allow(dead_code)] // Used only in determinism tests and seed label registry; see tests/determinism_capability_token_unit.rs and docs/determinism_seed_labels.md
+#[allow(dead_code, reason = "N4.3 staged token-threaded pack ID helper")]
 fn persist_pack_record_seeded(
     connection: &DbConnection,
     workspace_path: &Path,
