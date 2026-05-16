@@ -4456,8 +4456,11 @@ pub fn update_memory_link(
                 .map_err(|error| {
                     memory_command_storage_error(format!("Failed to query memory links: {error}"))
                 })?
-                .iter()
-                .map(stored_memory_link_item)
+                .into_iter()
+                .filter(|link| {
+                    crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref())
+                })
+                .map(|link| stored_memory_link_item(&link))
                 .collect::<Vec<_>>();
 
             Ok(MemoryLinkReport {
@@ -6395,6 +6398,141 @@ mod tests {
             duplicate.link.and_then(|link| link.link_id),
             Some(applied_link_id),
             "duplicate reports existing link",
+        )
+    }
+
+    fn denied_memory_link_metadata() -> String {
+        serde_json::json!({
+            "mesh": {
+                "workspaceScopeDecision": "deny",
+                "materialLane": "graphSignal",
+                "cachedMaterialId": "mesh_memory_link_denied",
+                "originWorkspaceId": "wsp_remote_private",
+                "originWorkspaceLabel": "/Users/alice/private/repo",
+                "producerPeerId": "peer_builder_one",
+                "producerPeerLabel": "/Users/alice/private/peer-agent",
+                "importDecisionId": "mesh_memory_link_decision_denied",
+                "trustLane": "quarantined",
+                "redactionPosture": "metadata_only"
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn memory_link_list_ignores_denied_mesh_links() -> TestResult {
+        let (temp, source) = remember_revisable_memory("Memory link source.")?;
+        let allowed = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: Some(&source.database_path),
+            content: "Allowed memory link target.",
+            workflow_id: None,
+            level: "semantic",
+            kind: "fact",
+            tags: Some("links"),
+            confidence: 0.8,
+            source: Some("file://README.md#L78-80"),
+            allow_secret_mention: false,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: false,
+            propose_candidates: false,
+        })
+        .map_err(|error| error.message())?;
+        let denied = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: Some(&source.database_path),
+            content: "Denied mesh memory link target.",
+            workflow_id: None,
+            level: "semantic",
+            kind: "fact",
+            tags: Some("links"),
+            confidence: 0.8,
+            source: Some("file://README.md#L81-83"),
+            allow_secret_mention: false,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: false,
+            propose_candidates: false,
+        })
+        .map_err(|error| error.message())?;
+        let source_id = source.memory_id.to_string();
+        let allowed_id = allowed.memory_id.to_string();
+        let denied_id = denied.memory_id.to_string();
+
+        let allowed_link = update_memory_link(&MemoryLinkOptions {
+            workspace_path: temp.path(),
+            database_path: &source.database_path,
+            memory_id: &source_id,
+            mode: MemoryLinkMode::Create {
+                target_memory_id: allowed_id.clone(),
+                relation: MemoryLinkRelation::Supports,
+                weight: 0.75,
+                confidence: 0.9,
+                directed: true,
+                evidence_count: 2,
+                source: MemoryLinkSource::Human,
+                metadata_json: None,
+            },
+            actor: Some("test"),
+            dry_run: false,
+            include_tombstoned: false,
+        })
+        .map_err(|error| error.message())?;
+        let allowed_link_id = allowed_link
+            .link
+            .and_then(|link| link.link_id)
+            .ok_or_else(|| "allowed link id missing".to_string())?;
+
+        let connection = crate::db::DbConnection::open_file(&source.database_path)
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory_link(
+                "link_00000000000000000000000201",
+                &CreateMemoryLinkInput {
+                    src_memory_id: source_id.clone(),
+                    dst_memory_id: denied_id.clone(),
+                    relation: MemoryLinkRelation::Supports,
+                    weight: 1.0,
+                    confidence: 0.9,
+                    directed: true,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: MemoryLinkSource::Import,
+                    created_by: Some("memory-link-mesh-filter-test".to_owned()),
+                    metadata_json: Some(denied_memory_link_metadata()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        let listed = update_memory_link(&MemoryLinkOptions {
+            workspace_path: temp.path(),
+            database_path: &source.database_path,
+            memory_id: &source_id,
+            mode: MemoryLinkMode::List { relation: None },
+            actor: None,
+            dry_run: false,
+            include_tombstoned: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(listed.status, "listed".to_owned(), "list status")?;
+        ensure(listed.links.len(), 1, "visible link count")?;
+        ensure(
+            listed.links[0].link_id.clone(),
+            Some(allowed_link_id),
+            "allowed link remains",
+        )?;
+        ensure(
+            listed
+                .links
+                .iter()
+                .any(|link| link.target_memory_id == denied_id),
+            false,
+            "denied mesh link target absent",
         )
     }
 
