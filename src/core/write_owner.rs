@@ -1304,6 +1304,192 @@ impl WriteSpool {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config as ProptestConfig, TestCaseError};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[derive(Clone, Debug)]
+    struct ScheduledSpoolWrite {
+        producer_id: u8,
+        kind: WriteSpoolIntentKind,
+        payload_bytes: usize,
+        cancel_before_drain: bool,
+    }
+
+    fn scheduled_spool_write_strategy() -> impl Strategy<Value = ScheduledSpoolWrite> {
+        (0_u8..8, 0_u8..4, 1_usize..512, proptest::bool::ANY).prop_map(
+            |(producer_id, kind_index, payload_bytes, cancel_before_drain)| {
+                let kind = match kind_index {
+                    0 => WriteSpoolIntentKind::Remember,
+                    1 => WriteSpoolIntentKind::Outcome,
+                    2 => WriteSpoolIntentKind::Import,
+                    _ => WriteSpoolIntentKind::Recorder,
+                };
+                ScheduledSpoolWrite {
+                    producer_id,
+                    kind,
+                    payload_bytes,
+                    cancel_before_drain,
+                }
+            },
+        )
+    }
+
+    fn next_snapshot_generation(current: u64, batch_committed: bool) -> u64 {
+        if batch_committed {
+            current.saturating_add(1)
+        } else {
+            current
+        }
+    }
+
+    fn assert_write_spool_schedule_invariants(
+        schedule: &[ScheduledSpoolWrite],
+    ) -> Result<(), TestCaseError> {
+        let mut spool = WriteSpool::new(WriteSpoolConfig::new(256, 8, 1_000_000, 30_000), 0);
+        let mut producer_sequences = BTreeMap::<u8, u16>::new();
+        let mut producer_request_ids = BTreeMap::<u8, Vec<u64>>::new();
+        let mut cancelled_request_ids = BTreeSet::<u64>::new();
+
+        for (arrival_index, write) in schedule.iter().enumerate() {
+            let sequence = producer_sequences.entry(write.producer_id).or_default();
+            let idempotency_key = format!("p{}-s{sequence}", write.producer_id);
+            *sequence = sequence.saturating_add(1);
+
+            let ticket = spool
+                .enqueue(
+                    WriteSpoolIntent::new(
+                        write.kind,
+                        "workspace",
+                        idempotency_key,
+                        write.payload_bytes,
+                    ),
+                    u64::try_from(arrival_index)
+                        .map_err(|error| TestCaseError::fail(error.to_string()))?,
+                )
+                .map_err(|error| TestCaseError::fail(error.to_string()))?;
+            producer_request_ids
+                .entry(write.producer_id)
+                .or_default()
+                .push(ticket.request_id);
+
+            if write.cancel_before_drain {
+                let cancelled = spool.cancel_pending(
+                    ticket.request_id,
+                    u64::try_from(arrival_index.saturating_add(1_000))
+                        .map_err(|error| TestCaseError::fail(error.to_string()))?,
+                );
+                prop_assert!(cancelled, "scheduled cancellation should succeed");
+                cancelled_request_ids.insert(ticket.request_id);
+            }
+        }
+
+        let mut committed_request_ids = BTreeSet::<u64>::new();
+        let mut failed_request_ids = BTreeSet::<u64>::new();
+        let mut batch_ids = BTreeSet::<u64>::new();
+        let mut snapshot_generations = Vec::<u64>::new();
+        let mut snapshot_generation = 0_u64;
+
+        while let Some(batch) = spool.next_batch() {
+            let mut sorted_request_ids = batch.request_ids.clone();
+            sorted_request_ids.sort_unstable();
+            prop_assert_eq!(
+                &batch.request_ids,
+                &sorted_request_ids,
+                "batch request IDs must stay in deterministic FIFO order"
+            );
+            let expected_audit_row_id = format!("audit_batch_{:016}", batch.batch_id);
+            prop_assert_eq!(batch.audit_row_id.as_str(), expected_audit_row_id);
+            let expected_job_row_id = format!("job_batch_{:016}", batch.batch_id);
+            prop_assert_eq!(batch.job_row_id.as_str(), expected_job_row_id);
+            prop_assert!(batch_ids.insert(batch.batch_id));
+
+            for request_id in &batch.request_ids {
+                prop_assert!(
+                    !cancelled_request_ids.contains(request_id),
+                    "cancelled request must not appear in a durable batch"
+                );
+                let record = spool
+                    .record(*request_id)
+                    .ok_or_else(|| TestCaseError::fail(format!("missing record {request_id}")))?;
+                prop_assert_eq!(record.batch_id, Some(batch.batch_id));
+                prop_assert_eq!(record.workspace_id.as_str(), batch.workspace_id.as_str());
+                prop_assert_eq!(record.kind, batch.kind);
+                prop_assert_eq!(record.durability, batch.durability);
+            }
+
+            if batch.batch_id % 7 == 0 {
+                let failed =
+                    spool.mark_batch_failed(batch.batch_id, 10_000 + batch.batch_id, "fsync");
+                prop_assert_eq!(failed, batch.request_ids.len());
+                failed_request_ids.extend(batch.request_ids.iter().copied());
+                snapshot_generation = next_snapshot_generation(snapshot_generation, false);
+            } else {
+                let committed = spool.mark_batch_committed(batch.batch_id, 10_000 + batch.batch_id);
+                prop_assert_eq!(committed, batch.request_ids.len());
+                committed_request_ids.extend(batch.request_ids.iter().copied());
+                snapshot_generation = next_snapshot_generation(snapshot_generation, true);
+                snapshot_generations.push(snapshot_generation);
+            }
+        }
+
+        let records = spool.recovery_records();
+        prop_assert_eq!(records.len(), schedule.len());
+        for (index, record) in records.iter().enumerate() {
+            prop_assert_eq!(
+                record.request_id,
+                u64::try_from(index.saturating_add(1))
+                    .map_err(|error| TestCaseError::fail(error.to_string()))?
+            );
+        }
+
+        for request_ids in producer_request_ids.values() {
+            for adjacent in request_ids.windows(2) {
+                prop_assert!(
+                    adjacent[0] < adjacent[1],
+                    "producer request IDs must preserve per-producer FIFO order"
+                );
+            }
+        }
+
+        for record in &records {
+            match record.status {
+                WriteSpoolRecordStatus::Committed => {
+                    prop_assert!(committed_request_ids.contains(&record.request_id));
+                    prop_assert!(record.batch_id.is_some());
+                }
+                WriteSpoolRecordStatus::Failed => {
+                    prop_assert!(failed_request_ids.contains(&record.request_id));
+                    prop_assert!(record.batch_id.is_some());
+                    prop_assert_eq!(record.failure.as_deref(), Some("fsync"));
+                }
+                WriteSpoolRecordStatus::Cancelled => {
+                    prop_assert!(cancelled_request_ids.contains(&record.request_id));
+                    prop_assert_eq!(record.batch_id, None);
+                }
+                WriteSpoolRecordStatus::Pending => {
+                    prop_assert!(false, "all non-cancelled records should be drained");
+                }
+            }
+        }
+
+        for expected_batch_id in 1..=u64::try_from(batch_ids.len())
+            .map_err(|error| TestCaseError::fail(error.to_string()))?
+        {
+            prop_assert!(
+                batch_ids.contains(&expected_batch_id),
+                "batch audit chain must not have holes"
+            );
+        }
+        for adjacent in snapshot_generations.windows(2) {
+            prop_assert!(
+                adjacent[0] < adjacent[1],
+                "snapshot generations must be monotone after committed batches"
+            );
+        }
+        prop_assert_eq!(spool.status(20_000).queue_depth, 0);
+        Ok(())
+    }
 
     #[test]
     fn write_operation_type_strings() {
@@ -1703,5 +1889,87 @@ mod tests {
         assert_eq!(err.pending_bytes, 48);
         assert_eq!(err.max_pending_bytes, 64);
         Ok(())
+    }
+
+    #[test]
+    fn write_spool_invariant_single_writer_happy() -> Result<(), String> {
+        let mut spool = WriteSpool::new(WriteSpoolConfig::new(8, 8, 4096, 30_000), 0);
+        let mut request_ids = Vec::new();
+        for sequence in 0..3 {
+            let ticket = spool
+                .enqueue(
+                    WriteSpoolIntent::new(
+                        WriteSpoolIntentKind::Remember,
+                        "workspace",
+                        format!("writer-0-seq-{sequence}"),
+                        64,
+                    ),
+                    sequence,
+                )
+                .map_err(|error| error.to_string())?;
+            request_ids.push(ticket.request_id);
+        }
+
+        let batch = spool
+            .next_batch()
+            .ok_or_else(|| "expected a single writer batch".to_string())?;
+        assert_eq!(batch.request_ids, request_ids);
+        assert_eq!(batch.audit_row_id, "audit_batch_0000000000000001");
+        assert_eq!(spool.mark_batch_committed(batch.batch_id, 10), 3);
+        assert_eq!(spool.status(11).queue_depth, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn write_spool_invariant_fsync_failure_propagation_model() -> Result<(), String> {
+        let mut spool = WriteSpool::new(WriteSpoolConfig::new(8, 8, 4096, 30_000), 0);
+        let ticket = spool
+            .enqueue(
+                WriteSpoolIntent::new(WriteSpoolIntentKind::Remember, "workspace", "fsync", 64),
+                0,
+            )
+            .map_err(|error| error.to_string())?;
+
+        let batch = spool
+            .next_batch()
+            .ok_or_else(|| "expected fsync-failure batch".to_string())?;
+        assert_eq!(
+            spool.mark_batch_failed(batch.batch_id, 5, "simulated fsync failure"),
+            1
+        );
+        let record = spool
+            .record(ticket.request_id)
+            .ok_or_else(|| "failed record missing".to_string())?;
+        assert_eq!(record.status, WriteSpoolRecordStatus::Failed);
+        assert_eq!(record.failure.as_deref(), Some("simulated fsync failure"));
+        assert_eq!(spool.status(6).total_failed, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn write_spool_invariant_snapshot_generation_monotone() {
+        let mut generation = 0_u64;
+        let outcomes = [true, true, false, true, false, true];
+        let mut observed = Vec::new();
+
+        for committed in outcomes {
+            generation = next_snapshot_generation(generation, committed);
+            if committed {
+                observed.push(generation);
+            }
+        }
+
+        assert_eq!(observed, vec![1, 2, 3, 4]);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn write_spool_group_commit_preserves_order_audit_and_snapshot_invariants(
+            schedule in prop::collection::vec(scheduled_spool_write_strategy(), 0..64),
+        ) {
+            assert_write_spool_schedule_invariants(&schedule)?;
+        }
     }
 }
