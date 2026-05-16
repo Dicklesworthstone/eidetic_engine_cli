@@ -1838,8 +1838,15 @@ mod tests {
 
     #[test]
     fn budget_check_degraded_entries_are_aggregated() {
-        let summary = ArtifactSummary::new("test", ArtifactKind::BenchmarkReport)
-            .with_degradation(SummaryDegradation::missing_metric("latency_ms"));
+        let mut summary = models::ArtifactSummary::new(
+            "test",
+            models::ArtifactKind::BenchmarkReport,
+            "ee.bench.v1",
+        );
+        summary.add_degradation(models::SummaryDegradation::missing_metric(
+            "latency_ms",
+            Some("test"),
+        ));
 
         let report = check_perf_budget_summary("swarm", &summary);
         let value = serde_json::to_value(&report).expect("budget report serializes");
