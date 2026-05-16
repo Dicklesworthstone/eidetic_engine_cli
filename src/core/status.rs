@@ -18,9 +18,10 @@ use crate::config::{
 };
 use crate::db::{
     CreateWorkspaceInput, DbConnection, FeedbackSourceHarmfulCount, GraphSnapshotStatus,
-    GraphSnapshotType, PROVENANCE_CHAIN_HASH_VERSION, PROVENANCE_STATUS_UNVERIFIED,
-    StoredAuditEntry, StoredCurationCandidate, StoredCurationTtlPolicy, StoredMemory,
-    StoredMemoryLink, audit_actions, default_curation_ttl_policy_id_for_review_state,
+    GraphSnapshotType, MeshStorageStatus, PROVENANCE_CHAIN_HASH_VERSION,
+    PROVENANCE_STATUS_UNVERIFIED, StoredAuditEntry, StoredCurationCandidate,
+    StoredCurationTtlPolicy, StoredMemory, StoredMemoryLink, audit_actions,
+    default_curation_ttl_policy_id_for_review_state,
 };
 use crate::models::degradation::GRAPH_SKYLINE_DEGENERATE_COMMUNITIES_CODE;
 use crate::models::posture::{
@@ -1021,6 +1022,46 @@ pub struct DegradationReport {
     pub repair: &'static str,
 }
 
+/// Redaction-safe mesh persistence posture for status surfaces.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MeshStorageStatusReport {
+    pub peer_count: u32,
+    pub cursor_count: u32,
+    pub imported_event_count: u32,
+    pub policy_failure_event_count: u32,
+    pub mapped_memory_count: u32,
+    pub cached_body_count: u32,
+}
+
+impl MeshStorageStatusReport {
+    fn add(&mut self, status: &MeshStorageStatus) {
+        self.peer_count = self.peer_count.saturating_add(status.peer_count);
+        self.cursor_count = self.cursor_count.saturating_add(status.cursor_count);
+        self.imported_event_count = self
+            .imported_event_count
+            .saturating_add(status.imported_event_count);
+        self.policy_failure_event_count = self
+            .policy_failure_event_count
+            .saturating_add(status.policy_failure_event_count);
+        self.mapped_memory_count = self
+            .mapped_memory_count
+            .saturating_add(status.mapped_memory_count);
+        self.cached_body_count = self
+            .cached_body_count
+            .saturating_add(status.cached_body_count);
+    }
+
+    #[must_use]
+    pub const fn has_rows(&self) -> bool {
+        self.peer_count > 0
+            || self.cursor_count > 0
+            || self.imported_event_count > 0
+            || self.policy_failure_event_count > 0
+            || self.mapped_memory_count > 0
+            || self.cached_body_count > 0
+    }
+}
+
 /// Full status report returned by the status command.
 #[derive(Clone, Debug)]
 pub struct StatusReport {
@@ -1038,6 +1079,7 @@ pub struct StatusReport {
     pub graph_compute: GraphComputeReport,
     pub graph_snapshot_artifact: GraphSnapshotArtifactReport,
     pub derived_assets: Vec<DerivedAssetReport>,
+    pub mesh_storage: Option<MeshStorageStatusReport>,
     pub tailscale_local: Option<TailscaleLocalReport>,
     pub agent_inventory: AgentInventoryReport,
     pub degradations: Vec<DegradationReport>,
@@ -1090,6 +1132,7 @@ impl StatusReport {
         let (feedback_health, feedback_degradations) =
             gather_feedback_health(options.workspace_path.as_deref());
         let singleflight_posture = super::singleflight::singleflight_posture_report();
+        let mesh_storage = gather_mesh_storage_status(options.workspace_path.as_deref());
         let tailscale_local = gather_tailscale_local_report();
         let agent_inventory = AgentInventoryReport::not_inspected();
 
@@ -1148,11 +1191,34 @@ impl StatusReport {
             graph_compute,
             graph_snapshot_artifact,
             derived_assets,
+            mesh_storage,
             tailscale_local,
             agent_inventory,
             degradations,
         }
     }
+}
+
+fn gather_mesh_storage_status(workspace_path: Option<&Path>) -> Option<MeshStorageStatusReport> {
+    let workspace_path = workspace_path?;
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return None;
+    }
+    let connection = DbConnection::open_file(&database_path).ok()?;
+    gather_mesh_storage_status_from_connection(&connection, workspace_path)
+}
+
+fn gather_mesh_storage_status_from_connection(
+    connection: &DbConnection,
+    workspace_path: &Path,
+) -> Option<MeshStorageStatusReport> {
+    let mut report = MeshStorageStatusReport::default();
+    for workspace_id in resolve_status_workspace_ids(connection, workspace_path) {
+        let status = connection.mesh_storage_status(&workspace_id).ok()?;
+        report.add(&status);
+    }
+    Some(report)
 }
 
 fn gather_qos_posture(workspace_path: Option<&Path>) -> super::qos::QosLaneSummary {
@@ -3736,6 +3802,59 @@ mod tests {
             true,
             "enabled skyline should not emit disabled degradation",
         )
+    }
+
+    #[test]
+    fn mesh_storage_status_report_counts_policy_failures_without_peer_labels() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_path = Path::new("/tmp/ee-status-mesh-storage");
+        let workspace_id = stable_workspace_id(workspace_path);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_mesh_import_ledger_event(&crate::db::InsertMeshImportLedgerEventInput {
+                workspace_id,
+                event_id: "mesh_evt_status_policy_denied".to_owned(),
+                origin_node_id: "node_remote_status".to_owned(),
+                origin_workspace_id: "wsp_remote_private".to_owned(),
+                producer_peer_id: Some("peer_builder_one".to_owned()),
+                seq: 1,
+                prev_event_hash: None,
+                event_hash: format!("blake3:{}", "a".repeat(64)),
+                event_kind: "create".to_owned(),
+                logical_memory_id: "mem_remote_status_rule".to_owned(),
+                content_hash: format!("blake3:{}", "b".repeat(64)),
+                material_lane: "body".to_owned(),
+                redaction_class: "deny".to_owned(),
+                trust_lane: "peerAgent".to_owned(),
+                import_decision: "deny".to_owned(),
+                local_memory_id: None,
+                body_cache_key: None,
+                policy_failure_surface_json: Some(
+                    r#"{"schema":"ee.mesh.policy_failure_surface.v1","code":"mesh_peer_policy_denied"}"#
+                        .to_owned(),
+                ),
+                policy_decision_json: None,
+                event_json: r#"{"schema":"ee.mesh.event.v1","eventKind":"create"}"#.to_owned(),
+                imported_at: Some("2026-05-16T21:40:00Z".to_owned()),
+            })
+            .map_err(|error| error.to_string())?;
+
+        let report = gather_mesh_storage_status_from_connection(&connection, workspace_path)
+            .ok_or_else(|| "mesh storage status should be inspected".to_owned())?;
+
+        ensure(report.imported_event_count, 1, "imported event count")?;
+        ensure(report.policy_failure_event_count, 1, "policy failure count")?;
+        ensure(report.has_rows(), true, "mesh storage has rows")?;
+        ensure(report.peer_count, 0, "peer labels are not surfaced")
     }
 
     #[test]

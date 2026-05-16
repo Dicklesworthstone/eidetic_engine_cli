@@ -35,7 +35,9 @@ use crate::core::rule::{
     RULE_SHOW_SCHEMA_V1, RULE_UPDATE_SCHEMA_V1, RuleAddReport, RuleListReport, RuleMarkReport,
     RuleProtectReport, RuleShowReport, RuleUpdateReport,
 };
-use crate::core::status::{DegradationReport, StatusReport, StatusSkylineReport};
+use crate::core::status::{
+    DegradationReport, MeshStorageStatusReport, StatusReport, StatusSkylineReport,
+};
 use crate::core::tailscale_probe::{TailscaleLocalReport, TailscaleProbeDegradation};
 use crate::core::why::WhyReport;
 use crate::core::{BuildProvenanceDegradation, VERSION_PROVENANCE_SCHEMA_V1, VersionReport};
@@ -3181,7 +3183,11 @@ pub fn render_status_json(report: &StatusReport) -> String {
         render_graph_compute_json(d, &report.graph_compute);
         render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
         render_derived_assets_json(d, &report.derived_assets, true);
-        render_mesh_status_json(d, report.tailscale_local.as_ref());
+        render_mesh_status_json(
+            d,
+            report.mesh_storage.as_ref(),
+            report.tailscale_local.as_ref(),
+        );
         render_agent_inventory_json(d, "agentInventory", &report.agent_inventory, false);
         let degraded = aggregate_status_degradations("status", &report.degradations);
         d.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
@@ -3497,13 +3503,35 @@ fn render_qos_lane_record_json(parent: &mut JsonBuilder, record: &crate::core::q
     parent.field_str("status", record.status.as_str());
 }
 
-fn render_mesh_status_json(parent: &mut JsonBuilder, tailscale: Option<&TailscaleLocalReport>) {
-    let Some(tailscale) = tailscale else {
+fn render_mesh_status_json(
+    parent: &mut JsonBuilder,
+    storage: Option<&MeshStorageStatusReport>,
+    tailscale: Option<&TailscaleLocalReport>,
+) {
+    if storage.is_none() && tailscale.is_none() {
         return;
-    };
+    }
 
     parent.field_object("mesh", |mesh| {
-        render_tailscale_local_status_json(mesh, tailscale);
+        if let Some(storage) = storage {
+            render_mesh_storage_status_json(mesh, storage);
+        }
+        if let Some(tailscale) = tailscale {
+            render_tailscale_local_status_json(mesh, tailscale);
+        }
+    });
+}
+
+fn render_mesh_storage_status_json(parent: &mut JsonBuilder, report: &MeshStorageStatusReport) {
+    parent.field_object("storage", |storage| {
+        storage.field_str("schema", "ee.mesh.storage_status.v1");
+        storage.field_u32("peerCount", report.peer_count);
+        storage.field_u32("cursorCount", report.cursor_count);
+        storage.field_u32("importedEventCount", report.imported_event_count);
+        storage.field_u32("policyFailureEventCount", report.policy_failure_event_count);
+        storage.field_u32("mappedMemoryCount", report.mapped_memory_count);
+        storage.field_u32("cachedBodyCount", report.cached_body_count);
+        storage.field_bool("hasRows", report.has_rows());
     });
 }
 
@@ -3847,7 +3875,11 @@ pub fn render_status_json_with_meta(
         render_graph_compute_json(d, &report.graph_compute);
         render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
         render_derived_assets_json(d, &report.derived_assets, true);
-        render_mesh_status_json(d, report.tailscale_local.as_ref());
+        render_mesh_status_json(
+            d,
+            report.mesh_storage.as_ref(),
+            report.tailscale_local.as_ref(),
+        );
         render_agent_inventory_json(d, "agentInventory", &report.agent_inventory, false);
         let degraded = aggregate_status_degradations("status", &report.degradations);
         d.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
@@ -9116,7 +9148,11 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
                 &report.derived_assets,
                 profile.include_verbose_details(),
             );
-            render_mesh_status_json(d, report.tailscale_local.as_ref());
+            render_mesh_status_json(
+                d,
+                report.mesh_storage.as_ref(),
+                report.tailscale_local.as_ref(),
+            );
             render_agent_inventory_json(
                 d,
                 "agentInventory",
@@ -12672,7 +12708,7 @@ mod tests {
         PreflightDegradation, PreflightRunView, RunReport as PreflightRunReport,
         ShowReport as PreflightShowReport,
     };
-    use crate::core::status::{DegradationReport, StatusReport};
+    use crate::core::status::{DegradationReport, MeshStorageStatusReport, StatusReport};
     use crate::core::tailscale_probe::{TailscaleLocalReport, TailscaleProbeMethod};
     use crate::core::{
         BUILD_TIMESTAMP_POLICY, BuildFeature, BuildInfo, BuildProvenanceDegradation,
@@ -13401,6 +13437,46 @@ mod tests {
             &degraded[0]["sources"],
             &serde_json::json!(["tailscale_status"]),
             "tailscale source label is preserved",
+        )
+    }
+
+    #[test]
+    fn status_json_renders_mesh_storage_counts_without_peer_identifiers() -> TestResult {
+        let mut report = StatusReport::gather();
+        report.mesh_storage = Some(MeshStorageStatusReport {
+            peer_count: 2,
+            cursor_count: 3,
+            imported_event_count: 5,
+            policy_failure_event_count: 1,
+            mapped_memory_count: 7,
+            cached_body_count: 11,
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&render_status_json(&report))
+            .map_err(|error| error.to_string())?;
+        let storage = value
+            .pointer("/data/mesh/storage")
+            .ok_or_else(|| "status JSON has mesh storage posture".to_string())?;
+
+        ensure_equal(
+            &storage["schema"],
+            &serde_json::json!("ee.mesh.storage_status.v1"),
+            "mesh storage schema",
+        )?;
+        ensure_equal(
+            &storage["importedEventCount"],
+            &serde_json::json!(5),
+            "imported event count",
+        )?;
+        ensure_equal(
+            &storage["policyFailureEventCount"],
+            &serde_json::json!(1),
+            "policy failure count",
+        )?;
+        ensure_equal(&storage["hasRows"], &serde_json::json!(true), "has rows")?;
+        ensure(
+            storage.get("producerPeerId").is_none(),
+            "mesh storage status must not expose peer identifiers",
         )
     }
 
