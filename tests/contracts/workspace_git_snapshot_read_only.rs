@@ -13,11 +13,13 @@ use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::Path;
 use std::process::Command;
+use std::time::Instant;
 
 use ee::core::swarm_brief::{
     SystemSwarmBriefCommandRunner, WorkspaceGitSnapshotOptions, WorkspaceGitStatusEntry,
     collect_workspace_git_snapshot,
 };
+use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
 
@@ -113,6 +115,92 @@ fn status_digest(workspace: &Path) -> Result<String, String> {
     )
 }
 
+fn artifact_summary(name: &str, content: &str) -> Value {
+    json!({
+        "name": name,
+        "bytes": content.len(),
+        "blake3": blake3::hash(content.as_bytes()).to_hex().to_string(),
+    })
+}
+
+fn mutation_hash(status: &str, files: &[(String, String)]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(status.as_bytes());
+    for (path, state) in files {
+        hasher.update(path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(state.as_bytes());
+        hasher.update(b"\0");
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn read_only_e2e_log(
+    scenario: &str,
+    workspace: &Path,
+    elapsed_ms: u128,
+    before_status: &str,
+    after_status: &str,
+    before_files: &[(String, String)],
+    after_files: &[(String, String)],
+) -> Value {
+    let before_mutation_hash = mutation_hash(before_status, before_files);
+    let after_mutation_hash = mutation_hash(after_status, after_files);
+    let first_failure_diagnosis = if before_mutation_hash == after_mutation_hash {
+        Value::Null
+    } else {
+        json!("workspace git snapshot provider mutated git status or files")
+    };
+
+    json!({
+        "schema": "ee.workspace_hygiene.git_snapshot_readonly_log.v1",
+        "command": "collect_workspace_git_snapshot",
+        "workspace": workspace.display().to_string(),
+        "scenario": scenario,
+        "elapsedMs": elapsed_ms,
+        "exitCode": 0,
+        "stdoutArtifacts": [
+            artifact_summary("git_status_before.stdout", before_status),
+            artifact_summary("git_status_after.stdout", after_status),
+        ],
+        "stderrArtifacts": [
+            artifact_summary("collect_workspace_git_snapshot.stderr", ""),
+        ],
+        "beforeMutationHash": before_mutation_hash,
+        "afterMutationHash": after_mutation_hash,
+        "firstFailureDiagnosis": first_failure_diagnosis,
+    })
+}
+
+fn assert_read_only_e2e_log(log: &Value, scenario: &str) -> TestResult {
+    assert_eq!(
+        log["schema"],
+        "ee.workspace_hygiene.git_snapshot_readonly_log.v1"
+    );
+    assert_eq!(log["command"], "collect_workspace_git_snapshot");
+    assert_eq!(log["scenario"], scenario);
+    assert_eq!(log["exitCode"], 0);
+    assert!(
+        log["workspace"]
+            .as_str()
+            .is_some_and(|path| !path.is_empty())
+    );
+    assert!(log["elapsedMs"].as_u64().is_some());
+    assert_eq!(log["firstFailureDiagnosis"], Value::Null);
+    assert_eq!(log["beforeMutationHash"], log["afterMutationHash"]);
+    assert!(log["stdoutArtifacts"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item["name"] == "git_status_before.stdout")
+    }));
+    assert!(log["stderrArtifacts"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item["name"] == "collect_workspace_git_snapshot.stderr")
+    }));
+    Ok(())
+}
+
 fn entry_by_path<'a>(
     entries: &'a [WorkspaceGitStatusEntry],
     path: &str,
@@ -176,11 +264,23 @@ fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
 
     let mut options = WorkspaceGitSnapshotOptions::for_workspace(workspace);
     options.large_file_threshold_bytes = 16;
+    let started = Instant::now();
     let snapshot = collect_workspace_git_snapshot(&options, &SystemSwarmBriefCommandRunner)
         .map_err(|error| format!("collect workspace git snapshot: {error:?}"))?;
+    let elapsed_ms = started.elapsed().as_millis();
 
     let after_status = status_digest(workspace)?;
     let after_files = file_state_digest(workspace)?;
+    let log = read_only_e2e_log(
+        "dirty_repo",
+        workspace,
+        elapsed_ms,
+        &before_status,
+        &after_status,
+        &before_files,
+        &after_files,
+    );
+    assert_read_only_e2e_log(&log, "dirty_repo")?;
     assert_eq!(
         after_status, before_status,
         "provider must not change git status"
@@ -287,11 +387,23 @@ fn workspace_git_snapshot_provider_is_read_only_for_unmerged_conflict() -> TestR
     }
 
     let options = WorkspaceGitSnapshotOptions::for_workspace(workspace);
+    let started = Instant::now();
     let snapshot = collect_workspace_git_snapshot(&options, &SystemSwarmBriefCommandRunner)
         .map_err(|error| format!("collect workspace git snapshot: {error:?}"))?;
+    let elapsed_ms = started.elapsed().as_millis();
 
     let after_status = status_digest(workspace)?;
     let after_files = file_state_digest(workspace)?;
+    let log = read_only_e2e_log(
+        "unmerged_conflict",
+        workspace,
+        elapsed_ms,
+        &before_status,
+        &after_status,
+        &before_files,
+        &after_files,
+    );
+    assert_read_only_e2e_log(&log, "unmerged_conflict")?;
     assert_eq!(
         after_status, before_status,
         "provider must not change unmerged git status"
