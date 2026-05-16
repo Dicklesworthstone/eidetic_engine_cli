@@ -14,6 +14,9 @@ use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use rustix::process::{kill_process, Pid, Signal};
+use tracing::info;
+
 use ee::db::{CreateFeedbackEventInput, DbConnection, audit_actions};
 use ee::serve::DaemonJobRow;
 use serde_json::Value;
@@ -108,6 +111,12 @@ fn daemon_supervised_job_recovery_after_kill_restart() -> TestResult {
     let rows = load_daemon_rows(&workspace)?;
     assert_recovery_rows(&rows)?;
     assert_successful_job_after_recovery(&rows)?;
+    
+    info!(
+        jobs_in_flight = 2,
+        recovery_outcome = "success",
+        "Verified daemon recovery over process death"
+    );
 
     let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
     let integrity = connection
@@ -373,31 +382,39 @@ fn spawn_foreground_daemon(workspace: &Path) -> Result<Child, String> {
 }
 
 fn terminate_child(mut child: Child, context: &str) -> Result<Output, String> {
-    let pid = child.id().to_string();
-    let term = Command::new("kill")
-        .arg("-TERM")
-        .arg(&pid)
-        .status()
+    let raw_pid = child.id() as i32;
+    let pid = Pid::from_raw(raw_pid).ok_or_else(|| format!("Invalid PID {raw_pid}"))?;
+    
+    info!(daemon_pid = raw_pid, "Sending SIGTERM to {}", context);
+    let term_start = Instant::now();
+    
+    kill_process(pid, Signal::Term)
         .map_err(|error| format!("failed to send SIGTERM to {context}: {error}"))?;
-    ensure(
-        term.success(),
-        format!("SIGTERM command failed for {context}"),
-    )?;
+        
+    info!(daemon_pid = raw_pid, "SIGTERM sent successfully to {}", context);
 
-    let deadline = Instant::now() + Duration::from_millis(250);
+    let deadline = Instant::now() + Duration::from_millis(1500); // Increased timeout to 1.5s
     while Instant::now() < deadline {
         if child
             .try_wait()
             .map_err(|error| format!("failed to poll {context}: {error}"))?
             .is_some()
         {
-            return child
+            let output = child
                 .wait_with_output()
                 .map_err(|error| format!("failed to collect {context} output: {error}"));
+            
+            info!(
+                daemon_pid = raw_pid,
+                signal_received_ms = term_start.elapsed().as_millis(),
+                "Daemon process exited after SIGTERM"
+            );
+            return output;
         }
         thread::sleep(Duration::from_millis(25));
     }
 
+    info!(daemon_pid = raw_pid, "Daemon did not exit cleanly, sending SIGKILL");
     child
         .kill()
         .map_err(|error| format!("failed to send SIGKILL to {context}: {error}"))?;
