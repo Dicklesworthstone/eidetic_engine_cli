@@ -480,12 +480,64 @@ pub fn scan_eidetic_legacy_source(
 }
 
 fn canonicalize_existing_source(path: &Path) -> Result<PathBuf, LegacyImportScanError> {
-    if !path.exists() {
-        return Err(LegacyImportScanError::SourceMissing {
+    if let Some(symlink_path) =
+        first_existing_symlink_component(path).map_err(|error| LegacyImportScanError::Io {
+            path: error.path,
+            message: error.source.to_string(),
+        })?
+    {
+        return Err(LegacyImportScanError::Io {
             path: path.to_path_buf(),
+            message: format!(
+                "refusing to scan legacy Eidetic source through symlinked path component `{}`",
+                symlink_path.display()
+            ),
         });
     }
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(LegacyImportScanError::SourceMissing {
+                path: path.to_path_buf(),
+            });
+        }
+        Err(error) => return Err(io_error(path, error)),
+    }
     fs::canonicalize(path).map_err(|error| io_error(path, error))
+}
+
+#[derive(Debug)]
+struct SymlinkComponentInspectionError {
+    path: PathBuf,
+    source: io::Error,
+}
+
+fn first_existing_symlink_component(
+    path: &Path,
+) -> Result<Option<PathBuf>, SymlinkComponentInspectionError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(source) => {
+                return Err(SymlinkComponentInspectionError {
+                    path: current,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn collect_files(root: &Path) -> Result<Vec<PathBuf>, LegacyImportScanError> {
@@ -1306,6 +1358,51 @@ mod tests {
                 .contains(&LegacyRiskFlag::SensitiveContent),
             "sensitive flag present",
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scanner_rejects_symlinked_source_path_components() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_source = tempdir.path().join("real-source");
+        fs::create_dir(&real_source).map_err(|error| error.to_string())?;
+        fs::write(real_source.join("memories.jsonl"), r#"{"memory":"source"}"#)
+            .map_err(|error| error.to_string())?;
+
+        let linked_source = tempdir.path().join("linked-source");
+        symlink(&real_source, &linked_source).map_err(|error| error.to_string())?;
+        let parent_error = match scan_eidetic_legacy_source(&LegacyImportScanOptions {
+            source_path: linked_source,
+            dry_run: true,
+        }) {
+            Ok(report) => return Err(format!("expected symlink parent rejection, got {report:?}")),
+            Err(error) => error,
+        };
+        assert!(
+            parent_error
+                .to_string()
+                .contains("symlinked path component"),
+            "unexpected error: {parent_error}"
+        );
+
+        let real_file = real_source.join("sessions.json");
+        fs::write(&real_file, r#"{"messages":[]}"#).map_err(|error| error.to_string())?;
+        let linked_file = tempdir.path().join("linked-sessions.json");
+        symlink(&real_file, &linked_file).map_err(|error| error.to_string())?;
+        let file_error = match scan_eidetic_legacy_source(&LegacyImportScanOptions {
+            source_path: linked_file,
+            dry_run: true,
+        }) {
+            Ok(report) => return Err(format!("expected symlink file rejection, got {report:?}")),
+            Err(error) => error,
+        };
+        assert!(
+            file_error.to_string().contains("symlinked path component"),
+            "unexpected error: {file_error}"
+        );
+        Ok(())
     }
 
     #[test]
