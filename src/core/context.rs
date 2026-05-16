@@ -3100,6 +3100,7 @@ fn candidates_from_search_with_metrics(
 
     // Phase 1: Resolve all memory IDs from hits (including artifact links).
     // This still does per-hit artifact link lookups but avoids O(k) memory/tag lookups.
+    let mut mesh_blocked_hits = 0usize;
     let mut hit_resolutions: Vec<(
         &crate::core::search::SearchHit,
         Option<(MemoryId, Option<String>)>,
@@ -3110,6 +3111,7 @@ fn candidates_from_search_with_metrics(
             MeshQueryVisibility::Blocked
         ) {
             metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
+            mesh_blocked_hits = mesh_blocked_hits.saturating_add(1);
             continue;
         }
         let resolution = match MemoryId::from_str(&hit.doc_id) {
@@ -3123,6 +3125,21 @@ fn candidates_from_search_with_metrics(
             metrics.resolved_memory_ids = metrics.resolved_memory_ids.saturating_add(1);
         }
         hit_resolutions.push((hit, resolution));
+    }
+    if mesh_blocked_hits > 0 {
+        push_degradation(
+            degraded,
+            "mesh_workspace_scope_filtered",
+            ContextResponseSeverity::Low,
+            format!(
+                "Filtered {mesh_blocked_hits} mesh-derived search hit{plural} because the indexed workspace-scope decision was not an explicit allow for this workspace.",
+                plural = if mesh_blocked_hits == 1 { "" } else { "s" },
+            ),
+            Some(
+                "Review the mesh peer-group binding and import ledger before authorizing remote workspace material."
+                    .to_string(),
+            ),
+        );
     }
 
     // Collect unique memory IDs for batch loading.
@@ -6292,6 +6309,11 @@ mod tests {
         assert_eq!(metrics.skipped_candidates, 1);
         assert_eq!(metrics.resolved_memory_ids, 1);
         assert_eq!(metrics.converted_candidates, 1);
+        assert!(degraded.iter().any(|entry| {
+            entry.code == "mesh_workspace_scope_filtered"
+                && entry.severity == ContextResponseSeverity::Low
+                && entry.message.contains("Filtered 1 mesh-derived search hit")
+        }));
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].memory_id.to_string(), local_id);
         let candidate = &candidates[0];
