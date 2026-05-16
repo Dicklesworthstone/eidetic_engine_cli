@@ -36,7 +36,8 @@
         "schema_gate",
         "field_selector",
         "bench_iteration",
-        "artifact_manifest"
+        "artifact_manifest",
+        "lint_determinism"
       ]
     },
     "command": {
@@ -214,6 +215,23 @@
               "log_path",
               "retention_manifest_path",
               "artifact_manifest_hash"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "lint_determinism"}}},
+      "then": {
+        "properties": {
+          "fields": {
+            "type": "object",
+            "required": [
+              "disallowed_methods_violations",
+              "exemptions_count",
+              "exemptions_with_justification",
+              "ui_tests_passed",
+              "ui_tests_failed"
             ]
           }
         }

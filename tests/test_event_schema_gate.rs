@@ -129,6 +129,13 @@ fn validate_kind_fields(kind: &str, fields: Option<&Value>) -> TestResult {
             "retention_manifest_path",
             "artifact_manifest_hash",
         ],
+        "lint_determinism" => &[
+            "disallowed_methods_violations",
+            "exemptions_count",
+            "exemptions_with_justification",
+            "ui_tests_passed",
+            "ui_tests_failed",
+        ],
         _ => &[],
     };
     if required.is_empty() {

@@ -81,6 +81,8 @@ pub enum EventKind {
     BenchIteration,
     /// Verification artifact manifest emitted by the J1 bash harness.
     ArtifactManifest,
+    /// Determinism-lint gate summary emitted by the N4.4 e2e driver.
+    LintDeterminism,
 }
 
 impl EventKind {
@@ -101,11 +103,12 @@ impl EventKind {
             Self::FieldSelector => "field_selector",
             Self::BenchIteration => "bench_iteration",
             Self::ArtifactManifest => "artifact_manifest",
+            Self::LintDeterminism => "lint_determinism",
         }
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 14] {
+    pub const fn all() -> [Self; 15] {
         [
             Self::CommandStart,
             Self::CommandEnd,
@@ -121,6 +124,7 @@ impl EventKind {
             Self::FieldSelector,
             Self::BenchIteration,
             Self::ArtifactManifest,
+            Self::LintDeterminism,
         ]
     }
 }
