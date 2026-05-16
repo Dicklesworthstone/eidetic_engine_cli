@@ -1028,6 +1028,7 @@ pub struct MeshStorageStatusReport {
     pub peer_count: u32,
     pub cursor_count: u32,
     pub imported_event_count: u32,
+    pub policy_decision_event_count: u32,
     pub policy_failure_event_count: u32,
     pub mapped_memory_count: u32,
     pub cached_body_count: u32,
@@ -1040,6 +1041,9 @@ impl MeshStorageStatusReport {
         self.imported_event_count = self
             .imported_event_count
             .saturating_add(status.imported_event_count);
+        self.policy_decision_event_count = self
+            .policy_decision_event_count
+            .saturating_add(status.policy_decision_event_count);
         self.policy_failure_event_count = self
             .policy_failure_event_count
             .saturating_add(status.policy_failure_event_count);
@@ -1056,6 +1060,7 @@ impl MeshStorageStatusReport {
         self.peer_count > 0
             || self.cursor_count > 0
             || self.imported_event_count > 0
+            || self.policy_decision_event_count > 0
             || self.policy_failure_event_count > 0
             || self.mapped_memory_count > 0
             || self.cached_body_count > 0
@@ -3842,7 +3847,10 @@ mod tests {
                     r#"{"schema":"ee.mesh.policy_failure_surface.v1","code":"mesh_peer_policy_denied"}"#
                         .to_owned(),
                 ),
-                policy_decision_json: None,
+                policy_decision_json: Some(
+                    r#"{"schema":"ee.mesh.policy_decision.v1","action":"deny","policyRef":"mesh_pol_status"}"#
+                        .to_owned(),
+                ),
                 event_json: r#"{"schema":"ee.mesh.event.v1","eventKind":"create"}"#.to_owned(),
                 imported_at: Some("2026-05-16T21:40:00Z".to_owned()),
             })
@@ -3852,6 +3860,11 @@ mod tests {
             .ok_or_else(|| "mesh storage status should be inspected".to_owned())?;
 
         ensure(report.imported_event_count, 1, "imported event count")?;
+        ensure(
+            report.policy_decision_event_count,
+            1,
+            "policy decision count",
+        )?;
         ensure(report.policy_failure_event_count, 1, "policy failure count")?;
         ensure(report.has_rows(), true, "mesh storage has rows")?;
         ensure(report.peer_count, 0, "peer labels are not surfaced")

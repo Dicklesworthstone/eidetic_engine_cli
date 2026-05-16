@@ -287,6 +287,46 @@ fn peer_policy_decision_schema_pins_directional_side_effect_fields() -> TestResu
 }
 
 #[test]
+fn mesh_storage_status_schema_pins_policy_decision_counts() -> TestResult {
+    let schema = read_json(STORAGE_STATUS_SCHEMA_PATH)?;
+
+    ensure_equal(
+        &schema.pointer("/$schema").and_then(Value::as_str),
+        &Some("https://json-schema.org/draft/2020-12/schema"),
+        "json schema draft",
+    )?;
+    ensure_equal(
+        &schema.pointer("/$id").and_then(Value::as_str),
+        &Some("https://eidetic-engine/schemas/ee.mesh.storage_status.v1.json"),
+        "schema id",
+    )?;
+    ensure_equal(
+        &schema.pointer("/title").and_then(Value::as_str),
+        &Some(MESH_STORAGE_STATUS_SCHEMA_V1),
+        "schema title",
+    )?;
+    ensure_schema_registered(MESH_STORAGE_STATUS_SCHEMA_V1, "mesh_storage_status")?;
+
+    let required = schema
+        .pointer("/required")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "storage status required fields missing".to_string())?;
+    ensure(
+        required
+            .iter()
+            .any(|value| value.as_str() == Some("policyDecisionEventCount")),
+        "storage status schema must require policyDecisionEventCount",
+    )?;
+    ensure(
+        schema
+            .pointer("/properties/policyDecisionEventCount/minimum")
+            .and_then(Value::as_u64)
+            == Some(0),
+        "policyDecisionEventCount must be a non-negative counter",
+    )
+}
+
+#[test]
 fn peer_policy_failure_surface_fixtures_are_redaction_safe() -> TestResult {
     for fixture in FAILURE_SURFACE_FIXTURES {
         let value = read_json(fixture)?;

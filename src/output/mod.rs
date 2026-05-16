@@ -3528,6 +3528,10 @@ fn render_mesh_storage_status_json(parent: &mut JsonBuilder, report: &MeshStorag
         storage.field_u32("peerCount", report.peer_count);
         storage.field_u32("cursorCount", report.cursor_count);
         storage.field_u32("importedEventCount", report.imported_event_count);
+        storage.field_u32(
+            "policyDecisionEventCount",
+            report.policy_decision_event_count,
+        );
         storage.field_u32("policyFailureEventCount", report.policy_failure_event_count);
         storage.field_u32("mappedMemoryCount", report.mapped_memory_count);
         storage.field_u32("cachedBodyCount", report.cached_body_count);
@@ -13458,6 +13462,7 @@ mod tests {
             peer_count: 2,
             cursor_count: 3,
             imported_event_count: 5,
+            policy_decision_event_count: 13,
             policy_failure_event_count: 1,
             mapped_memory_count: 7,
             cached_body_count: 11,
@@ -13478,6 +13483,11 @@ mod tests {
             &storage["importedEventCount"],
             &serde_json::json!(5),
             "imported event count",
+        )?;
+        ensure_equal(
+            &storage["policyDecisionEventCount"],
+            &serde_json::json!(13),
+            "policy decision count",
         )?;
         ensure_equal(
             &storage["policyFailureEventCount"],
