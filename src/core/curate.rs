@@ -322,6 +322,7 @@ pub struct CurateValidateReport {
     pub mutation: CurateValidateMutation,
     pub dry_run: bool,
     pub durable_mutation: bool,
+    #[serde(serialize_with = "serialize_curate_validate_degradations")]
     pub degraded: Vec<CurateCandidatesDegradation>,
     pub next_action: String,
 }
@@ -344,6 +345,7 @@ pub struct CurateApplyReport {
     pub target_after: Option<CurateApplyMemoryState>,
     pub dry_run: bool,
     pub durable_mutation: bool,
+    #[serde(serialize_with = "serialize_curate_apply_degradations")]
     pub degraded: Vec<CurateCandidatesDegradation>,
     pub next_action: String,
 }
@@ -364,6 +366,7 @@ pub struct CurateReviewReport {
     pub mutation: CurateReviewMutation,
     pub dry_run: bool,
     pub durable_mutation: bool,
+    #[serde(serialize_with = "serialize_curate_review_degradations")]
     pub degraded: Vec<CurateCandidatesDegradation>,
     pub next_action: String,
 }
@@ -1312,15 +1315,46 @@ fn serialize_curate_candidates_degradations<S>(
 where
     S: Serializer,
 {
-    aggregate_curate_candidates_degradations(degraded).serialize(serializer)
+    aggregate_curate_degradations("curate_candidates", degraded).serialize(serializer)
 }
 
-fn aggregate_curate_candidates_degradations(
+fn serialize_curate_validate_degradations<S>(
+    degraded: &[CurateCandidatesDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_curate_degradations("curate_validate", degraded).serialize(serializer)
+}
+
+fn serialize_curate_apply_degradations<S>(
+    degraded: &[CurateCandidatesDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_curate_degradations("curate_apply", degraded).serialize(serializer)
+}
+
+fn serialize_curate_review_degradations<S>(
+    degraded: &[CurateCandidatesDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_curate_degradations("curate_review", degraded).serialize(serializer)
+}
+
+fn aggregate_curate_degradations(
+    source: &'static str,
     degraded: &[CurateCandidatesDegradation],
 ) -> Vec<crate::core::degraded_aggregation::AggregatedDegradation> {
     aggregate_degraded_entries(degraded.iter().map(|entry| {
         DegradationAggregationInput::new(
-            "curate_candidates",
+            source,
             entry.code.clone(),
             entry.severity.clone(),
             entry.message.clone(),
@@ -8174,6 +8208,182 @@ mod tests {
             degraded[0]["sources"].clone(),
             serde_json::json!(["curate_candidates"])
         );
+        Ok(())
+    }
+
+    fn sample_curate_candidate_summary() -> super::CurateCandidateSummary {
+        let stored = StoredCurationCandidate {
+            id: "curate_aggregate00000000000001".to_owned(),
+            workspace_id: "wsp_curate_aggregate".to_owned(),
+            candidate_type: "promote".to_owned(),
+            target_memory_id: "mem_aggregate000000000000001".to_owned(),
+            proposed_content: None,
+            proposed_confidence: Some(0.82),
+            proposed_trust_class: Some("agent_validated".to_owned()),
+            source_type: "feedback_event".to_owned(),
+            source_id: Some("outcome_aggregate".to_owned()),
+            reason: "Helpful feedback raised confidence.".to_owned(),
+            confidence: 0.74,
+            status: "pending".to_owned(),
+            created_at: "2026-05-01T00:00:00Z".to_owned(),
+            reviewed_at: None,
+            reviewed_by: None,
+            applied_at: None,
+            ttl_expires_at: None,
+            review_state: "new".to_owned(),
+            snoozed_until: None,
+            merged_into_candidate_id: None,
+            state_entered_at: Some("2026-05-01T00:00:00Z".to_owned()),
+            last_action_at: None,
+            ttl_policy_id: None,
+        };
+
+        candidate_summary_from_stored(stored, std::path::Path::new("/repo"))
+    }
+
+    fn duplicate_curate_degradations() -> Vec<super::CurateCandidatesDegradation> {
+        vec![
+            super::CurateCandidatesDegradation {
+                code: "curate_fixture_degraded".to_owned(),
+                severity: "low".to_owned(),
+                message: "low duplicate".to_owned(),
+                repair: "low repair".to_owned(),
+            },
+            super::CurateCandidatesDegradation {
+                code: "curate_fixture_degraded".to_owned(),
+                severity: "high".to_owned(),
+                message: "high duplicate".to_owned(),
+                repair: "high repair".to_owned(),
+            },
+        ]
+    }
+
+    fn assert_aggregated_degraded_source(data_json: &str, expected_source: &str) -> TestResult {
+        let value: serde_json::Value =
+            serde_json::from_str(data_json).map_err(|error| error.to_string())?;
+        let degraded = value
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("degraded array missing: {value}"))?;
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(
+            degraded[0]["code"].as_str(),
+            Some("curate_fixture_degraded")
+        );
+        assert_eq!(degraded[0]["severity"].as_str(), Some("high"));
+        assert_eq!(degraded[0]["repair"].as_str(), Some("high repair"));
+        assert_eq!(
+            degraded[0]["sources"].clone(),
+            serde_json::json!([expected_source])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn curate_lifecycle_json_aggregates_duplicate_degraded_entries() -> TestResult {
+        let candidate = sample_curate_candidate_summary();
+
+        let validate_report = super::CurateValidateReport {
+            schema: CURATE_VALIDATE_SCHEMA_V1,
+            command: "curate validate",
+            version: env!("CARGO_PKG_VERSION"),
+            workspace_id: "wsp_curate_aggregate".to_owned(),
+            workspace_path: "/workspace".to_owned(),
+            database_path: "/workspace/.ee/ee.db".to_owned(),
+            candidate_id: candidate.id.clone(),
+            candidate: candidate.clone(),
+            validation: super::CurateValidateResult {
+                status: "valid".to_owned(),
+                decision: "approve".to_owned(),
+                errors: Vec::new(),
+                warnings: Vec::new(),
+            },
+            mutation: super::CurateValidateMutation {
+                from_status: "pending".to_owned(),
+                to_status: "approved".to_owned(),
+                persisted: false,
+                reviewed_at: None,
+                reviewed_by: None,
+                audit_id: None,
+            },
+            dry_run: true,
+            durable_mutation: false,
+            degraded: duplicate_curate_degradations(),
+            next_action: "ee curate apply <candidate-id> --json".to_owned(),
+        };
+        assert_aggregated_degraded_source(&validate_report.data_json(), "curate_validate")?;
+
+        let apply_report = super::CurateApplyReport {
+            schema: CURATE_APPLY_SCHEMA_V1,
+            command: "curate apply",
+            version: env!("CARGO_PKG_VERSION"),
+            workspace_id: "wsp_curate_aggregate".to_owned(),
+            workspace_path: "/workspace".to_owned(),
+            database_path: "/workspace/.ee/ee.db".to_owned(),
+            candidate_id: candidate.id.clone(),
+            candidate: candidate.clone(),
+            application: super::CurateApplyResult {
+                status: "would_apply".to_owned(),
+                decision: "apply".to_owned(),
+                candidate_type: "promote".to_owned(),
+                target_memory_id: "mem_aggregate000000000000001".to_owned(),
+                changes: Vec::new(),
+                errors: Vec::new(),
+                warnings: Vec::new(),
+            },
+            mutation: super::CurateApplyMutation {
+                from_status: "approved".to_owned(),
+                to_status: "applied".to_owned(),
+                persisted: false,
+                applied_at: None,
+                applied_by: None,
+                audit_id: None,
+            },
+            target_before: None,
+            target_after: None,
+            dry_run: true,
+            durable_mutation: false,
+            degraded: duplicate_curate_degradations(),
+            next_action: "no action required".to_owned(),
+        };
+        assert_aggregated_degraded_source(&apply_report.data_json(), "curate_apply")?;
+
+        let review_report = super::CurateReviewReport {
+            schema: CURATE_REVIEW_SCHEMA_V1,
+            command: "curate accept",
+            version: env!("CARGO_PKG_VERSION"),
+            workspace_id: "wsp_curate_aggregate".to_owned(),
+            workspace_path: "/workspace".to_owned(),
+            database_path: "/workspace/.ee/ee.db".to_owned(),
+            candidate_id: candidate.id.clone(),
+            candidate,
+            review: super::CurateReviewResult {
+                status: "accepted".to_owned(),
+                decision: "accept".to_owned(),
+                action: "accept".to_owned(),
+                errors: Vec::new(),
+                warnings: Vec::new(),
+            },
+            mutation: super::CurateReviewMutation {
+                from_status: "pending".to_owned(),
+                to_status: "accepted".to_owned(),
+                from_review_state: "new".to_owned(),
+                to_review_state: "accepted".to_owned(),
+                persisted: false,
+                reviewed_at: None,
+                reviewed_by: None,
+                snoozed_until: None,
+                merged_into_candidate_id: None,
+                audit_id: None,
+            },
+            dry_run: true,
+            durable_mutation: false,
+            degraded: duplicate_curate_degradations(),
+            next_action: "ee curate apply <candidate-id> --json".to_owned(),
+        };
+        assert_aggregated_degraded_source(&review_report.data_json(), "curate_review")?;
+
         Ok(())
     }
 

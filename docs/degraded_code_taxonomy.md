@@ -114,7 +114,10 @@ Current conventions:
 | `build` | Binary version and build-provenance degradation. |
 | `build_admission` | `ee diag build-admission` disk-pressure and external-build-root admission degradation. |
 | `bv` | Swarm brief BV source degradation. |
+| `curate_apply` | `ee curate apply` candidate-application degradation. |
 | `curate_candidates` | `ee curate candidates` queue listing degradation. |
+| `curate_review` | `ee curate accept/reject/snooze/merge` review-lifecycle degradation. |
+| `curate_validate` | `ee curate validate` candidate-validation degradation. |
 | `db_status` | `ee db status` migration or sidecar-file degradation. |
 | `dependency_contract` | `ee diag dependencies` dependency-contract degradation. |
 | `qos_registry` | QoS active-lane registry read or integrity degradation. |
