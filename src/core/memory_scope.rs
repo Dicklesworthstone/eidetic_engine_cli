@@ -255,6 +255,23 @@ impl MeshPeerPolicyDecision {
     }
 
     #[must_use]
+    pub fn to_json(&self) -> JsonValue {
+        json!({
+            "action": self.import.workspace_scope_decision.as_str(),
+            "reason": self.import.reason,
+            "policyRef": mesh_policy_ref(self.policy_id.as_deref()),
+            "materialLane": mesh_lane_name(self.import.material_lane),
+            "redaction": self.redaction.as_str(),
+            "trustLane": self.trust_lane.map(MeshTrustLane::as_str),
+            "importTrustClass": self.import_trust_class.map(TrustClass::as_str),
+            "bodyFetchAllowed": self.body_fetch_allowed,
+            "localTruthSideEffectsAllowed": self.import.permits_local_truth_side_effects(),
+            "searchOrGraphSideEffectsAllowed": self.import.permits_search_or_graph_side_effects(),
+            "failure": self.failure_surface().map(|surface| surface.to_json()),
+        })
+    }
+
+    #[must_use]
     pub fn failure_surface(&self) -> Option<MeshPolicyFailureSurface> {
         let code = match self.import.workspace_scope_decision {
             MeshImportDecisionKind::Allow => return None,
@@ -308,6 +325,22 @@ impl MeshOutboundPolicyDecision {
     #[must_use]
     pub fn requires_redacted_payload(&self) -> bool {
         self.permits_payload_export() && self.redaction == MeshRedactionDecision::Redact
+    }
+
+    #[must_use]
+    pub fn to_json(&self) -> JsonValue {
+        json!({
+            "action": self.action.as_str(),
+            "reason": self.reason,
+            "policyRef": mesh_policy_ref(self.policy_id.as_deref()),
+            "materialLane": mesh_lane_name(self.material_lane),
+            "redaction": self.redaction.as_str(),
+            "trustLane": self.trust_lane.map(MeshTrustLane::as_str),
+            "payloadExportAllowed": self.permits_payload_export(),
+            "rawPayloadExportAllowed": self.permits_raw_payload_export(),
+            "redactedPayloadRequired": self.requires_redacted_payload(),
+            "failure": self.failure_surface().map(|surface| surface.to_json()),
+        })
     }
 
     #[must_use]
@@ -1830,6 +1863,41 @@ max_bytes = 0
     }
 
     #[test]
+    fn mesh_peer_policy_decision_json_is_stable_and_redaction_safe() {
+        let allowed =
+            decide_mesh_peer_policy(&peer_policy_input(MeshLane::Metadata), Some(&peer_policy()));
+        let allowed_json = allowed.to_json();
+        assert_eq!(allowed_json["action"], "allow");
+        assert_eq!(allowed_json["reason"], "peer_policy_lane_allowed");
+        assert_eq!(allowed_json["policyRef"], "pol_alpha_mesh_policy");
+        assert_eq!(allowed_json["materialLane"], "metadata");
+        assert_eq!(allowed_json["redaction"], "share");
+        assert_eq!(allowed_json["trustLane"], "peerAgent");
+        assert_eq!(allowed_json["importTrustClass"], "agent_validated");
+        assert_eq!(allowed_json["bodyFetchAllowed"], false);
+        assert_eq!(allowed_json["localTruthSideEffectsAllowed"], true);
+        assert_eq!(allowed_json["searchOrGraphSideEffectsAllowed"], true);
+        assert_eq!(allowed_json["failure"], JsonValue::Null);
+
+        let mut path_policy = peer_policy();
+        path_policy.policy_id = "/Users/alice/private/inbound-policy.toml".to_owned();
+        let denied =
+            decide_mesh_peer_policy(&peer_policy_input(MeshLane::Body), Some(&path_policy));
+        let denied_json = denied.to_json();
+        assert_eq!(denied_json["action"], "deny");
+        assert_eq!(denied_json["reason"], "peer_policy_redaction_denied");
+        assert_eq!(denied_json["materialLane"], "body");
+        assert_eq!(
+            denied_json["failure"]["schema"],
+            "ee.mesh.policy_failure_surface.v1"
+        );
+        assert!(
+            !denied_json.to_string().contains("/Users/alice/private"),
+            "decision JSON leaked raw policy path: {denied_json}"
+        );
+    }
+
+    #[test]
     fn mesh_outbound_policy_allows_metadata_share_for_authorized_peer() {
         let decision = decide_mesh_outbound_policy(
             &outbound_policy_input(MeshLane::Metadata),
@@ -1963,6 +2031,42 @@ max_bytes = 0
         let denied = decide_mesh_outbound_policy(&redacted_input, Some(&policy));
         assert_eq!(denied.action, MeshImportDecisionKind::Deny);
         assert_eq!(denied.reason, "outbound_lane_denied");
+    }
+
+    #[test]
+    fn mesh_outbound_policy_decision_json_is_stable_and_redaction_safe() {
+        let allowed = decide_mesh_outbound_policy(
+            &outbound_policy_input(MeshLane::Metadata),
+            Some(&peer_policy()),
+        );
+        let allowed_json = allowed.to_json();
+        assert_eq!(allowed_json["action"], "allow");
+        assert_eq!(allowed_json["reason"], "outbound_lane_allowed");
+        assert_eq!(allowed_json["policyRef"], "pol_alpha_mesh_policy");
+        assert_eq!(allowed_json["materialLane"], "metadata");
+        assert_eq!(allowed_json["redaction"], "share");
+        assert_eq!(allowed_json["trustLane"], "peerAgent");
+        assert_eq!(allowed_json["payloadExportAllowed"], true);
+        assert_eq!(allowed_json["rawPayloadExportAllowed"], true);
+        assert_eq!(allowed_json["redactedPayloadRequired"], false);
+        assert_eq!(allowed_json["failure"], JsonValue::Null);
+
+        let mut path_policy = peer_policy();
+        path_policy.policy_id = "/Users/alice/private/outbound-policy.toml".to_owned();
+        let denied =
+            decide_mesh_outbound_policy(&outbound_policy_input(MeshLane::Body), Some(&path_policy));
+        let denied_json = denied.to_json();
+        assert_eq!(denied_json["action"], "deny");
+        assert_eq!(denied_json["reason"], "outbound_redaction_denied");
+        assert_eq!(denied_json["materialLane"], "body");
+        assert_eq!(
+            denied_json["failure"]["schema"],
+            "ee.mesh.policy_failure_surface.v1"
+        );
+        assert!(
+            !denied_json.to_string().contains("/Users/alice/private"),
+            "outbound decision JSON leaked raw policy path: {denied_json}"
+        );
     }
 
     #[test]

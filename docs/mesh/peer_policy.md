@@ -74,6 +74,16 @@ trust lane, and a redaction-safe policy reference. Path-like policy identifiers
 are replaced with stable `mesh_pol_*` aliases before they leave the policy
 layer.
 
+The full inbound decision also has a stable redaction-safe JSON surface for
+callers that need to expose allowed decisions:
+
+- `action`, `reason`, `policyRef`, `materialLane`, `redaction`, `trustLane`,
+  and `importTrustClass` describe the policy result.
+- `bodyFetchAllowed`, `localTruthSideEffectsAllowed`, and
+  `searchOrGraphSideEffectsAllowed` make side effects explicit.
+- `failure` is either `null` for allowed decisions or the
+  `ee.mesh.policy_failure_surface.v1` object described above.
+
 The same policy is checked before outbound sharing. A lane grant alone is not
 enough for body or embedding payloads: if the redaction posture is `deny`, the
 payload must not leave the node; if the posture is `redact`, only an already
@@ -88,6 +98,11 @@ that later export/status callers can embed directly:
 | `deny` | `mesh_outbound_policy_denied` |
 | `quarantine` | `mesh_outbound_policy_quarantined` |
 | `reject` | `mesh_outbound_policy_rejected` |
+
+The outbound decision JSON uses the same safe policy reference and exposes
+`payloadExportAllowed`, `rawPayloadExportAllowed`, and
+`redactedPayloadRequired`, so export callers can enforce body/embedding privacy
+without reinterpreting policy internals.
 
 The mesh import ledger persists the same `ee.mesh.policy_failure_surface.v1`
 JSON in `policy_failure_surface_json` when an imported event is retained after
