@@ -376,17 +376,22 @@ fn detect_git_root(path: &Path) -> Option<PathBuf> {
 /// Detect if the git repository is a worktree.
 fn detect_git_worktree(git_root: &Path) -> Option<String> {
     let git_file = git_root.join(".git");
-    if git_file.is_file() {
-        // This is a worktree - .git is a file pointing to the main repo
-        if let Ok(content) = fs::read_to_string(&git_file) {
-            if content.starts_with("gitdir:") {
-                // Extract worktree name from path like .git/worktrees/<name>
-                if let Some(worktree_path) = content.strip_prefix("gitdir:") {
-                    let trimmed = worktree_path.trim();
-                    if let Some(idx) = trimmed.rfind("/worktrees/") {
-                        let name = &trimmed[idx + 11..];
-                        return Some(name.to_string());
-                    }
+    let Ok(metadata) = fs::symlink_metadata(&git_file) else {
+        return None;
+    };
+    if !metadata.file_type().is_file() {
+        return None;
+    }
+
+    // This is a worktree - .git is a file pointing to the main repo.
+    if let Ok(content) = fs::read_to_string(&git_file) {
+        if content.starts_with("gitdir:") {
+            // Extract worktree name from path like .git/worktrees/<name>
+            if let Some(worktree_path) = content.strip_prefix("gitdir:") {
+                let trimmed = worktree_path.trim();
+                if let Some(idx) = trimmed.rfind("/worktrees/") {
+                    let name = &trimmed[idx + 11..];
+                    return Some(name.to_string());
                 }
             }
         }
@@ -1110,8 +1115,8 @@ mod tests {
     use super::{
         WORKSPACE_ENV_VAR, WORKSPACE_MARKER, WorkspaceError, WorkspaceLocation,
         WorkspaceResolutionMode, WorkspaceResolutionRequest, WorkspaceResolutionSource,
-        WorkspaceScopeKind, discover, discover_from_current_dir, resolve_workspace,
-        workspace_scope_from_repository_root,
+        WorkspaceScopeKind, detect_git_worktree, discover, discover_from_current_dir,
+        resolve_workspace, workspace_scope_from_repository_root,
     };
 
     type TestResult = Result<(), String>;
@@ -1573,6 +1578,45 @@ mod tests {
             }
             Err(error) => return Err(format!("unexpected workspace error: {error}")),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn detect_git_worktree_reads_regular_git_file() -> TestResult {
+        let scratch = ScratchDir::new("git-worktree-file")?;
+        let repo = scratch.make_dir("repo")?;
+        scratch.make_file(
+            "repo/.git",
+            "gitdir: /tmp/main-repo/.git/worktrees/feature-lane\n",
+        )?;
+
+        assert_eq!(detect_git_worktree(&repo).as_deref(), Some("feature-lane"));
+        Ok(())
+    }
+
+    #[test]
+    fn detect_git_worktree_ignores_git_directory() -> TestResult {
+        let scratch = ScratchDir::new("git-worktree-dir")?;
+        let repo = scratch.make_dir("repo")?;
+        scratch.make_dir("repo/.git")?;
+
+        assert_eq!(detect_git_worktree(&repo), None);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detect_git_worktree_ignores_symlinked_git_file() -> TestResult {
+        let scratch = ScratchDir::new("git-worktree-symlink")?;
+        let repo = scratch.make_dir("repo")?;
+        let outside = scratch.make_file(
+            "outside-git-file",
+            "gitdir: /tmp/main-repo/.git/worktrees/outside\n",
+        )?;
+        std::os::unix::fs::symlink(outside, repo.join(".git"))
+            .map_err(|error| format!("symlink .git: {error}"))?;
+
+        assert_eq!(detect_git_worktree(&repo), None);
         Ok(())
     }
 
