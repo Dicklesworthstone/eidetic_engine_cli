@@ -337,6 +337,35 @@ fn backup_export_import_roundtrip_with_standard_redaction_remains_deterministic(
 }
 
 #[test]
+fn backup_export_import_roundtrip_imports_all_redaction_levels() -> TestResult {
+    for level in RedactionLevel::all() {
+        let fixture = run_roundtrip(*level)
+            .map_err(|error| format!("round-trip for redaction level `{level}`: {error}"))?;
+        if fixture._memories_imported == 0 {
+            return Err(format!(
+                "round-trip for redaction level `{level}` imported 0 memories"
+            ));
+        }
+
+        let dst_conn = DbConnection::open_file(&fixture.dst_db)
+            .map_err(|error| format!("dst db open for `{level}`: {error}"))?;
+        let dst_workspace_id = single_workspace_id(&dst_conn)?;
+        let dst_count = dst_conn
+            .list_memories(&dst_workspace_id, None, true)
+            .map_err(|error| format!("dst list_memories for `{level}`: {error}"))?
+            .len();
+        if dst_count != fixture._memories_imported as usize {
+            return Err(format!(
+                "round-trip for redaction level `{level}` changed imported memory count: \
+                 report={}, db={dst_count}",
+                fixture._memories_imported
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn backup_records_jsonl_is_deterministic_across_two_exports() -> TestResult {
     // Raw backup records include run-specific provenance fields
     // (backup_id and timestamps). The deterministic contract for the
