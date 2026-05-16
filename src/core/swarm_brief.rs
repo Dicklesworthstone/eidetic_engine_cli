@@ -3292,22 +3292,23 @@ fn unquote_git_path(path: &str) -> Option<String> {
         return (!path.is_empty()).then(|| path.to_string());
     };
 
-    let mut unquoted = String::with_capacity(quoted.len());
+    let mut unquoted = Vec::with_capacity(quoted.len());
     let mut chars = quoted.chars();
     while let Some(ch) = chars.next() {
         if ch != '\\' {
-            unquoted.push(ch);
+            let mut encoded = [0; 4];
+            unquoted.extend_from_slice(ch.encode_utf8(&mut encoded).as_bytes());
             continue;
         }
         let escaped = chars.next()?;
         match escaped {
-            '\\' => unquoted.push('\\'),
-            '"' => unquoted.push('"'),
-            'n' => unquoted.push('\n'),
-            'r' => unquoted.push('\r'),
-            't' => unquoted.push('\t'),
-            'b' => unquoted.push('\u{0008}'),
-            'f' => unquoted.push('\u{000c}'),
+            '\\' => unquoted.push(b'\\'),
+            '"' => unquoted.push(b'"'),
+            'n' => unquoted.push(b'\n'),
+            'r' => unquoted.push(b'\r'),
+            't' => unquoted.push(b'\t'),
+            'b' => unquoted.push(0x08),
+            'f' => unquoted.push(0x0c),
             '0'..='7' => {
                 let mut value = escaped.to_digit(8)?;
                 for _ in 0..2 {
@@ -3321,7 +3322,7 @@ fn unquote_git_path(path: &str) -> Option<String> {
                     value = (value * 8) + digit;
                 }
                 let byte = u8::try_from(value).ok()?;
-                unquoted.push(char::from(byte));
+                unquoted.push(byte);
             }
             _ => return None,
         }
@@ -3329,7 +3330,7 @@ fn unquote_git_path(path: &str) -> Option<String> {
     if unquoted.is_empty() {
         return None;
     }
-    Some(unquoted)
+    String::from_utf8(unquoted).ok()
 }
 
 fn attach_workspace_git_metadata(
@@ -5382,9 +5383,31 @@ mod tests {
     }
 
     #[test]
+    fn workspace_git_porcelain_v2_parser_decodes_multibyte_octal_paths() {
+        let entries = parse_workspace_git_status_porcelain_v2(concat!(
+            "1 .M N... 100644 100644 100644 abc def \"src/caf\\303\\251.rs\"\n",
+            "? \"scratch/snowman-\\342\\230\\203.txt\"\n",
+            "2 R. N... 100644 100644 100644 abc def R100 \"renamed/ni\\303\\261o.rs\"\t\"old/ni\\303\\261o.rs\"\n",
+        ));
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (entry.path.as_str(), entry.original_path.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("renamed/ni\u{00f1}o.rs", Some("old/ni\u{00f1}o.rs")),
+                ("scratch/snowman-\u{2603}.txt", None),
+                ("src/caf\u{00e9}.rs", None),
+            ]
+        );
+    }
+
+    #[test]
     fn workspace_git_porcelain_v2_parser_rejects_malformed_quoted_paths() {
         let entries = parse_workspace_git_status_porcelain_v2(concat!(
             "1 .M N... 100644 100644 100644 abc def \"src/bad\\q.rs\"\n",
+            "1 .M N... 100644 100644 100644 abc def \"src/bad\\303.rs\"\n",
             "? \"\"\n",
             "? \"../escaped-outside.rs\"\n",
         ));
