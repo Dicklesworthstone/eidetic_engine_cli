@@ -110,7 +110,7 @@ spawn_context_reader() {
         elapsed_ms="$(python3 -c "print(int(($ended - $started) / 1_000_000))")"
         printf 'rc=%s\nelapsed_ms=%s\npool_size=%s\n' "$rc" "$elapsed_ms" "$pool_size" >"$meta_file"
     ) &
-    printf '%s\n' "$!"
+    SPAWNED_PID="$!"
 }
 
 spawn_writer() {
@@ -130,7 +130,7 @@ spawn_writer() {
         set -e
         printf 'rc=%s\n' "$rc" >"$ARTIFACT_DIR/$label.meta"
     ) &
-    printf '%s\n' "$!"
+    SPAWNED_PID="$!"
 }
 
 assert_context_response() {
@@ -223,12 +223,14 @@ run_batch() {
     write_read_pool_config "$pool_size"
 
     for i in $(seq 1 "$READ_POOL_CONTEXTS"); do
-        pids+=("$(spawn_context_reader "$prefix-context-$i" "$pool_size")")
+        spawn_context_reader "$prefix-context-$i" "$pool_size"
+        pids+=("$SPAWNED_PID")
     done
 
     sleep 0.1
     for i in $(seq 1 "$READ_POOL_WRITERS"); do
-        writer_pids+=("$(spawn_writer "$prefix-writer-$i")")
+        spawn_writer "$prefix-writer-$i"
+        writer_pids+=("$SPAWNED_PID")
     done
 
     for pid in "${pids[@]}"; do
