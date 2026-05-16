@@ -245,6 +245,81 @@ except Exception:
 PY
 }
 
+critical_checkout_manifest() {
+    GIT_LS_FILES="${RCH_VERIFY_GIT_LS_FILES:-}" \
+    PROJECT_ROOT_PATH="$PROJECT_ROOT" \
+    python3 - <<'PY'
+import os
+import subprocess
+
+explicit = os.environ.get("GIT_LS_FILES", "")
+project_root = os.environ["PROJECT_ROOT_PATH"]
+
+if explicit:
+    tracked = explicit.splitlines()
+else:
+    try:
+        result = subprocess.run(
+            ["git", "-C", project_root, "ls-files"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=10,
+        )
+        tracked = result.stdout.splitlines()
+    except Exception:
+        tracked = []
+
+critical = set()
+for path in tracked:
+    path = path.strip()
+    if not path:
+        continue
+    if path in {"src/lib.rs", "src/main.rs"}:
+        critical.add(path)
+        continue
+    if path.startswith("src/") and path.endswith(".rs"):
+        parts = path.split("/")
+        if len(parts) == 2 or (len(parts) == 3 and parts[2] == "mod.rs"):
+            critical.add(path)
+
+for path in sorted(critical):
+    print(path)
+PY
+}
+
+remote_checkout_missing_tracked_paths() {
+    CHECKOUT_OUTPUT="${1:-}" \
+    CRITICAL_MANIFEST="$(critical_checkout_manifest)" \
+    python3 - <<'PY'
+import os
+import re
+
+ansi = re.compile(r"\x1b\[[0-9;]*m")
+text = ansi.sub("", os.environ.get("CHECKOUT_OUTPUT", ""))
+manifest = {
+    line.strip()
+    for line in os.environ.get("CRITICAL_MANIFEST", "").splitlines()
+    if line.strip()
+}
+
+if "E0583" not in text:
+    raise SystemExit(0)
+
+candidates = []
+for match in re.finditer(r'"(src/[^"]+\.rs)"', text):
+    candidates.append(match.group(1))
+
+missing = []
+for path in candidates:
+    if path in manifest and path not in missing:
+        missing.append(path)
+
+print(",".join(missing))
+PY
+}
+
 run_rch_invocation_once() {
     if [ -n "${RCH_VERIFY_FAKE_OUTPUT:-}" ]; then
         printf '%s' "$RCH_VERIFY_FAKE_OUTPUT"
@@ -384,6 +459,7 @@ elif (
     or "rch_verify_local_fallback_refused" in degraded
     or "rch_verify_worker_disk_full" in degraded
     or "rch_verify_worker_quarantine_ignored" in degraded
+    or "rch_verify_remote_checkout_incomplete" in degraded
 ):
     status = "rch_environment_failure"
 elif "rch_verify_capacity_or_timeout" in degraded:
@@ -484,6 +560,11 @@ if contains_forbidden_text "${COMMAND[@]}"; then
     exit 2
 fi
 
+if [ "${RCH_VERIFY_PRINT_CRITICAL_MANIFEST:-0}" = "1" ]; then
+    critical_checkout_manifest
+    exit 0
+fi
+
 if [ "$COMMAND_KIND" = "rejected" ]; then
     RCH_INVOCATION=()
     emit_json false null 0 "" "unsupported verification command; pass --allow-raw for an explicitly raw remote command" "rch_verify_refused_unknown_command"
@@ -556,6 +637,12 @@ if [ -n "$worker_id" ]; then
     WORKER_ID_JSON="$(json_quote "$worker_id")"
 fi
 
+remote_checkout_missing_paths="$(remote_checkout_missing_tracked_paths "$combined_output")"
+if [ -n "$remote_checkout_missing_paths" ]; then
+    combined_output="${combined_output}
+[RCH_VERIFY] remote checkout missing tracked files: $remote_checkout_missing_paths"
+fi
+
 stdout_tail="$(printf '%s' "$combined_output" | tail_text)"
 degraded=()
 if [ "$exit_code" -ne 0 ]; then
@@ -569,6 +656,9 @@ if [ "$retried_after_disk_full" -eq 1 ]; then
 fi
 if [ -n "$disk_full_worker" ] && [ "${retry_worker:-}" = "$disk_full_worker" ]; then
     degraded+=("rch_verify_worker_quarantine_ignored")
+fi
+if [ -n "$remote_checkout_missing_paths" ]; then
+    degraded+=("rch_verify_remote_checkout_incomplete")
 fi
 if [ "$COMMAND_KIND" = "raw" ]; then
     degraded+=("rch_verify_raw_command_may_not_offload")

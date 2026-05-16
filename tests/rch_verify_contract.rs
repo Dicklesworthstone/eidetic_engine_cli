@@ -473,6 +473,117 @@ fn synthetic_compile_error_is_not_worker_disk_full() -> TestResult {
 }
 
 #[test]
+fn synthetic_e0583_for_tracked_module_is_remote_checkout_incomplete() -> TestResult {
+    let (status, stdout, _stderr) = run_script_with_env(
+        &["--", "cargo", "test", "--test", "context_stream"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "error[E0583]: file not found for module `cache`\n  --> src/lib.rs:4:1\n   |\n4  | pub mod cache;\n   | ^^^^^^^^^^^^^^\n   |\n   = help: to create the module `cache`, create file \"src/cache.rs\" or \"src/cache/mod.rs\"\n[RCH] remote css failed (exit 101)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "4000"),
+            (
+                "RCH_VERIFY_GIT_LS_FILES",
+                "src/main.rs\nsrc/cache/mod.rs\nsrc/lib.rs\nsrc/cache/pack_l2.rs\n",
+            ),
+        ],
+    )?;
+    if status.success() {
+        return Err(
+            "remote-checkout-incomplete transcript should preserve non-zero exit".to_owned(),
+        );
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse e0583: {error}"))?;
+    if report["status"] != "rch_environment_failure" {
+        return Err(format!(
+            "tracked missing module should be environment failure: {report}"
+        ));
+    }
+    if report["worker_id"] != "css" {
+        return Err(format!("worker id should be preserved: {report}"));
+    }
+    if !degraded_contains(&report, "rch_verify_remote_checkout_incomplete")? {
+        return Err(format!("missing remote checkout degradation: {report}"));
+    }
+    let stdout_tail = report["stdout_tail"]
+        .as_str()
+        .ok_or_else(|| "missing stdout_tail".to_owned())?;
+    if !stdout_tail.contains("remote checkout missing tracked files: src/cache/mod.rs") {
+        return Err(format!("missing tracked path note: {report}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn synthetic_e0583_for_untracked_module_remains_remote_failure() -> TestResult {
+    let (status, stdout, _stderr) = run_script_with_env(
+        &["--", "cargo", "test", "--test", "context_stream"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "error[E0583]: file not found for module `phantom`\n  --> src/lib.rs:99:1\n   |\n99 | pub mod phantom;\n   | ^^^^^^^^^^^^^^^^\n   |\n   = help: to create the module `phantom`, create file \"src/phantom.rs\" or \"src/phantom/mod.rs\"\n[RCH] remote css failed (exit 101)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "4000"),
+            (
+                "RCH_VERIFY_GIT_LS_FILES",
+                "src/main.rs\nsrc/cache/mod.rs\nsrc/lib.rs\n",
+            ),
+        ],
+    )?;
+    if status.success() {
+        return Err("real missing local module should preserve non-zero exit".to_owned());
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse local e0583: {error}"))?;
+    if report["status"] != "remote_failure" {
+        return Err(format!(
+            "untracked missing module should stay code failure: {report}"
+        ));
+    }
+    if degraded_contains(&report, "rch_verify_remote_checkout_incomplete")? {
+        return Err(format!(
+            "untracked missing module was misclassified: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn critical_checkout_manifest_from_synthetic_git_ls_files_is_deterministic() -> TestResult {
+    let (status, stdout, stderr) = run_script_with_env(
+        &["--dry-run", "--", "cargo", "test"],
+        &[
+            ("RCH_VERIFY_PRINT_CRITICAL_MANIFEST", "1"),
+            (
+                "RCH_VERIFY_GIT_LS_FILES",
+                "README.md\nsrc/search/index.rs\nsrc/main.rs\nsrc/cache/pack_l2.rs\nsrc/lib.rs\nsrc/cache/mod.rs\nsrc/cli/mod.rs\nsrc/db.rs\ndocs/design.md\n",
+            ),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "manifest test hook failed with {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            status.code()
+        ));
+    }
+    let lines = stdout.lines().collect::<Vec<_>>();
+    let expected = vec![
+        "src/cache/mod.rs",
+        "src/cli/mod.rs",
+        "src/db.rs",
+        "src/lib.rs",
+        "src/main.rs",
+    ];
+    if lines != expected {
+        return Err(format!("unexpected critical manifest: {lines:?}"));
+    }
+    Ok(())
+}
+
+#[test]
 fn synthetic_remote_transcript_writes_ledger_and_summary() -> TestResult {
     let dir = target_tmp_dir().join(format!("rch-verify-ledger-{}", std::process::id()));
     fs::create_dir_all(&dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
