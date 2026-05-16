@@ -77,11 +77,21 @@ mesh_phase_log "action" "node01" "ordinary remember/search/context commands with
 MEMORY_JSON="$(ee_workspace remember --level procedural --kind rule "Mesh-off e2e ordinary command fixture." --json 2>/dev/null || true)"
 SEARCH_JSON="$(ee_workspace search "mesh-off ordinary command fixture" --json 2>/dev/null || true)"
 CONTEXT_JSON="$(ee_workspace context "mesh-off ordinary command fixture" --max-tokens 500 --json 2>/dev/null || true)"
+MEMORY_ID="$(printf '%s' "$MEMORY_JSON" | jq -r '.data.memory_id // empty' 2>/dev/null || true)"
+PACK_JSON="$(ee_workspace pack "mesh-off ordinary command fixture" --max-tokens 500 --json 2>/dev/null || true)"
+WHY_JSON=""
+if [ -n "$MEMORY_ID" ]; then
+    WHY_JSON="$(ee_workspace why "$MEMORY_ID" --json 2>/dev/null || true)"
+else
+    e2e_log_assert_eq "<empty>" "memory id" "mesh_off_why_memory_id_present"
+fi
 
 for pair in \
     "remember:$MEMORY_JSON" \
     "search:$SEARCH_JSON" \
-    "context:$CONTEXT_JSON"
+    "context:$CONTEXT_JSON" \
+    "pack:$PACK_JSON" \
+    "why:$WHY_JSON"
 do
     label="${pair%%:*}"
     json="${pair#*:}"

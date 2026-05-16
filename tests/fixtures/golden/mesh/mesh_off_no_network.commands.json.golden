@@ -1,0 +1,58 @@
+[
+  {
+    "label": "init",
+    "meshCapability": "absent",
+    "meshOrPeerCodes": [],
+    "meshOrPeerDataKeys": [],
+    "schema": "ee.response.v2",
+    "success": true
+  },
+  {
+    "label": "status",
+    "meshCapability": "present",
+    "meshOrPeerCodes": [],
+    "meshOrPeerDataKeys": [],
+    "schema": "ee.response.v2",
+    "success": true
+  },
+  {
+    "label": "remember",
+    "meshCapability": "absent",
+    "meshOrPeerCodes": [],
+    "meshOrPeerDataKeys": [],
+    "schema": "ee.response.v2",
+    "success": true
+  },
+  {
+    "label": "search",
+    "meshCapability": "absent",
+    "meshOrPeerCodes": [],
+    "meshOrPeerDataKeys": [],
+    "schema": "ee.response.v2",
+    "success": true
+  },
+  {
+    "label": "context",
+    "meshCapability": "absent",
+    "meshOrPeerCodes": [],
+    "meshOrPeerDataKeys": [],
+    "schema": "ee.response.v2",
+    "success": true
+  },
+  {
+    "label": "pack",
+    "meshCapability": "absent",
+    "meshOrPeerCodes": [],
+    "meshOrPeerDataKeys": [],
+    "schema": "ee.response.v2",
+    "success": true
+  },
+  {
+    "label": "why",
+    "meshCapability": "absent",
+    "meshOrPeerCodes": [],
+    "meshOrPeerDataKeys": [],
+    "schema": "ee.response.v2",
+    "success": true
+  }
+]

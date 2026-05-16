@@ -4,6 +4,7 @@
 //! so remote-only RCH verification can exercise the built `ee` binary directly.
 
 use std::collections::BTreeSet;
+use std::fs;
 use std::process::{Command, Output};
 
 type TestResult = Result<(), String>;
@@ -104,6 +105,86 @@ fn assert_no_mesh_data_key(json: &serde_json::Value, label: &str) -> TestResult 
     }
 }
 
+fn mesh_or_peer_codes(json: &serde_json::Value, label: &str) -> Vec<String> {
+    if label == "status" {
+        return Vec::new();
+    }
+    let mut codes = Vec::new();
+    collect_codes(json, &mut codes);
+    codes.retain(|code| {
+        let lowered = code.to_ascii_lowercase();
+        lowered.contains("mesh") || lowered.contains("tailscale") || lowered.contains("peer")
+    });
+    codes.sort();
+    codes.dedup();
+    codes
+}
+
+fn mesh_or_peer_data_keys(json: &serde_json::Value, label: &str) -> Vec<String> {
+    if label == "status" {
+        return Vec::new();
+    }
+    let Some(data) = json.get("data").and_then(|data| data.as_object()) else {
+        return Vec::new();
+    };
+    let mut keys: Vec<String> = data
+        .keys()
+        .filter(|key| {
+            let lowered = key.to_ascii_lowercase();
+            lowered.contains("mesh") || lowered.contains("tailscale") || lowered.contains("peer")
+        })
+        .cloned()
+        .collect();
+    keys.sort();
+    keys
+}
+
+fn command_surface(label: &str, json: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "label": label,
+        "schema": json.get("schema").and_then(|value| value.as_str()).unwrap_or("<missing>"),
+        "success": json.get("success").and_then(|value| value.as_bool()).unwrap_or(false),
+        "meshCapability": if json.pointer("/data/capabilities/mesh").is_some() {
+            "present"
+        } else {
+            "absent"
+        },
+        "meshOrPeerCodes": mesh_or_peer_codes(json, label),
+        "meshOrPeerDataKeys": mesh_or_peer_data_keys(json, label),
+    })
+}
+
+fn assert_golden_surfaces(surfaces: &[serde_json::Value]) -> TestResult {
+    let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/golden/mesh/mesh_off_no_network.commands.json.golden");
+    let golden = fs::read_to_string(&golden_path)
+        .map_err(|error| format!("failed to read {}: {error}", golden_path.display()))?;
+    let expected: serde_json::Value = serde_json::from_str(&golden)
+        .map_err(|error| format!("failed to parse {}: {error}", golden_path.display()))?;
+    let actual = serde_json::Value::Array(surfaces.to_vec());
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "mesh-off normalized command surface drifted\nexpected: {}\nactual: {}",
+            serde_json::to_string_pretty(&expected).unwrap_or_else(|_| expected.to_string()),
+            serde_json::to_string_pretty(&actual).unwrap_or_else(|_| actual.to_string()),
+        ))
+    }
+}
+
+fn assert_byte_stable(workspace: &str, label: &str, args: &[&str]) -> TestResult {
+    let first = run_ee(workspace, args)?;
+    ensure_success(&first, label)?;
+    let second = run_ee(workspace, args)?;
+    ensure_success(&second, label)?;
+    if first.stdout == second.stdout {
+        Ok(())
+    } else {
+        Err(format!("{label}: mesh-off JSON output was not byte-stable"))
+    }
+}
+
 fn lsof_program() -> Option<&'static str> {
     if Command::new("sh")
         .args(["-c", "command -v lsof >/dev/null 2>&1"])
@@ -180,10 +261,12 @@ fn mesh_off_status_reports_capability_without_polluting_ordinary_json() -> TestR
 
     let init = run_ee(&workspace, &["init", "--json"])?;
     ensure_success(&init, "init")?;
+    let init_json = stdout_json(&init, "init")?;
 
     let status = run_ee(&workspace, &["status", "--json"])?;
     ensure_success(&status, "status")?;
     let status_json = stdout_json(&status, "status")?;
+    assert_byte_stable(&workspace, "status byte stability", &["status", "--json"])?;
     let posture = status_json
         .pointer("/data/capabilities/mesh")
         .and_then(|value| value.as_str())
@@ -196,6 +279,11 @@ fn mesh_off_status_reports_capability_without_polluting_ordinary_json() -> TestR
             "status: unexpected mesh capability posture {posture:?}"
         ));
     }
+
+    let mut surfaces = vec![
+        command_surface("init", &init_json),
+        command_surface("status", &status_json),
+    ];
 
     let cases: [(&str, Vec<&str>); 3] = [
         (
@@ -226,13 +314,44 @@ fn mesh_off_status_reports_capability_without_polluting_ordinary_json() -> TestR
         ),
     ];
 
+    let mut memory_id = String::new();
     for (label, args) in cases {
+        let output = run_ee(&workspace, &args)?;
+        ensure_success(&output, label)?;
+        let json = stdout_json(&output, label)?;
+        if label == "remember" {
+            memory_id = json
+                .pointer("/data/memory_id")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "remember: missing data.memory_id".to_owned())?
+                .to_owned();
+        }
+        assert_no_mesh_degradation(&json, label)?;
+        assert_no_mesh_data_key(&json, label)?;
+        surfaces.push(command_surface(label, &json));
+    }
+
+    for (label, args) in [
+        (
+            "pack",
+            vec![
+                "pack",
+                "mesh-off ordinary command fixture",
+                "--max-tokens",
+                "500",
+                "--json",
+            ],
+        ),
+        ("why", vec!["why", memory_id.as_str(), "--json"]),
+    ] {
         let output = run_ee(&workspace, &args)?;
         ensure_success(&output, label)?;
         let json = stdout_json(&output, label)?;
         assert_no_mesh_degradation(&json, label)?;
         assert_no_mesh_data_key(&json, label)?;
+        surfaces.push(command_surface(label, &json));
     }
+    assert_golden_surfaces(&surfaces)?;
 
     let before = listener_snapshot()?;
     let status = run_ee(&workspace, &["status", "--json"])?;

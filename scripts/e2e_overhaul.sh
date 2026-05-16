@@ -51,7 +51,7 @@ EE_BINARY="$(ee_resolve_binary release)"
 # Epic registry. Letter → script-basename. Iterate in this order regardless
 # of --only/--skip; that way the summary is deterministic across invocations.
 # ---------------------------------------------------------------------------
-EPIC_LETTERS=(A B C D Q E F G H I J K L M N O P R S)
+EPIC_LETTERS=(A B C D Q E F G H I J K L M N O P R S T)
 declare -A EPIC_SCRIPTS=(
     [A]="pack_format.sh"
     [B]="search_honesty.sh"
@@ -72,6 +72,7 @@ declare -A EPIC_SCRIPTS=(
     [P]="disk_pressure.sh"
     [R]="handoff_hmac.sh"
     [S]="pack_slo.sh"
+    [T]="mesh_off_no_network.sh"
 )
 declare -A EPIC_NAMES=(
     [A]="pack_format"
@@ -93,6 +94,7 @@ declare -A EPIC_NAMES=(
     [P]="disk_pressure"
     [R]="handoff_hmac"
     [S]="pack_slo"
+    [T]="mesh_off_no_network"
 )
 
 # ---------------------------------------------------------------------------
