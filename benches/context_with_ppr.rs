@@ -20,7 +20,7 @@ use ee::db::{
     MemoryLinkRelation, MemoryLinkSource,
 };
 use ee::graph::{CentralityRefreshOptions, CentralityRefreshStatus, refresh_graph_snapshot};
-use ee::models::{MemoryScope, WorkspaceId};
+use ee::models::{MemoryScope, RedactionLevel, WorkspaceId};
 use ee::pack::DEFAULT_COORDINATION_STALE_AFTER_MS;
 use ee::search::SpeedMode;
 
@@ -166,6 +166,7 @@ fn options(
         include_expired: false,
         include_future: false,
         include_stale: false,
+        redaction_level: RedactionLevel::Minimal,
         memory_scope: MemoryScope::Swarm,
         strict_scope: false,
         ppr_weight,

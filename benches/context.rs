@@ -32,7 +32,7 @@ use ee::core::context::{
 use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
-use ee::models::{MemoryScope, WorkspaceId};
+use ee::models::{MemoryScope, RedactionLevel, WorkspaceId};
 use ee::pack::PackResourceProfile;
 use ee::search::SpeedMode;
 
@@ -307,6 +307,7 @@ fn bench_context(c: &mut Criterion) {
                         include_expired: false,
                         include_future: false,
                         include_stale: false,
+                        redaction_level: RedactionLevel::Minimal,
                         memory_scope: MemoryScope::Swarm,
                         strict_scope: false,
                         ppr_weight: None,
@@ -358,6 +359,7 @@ fn bench_context_memory_scales(c: &mut Criterion) {
                     include_expired: false,
                     include_future: false,
                     include_stale: false,
+                    redaction_level: RedactionLevel::Minimal,
                     memory_scope: MemoryScope::Swarm,
                     strict_scope: false,
                     ppr_weight: None,
@@ -407,6 +409,7 @@ fn bench_context_s4_resource_scales(c: &mut Criterion) {
                         include_expired: false,
                         include_future: false,
                         include_stale: false,
+                        redaction_level: RedactionLevel::Minimal,
                         memory_scope: MemoryScope::Swarm,
                         strict_scope: false,
                         ppr_weight: None,

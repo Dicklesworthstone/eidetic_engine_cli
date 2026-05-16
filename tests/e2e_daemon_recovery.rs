@@ -467,7 +467,7 @@ fn terminate_child(mut child: Child, context: &str) -> Result<Output, String> {
         signal_sent = "SIGTERM",
         "Sending daemon termination signal"
     );
-    kill_process(pid, Signal::Term)
+    kill_process(pid, Signal::TERM)
         .map_err(|error| format!("failed to send SIGTERM to {context}: {error}"))?;
 
     info!(
