@@ -48,7 +48,7 @@ use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
     SearchOptions, SearchReport, SearchStatus, elapsed_timing_json, performance_redaction_json,
-    query_observation_json, run_search_with_read_connection,
+    query_observation_json, run_search_with_read_connection_seeded,
 };
 use crate::db::read_pool::{PoolConfig, ReadConnectionPool};
 use crate::db::{
@@ -67,7 +67,8 @@ use crate::pack::{
     ContextResponseSeverity, PackAssemblySlo, PackAssemblySloActuals, PackCandidate,
     PackCandidateInput, PackCoordinationSnapshot, PackItemLifecycle, PackProvenance,
     PackResourceProfile, PackScoreBreakdown, PackSection, PackTrustSignal,
-    assemble_draft_with_profile_and_options, estimate_tokens_default, pack_item_provenance_json,
+    assemble_draft_with_profile_and_options_seeded, estimate_tokens_default,
+    pack_item_provenance_json,
 };
 use crate::runtime::determinism::{Deterministic, Seed};
 
@@ -661,6 +662,14 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
     run_context_pack_with_performance(options, "context").map(|run| run.response)
 }
 
+pub fn run_context_pack_seeded(
+    options: &ContextPackOptions,
+    determinism: &Deterministic<Seed>,
+) -> Result<ContextResponse, ContextPackError> {
+    run_context_pack_with_performance_seeded(options, "context", determinism)
+        .map(|run| run.response)
+}
+
 pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut ContextResponse) {
     let workspace_path = workspace_path_from_database_path(database_path);
     match workspace_path
@@ -824,6 +833,40 @@ pub fn run_context_pack_with_performance(
     options: &ContextPackOptions,
     command: &'static str,
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
+    let determinism = Deterministic::from_seed(0);
+    run_context_pack_with_performance_inner(
+        options,
+        command,
+        &determinism,
+        PackRecordPersistence::Ambient,
+    )
+}
+
+pub fn run_context_pack_with_performance_seeded(
+    options: &ContextPackOptions,
+    command: &'static str,
+    determinism: &Deterministic<Seed>,
+) -> Result<ContextPackPerformanceRun, ContextPackError> {
+    run_context_pack_with_performance_inner(
+        options,
+        command,
+        determinism,
+        PackRecordPersistence::Seeded(determinism),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum PackRecordPersistence<'a> {
+    Ambient,
+    Seeded(&'a Deterministic<Seed>),
+}
+
+fn run_context_pack_with_performance_inner(
+    options: &ContextPackOptions,
+    command: &'static str,
+    determinism: &Deterministic<Seed>,
+    pack_record_persistence: PackRecordPersistence<'_>,
+) -> Result<ContextPackPerformanceRun, ContextPackError> {
     let total_start = Instant::now();
     let mut trace = ContextPerformanceTrace::default();
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
@@ -919,7 +962,7 @@ pub fn run_context_pack_with_performance(
     }
 
     let search_start = Instant::now();
-    let mut search_report = match run_search_with_read_connection(
+    let mut search_report = match run_search_with_read_connection_seeded(
         &SearchOptions {
             workspace_path: options.workspace_path.clone(),
             database_path: Some(database_path.clone()),
@@ -943,6 +986,7 @@ pub fn run_context_pack_with_performance(
             strict_scope: options.strict_scope,
         },
         &read_snapshot,
+        determinism,
     ) {
         Ok(report) => report,
         Err(SearchError::NoIndex) => missing_index_search_report(
@@ -1276,7 +1320,7 @@ pub fn run_context_pack_with_performance(
     } else {
         candidates
     };
-    let mut draft = assemble_draft_with_profile_and_options(
+    let mut draft = assemble_draft_with_profile_and_options_seeded(
         request.profile,
         request.query.clone(),
         request.budget,
@@ -1286,6 +1330,7 @@ pub fn run_context_pack_with_performance(
             include_coverage_fill: options.output_options.include_coverage_fill,
             output_redaction_enabled,
         },
+        determinism,
     )
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     let tombstoned_item_count = draft
@@ -1357,15 +1402,25 @@ pub fn run_context_pack_with_performance(
     trace.pack_record_writes = trace.pack_record_writes.saturating_add(1);
     let persist_result = DbConnection::open_file(&database_path)
         .map_err(|error| error.to_string())
-        .and_then(|connection| {
-            persist_pack_record(
+        .and_then(|connection| match pack_record_persistence {
+            PackRecordPersistence::Ambient => persist_pack_record(
                 &connection,
                 &options.workspace_path,
                 &request,
                 &draft,
                 &degraded,
             )
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string()),
+            PackRecordPersistence::Seeded(pack_id_seed) => persist_pack_record_seeded(
+                &connection,
+                &options.workspace_path,
+                &request,
+                &draft,
+                &degraded,
+                pack_id_seed,
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
         });
     if let Err(persist_error) = persist_result {
         push_degradation(
@@ -6759,6 +6814,113 @@ mod tests {
             .collect();
         assert!(degraded_codes.contains("index_missing"));
         assert!(degraded_codes.contains("context_lexical_fallback"));
+        Ok(())
+    }
+
+    #[test]
+    fn context_pack_seeded_entrypoint_replays_pack_record_id() -> Result<(), String> {
+        fn run_seeded_pack(seed: u64) -> Result<String, String> {
+            let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let workspace = tempdir.path().join("workspace");
+            std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+            let workspace = workspace
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            let ee_dir = workspace.join(".ee");
+            std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+            let db_path = ee_dir.join("ee.db");
+            let empty_index_dir = tempdir.path().join("empty-index");
+            std::fs::create_dir_all(&empty_index_dir).map_err(|error| error.to_string())?;
+
+            let connection =
+                DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+            connection.migrate().map_err(|error| error.to_string())?;
+            let workspace_id = super::stable_context_workspace_id(&workspace);
+            connection
+                .insert_workspace(
+                    &workspace_id,
+                    &CreateWorkspaceInput {
+                        path: workspace.to_string_lossy().into_owned(),
+                        name: Some("workspace".to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(4242)).to_string();
+            connection
+                .insert_memory(
+                    &memory_id,
+                    &CreateMemoryInput {
+                        workspace_id,
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        content: "Run cargo fmt --check before release.".to_owned(),
+                        workflow_id: None,
+                        confidence: 0.95,
+                        utility: 0.80,
+                        importance: 0.70,
+                        provenance_uri: None,
+                        trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                        trust_subclass: Some("test".to_owned()),
+                        tags: vec!["release".to_owned()],
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+
+            let determinism = crate::runtime::determinism::Deterministic::from_seed(seed);
+            let response = super::run_context_pack_seeded(
+                &super::ContextPackOptions {
+                    workspace_path: workspace,
+                    database_path: Some(db_path),
+                    index_dir: Some(empty_index_dir),
+                    query: "format before release".to_owned(),
+                    speed: crate::search::SpeedMode::Default,
+                    filters: crate::models::QueryFilters::default(),
+                    profile: Some(ContextPackProfile::Balanced),
+                    max_tokens: Some(400),
+                    candidate_pool: Some(10),
+                    max_results: None,
+                    include_tombstoned: false,
+                    as_of: None,
+                    include_expired: false,
+                    include_future: false,
+                    include_stale: false,
+                    memory_scope: MemoryScope::Swarm,
+                    strict_scope: false,
+                    ppr_weight: None,
+                    pagination: None,
+                    coordination_snapshot_path: None,
+                    coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+                    output_options: Default::default(),
+                },
+                &determinism,
+            )
+            .map_err(|error| error.to_string())?;
+
+            assert!(
+                response
+                    .data
+                    .pack
+                    .items
+                    .iter()
+                    .any(|item| item.memory_id.to_string() == memory_id),
+                "seeded context pack should include the fallback memory"
+            );
+            let history = connection
+                .list_pack_records_for_memory(&memory_id, 10)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(history.len(), 1);
+            Ok(history[0].0.id.clone())
+        }
+
+        let first = run_seeded_pack(8080)?;
+        let replay = run_seeded_pack(8080)?;
+        let other_seed = run_seeded_pack(8081)?;
+
+        assert_eq!(first, replay);
+        assert_ne!(first, other_seed);
+        assert!(first.starts_with("pack_"));
         Ok(())
     }
 
