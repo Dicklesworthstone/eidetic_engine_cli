@@ -495,6 +495,7 @@ fn create_boilerplate_file(
     };
 
     file.write_all(contents.as_bytes())?;
+    file.sync_all()?;
     Ok(BoilerplateCreateStatus::Created)
 }
 
