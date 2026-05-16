@@ -56,7 +56,7 @@ fn parse_trust_class_constant_time(input: &str) -> Option<TrustClass> {
     let mut matched = None;
 
     // We must compare against EVERY variant to ensure constant time
-    if ct_str_eq(input, "human_explicit") {
+    if std::hint::black_box(ct_str_eq(input, "human_explicit")) {
         matched = Some(TrustClass::HumanExplicit);
     }
     // Use black_box to prevent short-circuit optimization
@@ -496,9 +496,9 @@ fn is_feedback_event_id(value: &str) -> bool {
     let payload_is_alphanumeric = bytes
         .iter()
         .skip(3)
-        .all(|byte| byte.is_ascii_alphanumeric());
+        .fold(true, |acc, byte| acc & byte.is_ascii_alphanumeric());
 
-    (value.len() == 29) & has_prefix & payload_is_alphanumeric
+    std::hint::black_box(value.len() == 29) & has_prefix & payload_is_alphanumeric
 }
 
 fn is_audit_log_id(value: &str) -> bool {
@@ -506,9 +506,12 @@ fn is_audit_log_id(value: &str) -> bool {
     let has_prefix = bytes
         .get(..6)
         .is_some_and(|prefix| constant_time_eq(prefix, b"audit_"));
-    let payload_is_hex = bytes.iter().skip(6).all(|byte| byte.is_ascii_hexdigit());
+    let payload_is_hex = bytes
+        .iter()
+        .skip(6)
+        .fold(true, |acc, byte| acc & byte.is_ascii_hexdigit());
 
-    matches!(value.len(), 32 | 38) & has_prefix & payload_is_hex
+    std::hint::black_box(matches!(value.len(), 32 | 38)) & has_prefix & payload_is_hex
 }
 
 const INSTRUCTION_PATTERNS: &[InstructionPattern] = &[
