@@ -308,6 +308,10 @@ fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
 
     write_file(&workspace.join("tracked.txt"), "base\nunstaged\n")?;
     write_file(&workspace.join("both.txt"), "base\nstaged\n")?;
+    write_file(
+        &workspace.join("binary.bin"),
+        [0_u8, 159, 146, 150, 0, 1, 2, 3],
+    )?;
     run_git(workspace, &["add", "both.txt"])?;
     write_file(&workspace.join("both.txt"), "base\nstaged\nunstaged\n")?;
     write_file(&workspace.join("staged.txt"), "staged\n")?;
@@ -370,6 +374,7 @@ fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
     assert!(entries_by_path.contains_key("staged.txt"));
     assert!(entries_by_path.contains_key("rename_new.txt"));
     assert!(entries_by_path.contains_key("delete_me.txt"));
+    assert!(entries_by_path.contains_key("binary.bin"));
     assert!(entries_by_path.contains_key("untracked.txt"));
     assert!(entries_by_path.contains_key("large.dat"));
     assert!(entries_by_path.contains_key("tracked.link"));
@@ -404,6 +409,19 @@ fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
             .as_ref()
             .is_some_and(|metadata| !metadata.exists && metadata.file_type == "missing")
     );
+
+    let binary = entry_by_path(&snapshot.entries, "binary.bin")?;
+    let binary_metadata = binary
+        .metadata
+        .as_ref()
+        .ok_or_else(|| "binary.bin missing metadata".to_string())?;
+    assert_eq!(binary.entry_kind, "ordinary");
+    assert_eq!(binary.staged, ".");
+    assert_eq!(binary.unstaged, "M");
+    assert_eq!(binary_metadata.file_type, "file");
+    assert_eq!(binary_metadata.size_bytes, Some(8));
+    assert!(!binary_metadata.large_file);
+    assert_eq!(binary_metadata.skip_reason, None);
 
     let large = entry_by_path(&snapshot.entries, "large.dat")?;
     let large_metadata = large
