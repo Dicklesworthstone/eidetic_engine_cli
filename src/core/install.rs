@@ -777,6 +777,20 @@ pub fn execute_install_plan(
         };
     }
 
+    let install_path = Path::new(&plan.target.install_path);
+    if !is_safe_install_path(install_path) {
+        return InstallExecutionResult {
+            success: false,
+            artifact_verified: false,
+            binary_installed: false,
+            backup_path: None,
+            error_message: Some(format!(
+                "install target '{}' contains unsafe path components",
+                plan.target.install_path
+            )),
+        };
+    }
+
     let artifact = match &plan.artifact {
         Some(artifact) => artifact,
         None => {
@@ -889,7 +903,6 @@ pub fn execute_install_plan(
         };
     }
 
-    let install_path = Path::new(&plan.target.install_path);
     let install_dir = install_path.parent().unwrap_or(Path::new("."));
 
     // Create install directory if needed
@@ -1796,6 +1809,36 @@ mod tests {
                 .as_ref()
                 .is_some_and(|msg| msg.contains("no artifact")),
             "error message should mention missing artifact",
+        )
+    }
+
+    #[test]
+    fn execute_install_plan_rejects_unsafe_target_path() -> TestResult {
+        let artifact = InstallArtifactSelection {
+            artifact_id: "ee-9.9.9-x86_64-unknown-linux-gnu".to_owned(),
+            release_version: "9.9.9".to_owned(),
+            file_name: "ee-x86_64-unknown-linux-gnu.tar.xz".to_owned(),
+            target_triple: "x86_64-unknown-linux-gnu".to_owned(),
+            archive_format: "tar_xz".to_owned(),
+            checksum_algorithm: "blake3".to_owned(),
+            checksum: "unused".to_owned(),
+            signature: "missing".to_owned(),
+        };
+        let report = executable_plan_for_artifact(artifact, Path::new("relative-bin/ee"));
+
+        let result = execute_install_plan(&report, Path::new("/tmp/artifacts"));
+
+        ensure(!result.success, "unsafe target path should fail")?;
+        ensure(
+            !result.artifact_verified,
+            "target path rejection must happen before artifact verification",
+        )?;
+        ensure(
+            result
+                .error_message
+                .as_ref()
+                .is_some_and(|message| message.contains("unsafe path")),
+            "execute error should report unsafe target path",
         )
     }
 
