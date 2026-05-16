@@ -884,12 +884,11 @@ fn determinism_regression_fixture_persists_pack_case_mismatches_only() -> Result
     )?
     .ok_or_else(|| "mismatched pack case should persist a regression fixture".to_owned())?;
 
+    let persisted_fixtures = load_regression_fixtures(tempdir.path())?;
+    let expected_file_name = regression_fixture_file_name(&persisted_fixtures[0].input_hash)?;
     assert_eq!(
         path.file_name().and_then(|name| name.to_str()),
-        Some(
-            regression_fixture_file_name(&load_regression_fixtures(tempdir.path())?[0].input_hash)?
-                .as_str()
-        )
+        Some(expected_file_name.as_str())
     );
     assert_eq!(
         verify_loaded_regression_fixture_replays(tempdir.path())?,
