@@ -42,6 +42,7 @@ recent_commits.txt
 # Volatile Beads SQLite sidecars and temp files. Keep .beads/issues.jsonl
 # visible for tests and coordination, but do not let transient DB files make
 # RCH fall back to local execution when they vanish during rsync.
+.beads/*.db
 .beads/*db-shm
 .beads/*db-wal
 .beads/*db-journal
