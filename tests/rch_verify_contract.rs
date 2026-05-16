@@ -203,7 +203,7 @@ fn synthetic_remote_transcript_extracts_worker_id() -> TestResult {
         &[
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "remote test ok\n[RCH] remote trj (12.3s)\n",
+                "RCH_DAEMON_RESPONSE_TIMEOUT_SECS=900\nremote test ok\n[RCH] remote trj (12.3s)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "123"),
@@ -230,6 +230,16 @@ fn synthetic_remote_transcript_extracts_worker_id() -> TestResult {
         .any(|code| code == "rch_verify_remote_marker_missing")
     {
         return Err("remote marker was present but missing-marker degradation emitted".to_owned());
+    }
+    if report["degraded_codes"]
+        .as_array()
+        .ok_or_else(|| "missing degraded codes".to_owned())?
+        .iter()
+        .any(|code| code == "rch_verify_capacity_or_timeout")
+    {
+        return Err(
+            "successful timeout-text transcript should not be capacity degraded".to_owned(),
+        );
     }
     Ok(())
 }
