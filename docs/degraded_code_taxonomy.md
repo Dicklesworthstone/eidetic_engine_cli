@@ -113,6 +113,7 @@ Current conventions:
 | `beads` | Swarm brief Beads source degradation. |
 | `build` | Binary version and build-provenance degradation. |
 | `bv` | Swarm brief BV source degradation. |
+| `curate_candidates` | `ee curate candidates` queue listing degradation. |
 | `db_status` | `ee db status` migration or sidecar-file degradation. |
 | `dependency_contract` | `ee diag dependencies` dependency-contract degradation. |
 | `qos_registry` | QoS active-lane registry read or integrity degradation. |

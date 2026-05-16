@@ -13,9 +13,10 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use fnx_classes::Graph;
 use fnx_runtime::CompatibilityMode;
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 use crate::config::{ConfigFile, GRAPH_FEATURE_STRUCTURAL_DECAY_ENABLED_KEY};
+use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::curate::{
     CandidateInput, CandidateSource, CandidateStatus, CandidateType, CandidateValidationError,
     ReviewQueueState, validate_candidate, validate_candidate_trust_evidence,
@@ -300,6 +301,7 @@ pub struct CurateCandidatesReport {
     pub durable_mutation: bool,
     pub filter: CurateCandidatesFilter,
     pub candidates: Vec<CurateCandidateSummary>,
+    #[serde(serialize_with = "serialize_curate_candidates_degradations")]
     pub degraded: Vec<CurateCandidatesDegradation>,
     pub next_action: String,
 }
@@ -1301,6 +1303,30 @@ pub struct CurateCandidatesDegradation {
     pub severity: String,
     pub message: String,
     pub repair: String,
+}
+
+fn serialize_curate_candidates_degradations<S>(
+    degraded: &[CurateCandidatesDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_curate_candidates_degradations(degraded).serialize(serializer)
+}
+
+fn aggregate_curate_candidates_degradations(
+    degraded: &[CurateCandidatesDegradation],
+) -> Vec<crate::core::degraded_aggregation::AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "curate_candidates",
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry.repair.clone(),
+        )
+    }))
 }
 
 #[derive(Clone, Debug)]
@@ -8086,6 +8112,67 @@ mod tests {
             degraded
                 .repair
                 .contains("graph.feature.structural_decay.enabled")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn curate_candidates_json_aggregates_duplicate_degraded_entries() -> TestResult {
+        let report = CurateCandidatesReport {
+            schema: CURATE_CANDIDATES_SCHEMA_V1,
+            command: "curate candidates",
+            version: env!("CARGO_PKG_VERSION"),
+            workspace_id: "wsp_curate_aggregate".to_owned(),
+            workspace_path: "/workspace".to_owned(),
+            database_path: "/workspace/.ee/ee.db".to_owned(),
+            total_count: 0,
+            returned_count: 0,
+            limit: 50,
+            offset: 0,
+            truncated: false,
+            durable_mutation: false,
+            filter: CurateCandidatesFilter {
+                candidate_type: None,
+                status: None,
+                target_memory_id: None,
+                sort: "priority".to_owned(),
+                group_duplicates: false,
+            },
+            candidates: Vec::new(),
+            degraded: vec![
+                CurateCandidatesDegradation {
+                    code: "curate_fixture_degraded".to_owned(),
+                    severity: "low".to_owned(),
+                    message: "low duplicate".to_owned(),
+                    repair: "low repair".to_owned(),
+                },
+                CurateCandidatesDegradation {
+                    code: "curate_fixture_degraded".to_owned(),
+                    severity: "high".to_owned(),
+                    message: "high duplicate".to_owned(),
+                    repair: "high repair".to_owned(),
+                },
+            ],
+            next_action: "no pending curation candidates".to_owned(),
+        };
+
+        let value: serde_json::Value =
+            serde_json::from_str(&report.data_json()).map_err(|error| error.to_string())?;
+        let degraded = value
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("degraded array missing: {value}"))?;
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(
+            degraded[0]["code"].as_str(),
+            Some("curate_fixture_degraded")
+        );
+        assert_eq!(degraded[0]["severity"].as_str(), Some("high"));
+        assert_eq!(degraded[0]["repair"].as_str(), Some("high repair"));
+        assert_eq!(
+            degraded[0]["sources"].clone(),
+            serde_json::json!(["curate_candidates"])
         );
         Ok(())
     }
