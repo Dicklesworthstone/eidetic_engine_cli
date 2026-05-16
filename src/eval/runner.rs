@@ -436,12 +436,7 @@ pub fn discover_fixtures(fixture_dir: &Path) -> Result<Vec<DiscoveredFixture>, D
 
 /// Load a fixture scenario from JSON.
 pub fn load_scenario(path: &Path) -> Result<FixtureScenario, DomainError> {
-    ensure_eval_fixture_path_has_no_symlink_components(path, "read fixture scenario")?;
-
-    let content = std::fs::read_to_string(path).map_err(|e| DomainError::Storage {
-        message: format!("Failed to read scenario file {}: {e}", path.display()),
-        repair: None,
-    })?;
+    let content = read_eval_fixture_file(path, "read fixture scenario", "scenario file")?;
 
     serde_json::from_str(&content).map_err(|e| DomainError::Import {
         message: format!("Failed to parse scenario JSON: {e}"),
@@ -451,12 +446,8 @@ pub fn load_scenario(path: &Path) -> Result<FixtureScenario, DomainError> {
 
 /// Load source memories from JSON.
 pub fn load_source_memories(path: &Path) -> Result<SourceMemoryFile, DomainError> {
-    ensure_eval_fixture_path_has_no_symlink_components(path, "read fixture source memories")?;
-
-    let content = std::fs::read_to_string(path).map_err(|e| DomainError::Storage {
-        message: format!("Failed to read source memory file {}: {e}", path.display()),
-        repair: None,
-    })?;
+    let content =
+        read_eval_fixture_file(path, "read fixture source memories", "source memory file")?;
 
     serde_json::from_str(&content).map_err(|e| DomainError::Import {
         message: format!("Failed to parse source memory JSON: {e}"),
@@ -948,12 +939,8 @@ fn stable_numeric_suffix(value: &str) -> Option<(&str, u64, usize)> {
 }
 
 fn source_memory_counts(path: &Path) -> Result<(usize, usize), DomainError> {
-    ensure_eval_fixture_path_has_no_symlink_components(path, "read fixture source memories")?;
-
-    let content = std::fs::read_to_string(path).map_err(|e| DomainError::Storage {
-        message: format!("Failed to read source memory file {}: {e}", path.display()),
-        repair: None,
-    })?;
+    let content =
+        read_eval_fixture_file(path, "read fixture source memories", "source memory file")?;
 
     let value: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| DomainError::Import {
@@ -985,6 +972,40 @@ fn path_is_regular_file_no_follow(path: &Path) -> Result<bool, DomainError> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => Ok(metadata.file_type().is_file()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(DomainError::Storage {
+            message: format!("Failed to inspect fixture file {}: {error}", path.display()),
+            repair: None,
+        }),
+    }
+}
+
+fn read_eval_fixture_file(
+    path: &Path,
+    operation: &'static str,
+    label: &'static str,
+) -> Result<String, DomainError> {
+    ensure_eval_fixture_regular_file(path, operation)?;
+    std::fs::read_to_string(path).map_err(|e| DomainError::Storage {
+        message: format!("Failed to read {label} {}: {e}", path.display()),
+        repair: None,
+    })
+}
+
+fn ensure_eval_fixture_regular_file(
+    path: &Path,
+    operation: &'static str,
+) -> Result<(), DomainError> {
+    ensure_eval_fixture_path_has_no_symlink_components(path, operation)?;
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to {operation} {} because it is not a regular file.",
+                path.display()
+            ),
+            repair: Some("Replace eval fixture paths with regular JSON files.".into()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(DomainError::Storage {
             message: format!("Failed to inspect fixture file {}: {error}", path.display()),
             repair: None,
@@ -1615,6 +1636,23 @@ mod tests {
         )
     }
 
+    #[test]
+    fn load_scenario_rejects_non_regular_scenario_file() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let scenario_dir = tempdir.path().join("scenario.json");
+        std::fs::create_dir(&scenario_dir).map_err(|error| error.to_string())?;
+
+        let error = load_scenario(&scenario_dir)
+            .map(|scenario| format!("unexpected scenario: {scenario:?}"))
+            .expect_err("scenario directory should reject before read");
+
+        ensure(
+            error.to_string().contains("not a regular file"),
+            true,
+            "non-regular scenario file error",
+        )
+    }
+
     #[cfg(unix)]
     #[test]
     fn source_memory_counts_rejects_symlinked_source_file() -> TestResult {
@@ -1634,6 +1672,23 @@ mod tests {
             error.to_string().contains("symlinked path component"),
             true,
             "symlinked source memory file error",
+        )
+    }
+
+    #[test]
+    fn source_memory_counts_rejects_non_regular_source_file() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let source_dir = tempdir.path().join("source_memory.json");
+        std::fs::create_dir(&source_dir).map_err(|error| error.to_string())?;
+
+        let error = source_memory_counts(&source_dir)
+            .map(|counts| format!("unexpected counts: {counts:?}"))
+            .expect_err("source memory directory should reject before read");
+
+        ensure(
+            error.to_string().contains("not a regular file"),
+            true,
+            "non-regular source memory file error",
         )
     }
 
