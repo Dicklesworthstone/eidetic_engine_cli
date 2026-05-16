@@ -2065,6 +2065,9 @@ fn load_export_data(
         .filter(|link| {
             memory_ids.contains(&link.src_memory_id) && memory_ids.contains(&link.dst_memory_id)
         })
+        .filter(|link| {
+            crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref())
+        })
         .collect();
     let audits = connection
         .list_audit_entries(Some(&workspace.id), None)
@@ -3281,7 +3284,8 @@ mod tests {
     use super::*;
     use crate::db::{
         CreateAuditInput, CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput,
-        CreateGraphSnapshotInput, CreateMemoryInput, CreateWorkspaceInput, GraphSnapshotType,
+        CreateGraphSnapshotInput, CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput,
+        GraphSnapshotType, MemoryLinkRelation, MemoryLinkSource,
     };
     use crate::models::{MemoryId, MemoryLinkId, WorkspaceId};
     use tempfile::TempDir;
@@ -3393,6 +3397,24 @@ mod tests {
                 repair: None,
             })?;
         Ok((tempdir, workspace, database))
+    }
+
+    fn backup_denied_mesh_link_metadata() -> String {
+        json!({
+            "mesh": {
+                "workspaceScopeDecision": "deny",
+                "materialLane": "graphSignal",
+                "cachedMaterialId": "mesh_backup_denied",
+                "originWorkspaceId": "wsp_remote_private",
+                "originWorkspaceLabel": "/Users/alice/private/repo",
+                "producerPeerId": "peer_builder_one",
+                "producerPeerLabel": "/Users/alice/private/peer-agent",
+                "importDecisionId": "mesh_backup_decision_denied",
+                "trustLane": "quarantined",
+                "redactionPosture": "metadata_only"
+            }
+        })
+        .to_string()
     }
 
     #[test]
@@ -3522,6 +3544,85 @@ mod tests {
         ensure(
             manifest.contains(BACKUP_MANIFEST_SCHEMA_V1),
             "manifest schema must be present",
+        )
+    }
+
+    #[test]
+    fn backup_export_filters_denied_mesh_links() -> TestResult {
+        let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let workspace_record =
+            load_workspace(&connection, &workspace).map_err(|error| error.message())?;
+        let primary_memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+        let secondary_memory_id = MemoryId::from_uuid(Uuid::from_u128(0x8402)).to_string();
+        let allowed_link_id = MemoryLinkId::from_uuid(Uuid::from_u128(0x8403)).to_string();
+        let denied_link_id = MemoryLinkId::from_uuid(Uuid::from_u128(0x8404)).to_string();
+        connection
+            .insert_memory(
+                &secondary_memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_record.id.clone(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "Secondary memory for backup mesh filtering.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.6,
+                    importance: 0.7,
+                    provenance_uri: Some("ee-test://backup-secondary".to_owned()),
+                    trust_class: "agent_validated".to_owned(),
+                    trust_subclass: Some("fixture".to_owned()),
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory_link(
+                &allowed_link_id,
+                &CreateMemoryLinkInput {
+                    src_memory_id: primary_memory_id.clone(),
+                    dst_memory_id: secondary_memory_id.clone(),
+                    relation: MemoryLinkRelation::Supports,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    directed: false,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: MemoryLinkSource::Agent,
+                    created_by: Some("backup-mesh-test".to_owned()),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory_link(
+                &denied_link_id,
+                &CreateMemoryLinkInput {
+                    src_memory_id: secondary_memory_id.clone(),
+                    dst_memory_id: primary_memory_id.clone(),
+                    relation: MemoryLinkRelation::Contradicts,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    directed: false,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: MemoryLinkSource::Agent,
+                    created_by: Some("backup-mesh-test".to_owned()),
+                    metadata_json: Some(backup_denied_mesh_link_metadata()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let export =
+            load_export_data(&connection, workspace_record).map_err(|error| error.message())?;
+
+        ensure_equal(export.links.len(), 1, "visible exported link count")?;
+        ensure_equal(
+            export.links[0].id.as_str(),
+            allowed_link_id.as_str(),
+            "only allowed local link exported",
         )
     }
 
