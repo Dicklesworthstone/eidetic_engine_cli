@@ -82,6 +82,7 @@ Current conventions:
 | `agent_detection` | Agent inventory and agent-status detection degradation. |
 | `build` | Binary version and build-provenance degradation. |
 | `dependency_contract` | `ee diag dependencies` dependency-contract degradation. |
+| `graph_centrality_read` | `ee graph centrality` persisted centrality read degradation. |
 | `integrity` | `ee diag integrity` database, schema, canary, or provenance-sample degradation. |
 | `lab_counterfactual` | `ee lab counterfactual` replay-evidence degradation. |
 | `lab_replay` | `ee lab replay` replay-evidence degradation. |

@@ -11254,7 +11254,7 @@ fn science_status_human(report: &crate::science::ScienceStatusReport) -> String 
     out
 }
 
-fn aggregate_analyze_degraded_json<I>(entries: I) -> Vec<serde_json::Value>
+fn aggregate_cli_degraded_json<I>(entries: I) -> Vec<serde_json::Value>
 where
     I: IntoIterator<Item = DegradationAggregationInput>,
 {
@@ -11275,7 +11275,7 @@ where
 fn aggregate_drift_degraded_json(
     degradations: &[crate::science::DriftDegradation],
 ) -> Vec<serde_json::Value> {
-    aggregate_analyze_degraded_json(degradations.iter().map(|d| {
+    aggregate_cli_degraded_json(degradations.iter().map(|d| {
         DegradationAggregationInput::new(
             "science_drift",
             d.code.clone(),
@@ -11289,7 +11289,7 @@ fn aggregate_drift_degraded_json(
 fn aggregate_clustering_degraded_json(
     degradations: &[crate::science::ClusteringDegradation],
 ) -> Vec<serde_json::Value> {
-    aggregate_analyze_degraded_json(degradations.iter().map(|d| {
+    aggregate_cli_degraded_json(degradations.iter().map(|d| {
         DegradationAggregationInput::new(
             "science_clustering",
             d.code.clone(),
@@ -21440,17 +21440,15 @@ fn graph_centrality_read_row_json(row: &GraphCentralityReadRow) -> serde_json::V
 fn graph_centrality_read_degraded_json(
     degraded: &[GraphCentralityReadDegradation],
 ) -> Vec<serde_json::Value> {
-    degraded
-        .iter()
-        .map(|entry| {
-            serde_json::json!({
-                "code": entry.code,
-                "severity": entry.severity,
-                "message": entry.message,
-                "repair": entry.repair,
-            })
-        })
-        .collect()
+    aggregate_cli_degraded_json(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "graph_centrality_read",
+            entry.code,
+            entry.severity,
+            entry.message.clone(),
+            entry.repair.clone(),
+        )
+    }))
 }
 
 fn graph_centrality_read_human_output(report: &GraphCentralityReadReport) -> String {
@@ -44092,6 +44090,43 @@ default_half_life_days = 45
         ensure_equal(&code, &Some("deprecated_alias"), "remember alias code")?;
         ensure_equal(&severity, &Some("low"), "remember alias severity")?;
         ensure_contains(repair, "ee note", "remember alias repair")
+    }
+
+    #[test]
+    fn graph_centrality_read_degraded_entries_are_aggregated() -> TestResult {
+        let degraded = vec![
+            super::GraphCentralityReadDegradation {
+                code: "graph_snapshot_stale",
+                severity: "low",
+                message: "Graph snapshot is stale.".to_string(),
+                repair: "ee graph centrality-refresh".to_string(),
+            },
+            super::GraphCentralityReadDegradation {
+                code: "graph_snapshot_stale",
+                severity: "medium",
+                message: "Graph snapshot is stale; centrality scores may lag memory links."
+                    .to_string(),
+                repair: "ee graph centrality-refresh --workspace .".to_string(),
+            },
+        ];
+
+        let rendered = super::graph_centrality_read_degraded_json(&degraded);
+        ensure_equal(&rendered.len(), &1, "aggregated degradation count")?;
+        ensure_equal(
+            &rendered[0]["code"],
+            &serde_json::json!("graph_snapshot_stale"),
+            "aggregated graph centrality code",
+        )?;
+        ensure_equal(
+            &rendered[0]["severity"],
+            &serde_json::json!("medium"),
+            "severity escalates to highest rank",
+        )?;
+        ensure_equal(
+            &rendered[0]["sources"],
+            &serde_json::json!(["graph_centrality_read"]),
+            "source label",
+        )
     }
 
     #[test]
