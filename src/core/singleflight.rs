@@ -181,6 +181,7 @@ where
                 group: &'a SingleFlightGroup<T>,
                 key_hash: String,
                 entry: Arc<SingleFlightEntry<T>>,
+                leader_started: Instant,
                 completed: bool,
             }
 
@@ -188,9 +189,25 @@ where
                 fn drop(&mut self) {
                     if !self.completed {
                         let _ = self.group.remove_entry(&self.key_hash, &self.entry);
+                        self.group
+                            .counters
+                            .leader_failures
+                            .fetch_add(1, Ordering::SeqCst);
+                        trace_singleflight_checkpoint(
+                            SINGLEFLIGHT_LEADER_FAILED_EVENT,
+                            &self.key_hash,
+                            duration_ms(self.leader_started.elapsed()),
+                            &[SINGLEFLIGHT_LEADER_FAILED_CODE],
+                        );
                         if let Ok(mut state) = self.entry.state.lock() {
                             *state =
                                 SingleFlightState::Completed(Err("leader panicked".to_owned()));
+                            self.entry.ready.notify_all();
+                        } else {
+                            self.group
+                                .counters
+                                .state_poisoned
+                                .fetch_add(1, Ordering::SeqCst);
                             self.entry.ready.notify_all();
                         }
                     }
@@ -201,6 +218,7 @@ where
                 group: self,
                 key_hash: key_hash.clone(),
                 entry: Arc::clone(&entry),
+                leader_started,
                 completed: false,
             };
 
@@ -920,6 +938,99 @@ mod tests {
         assert_eq!(posture.status, "observed_failures");
         assert_eq!(posture.leader_failure_count, 1);
         Ok(())
+    }
+
+    #[test]
+    fn leader_panic_is_visible_to_followers_and_posture() -> TestResult {
+        let group = Arc::new(SingleFlightGroup::<String>::new());
+        let key = key("panicked read");
+        let (leader_started_tx, leader_started_rx) = mpsc::channel();
+        let (release_leader_tx, release_leader_rx) = mpsc::channel();
+
+        let leader_group = Arc::clone(&group);
+        let leader_key = key.clone();
+        let leader = thread::spawn(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                leader_group.run(&leader_key, Duration::from_secs(5), || {
+                    leader_started_tx
+                        .send(())
+                        .map_err(|error| format!("failed to signal leader start: {error}"))?;
+                    release_leader_rx
+                        .recv_timeout(Duration::from_secs(1))
+                        .map_err(|error| format!("leader release not received: {error}"))?;
+                    panic!("synthetic leader panic");
+                })
+            }))
+        });
+
+        leader_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|error| format!("leader did not start: {error}"))?;
+
+        let follower_group = Arc::clone(&group);
+        let follower_key = key.clone();
+        let follower = thread::spawn(move || {
+            follower_group.run(&follower_key, Duration::from_secs(5), || {
+                Ok("should-not-run".to_owned())
+            })
+        });
+
+        wait_for_registered_follower(&group, &key.key_hash)?;
+        release_leader_tx
+            .send(())
+            .map_err(|error| format!("failed to release leader: {error}"))?;
+
+        let leader_panic = leader.join().map_err(|_| "thread panicked".to_owned())?;
+        assert!(
+            leader_panic.is_err(),
+            "leader panic should be caught by the test"
+        );
+
+        let follower_error = match follower.join().map_err(|_| "thread panicked".to_owned())? {
+            Ok(run) => {
+                return Err(format!("follower should observe leader panic, got {run:?}"));
+            }
+            Err(error) => error,
+        };
+        assert_eq!(follower_error.code(), SINGLEFLIGHT_LEADER_FAILED_CODE);
+        match follower_error {
+            SingleFlightError::LeaderFailed { role, message, .. } => {
+                assert_eq!(role, SingleFlightRole::Follower);
+                assert_eq!(message, "leader panicked");
+            }
+            other => return Err(format!("unexpected follower error: {other:?}")),
+        }
+
+        let posture = group.posture(SingleFlightSurface::Context, true, Duration::from_secs(5));
+        assert_eq!(posture.status, "observed_failures");
+        assert_eq!(posture.leader_failure_count, 1);
+        assert_eq!(posture.active_leader_count, 0);
+        Ok(())
+    }
+
+    fn wait_for_registered_follower(
+        group: &SingleFlightGroup<String>,
+        key_hash: &str,
+    ) -> TestResult {
+        let started = Instant::now();
+        loop {
+            let follower_count = {
+                let entries = group
+                    .entries
+                    .lock()
+                    .map_err(|_| "single-flight entries lock poisoned".to_owned())?;
+                entries
+                    .get(key_hash)
+                    .map_or(0, |entry| entry.followers.load(Ordering::SeqCst))
+            };
+            if follower_count > 0 {
+                return Ok(());
+            }
+            if started.elapsed() >= Duration::from_secs(1) {
+                return Err("follower did not join the single-flight entry".to_owned());
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
     }
 
     #[test]
