@@ -1327,24 +1327,32 @@ fn collect_search_cache_hotset_entries(
     }
 
     if let Ok(rows) = connection.query(
-        "SELECT ml.src_memory_id, COUNT(*) AS hits
-         FROM memory_links ml
-         JOIN memories m ON m.id = ml.src_memory_id
-         WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND m.valid_to IS NULL
-         GROUP BY ml.src_memory_id
-         ORDER BY hits DESC, ml.src_memory_id ASC
-         LIMIT 4",
+        "SELECT id
+         FROM memories
+         WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND valid_to IS NULL",
         &[SqlValue::Text(workspace_id.to_owned())],
     ) {
-        entries.extend(rows.iter().filter_map(|row| {
-            let memory_id = row_text(row, 0)?;
-            Some(SearchHotsetEntry::graph_neighborhood(
-                memory_id,
-                2,
-                generation,
-                row_u64(row, 1).max(1),
-            ))
-        }));
+        let active_memory_ids = rows
+            .iter()
+            .filter_map(|row| row_text(row, 0))
+            .collect::<BTreeSet<_>>();
+        if let Ok(links) = connection.list_all_memory_links(None) {
+            let mut graph_hits = BTreeMap::<String, u64>::new();
+            for link in links.into_iter().filter(|link| {
+                active_memory_ids.contains(link.src_memory_id.as_str())
+                    && crate::graph::memory_link_mesh_metadata_visible(
+                        link.metadata_json.as_deref(),
+                    )
+            }) {
+                *graph_hits.entry(link.src_memory_id).or_default() += 1;
+            }
+            let mut graph_hits = graph_hits.into_iter().collect::<Vec<_>>();
+            graph_hits
+                .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+            entries.extend(graph_hits.into_iter().take(4).map(|(memory_id, hits)| {
+                SearchHotsetEntry::graph_neighborhood(memory_id, 2, generation, hits.max(1))
+            }));
+        }
     }
 
     entries
@@ -2893,6 +2901,157 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn cache_hotsets_ignore_denied_mesh_links_for_graph_entries() -> TestResult {
+        let root = unique_test_path("cache-hotset-mesh-links");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(workspace.join(".ee"))
+            .map_err(|error| format!("failed to create workspace metadata dir: {error}"))?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| format!("failed to canonicalize workspace: {error}"))?;
+
+        let database_path = workspace.join(".ee").join("ee.db");
+        let connection = DbConnection::open_file(&database_path)
+            .map_err(|error| format!("failed to open test db: {error}"))?;
+        connection
+            .migrate()
+            .map_err(|error| format!("failed to migrate test db: {error}"))?;
+
+        let workspace_id = "wsp_0123456789012345678901mesh";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("cache-hotset-mesh-links".to_owned()),
+                },
+            )
+            .map_err(|error| format!("failed to insert workspace: {error}"))?;
+
+        for memory_id in [
+            "mem_000000000000000000mesh0001",
+            "mem_000000000000000000mesh0002",
+            "mem_000000000000000000mesh0003",
+        ] {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &crate::db::CreateMemoryInput {
+                        workspace_id: workspace_id.to_owned(),
+                        level: "working".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: format!("Mesh hotset fixture memory {memory_id}."),
+                        workflow_id: None,
+                        confidence: 0.8,
+                        utility: 0.7,
+                        importance: 0.6,
+                        provenance_uri: Some("test://support-bundle/mesh-hotset".to_owned()),
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: Some("test".to_owned()),
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| format!("failed to insert memory {memory_id}: {error}"))?;
+        }
+
+        insert_support_bundle_test_link(
+            &connection,
+            "link_000000000000000000mesh0001",
+            "mem_000000000000000000mesh0001",
+            "mem_000000000000000000mesh0002",
+            Some(support_bundle_mesh_link_metadata("allow", true)),
+        )?;
+        insert_support_bundle_test_link(
+            &connection,
+            "link_000000000000000000mesh0002",
+            "mem_000000000000000000mesh0003",
+            "mem_000000000000000000mesh0001",
+            Some(support_bundle_mesh_link_metadata("deny", true)),
+        )?;
+        insert_support_bundle_test_link(
+            &connection,
+            "link_000000000000000000mesh0003",
+            "mem_000000000000000000mesh0002",
+            "mem_000000000000000000mesh0003",
+            Some(support_bundle_mesh_link_metadata("allow", false)),
+        )?;
+
+        let entries = super::collect_search_cache_hotset_entries(&connection, workspace_id, 42);
+        let graph_entries = entries
+            .iter()
+            .filter(|entry| entry.kind == crate::search::SearchHotsetEntryKind::GraphNeighborhood)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            graph_entries.len(),
+            1,
+            "only the allowed complete mesh link should seed a graph hotset entry"
+        );
+        assert_eq!(
+            graph_entries[0].hit_count, 1,
+            "denied and incomplete mesh links must not increase hotset hits"
+        );
+
+        connection
+            .close()
+            .map_err(|error| format!("failed to close test db: {error}"))
+    }
+
+    fn insert_support_bundle_test_link(
+        connection: &DbConnection,
+        id: &str,
+        src_memory_id: &str,
+        dst_memory_id: &str,
+        metadata_json: Option<String>,
+    ) -> TestResult {
+        connection
+            .insert_memory_link(
+                id,
+                &crate::db::CreateMemoryLinkInput {
+                    src_memory_id: src_memory_id.to_owned(),
+                    dst_memory_id: dst_memory_id.to_owned(),
+                    relation: crate::db::MemoryLinkRelation::Supports,
+                    weight: 0.9,
+                    confidence: 0.9,
+                    directed: true,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: crate::db::MemoryLinkSource::Agent,
+                    created_by: Some("support-bundle-mesh-test".to_owned()),
+                    metadata_json,
+                },
+            )
+            .map_err(|error| format!("failed to insert link {id}: {error}"))
+    }
+
+    fn support_bundle_mesh_link_metadata(workspace_scope_decision: &str, complete: bool) -> String {
+        let mut metadata = json!({
+            "mesh": {
+                "workspaceScopeDecision": workspace_scope_decision,
+                "cachedMaterialId": "mesh_support_bundle_link",
+                "originWorkspaceId": "wsp_remote_private",
+                "originWorkspaceLabel": "/Users/alice/private/repo",
+                "producerPeerId": "peer_builder_one",
+                "producerPeerLabel": "/Users/alice/private/peer-agent",
+                "materialLane": "graphSignal",
+                "importDecisionId": "mesh_support_bundle_decision",
+                "trustLane": "mesh_metadata",
+                "redactionPosture": "standard"
+            }
+        });
+        if !complete
+            && let Some(object) = metadata
+                .get_mut("mesh")
+                .and_then(serde_json::Value::as_object_mut)
+        {
+            object.remove("trustLane");
+        }
+        metadata.to_string()
     }
 
     #[test]
