@@ -1168,17 +1168,9 @@ fn plan_preconditions(task_frame_posture: Option<&TaskFramePlanPosture>) -> Vec<
 
 /// Generate a pseudo-random ID (deterministic for testing when seeded).
 fn rand_id() -> u32 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::SystemTime;
-
-    let mut hasher = DefaultHasher::new();
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        .hash(&mut hasher);
-    hasher.finish() as u32
+    let mut bytes = [0u8; 4];
+    let _ = getrandom::fill(&mut bytes);
+    u32::from_ne_bytes(bytes)
 }
 
 // ============================================================================
