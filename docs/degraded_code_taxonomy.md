@@ -75,6 +75,13 @@ Current conventions:
 | `pack` | Context pack assembly, advisory, consensus, or conflict degradation. |
 | `request` | Request parsing, compatibility, or ignored-query-field degradation. |
 | `search` | Search, index, recall, filtering, or visibility degradation carried into context output. |
+| `status` | Top-level `ee status` posture, capability, or subsystem degradation. |
+| `skyline` | `ee status --skyline` structural skyline degradation. |
+| `agent_detection` | Agent inventory and agent-status detection degradation. |
+| `build` | Binary version and build-provenance degradation. |
+| `integrity` | `ee diag integrity` database, schema, canary, or provenance-sample degradation. |
+| `quarantine` | `ee diag quarantine` trust or feedback quarantine degradation. |
+| `structural_health` | `ee health structural` graph-health degradation. |
 
 When adding a new renderer, prefer the most specific stable section, command,
 or algorithm label available. Do not include workspace paths, query text, or

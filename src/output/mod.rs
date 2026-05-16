@@ -23,7 +23,7 @@ use crate::core::doctor::{
     FixPlan, FrankenDependencyHealth, FrankenHealthReport, IntegrityCanaryReport,
     IntegrityDiagnosticCheck, IntegrityDiagnosticDegradation, IntegrityDiagnosticsReport,
 };
-use crate::core::health::{HealthReport, StructuralHealthReport};
+use crate::core::health::{HealthReport, StructuralHealthDegradation, StructuralHealthReport};
 use crate::core::memory::{
     MemoryDetails, MemoryHistoryReport, MemoryListReport, MemoryShowReport, memory_validity,
 };
@@ -35,9 +35,9 @@ use crate::core::rule::{
     RULE_SHOW_SCHEMA_V1, RULE_UPDATE_SCHEMA_V1, RuleAddReport, RuleListReport, RuleMarkReport,
     RuleProtectReport, RuleShowReport, RuleUpdateReport,
 };
-use crate::core::status::{StatusReport, StatusSkylineReport};
+use crate::core::status::{DegradationReport, StatusReport, StatusSkylineReport};
 use crate::core::why::WhyReport;
-use crate::core::{VERSION_PROVENANCE_SCHEMA_V1, VersionReport};
+use crate::core::{BuildProvenanceDegradation, VERSION_PROVENANCE_SCHEMA_V1, VersionReport};
 use crate::eval::{EvaluationReport, EvaluationStatus, FixtureListEntry, ScenarioValidationResult};
 use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
 use crate::models::{
@@ -2721,6 +2721,91 @@ fn build_aggregated_degradation(obj: &mut JsonBuilder, degraded: &AggregatedDegr
     );
 }
 
+fn aggregate_status_degradations(
+    source: &'static str,
+    degraded: &[DegradationReport],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            source,
+            entry.code,
+            entry.severity,
+            entry.message,
+            entry.repair,
+        )
+    }))
+}
+
+fn aggregate_build_provenance_degradations(
+    degraded: &[BuildProvenanceDegradation],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "build",
+            entry.code,
+            entry.severity,
+            entry.message,
+            entry.repair,
+        )
+    }))
+}
+
+fn aggregate_agent_inventory_degradations(
+    degraded: &[crate::core::agent_detect::AgentInventoryDegradation],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "agent_detection",
+            entry.code.clone(),
+            entry.severity,
+            entry.message.clone(),
+            entry.repair,
+        )
+    }))
+}
+
+fn aggregate_integrity_degradations(
+    degraded: &[IntegrityDiagnosticDegradation],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "integrity",
+            entry.code,
+            entry.severity,
+            entry.message.clone(),
+            entry.repair.unwrap_or_default(),
+        )
+    }))
+}
+
+fn aggregate_quarantine_degradations(
+    degraded: &[QuarantineDegradation],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "quarantine",
+            entry.code,
+            entry.severity,
+            entry.message.clone(),
+            entry.repair,
+        )
+    }))
+}
+
+fn aggregate_structural_health_degradations(
+    degraded: &[StructuralHealthDegradation],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "structural_health",
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry.repair.clone().unwrap_or_default(),
+        )
+    }))
+}
+
 fn context_degradation_source(code: &str) -> &'static str {
     if matches!(code, "deprecated_alias" | "query_unknown_field") {
         "request"
@@ -3081,12 +3166,8 @@ pub fn render_status_json(report: &StatusReport) -> String {
         render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
         render_derived_assets_json(d, &report.derived_assets, true);
         render_agent_inventory_json(d, "agentInventory", &report.agent_inventory, false);
-        d.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
-            obj.field_str("code", deg.code);
-            obj.field_str("severity", deg.severity);
-            obj.field_str("message", deg.message);
-            obj.field_str("repair", deg.repair);
-        });
+        let degraded = aggregate_status_degradations("status", &report.degradations);
+        d.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     });
     b.finish()
 }
@@ -3131,12 +3212,8 @@ fn render_status_skyline_data_json(parent: &mut JsonBuilder, report: &StatusSkyl
         obj.field_u32("onionLayer", community.onion_layer);
         obj.field_str("structuralHealth", &community.structural_health);
     });
-    parent.field_array_of_objects("degraded", &report.degraded, |obj, deg| {
-        obj.field_str("code", deg.code);
-        obj.field_str("severity", deg.severity);
-        obj.field_str("message", deg.message);
-        obj.field_str("repair", deg.repair);
-    });
+    let degraded = aggregate_status_degradations("skyline", &report.degraded);
+    parent.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
 }
 
 fn render_status_posture_json(
@@ -3598,12 +3675,8 @@ fn render_agent_inventory_json(
                 },
             );
         }
-        agent.field_array_of_objects("degraded", &inventory.degraded, |obj, degraded| {
-            obj.field_str("code", &degraded.code);
-            obj.field_str("severity", degraded.severity);
-            obj.field_str("message", &degraded.message);
-            obj.field_str("repair", degraded.repair);
-        });
+        let degraded = aggregate_agent_inventory_degradations(&inventory.degraded);
+        agent.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     });
 }
 
@@ -3647,12 +3720,8 @@ pub fn render_status_json_with_meta(
         render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
         render_derived_assets_json(d, &report.derived_assets, true);
         render_agent_inventory_json(d, "agentInventory", &report.agent_inventory, false);
-        d.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
-            obj.field_str("code", deg.code);
-            obj.field_str("severity", deg.severity);
-            obj.field_str("message", deg.message);
-            obj.field_str("repair", deg.repair);
-        });
+        let degraded = aggregate_status_degradations("status", &report.degradations);
+        d.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     });
     if let Some(t) = timing {
         b.field_object("meta", |m| {
@@ -3748,10 +3817,11 @@ pub fn render_status_skyline_human(report: &StatusSkylineReport) -> String {
             );
         }
     }
-    if !report.degraded.is_empty() {
+    let degraded = aggregate_status_degradations("skyline", &report.degraded);
+    if !degraded.is_empty() {
         let _ = writeln!(output);
         let _ = writeln!(output, "Degraded:");
-        for degraded in &report.degraded {
+        for degraded in &degraded {
             let _ = writeln!(
                 output,
                 "  [{}] {}: {}",
@@ -4205,7 +4275,8 @@ pub fn render_integrity_diagnostics_json(report: &IntegrityDiagnosticsReport) ->
         d.field_object("canary", |canary| {
             build_integrity_canary(canary, &report.canary)
         });
-        d.field_array_of_objects("degraded", &report.degraded, build_integrity_degradation);
+        let degraded = aggregate_integrity_degradations(&report.degraded);
+        d.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     });
     b.finish()
 }
@@ -4264,13 +4335,6 @@ fn build_integrity_canary(obj: &mut JsonBuilder, canary: &IntegrityCanaryReport)
     obj.field_str("status", canary.status.as_str());
     obj.field_str("message", &canary.message);
     field_optional_str(obj, "repair", canary.repair);
-}
-
-fn build_integrity_degradation(obj: &mut JsonBuilder, degraded: &IntegrityDiagnosticDegradation) {
-    obj.field_str("code", degraded.code);
-    obj.field_str("severity", degraded.severity);
-    obj.field_str("message", &degraded.message);
-    field_optional_str(obj, "repair", degraded.repair);
 }
 
 /// Render integrity diagnostics as human-readable text.
@@ -4675,7 +4739,8 @@ pub fn render_quarantine_json(report: &QuarantineReport) -> String {
             &report.blocked_sources,
             build_quarantine_entry,
         );
-        d.field_array_of_objects("degraded", &report.degraded, build_quarantine_degradation);
+        let degraded = aggregate_quarantine_degradations(&report.degraded);
+        d.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     });
     b.finish()
 }
@@ -4693,13 +4758,6 @@ fn build_quarantine_entry(obj: &mut JsonBuilder, entry: &QuarantineEntry) {
     obj.field_bool("requiresValidation", entry.requires_validation);
 }
 
-fn build_quarantine_degradation(obj: &mut JsonBuilder, degradation: &QuarantineDegradation) {
-    obj.field_str("code", degradation.code);
-    obj.field_str("severity", degradation.severity);
-    obj.field_str("message", &degradation.message);
-    obj.field_str("repair", degradation.repair);
-}
-
 /// Render a quarantine report as human-readable text.
 #[must_use]
 pub fn render_quarantine_human(report: &QuarantineReport) -> String {
@@ -4711,10 +4769,11 @@ pub fn render_quarantine_human(report: &QuarantineReport) -> String {
     if let Some(database_path) = &report.database_path {
         output.push_str(&format!("Database: {database_path}\n"));
     }
-    if !report.degraded.is_empty() {
+    let degraded = aggregate_quarantine_degradations(&report.degraded);
+    if !degraded.is_empty() {
         output.push('\n');
         output.push_str("Degraded:\n");
-        for degraded in &report.degraded {
+        for degraded in &degraded {
             output.push_str(&format!(
                 "  {}: {}\n    repair: {}\n",
                 degraded.code, degraded.message, degraded.repair
@@ -5123,7 +5182,17 @@ pub fn render_health_toon(report: &HealthReport) -> String {
 /// Render the opt-in structural health surface as canonical JSON.
 #[must_use]
 pub fn render_structural_health_json(report: &StructuralHealthReport) -> String {
-    serde_json::to_string(report)
+    let mut report = report.clone();
+    report.degraded = aggregate_structural_health_degradations(&report.degraded)
+        .into_iter()
+        .map(|entry| StructuralHealthDegradation {
+            code: entry.code,
+            severity: entry.severity,
+            message: entry.message,
+            repair: (!entry.repair.is_empty()).then_some(entry.repair),
+        })
+        .collect();
+    serde_json::to_string(&report)
         .unwrap_or_else(|_| "{\"schema\":\"ee.health.structural.v1\"}".to_owned())
 }
 
@@ -5138,9 +5207,10 @@ pub fn render_structural_health_human(report: &StructuralHealthReport) -> String
         report.summary.contradiction_cluster_count,
     );
 
-    if !report.degraded.is_empty() {
+    let degraded = aggregate_structural_health_degradations(&report.degraded);
+    if !degraded.is_empty() {
         output.push_str("\nDegraded:\n");
-        for degraded in &report.degraded {
+        for degraded in &degraded {
             output.push_str(&format!(
                 "  [{}] {} - {}\n",
                 degraded.severity, degraded.code, degraded.message
@@ -5791,12 +5861,8 @@ pub fn render_version_json(report: &VersionReport) -> String {
         });
         d.field_object("provenance", |provenance| {
             provenance.field_bool("available", report.provenance_available());
-            provenance.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
-                obj.field_str("code", deg.code);
-                obj.field_str("severity", deg.severity);
-                obj.field_str("message", deg.message);
-                obj.field_str("repair", deg.repair);
-            });
+            let degraded = aggregate_build_provenance_degradations(&report.degradations);
+            provenance.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
         });
     });
     b.finish()
@@ -8170,9 +8236,10 @@ pub fn render_agent_status_human(report: &AgentInventoryReport) -> String {
         }
     }
 
-    if !report.degraded.is_empty() {
+    let degraded = aggregate_agent_inventory_degradations(&report.degraded);
+    if !degraded.is_empty() {
         out.push_str("\nDegraded:\n");
-        for degraded in &report.degraded {
+        for degraded in &degraded {
             out.push_str(&format!("  - {}: {}\n", degraded.code, degraded.message));
         }
     }
@@ -8806,12 +8873,8 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
                 &report.agent_inventory,
                 profile.include_verbose_details(),
             );
-            d.field_array_of_objects("degraded", &report.degradations, |obj, deg| {
-                obj.field_str("code", deg.code);
-                obj.field_str("severity", deg.severity);
-                obj.field_str("message", deg.message);
-                obj.field_str("repair", deg.repair);
-            });
+            let degraded = aggregate_status_degradations("status", &report.degradations);
+            d.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
         }
     });
     b.finish()
@@ -9060,7 +9123,8 @@ pub fn render_quarantine_json_filtered(report: &QuarantineReport, profile: Field
             );
             d.field_array_of_objects("atRiskSources", &report.at_risk_sources, build_entry);
             d.field_array_of_objects("blockedSources", &report.blocked_sources, build_entry);
-            d.field_array_of_objects("degraded", &report.degraded, build_quarantine_degradation);
+            let degraded = aggregate_quarantine_degradations(&report.degraded);
+            d.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
         }
     });
     b.finish()
@@ -12301,7 +12365,7 @@ mod tests {
         LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1, LearnExperimentProposalReport,
     };
     use crate::core::memory::{MemoryHistoryEntry, MemoryHistoryReport};
-    use crate::core::status::StatusReport;
+    use crate::core::status::{DegradationReport, StatusReport};
     use crate::core::{
         BUILD_TIMESTAMP_POLICY, BuildFeature, BuildInfo, BuildProvenanceDegradation,
         SupportedSchema, VERSION_PROVENANCE_SCHEMA_V1, VersionReport,
@@ -12769,6 +12833,59 @@ mod tests {
         ensure_contains(&json, "\"degraded\":[", "status degraded array")?;
         ensure_contains(&json, "\"derivedAssets\":[", "derived assets")?;
         ensure_contains(&json, "\"name\":\"search_index\"", "search index asset")
+    }
+
+    #[test]
+    fn status_json_aggregates_duplicate_degradation_codes() -> TestResult {
+        let mut report = StatusReport::gather();
+        report.degradations = vec![
+            DegradationReport {
+                code: "storage_unavailable",
+                severity: "low",
+                message: "Storage was not initialized.",
+                repair: "Run ee init --workspace .",
+            },
+            DegradationReport {
+                code: "storage_unavailable",
+                severity: "high",
+                message: "Storage was unavailable for this response.",
+                repair: "Inspect the database path.",
+            },
+            DegradationReport {
+                code: "index_stale",
+                severity: "medium",
+                message: "Search index is stale.",
+                repair: "Run ee index rebuild --workspace .",
+            },
+        ];
+
+        let value: serde_json::Value = serde_json::from_str(&render_status_json(&report))
+            .map_err(|error| error.to_string())?;
+        let degraded = value
+            .pointer("/data/degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "status JSON has degraded array".to_string())?;
+
+        ensure_equal(
+            &serde_json::Value::from(degraded.len()),
+            &serde_json::json!(2),
+            "duplicate degraded codes are collapsed",
+        )?;
+        ensure_equal(
+            &degraded[0]["code"],
+            &serde_json::json!("storage_unavailable"),
+            "highest-severity aggregate sorts first",
+        )?;
+        ensure_equal(
+            &degraded[0]["severity"],
+            &serde_json::json!("high"),
+            "duplicate code escalates severity",
+        )?;
+        ensure_equal(
+            &degraded[0]["sources"],
+            &serde_json::json!(["status"]),
+            "status source label is preserved",
+        )
     }
 
     #[test]
