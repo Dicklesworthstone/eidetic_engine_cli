@@ -230,6 +230,19 @@ pub const LARGE_DATABASE: DegradationCode = DegradationCode {
     repair: Some("ee doctor --fix-plan --json"),
 };
 
+pub const ADVISORY_LOCK_TIMEOUT: DegradationCode = DegradationCode {
+    id: "D103",
+    subsystem: DegradedSubsystem::Storage,
+    severity: DegradationSeverity::Warning,
+    description: "Advisory lock acquisition exceeded its retry budget",
+    behavior_change: "Concurrent write operation could not prove exclusive ownership",
+    auto_recoverable: true,
+    repair: Some("ee diag advisory-lock --workspace . --json"),
+};
+
+/// Response degraded code for advisory lock acquisition timeout.
+pub const ADVISORY_LOCK_TIMEOUT_CODE: &str = "advisory_lock_timeout";
+
 // CASS degradations (D200 - D299)
 pub const CASS_NOT_FOUND: DegradationCode = DegradationCode {
     id: "D200",
@@ -430,6 +443,7 @@ pub const ALL_DEGRADATION_CODES: &[DegradationCode] = &[
     DATABASE_READ_ONLY,
     WAL_MODE_DISABLED,
     LARGE_DATABASE,
+    ADVISORY_LOCK_TIMEOUT,
     // CASS
     CASS_NOT_FOUND,
     CASS_VERSION_MISMATCH,

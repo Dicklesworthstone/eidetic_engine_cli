@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "advisory_lock_timeout",
+  "introduced_by": {
+    "bead": "bd-3usjw.57",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "remember",
+    "diag advisory-lock"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A multi-agent write path attempts to acquire a workspace advisory lock, but another live process holds the lock beyond the retry budget.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee diag advisory-lock --workspace . --resource-type workspace --holder held-by-agent --ttl-seconds 300 --json"
+    ],
+    "invocation": "ee remember 'contention fixture' --workspace . --level procedural --kind fact --json"
+  },
+  "expected_emission": {
+    "code": "advisory_lock_timeout",
+    "severity": "medium",
+    "message_contains": [
+      "advisory lock",
+      "timeout"
+    ],
+    "repair_contains": "ee diag advisory-lock"
+  }
+}
