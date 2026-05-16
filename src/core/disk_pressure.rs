@@ -7,6 +7,7 @@
 use std::cmp::Reverse;
 use std::env;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -193,6 +194,7 @@ pub struct BuildAdmissionCheck {
     pub admitted: bool,
     pub external_required: bool,
     pub external: bool,
+    pub symlink_component: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -536,7 +538,15 @@ pub fn gather_build_admission_report(options: &BuildAdmissionOptions) -> BuildAd
         let has_required_space = bytes_available
             .map(|available| available >= options.min_free_bytes)
             .unwrap_or(false);
-        let external = path.starts_with(external_root);
+        let (symlink_component, symlink_inspection_failed) =
+            match first_existing_symlink_component(&path) {
+                Ok(component) => (component, false),
+                Err(_) => (None, true),
+            };
+        let external_required_active = external_available && external_required;
+        let untrusted_external_path =
+            external_required_active && (symlink_component.is_some() || symlink_inspection_failed);
+        let external = path.starts_with(external_root) && !untrusted_external_path;
 
         if required && !has_required_space {
             degraded.push(BuildAdmissionDegradation {
@@ -549,7 +559,22 @@ pub fn gather_build_admission_report(options: &BuildAdmissionOptions) -> BuildAd
             });
         }
 
-        if external_available && external_required && !external {
+        if required && untrusted_external_path {
+            let reason = symlink_component.as_ref().map_or_else(
+                || "could not be inspected for symlink components".to_owned(),
+                |component| format!("traverses symlink component `{}`", component.display()),
+            );
+            degraded.push(BuildAdmissionDegradation {
+                code: "build_admission_denied",
+                severity: "medium",
+                message: format!(
+                    "required build path `{label}` {reason} before external-drive placement can be trusted."
+                ),
+                repair: "Use a real, inspectable directory under the external build root before starting heavy work.".to_owned(),
+            });
+        }
+
+        if external_required_active && !external {
             let (code, repair) = if label == "artifact_destination" {
                 (
                     "artifact_destination_not_external",
@@ -566,14 +591,28 @@ pub fn gather_build_admission_report(options: &BuildAdmissionOptions) -> BuildAd
                     "Set TMPDIR under /Volumes/USBNVME16TB/temp_agent_space before starting heavy Cargo work.",
                 )
             };
-            degraded.push(BuildAdmissionDegradation {
-                code,
-                severity: "warning",
-                message: format!(
+            let message = if let Some(component) = symlink_component.as_ref() {
+                format!(
+                    "{label} path `{}` traverses symlink component `{}`; external build-root placement cannot be trusted.",
+                    path.display(),
+                    component.display()
+                )
+            } else if symlink_inspection_failed {
+                format!(
+                    "{label} path `{}` could not be inspected for symlink components; external build-root placement cannot be trusted.",
+                    path.display()
+                )
+            } else {
+                format!(
                     "{label} path `{}` is not under the external build root {}.",
                     path.display(),
                     EXTERNAL_BUILD_ROOT
-                ),
+                )
+            };
+            degraded.push(BuildAdmissionDegradation {
+                code,
+                severity: "warning",
+                message,
                 repair: repair.to_owned(),
             });
         }
@@ -587,9 +626,12 @@ pub fn gather_build_admission_report(options: &BuildAdmissionOptions) -> BuildAd
             nearest_existing_ancestor: nearest.as_ref().map(|path| path_to_string(path)),
             bytes_available,
             min_free_bytes: options.min_free_bytes,
-            admitted: !required || has_required_space,
-            external_required: external_available && external_required,
+            admitted: !required || (has_required_space && !untrusted_external_path),
+            external_required: external_required_active,
             external,
+            symlink_component: symlink_component
+                .as_ref()
+                .map(|component| path_to_string(component)),
         });
     }
 
@@ -1473,7 +1515,35 @@ fn path_to_string(path: &Path) -> String {
 }
 
 fn path_string_is_within(path: &str, root: &Path) -> bool {
-    Path::new(path).starts_with(root)
+    trusted_external_path(Path::new(path), root)
+}
+
+fn trusted_external_path(path: &Path, root: &Path) -> bool {
+    path.starts_with(root)
+        && first_existing_symlink_component(path)
+            .map(|component| component.is_none())
+            .unwrap_or(false)
+}
+
+fn first_existing_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -1648,6 +1718,30 @@ mod tests {
             path_string_is_within("./target/debug", external_root),
             false,
             "relative target path",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_path_classification_rejects_symlink_components() -> TestResult {
+        let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let external_root = temp_dir.path().join("external");
+        let outside_root = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&external_root).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&outside_root).map_err(|error| error.to_string())?;
+        let linked_target = external_root.join("cargo-target");
+        std::os::unix::fs::symlink(&outside_root, &linked_target)
+            .map_err(|error| error.to_string())?;
+
+        ensure(
+            trusted_external_path(&external_root.join("real-target"), &external_root),
+            true,
+            "ordinary external child path",
+        )?;
+        ensure(
+            trusted_external_path(&linked_target, &external_root),
+            false,
+            "symlinked external child path",
         )
     }
 
