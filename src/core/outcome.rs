@@ -35,9 +35,10 @@ use crate::db::{
     ApplyProcedureFeedbackInput, AuditedFeedbackEventInput, CreateAuditInput,
     CreateFeedbackEventInput, CreateFeedbackQuarantineInput, DbConnection, FeedbackCounts,
     StoredFeedbackEvent, StoredFeedbackQuarantine, UpsertAgentContextProfileInput, audit_actions,
-    feedback_scoring, generate_audit_id,
+    feedback_scoring, generate_audit_id, generate_audit_id_seeded,
 };
 use crate::models::{AgentContextProfileCounts, DomainError, ProcessExitCode};
+use crate::runtime::determinism::{Deterministic, Seed};
 
 /// Exit code for cancelled operations (SIGINT convention).
 pub const EXIT_CANCELLED: u8 = 130;
@@ -638,6 +639,50 @@ impl OutcomeRecordReport {
 pub fn record_outcome(
     options: &OutcomeRecordOptions<'_>,
 ) -> Result<OutcomeRecordReport, DomainError> {
+    let mut id_source = OutcomeIdSource::Ambient;
+    record_outcome_inner(options, &mut id_source)
+}
+
+pub fn record_outcome_seeded(
+    options: &OutcomeRecordOptions<'_>,
+    determinism: &mut Deterministic<Seed>,
+) -> Result<OutcomeRecordReport, DomainError> {
+    let mut id_source = OutcomeIdSource::Seeded(determinism);
+    record_outcome_inner(options, &mut id_source)
+}
+
+enum OutcomeIdSource<'a> {
+    Ambient,
+    Seeded(&'a mut Deterministic<Seed>),
+}
+
+impl OutcomeIdSource<'_> {
+    fn next_feedback_event_id(&mut self) -> String {
+        match self {
+            Self::Ambient => generate_feedback_event_id(),
+            Self::Seeded(determinism) => generate_feedback_event_id_seeded(determinism),
+        }
+    }
+
+    fn next_feedback_quarantine_id(&mut self) -> String {
+        match self {
+            Self::Ambient => generate_feedback_quarantine_id(),
+            Self::Seeded(determinism) => generate_feedback_quarantine_id_seeded(determinism),
+        }
+    }
+
+    fn next_audit_id(&mut self) -> String {
+        match self {
+            Self::Ambient => generate_audit_id(),
+            Self::Seeded(determinism) => generate_audit_id_seeded(determinism),
+        }
+    }
+}
+
+fn record_outcome_inner(
+    options: &OutcomeRecordOptions<'_>,
+    id_source: &mut OutcomeIdSource<'_>,
+) -> Result<OutcomeRecordReport, DomainError> {
     trace_sprt_quarantine("input", 0, &[]);
 
     let target_type = require_allowed(
@@ -677,7 +722,7 @@ pub fn record_outcome(
     let event_id = match options.event_id.as_deref() {
         Some(raw) => Some(validate_feedback_event_id(raw)?),
         None if options.dry_run => None,
-        None => Some(generate_feedback_event_id()),
+        None => Some(id_source.next_feedback_event_id()),
     };
     let weight = options.weight.map_or_else(
         || Ok(default_feedback_weight(&source_type, &signal)),
@@ -798,11 +843,11 @@ pub fn record_outcome(
         options.harmful_per_source_per_hour,
         options.harmful_burst_window_seconds,
     )? {
-        let quarantine_id = generate_feedback_quarantine_id();
+        let quarantine_id = id_source.next_feedback_quarantine_id();
         let raw_event_hash = raw_feedback_event_hash(&event_id, &feedback_input)?;
         let reason = quarantine.reason.clone();
         trace_sprt_quarantine("persistence", 0, &[]);
-        let audit_id = insert_feedback_quarantine_audited(
+        let audit_id = insert_feedback_quarantine_audited_with_id(
             &connection,
             &quarantine_id,
             &CreateFeedbackQuarantineInput {
@@ -822,6 +867,7 @@ pub fn record_outcome(
                 raw_event_hash: raw_event_hash.clone(),
             },
             options.actor.as_deref(),
+            id_source.next_audit_id(),
         )?;
         let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
         trace_sprt_quarantine("response", 0, &[]);
@@ -852,19 +898,20 @@ pub fn record_outcome(
     }
 
     trace_sprt_quarantine("persistence", 0, &[]);
-    let audit_id = connection
-        .insert_feedback_event_audited(
-            &event_id,
-            &AuditedFeedbackEventInput {
-                event: feedback_input.clone(),
-                actor: options.actor.clone(),
-                details: Some(outcome_audit_details(&event_id, &feedback_input)),
-            },
-        )
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to record feedback event: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
+    let audit_id = insert_feedback_event_audited_with_id(
+        &connection,
+        &event_id,
+        &AuditedFeedbackEventInput {
+            event: feedback_input.clone(),
+            actor: options.actor.clone(),
+            details: Some(outcome_audit_details(&event_id, &feedback_input)),
+        },
+        id_source.next_audit_id(),
+    )
+    .map_err(|error| DomainError::Storage {
+        message: format!("Failed to record feedback event: {error}"),
+        repair: Some("ee doctor".to_string()),
+    })?;
 
     if target_type == "procedure" {
         connection
@@ -930,7 +977,7 @@ pub fn record_outcome(
                         repair: Some("ee doctor".to_string()),
                     })?;
 
-                let posterior_audit_id = generate_audit_id();
+                let posterior_audit_id = id_source.next_audit_id();
                 let details = serde_json::json!({
                     "schema": "ee.audit.bayes_posterior_updated.v1",
                     "feedbackEventId": &event_id,
@@ -1715,13 +1762,50 @@ fn harmful_quarantine_preview(
     }))
 }
 
-fn insert_feedback_quarantine_audited(
+fn insert_feedback_event_audited_with_id(
+    connection: &DbConnection,
+    event_id: &str,
+    input: &AuditedFeedbackEventInput,
+    audit_id: String,
+) -> crate::db::Result<String> {
+    let details = input.details.clone().unwrap_or_else(|| {
+        serde_json::json!({
+            "feedbackEventId": event_id,
+            "signal": &input.event.signal,
+            "weight": input.event.weight,
+            "sourceType": &input.event.source_type,
+            "sourceId": &input.event.source_id,
+            "reasonPresent": input.event.reason.is_some(),
+            "evidenceJsonPresent": input.event.evidence_json.is_some(),
+            "sessionId": &input.event.session_id,
+        })
+        .to_string()
+    });
+
+    connection.with_transaction(|| {
+        connection.insert_feedback_event(event_id, &input.event)?;
+        connection.insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(input.event.workspace_id.clone()),
+                actor: input.actor.clone(),
+                action: audit_actions::FEEDBACK_RECORD.to_string(),
+                target_type: Some(input.event.target_type.clone()),
+                target_id: Some(input.event.target_id.clone()),
+                details: Some(details),
+            },
+        )?;
+        Ok(audit_id)
+    })
+}
+
+fn insert_feedback_quarantine_audited_with_id(
     connection: &DbConnection,
     quarantine_id: &str,
     input: &CreateFeedbackQuarantineInput,
     actor: Option<&str>,
+    audit_id: String,
 ) -> Result<String, DomainError> {
-    let audit_id = generate_audit_id();
     let details = feedback_quarantine_audit_details(quarantine_id, input);
     connection
         .with_transaction(|| {
@@ -1859,8 +1943,20 @@ fn generate_feedback_event_id() -> String {
     format!("fb_{payload}")
 }
 
+fn generate_feedback_event_id_seeded(determinism: &mut Deterministic<Seed>) -> String {
+    let mut payload = determinism.clock().next_uuid_v7().simple().to_string();
+    payload.truncate(26);
+    format!("fb_{payload}")
+}
+
 fn generate_feedback_quarantine_id() -> String {
     let mut payload = uuid::Uuid::now_v7().simple().to_string();
+    payload.truncate(26);
+    format!("fq_{payload}")
+}
+
+fn generate_feedback_quarantine_id_seeded(determinism: &mut Deterministic<Seed>) -> String {
+    let mut payload = determinism.clock().next_uuid_v7().simple().to_string();
     payload.truncate(26);
     format!("fq_{payload}")
 }
@@ -2001,9 +2097,10 @@ mod tests {
         CliCancelReason, CliOutcomeClass, CliOutcomeSummary, DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
         DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR, EXIT_CANCELLED, EXIT_PANICKED, OutcomeRecordOptions,
         OutcomeRecordStatus, default_feedback_weight, generate_feedback_event_id, outcome_class,
-        outcome_exit_code, record_outcome, validate_feedback_event_id,
+        outcome_exit_code, record_outcome, record_outcome_seeded, validate_feedback_event_id,
     };
     use crate::models::{DomainError, ProcessExitCode};
+    use crate::runtime::determinism::Deterministic;
 
     type TestResult = Result<(), String>;
 
@@ -2431,6 +2528,64 @@ mod tests {
             &true,
             "audit actor alone must not create an agent profile",
         )
+    }
+
+    #[test]
+    fn record_outcome_seeded_replays_event_and_audit_ids() -> TestResult {
+        fn run_seeded(seed: u64) -> Result<(Option<String>, Option<String>), String> {
+            let (_dir, database) = seed_outcome_database("ee-outcome-seeded")?;
+            let mut determinism = Deterministic::from_seed(seed);
+            let report = record_outcome_seeded(
+                &OutcomeRecordOptions {
+                    database_path: &database,
+                    target_type: "memory".to_string(),
+                    target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+                    workspace_id: None,
+                    signal: "helpful".to_string(),
+                    weight: Some(2.0),
+                    source_type: "human_explicit".to_string(),
+                    source_id: Some("seeded-outcome".to_string()),
+                    reason: Some("Seeded feedback should replay IDs.".to_string()),
+                    evidence_json: Some(r#"{"outcome":"success","seeded":true}"#.to_string()),
+                    session_id: Some(OUTCOME_TEST_SESSION_ID.to_string()),
+                    event_id: None,
+                    actor: Some("test".to_string()),
+                    agent_name: None,
+                    dry_run: false,
+                    harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+                    harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+                },
+                &mut determinism,
+            )
+            .map_err(|error| error.message())?;
+
+            ensure_equal(
+                &report.status,
+                &OutcomeRecordStatus::Recorded,
+                "seeded recorded status",
+            )?;
+            ensure(
+                report
+                    .event_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("fb_")),
+                "seeded event id prefix",
+            )?;
+            ensure(
+                report
+                    .audit_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("audit_")),
+                "seeded audit id prefix",
+            )?;
+            Ok((report.event_id, report.audit_id))
+        }
+
+        let first = run_seeded(98_765)?;
+        let replay = run_seeded(98_765)?;
+        let other = run_seeded(98_766)?;
+        ensure_equal(&first, &replay, "same seed replays IDs")?;
+        ensure(first != other, "different seed changes IDs")
     }
 
     #[test]
