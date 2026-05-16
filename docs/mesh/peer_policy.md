@@ -116,5 +116,7 @@ Initial fixtures live under `tests/fixtures/mesh/`:
   denying bodies and embeddings.
 - `peer_policy_body_denied.json` proves body sharing remains denied even for a
   trusted peer-agent lane.
+- `peer_policy_redacted_body_allowed.json` allows bounded body fetch only with
+  consent and redacted body payloads while embeddings remain denied.
 
 These fixtures are intentionally local and do not require real Tailscale.

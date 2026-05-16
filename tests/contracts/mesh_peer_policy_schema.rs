@@ -12,6 +12,7 @@ const SCHEMA_PATH: &str = "docs/schemas/ee.mesh.peer_policy.v1.json";
 const FIXTURES: &[&str] = &[
     "tests/fixtures/mesh/peer_policy_metadata_only.json",
     "tests/fixtures/mesh/peer_policy_body_denied.json",
+    "tests/fixtures/mesh/peer_policy_redacted_body_allowed.json",
 ];
 
 fn repo_root() -> PathBuf {
@@ -198,5 +199,52 @@ fn body_denied_policy_keeps_peer_agent_below_body_lane() -> TestResult {
         &value.pointer("/bodyFetch/allowed").and_then(Value::as_bool),
         &Some(false),
         "body fetch remains denied",
+    )
+}
+
+#[test]
+fn redacted_body_policy_allows_body_only_with_redaction_and_consent() -> TestResult {
+    let value = read_json("tests/fixtures/mesh/peer_policy_redacted_body_allowed.json")?;
+
+    ensure_equal(
+        &value.pointer("/allowedLanes/body").and_then(Value::as_str),
+        &Some("allow"),
+        "body lane",
+    )?;
+    ensure_equal(
+        &value.pointer("/redaction/body").and_then(Value::as_str),
+        &Some("redact"),
+        "body redaction posture",
+    )?;
+    ensure_equal(
+        &value
+            .pointer("/allowedLanes/embedding")
+            .and_then(Value::as_str),
+        &Some("deny"),
+        "embedding lane remains denied",
+    )?;
+    ensure_equal(
+        &value
+            .pointer("/redaction/embedding")
+            .and_then(Value::as_str),
+        &Some("deny"),
+        "embedding redaction remains denied",
+    )?;
+    ensure_equal(
+        &value.pointer("/bodyFetch/allowed").and_then(Value::as_bool),
+        &Some(true),
+        "body fetch allowed",
+    )?;
+    ensure_equal(
+        &value
+            .pointer("/bodyFetch/requiresConsent")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "body fetch consent",
+    )?;
+    ensure_equal(
+        &value.pointer("/bodyFetch/maxBytes").and_then(Value::as_u64),
+        &Some(4096),
+        "body fetch max bytes",
     )
 }
