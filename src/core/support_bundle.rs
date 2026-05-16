@@ -1972,7 +1972,9 @@ fn discover_performance_explain_samples(workspace: &Path) -> Vec<Value> {
     let mut paths = entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "json"))
+        .filter(|path| {
+            regular_file_no_symlink(path) && path.extension().is_some_and(|ext| ext == "json")
+        })
         .collect::<Vec<_>>();
     paths.sort();
     paths.truncate(MAX_PERFORMANCE_EXPLAIN_SAMPLES);
@@ -1984,6 +1986,9 @@ fn discover_performance_explain_samples(workspace: &Path) -> Vec<Value> {
 }
 
 fn summarize_performance_explain_sample(workspace: &Path, path: &Path) -> Option<Value> {
+    if !regular_file_no_symlink(path) {
+        return None;
+    }
     let raw_content = fs::read_to_string(path).ok()?;
     let redaction = redact_support_diagnostic_content(&raw_content);
     let parsed = serde_json::from_str::<Value>(&raw_content).ok()?;
@@ -2114,7 +2119,9 @@ fn discover_swarm_report_summaries(workspace: &Path) -> Vec<Value> {
     let mut paths = entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "json"))
+        .filter(|path| {
+            regular_file_no_symlink(path) && path.extension().is_some_and(|ext| ext == "json")
+        })
         .collect::<Vec<_>>();
     paths.sort();
     paths.truncate(16);
@@ -2126,6 +2133,9 @@ fn discover_swarm_report_summaries(workspace: &Path) -> Vec<Value> {
 }
 
 fn summarize_swarm_report(workspace: &Path, path: &Path) -> Option<Value> {
+    if !regular_file_no_symlink(path) {
+        return None;
+    }
     let raw_content = fs::read_to_string(path).ok()?;
     let redaction = redact_support_diagnostic_content(&raw_content);
     let parsed = serde_json::from_str::<Value>(&raw_content).ok()?;
@@ -4154,6 +4164,84 @@ mod tests {
             "tampered metric attachment must be reported as a hash mismatch"
         );
 
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn performance_sample_discovery_ignores_symlinked_json() -> TestResult {
+        let root = unique_test_path("performance-sample-symlink");
+        let workspace = root.join("workspace");
+        let performance_dir = workspace.join(".ee").join(PERFORMANCE_EXPLAIN_SAMPLE_DIR);
+        fs::create_dir_all(&performance_dir)
+            .map_err(|error| format!("failed to create performance sample dir: {error}"))?;
+
+        let target = root.join("outside-performance-sample.json");
+        fs::write(
+            &target,
+            json!({
+                "schema": crate::core::search::PERFORMANCE_EXPLAIN_SCHEMA_V1,
+                "data": {
+                    "command": "search",
+                    "fallbacks": []
+                }
+            })
+            .to_string(),
+        )
+        .map_err(|error| format!("failed to write symlink target: {error}"))?;
+        let link = performance_dir.join("linked-sample.json");
+        std::os::unix::fs::symlink(&target, &link)
+            .map_err(|error| format!("failed to create sample symlink: {error}"))?;
+
+        let samples = discover_performance_explain_samples(&workspace);
+        assert!(
+            samples.is_empty(),
+            "performance sample discovery must not follow symlinked json files"
+        );
+        assert!(
+            summarize_performance_explain_sample(&workspace, &link).is_none(),
+            "direct performance sample summarization must reject symlinked json files"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swarm_report_discovery_ignores_symlinked_json() -> TestResult {
+        let root = unique_test_path("swarm-report-symlink");
+        let workspace = root.join("workspace");
+        let report_dir = workspace.join(".ee").join("swarm-contention");
+        fs::create_dir_all(&report_dir)
+            .map_err(|error| format!("failed to create swarm report dir: {error}"))?;
+
+        let target = root.join("outside-swarm-report.json");
+        fs::write(
+            &target,
+            json!({
+                "schema": "ee.swarm_contention.report.v1",
+                "scenario": "symlinked_report",
+                "processCount": 1,
+                "successCount": 1,
+                "failureCount": 0,
+                "dbIntegrityOk": true,
+                "determinismOk": true
+            })
+            .to_string(),
+        )
+        .map_err(|error| format!("failed to write symlink target: {error}"))?;
+        let link = report_dir.join("linked-report.json");
+        std::os::unix::fs::symlink(&target, &link)
+            .map_err(|error| format!("failed to create report symlink: {error}"))?;
+
+        let reports = discover_swarm_report_summaries(&workspace);
+        assert!(
+            reports.is_empty(),
+            "swarm report discovery must not follow symlinked json files"
+        );
+        assert!(
+            summarize_swarm_report(&workspace, &link).is_none(),
+            "direct swarm report summarization must reject symlinked json files"
+        );
         Ok(())
     }
 
