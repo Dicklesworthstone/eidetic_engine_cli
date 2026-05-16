@@ -6,12 +6,13 @@
     "epic_letter": "J"
   },
   "surfaces": [
-    "swarm brief"
+    "swarm brief",
+    "workspace hygiene"
   ],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
-    "description": "Swarm brief cannot collect git state for the workspace.",
+    "description": "A coordination or workspace-hygiene surface cannot collect git state for the workspace.",
     "setup_commands": [
       "# run swarm brief outside a git checkout or with git unavailable"
     ],

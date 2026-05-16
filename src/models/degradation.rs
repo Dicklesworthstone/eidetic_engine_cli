@@ -434,6 +434,31 @@ pub const NETWORK_UNAVAILABLE: DegradationCode = DegradationCode {
 /// Response degraded code for stale or partial Agent Mail archive evidence.
 pub const AGENT_MAIL_ARCHIVE_DEGRADED_CODE: &str = "agent_mail_archive_degraded";
 
+/// Response degraded code when workspace hygiene cannot invoke git.
+pub const WORKSPACE_HYGIENE_GIT_UNAVAILABLE_CODE: &str = "git_unavailable";
+/// Response degraded code when workspace hygiene runs outside a git checkout.
+pub const WORKSPACE_HYGIENE_GIT_NOT_REPOSITORY_CODE: &str = "git_not_repository";
+/// Response degraded code when workspace hygiene omits optional metadata.
+pub const WORKSPACE_HYGIENE_PARTIAL_METADATA_CODE: &str = "workspace_hygiene_partial_metadata";
+/// Response degraded code when workspace hygiene skips content secret scanning.
+pub const WORKSPACE_HYGIENE_SECRET_SCAN_SKIPPED_CODE: &str =
+    "workspace_hygiene_secret_scan_skipped";
+/// Response degraded code when workspace hygiene cannot read Agent Mail state.
+pub const WORKSPACE_HYGIENE_AGENT_MAIL_UNAVAILABLE_CODE: &str =
+    "workspace_hygiene_agent_mail_unavailable";
+/// Response degraded code when workspace hygiene times out reading Agent Mail.
+pub const WORKSPACE_HYGIENE_AGENT_MAIL_TIMEOUT_CODE: &str = "workspace_hygiene_agent_mail_timeout";
+/// Response degraded code when workspace hygiene cannot read Beads state.
+pub const WORKSPACE_HYGIENE_BEADS_UNAVAILABLE_CODE: &str = "workspace_hygiene_beads_unavailable";
+/// Response degraded code when workspace hygiene cannot parse Beads metadata.
+pub const WORKSPACE_HYGIENE_BEADS_PARSE_ERROR_CODE: &str = "workspace_hygiene_beads_parse_error";
+/// Response degraded code when workspace hygiene sees active Beads reservations.
+pub const WORKSPACE_HYGIENE_BEADS_RESERVED_CODE: &str = "workspace_hygiene_beads_reserved";
+/// Response degraded code when workspace hygiene config is invalid.
+pub const WORKSPACE_HYGIENE_CONFIG_INVALID_CODE: &str = "workspace_hygiene_config_invalid";
+/// Response degraded code when workspace hygiene truncates a large report.
+pub const WORKSPACE_HYGIENE_OUTPUT_TRUNCATED_CODE: &str = "workspace_hygiene_output_truncated";
+
 // Science degradations (D800 - D899)
 pub const SCIENCE_BACKEND_UNAVAILABLE: DegradationCode = DegradationCode {
     id: "D800",

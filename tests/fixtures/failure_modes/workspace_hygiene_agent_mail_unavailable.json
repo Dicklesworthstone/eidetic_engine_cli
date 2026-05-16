@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "workspace_hygiene_agent_mail_unavailable",
+  "introduced_by": {
+    "bead": "bd-1eq3l.11",
+    "epic_letter": "WH"
+  },
+  "surfaces": [
+    "workspace hygiene"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Workspace hygiene cannot collect Agent Mail reservations or active-agent state.",
+    "setup_commands": [
+      "# run workspace hygiene while Agent Mail is unreachable"
+    ],
+    "invocation": "ee workspace hygiene --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "workspace_hygiene_agent_mail_unavailable",
+    "severity": "warning",
+    "message_contains": [
+      "Agent Mail"
+    ],
+    "repair_contains": "Agent Mail",
+    "repair_strings": [
+      "Provide a redacted Agent Mail snapshot.",
+      "Run `am doctor check` and retry the hygiene report."
+    ],
+    "repair_command_regex": "Run `(?<cmd>am doctor check)`"
+  }
+}

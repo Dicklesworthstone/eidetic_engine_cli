@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "workspace_hygiene_beads_reserved",
+  "introduced_by": {
+    "bead": "bd-1eq3l.11",
+    "epic_letter": "WH"
+  },
+  "surfaces": [
+    "workspace hygiene"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Workspace hygiene detects active Beads metadata or file reservations that make a path unsafe to stage now.",
+    "setup_commands": [
+      "# create an active Agent Mail file reservation for .beads/issues.jsonl or another dirty path"
+    ],
+    "invocation": "ee workspace hygiene --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "workspace_hygiene_beads_reserved",
+    "severity": "warning",
+    "message_contains": [
+      "reserved"
+    ],
+    "repair_contains": "reservation",
+    "repair_strings": [
+      "Wait for the active reservation to clear.",
+      "Coordinate with the reservation holder before staging the path."
+    ]
+  }
+}

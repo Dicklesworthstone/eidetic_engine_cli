@@ -1,0 +1,34 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "git_not_repository",
+  "introduced_by": {
+    "bead": "bd-1eq3l.11",
+    "epic_letter": "WH"
+  },
+  "surfaces": [
+    "workspace hygiene"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Workspace hygiene is invoked in a directory that is not inside a git repository.",
+    "setup_commands": [
+      "tmpdir=$(mktemp -d)",
+      "cd \"$tmpdir\""
+    ],
+    "invocation": "ee workspace hygiene --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "git_not_repository",
+    "severity": "medium",
+    "message_contains": [
+      "not a git repository"
+    ],
+    "repair_contains": "workspace",
+    "repair_strings": [
+      "Run from a git checkout.",
+      "Pass --workspace pointing at the repository root."
+    ],
+    "repair_command_regex": "(?<cmd>git status --short)"
+  }
+}

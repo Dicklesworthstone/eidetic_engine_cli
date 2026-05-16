@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "workspace_hygiene_config_invalid",
+  "introduced_by": {
+    "bead": "bd-1eq3l.11",
+    "epic_letter": "WH"
+  },
+  "surfaces": [
+    "workspace hygiene"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Workspace hygiene finds invalid local configuration for scratch/generated path classification.",
+    "setup_commands": [
+      "# write invalid workspace-hygiene config in a temporary ee config file"
+    ],
+    "invocation": "ee workspace hygiene --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "workspace_hygiene_config_invalid",
+    "severity": "medium",
+    "message_contains": [
+      "config"
+    ],
+    "repair_contains": "configuration",
+    "repair_strings": [
+      "Fix the workspace hygiene configuration.",
+      "Run `ee config show --workspace . --json` to inspect resolved configuration."
+    ],
+    "repair_command_regex": "Run `(?<cmd>ee config show --workspace \\. --json)`"
+  }
+}

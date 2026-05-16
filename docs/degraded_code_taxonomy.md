@@ -256,11 +256,13 @@ memory bodies in `sources[]`.
 |------|----------|------|
 | `qos_registry_unavailable` | medium | bd-1zb7k.20.2 |
 
-#### Storage and runtime state (14)
+#### Storage and runtime state (16)
 | Code | Severity | Bead |
 |------|----------|------|
 | `db_migration_pending` | medium | bd-3usjw.1 (db inspect) |
 | `db_wal_stale` | medium | bd-3usjw.1 (db inspect) |
+| `read_pool_acquire_timeout` | medium | bd-2caru.7 |
+| `read_pool_undersized` | low | bd-2caru.7 |
 | `search_not_inspected` | low | bd-17c65.10.6 (J6) |
 | `search_not_ready` | medium | bd-17c65.10.6 (J6) |
 | `search_waiting_for_storage` | medium | bd-17c65.10.6 (J6) |
@@ -378,18 +380,20 @@ memory bodies in `sources[]`.
 | `serialization_failed` | medium | bd-17c65.10.6 (J6) |
 | `trust_promotion_evidence_rejected` | medium | bd-17c65.7.4 (G4) |
 
-#### Concurrency + write owner (3)
+#### Concurrency + write owner (5)
 | Code | Severity | Bead |
 |------|----------|------|
+| `advisory_lock_timeout` | medium | bd-3usjw.57 |
 | `index_publish_lock_contention` | warning | bd-17c65.12.2 (L1) |
 | `write_owner_busy` | warning | bd-17c65.12.2 (L1) |
 | `write_spool_backpressure` | warning | bd-17c65.12.2 (L1) |
 | `write_queue_full` | low | bd-17c65.12.2 (L1) |
 
-#### Other (6)
+#### Other (7)
 | Code | Severity | Bead |
 |------|----------|------|
 | `graph_feature_disabled` | medium | bd-17c65.5.3 (E3) — different from build-time `graph_unavailable`; this is a per-call disable |
+| `serve_unavailable_v1` | low | bd-3usjw.4 |
 | `singleflight_follower_timeout` | medium | bd-gni47.3 (SF3) |
 | `singleflight_leader_failed` | medium | bd-gni47.3 (SF3) |
 | `singleflight_state_poisoned` | high | bd-gni47.3 (SF3) |
@@ -504,7 +508,7 @@ memory bodies in `sources[]`.
 | `quarantine_rows_unreadable` | medium | bd-17c65.10.6 (J6) |
 | `trust_quarantine_rows_unreadable` | medium | bd-17c65.10.6 (J6) |
 
-#### Coordination / external tools (10)
+#### Coordination / external tools (20)
 | Code | Severity | Bead |
 |------|----------|------|
 | `agent_mail_unavailable` | medium | bd-2nkbn (Agent Mail resilience) |
@@ -513,10 +517,20 @@ memory bodies in `sources[]`.
 | `beads_tracker_stale` | warning | bd-1zb7k.13.3 (C3) |
 | `beads_unavailable` | medium | bd-1zb7k.4 (S3) |
 | `bv_unavailable` | medium | bd-1zb7k.4 (S3) |
-| `git_unavailable` | medium | bd-1zb7k.4 (S3) |
+| `git_unavailable` | warning | bd-1zb7k.4 (S3), bd-1eq3l.11 |
+| `git_not_repository` | medium | bd-1eq3l.11 |
 | `rch_remote_required_fallback_prevented` | warning | bd-1zb7k.13.4 (C4) |
 | `rch_unavailable` | low | bd-1zb7k.5 (S4) |
 | `rch_worker_topology_blocked` | warning | bd-1zb7k.13.4 (C4) |
+| `workspace_hygiene_agent_mail_timeout` | warning | bd-1eq3l.11 |
+| `workspace_hygiene_agent_mail_unavailable` | warning | bd-1eq3l.11 |
+| `workspace_hygiene_beads_parse_error` | medium | bd-1eq3l.11 |
+| `workspace_hygiene_beads_reserved` | warning | bd-1eq3l.11 |
+| `workspace_hygiene_beads_unavailable` | medium | bd-1eq3l.11 |
+| `workspace_hygiene_config_invalid` | medium | bd-1eq3l.11 |
+| `workspace_hygiene_output_truncated` | warning | bd-1eq3l.11 |
+| `workspace_hygiene_partial_metadata` | warning | bd-1eq3l.11 |
+| `workspace_hygiene_secret_scan_skipped` | medium | bd-1eq3l.11 |
 
 #### Model registry / science (5)
 | Code | Severity | Bead |
@@ -534,7 +548,7 @@ memory bodies in `sources[]`.
 | `clustering_no_candidates` | info | bd-17c65.7.5 (G5) |
 | `clustering_no_embeddings` | info | bd-17c65.7.5 (G5) |
 
-#### Miscellaneous (14)
+#### Miscellaneous (15)
 | Code | Severity | Bead |
 |------|----------|------|
 | `action_override_not_actionable` | low | (TBD) |
@@ -561,6 +575,7 @@ memory bodies in `sources[]`.
 | `unsupported_artifact_kind` | medium | (TBD) |
 | `unsupported_condition` | medium | (TBD) |
 | `unsupported_schema` | medium | (TBD) |
+| `windows_appdata_unavailable` | medium | bd-3usjw.68 |
 | `workspace_nested_markers` | warning | bd-17c65.12.2 (L1) |
 
 #### Mixed: storage_unavailable

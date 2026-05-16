@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "workspace_hygiene_output_truncated",
+  "introduced_by": {
+    "bead": "bd-1eq3l.11",
+    "epic_letter": "WH"
+  },
+  "surfaces": [
+    "workspace hygiene"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Workspace hygiene caps a very large dirty-path report to preserve deterministic output and agent token budgets.",
+    "setup_commands": [
+      "# create a temporary workspace with more dirty paths than the report item budget"
+    ],
+    "invocation": "ee workspace hygiene --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "workspace_hygiene_output_truncated",
+    "severity": "warning",
+    "message_contains": [
+      "truncated"
+    ],
+    "repair_contains": "limit",
+    "repair_strings": [
+      "Increase the workspace hygiene output limit.",
+      "Commit or exclude unrelated dirty paths, then rerun the report."
+    ]
+  }
+}

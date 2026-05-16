@@ -1,0 +1,34 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "workspace_hygiene_beads_parse_error",
+  "introduced_by": {
+    "bead": "bd-1eq3l.11",
+    "epic_letter": "WH"
+  },
+  "surfaces": [
+    "workspace hygiene"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Workspace hygiene cannot parse Beads JSONL or Beads command output while building the metadata block.",
+    "setup_commands": [
+      "# corrupt a disposable .beads/issues.jsonl fixture in a temporary workspace"
+    ],
+    "invocation": "ee workspace hygiene --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "workspace_hygiene_beads_parse_error",
+    "severity": "medium",
+    "message_contains": [
+      "Beads",
+      "parse"
+    ],
+    "repair_contains": "br doctor",
+    "repair_strings": [
+      "Run `br doctor` to inspect tracker state.",
+      "Repair Beads metadata before trusting staging recommendations."
+    ],
+    "repair_command_regex": "Run `(?<cmd>br doctor)`"
+  }
+}
