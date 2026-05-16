@@ -749,3 +749,103 @@ fn closure_lint_requires_inline_unit_tests_for_part_ii_implementations() -> Test
     }
     Ok(())
 }
+
+// bd-3usjw.61 — audit_row_obligation_part_ii.
+//
+// Rule 8 validates the shape of an `AUDIT EMISSION:` block WHEN
+// declared: a concrete `event_type=` literal, a `chain_continuity` or
+// equivalent acceptance phrase, and an existing `*_audit.rs` test file.
+// Beads that declare no block are exempt for this slice; the bulk
+// retrofit + the durable_write enforcement gate are separate follow-up
+// beads.
+
+#[test]
+fn closure_lint_validates_audit_emission_block_shape_when_declared() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    write_workspace(
+        temp.path(),
+        &[
+            r#"{"id":"bd-3usjw.no-audit-block","title":"[implements-surface:no-audit-block] real implementation","status":"closed","description":"No AUDIT EMISSION marker is declared on this bead.\n\nFILE SURFACE: scripts/some.sh","close_reason":"implemented with durable evidence","labels":["implements-surface:no-audit-block"],"parent":"bd-3usjw"}"#,
+            r#"{"id":"bd-3usjw.valid-audit","title":"[implements-surface:valid-audit] real implementation","status":"closed","description":"AUDIT EMISSION:\n- event_type=valid.surface.committed\n- chain_continuity: audit row joins ee_audit chain via prev_chain_hash and ee audit verify --json integrity_ok=true.\nTests: tests/valid_surface_audit.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:valid-audit"],"parent":"bd-3usjw"}"#,
+            r#"{"id":"bd-3usjw.no-event-type","title":"[implements-surface:no-event-type] real implementation","status":"closed","description":"AUDIT EMISSION:\n- TODO: name the event_type literal once we agree.\n- chain_continuity: audit row joins ee_audit chain.\nTests: tests/no_event_type_surface_audit.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:no-event-type"],"parent":"bd-3usjw"}"#,
+            r#"{"id":"bd-3usjw.no-chain","title":"[implements-surface:no-chain] real implementation","status":"closed","description":"AUDIT EMISSION:\n- event_type=missing.chain.surface\n- Will think about continuity later.\nTests: tests/no_chain_surface_audit.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:no-chain"],"parent":"bd-3usjw"}"#,
+            r#"{"id":"bd-3usjw.no-test-file","title":"[implements-surface:no-test-file] real implementation","status":"closed","description":"AUDIT EMISSION:\n- event_type=missing.test.surface\n- chain_continuity: chain_hash verified.\nTests: see ee audit verify integration coverage.","close_reason":"implemented with durable evidence","labels":["implements-surface:no-test-file"],"parent":"bd-3usjw"}"#,
+        ],
+        "",
+        &[
+            "no-audit-block",
+            "valid-audit",
+            "no-event-type",
+            "no-chain",
+            "no-test-file",
+        ],
+    )?;
+    write_text_file(
+        temp.path(),
+        "tests/valid_surface_audit.rs",
+        "#[test]\nfn covers_valid_surface_audit() {\n    assert!(true);\n}\n",
+    )?;
+    write_text_file(
+        temp.path(),
+        "tests/no_event_type_surface_audit.rs",
+        "#[test]\nfn covers_no_event_type_audit() {\n    assert!(true);\n}\n",
+    )?;
+    write_text_file(
+        temp.path(),
+        "tests/no_chain_surface_audit.rs",
+        "#[test]\nfn covers_no_chain_audit() {\n    assert!(true);\n}\n",
+    )?;
+
+    let (output, report) = run_linter(temp.path())?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "linter should fail malformed AUDIT EMISSION blocks\n{}",
+            output_excerpt(&output)
+        ),
+    )?;
+    ensure_eq(report_status(&report)?, "fail", "report status")?;
+
+    let observed = violation_keys(&report)?;
+    let audit_observed: Vec<(String, String, String)> = observed
+        .iter()
+        .filter(|(_, _, reason)| reason.contains("AUDIT EMISSION block declared"))
+        .cloned()
+        .collect();
+
+    // Three malformed beads each fire exactly one Rule 8 violation
+    // naming the missing component.
+    let mut expected = vec![
+        (
+            "bd-3usjw.no-event-type".to_owned(),
+            "no-event-type".to_owned(),
+            "AUDIT EMISSION block declared but missing event_type= literal (missing: event_type)"
+                .to_owned(),
+        ),
+        (
+            "bd-3usjw.no-chain".to_owned(),
+            "no-chain".to_owned(),
+            "AUDIT EMISSION block declared but missing chain_continuity acceptance criterion (missing: chain_continuity)"
+                .to_owned(),
+        ),
+        (
+            "bd-3usjw.no-test-file".to_owned(),
+            "no-test-file".to_owned(),
+            "AUDIT EMISSION block declared but no *_audit.rs test file is referenced and on disk (missing: audit_test_file)"
+                .to_owned(),
+        ),
+    ];
+    expected.sort();
+    let mut sorted = audit_observed.clone();
+    sorted.sort();
+    ensure_eq(sorted, expected, "Rule 8 violation set")?;
+
+    // The exempt and valid beads must not appear under Rule 8.
+    for clean_bead in ["bd-3usjw.no-audit-block", "bd-3usjw.valid-audit"] {
+        ensure(
+            !audit_observed.iter().any(|(bead, _, _)| bead == clean_bead),
+            format!("{clean_bead} should not violate audit-emission obligation"),
+        )?;
+    }
+    Ok(())
+}

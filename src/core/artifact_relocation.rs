@@ -420,13 +420,41 @@ fn write_manifest_no_overwrite(
         message: format!("failed to serialize relocation manifest: {error}"),
         repair: Some("Report the serialization failure.".to_owned()),
     })?;
-    fs::write(manifest_path, json).map_err(|error| DomainError::Storage {
+
+    let mut temp_path = manifest_path.to_owned();
+    temp_path.set_extension("tmp");
+
+    {
+        use std::io::Write;
+        let mut file = fs::File::create(&temp_path).map_err(|error| DomainError::Storage {
+            message: format!("failed to create temporary manifest {}: {error}", temp_path.display()),
+            repair: Some("Check manifest path permissions.".to_owned()),
+        })?;
+        file.write_all(json.as_bytes()).map_err(|error| DomainError::Storage {
+            message: format!("failed to write temporary manifest {}: {error}", temp_path.display()),
+            repair: Some("Check manifest path permissions.".to_owned()),
+        })?;
+        file.sync_data().map_err(|error| DomainError::Storage {
+            message: format!("failed to sync temporary manifest {}: {error}", temp_path.display()),
+            repair: Some("Check manifest path permissions.".to_owned()),
+        })?;
+    }
+
+    fs::rename(&temp_path, manifest_path).map_err(|error| DomainError::Storage {
         message: format!(
-            "failed to write manifest {}: {error}",
+            "failed to rename temporary manifest to {}: {error}",
             manifest_path.display()
         ),
         repair: Some("Check manifest path permissions.".to_owned()),
-    })
+    })?;
+
+    if let Some(parent) = manifest_path.parent() {
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_data();
+        }
+    }
+
+    Ok(())
 }
 
 fn read_manifest(path: &Path) -> Result<ArtifactRelocationManifest, DomainError> {

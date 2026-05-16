@@ -418,7 +418,9 @@ fn append_daemon_job_rows(table_path: &Path, rows: &[DaemonJobRow]) -> Result<()
             .map_err(|error| format!("Failed to write daemon job row: {error}"))?;
     }
     file.flush()
-        .map_err(|error| format!("Failed to flush daemon job table: {error}"))
+        .map_err(|error| format!("Failed to flush daemon job table: {error}"))?;
+    file.sync_data()
+        .map_err(|error| format!("Failed to sync daemon job table: {error}"))
 }
 
 fn latest_daemon_rows(rows: &[DaemonJobRow]) -> Vec<DaemonJobRow> {
