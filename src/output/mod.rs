@@ -10589,6 +10589,7 @@ use crate::core::preflight::{CloseReport, RunReport, ShowReport};
 /// Render a preflight run report as JSON.
 #[must_use]
 pub fn render_preflight_run_json(report: &RunReport) -> String {
+    let degraded = aggregate_preflight_degradations("preflight_run", &report.degraded);
     let json = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V1,
         "success": true,
@@ -10608,7 +10609,7 @@ pub fn render_preflight_run_json(report: &RunReport) -> String {
             "risks_identified": report.risks_identified,
             "tripwires_set": report.tripwires_set,
             "tripwires": report.tripwires,
-            "degraded": report.degraded,
+            "degraded": degraded,
             "dry_run": report.dry_run,
             "started_at": report.started_at,
             "completed_at": report.completed_at,
@@ -10657,6 +10658,7 @@ pub fn render_preflight_run_toon(report: &RunReport) -> String {
 /// Render a preflight show report as JSON.
 #[must_use]
 pub fn render_preflight_show_json(report: &ShowReport) -> String {
+    let degraded = aggregate_preflight_degradations("preflight_show", &report.degraded);
     let json = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V1,
         "success": true,
@@ -10664,10 +10666,25 @@ pub fn render_preflight_show_json(report: &ShowReport) -> String {
             "run": report.run,
             "brief": report.brief,
             "tripwires": report.tripwires,
-            "degraded": report.degraded,
+            "degraded": degraded,
         }
     });
     json.to_string()
+}
+
+fn aggregate_preflight_degradations(
+    source: &'static str,
+    degraded: &[crate::core::preflight::PreflightDegradation],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            source,
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry.repair.clone().unwrap_or_default(),
+        )
+    }))
 }
 
 /// Render a preflight show report as human-readable text.
@@ -12409,9 +12426,10 @@ mod tests {
         render_health_json, render_health_toon, render_integrity_diagnostics_json,
         render_learn_experiment_proposal_human, render_learn_experiment_proposal_json,
         render_learn_experiment_proposal_toon, render_memory_history_json,
-        render_memory_history_toon, render_schema_export_json, render_shadow_run_human,
-        render_shadow_run_json, render_shadow_run_toon, render_status_json,
-        render_status_json_filtered, render_status_toon, render_version_json, status_response_json,
+        render_memory_history_toon, render_preflight_run_json, render_preflight_show_json,
+        render_schema_export_json, render_shadow_run_human, render_shadow_run_json,
+        render_shadow_run_toon, render_status_json, render_status_json_filtered,
+        render_status_toon, render_version_json, status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::doctor::{
@@ -12430,6 +12448,10 @@ mod tests {
         LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1, LearnExperimentProposalReport,
     };
     use crate::core::memory::{MemoryHistoryEntry, MemoryHistoryReport};
+    use crate::core::preflight::{
+        PreflightDegradation, PreflightRunView, RunReport as PreflightRunReport,
+        ShowReport as PreflightShowReport,
+    };
     use crate::core::status::{DegradationReport, StatusReport};
     use crate::core::{
         BUILD_TIMESTAMP_POLICY, BuildFeature, BuildInfo, BuildProvenanceDegradation,
@@ -12595,6 +12617,56 @@ mod tests {
         assert_eq!(
             degraded[0]["diagnosticCommands"],
             serde_json::json!(["ee diag graph --json"])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn preflight_json_degraded_entries_are_aggregated() -> TestResult {
+        let duplicate_degraded = vec![
+            PreflightDegradation::evidence_unavailable("No matching evidence."),
+            PreflightDegradation::evidence_unavailable("No matching evidence."),
+        ];
+        let mut run_report =
+            PreflightRunReport::new("pf_test".to_owned(), "ship risky change".to_owned());
+        run_report.degraded = duplicate_degraded.clone();
+
+        let run_json = render_preflight_run_json(&run_report);
+        let run: serde_json::Value =
+            serde_json::from_str(&run_json).map_err(|error| error.to_string())?;
+        let run_degraded = run["data"]["degraded"]
+            .as_array()
+            .ok_or_else(|| "preflight run degraded must be an array".to_string())?;
+        assert_eq!(run_degraded.len(), 1);
+        assert_eq!(run_degraded[0]["code"], "preflight_evidence_unavailable");
+        assert_eq!(
+            run_degraded[0]["sources"],
+            serde_json::json!(["preflight_run"])
+        );
+
+        let mut show_report = PreflightShowReport::new(PreflightRunView {
+            id: "pf_test".to_owned(),
+            task_input: "ship risky change".to_owned(),
+            status: "blocked".to_owned(),
+            risk_level: "high".to_owned(),
+            cleared: false,
+            block_reason: None,
+            started_at: "2026-05-16T00:00:00Z".to_owned(),
+            completed_at: None,
+            duration_ms: None,
+        });
+        show_report.degraded = duplicate_degraded;
+
+        let show_json = render_preflight_show_json(&show_report);
+        let show: serde_json::Value =
+            serde_json::from_str(&show_json).map_err(|error| error.to_string())?;
+        let show_degraded = show["data"]["degraded"]
+            .as_array()
+            .ok_or_else(|| "preflight show degraded must be an array".to_string())?;
+        assert_eq!(show_degraded.len(), 1);
+        assert_eq!(
+            show_degraded[0]["sources"],
+            serde_json::json!(["preflight_show"])
         );
         Ok(())
     }

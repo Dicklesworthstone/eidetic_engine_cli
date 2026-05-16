@@ -73,6 +73,8 @@ Current conventions:
 | `revisionFrontiers` | `ee insights --section revisionFrontiers` degradation. |
 | `context` | General `ee context` response degradation without a narrower subsystem owner. |
 | `pack` | Context pack assembly, advisory, consensus, or conflict degradation. |
+| `preflight_run` | `ee preflight run` risk-evidence degradation. |
+| `preflight_show` | `ee preflight show` persisted-run or risk-evidence degradation. |
 | `request` | Request parsing, compatibility, or ignored-query-field degradation. |
 | `search` | Search, index, recall, filtering, or visibility degradation carried into context output. |
 | `status` | Top-level `ee status` posture, capability, or subsystem degradation. |
