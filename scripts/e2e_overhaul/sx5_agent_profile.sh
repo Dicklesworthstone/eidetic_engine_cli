@@ -77,15 +77,39 @@ run_ee_json() {
     shift 2
     json_event "command_start" "label" "$label" "agent" "$agent_name" "command" "$EE_BINARY $* --workspace $WORKSPACE"
     local output
-    if output="$(env EE_AGENT_NAME="$agent_name" "$EE_BINARY" "$@" --workspace "$WORKSPACE" 2>&1)"; then
+    local rc
+    set +e
+    output="$(env EE_AGENT_NAME="$agent_name" "$EE_BINARY" "$@" --workspace "$WORKSPACE" 2>&1)"
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
         json_event "command_end" "label" "$label" "agent" "$agent_name" "exit_code" "0"
         printf '%s\n' "$output"
         return 0
     fi
-    local rc=$?
     json_event "command_end" "label" "$label" "agent" "$agent_name" "exit_code" "$rc" "stderr_excerpt" "$output"
     printf '%s\n' "$output" >&2
-    exit "$rc"
+    return "$rc"
+}
+
+jq_required() {
+    local input="${1:?json input required}"
+    local filter="${2:?jq filter required}"
+    local label="${3:?label required}"
+    local value
+    if ! value="$(printf '%s' "$input" | jq -r "$filter")"; then
+        ASSERTS_FAIL=$((ASSERTS_FAIL + 1))
+        json_event "assert_fail" "label" "$label" "expected" "valid_json_field" "actual" "$(printf '%s' "$input" | head -c 200)"
+        echo "sx5_agent_profile: ${label}: expected valid JSON field via jq filter ${filter}" >&2
+        exit 1
+    fi
+    if [ -z "$value" ] || [ "$value" = "null" ]; then
+        ASSERTS_FAIL=$((ASSERTS_FAIL + 1))
+        json_event "assert_fail" "label" "$label" "expected" "non_empty_json_field" "actual" "$value"
+        echo "sx5_agent_profile: ${label}: missing required JSON field via jq filter ${filter}" >&2
+        exit 1
+    fi
+    printf '%s\n' "$value"
 }
 
 record_outcomes() {
@@ -147,8 +171,8 @@ run_ee_json "$AGENT_ALPHA" "init" init --json >/dev/null
 
 ALPHA_JSON="$(run_ee_json "$AGENT_ALPHA" "remember_alpha" remember --level procedural --kind rule "$QUERY: alpha preferred memory. This memory has identical retrieval terms." --json)"
 BETA_JSON="$(run_ee_json "$AGENT_ALPHA" "remember_beta" remember --level procedural --kind rule "$QUERY: beta preferred memory. This memory has identical retrieval terms." --json)"
-ALPHA_MEMORY="$(printf '%s' "$ALPHA_JSON" | jq -r '.data.memory_id // empty')"
-BETA_MEMORY="$(printf '%s' "$BETA_JSON" | jq -r '.data.memory_id // empty')"
+ALPHA_MEMORY="$(jq_required "$ALPHA_JSON" '.data.memory_id // empty' "sx5_alpha_memory_json")"
+BETA_MEMORY="$(jq_required "$BETA_JSON" '.data.memory_id // empty' "sx5_beta_memory_json")"
 assert_eq "$(printf '%s' "$ALPHA_MEMORY" | grep -c '^mem_')" "1" "sx5_alpha_memory_id"
 assert_eq "$(printf '%s' "$BETA_MEMORY" | grep -c '^mem_')" "1" "sx5_beta_memory_id"
 
@@ -161,11 +185,11 @@ ALPHA_CONTEXT="$(run_ee_json "$AGENT_ALPHA" "context_alpha" context "$QUERY" --m
 BETA_CONTEXT="$(run_ee_json "$AGENT_BETA" "context_beta" context "$QUERY" --max-tokens 1000 --explain --json)"
 GAMMA_CONTEXT="$(run_ee_json "$AGENT_GAMMA" "context_gamma" context "$QUERY" --max-tokens 1000 --explain --json)"
 
-ALPHA_FIRST="$(printf '%s' "$ALPHA_CONTEXT" | jq -r '.data.pack.items[0].memoryId // empty')"
-BETA_FIRST="$(printf '%s' "$BETA_CONTEXT" | jq -r '.data.pack.items[0].memoryId // empty')"
-GAMMA_PROFILE_PRESENT="$(printf '%s' "$GAMMA_CONTEXT" | jq -r 'has("data") and (.data.pack | has("agentProfile"))')"
-ALPHA_BIAS="$(printf '%s' "$ALPHA_CONTEXT" | jq -r '.data.pack.agentProfile.biasMagnitude // empty')"
-BETA_BIAS="$(printf '%s' "$BETA_CONTEXT" | jq -r '.data.pack.agentProfile.biasMagnitude // empty')"
+ALPHA_FIRST="$(jq_required "$ALPHA_CONTEXT" '.data.pack.items[0].memoryId // empty' "sx5_alpha_first_memory_json")"
+BETA_FIRST="$(jq_required "$BETA_CONTEXT" '.data.pack.items[0].memoryId // empty' "sx5_beta_first_memory_json")"
+GAMMA_PROFILE_PRESENT="$(jq_required "$GAMMA_CONTEXT" 'has("data") and (.data.pack | has("agentProfile"))' "sx5_gamma_profile_presence_json")"
+ALPHA_BIAS="$(jq_required "$ALPHA_CONTEXT" '.data.pack.agentProfile.biasMagnitude // empty' "sx5_alpha_bias_json")"
+BETA_BIAS="$(jq_required "$BETA_CONTEXT" '.data.pack.agentProfile.biasMagnitude // empty' "sx5_beta_bias_json")"
 
 assert_eq "$ALPHA_FIRST" "$ALPHA_MEMORY" "sx5_alpha_helpful_ranks_first"
 assert_eq "$BETA_FIRST" "$BETA_MEMORY" "sx5_beta_helpful_ranks_first"
@@ -174,8 +198,8 @@ assert_eq "$ALPHA_BIAS" "0.05" "sx5_alpha_bias_capped"
 assert_eq "$BETA_BIAS" "0.05" "sx5_beta_bias_capped"
 
 WHY_ALPHA="$(run_ee_json "$AGENT_ALPHA" "why_alpha" why "$ALPHA_MEMORY" --json)"
-assert_eq "$(printf '%s' "$WHY_ALPHA" | jq -r '.data.agentProfile.helpfulCount // empty')" "10" "sx5_why_helpful_count"
-assert_eq "$(printf '%s' "$WHY_ALPHA" | jq -r '.data.agentProfile.harmfulCount // empty')" "0" "sx5_why_harmful_count"
+assert_eq "$(jq_required "$WHY_ALPHA" '.data.agentProfile.helpfulCount // empty' "sx5_why_helpful_json")" "10" "sx5_why_helpful_count"
+assert_eq "$(jq_required "$WHY_ALPHA" '.data.agentProfile.harmfulCount // empty' "sx5_why_harmful_json")" "0" "sx5_why_harmful_count"
 
 json_event "note" \
     "message" "sx5_agent_profile_summary" \
