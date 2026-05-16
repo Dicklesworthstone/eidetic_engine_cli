@@ -33,15 +33,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo mkdir -p /data/projects
-          sudo chown "$USER" /data/projects
-          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git /data/projects/asupersync
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git /data/projects/franken_agent_detection
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_networkx.git /data/projects/franken_networkx
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensearch.git /data/projects/frankensearch
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git /data/projects/frankensqlite
-          git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git /data/projects/sqlmodel_rust
-          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git /data/projects/toon_rust
+          project_root="$RUNNER_TEMP/franken-stack/projects"
+          mkdir -p "$project_root"
+          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git "$project_root/asupersync"
+          git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git "$project_root/franken_agent_detection"
+          git clone --depth 1 https://github.com/Dicklesworthstone/franken_networkx.git "$project_root/franken_networkx"
+          git clone --depth 1 https://github.com/Dicklesworthstone/frankensearch.git "$project_root/frankensearch"
+          git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git "$project_root/frankensqlite"
+          git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git "$project_root/sqlmodel_rust"
+          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git "$project_root/toon_rust"
+          CARGO_PATH_ROOT="$project_root" perl -0pi -e 's#/data/projects#$ENV{CARGO_PATH_ROOT}#g' Cargo.toml
 
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@nightly
@@ -103,23 +104,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo mkdir -p /data/projects
-          sudo chown "$USER" /data/projects
-          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git /data/projects/asupersync
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git /data/projects/franken_agent_detection
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_networkx.git /data/projects/franken_networkx
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensearch.git /data/projects/frankensearch
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git /data/projects/frankensqlite
-          git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git /data/projects/sqlmodel_rust
-          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git /data/projects/toon_rust
+          project_root="$RUNNER_TEMP/franken-stack/projects"
+          mkdir -p "$project_root"
+          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git "$project_root/asupersync"
+          git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git "$project_root/franken_agent_detection"
+          git clone --depth 1 https://github.com/Dicklesworthstone/franken_networkx.git "$project_root/franken_networkx"
+          git clone --depth 1 https://github.com/Dicklesworthstone/frankensearch.git "$project_root/frankensearch"
+          git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git "$project_root/frankensqlite"
+          git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git "$project_root/sqlmodel_rust"
+          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git "$project_root/toon_rust"
+          CARGO_PATH_ROOT="$project_root" perl -0pi -e 's#/data/projects#$ENV{CARGO_PATH_ROOT}#g' Cargo.toml
 
       - name: Checkout Franken stack path dependencies
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $workspaceDrive = (Get-Location).Path.Substring(0, 2)
-          $projectRoot = Join-Path $workspaceDrive "\data\projects"
+          $projectRoot = Join-Path $env:RUNNER_TEMP "franken-stack\projects"
           New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
           git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git (Join-Path $projectRoot "asupersync")
           git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git (Join-Path $projectRoot "franken_agent_detection")
@@ -128,6 +129,8 @@ jobs:
           git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git (Join-Path $projectRoot "frankensqlite")
           git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git (Join-Path $projectRoot "sqlmodel_rust")
           git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git (Join-Path $projectRoot "toon_rust")
+          $cargoPathRoot = $projectRoot -replace "\\", "/"
+          (Get-Content Cargo.toml -Raw).Replace("/data/projects", $cargoPathRoot) | Set-Content Cargo.toml -NoNewline
 
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@nightly
@@ -158,8 +161,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $workspaceDrive = (Get-Location).Path.Substring(0, 2)
-          $projectRoot = Join-Path $workspaceDrive "\data\projects"
+          $projectRoot = Join-Path $env:RUNNER_TEMP "franken-stack\projects"
           New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
           git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git (Join-Path $projectRoot "asupersync")
           git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git (Join-Path $projectRoot "franken_agent_detection")
@@ -168,6 +170,8 @@ jobs:
           git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git (Join-Path $projectRoot "frankensqlite")
           git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git (Join-Path $projectRoot "sqlmodel_rust")
           git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git (Join-Path $projectRoot "toon_rust")
+          $cargoPathRoot = $projectRoot -replace "\\", "/"
+          (Get-Content Cargo.toml -Raw).Replace("/data/projects", $cargoPathRoot) | Set-Content Cargo.toml -NoNewline
 
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@nightly
