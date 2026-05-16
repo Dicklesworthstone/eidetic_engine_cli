@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::models::RedactionLevel;
 
@@ -97,8 +97,7 @@ pub const fn subsystem_name() -> &'static str {
 
 #[must_use]
 pub fn workspace_output_redaction_enabled(workspace_path: &Path) -> bool {
-    let config_path = workspace_path.join(".ee").join("config.toml");
-    let Ok(contents) = std::fs::read_to_string(config_path) else {
+    let Some(contents) = workspace_config_contents(workspace_path) else {
         return true;
     };
     ConfigFile::parse(&contents)
@@ -121,8 +120,7 @@ pub fn workspace_redaction_default(
     surface: RedactionDefaultSurface,
     built_in: RedactionLevel,
 ) -> RedactionLevel {
-    let config_path = workspace_path.join(".ee").join("config.toml");
-    let Ok(contents) = std::fs::read_to_string(config_path) else {
+    let Some(contents) = workspace_config_contents(workspace_path) else {
         return built_in;
     };
     let Ok(config) = ConfigFile::parse(&contents) else {
@@ -137,6 +135,48 @@ pub fn workspace_redaction_default(
     configured.unwrap_or(built_in)
 }
 
+fn workspace_config_contents(workspace_path: &Path) -> Option<String> {
+    let config_path = workspace_path.join(".ee").join("config.toml");
+    if first_existing_config_symlink_component(&config_path)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return None;
+    }
+    if !std::fs::symlink_metadata(&config_path)
+        .map(|metadata| metadata.file_type().is_file())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    std::fs::read_to_string(config_path).ok()
+}
+
+fn first_existing_config_symlink_component(path: &Path) -> std::io::Result<Option<PathBuf>> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                current.push(component.as_os_str());
+                continue;
+            }
+            std::path::Component::CurDir => continue,
+            std::path::Component::ParentDir | std::path::Component::Normal(_) => {
+                current.push(component.as_os_str());
+            }
+        }
+
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -149,6 +189,14 @@ mod tests {
     use crate::models::RedactionLevel;
 
     type TestResult = Result<(), String>;
+
+    fn unique_temp_path(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("ee-{label}-{}-{nanos}", std::process::id()))
+    }
 
     fn ensure_equal<T>(actual: &T, expected: &T, context: &str) -> TestResult
     where
@@ -211,6 +259,71 @@ support_bundle = "paranoid"
             ),
             &RedactionLevel::Paranoid,
             "missing config fallback",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_redaction_config_refuses_symlinked_config_file() -> TestResult {
+        let workspace = unique_temp_path("redaction-symlink-config");
+        let outside = unique_temp_path("redaction-symlink-outside");
+        fs::create_dir_all(workspace.join(".ee"))
+            .map_err(|error| format!("create workspace config dir: {error}"))?;
+        fs::create_dir_all(&outside)
+            .map_err(|error| format!("create outside config dir: {error}"))?;
+        fs::write(
+            outside.join("config.toml"),
+            r#"
+[policy.output_redaction]
+enabled = false
+
+[redaction.defaults]
+export = "strict"
+"#,
+        )
+        .map_err(|error| format!("write outside config: {error}"))?;
+        std::os::unix::fs::symlink(
+            outside.join("config.toml"),
+            workspace.join(".ee").join("config.toml"),
+        )
+        .map_err(|error| format!("create config symlink: {error}"))?;
+
+        ensure_equal(
+            &workspace_output_redaction_enabled(&workspace),
+            &true,
+            "symlinked output redaction config falls back to enabled",
+        )?;
+        ensure_equal(
+            &workspace_redaction_default(
+                &workspace,
+                RedactionDefaultSurface::Export,
+                RedactionLevel::Standard,
+            ),
+            &RedactionLevel::Standard,
+            "symlinked redaction default falls back to built-in",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_redaction_config_refuses_symlinked_config_parent() -> TestResult {
+        let workspace = unique_temp_path("redaction-symlink-parent");
+        let outside = unique_temp_path("redaction-symlink-parent-outside");
+        fs::create_dir_all(&workspace).map_err(|error| format!("create workspace dir: {error}"))?;
+        fs::create_dir_all(&outside)
+            .map_err(|error| format!("create outside config dir: {error}"))?;
+        fs::write(
+            outside.join("config.toml"),
+            "[policy.output_redaction]\nenabled = false\n",
+        )
+        .map_err(|error| format!("write outside config: {error}"))?;
+        std::os::unix::fs::symlink(&outside, workspace.join(".ee"))
+            .map_err(|error| format!("create config parent symlink: {error}"))?;
+
+        ensure_equal(
+            &workspace_output_redaction_enabled(&workspace),
+            &true,
+            "symlinked config parent falls back to enabled",
         )
     }
 }
