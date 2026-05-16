@@ -4,9 +4,9 @@
 # regression_factor = 1.5 emits an advisory when elapsed time exceeds p50 * 1.5.
 # scripts/verify.sh fails the run when elapsed time exceeds p50 * 3.
 #
-# Non-benchmark p50 values sum to 600s, matching the 10-minute target for the
+# Non-benchmark p50 values sum to 605s, matching the roughly 10-minute target for the
 # full readiness gate. Benchmarks are optional behind --include-bench.
-total_expected_seconds = 600
+total_expected_seconds = 605
 total_regression_factor = 1.5
 
 [[stage]]
@@ -37,6 +37,11 @@ regression_factor = 1.5
 [[stage]]
 name = "Vision Coverage"
 expected_seconds_p50 = 20
+regression_factor = 1.5
+
+[[stage]]
+name = "Proof Verification (bd-nnfq4)"
+expected_seconds_p50 = 5
 regression_factor = 1.5
 
 [[stage]]

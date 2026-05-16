@@ -19,6 +19,7 @@ set -euo pipefail
 #   4. Untracked Work Audit    - advisory Beads FILE SURFACE coverage for dirty paths
 #   4.5. Bridge Staleness      - advisory signal when CLOSE_THE_GAP_PLAN needs refresh
 #   5. Vision Coverage         - report documented implemented/stubbed/missing surfaces
+#   5.5. Proof Verification    - advisory Lean4/TLA+ proof artifact checks
 #   6. Unit/Contract/Golden    - cargo test --workspace --lib --bins --tests --examples
 #   6. Basic E2E               - scripts/e2e_test.sh
 #   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
@@ -407,6 +408,10 @@ run_stage "Bridge Staleness Advisory" "with_beads_read_locks ./scripts/bridge-st
 
 # Gate 4: Strategic Vision Coverage
 run_stage "Vision Coverage" "with_beads_read_locks sh ./scripts/vision-coverage.sh --json"
+
+# Gate 4.5: Mechanized proof artifacts. Missing Lean4/TLA+ tools degrade
+# inside the driver instead of blocking the default readiness gate.
+run_stage "Proof Verification (bd-nnfq4)" "./scripts/e2e_overhaul/proof_verify.sh"
 
 # Gate 5: Core Cargo Tests (Contracts, Logic, Golden). Benchmarks are
 # deliberately excluded here and run only through the explicit benchmark gate.
