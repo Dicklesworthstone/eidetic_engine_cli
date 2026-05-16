@@ -1011,7 +1011,6 @@ if [ -n "${{BASH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; the
 fi
 "#,
         ee_path = ee_path_quoted,
-        severities = PREFLIGHT_HOOK_BLOCK_SEVERITIES.trim(),
     )
 }
 
@@ -1085,7 +1084,6 @@ if [ -n "${{ZSH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; then
 fi
 "#,
         ee_path = ee_path_quoted,
-        severities = PREFLIGHT_HOOK_BLOCK_SEVERITIES.trim(),
     )
 }
 

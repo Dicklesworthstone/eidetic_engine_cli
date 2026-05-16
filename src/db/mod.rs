@@ -13092,27 +13092,27 @@ fn advisory_lock_retry_delay(attempt: usize) -> Duration {
     Duration::from_millis(BASE_DELAY_MS.saturating_mul(multiplier).min(MAX_DELAY_MS))
 }
 
-/// NOTE ON Asupersync / CANCELLATION CONTRACT (as of 2026-05 ownership-posture review):
-/// The retry loops that call `std::thread::sleep(advisory_lock_retry_delay(...))` (in
-/// `retry_file_database_open`, `retry_sqlite_contention`, advisory lock acquisition,
-/// and the write-owner begin_tx path) use a hard OS thread sleep.
-///
-/// Per AGENTS.md and the core architecture, all long-running/contended work should
-/// respect `&Cx`, `Outcome`, budgets, and cancellation via asupersync. `thread::sleep`
-/// cannot be cancelled and does not participate in structured concurrency.
-///
-/// Current mitigation (best judgement at time of review):
-/// - Total backoff across all attempts is intentionally capped at < ~400 ms (16 attempts
-///   at 50 ms cap).
-/// - The primary callers for the hot query contention path are bounded.
-/// - DB open paths are synchronous CLI entry points (init, workspace resolution).
-///
-/// TODO (follow-up bead): Provide a Cx-aware variant of the retry helpers that accepts
-/// `Option<&Cx>` and uses `asupersync::time::sleep(cx.now(), dur).await` (see steward/mod.rs
-/// for the pattern) when a Cx is supplied, falling back to thread::sleep only for
-/// truly synchronous open. When that lands, remove this note and the `std::thread::sleep`
-/// calls in async-reachable paths. The write-owner flock + process gate remain the
-/// correct safety mechanism; only the *waiting* strategy needs to become cancellation-aware.
+// NOTE ON Asupersync / CANCELLATION CONTRACT (as of 2026-05 ownership-posture review):
+// The retry loops that call `std::thread::sleep(advisory_lock_retry_delay(...))` (in
+// `retry_file_database_open`, `retry_sqlite_contention`, advisory lock acquisition,
+// and the write-owner begin_tx path) use a hard OS thread sleep.
+//
+// Per AGENTS.md and the core architecture, all long-running/contended work should
+// respect `&Cx`, `Outcome`, budgets, and cancellation via asupersync. `thread::sleep`
+// cannot be cancelled and does not participate in structured concurrency.
+//
+// Current mitigation (best judgement at time of review):
+// - Total backoff across all attempts is intentionally capped at < ~400 ms (16 attempts
+//   at 50 ms cap).
+// - The primary callers for the hot query contention path are bounded.
+// - DB open paths are synchronous CLI entry points (init, workspace resolution).
+//
+// TODO (follow-up bead): Provide a Cx-aware variant of the retry helpers that accepts
+// `Option<&Cx>` and uses `asupersync::time::sleep(cx.now(), dur).await` (see steward/mod.rs
+// for the pattern) when a Cx is supplied, falling back to thread::sleep only for
+// truly synchronous open. When that lands, remove this note and the `std::thread::sleep`
+// calls in async-reachable paths. The write-owner flock + process gate remain the
+// correct safety mechanism; only the *waiting* strategy needs to become cancellation-aware.
 
 /// Result of attempting to acquire an advisory lock.
 #[derive(Clone, Debug, PartialEq, Eq)]
