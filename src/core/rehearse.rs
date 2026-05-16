@@ -944,8 +944,10 @@ fn command_args_escape_sandbox(args: &[String]) -> bool {
 
 fn prepare_artifact_root(output_dir: Option<&Path>) -> Result<PathBuf, DomainError> {
     if let Some(path) = output_dir {
+        ensure_no_rehearsal_artifact_symlink_components(path, "create rehearsal output dir")?;
         fs::create_dir_all(path)
             .map_err(|error| storage_error("create rehearsal output dir", error))?;
+        ensure_no_rehearsal_artifact_symlink_components(path, "create rehearsal output dir")?;
         return Ok(path.to_path_buf());
     }
 
@@ -1225,10 +1227,20 @@ fn write_json_artifact<T>(path: &Path, value: &T) -> Result<(), DomainError>
 where
     T: Serialize,
 {
+    ensure_no_rehearsal_artifact_symlink_components(path, "write rehearsal artifact")?;
     if let Some(parent) = path.parent() {
+        ensure_no_rehearsal_artifact_symlink_components(
+            parent,
+            "create rehearsal artifact parent",
+        )?;
         fs::create_dir_all(parent)
             .map_err(|error| storage_error("create rehearsal artifact parent", error))?;
+        ensure_no_rehearsal_artifact_symlink_components(
+            parent,
+            "create rehearsal artifact parent",
+        )?;
     }
+    ensure_no_rehearsal_artifact_symlink_components(path, "write rehearsal artifact")?;
     let bytes = serde_json::to_vec_pretty(value).map_err(|error| DomainError::Storage {
         message: format!("Failed to serialize rehearsal artifact: {error}"),
         repair: Some("ee rehearse run --json".to_string()),
@@ -1299,12 +1311,12 @@ fn execute_rehearsal_command(
 
 fn resolve_manifest_path(artifact_id: &str, workspace: &Path) -> Result<PathBuf, DomainError> {
     let direct = PathBuf::from(artifact_id);
-    if direct.is_file() {
+    if path_is_regular_file_no_symlinks(&direct, "read rehearsal manifest")? {
         return Ok(direct);
     }
-    if direct.is_dir() {
+    if path_is_directory_no_symlinks(&direct, "read rehearsal artifact directory")? {
         let manifest = direct.join(MANIFEST_FILE);
-        if manifest.is_file() {
+        if path_is_regular_file_no_symlinks(&manifest, "read rehearsal manifest")? {
             return Ok(manifest);
         }
     }
@@ -1313,7 +1325,7 @@ fn resolve_manifest_path(artifact_id: &str, workspace: &Path) -> Result<PathBuf,
         .join("rehearsals")
         .join(artifact_id)
         .join(MANIFEST_FILE);
-    if workspace_manifest.is_file() {
+    if path_is_regular_file_no_symlinks(&workspace_manifest, "read rehearsal manifest")? {
         return Ok(workspace_manifest);
     }
     Err(DomainError::NotFound {
@@ -1344,6 +1356,80 @@ fn storage_error(context: &str, error: io::Error) -> DomainError {
         message: format!("Failed to {context}: {error}"),
         repair: Some("ee rehearse run --json".to_string()),
     }
+}
+
+fn path_is_regular_file_no_symlinks(
+    path: &Path,
+    operation: &'static str,
+) -> Result<bool, DomainError> {
+    ensure_no_rehearsal_artifact_symlink_components(path, operation)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(storage_error(operation, error)),
+    }
+}
+
+fn path_is_directory_no_symlinks(
+    path: &Path,
+    operation: &'static str,
+) -> Result<bool, DomainError> {
+    ensure_no_rehearsal_artifact_symlink_components(path, operation)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.is_dir()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(storage_error(operation, error)),
+    }
+}
+
+fn ensure_no_rehearsal_artifact_symlink_components(
+    path: &Path,
+    operation: &'static str,
+) -> Result<(), DomainError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Refusing to {operation} `{}` through symlinked path component `{}`.",
+                        path.display(),
+                        current.display()
+                    ),
+                    repair: Some(
+                        "Replace the symlink with a regular rehearsal artifact path before retrying."
+                            .to_owned(),
+                    ),
+                });
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(storage_error(operation, error)),
+        }
+    }
+    Ok(())
 }
 
 /// Generate a short random ID.
@@ -1671,6 +1757,74 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn run_rejects_symlinked_output_directory() -> TestResult {
+        let workspace = kept_temp_dir("ee-rehearse-run-symlink-output-workspace")?;
+        let output_parent = kept_temp_dir("ee-rehearse-run-symlink-output-parent")?;
+        let real_output = kept_temp_dir("ee-rehearse-run-symlink-output-real")?;
+        fs::write(workspace.join("state.txt"), "source").map_err(|error| error.to_string())?;
+        let output_link = output_parent.join("out-link");
+        std::os::unix::fs::symlink(&real_output, &output_link)
+            .map_err(|error| error.to_string())?;
+
+        let options = RehearseRunOptions {
+            workspace,
+            output_dir: Some(output_link),
+            ..Default::default()
+        };
+        let error = match run_rehearsal(&options) {
+            Ok(report) => {
+                return Err(format!(
+                    "symlinked rehearsal output directory was accepted: {report:?}"
+                ));
+            }
+            Err(error) => error,
+        };
+
+        assert!(error.message().contains("symlinked path component"));
+        assert!(
+            !real_output.join(SOURCE_SNAPSHOT_FILE).exists(),
+            "rehearsal artifacts must not be written through a symlinked output directory"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_rejects_symlinked_output_artifact_file() -> TestResult {
+        let workspace = kept_temp_dir("ee-rehearse-run-symlink-artifact-workspace")?;
+        let out = kept_temp_dir("ee-rehearse-run-symlink-artifact-out")?;
+        let outside = kept_temp_dir("ee-rehearse-run-symlink-artifact-target")?;
+        fs::write(workspace.join("state.txt"), "source").map_err(|error| error.to_string())?;
+        let outside_snapshot = outside.join(SOURCE_SNAPSHOT_FILE);
+        fs::write(&outside_snapshot, "outside").map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_snapshot, out.join(SOURCE_SNAPSHOT_FILE))
+            .map_err(|error| error.to_string())?;
+
+        let options = RehearseRunOptions {
+            workspace,
+            output_dir: Some(out),
+            ..Default::default()
+        };
+        let error = match run_rehearsal(&options) {
+            Ok(report) => {
+                return Err(format!(
+                    "symlinked rehearsal artifact file was accepted: {report:?}"
+                ));
+            }
+            Err(error) => error,
+        };
+
+        assert!(error.message().contains("symlinked path component"));
+        assert_eq!(
+            fs::read_to_string(&outside_snapshot).map_err(|error| error.to_string())?,
+            "outside",
+            "rehearsal artifact write must not follow a symlinked file"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn run_reports_executor_unavailable_but_still_creates_sandbox() -> TestResult {
         let workspace = kept_temp_dir("ee-rehearse-run-no-executor")?;
         fs::write(workspace.join("state.txt"), "source").map_err(|error| error.to_string())?;
@@ -1724,6 +1878,35 @@ mod tests {
         assert_eq!(report.success_count, 0);
         assert_eq!(report.integrity_status, "valid");
         assert!(report.warnings.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn inspect_rejects_symlinked_manifest_file() -> TestResult {
+        let workspace = kept_temp_dir("ee-rehearse-inspect-symlink-workspace")?;
+        let out = kept_temp_dir("ee-rehearse-inspect-symlink-out")?;
+        let outside = kept_temp_dir("ee-rehearse-inspect-symlink-target")?;
+        let outside_manifest = outside.join(MANIFEST_FILE);
+        fs::write(&outside_manifest, "{}").map_err(|error| error.to_string())?;
+        let manifest_link = out.join(MANIFEST_FILE);
+        std::os::unix::fs::symlink(&outside_manifest, &manifest_link)
+            .map_err(|error| error.to_string())?;
+
+        let options = RehearseInspectOptions {
+            artifact_id: manifest_link.display().to_string(),
+            workspace,
+        };
+        let error = match inspect_rehearsal(&options) {
+            Ok(report) => {
+                return Err(format!(
+                    "symlinked rehearsal manifest was accepted: {report:?}"
+                ));
+            }
+            Err(error) => error,
+        };
+
+        assert!(error.message().contains("symlinked path component"));
         Ok(())
     }
 
