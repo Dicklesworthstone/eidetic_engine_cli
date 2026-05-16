@@ -289,6 +289,52 @@ impl MeshOutboundPolicyDecision {
     pub fn requires_redacted_payload(&self) -> bool {
         self.permits_payload_export() && self.redaction == MeshRedactionDecision::Redact
     }
+
+    #[must_use]
+    pub fn failure_surface(&self) -> Option<MeshPolicyFailureSurface> {
+        let code = match self.action {
+            MeshImportDecisionKind::Allow => return None,
+            MeshImportDecisionKind::Quarantine => "mesh_outbound_policy_quarantined",
+            MeshImportDecisionKind::Deny => "mesh_outbound_policy_denied",
+            MeshImportDecisionKind::Reject => "mesh_outbound_policy_rejected",
+        };
+
+        Some(MeshPolicyFailureSurface {
+            code,
+            action: self.action,
+            reason: self.reason,
+            policy_ref: mesh_policy_ref(self.policy_id.as_deref()),
+            material_lane: self.material_lane,
+            redaction: self.redaction,
+            trust_lane: self.trust_lane,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshPolicyFailureSurface {
+    pub code: &'static str,
+    pub action: MeshImportDecisionKind,
+    pub reason: &'static str,
+    pub policy_ref: String,
+    pub material_lane: MeshLane,
+    pub redaction: MeshRedactionDecision,
+    pub trust_lane: Option<MeshTrustLane>,
+}
+
+impl MeshPolicyFailureSurface {
+    #[must_use]
+    pub fn to_json(&self) -> JsonValue {
+        json!({
+            "code": self.code,
+            "action": self.action.as_str(),
+            "reason": self.reason,
+            "policyRef": self.policy_ref,
+            "materialLane": mesh_lane_name(self.material_lane),
+            "redaction": self.redaction.as_str(),
+            "trustLane": self.trust_lane.map(MeshTrustLane::as_str),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1229,6 +1275,13 @@ fn stable_mesh_alias(prefix: &str, value: &str) -> String {
     format!("{prefix}_{}", &hash[..10])
 }
 
+fn mesh_policy_ref(policy_id: Option<&str>) -> String {
+    let Some(policy_id) = policy_id else {
+        return "missing".to_owned();
+    };
+    redaction_safe_label(policy_id).unwrap_or_else(|| stable_mesh_alias("mesh_pol", policy_id))
+}
+
 fn metadata_contains_mesh_marker(metadata: &JsonValue) -> bool {
     [
         "mesh",
@@ -1821,6 +1874,74 @@ max_bytes = 0
         let denied = decide_mesh_outbound_policy(&redacted_input, Some(&policy));
         assert_eq!(denied.action, MeshImportDecisionKind::Deny);
         assert_eq!(denied.reason, "outbound_lane_denied");
+    }
+
+    #[test]
+    fn mesh_outbound_policy_failure_surface_uses_stable_structured_codes() {
+        let missing = decide_mesh_outbound_policy(&outbound_policy_input(MeshLane::Metadata), None);
+        let missing_surface = missing
+            .failure_surface()
+            .expect("denied outbound policy should expose failure fields");
+        assert_eq!(missing_surface.code, "mesh_outbound_policy_denied");
+        assert_eq!(missing_surface.action, MeshImportDecisionKind::Deny);
+        assert_eq!(missing_surface.policy_ref, "missing");
+        assert_eq!(missing_surface.reason, "missing_peer_policy");
+
+        let quarantined = decide_mesh_outbound_policy(
+            &outbound_policy_input(MeshLane::CurationSignal),
+            Some(&peer_policy()),
+        );
+        let quarantine_surface = quarantined
+            .failure_surface()
+            .expect("quarantined outbound policy should expose failure fields");
+        assert_eq!(quarantine_surface.code, "mesh_outbound_policy_quarantined");
+        assert_eq!(
+            quarantine_surface.action,
+            MeshImportDecisionKind::Quarantine
+        );
+
+        let mut policy = peer_policy();
+        policy.default_action = MeshLaneDecision::Allow;
+        let rejected =
+            decide_mesh_outbound_policy(&outbound_policy_input(MeshLane::Metadata), Some(&policy));
+        let reject_surface = rejected
+            .failure_surface()
+            .expect("rejected outbound policy should expose failure fields");
+        assert_eq!(reject_surface.code, "mesh_outbound_policy_rejected");
+        assert_eq!(reject_surface.action, MeshImportDecisionKind::Reject);
+
+        let allowed = decide_mesh_outbound_policy(
+            &outbound_policy_input(MeshLane::Metadata),
+            Some(&peer_policy()),
+        );
+        assert_eq!(allowed.failure_surface(), None);
+    }
+
+    #[test]
+    fn mesh_outbound_policy_failure_surface_redacts_path_like_policy_refs() {
+        let mut policy = peer_policy();
+        policy.policy_id = "/Users/alice/private/policy.toml".to_owned();
+        let decision =
+            decide_mesh_outbound_policy(&outbound_policy_input(MeshLane::Body), Some(&policy));
+        let surface = decision
+            .failure_surface()
+            .expect("denied outbound body should expose failure fields");
+
+        assert_eq!(surface.code, "mesh_outbound_policy_denied");
+        assert!(surface.policy_ref.starts_with("mesh_pol_"));
+        assert_ne!(surface.policy_ref, "/Users/alice/private/policy.toml");
+
+        let fields = surface.to_json();
+        assert_eq!(fields["code"], "mesh_outbound_policy_denied");
+        assert_eq!(fields["action"], "deny");
+        assert_eq!(fields["reason"], "outbound_redaction_denied");
+        assert_eq!(fields["materialLane"], "body");
+        assert_eq!(fields["redaction"], "deny");
+        assert_eq!(fields["trustLane"], "peerAgent");
+        assert!(
+            !fields.to_string().contains("/Users/alice/private"),
+            "failure surface leaked raw policy path: {fields}"
+        );
     }
 
     #[test]

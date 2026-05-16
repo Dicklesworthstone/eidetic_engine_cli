@@ -67,6 +67,20 @@ payload must not leave the node; if the posture is `redact`, only an already
 redacted payload can be exported. Raw body or embedding payloads require both
 `allow` on the lane and `share` on the matching redaction posture.
 
+Outbound failures use a small structured surface that later export/status
+callers can embed directly:
+
+| Decision | Code |
+| --- | --- |
+| `deny` | `mesh_outbound_policy_denied` |
+| `quarantine` | `mesh_outbound_policy_quarantined` |
+| `reject` | `mesh_outbound_policy_rejected` |
+
+The failure fields include the action, reason, material lane, redaction posture,
+trust lane, and a redaction-safe policy reference. Path-like policy identifiers
+are replaced with stable `mesh_pol_*` aliases before they leave the policy
+layer.
+
 ## Config Registry
 
 Workspace-local peer policies are registered in `.ee/config.toml` under
