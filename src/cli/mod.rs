@@ -589,6 +589,9 @@ pub enum Command {
     /// Inspect and update workspace configuration.
     #[command(subcommand)]
     Config(ConfigCommand),
+    /// Persist redaction-safe coordination fallback evidence.
+    #[command(subcommand)]
+    Coordination(CoordinationCommand),
     /// Review curation proposals without silently mutating memory.
     #[command(subcommand)]
     Curate(CurateCommand),
@@ -7671,6 +7674,37 @@ pub struct MemoryTagsArgs {
     pub database: Option<PathBuf>,
 }
 
+/// Subcommands for `ee coordination`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum CoordinationCommand {
+    /// Ingest coordination fallback evidence.
+    #[command(subcommand)]
+    Evidence(CoordinationEvidenceCommand),
+}
+
+/// Subcommands for `ee coordination evidence`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum CoordinationEvidenceCommand {
+    /// Persist a redaction-safe fallback evidence record.
+    Ingest(CoordinationEvidenceIngestArgs),
+}
+
+/// Arguments for `ee coordination evidence ingest`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct CoordinationEvidenceIngestArgs {
+    /// Read the evidence JSON object from this file.
+    #[arg(long, value_name = "PATH", conflicts_with = "stdin")]
+    pub file: Option<PathBuf>,
+
+    /// Read the evidence JSON object from stdin.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub stdin: bool,
+
+    /// Preview validation and idempotency without appending to the ledger.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum SituationCommand {
     /// Classify task text into a situation category.
@@ -8225,6 +8259,9 @@ where
         Some(Command::Config(ref config_cmd)) => {
             handle_config_command(&cli, config_cmd, stdout, stderr)
         }
+        Some(Command::Coordination(CoordinationCommand::Evidence(
+            CoordinationEvidenceCommand::Ingest(ref args),
+        ))) => handle_coordination_evidence_ingest(&cli, args, stdout, stderr),
         Some(Command::Db(ref db_cmd)) => match db_cmd {
             DbCommand::Status(args) => handle_db_status(&cli, args, stdout),
             DbCommand::Inspect(args) => handle_db_inspect(&cli, args, stdout),
@@ -35796,6 +35833,362 @@ where
 // Real implementation in crate::core::support_bundle (eidetic_engine_cli-wtpl)
 // ============================================================================
 
+const COORDINATION_FALLBACK_EVIDENCE_SCHEMA_V1: &str = "ee.coordination_fallback_evidence.v1";
+const COORDINATION_FALLBACK_LEDGER_RECORD_SCHEMA_V1: &str =
+    "ee.coordination_fallback_ledger_record.v1";
+const COORDINATION_FALLBACK_INGEST_SCHEMA_V1: &str = "ee.coordination_fallback_ingest.v1";
+const COORDINATION_FALLBACK_LEDGER_FILE: &str = "coordination-fallback-evidence.jsonl";
+
+fn handle_coordination_evidence_ingest<W, E>(
+    cli: &Cli,
+    args: &CoordinationEvidenceIngestArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match coordination_evidence_ingest_report(cli, args) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                let status = if report.inserted {
+                    "ingested"
+                } else if report.duplicate {
+                    "already present"
+                } else {
+                    "validated"
+                };
+                write_stdout(
+                    stdout,
+                    &format!(
+                        "Coordination fallback evidence {status}\n  Evidence: {}\n  Status: {}\n  Source: {}\n  Ledger: {}\n  Content hash: {}\n",
+                        report.evidence_id,
+                        report.status,
+                        report.source_kind,
+                        report.ledger_path.display(),
+                        report.content_hash
+                    ),
+                )
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&report.data_json().to_string()) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let response = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": true,
+                    "data": report.data_json(),
+                });
+                write_stdout(stdout, &(response.to_string() + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CoordinationEvidenceIngestReport {
+    workspace: PathBuf,
+    ledger_path: PathBuf,
+    evidence_id: String,
+    status: String,
+    source_kind: String,
+    source_id: String,
+    reason_code: String,
+    content_hash: String,
+    inserted: bool,
+    duplicate: bool,
+    dry_run: bool,
+}
+
+impl CoordinationEvidenceIngestReport {
+    fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": COORDINATION_FALLBACK_INGEST_SCHEMA_V1,
+            "workspace": self.workspace.display().to_string(),
+            "ledgerPath": self.ledger_path.display().to_string(),
+            "evidenceId": self.evidence_id,
+            "status": self.status,
+            "source": {
+                "kind": self.source_kind,
+                "sourceId": self.source_id,
+            },
+            "reasonCode": self.reason_code,
+            "contentHash": self.content_hash,
+            "inserted": self.inserted,
+            "duplicate": self.duplicate,
+            "dryRun": self.dry_run,
+        })
+    }
+}
+
+fn coordination_evidence_ingest_report(
+    cli: &Cli,
+    args: &CoordinationEvidenceIngestArgs,
+) -> Result<CoordinationEvidenceIngestReport, DomainError> {
+    let raw = read_coordination_evidence_input(args)?;
+    let evidence: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|error| DomainError::Usage {
+            message: format!("Failed to parse coordination fallback evidence JSON: {error}."),
+            repair: Some(
+                "Pass one ee.coordination_fallback_evidence.v1 object via --file or --stdin."
+                    .to_owned(),
+            ),
+        })?;
+    validate_coordination_fallback_evidence(&evidence)?;
+
+    let canonical = canonical_json(&evidence);
+    let content_hash = format!("blake3:{}", blake3::hash(canonical.as_bytes()).to_hex());
+    let workspace = cli.resolve_workspace();
+    let ledger_path = workspace
+        .join(".ee")
+        .join(COORDINATION_FALLBACK_LEDGER_FILE);
+    let duplicate = coordination_fallback_ledger_contains_hash(&ledger_path, &content_hash)?;
+
+    if !duplicate && !args.dry_run {
+        append_coordination_fallback_ledger_record(&ledger_path, &content_hash, &evidence)?;
+    }
+
+    Ok(CoordinationEvidenceIngestReport {
+        workspace,
+        ledger_path,
+        evidence_id: required_json_string(&evidence, "/evidenceId")?.to_owned(),
+        status: required_json_string(&evidence, "/status")?.to_owned(),
+        source_kind: required_json_string(&evidence, "/source/kind")?.to_owned(),
+        source_id: required_json_string(&evidence, "/source/sourceId")?.to_owned(),
+        reason_code: required_json_string(&evidence, "/reasonCode")?.to_owned(),
+        content_hash,
+        inserted: !duplicate && !args.dry_run,
+        duplicate,
+        dry_run: args.dry_run,
+    })
+}
+
+fn read_coordination_evidence_input(
+    args: &CoordinationEvidenceIngestArgs,
+) -> Result<String, DomainError> {
+    match (&args.file, args.stdin) {
+        (Some(path), false) => fs::read_to_string(path).map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to read coordination fallback evidence file {}: {error}",
+                path.display()
+            ),
+            repair: Some("Pass a readable evidence JSON file or use --stdin.".to_owned()),
+        }),
+        (None, true) => {
+            let mut input = String::new();
+            io::stdin()
+                .read_to_string(&mut input)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to read coordination fallback evidence from stdin: {error}"),
+                    repair: Some("Pipe one ee.coordination_fallback_evidence.v1 JSON object to stdin.".to_owned()),
+                })?;
+            Ok(input)
+        }
+        (None, false) => Err(DomainError::Usage {
+            message: "coordination evidence ingest requires --file or --stdin".to_owned(),
+            repair: Some("Run `ee coordination evidence ingest --file evidence.json --json`.".to_owned()),
+        }),
+        (Some(_), true) => Err(DomainError::Usage {
+            message: "Pass only one of --file or --stdin".to_owned(),
+            repair: Some("Use --file for a JSON file or --stdin for piped input.".to_owned()),
+        }),
+    }
+}
+
+fn validate_coordination_fallback_evidence(evidence: &serde_json::Value) -> Result<(), DomainError> {
+    if !evidence.is_object() {
+        return Err(DomainError::Usage {
+            message: "Coordination fallback evidence must be a JSON object.".to_owned(),
+            repair: Some("Pass one ee.coordination_fallback_evidence.v1 object.".to_owned()),
+        });
+    }
+    let schema = required_json_string(evidence, "/schema")?;
+    if schema != COORDINATION_FALLBACK_EVIDENCE_SCHEMA_V1 {
+        return Err(DomainError::Usage {
+            message: format!("Unsupported coordination fallback evidence schema `{schema}`."),
+            repair: Some(format!(
+                "Use schema {COORDINATION_FALLBACK_EVIDENCE_SCHEMA_V1}."
+            )),
+        });
+    }
+
+    let status = required_json_string(evidence, "/status")?;
+    if !matches!(
+        status,
+        "available" | "unavailable" | "stale" | "blocked" | "unknown"
+    ) {
+        return Err(DomainError::Usage {
+            message: format!("Unsupported coordination fallback status `{status}`."),
+            repair: Some(
+                "Use available, unavailable, stale, blocked, or unknown.".to_owned(),
+            ),
+        });
+    }
+
+    let source_kind = required_json_string(evidence, "/source/kind")?;
+    if !matches!(
+        source_kind,
+        "agent_mail" | "beads" | "file_reservation" | "rch" | "bv" | "git" | "other"
+    ) {
+        return Err(DomainError::Usage {
+            message: format!("Unsupported coordination fallback source kind `{source_kind}`."),
+            repair: Some(
+                "Use agent_mail, beads, file_reservation, rch, bv, git, or other.".to_owned(),
+            ),
+        });
+    }
+
+    for pointer in [
+        "/evidenceId",
+        "/capturedAt",
+        "/source/sourceId",
+        "/reasonCode",
+        "/summary/text",
+        "/summary/contentHash",
+        "/fallbackAction/kind",
+        "/fallbackAction/summary",
+    ] {
+        let _ = required_json_string(evidence, pointer)?;
+    }
+
+    if evidence.pointer("/summary/redacted") != Some(&serde_json::Value::Bool(true))
+        || evidence.pointer("/redaction/rawInboxIncluded") != Some(&serde_json::Value::Bool(false))
+        || evidence.pointer("/redaction/rawLogIncluded") != Some(&serde_json::Value::Bool(false))
+        || evidence.pointer("/redaction/secretScanApplied") != Some(&serde_json::Value::Bool(true))
+    {
+        return Err(DomainError::PolicyDenied {
+            message: "Coordination fallback evidence must be redaction-safe before ingest.".to_owned(),
+            repair: Some(
+                "Set summary.redacted=true, rawInboxIncluded=false, rawLogIncluded=false, and secretScanApplied=true."
+                    .to_owned(),
+            ),
+        });
+    }
+
+    let path_policy = required_json_string(evidence, "/redaction/pathPolicy")?;
+    if !matches!(path_policy, "redact_home" | "hash_paths" | "labels_only") {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "Coordination fallback evidence path policy `{path_policy}` is not safe for ingest."
+            ),
+            repair: Some("Use redact_home, hash_paths, or labels_only.".to_owned()),
+        });
+    }
+
+    Ok(())
+}
+
+fn required_json_string<'a>(
+    value: &'a serde_json::Value,
+    pointer: &str,
+) -> Result<&'a str, DomainError> {
+    value
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| DomainError::Usage {
+            message: format!("Coordination fallback evidence is missing string field `{pointer}`."),
+            repair: Some(
+                "Use the ee.coordination_fallback_evidence.v1 schema and fixture shape."
+                    .to_owned(),
+            ),
+        })
+}
+
+fn coordination_fallback_ledger_contains_hash(
+    ledger_path: &Path,
+    content_hash: &str,
+) -> Result<bool, DomainError> {
+    let file = match fs::File::open(ledger_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Failed to read coordination fallback ledger {}: {error}",
+                    ledger_path.display()
+                ),
+                repair: Some("Check the .ee ledger file permissions.".to_owned()),
+            });
+        }
+    };
+
+    for line in io::BufReader::new(file).lines() {
+        let line = line.map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to read coordination fallback ledger {}: {error}",
+                ledger_path.display()
+            ),
+            repair: Some("Check the .ee ledger file permissions.".to_owned()),
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: serde_json::Value =
+            serde_json::from_str(&line).map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to parse coordination fallback ledger {}: {error}",
+                    ledger_path.display()
+                ),
+                repair: Some("Repair or regenerate the coordination fallback ledger.".to_owned()),
+            })?;
+        if record
+            .pointer("/contentHash")
+            .and_then(serde_json::Value::as_str)
+            == Some(content_hash)
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn append_coordination_fallback_ledger_record(
+    ledger_path: &Path,
+    content_hash: &str,
+    evidence: &serde_json::Value,
+) -> Result<(), DomainError> {
+    if let Some(parent) = ledger_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to create coordination fallback ledger directory {}: {error}",
+                parent.display()
+            ),
+            repair: Some("Check workspace .ee directory permissions.".to_owned()),
+        })?;
+    }
+    let record = serde_json::json!({
+        "schema": COORDINATION_FALLBACK_LEDGER_RECORD_SCHEMA_V1,
+        "contentHash": content_hash,
+        "evidence": evidence,
+    });
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(ledger_path)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to open coordination fallback ledger {}: {error}",
+                ledger_path.display()
+            ),
+            repair: Some("Check workspace .ee directory permissions.".to_owned()),
+        })?;
+    writeln!(file, "{}", canonical_json(&record)).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to append coordination fallback ledger {}: {error}",
+            ledger_path.display()
+        ),
+        repair: Some("Check workspace .ee directory permissions.".to_owned()),
+    })
+}
+
 fn handle_support_bundle<W, E>(
     cli: &Cli,
     args: &SupportBundleArgs,
@@ -36542,6 +36935,7 @@ const COMMAND_NAMES: &[&str] = &[
     "check",
     "claim",
     "config",
+    "coordination",
     "context",
     "curate",
     "daemon",
@@ -36608,6 +37002,8 @@ const CAUSAL_SUBCOMMANDS: &[&str] = &["trace", "compare", "estimate", "promote-p
 const CERTIFICATE_SUBCOMMANDS: &[&str] = &["list", "show", "verify"];
 const CLAIM_SUBCOMMANDS: &[&str] = &["list", "show", "verify"];
 const CONFIG_SUBCOMMANDS: &[&str] = &["show", "get", "set"];
+const COORDINATION_SUBCOMMANDS: &[&str] = &["evidence"];
+const COORDINATION_EVIDENCE_SUBCOMMANDS: &[&str] = &["ingest"];
 const CURATE_SUBCOMMANDS: &[&str] = &[
     "candidates",
     "validate",
@@ -36842,6 +37238,13 @@ impl NormalizedInvocation {
                     ConfigCommand::Show(_) => "config show".to_string(),
                     ConfigCommand::Get(_) => "config get".to_string(),
                     ConfigCommand::Set(_) => "config set".to_string(),
+                },
+                Command::Coordination(coordination) => match coordination {
+                    CoordinationCommand::Evidence(evidence) => match evidence {
+                        CoordinationEvidenceCommand::Ingest(_) => {
+                            "coordination evidence ingest".to_string()
+                        }
+                    },
                 },
                 Command::Db(db) => match db {
                     DbCommand::Status(_) => "db status".to_string(),
@@ -37265,6 +37668,8 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "certificate" => Some(CERTIFICATE_SUBCOMMANDS),
         "claim" => Some(CLAIM_SUBCOMMANDS),
         "config" => Some(CONFIG_SUBCOMMANDS),
+        "coordination" => Some(COORDINATION_SUBCOMMANDS),
+        "coordination evidence" => Some(COORDINATION_EVIDENCE_SUBCOMMANDS),
         "curate" => Some(CURATE_SUBCOMMANDS),
         "demo" => Some(DEMO_SUBCOMMANDS),
         "diag" => Some(DIAG_SUBCOMMANDS),
