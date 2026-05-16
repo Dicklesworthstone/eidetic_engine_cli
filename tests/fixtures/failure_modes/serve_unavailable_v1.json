@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "serve_unavailable_v1",
+  "introduced_by": {
+    "bead": "bd-3usjw.4",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "serve",
+    "serve_localhost"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "The v1 binary exposes `ee serve --foreground` as an honest defer-to-v2 surface instead of starting a localhost HTTP/SSE adapter.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee serve --foreground --json"
+  },
+  "expected_emission": {
+    "code": "serve_unavailable_v1",
+    "severity": "low",
+    "message_contains": [
+      "localhost HTTP adapter",
+      "planned for v2"
+    ],
+    "repair_contains": "docs/adr/0033-serve-localhost-v2-design.md",
+    "repair_string": "Track bd-3usjw.4 and docs/adr/0033-serve-localhost-v2-design.md; use direct CLI commands such as `ee context`, `ee search`, `ee why`, and `ee status` for now."
+  }
+}

@@ -7,6 +7,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
+use crate::models::DomainError;
 use crate::steward::{DaemonForegroundOptions, DaemonForegroundReport, JobRunResult, JobType};
 
 pub const SUBSYSTEM: &str = "serve";
@@ -15,6 +16,7 @@ pub const DAEMON_JOB_ROW_SCHEMA_V1: &str = "ee.steward.daemon_job_row.v1";
 pub const DAEMON_STATUS_SCHEMA_V1: &str = "ee.steward.daemon_status.v1";
 pub const DAEMON_RECOVERY_SCHEMA_V1: &str = "ee.steward.daemon_recovery.v1";
 pub const DAEMON_WRITE_OWNER_IDENTITY: &str = "ee-daemon-single-write-owner";
+pub const SERVE_UNAVAILABLE_V1_CODE: &str = "serve_unavailable_v1";
 
 fn trace_serve_localhost(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
     tracing::info!(
@@ -32,6 +34,51 @@ fn trace_serve_localhost(phase: &'static str, elapsed_ms: u64, degraded_codes: &
 #[must_use]
 pub const fn subsystem_name() -> &'static str {
     SUBSYSTEM
+}
+
+#[must_use]
+pub fn serve_unavailable_v1_error() -> DomainError {
+    trace_serve_localhost("input", 0, &[]);
+    trace_serve_localhost("dependency_check", 0, &[SERVE_UNAVAILABLE_V1_CODE]);
+    trace_serve_localhost("response", 0, &[SERVE_UNAVAILABLE_V1_CODE]);
+    DomainError::UsageCodeWithDetails {
+        code: SERVE_UNAVAILABLE_V1_CODE,
+        message: "The localhost HTTP adapter is planned for v2; forbidden-dep-clean HTTP/SSE is not wired in v1.".to_owned(),
+        repair: Some(
+            "Track bd-3usjw.4 and docs/adr/0033-serve-localhost-v2-design.md; use direct CLI commands such as `ee context`, `ee search`, `ee why`, and `ee status` for now."
+                .to_owned(),
+        ),
+        details_json: json!({
+            "surface": "serve_localhost",
+            "selectedPath": "honest_defer_to_v2",
+            "trackingBead": "bd-3usjw.4",
+            "designAdr": "docs/adr/0033-serve-localhost-v2-design.md",
+            "recovery": [
+                {
+                    "priority": 1,
+                    "kind": "broaden",
+                    "rationale": "Use the direct context-pack CLI surface instead of the planned localhost adapter.",
+                    "command": "ee context \"<task>\" --workspace . --json",
+                    "resultsIn": "A deterministic context pack response on stdout."
+                },
+                {
+                    "priority": 2,
+                    "kind": "broaden",
+                    "rationale": "Use direct search when an HTTP search endpoint would have been used.",
+                    "command": "ee search \"<query>\" --workspace . --json",
+                    "resultsIn": "A deterministic search response on stdout."
+                },
+                {
+                    "priority": 3,
+                    "kind": "broaden",
+                    "rationale": "Use direct status and doctor checks for readiness probes.",
+                    "command": "ee status --workspace . --json && ee doctor --workspace . --json",
+                    "resultsIn": "Local CLI readiness and repair information without a background HTTP server."
+                }
+            ]
+        })
+        .to_string(),
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -1,31 +1,33 @@
 ---
-source: src/core/capabilities.rs, Cargo.toml
-assertion: serve adapter is feature-gated and unavailable in default build
+source: src/cli/mod.rs, src/serve.rs, Cargo.toml
+assertion: serve localhost is an honest defer-to-v2 command surface in v1
 schema:
-  feature: serve
-  status: feature_disabled
+  command: ee serve --foreground --json
+  envelope: ee.error.v2
+  code: serve_unavailable_v1
+  status: documented_stubbed
 contracts:
-  - serve feature enables optional HTTP adapter for localhost access
-  - default build does not include serve feature
-  - serve feature must not pull tokio, hyper, axum, tower, or reqwest into default tree
-  - when serve feature disabled, capabilities report serve as unavailable
-  - serve adapter wraps existing CLI commands, does not add business logic
-  - localhost-only boundary enforced (no public network exposure)
-  - read-only or explicitly audited mutations
-  - JSON responses mirror CLI contracts
-  - HTTP endpoints follow ee_ naming convention from MCP tools
+  - ee serve --help is visible in default builds
+  - ee serve --foreground --json emits ee.error.v2 with code serve_unavailable_v1
+  - severity is low because direct CLI commands remain the supported v1 path
+  - repair text tracks bd-3usjw.4 and docs/adr/0033-serve-localhost-v2-design.md
+  - recovery actions point to direct CLI commands: ee context, ee search, ee status, and ee doctor
+  - human output says the localhost HTTP adapter is planned for v2
+  - no HTTP listener starts in v1 and no forbidden HTTP stack is introduced
+  - serve adapter remains a wrapper boundary and must not add business logic
 feature_requirements:
   - serve = [] feature flag in Cargo.toml
   - BuildFeature::new("serve", cfg!(feature = "serve")) in capabilities
   - FeatureEntry::new("serve", cfg!(feature = "serve"), "HTTP serve adapter")
   - forbidden dependencies not pulled: tokio, hyper, axum, tower, reqwest
-  - no CLI command surface when feature disabled (adapter-only)
+  - top-level CLI command exists as an honest v1 unavailable surface
 evidence:
   - Cargo.toml: serve = []
-  - src/core/mod.rs: BuildFeature::new("serve", cfg!(feature = "serve"))
-  - src/core/capabilities.rs: FeatureEntry for serve
-  - status --json includes serve in features array with enabled: false
+  - src/cli/mod.rs: Command::Serve and SERVE_UNAVAILABLE_CODE
+  - src/serve.rs: SERVE_UNAVAILABLE_V1_CODE and serve_unavailable_v1_error
+  - tests/fixtures/failure_modes/serve_unavailable_v1.json
+  - scripts/vision-coverage.sh reports serve under documented_stubbed_surfaces
 degraded_contract:
-  - serve surface unavailable in default build
-  - capabilities.features reports serve.enabled = false
-  - no HTTP server starts without explicit feature enablement
+  - serve surface returns a deterministic unavailable error in v1
+  - capabilities.features may still report the optional serve feature disabled
+  - no HTTP server starts until the v2 ADR is implemented

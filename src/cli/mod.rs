@@ -612,6 +612,8 @@ pub enum Command {
     Migrate(MigrateCommand),
     /// Run the optional maintenance daemon in foreground mode.
     Daemon(DaemonArgs),
+    /// Report localhost HTTP/SSE adapter availability.
+    Serve(ServeArgs),
     /// Run health checks on workspace and subsystems.
     Doctor(DoctorArgs),
     /// Run explicit maintenance jobs without a daemon.
@@ -1489,6 +1491,16 @@ pub enum DaemonCommand {
 
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct DaemonStatusArgs {}
+
+/// Arguments for `ee serve`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ServeArgs {
+    /// Request the foreground localhost adapter.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub foreground: bool,
+}
+
+pub const SERVE_UNAVAILABLE_CODE: &str = crate::serve::SERVE_UNAVAILABLE_V1_CODE;
 
 /// Memory maintenance commands.
 #[derive(Clone, Debug, PartialEq, Subcommand)]
@@ -8141,6 +8153,7 @@ where
             DemoCommand::Verify(args) => handle_demo_verify(&cli, args, stdout, stderr),
         },
         Some(Command::Daemon(ref args)) => handle_daemon(&cli, args, stdout, stderr),
+        Some(Command::Serve(ref args)) => handle_serve(&cli, args, stdout, stderr),
         Some(Command::Job(ref job_cmd)) => handle_job(&cli, job_cmd, stdout),
         Some(Command::Maintenance(ref maintenance_cmd)) => match maintenance_cmd {
             MaintenanceCommand::Run(args) => handle_maintenance_run(&cli, args, stdout),
@@ -34093,6 +34106,20 @@ where
     }
 }
 
+fn handle_serve<W, E>(
+    cli: &Cli,
+    _args: &ServeArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let error = crate::serve::serve_unavailable_v1_error();
+    write_domain_error(&error, cli.wants_json(), stdout, stderr)
+}
+
 fn write_daemon_status<W, E>(
     cli: &Cli,
     args: &DaemonArgs,
@@ -36168,6 +36195,7 @@ impl NormalizedInvocation {
                     DemoCommand::Verify(_) => "demo verify".to_string(),
                 },
                 Command::Daemon(_) => "daemon".to_string(),
+                Command::Serve(_) => "serve".to_string(),
                 Command::Job(job) => match job {
                     JobCommand::Run(_) => "job run".to_string(),
                     JobCommand::List(_) => "job list".to_string(),
@@ -42167,6 +42195,65 @@ mod tests {
             },
             _ => Err("expected daemon command".to_string()),
         }
+    }
+
+    #[test]
+    fn serve_foreground_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "serve", "--foreground", "--json"])
+            .map_err(|e| format!("failed to parse serve foreground: {:?}", e.kind()))?;
+
+        ensure(parsed.wants_json(), "serve foreground honors json global")?;
+        match parsed.command {
+            Some(Command::Serve(args)) => ensure_equal(&args.foreground, &true, "foreground flag"),
+            other => Err(format!("expected serve command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn serve_foreground_json_is_honest_v2_unavailable() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "serve", "--foreground", "--json"]);
+
+        ensure_equal(&exit, &ProcessExitCode::Usage, "serve unavailable exit")?;
+        ensure(stderr.is_empty(), "serve JSON stderr clean")?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("serve JSON did not parse: {error}; stdout={stdout}"))?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.error.v2"),
+            "serve error schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!(SERVE_UNAVAILABLE_CODE),
+            "serve error code",
+        )?;
+        ensure_equal(
+            &value["error"]["severity"],
+            &serde_json::json!("low"),
+            "serve severity",
+        )?;
+        ensure_contains(&stdout, "planned for v2", "serve v2 message")?;
+        ensure_contains(
+            &stdout,
+            "docs/adr/0033-serve-localhost-v2-design.md",
+            "serve ADR",
+        )?;
+        ensure_contains(&stdout, "ee context", "context recovery command")?;
+        ensure_contains(&stdout, "ee search", "search recovery command")?;
+        ensure_contains(&stdout, "ee status", "status recovery command")
+    }
+
+    #[test]
+    fn serve_foreground_human_points_to_direct_cli_surfaces() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "serve", "--foreground"]);
+
+        ensure_equal(&exit, &ProcessExitCode::Usage, "serve unavailable exit")?;
+        ensure(stdout.is_empty(), "serve human stdout clean")?;
+        ensure_contains(&stderr, "planned for v2", "serve v2 human message")?;
+        ensure_contains(&stderr, "ee context", "context human repair")?;
+        ensure_contains(&stderr, "ee search", "search human repair")?;
+        ensure_contains(&stderr, "ee why", "why human repair")?;
+        ensure_contains(&stderr, "ee status", "status human repair")
     }
 
     #[test]
