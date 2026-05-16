@@ -2,8 +2,11 @@ use std::str::FromStr;
 
 use ee::models::{MemoryId, ProvenanceUri, UnitScore};
 use ee::pack::{
-    PackCandidate, PackCandidateInput, PackProvenance, PackSection, TokenBudget, assemble_draft,
+    ContextPackProfile, PackAssemblyOptions, PackCandidate, PackCandidateInput, PackDraft,
+    PackProvenance, PackSection, TokenBudget, assemble_draft,
+    assemble_draft_with_profile_and_options_seeded,
 };
+use ee::runtime::determinism::Deterministic;
 use ee::search::parse_search_query;
 use proptest::prelude::*;
 use uuid::Uuid;
@@ -62,6 +65,32 @@ fn candidate_specs() -> impl Strategy<Value = Vec<(u32, u16, u16, bool)>> {
         (1_u32..=250, 0_u16..=1000, 0_u16..=1000, any::<bool>()),
         0..32,
     )
+}
+
+fn profile_for(raw: u8) -> ContextPackProfile {
+    match raw % 4 {
+        0 => ContextPackProfile::Compact,
+        1 => ContextPackProfile::Balanced,
+        2 => ContextPackProfile::Thorough,
+        _ => ContextPackProfile::Submodular,
+    }
+}
+
+fn deterministic_reordered<T>(mut values: Vec<T>, seed: u64) -> Vec<T> {
+    let mut indexed = values.drain(..).enumerate().collect::<Vec<_>>();
+    indexed.sort_by_key(|(index, _)| stable_test_word(seed ^ *index as u64));
+    indexed.into_iter().map(|(_, value)| value).collect()
+}
+
+fn stable_test_word(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
+}
+
+fn draft_bytes(draft: &PackDraft) -> Vec<u8> {
+    format!("{draft:#?}").into_bytes()
 }
 
 proptest! {
@@ -128,5 +157,58 @@ proptest! {
             prop_assert!(step.objective_value.is_finite());
             prop_assert!(step.token_cost > 0);
         }
+    }
+
+    #[test]
+    fn seeded_pack_assembly_replays_byte_identical_output(
+        budget_raw in 1_u32..=400,
+        seed in any::<u64>(),
+        profile_raw in any::<u8>(),
+        query_suffix in "[a-z0-9 _-]{0,48}",
+        specs in candidate_specs(),
+    ) {
+        let budget = TokenBudget::new(budget_raw)
+            .map_err(|error| TestCaseError::fail(format!("{error:?}")))?;
+        let mut candidates = Vec::with_capacity(specs.len());
+        for (index, (tokens, relevance, utility, duplicate_content)) in specs.into_iter().enumerate() {
+            candidates.push(
+                candidate_from_spec(index, tokens, relevance, utility, duplicate_content)
+                    .map_err(TestCaseError::fail)?,
+            );
+        }
+        let query = format!("property pack determinism {query_suffix}");
+        let profile = profile_for(profile_raw);
+        let options = PackAssemblyOptions::default();
+
+        let first = assemble_draft_with_profile_and_options_seeded(
+            profile,
+            query.clone(),
+            budget,
+            candidates.clone(),
+            options,
+            &Deterministic::from_seed(seed),
+        )
+        .map_err(|error| TestCaseError::fail(format!("{error:?}")))?;
+        let replay = assemble_draft_with_profile_and_options_seeded(
+            profile,
+            query.clone(),
+            budget,
+            candidates.clone(),
+            options,
+            &Deterministic::from_seed(seed),
+        )
+        .map_err(|error| TestCaseError::fail(format!("{error:?}")))?;
+        let reordered = assemble_draft_with_profile_and_options_seeded(
+            profile,
+            query,
+            budget,
+            deterministic_reordered(candidates, seed),
+            options,
+            &Deterministic::from_seed(seed),
+        )
+        .map_err(|error| TestCaseError::fail(format!("{error:?}")))?;
+
+        prop_assert_eq!(draft_bytes(&first), draft_bytes(&replay));
+        prop_assert_eq!(draft_bytes(&first), draft_bytes(&reordered));
     }
 }
