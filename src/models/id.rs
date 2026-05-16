@@ -39,6 +39,8 @@ use std::str::FromStr;
 
 use uuid::Uuid;
 
+use crate::runtime::determinism::{Deterministic, Seed};
+
 /// Canonical ULID/Crockford Base32 alphabet.
 ///
 /// Excludes `I`, `L`, `O`, `U` to avoid confusion with `1`, `0`, and
@@ -345,6 +347,16 @@ impl<K: IdKind> Id<K> {
             inner: Uuid::now_v7(),
             _phantom: PhantomData,
         }
+    }
+
+    /// Generate a deterministic time-ordered ID from a capability token.
+    ///
+    /// This is the N4.3 token-threaded counterpart to [`Id::now`]. The caller
+    /// owns mutable deterministic state, so repeated runs with the same seed
+    /// replay the same UUIDv7 sequence while successive calls advance it.
+    #[must_use]
+    pub fn now_seeded(determinism: &mut Deterministic<Seed>) -> Self {
+        Self::from_uuid(determinism.clock().next_uuid_v7())
     }
 
     /// Wrap an existing [`Uuid`] as an [`Id`] of this kind.
@@ -728,6 +740,8 @@ mod tests {
 
     use uuid::Uuid;
 
+    use crate::runtime::determinism::Deterministic;
+
     use super::{
         BackupId, ClaimId, DemoId, ENCODED_LEN, EXECUTABLE_ID_SCHEMA_V1, EvidenceId,
         ExecutableIdKind, Id, IdKind, MemoryId, ModelId, PackId, ParseExecutableIdKindError,
@@ -926,6 +940,18 @@ mod tests {
                 pair[1]
             );
         }
+    }
+
+    #[test]
+    fn ids_from_seeded_clock_are_replayable_and_monotonic() {
+        let mut first_token = Deterministic::from_seed(5_000);
+        let first = MemoryId::now_seeded(&mut first_token);
+        let second = MemoryId::now_seeded(&mut first_token);
+        assert!(first < second);
+
+        let mut replay_token = Deterministic::from_seed(5_000);
+        assert_eq!(first, MemoryId::now_seeded(&mut replay_token));
+        assert_eq!(second, MemoryId::now_seeded(&mut replay_token));
     }
 
     #[test]
