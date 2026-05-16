@@ -19,6 +19,7 @@ set -euo pipefail
 #   4. Untracked Work Audit    - advisory Beads FILE SURFACE coverage for dirty paths
 #   4.5. Bridge Staleness      - advisory signal when CLOSE_THE_GAP_PLAN needs refresh
 #   4.6. Plan Drift Advisory   - advisory plan_doc_section drift hints for Beads triage
+#   4.7. Fuzz Target Audit     - static cargo-fuzz target registration/docs check
 #   5. Vision Coverage         - report documented implemented/stubbed/missing surfaces
 #   5.5. Proof Verification    - advisory Lean4/TLA+ proof artifact checks
 #   6. Unit/Contract/Golden    - cargo test --workspace --lib --bins --tests --examples
@@ -187,6 +188,59 @@ snapshot_proposal_guard() {
     fi
     echo "ok: $count tracked insta proposal snapshot(s) match accepted snapshots"
     echo "    removal of redundant .snap.new files still requires explicit approval"
+}
+
+# shellcheck disable=SC2329
+fuzz_target_audit() {
+    local manifest="${REPO_ROOT}/fuzz/Cargo.toml"
+    local readme="${REPO_ROOT}/fuzz/README.md"
+    local failures=0
+    local target
+
+    if [ ! -f "$manifest" ]; then
+        echo "error: missing fuzz manifest: fuzz/Cargo.toml" >&2
+        return 1
+    fi
+    if [ ! -f "$readme" ]; then
+        echo "error: missing fuzz README: fuzz/README.md" >&2
+        return 1
+    fi
+
+    for target in \
+        insights_section_dispatch \
+        proximity_arg_parser \
+        ppr_weight_clamp \
+        insights_json_decode
+    do
+        local target_path="fuzz_targets/${target}.rs"
+        if ! grep -Fq "name = \"${target}\"" "$manifest"; then
+            echo "error: fuzz/Cargo.toml missing bin registration for ${target}" >&2
+            failures=1
+        fi
+        if ! grep -Fq "path = \"${target_path}\"" "$manifest"; then
+            echo "error: fuzz/Cargo.toml missing path registration for ${target_path}" >&2
+            failures=1
+        fi
+        if [ ! -f "${REPO_ROOT}/fuzz/${target_path}" ]; then
+            echo "error: missing fuzz target file: fuzz/${target_path}" >&2
+            failures=1
+        fi
+        if ! grep -Fq "cargo fuzz run ${target}" "$readme"; then
+            echo "error: fuzz/README.md missing cargo-fuzz command for ${target}" >&2
+            failures=1
+        fi
+    done
+
+    if ! grep -Fq "Deliberate-panic proof" "$readme"; then
+        echo "error: fuzz/README.md missing deliberate-panic proof instructions" >&2
+        failures=1
+    fi
+
+    if [ "$failures" -ne 0 ]; then
+        return 1
+    fi
+
+    echo "ok: bd-bife.10 fuzz targets are registered, present, and documented"
 }
 
 test_trace_root() {
@@ -411,6 +465,10 @@ run_stage "Bridge Staleness Advisory" "with_beads_read_locks ./scripts/bridge-st
 # .plan-drift-report.json with BV-friendly warning hints for active
 # implements-surface beads whose plan_doc_section labels point at evolved text.
 run_stage "Plan Drift Advisory" "with_beads_read_locks ./scripts/plan-drift.sh --quiet"
+
+# Gate 4.7: Static cargo-fuzz target registration/docs audit. This is a
+# no-build guard; actual cargo-fuzz sweeps remain explicit RCH-only evidence.
+run_stage "Fuzz Target Audit (bd-bife.10)" "fuzz_target_audit"
 
 # Gate 4: Strategic Vision Coverage
 run_stage "Vision Coverage" "with_beads_read_locks sh ./scripts/vision-coverage.sh --json"
