@@ -4,8 +4,6 @@
 //! only long enough to hash it, and the serialized key stores only hashes plus
 //! output-affecting options.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -404,18 +402,15 @@ pub fn sample_singleflight_keys() -> Vec<SingleFlightKey> {
 }
 
 fn option_pairs_hash(pairs: &[(&str, &str)]) -> String {
-    let mut normalized = BTreeMap::new();
+    let mut normalized = Vec::new();
     for (key, value) in pairs {
         if let (Some(key), Some(value)) = (non_empty(key), non_empty(value)) {
-            normalized.insert(key.to_owned(), value.to_owned());
+            normalized.push(format!("{key}={value}"));
         }
     }
 
-    let mut lines = Vec::with_capacity(normalized.len());
-    for (key, value) in normalized {
-        lines.push(format!("{key}={value}"));
-    }
-    redacted_hash("singleflight.options", &lines.join("\n"))
+    normalized.sort_unstable();
+    redacted_hash("singleflight.options", &normalized.join("\n"))
 }
 
 fn string_list_hash(label: &str, values: &[&str]) -> String {
@@ -572,6 +567,34 @@ mod tests {
         assert_eq!(
             SingleFlightKey::from_input(&left).key_hash,
             SingleFlightKey::from_input(&right).key_hash
+        );
+    }
+
+    #[test]
+    fn duplicate_option_pairs_do_not_collapse_key_hash() {
+        let mut with_duplicate = SingleFlightKeyInput::new(
+            SingleFlightSurface::Search,
+            "workspace-a",
+            7,
+            "ee.search.v1",
+        );
+        with_duplicate.option_pairs = &[("sourceMode", "hybrid"), ("sourceMode", "lexical")];
+
+        let mut without_duplicate = with_duplicate.clone();
+        without_duplicate.option_pairs = &[("sourceMode", "lexical")];
+
+        assert_ne!(
+            SingleFlightKey::from_input(&with_duplicate).key_hash,
+            SingleFlightKey::from_input(&without_duplicate).key_hash,
+            "duplicate output-affecting option keys must not be silently collapsed"
+        );
+
+        let mut reordered_duplicate = with_duplicate.clone();
+        reordered_duplicate.option_pairs = &[("sourceMode", "lexical"), ("sourceMode", "hybrid")];
+        assert_eq!(
+            SingleFlightKey::from_input(&with_duplicate).key_hash,
+            SingleFlightKey::from_input(&reordered_duplicate).key_hash,
+            "duplicate option keys should still be order-independent"
         );
     }
 
