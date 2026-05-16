@@ -467,6 +467,99 @@ rust_test_file_has_only_ignored_tests() {
     [ "$test_count" -gt 0 ] && [ "$ignore_count" -ge "$test_count" ]
 }
 
+# bd-3usjw.62 — unit_test_obligation_part_ii helpers.
+#
+# Returns lines from a bead's FILE SURFACE that point at src/...rs
+# implementation files (i.e. the production code paths the bead introduces
+# or revises). Used to assert AGENTS.md L300-302 "Every module includes
+# inline #[cfg(test)] unit tests alongside the implementation."
+bead_declared_src_file_surfaces() {
+    local bead_id="$1"
+    bead_declared_file_surfaces "$bead_id" |
+        grep -E '^src/.*\.rs$' || true
+}
+
+# A .rs file satisfies the inline-tests-module shape when it has both a
+# `#[cfg(test)]` attribute AND a `mod tests` declaration. The grep checks
+# are independent (not adjacency-aware) on purpose — adjacency parsing in
+# pure shell is fragile, and the false-accept rate here is tiny in
+# practice given the existing module layout in this repo.
+rust_src_file_has_inline_tests_module() {
+    local src_file="$1"
+    grep -q '^[[:space:]]*#\[cfg(test)\]' "$src_file" 2>/dev/null &&
+        grep -qE '^[[:space:]]*mod[[:space:]]+tests[[:space:]]*\{' "$src_file" 2>/dev/null
+}
+
+rust_src_file_inline_test_count() {
+    local src_file="$1"
+    grep -c '^[[:space:]]*#\[test\]' "$src_file" 2>/dev/null || true
+}
+
+rust_src_file_inline_ignore_count() {
+    local src_file="$1"
+    grep -c '^[[:space:]]*#\[ignore\]' "$src_file" 2>/dev/null || true
+}
+
+# Returns 0 (true) when the file ships >= 3 `#[test]` fns whose count
+# exceeds the count of adjacent `#[ignore]` attributes (so a fully-ignored
+# test module is rejected the same way `rust_test_file_has_only_ignored_tests`
+# rejects the test-side variant).
+rust_src_file_has_sufficient_inline_tests() {
+    local src_file="$1"
+    local count
+    local ignore_count
+
+    count=$(rust_src_file_inline_test_count "$src_file")
+    [ "$count" -ge 3 ] || return 1
+    ignore_count=$(rust_src_file_inline_ignore_count "$src_file")
+    [ "$count" -gt "$ignore_count" ]
+}
+
+# Rule 7: AGENTS.md L300-302 requires every module to ship inline
+# #[cfg(test)] tests covering happy, edge, and error paths. For any
+# implements-surface:* bead closing, when its FILE SURFACE declares one
+# or more src/...rs implementation files, AT LEAST ONE of those files
+# must carry an inline `#[cfg(test)] mod tests` block with >=3 non-ignored
+# `#[test]` functions AND assertion-style coverage (per the existing
+# `rust_test_file_has_assertion` definition shared with Rule 5).
+#
+# Beads whose FILE SURFACE contains no src/...rs paths (script-only,
+# fixture-only, doc-only surfaces) are exempt: the obligation is for
+# implementation modules, not for closure-lint-internal scripts or
+# documentation drift gates.
+check_implementation_unit_test_obligation() {
+    local bead_id="$1"
+    local surface="$2"
+    local src_file
+    local any_existing_src=false
+    local satisfied=false
+    local first_path=""
+
+    for src_file in $(bead_declared_src_file_surfaces "$bead_id"); do
+        # Only enforce against src files that actually exist on disk. A
+        # declared-but-missing src path is a different policy concern
+        # (file-not-shipped) and would produce a misleading "no inline
+        # tests" message; let the existing test-reference/golden gates
+        # cover that case.
+        [ -f "$src_file" ] || continue
+        any_existing_src=true
+        if [ -z "$first_path" ]; then
+            first_path="$src_file"
+        fi
+        rust_src_file_has_inline_tests_module "$src_file" || continue
+        rust_src_file_has_sufficient_inline_tests "$src_file" || continue
+        rust_test_file_has_assertion "$src_file" || continue
+        satisfied=true
+        break
+    done
+
+    [ "$any_existing_src" = false ] && return 0
+    [ "$satisfied" = true ] && return 0
+
+    add_violation "$bead_id" "implements-surface" "$surface" \
+        "no src/ file in FILE SURFACE has #[cfg(test)] mod tests with >=3 non-ignored #[test] fns and assertion coverage (first declared src path: ${first_path:-<none>})"
+}
+
 check_referenced_rust_test_file() {
     local bead_id="$1"
     local surface="$2"
@@ -1022,6 +1115,12 @@ for bead_id in $BEAD_IDS; do
             # Rule 6: Closed Part II implementation beads that declare
             # degraded codes must ship and cite their J6 failure-mode fixture.
             check_failure_mode_fixture_obligation "$bead_id" "$surface"
+
+            # Rule 7: Closed implements-surface beads whose FILE SURFACE
+            # lists src/ implementation files must include inline
+            # #[cfg(test)] unit-test coverage per AGENTS.md L300-302
+            # (bd-3usjw.62).
+            check_implementation_unit_test_obligation "$bead_id" "$surface"
         done
     fi
 

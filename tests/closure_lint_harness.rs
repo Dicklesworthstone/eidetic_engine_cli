@@ -507,3 +507,245 @@ fn closure_lint_skips_when_beads_write_lock_is_held() -> TestResult {
         format!("skip reason should name the held write lock, got {reason:?}"),
     )
 }
+
+// bd-3usjw.62 — unit_test_obligation_part_ii.
+//
+// The closure linter must reject closing an implements-surface:* bead
+// whose FILE SURFACE lists src/ implementation files when none of those
+// files ships inline #[cfg(test)] coverage that meets AGENTS.md L300-302
+// (>=3 non-ignored #[test] fns plus assertion-style coverage). The check
+// is exempt when FILE SURFACE has no src/ entries at all.
+
+const UNIT_TESTS_HAPPY_EDGE_ERROR: &str = r#"
+pub fn echo(value: u32) -> u32 { value }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn happy_path() {
+        assert_eq!(echo(1), 1);
+    }
+
+    #[test]
+    fn empty_or_boundary() {
+        assert_eq!(echo(0), 0);
+        assert_eq!(echo(u32::MAX), u32::MAX);
+    }
+
+    #[test]
+    fn error_or_invalid() {
+        assert_ne!(echo(2), 3);
+    }
+}
+"#;
+
+const UNIT_TESTS_MISSING_MOD: &str = r#"
+pub fn echo(value: u32) -> u32 { value }
+"#;
+
+const UNIT_TESTS_ONLY_TWO: &str = r#"
+pub fn echo(value: u32) -> u32 { value }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn happy_path() {
+        assert_eq!(echo(1), 1);
+    }
+
+    #[test]
+    fn boundary() {
+        assert_eq!(echo(0), 0);
+    }
+}
+"#;
+
+const UNIT_TESTS_ALL_IGNORED: &str = r#"
+pub fn echo(value: u32) -> u32 { value }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn happy_path() {
+        assert_eq!(echo(1), 1);
+    }
+
+    #[test]
+    #[ignore]
+    fn boundary() {
+        assert_eq!(echo(0), 0);
+    }
+
+    #[test]
+    #[ignore]
+    fn error_path() {
+        assert_ne!(echo(2), 3);
+    }
+}
+"#;
+
+const UNIT_TESTS_THIN_REEXPORT: &str = r#"
+pub use crate::other::*;
+"#;
+
+#[test]
+fn closure_lint_requires_inline_unit_tests_for_part_ii_implementations() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    write_workspace(
+        temp.path(),
+        &[
+            r#"{"id":"bd-3usjw.valid-inline","title":"[implements-surface:valid-inline-surface] real implementation","status":"closed","description":"Happy/edge/error inline tests live next to the implementation.\n\nFILE SURFACE: src/core/example.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:valid-inline-surface"],"parent":"bd-3usjw"}"#,
+            r#"{"id":"bd-3usjw.missing-mod-tests","title":"[implements-surface:missing-mod-tests-surface] real implementation","status":"closed","description":"Implementation ships without any #[cfg(test)] mod tests block.\n\nFILE SURFACE: src/core/example.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:missing-mod-tests-surface"],"parent":"bd-3usjw"}"#,
+            r#"{"id":"bd-3usjw.fewer-than-three","title":"[implements-surface:fewer-than-three-surface] real implementation","status":"closed","description":"Inline tests module exists but only ships 2 #[test] fns, missing the happy/edge/error triad.\n\nFILE SURFACE: src/core/example.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:fewer-than-three-surface"],"parent":"bd-3usjw"}"#,
+            r#"{"id":"bd-3usjw.all-ignored","title":"[implements-surface:all-ignored-surface] real implementation","status":"closed","description":"Inline tests module has 3 #[test] fns but every one is gated with #[ignore].\n\nFILE SURFACE: src/core/example.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:all-ignored-surface"],"parent":"bd-3usjw"}"#,
+            r#"{"id":"bd-3usjw.multi-src","title":"[implements-surface:multi-src-surface] real implementation","status":"closed","description":"Two src files; one ships inline coverage, the other is a thin re-export module without tests. At least one satisfying file should satisfy the rule.\n\nFILE SURFACE: src/core/example.rs, src/core/reexport.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:multi-src-surface"],"parent":"bd-3usjw"}"#,
+            r#"{"id":"bd-3usjw.no-src-surface","title":"[implements-surface:no-src-surface] real implementation","status":"closed","description":"Script-only surface; FILE SURFACE points at scripts and fixtures, not src/.\n\nFILE SURFACE: scripts/closure-lint.sh, tests/fixtures/closure_lint/unit_test_obligation_cases","close_reason":"implemented with durable evidence","labels":["implements-surface:no-src-surface"],"parent":"bd-3usjw"}"#,
+            r#"{"id":"bd-3usjw.older-non-part-ii","title":"[implements-surface:older-non-part-ii-surface] real implementation","status":"closed","description":"Closed implementation without the bd-3usjw parent. The rule fires for every implements-surface closure regardless of Part II membership.\n\nFILE SURFACE: src/core/example.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:older-non-part-ii-surface"]}"#,
+        ],
+        "",
+        &[
+            "valid-inline-surface",
+            "missing-mod-tests-surface",
+            "fewer-than-three-surface",
+            "all-ignored-surface",
+            "multi-src-surface",
+            "no-src-surface",
+            "older-non-part-ii-surface",
+        ],
+    )?;
+
+    // Synthetic implementation files for each declared FILE SURFACE.
+    // The shared `src/core/example.rs` path is rewritten per-bead via the
+    // distinct workspace temp dirs would normally — but because all beads
+    // here point at the same relative path inside one workspace, we
+    // collapse the cases by writing the WORST shape that still produces
+    // the per-bead expected outcome below. Instead, we use distinct paths
+    // per bead by overriding FILE SURFACE — but reusing the harness's
+    // single-tempdir setup is simpler. So each fixture file written here
+    // is the file the bead declared, named uniquely per bead.
+    //
+    // To avoid collision, we override the FILE SURFACE per bead with a
+    // per-bead path here: re-write the issues with distinct src paths.
+    // (The harness happens to accept arbitrary file existence; we just
+    // need one path per case.)
+    write_text_file(
+        temp.path(),
+        "src/core/example_valid.rs",
+        UNIT_TESTS_HAPPY_EDGE_ERROR,
+    )?;
+    write_text_file(
+        temp.path(),
+        "src/core/example_missing_mod.rs",
+        UNIT_TESTS_MISSING_MOD,
+    )?;
+    write_text_file(
+        temp.path(),
+        "src/core/example_only_two.rs",
+        UNIT_TESTS_ONLY_TWO,
+    )?;
+    write_text_file(
+        temp.path(),
+        "src/core/example_all_ignored.rs",
+        UNIT_TESTS_ALL_IGNORED,
+    )?;
+    write_text_file(
+        temp.path(),
+        "src/core/example_multi_primary.rs",
+        UNIT_TESTS_HAPPY_EDGE_ERROR,
+    )?;
+    write_text_file(
+        temp.path(),
+        "src/core/example_multi_thin.rs",
+        UNIT_TESTS_THIN_REEXPORT,
+    )?;
+    write_text_file(
+        temp.path(),
+        "src/core/example_older.rs",
+        UNIT_TESTS_MISSING_MOD,
+    )?;
+
+    // Re-emit the issues file with per-bead distinct FILE SURFACE paths
+    // so the linter checks the right file per case.
+    let issues = [
+        r#"{"id":"bd-3usjw.valid-inline","title":"[implements-surface:valid-inline-surface] real implementation","status":"closed","description":"Happy/edge/error inline tests live next to the implementation.\n\nFILE SURFACE: src/core/example_valid.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:valid-inline-surface"],"parent":"bd-3usjw"}"#,
+        r#"{"id":"bd-3usjw.missing-mod-tests","title":"[implements-surface:missing-mod-tests-surface] real implementation","status":"closed","description":"Implementation ships without any #[cfg(test)] mod tests block.\n\nFILE SURFACE: src/core/example_missing_mod.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:missing-mod-tests-surface"],"parent":"bd-3usjw"}"#,
+        r#"{"id":"bd-3usjw.fewer-than-three","title":"[implements-surface:fewer-than-three-surface] real implementation","status":"closed","description":"Inline tests module exists but only ships 2 #[test] fns, missing the happy/edge/error triad.\n\nFILE SURFACE: src/core/example_only_two.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:fewer-than-three-surface"],"parent":"bd-3usjw"}"#,
+        r#"{"id":"bd-3usjw.all-ignored","title":"[implements-surface:all-ignored-surface] real implementation","status":"closed","description":"Inline tests module has 3 #[test] fns but every one is gated with #[ignore].\n\nFILE SURFACE: src/core/example_all_ignored.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:all-ignored-surface"],"parent":"bd-3usjw"}"#,
+        r#"{"id":"bd-3usjw.multi-src","title":"[implements-surface:multi-src-surface] real implementation","status":"closed","description":"Two src files; one ships inline coverage, the other is a thin re-export module without tests. At least one satisfying file should satisfy the rule.\n\nFILE SURFACE: src/core/example_multi_primary.rs, src/core/example_multi_thin.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:multi-src-surface"],"parent":"bd-3usjw"}"#,
+        r#"{"id":"bd-3usjw.no-src-surface","title":"[implements-surface:no-src-surface] real implementation","status":"closed","description":"Script-only surface; FILE SURFACE points at scripts and fixtures, not src/.\n\nFILE SURFACE: scripts/closure-lint.sh, tests/fixtures/closure_lint/unit_test_obligation_cases","close_reason":"implemented with durable evidence","labels":["implements-surface:no-src-surface"],"parent":"bd-3usjw"}"#,
+        r#"{"id":"bd-3usjw.older-non-part-ii","title":"[implements-surface:older-non-part-ii-surface] real implementation","status":"closed","description":"Closed implementation without the bd-3usjw parent. The rule fires for every implements-surface closure regardless of Part II membership.\n\nFILE SURFACE: src/core/example_older.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:older-non-part-ii-surface"]}"#,
+    ];
+    fs::write(
+        temp.path().join(".beads").join("issues.jsonl"),
+        issues.join("\n") + "\n",
+    )
+    .map_err(|error| format!("rewrite issues.jsonl: {error}"))?;
+
+    let (output, report) = run_linter(temp.path())?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "linter should fail missing inline-unit-test obligations\n{}",
+            output_excerpt(&output)
+        ),
+    )?;
+    ensure_eq(report_status(&report)?, "fail", "report status")?;
+    let observed = violation_keys(&report)?;
+    let observed_keys: Vec<(String, String)> = observed
+        .iter()
+        .filter(|(_, _, reason)| {
+            reason.contains("no src/ file in FILE SURFACE has #[cfg(test)] mod tests")
+        })
+        .map(|(bead, surface, _)| (bead.clone(), surface.clone()))
+        .collect();
+    let mut expected_keys: Vec<(String, String)> = vec![
+        (
+            "bd-3usjw.missing-mod-tests".to_owned(),
+            "missing-mod-tests-surface".to_owned(),
+        ),
+        (
+            "bd-3usjw.fewer-than-three".to_owned(),
+            "fewer-than-three-surface".to_owned(),
+        ),
+        (
+            "bd-3usjw.all-ignored".to_owned(),
+            "all-ignored-surface".to_owned(),
+        ),
+        (
+            "bd-3usjw.older-non-part-ii".to_owned(),
+            "older-non-part-ii-surface".to_owned(),
+        ),
+    ];
+    expected_keys.sort();
+    let mut observed_sorted = observed_keys.clone();
+    observed_sorted.sort();
+    ensure_eq(
+        observed_sorted,
+        expected_keys,
+        "unit-test-obligation violations",
+    )?;
+
+    // The valid, multi-src-with-satisfying-file, and no-src-surface beads
+    // must NOT show up under this rule.
+    for clean_bead in [
+        "bd-3usjw.valid-inline",
+        "bd-3usjw.multi-src",
+        "bd-3usjw.no-src-surface",
+    ] {
+        ensure(
+            !observed.iter().any(|(bead, _, reason)| {
+                bead == clean_bead
+                    && reason.contains("no src/ file in FILE SURFACE has #[cfg(test)] mod tests")
+            }),
+            format!("{clean_bead} should not violate unit-test obligation"),
+        )?;
+    }
+    Ok(())
+}

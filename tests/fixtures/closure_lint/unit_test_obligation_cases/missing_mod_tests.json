@@ -1,0 +1,7 @@
+{
+  "schema": "ee.closure_lint.unit_test_obligation_case.v1",
+  "case": "missing_mod_tests",
+  "bead_id": "bd-3usjw.missing-mod-tests",
+  "description": "Part II implements-surface bead declares src/core/example.rs in FILE SURFACE but the file has no #[cfg(test)] mod tests block at all. AGENTS.md L300-302 violation. Expected closure-lint outcome: fail.",
+  "expected": "fail"
+}

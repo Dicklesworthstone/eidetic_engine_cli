@@ -1,0 +1,7 @@
+{
+  "schema": "ee.closure_lint.unit_test_obligation_case.v1",
+  "case": "all_tests_ignored",
+  "bead_id": "bd-3usjw.all-ignored",
+  "description": "Part II implements-surface bead declares src/core/example.rs in FILE SURFACE; the file ships a #[cfg(test)] mod tests block with 3 #[test] fns but every test is gated with #[ignore], so none run in CI. Mirrors the test-side rust_test_file_has_only_ignored_tests rejection. Expected closure-lint outcome: fail.",
+  "expected": "fail"
+}

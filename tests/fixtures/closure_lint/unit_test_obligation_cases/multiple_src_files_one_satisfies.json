@@ -1,0 +1,7 @@
+{
+  "schema": "ee.closure_lint.unit_test_obligation_case.v1",
+  "case": "multiple_src_files_one_satisfies",
+  "bead_id": "bd-3usjw.multi-src",
+  "description": "Part II implements-surface bead declares two src files in FILE SURFACE. One file has the full inline-test contract (#[cfg(test)] mod tests, 3+ non-ignored #[test] fns, assertion coverage); the other is a thin re-export module with no inline tests. The obligation is satisfied because the rule requires AT LEAST ONE src file to ship the coverage. Expected closure-lint outcome: pass.",
+  "expected": "pass"
+}

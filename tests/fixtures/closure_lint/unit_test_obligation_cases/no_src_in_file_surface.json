@@ -1,0 +1,7 @@
+{
+  "schema": "ee.closure_lint.unit_test_obligation_case.v1",
+  "case": "no_src_in_file_surface",
+  "bead_id": "bd-3usjw.no-src-surface",
+  "description": "Part II implements-surface bead whose FILE SURFACE is script/fixture/docs-only (e.g. scripts/closure-lint.sh, tests/fixtures/closure_lint/**) with no src/...rs paths at all. The unit-test obligation is exempt because the rule applies to implementation modules, not closure-lint-internal scripts or documentation drift gates. Expected closure-lint outcome: pass.",
+  "expected": "pass"
+}

@@ -1,0 +1,7 @@
+{
+  "schema": "ee.closure_lint.unit_test_obligation_case.v1",
+  "case": "fewer_than_three_tests",
+  "bead_id": "bd-3usjw.fewer-than-three",
+  "description": "Part II implements-surface bead declares src/core/example.rs in FILE SURFACE; the file ships a #[cfg(test)] mod tests block but only 2 #[test] fns, missing the happy/edge/error triad. Expected closure-lint outcome: fail.",
+  "expected": "fail"
+}
