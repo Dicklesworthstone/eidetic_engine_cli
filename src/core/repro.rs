@@ -332,21 +332,22 @@ pub fn capture_pack(options: &CaptureOptions) -> Result<CaptureReport, DomainErr
     );
     report.dry_run = options.dry_run;
 
-    if !options.source.exists() {
-        return Err(DomainError::NotFound {
-            resource: "source".to_string(),
-            id: options.source.display().to_string(),
-            repair: Some("Provide a valid source directory or fixture".to_string()),
-        });
-    }
+    validate_existing_repro_path(
+        &options.source,
+        "source",
+        "Provide a valid source directory or fixture",
+    )?;
 
     if !options.dry_run {
+        reject_existing_symlink_components(&pack_path)
+            .map_err(repro_symlink_refused_storage_error)?;
         if let Err(e) = fs::create_dir_all(&pack_path) {
             return Err(DomainError::Storage {
                 message: format!("Failed to create pack directory: {e}"),
                 repair: Some("Check directory permissions".to_string()),
             });
         }
+        validate_pack_root(&pack_path)?;
 
         let now = Utc::now().to_rfc3339();
 
@@ -360,8 +361,7 @@ pub fn capture_pack(options: &CaptureOptions) -> Result<CaptureReport, DomainErr
         let manifest_json =
             create_manifest_json(&pack_name, &options.version, &now, &payload_files);
 
-        let env_path = pack_path.join("env.json");
-        if let Err(e) = fs::write(&env_path, &env_json) {
+        if let Err(e) = write_pack_file_no_symlinks(&pack_path, "env.json", env_json.as_bytes()) {
             return Err(DomainError::Storage {
                 message: format!("Failed to write env.json: {e}"),
                 repair: None,
@@ -369,8 +369,9 @@ pub fn capture_pack(options: &CaptureOptions) -> Result<CaptureReport, DomainErr
         }
         report.add_file(env_file);
 
-        let manifest_path = pack_path.join("manifest.json");
-        if let Err(e) = fs::write(&manifest_path, &manifest_json) {
+        if let Err(e) =
+            write_pack_file_no_symlinks(&pack_path, "manifest.json", manifest_json.as_bytes())
+        {
             return Err(DomainError::Storage {
                 message: format!("Failed to write manifest.json: {e}"),
                 repair: None,
@@ -382,8 +383,8 @@ pub fn capture_pack(options: &CaptureOptions) -> Result<CaptureReport, DomainErr
             size_bytes: len_to_u64(manifest_json.len()),
         });
 
-        let lock_path = pack_path.join("repro.lock");
-        if let Err(e) = fs::write(&lock_path, &lock_json) {
+        if let Err(e) = write_pack_file_no_symlinks(&pack_path, "repro.lock", lock_json.as_bytes())
+        {
             return Err(DomainError::Storage {
                 message: format!("Failed to write repro.lock: {e}"),
                 repair: None,
@@ -391,8 +392,9 @@ pub fn capture_pack(options: &CaptureOptions) -> Result<CaptureReport, DomainErr
         }
         report.add_file(lock_file);
 
-        let prov_path = pack_path.join("provenance.json");
-        if let Err(e) = fs::write(&prov_path, &prov_json) {
+        if let Err(e) =
+            write_pack_file_no_symlinks(&pack_path, "provenance.json", prov_json.as_bytes())
+        {
             return Err(DomainError::Storage {
                 message: format!("Failed to write provenance.json: {e}"),
                 repair: None,
@@ -503,13 +505,7 @@ pub fn replay_pack(options: &ReplayOptions) -> Result<ReplayReport, DomainError>
 
 /// Minimize a repro pack by removing optional/large artifacts.
 pub fn minimize_pack(options: &MinimizeOptions) -> Result<MinimizeReport, DomainError> {
-    if !options.pack_path.exists() {
-        return Err(DomainError::NotFound {
-            resource: "pack".to_string(),
-            id: options.pack_path.display().to_string(),
-            repair: Some("Provide a valid repro pack path".to_string()),
-        });
-    }
+    validate_pack_root(&options.pack_path)?;
 
     let mut report = MinimizeReport::new(options.pack_path.clone(), options.output_dir.clone());
     report.dry_run = options.dry_run;
@@ -517,26 +513,20 @@ pub fn minimize_pack(options: &MinimizeOptions) -> Result<MinimizeReport, Domain
     let required_files = ["env.json", "manifest.json", "repro.lock", "provenance.json"];
 
     for file_name in &required_files {
-        let file_path = options.pack_path.join(file_name);
-        if file_path.exists() {
-            if let Ok(metadata) = fs::metadata(&file_path) {
-                report.add_kept(metadata.len());
-            }
+        if let Some(metadata) = pack_file_metadata_no_symlinks(&options.pack_path, file_name)? {
+            report.add_kept(metadata.len());
         }
     }
 
-    let legal_path = options.pack_path.join("LEGAL.md");
-    if legal_path.exists() {
-        if let Ok(metadata) = fs::metadata(&legal_path) {
-            if options.remove_optional {
-                report.add_removed(RemovedFile {
-                    path: "LEGAL.md".to_string(),
-                    size_bytes: metadata.len(),
-                    reason: "optional artifact".to_string(),
-                });
-            } else {
-                report.add_kept(metadata.len());
-            }
+    if let Some(metadata) = pack_file_metadata_no_symlinks(&options.pack_path, "LEGAL.md")? {
+        if options.remove_optional {
+            report.add_removed(RemovedFile {
+                path: "LEGAL.md".to_string(),
+                size_bytes: metadata.len(),
+                reason: "optional artifact".to_string(),
+            });
+        } else {
+            report.add_kept(metadata.len());
         }
     }
 
@@ -576,7 +566,51 @@ fn len_to_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
 }
 
+fn validate_existing_repro_path(
+    path: &Path,
+    resource: &str,
+    repair: &str,
+) -> Result<(), DomainError> {
+    reject_existing_symlink_components(path).map_err(repro_symlink_refused_storage_error)?;
+    fs::symlink_metadata(path).map_err(|_| DomainError::NotFound {
+        resource: resource.to_string(),
+        id: path.display().to_string(),
+        repair: Some(repair.to_string()),
+    })?;
+    Ok(())
+}
+
+fn reject_existing_symlink_components(path: &Path) -> Result<(), String> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!("repro_path_symlink_refused: {}", current.display()));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(format!(
+                    "repro_path_unavailable: {}: {}",
+                    current.display(),
+                    error
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn repro_symlink_refused_storage_error(error: String) -> DomainError {
+    DomainError::Storage {
+        message: error,
+        repair: Some("Use real repro pack paths without symbolic links".to_string()),
+    }
+}
+
 fn validate_pack_root(pack_path: &Path) -> Result<(), DomainError> {
+    reject_existing_symlink_components(pack_path).map_err(repro_symlink_refused_storage_error)?;
     let metadata = fs::symlink_metadata(pack_path).map_err(|_| DomainError::NotFound {
         resource: "pack".to_string(),
         id: pack_path.display().to_string(),
@@ -732,6 +766,45 @@ fn read_pack_file_no_symlinks(pack_path: &Path, relative_path: &str) -> Result<V
     })
 }
 
+fn write_pack_file_no_symlinks(
+    pack_path: &Path,
+    relative_path: &str,
+    content: &[u8],
+) -> Result<(), String> {
+    let target_path = resolve_pack_file_path_for_write_no_symlinks(pack_path, relative_path)?;
+    fs::write(&target_path, content).map_err(|error| {
+        format!(
+            "pack_artifact_write_failed: {}: {}",
+            target_path.display(),
+            error
+        )
+    })
+}
+
+fn pack_file_metadata_no_symlinks(
+    pack_path: &Path,
+    relative_path: &str,
+) -> Result<Option<fs::Metadata>, DomainError> {
+    let Some(target_path) = resolve_optional_pack_file_path_no_symlinks(pack_path, relative_path)
+        .map_err(|error| DomainError::Storage {
+        message: error,
+        repair: Some("Use real repro pack member paths without symbolic links".to_string()),
+    })?
+    else {
+        return Ok(None);
+    };
+    fs::metadata(&target_path)
+        .map(Some)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "pack_artifact_metadata_unavailable: {}: {}",
+                target_path.display(),
+                error
+            ),
+            repair: None,
+        })
+}
+
 fn resolve_pack_file_path_no_symlinks(
     pack_path: &Path,
     relative_path: &str,
@@ -746,6 +819,71 @@ fn resolve_pack_file_path_no_symlinks(
         reject_pack_symlink_component(&target_path)?;
     }
     Ok(target_path)
+}
+
+fn resolve_pack_file_path_for_write_no_symlinks(
+    pack_path: &Path,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
+    reject_pack_symlink_component(pack_path)?;
+    let mut target_path = pack_path.to_path_buf();
+    let mut components = Path::new(relative_path).components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(segment) = component else {
+            return Err(format!("invalid pack member path: {relative_path}"));
+        };
+        target_path.push(segment);
+        match fs::symlink_metadata(&target_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!("pack_symlink_refused: {}", target_path.display()));
+            }
+            Ok(_) => {}
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound && components.peek().is_none() => {}
+            Err(error) => {
+                return Err(format!(
+                    "pack_artifact_not_found: {}: {}",
+                    target_path.display(),
+                    error
+                ));
+            }
+        }
+    }
+    Ok(target_path)
+}
+
+fn resolve_optional_pack_file_path_no_symlinks(
+    pack_path: &Path,
+    relative_path: &str,
+) -> Result<Option<PathBuf>, String> {
+    reject_pack_symlink_component(pack_path)?;
+    let mut target_path = pack_path.to_path_buf();
+    let mut components = Path::new(relative_path).components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(segment) = component else {
+            return Err(format!("invalid pack member path: {relative_path}"));
+        };
+        target_path.push(segment);
+        match fs::symlink_metadata(&target_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!("pack_symlink_refused: {}", target_path.display()));
+            }
+            Ok(_) => {}
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound && components.peek().is_none() =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "pack_artifact_not_found: {}: {}",
+                    target_path.display(),
+                    error
+                ));
+            }
+        }
+    }
+    Ok(Some(target_path))
 }
 
 fn reject_pack_symlink_component(path: &Path) -> Result<(), String> {
@@ -981,5 +1119,91 @@ mod tests {
         assert_eq!(report.artifacts_removed, 1);
         assert_eq!(report.minimized_size_bytes, 300);
         assert_eq!(report.original_size_bytes, 1300);
+    }
+
+    #[cfg(unix)]
+    fn temp_root(prefix: &str) -> Result<PathBuf, String> {
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .map(tempfile::TempDir::keep)
+            .map_err(|e| e.to_string())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_pack_rejects_symlinked_output_parent() -> TestResult {
+        let workspace = temp_root("ee_repro_capture_symlink_parent_")?;
+        let source = workspace.join("source");
+        let real_output = workspace.join("real-output");
+        let symlink_output = workspace.join("out-link");
+        fs::create_dir_all(&source).map_err(|e| e.to_string())?;
+        fs::create_dir_all(&real_output).map_err(|e| e.to_string())?;
+        std::os::unix::fs::symlink(&real_output, &symlink_output).map_err(|e| e.to_string())?;
+
+        let error = capture_pack(&CaptureOptions {
+            source,
+            output_dir: symlink_output,
+            name: Some("pack".to_string()),
+            version: "1.0.0".to_string(),
+            dry_run: false,
+            ..Default::default()
+        })
+        .expect_err("symlinked output parent must be rejected");
+
+        assert_eq!(error.code(), "storage");
+        assert!(error.message().contains("symlink"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_pack_rejects_symlinked_pack_directory() -> TestResult {
+        let workspace = temp_root("ee_repro_capture_symlink_pack_")?;
+        let source = workspace.join("source");
+        let output = workspace.join("output");
+        let real_pack = workspace.join("real-pack");
+        fs::create_dir_all(&source).map_err(|e| e.to_string())?;
+        fs::create_dir_all(&output).map_err(|e| e.to_string())?;
+        fs::create_dir_all(&real_pack).map_err(|e| e.to_string())?;
+        std::os::unix::fs::symlink(&real_pack, output.join("pack")).map_err(|e| e.to_string())?;
+
+        let error = capture_pack(&CaptureOptions {
+            source,
+            output_dir: output,
+            name: Some("pack".to_string()),
+            version: "1.0.0".to_string(),
+            dry_run: false,
+            ..Default::default()
+        })
+        .expect_err("symlinked pack directory must be rejected");
+
+        assert_eq!(error.code(), "storage");
+        assert!(error.message().contains("symlink"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn minimize_pack_rejects_symlinked_required_member() -> TestResult {
+        let workspace = temp_root("ee_repro_minimize_symlink_member_")?;
+        let pack = workspace.join("pack");
+        fs::create_dir_all(&pack).map_err(|e| e.to_string())?;
+        let external_env = workspace.join("external-env.json");
+        fs::write(&external_env, "{}\n").map_err(|e| e.to_string())?;
+        std::os::unix::fs::symlink(&external_env, pack.join("env.json"))
+            .map_err(|e| e.to_string())?;
+
+        let error = minimize_pack(&MinimizeOptions {
+            pack_path: pack,
+            output_dir: workspace.join("minimized"),
+            dry_run: true,
+            ..Default::default()
+        })
+        .expect_err("symlinked required pack member must be rejected");
+
+        assert_eq!(error.code(), "storage");
+        assert!(error.message().contains("symlink"));
+        Ok(())
     }
 }
