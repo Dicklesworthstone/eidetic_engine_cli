@@ -361,6 +361,20 @@ fn replay_pack_case_input_bytes(input: &serde_json::Value) -> Result<Vec<u8>, St
     Ok(draft_bytes(&draft))
 }
 
+fn verify_regression_fixture_replay(
+    fixture: &DeterminismRegressionFixture,
+) -> Result<String, String> {
+    let replayed = replay_pack_case_input_bytes(&fixture.input)?;
+    let replayed_hash = hash_bytes(&replayed);
+    if replayed_hash != fixture.expected_hash {
+        return Err(format!(
+            "fixture {} expected_hash {} does not match replay hash {}",
+            fixture.input_hash, fixture.expected_hash, replayed_hash
+        ));
+    }
+    Ok(replayed_hash)
+}
+
 fn regression_fixture_file_name(input_hash: &str) -> Result<String, String> {
     let input_hash_hex = input_hash.trim_start_matches("blake3:");
     if input_hash_hex.len() < 16 {
@@ -788,6 +802,47 @@ fn determinism_regression_fixture_replays_structured_pack_input() -> Result<(), 
     assert_eq!(first, replay);
     assert_eq!(fixture.expected_hash, hash_bytes(&replay));
     assert_eq!(fixture.input, input);
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_verifies_replayed_expected_hash() -> Result<(), String> {
+    let specs = vec![(8, 900, 700, 1), (13, 500, 950, 3), (5, 650, 875, 2)];
+    let budget = TokenBudget::new(64).map_err(|error| format!("{error:?}"))?;
+    let options = PackAssemblyOptions {
+        include_coverage_fill: true,
+        output_redaction_enabled: true,
+        redaction_level: RedactionLevel::Strict,
+    };
+    let input = regression_input_for_pack_case(
+        "structured replay".to_string(),
+        budget,
+        ContextPackProfile::Balanced,
+        options,
+        42,
+        &specs,
+    )?;
+    let input_bytes = serde_json::to_vec(&input).map_err(|error| error.to_string())?;
+    let replayed = replay_pack_case_input_bytes(&input)?;
+    let mut fixture = regression_fixture_for_mismatch(
+        42,
+        &input_bytes,
+        &replayed,
+        b"synthetic nondeterministic output",
+    )
+    .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+
+    assert_eq!(
+        verify_regression_fixture_replay(&fixture)?,
+        fixture.expected_hash
+    );
+
+    fixture.expected_hash = hash_bytes(b"wrong expected bytes");
+    let error = verify_regression_fixture_replay(&fixture)
+        .expect_err("mismatched expected_hash should reject regression replay");
+
+    assert!(error.contains("expected_hash"));
+    assert!(error.contains(&fixture.input_hash));
     Ok(())
 }
 
