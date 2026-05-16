@@ -129,6 +129,7 @@ impl PreflightRun {
     #[must_use]
     pub fn cleared(mut self) -> Self {
         self.cleared = true;
+        self.block_reason = None;
         self
     }
 
@@ -998,6 +999,16 @@ mod tests {
             Some("Critical risk: data loss".to_string()),
             "reason",
         )
+    }
+
+    #[test]
+    fn preflight_run_cleared_removes_prior_block_reason() -> TestResult {
+        let run = PreflightRun::new("pf_003", "Retry task", "2026-04-30T12:00:00Z")
+            .blocked("Waiting on explicit confirmation")
+            .cleared();
+
+        ensure(run.cleared, true, "cleared")?;
+        ensure(run.block_reason, None, "block reason")
     }
 
     #[test]
