@@ -3,43 +3,43 @@ source: tests/agent_profile_e2e.rs
 expression: value
 ---
 {
+  "schema": "ee.context.agent_profile.v1",
   "agentName": "AgentProfileAlpha",
   "agentNameHash": "<agent-hash>",
-  "biasMagnitude": 0.05,
-  "coldStart": false,
-  "coldStartThreshold": 10,
-  "degraded": [],
-  "determinismKey": {
-    "agentNameHash": "<agent-hash>",
-    "basePackHash": "<pack-hash>",
-    "profileGeneration": 20,
-    "workspaceGeneration": 0
-  },
-  "halfLifeDays": null,
-  "harmfulCount": 10,
+  "workspaceId": "<workspace-id>",
+  "observedOutcomes": 20,
   "helpfulCount": 10,
+  "harmfulCount": 10,
   "ignoredCount": 0,
+  "biasMagnitude": 0.05,
   "maxBiasMagnitude": 0.05,
   "memoryBiasApplied": 2,
-  "observedOutcomes": 20,
-  "schema": "ee.context.agent_profile.v1",
+  "coldStart": false,
+  "coldStartThreshold": 10,
+  "halfLifeDays": null,
+  "determinismKey": {
+    "workspaceGeneration": 0,
+    "profileGeneration": 20,
+    "agentNameHash": "<agent-hash>",
+    "basePackHash": "<pack-hash>"
+  },
   "topBiases": [
     {
+      "memoryId": "<alpha-memory>",
       "bias": 0.05,
-      "harmfulCount": 0,
       "helpfulCount": 10,
+      "harmfulCount": 0,
       "ignoredCount": 0,
-      "lastSeenAt": "<timestamp>",
-      "memoryId": "<alpha-memory>"
+      "lastSeenAt": "<timestamp>"
     },
     {
+      "memoryId": "<beta-memory>",
       "bias": -0.05,
-      "harmfulCount": 10,
       "helpfulCount": 0,
+      "harmfulCount": 10,
       "ignoredCount": 0,
-      "lastSeenAt": "<timestamp>",
-      "memoryId": "<beta-memory>"
+      "lastSeenAt": "<timestamp>"
     }
   ],
-  "workspaceId": "<workspace-id>"
+  "degraded": []
 }
