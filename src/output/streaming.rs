@@ -794,7 +794,7 @@ mod tests {
         validator.observe(&error_frame()).unwrap();
 
         assert_eq!(
-            validator.observe(&trailer(0)),
+            validator.observe(&item(0, 1)),
             Err(StreamValidationError::FrameAfterTerminal)
         );
     }
