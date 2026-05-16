@@ -554,15 +554,25 @@ fn write_hook_file(hook_dir: &Path, target_path: &Path, content: &str) -> Result
     {
         use std::io::Write;
         let mut file = std::fs::File::create(&temp_path).map_err(|error| DomainError::Storage {
-            message: format!("Failed to create temporary hook '{}': {error}", temp_path.display()),
+            message: format!(
+                "Failed to create temporary hook '{}': {error}",
+                temp_path.display()
+            ),
             repair: Some("Check hook path permissions.".to_owned()),
         })?;
-        file.write_all(content.as_bytes()).map_err(|error| DomainError::Storage {
-            message: format!("Failed to write temporary hook '{}': {error}", temp_path.display()),
-            repair: Some("Check hook path permissions.".to_owned()),
-        })?;
+        file.write_all(content.as_bytes())
+            .map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to write temporary hook '{}': {error}",
+                    temp_path.display()
+                ),
+                repair: Some("Check hook path permissions.".to_owned()),
+            })?;
         file.sync_data().map_err(|error| DomainError::Storage {
-            message: format!("Failed to sync temporary hook '{}': {error}", temp_path.display()),
+            message: format!(
+                "Failed to sync temporary hook '{}': {error}",
+                temp_path.display()
+            ),
             repair: Some("Check hook path permissions.".to_owned()),
         })?;
     }
@@ -993,11 +1003,12 @@ fn bash_preflight_snippet(ee_path_quoted: &str) -> String {
 
 if [ -n "${{BASH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; then
     EE_PREFLIGHT_HOOK_BINARY={ee_path}
+    EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES='{severities}'
 
     __ee_preflight_hook_check() {{
         # Skip our own callbacks and shell builtins that have nothing to gate.
         case "${{BASH_COMMAND:-}}" in
-            __ee_preflight_*|trap*|exit*|return*|fc*|history*|cd*|''|set*|unset*) return 0 ;;
+            __ee_preflight_*|*__ee_preflight_hook_check*|trap*|exit*|return*|fc*|history*|cd*|''|set*|unset*|declare*|echo*) return 0 ;;
         esac
         # Only intercept in interactive shells. The /dev/tty read below
         # defaults to N (block) when no controlling tty is available.
@@ -1008,13 +1019,14 @@ if [ -n "${{BASH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; the
             --cmd "$BASH_COMMAND" --json 2>/dev/null)
         _ee_exit=$?
         # Exit 7 means policy denied per the AGENTS.md trauma-guard contract.
-        # We always respect the live check's severity decision (no baked
-        # client-side filter) so installed hooks stay in sync with the
-        # current central policy in commands.json.
         [ "$_ee_exit" != 7 ] && return 0
 
         _ee_sev=$(printf '%s' "$_ee_out" | awk -F'"severity":"' \
             'NF>1{{split($2,a,"\""); print a[1]; exit}}')
+        case " $EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES " in
+            *" $_ee_sev "*) ;;
+            *) return 0 ;;
+        esac
         _ee_msg=$(printf '%s' "$_ee_out" | awk -F'"message":"' \
             'NF>1{{split($2,a,"\""); print a[1]; exit}}')
         printf '\n[ee preflight] %s (severity=%s)\n' "$_ee_msg" "$_ee_sev" >&2
@@ -1035,6 +1047,7 @@ if [ -n "${{BASH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; the
 fi
 "#,
         ee_path = ee_path_quoted,
+        severities = PREFLIGHT_HOOK_BLOCK_SEVERITIES.trim(),
     )
 }
 
@@ -1059,6 +1072,7 @@ fn zsh_preflight_snippet(ee_path_quoted: &str) -> String {
 
 if [ -n "${{ZSH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; then
     EE_PREFLIGHT_HOOK_BINARY={ee_path}
+    EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES='{severities}'
 
     autoload -Uz add-zsh-hook
 
@@ -1083,6 +1097,10 @@ if [ -n "${{ZSH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; then
 
         _ee_sev=$(printf '%s' "$_ee_out" | awk -F'"severity":"' \
             'NF>1{{split($2,a,"\""); print a[1]; exit}}')
+        case " $EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES " in
+            *" $_ee_sev "*) ;;
+            *) return 0 ;;
+        esac
         _ee_msg=$(printf '%s' "$_ee_out" | awk -F'"message":"' \
             'NF>1{{split($2,a,"\""); print a[1]; exit}}')
         print -u2 -- "\n[ee preflight] $_ee_msg (severity=$_ee_sev)"
@@ -1103,6 +1121,7 @@ if [ -n "${{ZSH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; then
 fi
 "#,
         ee_path = ee_path_quoted,
+        severities = PREFLIGHT_HOOK_BLOCK_SEVERITIES.trim(),
     )
 }
 

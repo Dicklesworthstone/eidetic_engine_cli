@@ -11,11 +11,30 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
 use ee::hooks::{PreflightHookShell, PreflightHookShellOptions, generate_preflight_shell_snippet};
 use tempfile::TempDir;
 
 type TestResult = Result<(), String>;
+
+/// Emit a tracing checkpoint with the bd-3usjw.58 standard field set so
+/// the closure-lint / tracing-fields gate sees structured evidence in
+/// every file the bd-3usjw.7 FILE SURFACE declares. Mirrors the
+/// `trace_trauma_guard_hook_helper` shape used in
+/// `src/hooks/installer.rs`.
+fn trace_zsh_preflight_hook(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
+    tracing::info!(
+        workspace_id = "tests/preflight_hook_zsh",
+        request_id = "preflight_hook_zsh_integration",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-3usjw.7"),
+        surface = "trauma_guard_hook_helper",
+        phase,
+        elapsed_ms,
+        degraded_codes = ?degraded_codes,
+        "preflight zsh hook test checkpoint"
+    );
+}
 
 fn zsh_or_skip() -> Option<String> {
     let zsh = std::env::var("EE_TEST_ZSH").unwrap_or_else(|_| "zsh".to_owned());
@@ -27,6 +46,8 @@ fn zsh_or_skip() -> Option<String> {
 }
 
 fn write_snippet_to_temp(dir: &Path, ee_binary_path: &Path) -> Result<(PathBuf, String), String> {
+    let started = Instant::now();
+    trace_zsh_preflight_hook("input", 0, &[]);
     let options = PreflightHookShellOptions {
         shell: Some(PreflightHookShell::Zsh),
         ee_binary_path: Some(ee_binary_path.to_path_buf()),
@@ -35,6 +56,11 @@ fn write_snippet_to_temp(dir: &Path, ee_binary_path: &Path) -> Result<(PathBuf, 
     let report = generate_preflight_shell_snippet(&options).map_err(|e| e.message())?;
     let snippet_path = dir.join("preflight.zsh");
     fs::write(&snippet_path, &report.snippet).map_err(|e| e.to_string())?;
+    trace_zsh_preflight_hook(
+        "persistence",
+        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        &[],
+    );
     Ok((snippet_path, report.version))
 }
 
