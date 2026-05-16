@@ -16,13 +16,11 @@ use crate::config::{
     WorkspaceResolution, WorkspaceResolutionMode, WorkspaceResolutionRequest,
     WorkspaceResolutionSource, diagnose_workspace_resolution, read_env_var, resolve_workspace,
 };
-#[cfg(feature = "graph")]
-use crate::db::StoredMemoryLink;
 use crate::db::{
     CreateWorkspaceInput, DbConnection, FeedbackSourceHarmfulCount, GraphSnapshotStatus,
     GraphSnapshotType, PROVENANCE_CHAIN_HASH_VERSION, PROVENANCE_STATUS_UNVERIFIED,
     StoredAuditEntry, StoredCurationCandidate, StoredCurationTtlPolicy, StoredMemory,
-    audit_actions, default_curation_ttl_policy_id_for_review_state,
+    StoredMemoryLink, audit_actions, default_curation_ttl_policy_id_for_review_state,
 };
 use crate::models::degradation::GRAPH_SKYLINE_DEGENERATE_COMMUNITIES_CODE;
 use crate::models::posture::{
@@ -1905,7 +1903,7 @@ fn gather_status_skyline_community_count(workspace_path: Option<&Path>) -> Optio
             return None;
         }
         let connection = DbConnection::open_file(&database_path).ok()?;
-        let links = connection.list_all_memory_links(None).ok()?;
+        let links = status_visible_memory_links(connection.list_all_memory_links(None).ok()?);
         Some(status_skyline_community_count_from_links(&links))
     }
     #[cfg(not(feature = "graph"))]
@@ -2249,7 +2247,7 @@ fn graph_live_compute_availability() -> &'static str {
 fn memory_graph_generation(
     connection: &DbConnection,
 ) -> Result<(u64, u32, u32), crate::db::DbError> {
-    let links = connection.list_all_memory_links(None)?;
+    let links = status_visible_memory_links(connection.list_all_memory_links(None)?);
     let mut nodes = BTreeSet::new();
     for link in &links {
         nodes.insert(link.src_memory_id.clone());
@@ -2259,6 +2257,15 @@ fn memory_graph_generation(
     let node_count = u32::try_from(nodes.len()).unwrap_or(u32::MAX);
     let edge_count = u32::try_from(links.len()).unwrap_or(u32::MAX);
     Ok((generation, node_count, edge_count))
+}
+
+fn status_visible_memory_links(links: Vec<StoredMemoryLink>) -> Vec<StoredMemoryLink> {
+    links
+        .into_iter()
+        .filter(|link| {
+            crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref())
+        })
+        .collect()
 }
 
 fn resolve_status_workspace_ids(connection: &DbConnection, workspace_path: &Path) -> Vec<String> {
@@ -3868,6 +3875,93 @@ mod tests {
     }
 
     #[test]
+    fn memory_graph_generation_ignores_denied_mesh_links() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_path = Path::new("/tmp/ee-status-graph-mesh-filter");
+        let workspace_id = stable_workspace_id(workspace_path);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for (memory_id, content) in [
+            ("mem_status_mesh_a", "Local graph source A"),
+            ("mem_status_mesh_b", "Local graph source B"),
+            ("mem_status_mesh_c", "Denied mesh graph source C"),
+        ] {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &crate::db::CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "operational".to_owned(),
+                        kind: "note".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence: 0.8,
+                        utility: 0.5,
+                        importance: 0.5,
+                        provenance_uri: None,
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection
+            .insert_memory_link(
+                "link_status_mesh_local",
+                &crate::db::CreateMemoryLinkInput {
+                    src_memory_id: "mem_status_mesh_a".to_owned(),
+                    dst_memory_id: "mem_status_mesh_b".to_owned(),
+                    relation: crate::db::MemoryLinkRelation::Supports,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    directed: false,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: crate::db::MemoryLinkSource::Agent,
+                    created_by: Some("status-mesh-test".to_owned()),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory_link(
+                "link_status_mesh_denied",
+                &crate::db::CreateMemoryLinkInput {
+                    src_memory_id: "mem_status_mesh_b".to_owned(),
+                    dst_memory_id: "mem_status_mesh_c".to_owned(),
+                    relation: crate::db::MemoryLinkRelation::Supports,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    directed: false,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: crate::db::MemoryLinkSource::Agent,
+                    created_by: Some("status-mesh-test".to_owned()),
+                    metadata_json: Some(status_denied_mesh_link_metadata()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let (generation, node_count, edge_count) =
+            memory_graph_generation(&connection).map_err(|error| error.to_string())?;
+
+        ensure(generation, 1, "visible graph generation")?;
+        ensure(node_count, 2, "visible node count")?;
+        ensure(edge_count, 1, "visible edge count")
+    }
+
+    #[test]
     fn graph_snapshot_artifact_reports_current_persisted_snapshot() -> TestResult {
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
@@ -3987,6 +4081,24 @@ mod tests {
             last_action_at: None,
             ttl_policy_id: ttl_policy_id.map(|s| s.to_owned()),
         }
+    }
+
+    fn status_denied_mesh_link_metadata() -> String {
+        serde_json::json!({
+            "mesh": {
+                "workspaceScopeDecision": "deny",
+                "materialLane": "graphSignal",
+                "cachedMaterialId": "mesh_status_denied",
+                "originWorkspaceId": "wsp_remote_private",
+                "originWorkspaceLabel": "/Users/alice/private/repo",
+                "producerPeerId": "peer_builder_one",
+                "producerPeerLabel": "/Users/alice/private/peer-agent",
+                "importDecisionId": "mesh_status_decision_denied",
+                "trustLane": "quarantined",
+                "redactionPosture": "metadata_only"
+            }
+        })
+        .to_string()
     }
 
     #[test]
