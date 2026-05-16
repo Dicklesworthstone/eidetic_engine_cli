@@ -1410,6 +1410,8 @@ fn metadata_contains_mesh_marker(metadata: &JsonValue) -> bool {
         "origin_workspace_id",
         "materialLane",
         "material_lane",
+        "policyDecision",
+        "policy_decision",
     ]
     .iter()
     .any(|key| metadata.get(key).is_some())
@@ -2661,6 +2663,13 @@ max_bytes = 0
                 }
             }
         });
+        let standalone_policy_decision = json!({
+            "policyDecision": {
+                "schema": "ee.mesh.policy_decision.v1",
+                "direction": "inbound",
+                "action": "allow"
+            }
+        });
 
         assert_eq!(
             mesh_query_visibility(Some(&denied)),
@@ -2684,6 +2693,10 @@ max_bytes = 0
         );
         assert_eq!(
             mesh_query_visibility(Some(&malformed_policy_decision)),
+            MeshQueryVisibility::Blocked
+        );
+        assert_eq!(
+            mesh_query_visibility(Some(&standalone_policy_decision)),
             MeshQueryVisibility::Blocked
         );
         assert_eq!(
