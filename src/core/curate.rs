@@ -31,8 +31,8 @@ use crate::db::{
     audit_actions, default_curation_ttl_policy_id_for_review_state, generate_audit_id,
 };
 use crate::graph::decay::{
-    StructuralDecayMultiplier, compute_structural_decay_adjustment,
-    compute_structural_decay_connectivity,
+    StructuralDecayMultiplier, compute_structural_decay_connectivity,
+    compute_structural_decay_index,
 };
 use crate::models::degradation::GRAPH_CURATE_DISCONNECTED_GRAPH_CODE;
 use crate::models::{
@@ -4150,6 +4150,7 @@ fn curate_structural_decay_adjustments(
         .collect::<Vec<_>>();
     let graph = curate_structural_decay_graph(&memory_ids, &visible_links);
     push_structural_decay_connectivity_degradation(&graph, degraded);
+    let structural_decay_index = compute_structural_decay_index(&graph);
     let mut adjustments = BTreeMap::new();
 
     for candidate in candidates {
@@ -4179,7 +4180,7 @@ fn curate_structural_decay_adjustments(
         } else {
             (elapsed_seconds as f64 / policy.threshold_seconds as f64).clamp(0.0, 1.0) as f32
         };
-        let structural = compute_structural_decay_adjustment(&graph, &candidate.target_memory_id);
+        let structural = structural_decay_index.adjustment(&candidate.target_memory_id);
         let adjustment = curate_structural_decay_adjustment(
             &candidate.id,
             &candidate.target_memory_id,

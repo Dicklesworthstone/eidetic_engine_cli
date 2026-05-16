@@ -70,6 +70,83 @@ pub struct StructuralDecayConnectivityReport {
     pub is_connected: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructuralDecayIndex {
+    onion: OnionLayerReport,
+    articulation_points: BTreeSet<String>,
+    policy: StructuralDecayPolicy,
+}
+
+impl StructuralDecayIndex {
+    #[must_use]
+    pub fn adjustment(&self, memory_id: &str) -> StructuralDecayMultiplier {
+        let onion_layer = self.onion.layers_by_memory.get(memory_id).copied();
+        let is_articulation_point = self.articulation_points.contains(memory_id);
+
+        let Some(layer) = onion_layer else {
+            return StructuralDecayMultiplier {
+                memory_id: memory_id.to_owned(),
+                onion_layer,
+                max_layer: self.onion.max_layer,
+                is_articulation_point,
+                structural_multiplier: 1.0,
+                rationale: "structural_decay_baseline".to_owned(),
+            };
+        };
+
+        if self.onion.max_layer < 2 {
+            return StructuralDecayMultiplier {
+                memory_id: memory_id.to_owned(),
+                onion_layer: Some(layer),
+                max_layer: self.onion.max_layer,
+                is_articulation_point,
+                structural_multiplier: 1.0,
+                rationale: "structural_decay_baseline".to_owned(),
+            };
+        }
+
+        let onion_normalized =
+            (self.onion.max_layer.saturating_sub(layer)) as f64 / self.onion.max_layer as f64;
+        let onion_multiplier =
+            1.0 + (self.policy.onion_decay_max - 1.0).max(0.0) * onion_normalized;
+        let articulation_multiplier = if is_articulation_point {
+            self.policy.articulation_protection.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let structural_multiplier = onion_multiplier * articulation_multiplier;
+
+        StructuralDecayMultiplier {
+            memory_id: memory_id.to_owned(),
+            onion_layer: Some(layer),
+            max_layer: self.onion.max_layer,
+            is_articulation_point,
+            structural_multiplier,
+            rationale: structural_decay_rationale(layer, is_articulation_point),
+        }
+    }
+}
+
+#[must_use]
+pub fn compute_structural_decay_index(graph: &Graph) -> StructuralDecayIndex {
+    compute_structural_decay_index_with_policy(graph, StructuralDecayPolicy::default())
+}
+
+#[must_use]
+pub fn compute_structural_decay_index_with_policy(
+    graph: &Graph,
+    policy: StructuralDecayPolicy,
+) -> StructuralDecayIndex {
+    StructuralDecayIndex {
+        onion: compute_onion_layers(graph),
+        articulation_points: compute_articulation_points(graph)
+            .memory_ids
+            .into_iter()
+            .collect(),
+        policy,
+    }
+}
+
 #[must_use]
 pub fn compute_articulation_points(graph: &Graph) -> ArticulationPointReport {
     match try_compute_articulation_points(graph) {
@@ -212,53 +289,7 @@ pub fn compute_structural_decay_adjustment_with_policy(
     memory_id: &str,
     policy: StructuralDecayPolicy,
 ) -> StructuralDecayMultiplier {
-    let onion = compute_onion_layers(graph);
-    let articulation_points = compute_articulation_points(graph)
-        .memory_ids
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    let onion_layer = onion.layers_by_memory.get(memory_id).copied();
-    let is_articulation_point = articulation_points.contains(memory_id);
-
-    let Some(layer) = onion_layer else {
-        return StructuralDecayMultiplier {
-            memory_id: memory_id.to_owned(),
-            onion_layer,
-            max_layer: onion.max_layer,
-            is_articulation_point,
-            structural_multiplier: 1.0,
-            rationale: "structural_decay_baseline".to_owned(),
-        };
-    };
-
-    if onion.max_layer < 2 {
-        return StructuralDecayMultiplier {
-            memory_id: memory_id.to_owned(),
-            onion_layer: Some(layer),
-            max_layer: onion.max_layer,
-            is_articulation_point,
-            structural_multiplier: 1.0,
-            rationale: "structural_decay_baseline".to_owned(),
-        };
-    }
-
-    let onion_normalized = (onion.max_layer.saturating_sub(layer)) as f64 / onion.max_layer as f64;
-    let onion_multiplier = 1.0 + (policy.onion_decay_max - 1.0).max(0.0) * onion_normalized;
-    let articulation_multiplier = if is_articulation_point {
-        policy.articulation_protection.clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
-    let structural_multiplier = onion_multiplier * articulation_multiplier;
-
-    StructuralDecayMultiplier {
-        memory_id: memory_id.to_owned(),
-        onion_layer: Some(layer),
-        max_layer: onion.max_layer,
-        is_articulation_point,
-        structural_multiplier,
-        rationale: structural_decay_rationale(layer, is_articulation_point),
-    }
+    compute_structural_decay_index_with_policy(graph, policy).adjustment(memory_id)
 }
 
 fn structural_decay_rationale(layer: usize, is_articulation_point: bool) -> String {
@@ -389,5 +420,26 @@ mod tests {
         assert_eq!(policy.articulation_protection, 0.25);
         assert!(adjustment.is_articulation_point);
         assert!(adjustment.structural_multiplier <= 0.5);
+    }
+
+    #[test]
+    fn structural_decay_index_matches_direct_adjustments() {
+        let policy = StructuralDecayPolicy::from_optional_config(Some(2.5), Some(0.4));
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        let _ = graph.extend_edges_unrecorded([
+            ("a", "b"),
+            ("b", "c"),
+            ("c", "d"),
+            ("c", "e"),
+            ("e", "f"),
+        ]);
+        let index = compute_structural_decay_index_with_policy(&graph, policy);
+
+        for memory_id in ["a", "b", "c", "e", "missing"] {
+            assert_eq!(
+                index.adjustment(memory_id),
+                compute_structural_decay_adjustment_with_policy(&graph, memory_id, policy)
+            );
+        }
     }
 }
