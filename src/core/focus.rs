@@ -1046,7 +1046,8 @@ fn memory_lookup_if_database_exists(
     memory_ids: &[MemoryId],
 ) -> Option<BTreeMap<String, FocusMemoryAvailability>> {
     let database_path = workspace_path.join(".ee").join("ee.db");
-    if !database_path.exists() {
+    ensure_no_symlink_components(&database_path, "read").ok()?;
+    if fs::symlink_metadata(&database_path).is_err() {
         return None;
     }
     let Ok(connection) = DbConnection::open_file(database_path) else {
@@ -1515,6 +1516,27 @@ mod tests {
                 .all(|status| status.status == FocusMemoryStatusKind::Unverified),
             true,
             "unverified statuses",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn memory_lookup_refuses_symlinked_database_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().join("workspace");
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let outside_db = dir.path().join("outside-ee.db");
+        std::fs::write(&outside_db, b"").map_err(|error| error.to_string())?;
+        symlink(&outside_db, ee_dir.join("ee.db")).map_err(|error| error.to_string())?;
+
+        let lookup = memory_lookup_if_database_exists(&workspace, &[memory_id(60)]);
+        ensure(
+            lookup.is_none(),
+            true,
+            "symlinked focus memory DB lookup is refused",
         )
     }
 
