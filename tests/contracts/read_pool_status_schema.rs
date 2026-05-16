@@ -1,5 +1,5 @@
-//! Contract checks for `data.read_pool` in the `ee status --json` surface
-//! (bd-2caru.4 / bd-2caru.7 acceptance). Locks the counters and acquire-wait
+//! Contract checks for compact coordination posture in the `ee status --json`
+//! surface. Locks the read-pool counters, acquire-wait summary, and QoS lane
 //! summary against the schema definition at
 //! `docs/schemas/ee.status.v1.json` so the read-pool report cannot drift
 //! between the Rust type, the JSON renderer, and the published schema.
@@ -23,6 +23,19 @@ const READ_POOL_FIELDS: &[&str] = &[
     "acquire_wait",
 ];
 const ACQUIRE_WAIT_FIELDS: &[&str] = &["samples", "p50_ns", "p99_ns"];
+const QOS_STATUS_FIELDS: &[&str] = &[
+    "schema",
+    "workspaceHash",
+    "foregroundActiveCount",
+    "backgroundActiveCount",
+    "verificationActiveCount",
+    "maintenanceActiveCount",
+    "staleIgnoredCount",
+    "foregroundPressure",
+    "backgroundWorkActive",
+    "registryHealthy",
+    "degraded",
+];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -114,11 +127,14 @@ fn read_pool_status_schema_declares_counters_and_wait_summary() -> TestResult {
     // `read_pool` must appear in the envelope's `data.required` list so the
     // schema refuses status payloads that omit the field.
     ensure_string_array_contains(&schema, "/properties/data/required", "read_pool")?;
+    ensure_string_array_contains(&schema, "/properties/data/required", "qos")?;
 
     // The `standard` field profile (`ee status --json` default) must
     // emit `read_pool`, so the per-profile registry stays consistent
     // with the schema's required-set.
     ensure_string_array_contains(&schema, "/field_presets/standard", "read_pool")?;
+    ensure_string_array_contains(&schema, "/field_presets/summary", "qos")?;
+    ensure_string_array_contains(&schema, "/field_presets/standard", "qos")?;
 
     // The `data.properties.read_pool` slot must point at the
     // canonical `$defs/readPoolStatus` definition.
@@ -165,6 +181,59 @@ fn read_pool_status_schema_declares_counters_and_wait_summary() -> TestResult {
 }
 
 #[test]
+fn qos_status_schema_declares_compact_lane_summary() -> TestResult {
+    let schema = read_json(STATUS_SCHEMA_PATH)?;
+
+    ensure_str_eq(
+        &schema,
+        "/properties/data/properties/qos/$ref",
+        "#/$defs/qosStatus",
+    )?;
+    ensure_str_eq(&schema, "/$defs/qosStatus/type", "object")?;
+    ensure_bool_eq(&schema, "/$defs/qosStatus/additionalProperties", false)?;
+    for field in QOS_STATUS_FIELDS {
+        ensure_string_array_contains(&schema, "/$defs/qosStatus/required", field)?;
+    }
+    ensure_object_keys_eq(
+        &schema,
+        "/$defs/qosStatus/properties",
+        &[
+            "schema",
+            "workspaceHash",
+            "foregroundActiveCount",
+            "backgroundActiveCount",
+            "verificationActiveCount",
+            "maintenanceActiveCount",
+            "staleIgnoredCount",
+            "foregroundPressure",
+            "backgroundWorkActive",
+            "registryHealthy",
+            "activeRecords",
+            "degraded",
+        ],
+    )?;
+    ensure_str_eq(
+        &schema,
+        "/$defs/qosStatus/properties/schema/const",
+        "ee.qos.active_lane_summary.v1",
+    )?;
+    for counter in [
+        "foregroundActiveCount",
+        "backgroundActiveCount",
+        "verificationActiveCount",
+        "maintenanceActiveCount",
+        "staleIgnoredCount",
+    ] {
+        let type_pointer = format!("/$defs/qosStatus/properties/{counter}/type");
+        let minimum_pointer = format!("/$defs/qosStatus/properties/{counter}/minimum");
+        ensure_str_eq(&schema, &type_pointer, "integer")?;
+        ensure_u64_eq(&schema, &minimum_pointer, 0)?;
+    }
+
+    Ok(())
+}
+
+#[test]
 fn read_pool_status_report_default_emits_zero_counters() -> TestResult {
     let report = ReadPoolStatusReport::default();
     if report.active != 0
@@ -189,6 +258,50 @@ fn read_pool_status_report_default_emits_zero_counters() -> TestResult {
         return Err(format!(
             "ReadPoolStatusReport::gather drifted from Default: {gathered:?} vs {report:?}"
         ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn rendered_status_json_includes_qos_posture_without_active_records_by_default() -> TestResult {
+    let status = StatusReport::gather();
+    let rendered = render_status_json(&status);
+    let parsed: Value = serde_json::from_str(&rendered)
+        .map_err(|error| format!("status JSON did not parse: {error}"))?;
+
+    let qos = parsed
+        .pointer("/data/qos")
+        .ok_or_else(|| format!("data.qos missing from rendered status JSON: {parsed}"))?;
+    ensure_object_keys_eq(&parsed, "/data/qos", QOS_STATUS_FIELDS)?;
+    ensure_str_eq(qos, "/schema", "ee.qos.active_lane_summary.v1")?;
+    for counter in [
+        "foregroundActiveCount",
+        "backgroundActiveCount",
+        "verificationActiveCount",
+        "maintenanceActiveCount",
+        "staleIgnoredCount",
+    ] {
+        qos.pointer(&format!("/{counter}"))
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("data.qos.{counter} not a u64"))?;
+    }
+    qos.pointer("/foregroundPressure")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "data.qos.foregroundPressure not a bool".to_owned())?;
+    qos.pointer("/backgroundWorkActive")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "data.qos.backgroundWorkActive not a bool".to_owned())?;
+    qos.pointer("/registryHealthy")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "data.qos.registryHealthy not a bool".to_owned())?;
+    qos.pointer("/degraded")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "data.qos.degraded not an array".to_owned())?;
+    if qos.get("activeRecords").is_some() {
+        return Err(
+            "default status JSON should keep QoS compact and omit activeRecords".to_owned(),
+        );
     }
 
     Ok(())

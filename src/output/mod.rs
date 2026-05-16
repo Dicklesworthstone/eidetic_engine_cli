@@ -3159,6 +3159,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
             r.field_str("asyncBoundary", report.runtime.async_boundary);
         });
         render_read_pool_status_json(d, &report.read_pool);
+        render_qos_status_json(d, &report.qos_posture, false);
         render_memory_health_json(d, &report.memory_health);
         render_curation_health_json(d, &report.curation_health);
         render_feedback_health_json(d, &report.feedback_health);
@@ -3431,6 +3432,55 @@ fn render_read_pool_status_json(
             wait.field_raw("p99_ns", &report.acquire_wait.p99_ns.to_string());
         });
     });
+}
+
+fn render_qos_status_json(
+    parent: &mut JsonBuilder,
+    report: &crate::core::qos::QosLaneSummary,
+    include_records: bool,
+) {
+    parent.field_object("qos", |qos| {
+        qos.field_str("schema", &report.schema);
+        qos.field_str("workspaceHash", &report.workspace_hash);
+        qos.field_u32("foregroundActiveCount", report.foreground_active_count);
+        qos.field_u32("backgroundActiveCount", report.background_active_count);
+        qos.field_u32("verificationActiveCount", report.verification_active_count);
+        qos.field_u32("maintenanceActiveCount", report.maintenance_active_count);
+        qos.field_u32("staleIgnoredCount", report.stale_ignored_count);
+        qos.field_bool("foregroundPressure", report.foreground_active_count > 0);
+        qos.field_bool("backgroundWorkActive", report.background_active_count > 0);
+        qos.field_bool("registryHealthy", report.degraded.is_empty());
+        if include_records {
+            qos.field_array_of_objects("activeRecords", &report.active_records, |obj, record| {
+                render_qos_lane_record_json(obj, record);
+            });
+        }
+        qos.field_array_of_objects("degraded", &report.degraded, |obj, degradation| {
+            obj.field_str("code", &degradation.code);
+            obj.field_str("severity", &degradation.severity);
+            obj.field_str("message", &degradation.message);
+            obj.field_str("repair", &degradation.repair);
+        });
+    });
+}
+
+fn render_qos_lane_record_json(parent: &mut JsonBuilder, record: &crate::core::qos::QosLaneRecord) {
+    parent.field_str("schema", &record.schema);
+    parent.field_str("recordId", &record.record_id);
+    parent.field_str("workspaceHash", &record.workspace_hash);
+    parent.field_str("lane", record.lane.as_str());
+    parent.field_str("commandClass", &record.command_class);
+    match record.process_id {
+        Some(process_id) => parent.field_u32("processId", process_id),
+        None => parent.field_raw("processId", "null"),
+    }
+    field_optional_str(parent, "profileLabel", record.profile_label.as_deref());
+    field_optional_str(parent, "budgetLabel", record.budget_label.as_deref());
+    field_optional_str(parent, "requestHash", record.request_hash.as_deref());
+    parent.field_raw("startedAtEpochMs", &record.started_at_epoch_ms.to_string());
+    parent.field_raw("deadlineEpochMs", &record.deadline_epoch_ms.to_string());
+    parent.field_raw("ttlMs", &record.ttl_ms.to_string());
+    parent.field_str("status", record.status.as_str());
 }
 
 fn render_mesh_status_json(parent: &mut JsonBuilder, tailscale: Option<&TailscaleLocalReport>) {
@@ -8987,6 +9037,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
         if profile.include_summary_metrics() {
             render_status_posture_json(d, &report.posture);
             render_singleflight_posture_json(d, &report.singleflight_posture);
+            render_qos_status_json(d, &report.qos_posture, profile.include_verbose_details());
             d.field_object("capabilities", |c| {
                 c.field_str("runtime", report.capabilities.runtime.as_str());
                 c.field_str("storage", report.capabilities.storage.as_str());

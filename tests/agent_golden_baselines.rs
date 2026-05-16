@@ -14,6 +14,7 @@ use std::process::{Command, Output};
 use ee::config::{WorkspaceDiagnosticSeverity, WorkspaceResolutionSource};
 use ee::core::agent_detect::AgentInventoryReport;
 use ee::core::doctor::{CheckResult, DoctorReport, Posture};
+use ee::core::qos::{QOS_ACTIVE_LANE_SUMMARY_SCHEMA_V1, QosLaneSummary};
 use ee::core::status::{
     CapabilityReport, CurationHealthReport, DegradationReport, DerivedAssetReport,
     DerivedAssetStatus, FeedbackHealthReport, FeedbackHealthStatus,
@@ -1001,6 +1002,20 @@ fn fixture_runtime_report() -> RuntimeReport {
     }
 }
 
+fn fixture_qos_posture() -> QosLaneSummary {
+    QosLaneSummary {
+        schema: QOS_ACTIVE_LANE_SUMMARY_SCHEMA_V1.to_owned(),
+        workspace_hash: "sha256:fixture-qos-workspace".to_owned(),
+        active_records: Vec::new(),
+        foreground_active_count: 0,
+        background_active_count: 0,
+        verification_active_count: 0,
+        maintenance_active_count: 0,
+        stale_ignored_count: 0,
+        degraded: Vec::new(),
+    }
+}
+
 fn fixture_workspace_status(marker_present: bool) -> WorkspaceStatusReport {
     WorkspaceStatusReport {
         source: WorkspaceResolutionSource::Explicit,
@@ -1180,6 +1195,7 @@ fn status_missing_db_report() -> StatusReport {
         capabilities: fixture_capabilities(CapabilityStatus::Pending, CapabilityStatus::Pending),
         runtime: fixture_runtime_report(),
         read_pool: ReadPoolStatusReport::default(),
+        qos_posture: fixture_qos_posture(),
         memory_health: unavailable_memory_health(),
         curation_health: CurationHealthReport::unavailable(),
         feedback_health: unavailable_feedback_health(),
@@ -1239,6 +1255,7 @@ fn status_pending_migration_report() -> StatusReport {
         capabilities: fixture_capabilities(CapabilityStatus::Degraded, CapabilityStatus::Degraded),
         runtime: fixture_runtime_report(),
         read_pool: ReadPoolStatusReport::default(),
+        qos_posture: fixture_qos_posture(),
         memory_health: unavailable_memory_health(),
         curation_health: CurationHealthReport::unavailable(),
         feedback_health: unavailable_feedback_health(),
@@ -1298,6 +1315,7 @@ fn status_stale_index_lexical_only_report() -> StatusReport {
         capabilities: fixture_capabilities(CapabilityStatus::Ready, CapabilityStatus::Degraded),
         runtime: fixture_runtime_report(),
         read_pool: ReadPoolStatusReport::default(),
+        qos_posture: fixture_qos_posture(),
         memory_health: healthy_memory_health(),
         curation_health: CurationHealthReport::not_inspected(),
         feedback_health: healthy_feedback_health(),
@@ -1346,6 +1364,7 @@ fn status_search_unimplemented_report() -> StatusReport {
         ),
         runtime: fixture_runtime_report(),
         read_pool: ReadPoolStatusReport::default(),
+        qos_posture: fixture_qos_posture(),
         memory_health: healthy_memory_health(),
         curation_health: CurationHealthReport::not_inspected(),
         feedback_health: healthy_feedback_health(),
