@@ -3953,7 +3953,13 @@ fn curate_structural_decay_adjustments(
             message: format!("Failed to list memory links for structural decay: {error}"),
             repair: Some("ee graph project --json".to_owned()),
         })?;
-    let graph = curate_structural_decay_graph(&memory_ids, &links);
+    let visible_links = links
+        .into_iter()
+        .filter(|link| {
+            crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref())
+        })
+        .collect::<Vec<_>>();
+    let graph = curate_structural_decay_graph(&memory_ids, &visible_links);
     push_structural_decay_connectivity_degradation(&graph, degraded);
     let mut adjustments = BTreeMap::new();
 
@@ -8149,6 +8155,72 @@ mod tests {
     }
 
     #[test]
+    fn curation_disposition_structural_decay_ignores_denied_mesh_links() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let first_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x5201)).to_string();
+        let second_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x5202)).to_string();
+        let first_candidate_id = curate_id(0x5203);
+        let second_candidate_id = curate_id(0x5204);
+        let connection = seed_candidate_database(
+            &database_path,
+            &workspace_id,
+            &first_memory_id,
+            &first_candidate_id,
+            "promote",
+            Some("pending"),
+            None,
+        )?;
+        insert_test_memory(
+            &connection,
+            &workspace_id,
+            &second_memory_id,
+            "Review isolated mesh-derived evidence separately.",
+        )?;
+        insert_test_candidate(
+            &connection,
+            TestCandidateInput {
+                workspace_id: &workspace_id,
+                memory_id: &second_memory_id,
+                candidate_id: &second_candidate_id,
+                source_id: "fb_52045204520452045204520452",
+                candidate_type: "promote",
+                status: Some("pending"),
+                proposed_content: None,
+            },
+        )?;
+        insert_test_link_with_metadata(
+            &connection,
+            "link_00000000000000000000005201",
+            &first_memory_id,
+            &second_memory_id,
+            Some(denied_mesh_link_metadata()),
+        )?;
+        enable_structural_decay_feature(workspace_path)?;
+
+        let report = run_curation_disposition(&CurateDispositionOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            actor: None,
+            apply: false,
+            structural_decay: true,
+            now_rfc3339: Some("2026-05-02T00:00:02Z"),
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.structural_adjustments.len(), 2);
+        let degraded = report
+            .degraded
+            .iter()
+            .find(|entry| entry.code == GRAPH_CURATE_DISCONNECTED_GRAPH_CODE)
+            .ok_or_else(|| "denied mesh link must not connect curation graph".to_owned())?;
+        assert_eq!(degraded.severity, "warning");
+        Ok(())
+    }
+
+    #[test]
     fn curation_disposition_no_structural_decay_keeps_legacy_report_shape() -> TestResult {
         let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
@@ -8217,6 +8289,16 @@ mod tests {
         src_memory_id: &str,
         dst_memory_id: &str,
     ) -> Result<(), String> {
+        insert_test_link_with_metadata(connection, link_id, src_memory_id, dst_memory_id, None)
+    }
+
+    fn insert_test_link_with_metadata(
+        connection: &DbConnection,
+        link_id: &str,
+        src_memory_id: &str,
+        dst_memory_id: &str,
+        metadata_json: Option<String>,
+    ) -> Result<(), String> {
         connection
             .insert_memory_link(
                 link_id,
@@ -8231,10 +8313,28 @@ mod tests {
                     last_reinforced_at: None,
                     source: MemoryLinkSource::Agent,
                     created_by: Some("curate-structural-test".to_owned()),
-                    metadata_json: None,
+                    metadata_json,
                 },
             )
             .map_err(|error| error.to_string())
+    }
+
+    fn denied_mesh_link_metadata() -> String {
+        serde_json::json!({
+            "mesh": {
+                "workspaceScopeDecision": "deny",
+                "materialLane": "graphSignal",
+                "cachedMaterialId": "mesh_link_denied_5201",
+                "originWorkspaceId": "wsp_remote_private",
+                "originWorkspaceLabel": "/Users/alice/private/repo",
+                "producerPeerId": "peer_builder_one",
+                "producerPeerLabel": "/Users/alice/private/peer-agent",
+                "importDecisionId": "mesh_decision_denied_5201",
+                "trustLane": "quarantined",
+                "redactionPosture": "metadata_only"
+            }
+        })
+        .to_string()
     }
 
     struct TestCandidateInput<'a> {
