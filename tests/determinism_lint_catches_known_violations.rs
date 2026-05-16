@@ -34,10 +34,15 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
     let lines = source.lines().collect::<Vec<_>>();
     let mut findings = Vec::new();
 
-    for (index, line) in lines.iter().enumerate() {
+    let scan_lines = lines
+        .iter()
+        .map(|line| strip_rust_line_noise(line))
+        .collect::<Vec<_>>();
+
+    for (index, line) in scan_lines.iter().enumerate() {
         let line_no = index + 1;
         if line.contains("#[determinism::required]")
-            && !function_signature_has_deterministic_seed(&lines, index)
+            && !function_signature_has_deterministic_seed(&scan_lines, index)
         {
             findings.push(Finding {
                 line: line_no,
@@ -87,7 +92,7 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "read env through the registered config boundary",
             });
         }
-        if line.contains(".iter()") && nearby_lines_contain(&lines, index, "HashMap") {
+        if line.contains(".iter()") && nearby_lines_contain(&scan_lines, index, "HashMap") {
             findings.push(Finding {
                 line: line_no,
                 code: "hashmap_iteration",
@@ -106,15 +111,59 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
     findings
 }
 
-fn function_signature_has_deterministic_seed(lines: &[&str], attribute_index: usize) -> bool {
-    lines
-        .iter()
-        .skip(attribute_index + 1)
-        .take(3)
-        .any(|line| line.contains("Deterministic<Seed>"))
+fn function_signature_has_deterministic_seed(lines: &[String], attribute_index: usize) -> bool {
+    for line in lines.iter().skip(attribute_index + 1).take(16) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.contains("Deterministic<Seed>") {
+            return true;
+        }
+        if line.contains('{') || line.contains(';') {
+            return false;
+        }
+    }
+
+    false
 }
 
-fn nearby_lines_contain(lines: &[&str], index: usize, needle: &str) -> bool {
+fn strip_rust_line_noise(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut escaped = false;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut cleaned = String::with_capacity(line.len());
+
+    for index in 0..bytes.len() {
+        let byte = bytes[index];
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if byte == b'\\' && (in_string || in_char) {
+            escaped = true;
+            continue;
+        }
+        if byte == b'"' && !in_char {
+            in_string = !in_string;
+            continue;
+        }
+        if byte == b'\'' && !in_string {
+            in_char = !in_char;
+            continue;
+        }
+        if !in_string && !in_char && byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            return cleaned;
+        }
+        if !in_string && !in_char {
+            cleaned.push(char::from(byte));
+        }
+    }
+
+    cleaned
+}
+
+fn nearby_lines_contain(lines: &[String], index: usize, needle: &str) -> bool {
     let start = index.saturating_sub(3);
     lines[start..=index]
         .iter()
@@ -144,5 +193,30 @@ mod self_tests {
         "#;
         let report = render_report(&scan_fixture(fixture));
         assert!(!report.contains("missing_seed_param"));
+    }
+
+    #[test]
+    fn multiline_seeded_required_function_does_not_emit_missing_seed() {
+        let fixture = r#"
+            #[determinism::required]
+            fn seeded(
+                _: &ee::runtime::determinism::Deterministic<Seed>,
+            ) {}
+        "#;
+        let report = render_report(&scan_fixture(fixture));
+        assert!(!report.contains("missing_seed_param"));
+    }
+
+    #[test]
+    fn comments_and_strings_do_not_emit_known_violations() {
+        let fixture = r#"
+            fn documentation_mentions() {
+                let _ = "rand::random::<u64>() Instant::now() std::fs::read_dir(.)";
+                // rand::thread_rng();
+                // std::env::var("EE_SEED");
+            }
+        "#;
+        let report = render_report(&scan_fixture(fixture));
+        assert_eq!(report, "schema: ee.determinism_lint_fixture.v1\n");
     }
 }

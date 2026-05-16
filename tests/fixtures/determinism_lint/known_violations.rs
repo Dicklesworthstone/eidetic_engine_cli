@@ -48,3 +48,9 @@ fn hashmap_iteration(_: &ee::runtime::determinism::Deterministic<Seed>) {
 fn read_dir_order(_: &ee::runtime::determinism::Deterministic<Seed>) {
     let _ = std::fs::read_dir(".");
 }
+
+fn benign_documentation_mentions() {
+    let _ = "rand::random::<u64>() Instant::now() SystemTime::now() std::fs::read_dir(.)";
+    // rand::thread_rng();
+    // std::env::var("EE_SEED");
+}
