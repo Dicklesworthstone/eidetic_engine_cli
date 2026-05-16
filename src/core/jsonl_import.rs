@@ -573,6 +573,15 @@ fn parse_jsonl_source(input: &str) -> ParsedJsonlImport {
             first_schema = Some((line_number, schema.to_owned()));
         }
 
+        if parsed.footer.is_some() && schema != EXPORT_FOOTER_SCHEMA_V1 {
+            parsed.issues.push(JsonlImportIssue::error(
+                Some(line_number),
+                "footer_not_last",
+                "JSONL footer must be the final non-empty record",
+            ));
+            continue;
+        }
+
         match schema {
             EXPORT_HEADER_SCHEMA_V1 => parse_header_record(&mut parsed, line_number, value),
             EXPORT_MEMORY_SCHEMA_V1 => {
@@ -1363,6 +1372,40 @@ mod tests {
             true,
             "footer mismatch issue",
         )
+    }
+
+    #[test]
+    fn parse_jsonl_source_rejects_records_after_footer() -> TestResult {
+        let mut lines = sample_jsonl()
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let footer = lines
+            .pop()
+            .ok_or_else(|| "sample JSONL must include a footer".to_string())?;
+        let trailing_memory = lines
+            .get(1)
+            .cloned()
+            .ok_or_else(|| "sample JSONL must include a memory record".to_string())?
+            .replace(
+                "mem_01234567890123456789012345",
+                "mem_22222222222222222222222222",
+            );
+        lines.push(footer);
+        lines.push(trailing_memory);
+        let parsed = parse_jsonl_source(&lines.join("\n"));
+
+        ensure(parsed.has_errors(), true, "has errors")?;
+        ensure(
+            parsed.issues.iter().any(|issue| {
+                issue.line == Some(5)
+                    && issue.code == "footer_not_last"
+                    && issue.message.contains("final")
+            }),
+            true,
+            "footer-not-last issue",
+        )?;
+        ensure(parsed.memories.len(), 1, "trailing memory ignored")
     }
 
     #[test]
