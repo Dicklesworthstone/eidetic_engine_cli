@@ -1856,7 +1856,7 @@ fn graph_projection_links(
         .into_iter()
         .filter(|link| {
             graph_link_matches_options(link, options)
-                && graph_link_mesh_metadata_visible(link.metadata_json.as_deref())
+                && memory_link_mesh_metadata_visible(link.metadata_json.as_deref())
         })
         .collect())
 }
@@ -1870,7 +1870,7 @@ fn graph_link_matches_options(link: &StoredMemoryLink, options: &ProjectionOptio
             .is_none_or(|min_confidence| link.confidence >= min_confidence)
 }
 
-fn graph_link_mesh_metadata_visible(metadata_json: Option<&str>) -> bool {
+pub(crate) fn memory_link_mesh_metadata_visible(metadata_json: Option<&str>) -> bool {
     let Some(metadata_json) = metadata_json else {
         return true;
     };

@@ -3739,7 +3739,9 @@ fn context_proximity_graph(connection: &DbConnection) -> Result<fnx_classes::Gra
         .list_all_memory_links(None)
         .map_err(|error| error.to_string())?;
     let mut graph = fnx_classes::Graph::strict();
-    for link in links {
+    for link in links.into_iter().filter(|link| {
+        crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref())
+    }) {
         graph.add_node(&link.src_memory_id);
         graph.add_node(&link.dst_memory_id);
         let mut attrs = AttrMap::new();
@@ -5520,6 +5522,30 @@ mod tests {
         })
     }
 
+    fn mesh_link_metadata(
+        workspace_scope_decision: &str,
+        material_lane: &str,
+        complete: bool,
+    ) -> String {
+        let mut mesh = serde_json::json!({
+            "workspaceScopeDecision": workspace_scope_decision,
+            "workspaceId": "wsp_local_alpha",
+            "cachedMaterialId": "mesh_context_link_123",
+            "originWorkspaceId": "wsp_remote_beta",
+            "originWorkspaceLabel": "/Users/alice/private/repo",
+            "producerPeerId": "peer_builder_one",
+            "producerPeerLabel": "/Users/alice/private/peer-agent",
+            "materialLane": material_lane,
+            "importDecisionId": "mesh_dec_456",
+            "trustLane": "mesh_metadata",
+            "redactionPosture": "standard"
+        });
+        if !complete && let Some(object) = mesh.as_object_mut() {
+            object.remove("trustLane");
+        }
+        serde_json::json!({ "mesh": mesh }).to_string()
+    }
+
     fn ppr_candidate(memory_id: MemoryId, relevance: f32) -> Result<PackCandidate, String> {
         let provenance =
             PackProvenance::new(ProvenanceUri::EeMemory(memory_id), "context ppr fixture")
@@ -5833,11 +5859,33 @@ mod tests {
 
     #[test]
     fn context_proximity_feature_enabled_annotates_seed_neighbor() -> Result<(), String> {
+        use crate::db::{CreateMemoryLinkInput, MemoryLinkRelation, MemoryLinkSource};
+
         let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
         enable_context_proximity_feature(&fixture.workspace_path)?;
+        fixture
+            .connection
+            .insert_memory_link(
+                "link_00000000000000000000000902",
+                &CreateMemoryLinkInput {
+                    src_memory_id: fixture.seed.to_string(),
+                    dst_memory_id: fixture.orphan.to_string(),
+                    relation: MemoryLinkRelation::Supports,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    directed: true,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: MemoryLinkSource::Agent,
+                    created_by: Some("context-proximity-test".to_string()),
+                    metadata_json: Some(mesh_link_metadata("deny", "metadata", true)),
+                },
+            )
+            .map_err(|error| error.to_string())?;
         let mut candidates = vec![
             ppr_candidate(fixture.seed, 0.80)?,
             ppr_candidate(fixture.neighbor, 0.20)?,
+            ppr_candidate(fixture.orphan, 0.40)?,
         ];
         let search_report = ppr_search_report(vec![ppr_hit(fixture.seed, 0.90, Some(0.95))]);
         let mut degraded = Vec::new();
@@ -5859,6 +5907,7 @@ mod tests {
             neighbor_proximity >= 1.0,
             "neighbor proximity should reflect seeded support link, got {neighbor_proximity}"
         );
+        assert_eq!(candidates[2].proximity_to_seed, None);
         assert!(
             degraded.is_empty(),
             "enabled proximity should not degrade: {degraded:?}"
