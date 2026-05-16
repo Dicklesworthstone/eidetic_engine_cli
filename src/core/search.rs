@@ -21,6 +21,7 @@ use crate::pack::{
 };
 use crate::runtime::determinism::{Deterministic, Seed};
 
+use super::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use super::index::{
     IndexHealth, IndexStatusError, IndexStatusOptions, IndexStatusReport, get_index_status,
 };
@@ -1093,7 +1094,7 @@ impl SearchReport {
             "metrics": metrics,
             "profileRuntime": self.runtime_profile.data_json(),
             "errors": self.errors,
-            "degraded": self.degraded.iter().map(SearchDegradation::data_json).collect::<Vec<_>>(),
+            "degraded": search_degraded_data_json("search", &self.degraded),
         })
     }
 
@@ -1161,10 +1162,36 @@ impl SearchReport {
                 "status": "not_used",
                 "reason": "search_command_does_not_request_graph_projection",
             },
-            "fallbacks": self.degraded.iter().map(SearchDegradation::data_json).collect::<Vec<_>>(),
+            "fallbacks": search_degraded_data_json("search", &self.degraded),
             "redaction": performance_redaction_json(),
         })
     }
+}
+
+pub(crate) fn search_degraded_data_json(
+    source: &'static str,
+    degraded: &[SearchDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            source,
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry.repair.clone().unwrap_or_default(),
+        )
+    }))
+    .into_iter()
+    .map(|entry| {
+        serde_json::json!({
+            "code": entry.code,
+            "severity": entry.severity,
+            "message": entry.message,
+            "repair": entry.repair,
+            "sources": entry.sources,
+        })
+    })
+    .collect()
 }
 
 impl SearchDiagnosticReport {
@@ -4841,6 +4868,56 @@ mod tests {
         assert!(!rendered.contains("sk_live_do_not_emit"));
         assert!(!rendered.contains("mem-secret-doc"));
         assert!(!rendered.contains("token should not leave"));
+    }
+
+    #[test]
+    fn search_report_degraded_entries_are_aggregated() {
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "format before release".to_string(),
+            requested_limit: 10,
+            results: Vec::new(),
+            elapsed_ms: 7.0,
+            errors: Vec::new(),
+            degraded: vec![
+                SearchDegradation {
+                    code: "search_index_stale".to_string(),
+                    severity: "warning".to_string(),
+                    message: "Search index is stale.".to_string(),
+                    repair: Some("ee index rebuild --workspace .".to_string()),
+                },
+                SearchDegradation {
+                    code: "search_index_stale".to_string(),
+                    severity: "high".to_string(),
+                    message: "Search index is stale and missing recent memories.".to_string(),
+                    repair: Some("ee index rebuild --workspace . --force".to_string()),
+                },
+            ],
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
+        };
+
+        let json = report.data_json();
+        assert_eq!(json["degraded"].as_array().map(Vec::len), Some(1));
+        assert_eq!(json["degraded"][0]["code"], "search_index_stale");
+        assert_eq!(json["degraded"][0]["severity"], "high");
+        assert_eq!(
+            json["degraded"][0]["repair"],
+            "ee index rebuild --workspace . --force"
+        );
+        assert_eq!(json["degraded"][0]["sources"][0], "search");
+
+        let perf = report.performance_explain_data_json(SpeedMode::Instant, false);
+        assert_eq!(perf["fallbacks"].as_array().map(Vec::len), Some(1));
+        assert_eq!(perf["fallbacks"][0]["sources"][0], "search");
     }
 
     #[test]

@@ -48,7 +48,7 @@ use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
     SearchOptions, SearchReport, SearchStatus, elapsed_timing_json, performance_redaction_json,
-    query_observation_json, run_search_with_read_connection_seeded,
+    query_observation_json, run_search_with_read_connection_seeded, search_degraded_data_json,
 };
 use crate::db::read_pool::{PoolConfig, ReadConnectionPool};
 use crate::db::{
@@ -1662,7 +1662,7 @@ fn context_search_json(
         "returnedHits": search_report.results.len(),
         "usesEmbeddings": speed.uses_embeddings(),
         "metrics": metrics.data_json(),
-        "degraded": search_report.degraded.iter().map(search_degradation_summary_json).collect::<Vec<_>>(),
+        "degraded": search_degraded_data_json("search", &search_report.degraded),
         "elapsed": elapsed_timing_json(search_report.elapsed_ms),
     })
 }
@@ -1782,17 +1782,6 @@ fn context_degradation_json(degraded: &ContextResponseDegradation) -> serde_json
     serde_json::json!({
         "code": &degraded.code,
         "severity": degraded.severity.as_str(),
-        "message": &degraded.message,
-        "repair": &degraded.repair,
-    })
-}
-
-fn search_degradation_summary_json(
-    degraded: &crate::core::search::SearchDegradation,
-) -> serde_json::Value {
-    serde_json::json!({
-        "code": &degraded.code,
-        "severity": &degraded.severity,
         "message": &degraded.message,
         "repair": &degraded.repair,
     })
